@@ -16,6 +16,11 @@ WorkerFactory = Callable[[RunRecord], WorkerCoroutine]
 TaskFactory = Callable[[WorkerCoroutine], asyncio.Task[None]]
 
 
+class InternalSourceKind(StrEnum):
+    http = "http"
+    scheduled_task = "scheduled_task"
+
+
 @dataclass(frozen=True)
 class InternalLaunchIntent:
     """Finite, host-internal request for one invocation."""
@@ -35,6 +40,11 @@ class InternalLaunchIntent:
     stream_subgraphs: bool = False
     on_disconnect: Literal["cancel", "continue"] = "cancel"
     multitask_strategy: Literal["reject", "rollback", "interrupt"] = "reject"
+    source_kind: InternalSourceKind = InternalSourceKind.http
+    trusted_task_id: str | None = None
+    task_run_id: str | None = None
+    scheduled_trigger: Literal["scheduled", "manual"] | None = None
+    owner_user_id: str | None = None
 
 
 @dataclass(frozen=True)

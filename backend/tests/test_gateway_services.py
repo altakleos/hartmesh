@@ -2164,65 +2164,99 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
     assert context.get("langgraph_auth_user_id") is None
 
 
-def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
+def test_scheduled_invocation_runtime_materializes_trusted_execution_facts(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
-    from unittest.mock import patch
+    from unittest.mock import AsyncMock, patch
 
-    from app.gateway.routers.thread_runs import RunCreateRequest
-    from app.gateway.services import launch_scheduled_thread_run
+    from app.gateway.services import build_scheduled_invocation_runtime
+    from app.runtime.invocation import InternalLaunchIntent, InternalSourceKind
+    from deerflow.runtime import RunManager
+
+    class AllowThreadStore:
+        async def check_access(self, *_args, **_kwargs):
+            return True
 
     async def _scenario():
+        run_manager = RunManager()
+        app = _make_start_run_request(
+            run_manager,
+            thread_store=AllowThreadStore(),
+        ).app
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request):
-            captured["body"] = body
-            captured["thread_id"] = thread_id
-            captured["context"] = body.context
-            captured["metadata"] = body.metadata
-            captured["if_not_exists"] = body.if_not_exists
-            captured["on_completion"] = body.on_completion
-            return SimpleNamespace(run_id="run-1", thread_id=thread_id)
+        async def fake_run_agent(*_args, **kwargs):
+            captured["context"] = kwargs["config"]["context"]
 
-        with patch("app.gateway.services.start_run", side_effect=fake_start_run):
-            result = await launch_scheduled_thread_run(
-                thread_id="thread-scheduled",
-                assistant_id="lead_agent",
-                prompt="Run in background",
-                app=SimpleNamespace(state=SimpleNamespace()),
-                owner_user_id="user-1",
-                metadata={"scheduled_task_id": "task-1"},
+        owner = SimpleNamespace(
+            id="user-1",
+            system_role="user",
+            oauth_provider=None,
+            oauth_id=None,
+        )
+        with (
+            patch("app.gateway.services.ensure_checkpoint_history_seeded", new=AsyncMock()),
+            patch("app.gateway.services._ensure_thread_metadata", new=AsyncMock()),
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+            patch(
+                "app.gateway.services.resolve_trusted_internal_owner_for_attribution",
+                new=AsyncMock(return_value=owner),
+            ),
+        ):
+            runtime = build_scheduled_invocation_runtime(app)
+            receipt = await runtime.launch(
+                InternalLaunchIntent(
+                    thread_id="thread-scheduled",
+                    assistant_id="lead_agent",
+                    input={"messages": [{"role": "user", "content": "Run in background"}]},
+                    context={"non_interactive": True, "user_id": "user-1"},
+                    on_disconnect="continue",
+                    source_kind=InternalSourceKind.scheduled_task,
+                    trusted_task_id="task-1",
+                    task_run_id="task-run-1",
+                    scheduled_trigger="manual",
+                    owner_user_id="user-1",
+                )
             )
-        return captured, result
+            await receipt.record.task
+            return receipt.record, captured
 
-    captured, result = asyncio.run(_scenario())
+    record, captured = asyncio.run(_scenario())
 
-    assert captured["thread_id"] == "thread-scheduled"
-    assert isinstance(captured["body"], RunCreateRequest)
-    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
-    assert captured["metadata"] == {"scheduled_task_id": "task-1"}
-    assert captured["if_not_exists"] == "create"
-    assert captured["on_completion"] is None
-    assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
+    assert record.user_id == "user-1"
+    assert record.metadata == {
+        "scheduled_task_id": "task-1",
+        "scheduled_task_run_id": "task-run-1",
+        "scheduled_trigger": "manual",
+    }
+    assert captured["context"]["non_interactive"] is True
+    assert captured["context"]["user_id"] == "user-1"
 
 
-def test_launch_scheduled_thread_run_rejects_legacy_auth_token():
-    """The internal launcher shares run admission; task API/model state has no metadata field."""
+def test_scheduled_invocation_runtime_rejects_legacy_auth_token():
+    """The internal scheduler path shares the normal metadata-secret guard."""
     import asyncio
     from types import SimpleNamespace
 
     from fastapi import HTTPException
 
-    from app.gateway.services import launch_scheduled_thread_run
+    from app.gateway.services import build_scheduled_invocation_runtime
+    from app.runtime.invocation import InternalLaunchIntent, InternalSourceKind
 
     async def _scenario():
+        runtime = build_scheduled_invocation_runtime(SimpleNamespace(state=SimpleNamespace()))
         with pytest.raises(HTTPException) as exc_info:
-            await launch_scheduled_thread_run(
-                thread_id="thread-scheduled",
-                assistant_id="lead_agent",
-                prompt="Run in background",
-                app=SimpleNamespace(state=SimpleNamespace()),
-                metadata={"auth_token": "legacy-secret"},
+            await runtime.launch(
+                InternalLaunchIntent(
+                    thread_id="thread-scheduled",
+                    assistant_id="lead_agent",
+                    metadata={"auth_token": "legacy-secret"},
+                    source_kind=InternalSourceKind.scheduled_task,
+                    trusted_task_id="task-1",
+                    task_run_id="task-run-1",
+                    scheduled_trigger="scheduled",
+                )
             )
 
         assert exc_info.value.status_code == 422

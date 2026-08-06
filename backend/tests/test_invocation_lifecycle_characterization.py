@@ -2,9 +2,10 @@
 
 Durable ``RunRow`` creation inventory discovered from production source:
 
-* Normal graph runs enter through ``app.gateway.services.start_run``. The
-  Gateway's five create/stream/wait HTTP variants, native-channel SDK
-  create/wait/stream calls, and Scheduled Task launcher all converge there.
+* Normal graph runs enter through ``app.runtime.InvocationRuntime``. The
+  Gateway's five create/stream/wait HTTP variants and native-channel SDK
+  create/wait/stream calls use the ``start_run`` compatibility adapter;
+  Scheduled Task occurrences call the runtime directly.
 * Checkpoint mutations call ``reserve_checkpoint_write`` and create a temporary
   ``operation_kind=checkpoint_write`` row through
   ``RunManager.reserve_thread_operation``.
@@ -37,6 +38,7 @@ from fastapi import HTTPException
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
+from support.scheduled_task_runtime import CallbackInvocationRuntime
 
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import (
@@ -470,7 +472,7 @@ async def test_scheduled_task_persists_task_run_before_durable_launch(
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=task_run_repo,
-        launch_run=launch_run,
+        invocation_runtime=CallbackInvocationRuntime(launch_run),
         poll_interval_seconds=5,
         lease_seconds=30,
         max_concurrent_runs=2,
@@ -515,7 +517,7 @@ async def test_scheduled_task_overlap_never_crosses_launch_boundary(
     service = ScheduledTaskService(
         task_repo=_TaskRepo(),
         task_run_repo=task_run_repo,
-        launch_run=launch_run,
+        invocation_runtime=CallbackInvocationRuntime(launch_run),
         poll_interval_seconds=5,
         lease_seconds=30,
         max_concurrent_runs=2,
@@ -536,34 +538,33 @@ async def test_scheduled_task_overlap_never_crosses_launch_boundary(
 
 
 @pytest.mark.anyio
-async def test_scheduled_launcher_marks_noninteractive_and_uses_start_run(monkeypatch):
-    from app.gateway import services
+async def test_scheduled_runtime_boundary_marks_noninteractive():
+    from app.scheduler.service import ScheduledTaskService
 
     captured = {}
 
-    async def durable_start_run(body, thread_id, _request):
-        captured.update(body=body, thread_id=thread_id)
-        return SimpleNamespace(run_id="run-1", thread_id=thread_id)
+    async def launch_run(**kwargs):
+        captured.update(kwargs)
+        return {"run_id": "run-1", "thread_id": kwargs["thread_id"]}
 
-    monkeypatch.setattr(services, "start_run", durable_start_run)
-    result = await services.launch_scheduled_thread_run(
-        thread_id="scheduled-thread",
-        assistant_id="report-agent",
-        prompt="prepare report",
-        app=SimpleNamespace(state=SimpleNamespace()),
-        owner_user_id="owner-1",
-        metadata={
-            "scheduled_task_id": "task-1",
-            "scheduled_task_run_id": "task-run-1",
-        },
+    service = ScheduledTaskService(
+        task_repo=_TaskRepo(),
+        task_run_repo=_TaskRunRepo([]),
+        invocation_runtime=CallbackInvocationRuntime(launch_run),
+        poll_interval_seconds=5,
+        lease_seconds=30,
+        max_concurrent_runs=2,
+    )
+    result = await service.dispatch_task(
+        _scheduled_task(context_mode="reuse_thread"),
+        now=datetime(2026, 8, 6, tzinfo=UTC),
+        trigger="scheduled",
     )
 
-    body = captured["body"]
     assert captured["thread_id"] == "scheduled-thread"
-    assert body.context == {"non_interactive": True, "user_id": "owner-1"}
-    assert body.multitask_strategy == "reject"
-    assert body.metadata["scheduled_task_run_id"] == "task-run-1"
-    assert result == {"run_id": "run-1", "thread_id": "scheduled-thread"}
+    assert captured["context"] == {"non_interactive": True, "user_id": "owner-1"}
+    assert captured["multitask_strategy"] == "reject"
+    assert captured["metadata"]["scheduled_task_run_id"] == result["task_run_id"]
 
 
 @pytest.mark.anyio
