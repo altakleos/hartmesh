@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from typing import Any
 
@@ -31,6 +31,13 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
+from app.runtime.invocation import (
+    InternalCancelRequest,
+    InternalLaunchIntent,
+    InvocationPrincipal,
+    InvocationRuntime,
+    PreparedLaunch,
+)
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
@@ -39,6 +46,7 @@ from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
     ORPHAN_RECOVERY_STOP_REASON,
+    CancelOutcome,
     CheckpointStateAccessor,
     ConflictError,
     DisconnectMode,
@@ -1047,109 +1055,105 @@ async def ensure_checkpoint_history_seeded(
 # ---------------------------------------------------------------------------
 
 
-async def start_run(
-    body: RunCreateRequest,
-    thread_id: str,
-    request: Request,
-) -> RunRecord:
-    """Create a RunRecord and launch the background agent task.
+class _GatewayLaunchNormalizer:
+    """Translate a finite internal intent into the current Gateway run plan."""
 
-    Parameters
-    ----------
-    body : RunCreateRequest
-        The validated request body shared by HTTP and internal launch paths.
-    thread_id : str
-        Target thread.
-    request : Request
-        FastAPI request — used to retrieve singletons from ``app.state``.
-    """
-    try:
-        validate_thread_id(thread_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    def __init__(self, request: Request) -> None:
+        self._request = request
 
-    body_config = getattr(body, "config", None)
-    config_metadata = body_config.get("metadata") if isinstance(body_config, dict) else None
-    try:
-        validate_run_metadata_secrets(getattr(body, "metadata", None))
-        validate_run_metadata_secrets(config_metadata)
-    except LegacyRunMetadataSecretError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    @contextmanager
+    def scope(self, _intent: InternalLaunchIntent):
+        owner_user_id = get_trusted_internal_owner_user_id(self._request)
+        token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
+        try:
+            yield
+        finally:
+            if token is not None:
+                reset_current_user(token)
 
-    stream_modes = normalize_stream_modes(body.stream_mode)
-    bridge = get_stream_bridge(request)
-    run_mgr = get_run_manager(request)
-    run_ctx = get_run_context(request)
+    async def normalize(self, intent: InternalLaunchIntent) -> PreparedLaunch:
+        try:
+            validate_thread_id(intent.thread_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
+        config_metadata = intent.config.get("metadata") if isinstance(intent.config, dict) else None
+        try:
+            validate_run_metadata_secrets(intent.metadata)
+            validate_run_metadata_secrets(config_metadata)
+        except LegacyRunMetadataSecretError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    body_context = getattr(body, "context", None) or {}
-    model_name = body_context.get("model_name")
-    # Coerce non-string model_name values to str before truncation.
-    if model_name is not None and not isinstance(model_name, str):
-        model_name = str(model_name)
+        stream_modes = normalize_stream_modes(intent.stream_mode)
+        bridge = get_stream_bridge(self._request)
+        run_mgr = get_run_manager(self._request)
+        run_ctx = get_run_context(self._request)
+        disconnect = DisconnectMode.cancel if intent.on_disconnect == "cancel" else DisconnectMode.continue_
 
-    # Validate model against the allowlist when a model_name is provided.
-    if model_name:
-        app_config = get_app_config()
-        resolved = app_config.get_model_config(model_name)
-        if resolved is None:
+        body_context = intent.context or {}
+        model_name = body_context.get("model_name")
+        # Coerce non-string model_name values to str before truncation.
+        if model_name is not None and not isinstance(model_name, str):
+            model_name = str(model_name)
+        # Validate model against the allowlist when a model_name is provided.
+        if model_name and get_app_config().get_model_config(model_name) is None:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model {model_name!r} is not in the configured model allowlist",
             )
 
-    owner_user_id = get_trusted_internal_owner_user_id(request)
-    # Stateless run endpoints carry thread_id in the request *body*, so the
-    # @require_permission(owner_check=True) decorator -- which resolves ownership
-    # from the path param -- cannot protect them. Enforce thread ownership here,
-    # before any run is created, so one user cannot start runs on (or read /wait
-    # checkpoint state from) another user's thread. Missing rows (auto-created
-    # temp threads) and NULL-owner rows (shared / pre-auth data) stay accessible
-    # via check_access; only a thread already owned by another user is rejected
-    # with 404, matching thread_runs.py's anti-enumeration behaviour. Internal
-    # channel runs act on behalf of the connection owner carried in
-    # X-DeerFlow-Owner-User-Id, so they are scoped to that owner instead of
-    # bypassing the check -- a leaked internal token must not grant cross-user
-    # thread access.
-    user = getattr(request.state, "user", None)
-    if user is not None:
-        allowed = await run_ctx.thread_store.check_access(thread_id, str(user.id))
-        if not allowed and owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
-            # Channel workers may also act for the connection owner named in
-            # the trusted header (e.g. claiming a legacy default-owned channel
-            # thread for its real owner).
-            allowed = await run_ctx.thread_store.check_access(thread_id, owner_user_id)
-        if not allowed:
-            raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+        owner_user_id = get_trusted_internal_owner_user_id(self._request)
+        # Stateless run endpoints carry thread_id in the request *body*, so the
+        # @require_permission(owner_check=True) decorator -- which resolves
+        # ownership from the path param -- cannot protect them. Enforce thread
+        # ownership before admission. Internal channel runs act on behalf of the
+        # connection owner carried in X-DeerFlow-Owner-User-Id, so they remain
+        # scoped to that owner instead of bypassing the check.
+        user = getattr(self._request.state, "user", None)
+        if user is not None:
+            allowed = await run_ctx.thread_store.check_access(intent.thread_id, str(user.id))
+            if not allowed and owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+                # Channel workers may act for the connection owner named in the
+                # trusted header (for example, claiming a legacy default-owned
+                # channel thread for its real owner).
+                allowed = await run_ctx.thread_store.check_access(intent.thread_id, owner_user_id)
+            if not allowed:
+                raise HTTPException(status_code=404, detail=f"Thread {intent.thread_id} not found")
 
-    owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
-    try:
-        agent_factory = resolve_agent_factory(body.assistant_id)
-        is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
-        command = getattr(body, "command", None)
-        if command and command.get("resume") is not None:
-            graph_input = Command(resume=command["resume"])
+        agent_factory = resolve_agent_factory(intent.assistant_id)
+        is_internal_caller = getattr(getattr(self._request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
+        if intent.command and intent.command.get("resume") is not None:
+            graph_input = Command(resume=intent.command["resume"])
         else:
-            graph_input = normalize_input(body.input, trusted_internal=is_internal_caller)
-        config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
-        await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
-
-        # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
-        # The ``context`` field is a custom extension for the langgraph-compat layer
-        # that carries agent configuration (model_name, thinking_enabled, etc.).
-        # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
-        merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
+            graph_input = normalize_input(intent.input, trusted_internal=is_internal_caller)
+        config = build_run_config(
+            intent.thread_id,
+            intent.config,
+            intent.metadata,
+            assistant_id=intent.assistant_id,
+        )
+        await apply_checkpoint_to_run_config(
+            config,
+            body=intent,
+            thread_id=intent.thread_id,
+            request=self._request,
+        )
+        # Merge DeerFlow-specific context overrides into both ``configurable``
+        # and ``context``. Only agent-relevant keys are forwarded.
+        merge_run_context_overrides(config, intent.context, internal=is_internal_caller)
         if not is_internal_caller:
-            # ``body.config`` is free-form and copied verbatim by
-            # ``build_run_config``; scrub internal-only keys smuggled there.
+            # ``intent.config`` is free-form and copied by ``build_run_config``;
+            # scrub any internal-only keys smuggled there.
             strip_internal_context_keys(config)
-        internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
+        internal_owner_user = await resolve_trusted_internal_owner_for_attribution(
+            self._request,
+            owner_user_id,
+        )
         inject_authenticated_user_context(
             config,
-            request,
+            self._request,
             internal_owner_user=internal_owner_user,
-            request_context=getattr(body, "context", None),
+            request_context=intent.context,
         )
 
         async def run_after_metadata(record: RunRecord) -> None:
@@ -1177,33 +1181,35 @@ async def start_run(
                         metadata_failure_logged = True
                         logger.warning(
                             "Failed to ensure thread_meta for %s (non-fatal)",
-                            sanitize_log_param(thread_id),
+                            sanitize_log_param(intent.thread_id),
                             exc_info=True,
                         )
                 elif abort_task not in done:
                     logger.warning(
                         "Timed out ensuring thread_meta for %s after %.1fs",
-                        sanitize_log_param(thread_id),
+                        sanitize_log_param(intent.thread_id),
                         _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
                     )
             finally:
                 if metadata_task.done():
                     if not metadata_failure_logged:
-                        _log_thread_metadata_task_result(metadata_task, thread_id=thread_id)
+                        _log_thread_metadata_task_result(
+                            metadata_task,
+                            thread_id=intent.thread_id,
+                        )
                 else:
                     metadata_task.cancel()
                     metadata_task.add_done_callback(
                         lambda task: _log_thread_metadata_task_result(
                             task,
-                            thread_id=thread_id,
+                            thread_id=intent.thread_id,
                         )
                     )
                 if not abort_task.done():
                     abort_task.cancel()
                     abort_task.add_done_callback(_consume_task_result)
-            # Continue through run_agent even after metadata abort/timeout:
-            # its startup barrier is the single path that turns pending
-            # cancellation into no-agent-construction plus publish_end.
+            # Continue even after metadata abort/timeout: run_agent's startup
+            # barrier is the single path that finalizes pending cancellation.
             await run_agent(
                 bridge,
                 run_mgr,
@@ -1213,61 +1219,124 @@ async def start_run(
                 graph_input=graph_input,
                 config=config,
                 stream_modes=stream_modes,
-                stream_subgraphs=body.stream_subgraphs,
-                interrupt_before=body.interrupt_before,
-                interrupt_after=body.interrupt_after,
+                stream_subgraphs=intent.stream_subgraphs,
+                interrupt_before=intent.interrupt_before,
+                interrupt_after=intent.interrupt_after,
             )
 
-        try:
-            async with goal_thread_lock(thread_id):
-                await ensure_checkpoint_history_seeded(
-                    request,
-                    thread_id=thread_id,
-                    assistant_id=body.assistant_id,
-                )
-                record = await run_mgr.create_or_reject(
-                    thread_id,
-                    body.assistant_id,
-                    on_disconnect=disconnect,
-                    metadata=body.metadata or {},
-                    # Persist a secret-redacted copy of the config: the run record is
-                    # written to runs.kwargs_json and echoed by the run API, so a
-                    # request-scoped secret (#3861) must not ride along. The live
-                    # config built above keeps the secrets for the actual run.
-                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
-                    multitask_strategy=body.multitask_strategy,
-                    model_name=model_name,
-                    user_id=owner_user_id,
-                )
+        return PreparedLaunch(
+            thread_id=intent.thread_id,
+            assistant_id=intent.assistant_id,
+            on_disconnect=disconnect,
+            metadata=intent.metadata or {},
+            kwargs={
+                # The stored kwargs are echoed by the run API, so persist a
+                # secret-redacted config while retaining live secrets above.
+                "input": intent.input,
+                "config": redact_config_secrets(intent.config),
+            },
+            multitask_strategy=intent.multitask_strategy,
+            model_name=model_name,
+            user_id=owner_user_id,
+            worker=run_after_metadata,
+        )
 
-                worker = run_after_metadata(record)
-                try:
-                    # No await is allowed between durable admission and task
-                    # attachment. Metadata setup runs inside the attached
-                    # worker so a pending cancellation can bypass stalled
-                    # thread-store IO and still reach run_agent's startup
-                    # barrier / stream finalization.
-                    record.task = asyncio.create_task(worker)
-                except Exception as exc:
-                    worker.close()
-                    await run_mgr.fail_start_if_pending(
-                        record.run_id,
-                        error=f"Failed to attach run worker: {exc}",
-                    )
-                    raise
-        except ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except UnsupportedStrategyError as exc:
-            raise HTTPException(status_code=501, detail=str(exc)) from exc
 
-        # Title sync is handled by worker.py's finally block which reads the
-        # title from the checkpoint and calls thread_store.update_display_name
-        # after the run completes.
+class _GatewayDurableRuns:
+    """Gateway adapter over the harness run manager and admission lock."""
 
-        return record
-    finally:
-        if owner_context_token is not None:
-            reset_current_user(owner_context_token)
+    def __init__(self, request: Request) -> None:
+        self._request = request
+
+    @asynccontextmanager
+    async def admission_scope(self, thread_id: str):
+        async with goal_thread_lock(thread_id):
+            yield
+
+    async def prepare_admission(self, launch: PreparedLaunch) -> None:
+        await ensure_checkpoint_history_seeded(
+            self._request,
+            thread_id=launch.thread_id,
+            assistant_id=launch.assistant_id,
+        )
+
+    async def admit(self, launch: PreparedLaunch) -> RunRecord:
+        return await get_run_manager(self._request).create_or_reject(
+            launch.thread_id,
+            launch.assistant_id,
+            on_disconnect=launch.on_disconnect,
+            metadata=launch.metadata,
+            kwargs=launch.kwargs,
+            multitask_strategy=launch.multitask_strategy,
+            model_name=launch.model_name,
+            user_id=launch.user_id,
+        )
+
+    async def fail_start(self, record: RunRecord, error: str) -> None:
+        await get_run_manager(self._request).fail_start_if_pending(
+            record.run_id,
+            error=error,
+        )
+
+    async def observe(
+        self,
+        run_id: str,
+        principal: InvocationPrincipal,
+    ) -> RunRecord | None:
+        return await get_run_manager(self._request).get(
+            run_id,
+            user_id=principal.user_id,
+        )
+
+    async def cancel(self, cancel_request: InternalCancelRequest) -> CancelOutcome:
+        return await get_run_manager(self._request).cancel(
+            cancel_request.run_id,
+            action=cancel_request.action,
+        )
+
+
+def build_invocation_runtime(request: Request) -> InvocationRuntime:
+    """Construct a request-scoped runtime from typed Gateway adapters."""
+    return InvocationRuntime(
+        normalizer=_GatewayLaunchNormalizer(request),
+        runs=_GatewayDurableRuns(request),
+    )
+
+
+def _launch_intent(body: RunCreateRequest, thread_id: str) -> InternalLaunchIntent:
+    return InternalLaunchIntent(
+        thread_id=thread_id,
+        assistant_id=getattr(body, "assistant_id", None),
+        input=getattr(body, "input", None),
+        command=getattr(body, "command", None),
+        metadata=getattr(body, "metadata", None),
+        config=getattr(body, "config", None),
+        context=getattr(body, "context", None),
+        checkpoint_id=getattr(body, "checkpoint_id", None),
+        checkpoint=getattr(body, "checkpoint", None),
+        interrupt_before=getattr(body, "interrupt_before", None),
+        interrupt_after=getattr(body, "interrupt_after", None),
+        stream_mode=getattr(body, "stream_mode", None),
+        stream_subgraphs=getattr(body, "stream_subgraphs", False),
+        on_disconnect=getattr(body, "on_disconnect", "cancel"),
+        multitask_strategy=getattr(body, "multitask_strategy", "reject"),
+    )
+
+
+async def start_run(
+    body: RunCreateRequest,
+    thread_id: str,
+    request: Request,
+) -> RunRecord:
+    """FastAPI compatibility adapter for application-owned invocation launch."""
+    runtime = build_invocation_runtime(request)
+    try:
+        receipt = await runtime.launch(_launch_intent(body, thread_id))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except UnsupportedStrategyError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    return receipt.record
 
 
 async def launch_scheduled_thread_run(
