@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from fastapi import HTTPException
 
+from app.runtime.invocation import InternalLaunchIntent, InternalSourceKind, InvocationRuntime
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.schedules import next_run_at
@@ -28,14 +29,14 @@ class ScheduledTaskService:
         *,
         task_repo,
         task_run_repo,
-        launch_run,
+        invocation_runtime: InvocationRuntime,
         poll_interval_seconds: int,
         lease_seconds: int,
         max_concurrent_runs: int,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
-        self._launch_run = launch_run
+        self._invocation_runtime = invocation_runtime
         self._poll_interval_seconds = poll_interval_seconds
         self._lease_seconds = lease_seconds
         self._max_concurrent_runs = max_concurrent_runs
@@ -79,7 +80,7 @@ class ScheduledTaskService:
 
     @staticmethod
     def _task_status_for_launch(task: dict[str, Any], *, trigger: str) -> str:
-        # The task-level status to write once _launch_run has produced a live
+        # The task-level status to write once InvocationRuntime has produced a live
         # run. A `once` task stays "running" until handle_run_completion
         # observes the real terminal outcome; declaring "completed" at launch
         # would stick if the run fails or the process dies (startup
@@ -103,7 +104,7 @@ class ScheduledTaskService:
         task: dict[str, Any],
         *,
         now: datetime,
-        trigger: str,
+        trigger: Literal["scheduled", "manual"],
     ) -> dict[str, Any]:
         execution_thread_id = task.get("thread_id")
         if task.get("context_mode") == "fresh_thread_per_run" or execution_thread_id is None:
@@ -178,7 +179,7 @@ class ScheduledTaskService:
             if trigger == "manual":
                 return self._active_run_conflict_result(execution_thread_id)
             return await self._record_scheduled_skip(task, thread_id=execution_thread_id, now=now, trigger=trigger)
-        # Track whether _launch_run has produced a live run. A bookkeeping
+        # Track whether InvocationRuntime has produced a live run. A bookkeeping
         # failure AFTER launch (the queued->running write, or the parent task
         # update) must NOT be recorded as "failed": "failed" is outside the
         # partial unique index uq_scheduled_task_run_active, so it would release
@@ -187,27 +188,34 @@ class ScheduledTaskService:
         # retain the launched run_id regardless of bookkeeping errors.
         launched_run_id: str | None = None
         launched_thread_id: str | None = None
-        # Flip immediately after _launch_run returns, before any further code
-        # that can raise (e.g. result["run_id"] on a malformed result). The
+        # Flip immediately after InvocationRuntime returns, before any further
+        # code that can raise while unpacking the receipt. The
         # retention branch keys off this flag, not `launched_run_id is not
         # None`, so a launch that succeeded but whose result-unpacking raised
         # still takes the retention path instead of the release-the-slot path.
         launch_succeeded = False
         try:
-            result = await self._launch_run(
-                thread_id=execution_thread_id,
-                assistant_id=task.get("assistant_id"),
-                prompt=task["prompt"],
-                owner_user_id=task.get("user_id"),
-                metadata={
-                    "scheduled_task_id": task["id"],
-                    "scheduled_task_run_id": task_run_id,
-                    "scheduled_trigger": trigger,
-                },
+            receipt = await self._invocation_runtime.launch(
+                InternalLaunchIntent(
+                    thread_id=execution_thread_id,
+                    assistant_id=task.get("assistant_id"),
+                    input={"messages": [{"role": "user", "content": task["prompt"]}]},
+                    context={
+                        "non_interactive": True,
+                        **({"user_id": task["user_id"]} if task.get("user_id") else {}),
+                    },
+                    on_disconnect="continue",
+                    multitask_strategy="reject",
+                    source_kind=InternalSourceKind.scheduled_task,
+                    trusted_task_id=task["id"],
+                    task_run_id=task_run_id,
+                    scheduled_trigger=trigger,
+                    owner_user_id=task.get("user_id"),
+                )
             )
             launch_succeeded = True
-            launched_run_id = result["run_id"]
-            launched_thread_id = result["thread_id"]
+            launched_run_id = receipt.record.run_id
+            launched_thread_id = receipt.record.thread_id
             next_at = next_run_at(
                 task["schedule_type"],
                 task["schedule_spec"],
@@ -266,7 +274,7 @@ class ScheduledTaskService:
             )
 
             if launch_succeeded:
-                # _launch_run succeeded, so a run is live even though
+                # InvocationRuntime succeeded, so a run is live even though
                 # post-launch bookkeeping raised. Keep the task-run row
                 # "running" so it keeps holding the task's single active slot
                 # (preventing a duplicate launch on the next dispatch) and
@@ -324,7 +332,7 @@ class ScheduledTaskService:
                     "error": str(exc),
                 }
 
-            # _launch_run itself failed (or a step before it did): no live run
+            # InvocationRuntime itself failed (or a step before it did): no live run
             # was created, so it is safe to release the active slot.
             task_status = self._task_status_for_failure(task, trigger=trigger)
             await self._task_run_repo.update_status(

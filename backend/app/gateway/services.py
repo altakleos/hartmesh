@@ -24,7 +24,6 @@ from langgraph.types import Command
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
-    INTERNAL_OWNER_USER_ID_HEADER_NAME,
     INTERNAL_SYSTEM_ROLE,
     get_internal_user,
     get_trusted_internal_owner_user_id,
@@ -34,6 +33,7 @@ from app.gateway.utils import sanitize_log_param
 from app.runtime.invocation import (
     InternalCancelRequest,
     InternalLaunchIntent,
+    InternalSourceKind,
     InvocationPrincipal,
     InvocationRuntime,
     PreparedLaunch,
@@ -1058,12 +1058,36 @@ async def ensure_checkpoint_history_seeded(
 class _GatewayLaunchNormalizer:
     """Translate a finite internal intent into the current Gateway run plan."""
 
-    def __init__(self, request: Request) -> None:
+    def __init__(
+        self,
+        request: Request,
+        *,
+        trust_internal_launch_facts: bool = False,
+    ) -> None:
         self._request = request
+        self._trust_internal_launch_facts = trust_internal_launch_facts
+
+    def _owner_user_id(self, intent: InternalLaunchIntent) -> str | None:
+        if self._trust_internal_launch_facts and intent.source_kind is InternalSourceKind.scheduled_task:
+            return intent.owner_user_id
+        return get_trusted_internal_owner_user_id(self._request)
+
+    def _metadata(self, intent: InternalLaunchIntent) -> dict[str, Any]:
+        metadata = dict(intent.metadata or {})
+        if not self._trust_internal_launch_facts or intent.source_kind is not InternalSourceKind.scheduled_task:
+            return metadata
+        if not intent.trusted_task_id or not intent.task_run_id or intent.scheduled_trigger not in {"scheduled", "manual"}:
+            raise ValueError("scheduled task launch requires trusted task, occurrence, and trigger facts")
+        metadata.update(
+            scheduled_task_id=intent.trusted_task_id,
+            scheduled_task_run_id=intent.task_run_id,
+            scheduled_trigger=intent.scheduled_trigger,
+        )
+        return metadata
 
     @contextmanager
-    def scope(self, _intent: InternalLaunchIntent):
-        owner_user_id = get_trusted_internal_owner_user_id(self._request)
+    def scope(self, intent: InternalLaunchIntent):
+        owner_user_id = self._owner_user_id(intent)
         token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
         try:
             yield
@@ -1077,9 +1101,10 @@ class _GatewayLaunchNormalizer:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+        metadata = self._metadata(intent)
         config_metadata = intent.config.get("metadata") if isinstance(intent.config, dict) else None
         try:
-            validate_run_metadata_secrets(intent.metadata)
+            validate_run_metadata_secrets(metadata)
             validate_run_metadata_secrets(config_metadata)
         except LegacyRunMetadataSecretError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1102,7 +1127,7 @@ class _GatewayLaunchNormalizer:
                 detail=f"Model {model_name!r} is not in the configured model allowlist",
             )
 
-        owner_user_id = get_trusted_internal_owner_user_id(self._request)
+        owner_user_id = self._owner_user_id(intent)
         # Stateless run endpoints carry thread_id in the request *body*, so the
         # @require_permission(owner_check=True) decorator -- which resolves
         # ownership from the path param -- cannot protect them. Enforce thread
@@ -1129,7 +1154,7 @@ class _GatewayLaunchNormalizer:
         config = build_run_config(
             intent.thread_id,
             intent.config,
-            intent.metadata,
+            metadata,
             assistant_id=intent.assistant_id,
         )
         await apply_checkpoint_to_run_config(
@@ -1228,7 +1253,7 @@ class _GatewayLaunchNormalizer:
             thread_id=intent.thread_id,
             assistant_id=intent.assistant_id,
             on_disconnect=disconnect,
-            metadata=intent.metadata or {},
+            metadata=metadata,
             kwargs={
                 # The stored kwargs are echoed by the run API, so persist a
                 # secret-redacted config while retaining live secrets above.
@@ -1303,6 +1328,26 @@ def build_invocation_runtime(request: Request) -> InvocationRuntime:
     )
 
 
+def build_scheduled_invocation_runtime(app: Any) -> InvocationRuntime:
+    """Construct the scheduler's process-internal application runtime."""
+    request = SimpleNamespace(
+        app=app,
+        headers={},
+        state=SimpleNamespace(
+            user=get_internal_user(),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
+        cookies={},
+    )
+    return InvocationRuntime(
+        normalizer=_GatewayLaunchNormalizer(
+            request,
+            trust_internal_launch_facts=True,
+        ),
+        runs=_GatewayDurableRuns(request),
+    )
+
+
 def _launch_intent(body: RunCreateRequest, thread_id: str) -> InternalLaunchIntent:
     return InternalLaunchIntent(
         thread_id=thread_id,
@@ -1337,58 +1382,6 @@ async def start_run(
     except UnsupportedStrategyError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
     return receipt.record
-
-
-async def launch_scheduled_thread_run(
-    *,
-    thread_id: str,
-    assistant_id: str | None,
-    prompt: str,
-    request: Request | None = None,
-    app: Any | None = None,
-    owner_user_id: str | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    if request is None:
-        if app is None:
-            raise ValueError("launch_scheduled_thread_run requires request or app")
-        request = SimpleNamespace(
-            app=app,
-            headers=({INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id} if owner_user_id else {}),
-            state=SimpleNamespace(
-                user=get_internal_user(),
-                auth_source=AUTH_SOURCE_INTERNAL,
-            ),
-            cookies={},
-        )
-    body = RunCreateRequest(
-        assistant_id=assistant_id,
-        input={"messages": [{"role": "user", "content": prompt}]},
-        command=None,
-        metadata=metadata or {},
-        config=None,
-        # ``user_id`` mirrors what IM channels put in ``body.context`` so
-        # runtime-context consumers without a ContextVar fallback (e.g.
-        # user-scoped GuardrailMiddleware providers) see the owning user;
-        # ``inject_authenticated_user_context`` skips the internal user.
-        context=({"non_interactive": True, "user_id": owner_user_id} if owner_user_id else {"non_interactive": True}),
-        webhook=None,
-        checkpoint_id=None,
-        checkpoint=None,
-        interrupt_before=None,
-        interrupt_after=None,
-        stream_mode=None,
-        stream_subgraphs=False,
-        stream_resumable=None,
-        on_disconnect="continue",
-        on_completion=None,
-        multitask_strategy="reject",
-        after_seconds=None,
-        if_not_exists="create",
-        feedback_keys=None,
-    )
-    record = await start_run(body, thread_id, request)
-    return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 
 async def sse_consumer(

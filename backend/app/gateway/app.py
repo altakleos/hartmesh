@@ -293,7 +293,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.channels.service import start_channel_service
 
-            # Closure over `app` (mirrors ScheduledTaskService's `launch_run`
+            # Closure over `app` (mirrors the scheduler runtime construction
             # below) rather than resolving `app.state.stream_bridge` here
             # directly: `stream_bridge` is a STARTUP_ONLY_FIELDS singleton set
             # once, above, by `langgraph_runtime(app, startup_config)`, so
@@ -311,14 +311,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.exception("No IM channels configured or channel service failed to start")
 
         try:
-            from app.gateway.services import launch_scheduled_thread_run
+            from app.gateway.services import build_scheduled_invocation_runtime
             from app.scheduler import ScheduledTaskService
 
             if getattr(app.state, "scheduled_task_repo", None) is not None and getattr(app.state, "scheduled_task_run_repo", None) is not None:
                 scheduled_task_service = ScheduledTaskService(
                     task_repo=app.state.scheduled_task_repo,
                     task_run_repo=app.state.scheduled_task_run_repo,
-                    launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs),
+                    invocation_runtime=build_scheduled_invocation_runtime(app),
                     poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
                     lease_seconds=startup_config.scheduler.lease_seconds,
                     max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,

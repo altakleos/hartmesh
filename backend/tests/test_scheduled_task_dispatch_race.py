@@ -13,7 +13,7 @@ fast-path check.
 
 These tests drive the REAL ``ScheduledTaskRunRepository`` + ``ScheduledTaskService``
 against a real file-backed ``sqlite+aiosqlite`` DB (so the index is actually
-enforced), with a fake ``launch_run`` that only records launches.
+enforced), with a fake ``InvocationRuntime`` that only records launches.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
+from support.scheduled_task_runtime import CallbackInvocationRuntime
 
 from app.scheduler.service import ScheduledTaskService
 from deerflow.config.database_config import DatabaseConfig
@@ -61,7 +62,7 @@ def _make_service(task_repo, run_repo, launched: list) -> ScheduledTaskService:
     return ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=10,

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from support.scheduled_task_runtime import CallbackInvocationRuntime, NeverLaunchInvocationRuntime
 
 from app.scheduler.service import ScheduledTaskService
 from deerflow.runtime import ConflictError, RunStatus
@@ -93,7 +94,7 @@ async def test_service_claims_and_dispatches_due_task():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -133,7 +134,7 @@ async def test_manual_trigger_keeps_paused_cron_task_paused():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -174,7 +175,7 @@ async def test_fresh_thread_per_run_creates_new_execution_thread():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -219,7 +220,7 @@ async def test_scheduled_overlap_conflict_is_recorded_as_skip():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -262,7 +263,7 @@ async def test_manual_overlap_conflict_returns_conflict():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -287,7 +288,7 @@ async def test_dispatch_task_records_failure_for_legacy_invalid_thread_id():
     aborts the rest of the claimed batch every cycle."""
 
     async def fake_launch(**_kwargs):
-        raise AssertionError("launch_run must not be called for an invalid thread_id")
+        raise AssertionError("InvocationRuntime must not be called for an invalid thread_id")
 
     task_repo = DummyTaskRepo(
         [
@@ -309,7 +310,7 @@ async def test_dispatch_task_records_failure_for_legacy_invalid_thread_id():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -372,7 +373,7 @@ async def test_run_once_continues_batch_after_invalid_thread_id():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -406,7 +407,7 @@ async def test_handle_run_completion_persists_success():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=lambda **_kwargs: None,
+        invocation_runtime=NeverLaunchInvocationRuntime(),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -436,7 +437,7 @@ def _make_service(task_repo, run_repo):
     return ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=lambda **_kwargs: None,
+        invocation_runtime=NeverLaunchInvocationRuntime(),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -543,7 +544,7 @@ async def test_skip_policy_applies_to_fresh_thread_runs():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -591,7 +592,7 @@ async def test_manual_trigger_with_active_run_returns_conflict_without_launching
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -638,7 +639,7 @@ async def test_launch_bookkeeping_passes_protect_terminal():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -659,7 +660,7 @@ class _StatefulRunRepo:
         ``run_id``;
       * with ``fail_first_update=True`` the very FIRST ``update_status()``
         call raises, simulating a transient DB failure on the
-        ``queued -> running`` write that fires right after ``_launch_run``
+        ``queued -> running`` write that fires right after ``InvocationRuntime``
         returns a live ``run_id``; every later ``update_status()`` applies;
       * ``has_active_runs()`` reflects whether any tracked row for the task
         is still in an active status (``queued``/``running``), exactly like
@@ -691,7 +692,7 @@ class _StatefulRunRepo:
         self.updates.append((run_record_id, kwargs))
         if self._fail_first_update and not self._first_update_raised:
             # The launch-path queued->running write fails once, AFTER
-            # _launch_run has already returned a live run_id.
+            # InvocationRuntime has already returned a live run_id.
             self._first_update_raised = True
             raise RuntimeError("simulated transient DB error on queued->running write")
         row = self.rows.get(run_record_id)
@@ -714,7 +715,7 @@ async def test_post_launch_bookkeeping_failure_does_not_release_active_slot():
     """Regression for issue #4452.
 
     A transient failure in the ``queued -> running`` bookkeeping write
-    (after ``_launch_run`` has already returned a live ``run_id``) must NOT
+    (after ``InvocationRuntime`` has already returned a live ``run_id``) must NOT
     flip the task-run row to ``failed``: ``failed`` is outside the partial
     unique index ``uq_scheduled_task_run_active``, so releasing the slot
     would let the next dispatch launch a DUPLICATE run. The fix keeps the
@@ -748,7 +749,7 @@ async def test_post_launch_bookkeeping_failure_does_not_release_active_slot():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -786,7 +787,7 @@ async def test_post_launch_bookkeeping_failure_does_not_release_active_slot():
 
 @pytest.mark.asyncio
 async def test_pre_launch_failure_still_releases_active_slot():
-    """Complement to the #4452 fix: when ``_launch_run`` itself fails (no run
+    """Complement to the #4452 fix: when ``InvocationRuntime`` itself fails (no run
     was ever started), the task-run row is marked ``failed`` and the active
     slot is released as before -- the post-launch retention path does not
     apply because there is no live run to protect.
@@ -818,7 +819,7 @@ async def test_pre_launch_failure_still_releases_active_slot():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -840,7 +841,7 @@ async def test_pre_launch_failure_still_releases_active_slot():
 async def test_malformed_launch_result_still_retains_active_slot():
     """Defense-in-depth for the #4452 invariant.
 
-    If ``_launch_run`` returns a malformed result (e.g. missing ``run_id``),
+    If ``InvocationRuntime`` returns a malformed receipt (e.g. missing ``run_id``),
     the unpacking line raises AFTER a live run was already created. The
     dispatch must still take the retention path (keep the row active so the
     slot stays held and no duplicate launches) rather than the pre-launch
@@ -876,7 +877,7 @@ async def test_malformed_launch_result_still_retains_active_slot():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        launch_run=fake_launch,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
