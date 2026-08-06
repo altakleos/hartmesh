@@ -3,9 +3,10 @@
 Durable ``RunRow`` creation inventory discovered from production source:
 
 * Normal graph runs enter through ``app.runtime.InvocationRuntime``. The
-  Gateway's five create/stream/wait HTTP variants and native-channel SDK
-  create/wait/stream calls use the ``start_run`` compatibility adapter;
-  Scheduled Task occurrences call the runtime directly.
+  Gateway's five create/stream/wait HTTP variants use the ``start_run``
+  compatibility adapter; Scheduled Task occurrences and in-process native
+  channels call the runtime directly. A standalone channel manager retains
+  the SDK create/wait/stream transport when Gateway is a real process boundary.
 * Checkpoint mutations call ``reserve_checkpoint_write`` and create a temporary
   ``operation_kind=checkpoint_write`` row through
   ``RunManager.reserve_thread_operation``.
@@ -244,7 +245,7 @@ class _ChannelConnectionRepo:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("launch_mode", ["create", "stream", "wait"])
-async def test_native_channel_launch_modes_select_gateway_durable_routes(
+async def test_standalone_native_channel_launch_modes_select_sdk_transport(
     launch_mode,
     tmp_path,
     monkeypatch,

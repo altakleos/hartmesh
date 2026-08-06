@@ -17,6 +17,7 @@ from app.channels.store import ChannelStore
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from app.runtime import InvocationRuntime
     from deerflow.config.app_config import AppConfig
     from deerflow.config.channel_connections_config import ChannelConnectionsConfig
     from deerflow.runtime import StreamBridge
@@ -103,6 +104,7 @@ class ChannelService:
         require_bound_identity: bool = False,
         app_config: AppConfig | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+        invocation_runtime: InvocationRuntime | None = None,
     ) -> None:
         self.bus = MessageBus()
         self.store = ChannelStore()
@@ -126,6 +128,7 @@ class ChannelService:
             require_bound_identity=require_bound_identity,
             inbound_dedupe_store=make_inbound_dedupe_store(app_config),
             get_stream_bridge=get_stream_bridge,
+            invocation_runtime=invocation_runtime,
         )
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
@@ -138,13 +141,16 @@ class ChannelService:
         app_config: AppConfig | None = None,
         *,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+        invocation_runtime: InvocationRuntime | None = None,
     ) -> ChannelService:
         """Create a ChannelService from the application config.
 
         ``get_stream_bridge`` is threaded straight through to the
         ``ChannelManager`` (see its docstring); it is optional so direct
         callers (including most tests) that don't need follow-up-buffer
-        auto-draining can omit it.
+        auto-draining can omit it. The embedded Gateway also supplies its
+        explicitly constructed ``InvocationRuntime``; omission retains the
+        standalone SDK transport boundary.
         """
         if app_config is None:
             from deerflow.config.app_config import get_app_config
@@ -165,6 +171,7 @@ class ChannelService:
             require_bound_identity=require_bound_identity,
             app_config=app_config,
             get_stream_bridge=get_stream_bridge,
+            invocation_runtime=invocation_runtime,
         )
 
     async def start(self) -> None:
@@ -435,15 +442,17 @@ async def start_channel_service(
     app_config: AppConfig | None = None,
     *,
     get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+    invocation_runtime: InvocationRuntime | None = None,
 ) -> ChannelService:
     """Create and start the global ChannelService from app config.
 
-    ``get_stream_bridge`` is threaded through to ``ChannelService.from_app_config``
-    -> ``ChannelManager`` so fire_and_forget channels that opt into
+    ``invocation_runtime`` and ``get_stream_bridge`` are threaded through
+    ``ChannelService.from_app_config`` -> ``ChannelManager`` so channel launches
+    share durable admission and fire_and_forget channels that opt into
     ``ChannelRunPolicy.buffer_followups_on_busy`` (currently GitHub) can watch
     a run's completion and auto-drain buffered follow-ups. ``app.py``'s
-    lifespan passes a closure over ``app.state.stream_bridge`` here, the same
-    pattern it already uses for ``ScheduledTaskService``'s ``launch_run``.
+    lifespan passes a closure over ``app.state.stream_bridge`` and constructs
+    the channel runtime beside the Scheduled Task runtime.
     """
     global _channel_service
     if _channel_service is not None:
@@ -451,7 +460,14 @@ async def start_channel_service(
     # from_app_config reads the JSON channel store and runtime config files;
     # keep that disk IO off the event loop. asyncio.to_thread forwards both
     # args and kwargs to the target callable.
-    _channel_service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge)
+    factory_kwargs: dict[str, Any] = {"get_stream_bridge": get_stream_bridge}
+    if invocation_runtime is not None:
+        factory_kwargs["invocation_runtime"] = invocation_runtime
+    _channel_service = await asyncio.to_thread(
+        ChannelService.from_app_config,
+        app_config,
+        **factory_kwargs,
+    )
     await _channel_service.start()
     return _channel_service
 

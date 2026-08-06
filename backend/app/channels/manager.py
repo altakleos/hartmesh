@@ -39,9 +39,16 @@ from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, gene
 # ChannelManager construction sees the same policy map as gateway bootstrap.
 from app.gateway.github import run_policy as _github_run_policy  # noqa: F401
 from app.gateway.internal_auth import create_internal_auth_headers
+from app.runtime import (
+    InternalLaunchIntent,
+    InternalNativeChannelFacts,
+    InternalSourceKind,
+    InvocationRuntime,
+)
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
+from deerflow.runtime import ConflictError as RuntimeConflictError
 from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
@@ -257,7 +264,7 @@ class _FollowupEntry:
 def _is_thread_busy_error(exc: BaseException | None) -> bool:
     if exc is None:
         return False
-    if isinstance(exc, ConflictError):
+    if isinstance(exc, (ConflictError, RuntimeConflictError)):
         return True
     return "already running a task" in str(exc)
 
@@ -974,9 +981,9 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
 class ChannelManager:
     """Core dispatcher that bridges IM channels to the DeerFlow agent.
 
-    It reads from the MessageBus inbound queue, creates/reuses threads on
-    Gateway's LangGraph-compatible API, sends messages via ``runs.wait``, and publishes
-    outbound responses back through the bus.
+    It reads from the MessageBus inbound queue, creates/reuses threads through
+    Gateway's LangGraph-compatible transport, launches durable work through the
+    injected InvocationRuntime, and publishes outbound responses through the bus.
     """
 
     def __init__(
@@ -994,6 +1001,7 @@ class ChannelManager:
         require_bound_identity: bool = False,
         inbound_dedupe_store: InboundDedupeStore | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+        invocation_runtime: InvocationRuntime | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -1013,6 +1021,11 @@ class ChannelManager:
         # tests) — follow-up buffering still works, but no watcher is
         # spawned to auto-drain it (see _maybe_spawn_followup_watcher).
         self._get_stream_bridge = get_stream_bridge
+        # In the embedded Gateway process, every durable channel launch goes
+        # through this application-owned runtime. ``None`` retains the SDK
+        # transport for direct/standalone managers where the Gateway is a real
+        # process boundary rather than an in-process dependency.
+        self._invocation_runtime = invocation_runtime
         self._client = None  # lazy init — langgraph_sdk async client
         self._channel_metadata_synced: set[str] = set()
         # Per-conversation locks so concurrent inbound messages for the same
@@ -1349,7 +1362,18 @@ class ChannelManager:
             if owner_headers := _owner_headers(carrier_msg):
                 run_kwargs["headers"] = owner_headers
 
-            result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
+            if self._invocation_runtime is not None:
+                record = await self._launch_with_invocation_runtime(
+                    msg=carrier_msg,
+                    thread_id=thread_id,
+                    assistant_id=assistant_id,
+                    run_input=run_kwargs["input"],
+                    run_config=run_config,
+                    run_context=run_context,
+                )
+                result = {"run_id": record.run_id}
+            else:
+                result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
         except Exception as exc:
             if _is_thread_busy_error(exc):
                 logger.warning(
@@ -1541,6 +1565,51 @@ class ChannelManager:
             return set(agent_config.skills)
         return None
 
+    async def _launch_with_invocation_runtime(
+        self,
+        *,
+        msg: InboundMessage,
+        thread_id: str,
+        assistant_id: str,
+        run_input: dict[str, Any],
+        run_config: dict[str, Any],
+        run_context: dict[str, Any],
+        stream_mode: list[str] | None = None,
+    ) -> Any:
+        """Launch one verified in-process channel turn through the runtime."""
+        if self._invocation_runtime is None:
+            raise RuntimeError("native-channel InvocationRuntime is not configured")
+
+        resolved_agent_name = run_context.get("agent_name")
+        if not isinstance(resolved_agent_name, str) or not resolved_agent_name:
+            resolved_agent_name = None
+        facts = InternalNativeChannelFacts(
+            provider=msg.channel_name,
+            connection_id=msg.connection_id,
+            workspace_id=msg.workspace_id,
+            chat_id=msg.chat_id,
+            topic_id=msg.topic_id,
+            provider_message_id=self._stable_provider_message_id(msg),
+            channel_user_id=msg.user_id,
+            resolved_assistant_id=assistant_id,
+            resolved_agent_name=resolved_agent_name,
+        )
+        receipt = await self._invocation_runtime.launch(
+            InternalLaunchIntent(
+                thread_id=thread_id,
+                assistant_id=assistant_id,
+                input=run_input,
+                config=run_config,
+                context=run_context,
+                stream_mode=stream_mode,
+                multitask_strategy="reject",
+                source_kind=InternalSourceKind.native_channel,
+                owner_user_id=_effective_owner_user_id(msg),
+                native_channel=facts,
+            )
+        )
+        return receipt.record
+
     # -- LangGraph SDK client (lazy) ----------------------------------------
 
     def _get_client(self):
@@ -1639,22 +1708,24 @@ class ChannelManager:
             task.add_done_callback(self._log_task_error)
 
     @staticmethod
-    def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
+    def _stable_provider_message_id(msg: InboundMessage) -> str | None:
         metadata = msg.metadata or {}
-        message_id = None
         for key in INBOUND_DEDUPE_METADATA_KEYS:
             value = metadata.get(key)
             if value:
-                message_id = str(value)
-                break
-        if message_id is None:
-            raw_message = metadata.get("raw_message")
-            if isinstance(raw_message, Mapping):
-                for key in INBOUND_DEDUPE_METADATA_KEYS:
-                    value = raw_message.get(key)
-                    if value:
-                        message_id = str(value)
-                        break
+                return str(value)
+        raw_message = metadata.get("raw_message")
+        if isinstance(raw_message, Mapping):
+            for key in INBOUND_DEDUPE_METADATA_KEYS:
+                value = raw_message.get(key)
+                if value:
+                    return str(value)
+        return None
+
+    @staticmethod
+    def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
+        metadata = msg.metadata or {}
+        message_id = ChannelManager._stable_provider_message_id(msg)
         if message_id is None:
             return None
 
@@ -2100,14 +2171,12 @@ class ChannelManager:
             # Fire-and-forget path: the channel does its own outbound
             # during the run (GitHub agents post to the issue/PR via the
             # ``gh`` CLI from inside the sandbox), so there is nothing
-            # for the manager to ferry back. Use ``runs.create`` — a
-            # short POST that returns once the run is ``pending`` — to
-            # avoid the SDK's 300s ``httpx.ReadTimeout`` on legitimately
-            # long autonomous runs, and the false "internal error"
-            # outbound that follows when it fires. ``ConflictError`` is
-            # still raised synchronously by ``start_run`` if a previous
-            # run on this thread is still active, so the existing
-            # busy-thread path is preserved.
+            # for the manager to ferry back. In-process dispatch returns
+            # after InvocationRuntime durably admits the run and attaches its
+            # worker, avoiding a long-lived SDK wait on autonomous work. A
+            # standalone manager retains the short ``runs.create`` request.
+            # ConflictError is still synchronous, preserving the existing
+            # busy-thread path.
             logger.info(
                 "[Manager] invoking runs.create(thread_id=%s, text_len=%d) [fire_and_forget]",
                 thread_id,
@@ -2119,7 +2188,18 @@ class ChannelManager:
                 # needs to subscribe to this run's StreamBridge stream. When
                 # ``buffer_followups_on_busy`` is off this is otherwise
                 # behaviorally identical to the previous bare ``await``.
-                result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
+                if self._invocation_runtime is not None:
+                    record = await self._launch_with_invocation_runtime(
+                        msg=msg,
+                        thread_id=thread_id,
+                        assistant_id=assistant_id,
+                        run_input=run_kwargs["input"],
+                        run_config=run_config,
+                        run_context=run_context,
+                    )
+                    result = {"run_id": record.run_id}
+                else:
+                    result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
             except Exception as exc:
                 if _is_thread_busy_error(exc):
                     logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
@@ -2139,11 +2219,29 @@ class ChannelManager:
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
         try:
-            result = await client.runs.wait(
-                thread_id,
-                assistant_id,
-                **run_kwargs,
-            )
+            if self._invocation_runtime is not None:
+                record = await self._launch_with_invocation_runtime(
+                    msg=msg,
+                    thread_id=thread_id,
+                    assistant_id=assistant_id,
+                    run_input=run_kwargs["input"],
+                    run_config=run_config,
+                    run_context=run_context,
+                )
+                join_kwargs: dict[str, Any] = {}
+                if owner_headers := _owner_headers(msg):
+                    join_kwargs["headers"] = owner_headers
+                result = await client.runs.join(
+                    thread_id,
+                    record.run_id,
+                    **join_kwargs,
+                )
+            else:
+                result = await client.runs.wait(
+                    thread_id,
+                    assistant_id,
+                    **run_kwargs,
+                )
         except Exception as exc:
             if _is_thread_busy_error(exc):
                 logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
@@ -2224,11 +2322,34 @@ class ChannelManager:
             stream_kwargs["headers"] = owner_headers
 
         try:
-            async for chunk in client.runs.stream(
-                thread_id,
-                assistant_id,
-                **stream_kwargs,
-            ):
+            if self._invocation_runtime is not None:
+                record = await self._launch_with_invocation_runtime(
+                    msg=msg,
+                    thread_id=thread_id,
+                    assistant_id=assistant_id,
+                    run_input=stream_kwargs["input"],
+                    run_config=run_config,
+                    run_context=run_context,
+                    stream_mode=list(STREAM_MODES),
+                )
+                join_kwargs: dict[str, Any] = {
+                    "stream_mode": list(STREAM_MODES),
+                }
+                if owner_headers := _owner_headers(msg):
+                    join_kwargs["headers"] = owner_headers
+                chunks = client.runs.join_stream(
+                    thread_id,
+                    record.run_id,
+                    **join_kwargs,
+                )
+            else:
+                chunks = client.runs.stream(
+                    thread_id,
+                    assistant_id,
+                    **stream_kwargs,
+                )
+
+            async for chunk in chunks:
                 event = getattr(chunk, "event", "")
                 data = getattr(chunk, "data", None)
 
