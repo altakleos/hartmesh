@@ -19,6 +19,22 @@ TaskFactory = Callable[[WorkerCoroutine], asyncio.Task[None]]
 class InternalSourceKind(StrEnum):
     http = "http"
     scheduled_task = "scheduled_task"
+    native_channel = "native_channel"
+
+
+@dataclass(frozen=True)
+class InternalNativeChannelFacts:
+    """Authenticated native-channel facts carried only inside the host."""
+
+    provider: str
+    connection_id: str | None
+    workspace_id: str | None
+    chat_id: str
+    topic_id: str | None
+    provider_message_id: str | None
+    channel_user_id: str
+    resolved_assistant_id: str
+    resolved_agent_name: str | None
 
 
 @dataclass(frozen=True)
@@ -45,6 +61,7 @@ class InternalLaunchIntent:
     task_run_id: str | None = None
     scheduled_trigger: Literal["scheduled", "manual"] | None = None
     owner_user_id: str | None = None
+    native_channel: InternalNativeChannelFacts | None = None
 
 
 @dataclass(frozen=True)

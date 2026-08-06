@@ -292,6 +292,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Start IM channel service if any channels are configured
         try:
             from app.channels.service import start_channel_service
+            from app.gateway.services import build_channel_invocation_runtime
 
             # Closure over `app` (mirrors the scheduler runtime construction
             # below) rather than resolving `app.state.stream_bridge` here
@@ -305,6 +306,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             channel_service = await start_channel_service(
                 startup_config,
                 get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None),
+                invocation_runtime=build_channel_invocation_runtime(app),
             )
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:

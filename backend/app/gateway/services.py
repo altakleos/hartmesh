@@ -33,6 +33,7 @@ from app.gateway.utils import sanitize_log_param
 from app.runtime.invocation import (
     InternalCancelRequest,
     InternalLaunchIntent,
+    InternalNativeChannelFacts,
     InternalSourceKind,
     InvocationPrincipal,
     InvocationRuntime,
@@ -1068,9 +1069,26 @@ class _GatewayLaunchNormalizer:
         self._trust_internal_launch_facts = trust_internal_launch_facts
 
     def _owner_user_id(self, intent: InternalLaunchIntent) -> str | None:
-        if self._trust_internal_launch_facts and intent.source_kind is InternalSourceKind.scheduled_task:
+        if self._trust_internal_launch_facts and intent.source_kind in {
+            InternalSourceKind.scheduled_task,
+            InternalSourceKind.native_channel,
+        }:
             return intent.owner_user_id
         return get_trusted_internal_owner_user_id(self._request)
+
+    @staticmethod
+    def _validate_native_channel_facts(intent: InternalLaunchIntent) -> InternalNativeChannelFacts:
+        facts = intent.native_channel
+        if facts is None or not facts.provider or not facts.chat_id or not facts.channel_user_id:
+            raise ValueError("native channel launch requires authenticated provider, chat, and sender facts")
+        if facts.resolved_assistant_id != intent.assistant_id:
+            raise ValueError("native channel launch assistant does not match its resolved route")
+        context = intent.context or {}
+        if context.get("channel_user_id") != facts.channel_user_id:
+            raise ValueError("native channel launch sender does not match its authenticated source facts")
+        if context.get("agent_name") != facts.resolved_agent_name:
+            raise ValueError("native channel launch agent does not match its resolved route")
+        return facts
 
     def _metadata(self, intent: InternalLaunchIntent) -> dict[str, Any]:
         metadata = dict(intent.metadata or {})
@@ -1096,6 +1114,8 @@ class _GatewayLaunchNormalizer:
                 reset_current_user(token)
 
     async def normalize(self, intent: InternalLaunchIntent) -> PreparedLaunch:
+        if self._trust_internal_launch_facts and intent.source_kind is InternalSourceKind.native_channel:
+            self._validate_native_channel_facts(intent)
         try:
             validate_thread_id(intent.thread_id)
         except ValueError as exc:
@@ -1330,6 +1350,26 @@ def build_invocation_runtime(request: Request) -> InvocationRuntime:
 
 def build_scheduled_invocation_runtime(app: Any) -> InvocationRuntime:
     """Construct the scheduler's process-internal application runtime."""
+    request = SimpleNamespace(
+        app=app,
+        headers={},
+        state=SimpleNamespace(
+            user=get_internal_user(),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
+        cookies={},
+    )
+    return InvocationRuntime(
+        normalizer=_GatewayLaunchNormalizer(
+            request,
+            trust_internal_launch_facts=True,
+        ),
+        runs=_GatewayDurableRuns(request),
+    )
+
+
+def build_channel_invocation_runtime(app: Any) -> InvocationRuntime:
+    """Construct the native-channel process-internal application runtime."""
     request = SimpleNamespace(
         app=app,
         headers={},
