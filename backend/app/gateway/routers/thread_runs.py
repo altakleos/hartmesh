@@ -37,8 +37,9 @@ from app.gateway.context_usage import build_context_usage
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import build_checkpoint_state_accessor, build_invocation_runtime, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
+from app.runtime import InternalCancelRequest, InvocationPrincipal, NotFoundOrInvisible
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
@@ -912,10 +913,12 @@ async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
 @require_permission("runs", "read", owner_check=True)
 async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
-    run_mgr = get_run_manager(request)
     user_id = await get_current_user(request)
-    record = await run_mgr.get(run_id, user_id=user_id)
-    if record is None or record.thread_id != thread_id:
+    record = await build_invocation_runtime(request).observe_run(
+        run_id,
+        InvocationPrincipal(user_id=user_id),
+    )
+    if record is NotFoundOrInvisible.not_found_or_invisible or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return _record_to_response(record)
 
@@ -940,12 +943,19 @@ async def cancel_run(
     durably notifies the owner when its lease is live, or takes over and
     terminalizes the run when that lease has expired.
     """
-    run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
-    if record is None or record.thread_id != thread_id:
+    runtime = build_invocation_runtime(request)
+    record = await runtime.observe_run(
+        run_id,
+        InvocationPrincipal(user_id=None),
+    )
+    if record is NotFoundOrInvisible.not_found_or_invisible or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
-    outcome = await run_mgr.cancel(run_id, action=action)
+    outcome = (
+        await runtime.cancel_run(
+            InternalCancelRequest(run_id=run_id, action=action),
+        )
+    ).outcome
 
     # Success paths — the run was cancelled locally, durably requested from
     # a live owner, or taken over from a dead worker.
@@ -963,6 +973,7 @@ async def cancel_run(
         if wait and outcome == CancelOutcome.requested:
             bridge = get_stream_bridge(request)
             if record.store_only and bridge.supports_cross_process:
+                run_mgr = get_run_manager(request)
                 completed = await wait_for_run_completion(
                     bridge,
                     record,
@@ -974,6 +985,7 @@ async def cancel_run(
         return Response(status_code=202)
 
     if outcome == CancelOutcome.lease_valid_elsewhere:
+        run_mgr = get_run_manager(request)
         await _raise_lease_valid_elsewhere(run_id, run_mgr, record)
 
     # not_cancellable, not_active_locally, unknown
@@ -984,13 +996,16 @@ async def cancel_run(
 @require_permission("runs", "read", owner_check=True)
 async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> StreamingResponse:
     """Join an existing run's SSE stream."""
-    run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
-    if record is None or record.thread_id != thread_id:
+    record = await build_invocation_runtime(request).observe_run(
+        run_id,
+        InvocationPrincipal(user_id=None),
+    )
+    if record is NotFoundOrInvisible.not_found_or_invisible or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
     if record.store_only and not bridge.supports_cross_process:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
+    run_mgr = get_run_manager(request)
 
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
@@ -1024,9 +1039,12 @@ async def stream_existing_run(
     is present the run is cancelled first; the response then streams any
     remaining buffered events so the client observes a clean shutdown.
     """
-    run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
-    if record is None or record.thread_id != thread_id:
+    runtime = build_invocation_runtime(request)
+    record = await runtime.observe_run(
+        run_id,
+        InvocationPrincipal(user_id=None),
+    )
+    if record is NotFoundOrInvisible.not_found_or_invisible or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
     if record.store_only and action is None and not bridge.supports_cross_process:
@@ -1034,7 +1052,11 @@ async def stream_existing_run(
 
     # Cancel if an action was requested (stop-button / interrupt flow)
     if action is not None:
-        outcome = await run_mgr.cancel(run_id, action=action)
+        outcome = (
+            await runtime.cancel_run(
+                InternalCancelRequest(run_id=run_id, action=action),
+            )
+        ).outcome
         if outcome == CancelOutcome.taken_over:
             # The run was on another worker and is now marked ``error`` in the
             # store.  There is no local stream to drain — return immediately so
@@ -1043,6 +1065,7 @@ async def stream_existing_run(
             return Response(status_code=202)
         if outcome not in (CancelOutcome.cancelled, CancelOutcome.requested):
             if outcome == CancelOutcome.lease_valid_elsewhere:
+                run_mgr = get_run_manager(request)
                 await _raise_lease_valid_elsewhere(run_id, run_mgr, record)
             raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
         if outcome == CancelOutcome.requested and record.store_only and not bridge.supports_cross_process:
@@ -1057,6 +1080,7 @@ async def stream_existing_run(
                 pass
             return Response(status_code=204)
         if wait and outcome == CancelOutcome.requested:
+            run_mgr = get_run_manager(request)
             completed = await wait_for_run_completion(
                 bridge,
                 record,
@@ -1065,6 +1089,7 @@ async def stream_existing_run(
             )
             return Response(status_code=204 if completed else 202)
 
+    run_mgr = get_run_manager(request)
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
