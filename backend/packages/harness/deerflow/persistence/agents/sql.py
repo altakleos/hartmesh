@@ -30,11 +30,13 @@ from deerflow.config.paths import get_paths
 from deerflow.persistence.agents.base import (
     AgentDeleteOutcome,
     AgentExistsError,
+    AgentSnapshot,
     AgentStore,
     parse_agent_config,
 )
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,17 @@ class SqlAgentStore(AgentStore):
         if row is None:
             raise FileNotFoundError(f"Agent config not found: {name} (user {effective_user})")
         return parse_agent_config(row.config or {}, row.name)
+
+    def snapshot(self, name: str, *, user_id: str | None = None) -> AgentSnapshot:
+        effective_user = user_id or get_effective_user_id()
+        with self._Session() as session:
+            row = self._row(session, name, effective_user)
+            if row is None:
+                raise FileNotFoundError(f"Agent config not found: {name} (user {effective_user})")
+            config = parse_agent_config(row.config or {}, row.name)
+            soul = row.soul or None
+            version = coerce_iso(row.updated_at) if isinstance(row.updated_at, datetime) else str(row.updated_at)
+        return AgentSnapshot(config=config, soul=soul, source="database", version=version)
 
     def exists(self, name: str, *, user_id: str | None = None) -> bool:
         effective_user = user_id or get_effective_user_id()

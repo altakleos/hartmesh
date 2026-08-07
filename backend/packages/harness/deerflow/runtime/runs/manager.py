@@ -196,6 +196,7 @@ class RunRecord:
     # either known to be lost or could not be confirmed before expiry.
     ownership_lost: bool = False
     stop_reason: str | None = None
+    accepted_invocation: Any | None = field(default=None, repr=False)
 
 
 class RunStartOutcome(StrEnum):
@@ -297,6 +298,8 @@ class RunManager:
             payload["user_id"] = record.user_id
         if record.stop_reason is not None:
             payload["stop_reason"] = record.stop_reason
+        if record.operation_kind == ThreadOperationKind.run and record.accepted_invocation is not None:
+            payload.update(record.accepted_invocation.to_persisted())
         return payload
 
     async def _call_store_with_retry(
@@ -436,6 +439,8 @@ class RunManager:
         NULL status/on_disconnect columns (e.g. from rows written before those
         columns were added) default to ``pending`` and ``cancel`` respectively.
         """
+        from deerflow.runtime.accepted_invocation import AcceptedInvocation
+
         return RunRecord(
             run_id=row["run_id"],
             thread_id=row["thread_id"],
@@ -466,6 +471,7 @@ class RunManager:
             owner_worker_id=row.get("owner_worker_id"),
             lease_expires_at=row.get("lease_expires_at"),
             stop_reason=row.get("stop_reason"),
+            accepted_invocation=AcceptedInvocation.from_persisted(row),
         )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
@@ -1384,6 +1390,7 @@ class RunManager:
         multitask_strategy: str = "reject",
         model_name: str | None = None,
         user_id: str | None = None,
+        accepted_invocation: Any | None = None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -1396,6 +1403,7 @@ class RunManager:
             multitask_strategy=multitask_strategy,
             model_name=model_name,
             user_id=user_id,
+            accepted_invocation=accepted_invocation,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -1455,6 +1463,7 @@ class RunManager:
         multitask_strategy: str = "reject",
         model_name: str | None = None,
         user_id: str | None = None,
+        accepted_invocation: Any | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -1497,6 +1506,7 @@ class RunManager:
             model_name=model_name,
             owner_worker_id=self._worker_id,
             lease_expires_at=lease_expires_at,
+            accepted_invocation=accepted_invocation if operation_kind == ThreadOperationKind.run else None,
         )
 
         async with self._lock:
@@ -1540,6 +1550,7 @@ class RunManager:
                                 kwargs=kwargs,
                                 created_at=now,
                                 grace_seconds=grace_seconds,
+                                **(accepted_invocation.to_persisted() if accepted_invocation is not None and operation_kind == ThreadOperationKind.run else {}),
                             ),
                         )
                     except ConflictError:
@@ -1572,6 +1583,7 @@ class RunManager:
                                     kwargs=kwargs,
                                     created_at=now,
                                     grace_seconds=grace_seconds,
+                                    **(accepted_invocation.to_persisted() if accepted_invocation is not None and operation_kind == ThreadOperationKind.run else {}),
                                 ),
                             )
                             break

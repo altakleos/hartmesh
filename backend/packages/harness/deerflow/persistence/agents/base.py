@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Hashable
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from deerflow.config.agents_config import AgentConfig
@@ -56,11 +57,40 @@ def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
 AgentDeleteOutcome = Literal["deleted", "legacy", "missing", "not-custom-agent"]
 
 
+@dataclass(frozen=True)
+class AgentSnapshot:
+    config: AgentConfig
+    soul: str | None
+    source: str
+    version: str
+
+
 class AgentExistsError(Exception):
     """Raised by :meth:`AgentStore.create` when ``(user_id, name)`` already exists."""
 
 
 class AgentStore(abc.ABC):
+    def snapshot(self, name: str, *, user_id: str | None = None) -> AgentSnapshot:
+        """Read config and SOUL under one verified store version.
+
+        Concrete stores may override with a transactional read. The default
+        retries if the store-wide signature changes between the two reads, so
+        callers never accept a knowingly mixed revision.
+        """
+        for _attempt in range(3):
+            before = self.signature()
+            config = self.get(name, user_id=user_id)
+            soul = self.get_soul(name, user_id=user_id)
+            after = self.signature()
+            if before == after:
+                return AgentSnapshot(
+                    config=config,
+                    soul=soul,
+                    source=f"{type(self).__module__}.{type(self).__qualname__}",
+                    version=repr(after),
+                )
+        raise RuntimeError(f"Agent {name!r} changed repeatedly while resolving its revision")
+
     @abc.abstractmethod
     def get(self, name: str, *, user_id: str | None = None) -> AgentConfig:
         """Return the agent's config.

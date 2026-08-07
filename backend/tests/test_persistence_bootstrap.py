@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0011_mcp_tasks"
+HEAD = "0011_accepted_invocation"
 BASELINE = "0001_baseline"
 
 

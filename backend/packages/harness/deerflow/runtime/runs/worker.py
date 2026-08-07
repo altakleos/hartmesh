@@ -440,6 +440,10 @@ class RunContext:
     # this process" (embedded/tests) and resolves to the config default.
     checkpoint_snapshot_frequency: int | None = None
     on_run_completed: Any | None = field(default=None)
+    # Restart-only seam: resolve current agent material once for a persisted
+    # accepted revision. The accepting process uses the captured material on
+    # RunRecord and does not call this resolver.
+    agent_revision_resolver: Any | None = field(default=None, repr=False)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -457,9 +461,46 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             existing_context[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = runtime_context[AUTHORIZATION_PROVIDER_CONTEXT_KEY]
         if CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY in runtime_context:
             existing_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = runtime_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY]
+        from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+
+        for internal_key in (
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
+            "accepted_agent_revision_digest",
+            "accepted_extension_generation",
+        ):
+            if internal_key in runtime_context:
+                existing_context[internal_key] = runtime_context[internal_key]
         return
 
     config["context"] = dict(runtime_context)
+
+
+def _install_pinned_agent_facts(runtime_context: dict[str, Any], material: Any) -> None:
+    """Replace mutable factory inputs with the facts covered by the revision."""
+    defaults = material.runtime_defaults
+    for key in (
+        "agent_name",
+        "is_bootstrap",
+        "thinking_enabled",
+        "reasoning_effort",
+        "is_plan_mode",
+        "subagent_enabled",
+        "max_concurrent_subagents",
+        "max_total_subagents",
+        "non_interactive",
+        "channel_name",
+    ):
+        if key not in defaults:
+            continue
+        value = defaults[key]
+        if value is None:
+            runtime_context.pop(key, None)
+        else:
+            runtime_context[key] = value
+    selected_model = material.model_profile.get("name")
+    if isinstance(selected_model, str) and selected_model:
+        runtime_context["model_name"] = selected_model
+        runtime_context.pop("model", None)
 
 
 def _compute_agent_factory_supports_app_config(agent_factory: Any) -> bool:
@@ -824,6 +865,50 @@ async def run_agent(
             configurable.pop("checkpoint_map", None)
             continuation_config["configurable"] = configurable
             return RunnableConfig(**continuation_config)
+
+        accepted = record.accepted_invocation
+        if accepted is not None:
+            from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1, ResolvedAgentRevision
+            from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+
+            pinned_material = accepted.agent_revision.material
+            if pinned_material is None:
+                candidate = runtime_ctx.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+                if isinstance(candidate, ResolvedAgentMaterialV1):
+                    pinned_material = candidate
+            if pinned_material is None and ctx.agent_revision_resolver is not None:
+                resolved = ctx.agent_revision_resolver(record, config)
+                if inspect.isawaitable(resolved):
+                    resolved = await resolved
+                if isinstance(resolved, ResolvedAgentRevision):
+                    pinned_material = resolved.material
+                elif isinstance(resolved, ResolvedAgentMaterialV1):
+                    pinned_material = resolved
+            actual_revision = ResolvedAgentRevision.from_material(pinned_material) if isinstance(pinned_material, ResolvedAgentMaterialV1) else None
+            if actual_revision is None or actual_revision.digest != accepted.agent_revision.digest:
+                error = "Accepted agent revision no longer matches current resolved material"
+                await run_manager.set_status_if_not_cancelled(
+                    run_id,
+                    RunStatus.error,
+                    error=error,
+                    stop_reason="agent_revision_drift",
+                    **terminal_status_kwargs,
+                )
+                await bridge.publish(
+                    run_id,
+                    "error",
+                    {"message": error, "name": "AgentRevisionDriftError"},
+                )
+                return
+            # Bind the exact object that passed the digest check. The factory
+            # consumes it directly and never performs a second mutable read.
+            runtime_ctx[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = pinned_material
+            runtime_ctx["accepted_agent_revision_digest"] = actual_revision.digest
+            runtime_ctx["accepted_extension_generation"] = accepted.extension_generation
+            _install_pinned_agent_facts(runtime_ctx, pinned_material)
+            _install_runtime_context(config, runtime_ctx)
+            _install_pinned_agent_facts(config["context"], pinned_material)
+            initial_runnable_config = RunnableConfig(**config)
 
         agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):

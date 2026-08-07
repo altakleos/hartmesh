@@ -14,6 +14,7 @@ tests target.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import shutil
 import tempfile
@@ -33,6 +34,7 @@ from deerflow.config.agents_config import (
 from deerflow.persistence.agents.base import (
     AgentDeleteOutcome,
     AgentExistsError,
+    AgentSnapshot,
     AgentStore,
     parse_agent_config,
 )
@@ -42,6 +44,37 @@ logger = logging.getLogger(__name__)
 
 
 class FileAgentStore(AgentStore):
+    def snapshot(self, name: str, *, user_id: str | None = None) -> AgentSnapshot:
+        name = validate_agent_name(name)
+        for _attempt in range(3):
+            agent_dir = resolve_agent_dir(name, user_id=user_id)
+            config_path = agent_dir / "config.yaml"
+            soul_path = agent_dir / SOUL_FILENAME
+
+            def _version() -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+                values = []
+                for path in (config_path, soul_path):
+                    try:
+                        stat = path.stat()
+                        values.append((stat.st_mtime_ns, stat.st_size))
+                    except OSError:
+                        values.append(None)
+                return values[0], values[1]
+
+            before = _version()
+            config = self.get(name, user_id=user_id)
+            soul = self.get_soul(name, user_id=user_id)
+            after = _version()
+            if before == after:
+                content_version = hashlib.sha256(repr((config.model_dump(mode="json"), soul or "")).encode("utf-8")).hexdigest()
+                return AgentSnapshot(
+                    config=config,
+                    soul=soul,
+                    source="file",
+                    version=content_version,
+                )
+        raise RuntimeError(f"Agent {name!r} changed repeatedly while resolving its revision")
+
     def get(self, name: str, *, user_id: str | None = None) -> AgentConfig:
         name = validate_agent_name(name)
         agent_dir = resolve_agent_dir(name, user_id=user_id)

@@ -61,6 +61,15 @@ class RunStore(abc.ABC):
         created_at: str | None = None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
+        origin_json: dict[str, Any] | None = None,
+        principal_projection_json: dict[str, Any] | None = None,
+        principal_projection_digest: str | None = None,
+        base_origin_digest: str | None = None,
+        accepted_context_digest: str | None = None,
+        agent_revision_json: dict[str, Any] | None = None,
+        agent_revision_digest: str | None = None,
+        extension_generation: int | None = None,
+        decision_evidence_json: dict[str, Any] | None = None,
     ) -> None:
         pass
 
@@ -338,6 +347,15 @@ class RunStore(abc.ABC):
         kwargs: dict[str, Any] | None = None,
         created_at: str | None = None,
         grace_seconds: int = 10,
+        origin_json: dict[str, Any] | None = None,
+        principal_projection_json: dict[str, Any] | None = None,
+        principal_projection_digest: str | None = None,
+        base_origin_digest: str | None = None,
+        accepted_context_digest: str | None = None,
+        agent_revision_json: dict[str, Any] | None = None,
+        agent_revision_digest: str | None = None,
+        extension_generation: int | None = None,
+        decision_evidence_json: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -354,6 +372,21 @@ class RunStore(abc.ABC):
             raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")
         if operation_kind != "run":
             raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot create non-run thread operations")
+        if any(
+            value is not None
+            for value in (
+                origin_json,
+                principal_projection_json,
+                principal_projection_digest,
+                base_origin_digest,
+                accepted_context_digest,
+                agent_revision_json,
+                agent_revision_digest,
+                extension_generation,
+                decision_evidence_json,
+            )
+        ):
+            raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot persist accepted invocation facts")
         return await self.create_run_atomic(
             run_id,
             thread_id=thread_id,

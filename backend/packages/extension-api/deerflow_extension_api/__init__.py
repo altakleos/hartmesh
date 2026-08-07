@@ -24,6 +24,24 @@ from deerflow_extension_api.contracts import (
     MiddlewareContributor,
     extension,
 )
+from deerflow_extension_api.contributors import (
+    ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION,
+    ORIGIN_CONTRIBUTOR_KIND,
+    RUN_CONTEXT_CONTRIBUTOR_CAPABILITY_API_VERSION,
+    RUN_CONTEXT_CONTRIBUTOR_KIND,
+    OriginContributionRequestV1,
+    OriginContributionV1,
+    OriginContributor,
+    OriginContributorFactory,
+    PrincipalProjectionV1,
+    ResolvedAgentRevisionReferenceV1,
+    RunContextContributionRequestV1,
+    RunContextContributionV1,
+    RunContextContributor,
+    RunContextContributorFactory,
+    SafeContextReferenceV1,
+    SealedOriginV1,
+)
 from deerflow_extension_api.placement import (
     AgentBuildContext,
     AgentScope,
@@ -39,7 +57,7 @@ from deerflow_extension_api.state import ExtensionData
 #: Contract version. Pre-1.0 minors may break and only patches promise to be
 #: additive. From 1.0 on, bump the major on any breaking change; see the spec's
 #: evolution rules for what counts as additive.
-API_VERSION = "0.2.0"
+API_VERSION = "0.3.0"
 
 __all__ = [
     "API_VERSION",
@@ -61,6 +79,22 @@ __all__ = [
     "MiddlewarePlacement",
     "Placement",
     "Principal",
+    "ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION",
+    "ORIGIN_CONTRIBUTOR_KIND",
+    "RUN_CONTEXT_CONTRIBUTOR_CAPABILITY_API_VERSION",
+    "RUN_CONTEXT_CONTRIBUTOR_KIND",
+    "OriginContributionRequestV1",
+    "OriginContributionV1",
+    "OriginContributor",
+    "OriginContributorFactory",
+    "PrincipalProjectionV1",
+    "ResolvedAgentRevisionReferenceV1",
+    "RunContextContributionRequestV1",
+    "RunContextContributionV1",
+    "RunContextContributor",
+    "RunContextContributorFactory",
+    "SafeContextReferenceV1",
+    "SealedOriginV1",
     "extension",
     "task_store_from_runtime",
 ]

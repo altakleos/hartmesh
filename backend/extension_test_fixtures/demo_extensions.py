@@ -27,7 +27,7 @@ def install_ok(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     registry.middlewares(_Contributor("ok"))
 
 
-@extension(api="0.2", name="stamped")
+@extension(api="0.3", name="stamped")
 def install_stamped(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     INSTALLED.append("stamped")
     registry.middlewares(_Contributor("stamped"))
@@ -39,7 +39,7 @@ def install_future_api(registry: ExtensionRegistry, config: Mapping[str, Any]) -
     registry.middlewares(_Contributor("future"))
 
 
-@extension(api="0.3", name="newer-minor")
+@extension(api="0.4", name="newer-minor")
 def install_newer_minor_api(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     """Written against a newer 0.x minor than the host provides: before 1.0,
     minors carry no compatibility promise in either direction."""

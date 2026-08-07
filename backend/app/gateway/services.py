@@ -16,6 +16,14 @@ from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from typing import Any
 
+from deerflow_extension_api import (
+    OriginContributionRequestV1,
+    PrincipalProjectionV1,
+    ResolvedAgentRevisionReferenceV1,
+    RunContextContributionRequestV1,
+    SafeContextReferenceV1,
+    SealedOriginV1,
+)
 from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
@@ -41,6 +49,7 @@ from app.runtime.invocation import (
 )
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
+from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
 from deerflow.runtime import (
@@ -61,6 +70,16 @@ from deerflow.runtime import (
     UnsupportedStrategyError,
     build_state_mutation_graph,
     run_agent,
+)
+from deerflow.runtime.accepted_invocation import (
+    AcceptedInvocation,
+    InvocationOrigin,
+    PrincipalProjection,
+    canonical_digest,
+)
+from deerflow.runtime.agent_revision import (
+    RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
+    resolve_agent_revision,
 )
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
@@ -327,6 +346,9 @@ _CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
 #   ``langgraph_auth_user*``    — populated only by LangGraph Server auth.
 _SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
     {
+        "user_role",
+        "oauth_provider",
+        "oauth_id",
         "is_internal",
         "authz_attributes",
         "channel_user_id",
@@ -1061,6 +1083,212 @@ async def ensure_checkpoint_history_seeded(
 # ---------------------------------------------------------------------------
 
 
+def _bounded_source_value(value: Any) -> str | int | bool | None:
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    rendered = str(value)
+    encoded = rendered.encode("utf-8")[:1024]
+    return encoded.decode("utf-8", errors="ignore")
+
+
+def _base_origin_references(intent: InternalLaunchIntent) -> dict[str, str | int | bool | None]:
+    if intent.source_kind is InternalSourceKind.scheduled_task:
+        return {
+            "task_id": _bounded_source_value(intent.trusted_task_id),
+            "task_run_id": _bounded_source_value(intent.task_run_id),
+            "trigger": _bounded_source_value(intent.scheduled_trigger),
+        }
+    if intent.source_kind is InternalSourceKind.native_channel:
+        facts = intent.native_channel
+        if facts is None:
+            return {}
+        return {
+            "provider": _bounded_source_value(facts.provider),
+            "connection_id": _bounded_source_value(facts.connection_id),
+            "workspace_id": _bounded_source_value(facts.workspace_id),
+            "chat_id": _bounded_source_value(facts.chat_id),
+            "topic_id": _bounded_source_value(facts.topic_id),
+            "provider_message_id": _bounded_source_value(facts.provider_message_id),
+            "channel_user_id": _bounded_source_value(facts.channel_user_id),
+        }
+    return {}
+
+
+def _origin_request_references(references: Mapping[str, Any]) -> tuple[SafeContextReferenceV1, ...]:
+    return tuple(
+        SafeContextReferenceV1(
+            key=key,
+            value=value,
+            storage_class="persistable",
+            purpose="correlation",
+        )
+        for key, value in sorted(references.items())
+    )
+
+
+def _contribution_json(composed: Any) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            "contribution_id": item.contribution_id,
+            "namespace": item.namespace,
+            "key": item.reference.key,
+            "value": item.reference.value,
+            "storage_class": item.reference.storage_class,
+            "purpose": item.reference.purpose,
+        }
+        for item in composed.persistable
+    )
+
+
+async def _seal_accepted_invocation(
+    *,
+    request: Any,
+    intent: InternalLaunchIntent,
+    config: dict[str, Any],
+    graph_input: Any,
+    owner_user_id: str | None,
+    run_ctx: RunContext,
+) -> AcceptedInvocation:
+    runtime_context = config.get("context") if isinstance(config.get("context"), dict) else {}
+    request_user = getattr(getattr(request, "state", None), "user", None)
+    request_user_id = getattr(request_user, "id", None)
+    request_user_role = getattr(request_user, "system_role", None)
+    is_internal_principal = request_user_role == INTERNAL_SYSTEM_ROLE
+    principal_user_id = owner_user_id or (None if is_internal_principal else (str(request_user_id) if request_user_id is not None else None))
+    principal = PrincipalProjection(
+        user_id=principal_user_id,
+        role=runtime_context.get("user_role") if owner_user_id else (None if is_internal_principal else request_user_role),
+        oauth_provider=runtime_context.get("oauth_provider") if owner_user_id else getattr(request_user, "oauth_provider", None),
+        oauth_id=runtime_context.get("oauth_id") if owner_user_id else getattr(request_user, "oauth_id", None),
+        channel_user_id=runtime_context.get("channel_user_id"),
+        is_internal=bool(runtime_context.get("is_internal", False)),
+    )
+    base_references = _base_origin_references(intent)
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    contributor_host = getattr(app_state, "contributor_host", None)
+    empty_contributor_digest = canonical_digest({"version": 1, "execution": []})
+    if contributor_host is None:
+        origin_contributions = SimpleNamespace(
+            persistable=(),
+            execution_digest=empty_contributor_digest,
+            diagnostics=(),
+        )
+    else:
+        origin_contributions = await contributor_host.contribute_origin(
+            OriginContributionRequestV1(
+                source_kind=intent.source_kind.value,
+                authenticated_subject_reference=principal.user_id,
+                source_references=_origin_request_references(base_references),
+            )
+        )
+    for diagnostic in origin_contributions.diagnostics:
+        logger.warning(
+            "Optional invocation capability %s omitted (%s)",
+            diagnostic.capability_id,
+            diagnostic.message,
+        )
+    origin = InvocationOrigin(
+        source_kind=intent.source_kind.value,
+        references=base_references,
+        contributor_references=_contribution_json(origin_contributions),
+    )
+
+    app_config = run_ctx.app_config or get_app_config()
+    revision = await asyncio.to_thread(
+        resolve_agent_revision,
+        config,
+        app_config=app_config,
+        user_id=principal.user_id,
+    )
+    if revision.material is None:  # pragma: no cover - resolver contract
+        raise RuntimeError("accepted agent revision is missing captured material")
+
+    public_principal = PrincipalProjectionV1(
+        user_id=principal.user_id,
+        role=principal.role,
+        oauth_provider=principal.oauth_provider,
+        oauth_id=principal.oauth_id,
+        channel_user_id=principal.channel_user_id,
+        is_internal=principal.is_internal,
+    )
+    public_origin = SealedOriginV1(
+        source_kind=origin.source_kind,
+        references=_origin_request_references(base_references),
+        digest=canonical_digest({"version": 1, "origin": origin.base_json()}),
+    )
+    if contributor_host is None:
+        context_contributions = SimpleNamespace(
+            persistable=(),
+            execution_digest=empty_contributor_digest,
+            diagnostics=(),
+        )
+    else:
+        context_contributions = await contributor_host.contribute_run_context(
+            RunContextContributionRequestV1(
+                principal=public_principal,
+                origin=public_origin,
+                thread_id=intent.thread_id,
+                agent_revision=ResolvedAgentRevisionReferenceV1(
+                    agent_id=revision.agent_id,
+                    digest=revision.digest,
+                ),
+                external_key_reference=None,
+            )
+        )
+    for diagnostic in context_contributions.diagnostics:
+        logger.warning(
+            "Optional invocation capability %s omitted (%s)",
+            diagnostic.capability_id,
+            diagnostic.message,
+        )
+
+    contributor_execution_digest = canonical_digest(
+        {
+            "version": 1,
+            "origin": origin_contributions.execution_digest,
+            "run_context": context_contributions.execution_digest,
+        }
+    )
+    context_references = {
+        key: runtime_context[key]
+        for key in (
+            "non_interactive",
+            "is_plan_mode",
+            "subagent_enabled",
+            "max_concurrent_subagents",
+            "max_total_subagents",
+        )
+        if key in runtime_context
+    }
+    extensions = getattr(app_state, "extensions", None)
+    extension_generation = int(getattr(extensions, "generation", 0))
+    accepted = AcceptedInvocation.seal(
+        principal=principal,
+        origin=origin,
+        thread_id=intent.thread_id,
+        context_references=context_references,
+        agent_revision=revision,
+        normalized_input=graph_input,
+        execution_options={
+            "multitask_strategy": intent.multitask_strategy,
+            "interrupt_before": intent.interrupt_before,
+            "interrupt_after": intent.interrupt_after,
+            "checkpoint_id": intent.checkpoint_id,
+            "recursion_limit": config.get("recursion_limit"),
+        },
+        extension_generation=extension_generation,
+        contributor_execution_digest=contributor_execution_digest,
+    )
+    # These objects are server-owned and installed after all caller context is
+    # scrubbed. The worker and delegated subagents inherit the same accepted
+    # revision/generation for construction and audit.
+    runtime_context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = revision.material
+    runtime_context["accepted_agent_revision_digest"] = revision.digest
+    runtime_context["accepted_extension_generation"] = extension_generation
+    config["context"] = runtime_context
+    return accepted
+
+
 class _GatewayLaunchNormalizer:
     """Translate a finite internal intent into the current Gateway run plan."""
 
@@ -1091,6 +1319,8 @@ class _GatewayLaunchNormalizer:
         context = intent.context or {}
         if context.get("channel_user_id") != facts.channel_user_id:
             raise ValueError("native channel launch sender does not match its authenticated source facts")
+        if context.get("channel_name") not in (None, facts.provider):
+            raise ValueError("native channel launch provider does not match its authenticated source facts")
         if context.get("agent_name") != facts.resolved_agent_name:
             raise ValueError("native channel launch agent does not match its resolved route")
         return facts
@@ -1205,6 +1435,35 @@ class _GatewayLaunchNormalizer:
             internal_owner_user=internal_owner_user,
             request_context=intent.context,
         )
+        if not is_internal_caller:
+            # External agent/config values remain hints until this server-side
+            # route resolution. A body/config value cannot stamp the accepted
+            # agent revision independently of assistant_id.
+            resolved_agent_name = intent.assistant_id if intent.assistant_id not in (None, _DEFAULT_ASSISTANT_ID) else None
+            resolved_bootstrap = False
+            if resolved_agent_name is None and body_context.get("is_bootstrap") is True:
+                try:
+                    resolved_agent_name = validate_agent_name(body_context.get("agent_name"))
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                resolved_bootstrap = resolved_agent_name is not None
+            for section_name in ("context", "configurable"):
+                section = config.get(section_name)
+                if not isinstance(section, dict):
+                    continue
+                section.pop("agent_name", None)
+                section["is_bootstrap"] = resolved_bootstrap
+                if resolved_agent_name is not None:
+                    section["agent_name"] = resolved_agent_name
+
+        accepted_invocation = await _seal_accepted_invocation(
+            request=self._request,
+            intent=intent,
+            config=config,
+            graph_input=graph_input,
+            owner_user_id=owner_user_id,
+            run_ctx=run_ctx,
+        )
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
@@ -1289,6 +1548,7 @@ class _GatewayLaunchNormalizer:
             model_name=model_name,
             user_id=owner_user_id,
             worker=run_after_metadata,
+            accepted_invocation=accepted_invocation,
         )
 
 
@@ -1320,6 +1580,7 @@ class _GatewayDurableRuns:
             multitask_strategy=launch.multitask_strategy,
             model_name=launch.model_name,
             user_id=launch.user_id,
+            accepted_invocation=launch.accepted_invocation,
         )
 
     async def fail_start(self, record: RunRecord, error: str) -> None:

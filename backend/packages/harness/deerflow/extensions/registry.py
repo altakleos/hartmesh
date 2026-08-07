@@ -17,6 +17,10 @@ from deerflow_extension_api import (
     AuthorizationProviderFactory,
     ExtensionData,
     MiddlewareContributor,
+    OriginContributor,
+    OriginContributorFactory,
+    RunContextContributor,
+    RunContextContributorFactory,
 )
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
 
@@ -41,9 +45,33 @@ class RegisteredAuthorizationProviderFactory:
 
 
 @dataclass(frozen=True)
+class RegisteredOriginContributorFactory:
+    contribution_id: str
+    capability_api_version: str
+    factory: Callable[[], OriginContributor]
+    kind: Literal["origin_contributor"]
+    source: str
+    package_name: str | None
+    package_version: str | None
+
+
+@dataclass(frozen=True)
+class RegisteredRunContextContributorFactory:
+    contribution_id: str
+    capability_api_version: str
+    factory: Callable[[], RunContextContributor]
+    kind: Literal["run_context_contributor"]
+    source: str
+    package_name: str | None
+    package_version: str | None
+
+
+@dataclass(frozen=True)
 class _RegistryMark:
     middleware_count: int
     authorization_provider_count: int
+    origin_contributor_count: int
+    run_context_contributor_count: int
 
 
 @dataclass(frozen=True)
@@ -58,6 +86,8 @@ class LoadedExtensions:
     generation: int = 0
     middleware_contributors: tuple[tuple[str, MiddlewareContributor], ...] = ()
     authorization_provider_factories: tuple[RegisteredAuthorizationProviderFactory, ...] = ()
+    origin_contributor_factories: tuple[RegisteredOriginContributorFactory, ...] = ()
+    run_context_contributor_factories: tuple[RegisteredRunContextContributorFactory, ...] = ()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
     # short-circuit, so the zero-extension path constructs nothing.
@@ -81,6 +111,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
     def __init__(self) -> None:
         self._middlewares: list[_Entry] = []
         self._authorization_providers: list[RegisteredAuthorizationProviderFactory] = []
+        self._origin_contributors: list[RegisteredOriginContributorFactory] = []
+        self._run_context_contributors: list[RegisteredRunContextContributorFactory] = []
         self._current_source: str | None = None
         self._current_package_name: str | None = None
         self._current_package_version: str | None = None
@@ -133,6 +165,40 @@ class ExtensionRegistry(ExtensionRegistryContract):
             )
         )
 
+    def origin_contributor(self, contribution: OriginContributorFactory) -> None:
+        if not isinstance(contribution, OriginContributorFactory):
+            raise TypeError("origin_contributor requires OriginContributorFactory")
+        if any(item.contribution_id == contribution.contribution_id for item in self._origin_contributors):
+            raise ValueError(f"duplicate origin contributor contribution_id {contribution.contribution_id!r}")
+        self._origin_contributors.append(
+            RegisteredOriginContributorFactory(
+                contribution_id=contribution.contribution_id,
+                capability_api_version=contribution.capability_api_version,
+                factory=contribution.factory,
+                kind=contribution.kind,
+                source=self._source(),
+                package_name=self._current_package_name,
+                package_version=self._current_package_version,
+            )
+        )
+
+    def run_context_contributor(self, contribution: RunContextContributorFactory) -> None:
+        if not isinstance(contribution, RunContextContributorFactory):
+            raise TypeError("run_context_contributor requires RunContextContributorFactory")
+        if any(item.contribution_id == contribution.contribution_id for item in self._run_context_contributors):
+            raise ValueError(f"duplicate run-context contributor contribution_id {contribution.contribution_id!r}")
+        self._run_context_contributors.append(
+            RegisteredRunContextContributorFactory(
+                contribution_id=contribution.contribution_id,
+                capability_api_version=contribution.capability_api_version,
+                factory=contribution.factory,
+                kind=contribution.kind,
+                source=self._source(),
+                package_name=self._current_package_name,
+                package_version=self._current_package_version,
+            )
+        )
+
     def discard(self, source: str) -> None:
         """Remove every entry registered by ``source``.
 
@@ -148,10 +214,17 @@ class ExtensionRegistry(ExtensionRegistryContract):
         """
         self._middlewares[:] = [entry for entry in self._middlewares if entry[0] != source]
         self._authorization_providers[:] = [entry for entry in self._authorization_providers if entry.source != source]
+        self._origin_contributors[:] = [entry for entry in self._origin_contributors if entry.source != source]
+        self._run_context_contributors[:] = [entry for entry in self._run_context_contributors if entry.source != source]
 
     def mark(self) -> _RegistryMark:
         """Snapshot bucket lengths so one install() can be undone positionally."""
-        return _RegistryMark(len(self._middlewares), len(self._authorization_providers))
+        return _RegistryMark(
+            len(self._middlewares),
+            len(self._authorization_providers),
+            len(self._origin_contributors),
+            len(self._run_context_contributors),
+        )
 
     def rollback_to(self, mark: _RegistryMark) -> None:
         """Undo every registration made since ``mark``.
@@ -162,6 +235,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
         """
         del self._middlewares[mark.middleware_count :]
         del self._authorization_providers[mark.authorization_provider_count :]
+        del self._origin_contributors[mark.origin_contributor_count :]
+        del self._run_context_contributors[mark.run_context_contributor_count :]
 
     def build(self, *, generation: int = 0) -> LoadedExtensions:
         return LoadedExtensions(
@@ -169,6 +244,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
             generation=generation,
             middleware_contributors=tuple(self._middlewares),
             authorization_provider_factories=tuple(self._authorization_providers),
+            origin_contributor_factories=tuple(self._origin_contributors),
+            run_context_contributor_factories=tuple(self._run_context_contributors),
             has_middleware_contributors=bool(self._middlewares),
             needs_task_store=bool(self._middlewares),
         )

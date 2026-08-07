@@ -28,6 +28,18 @@ class RunRow(Base):
     error: Mapped[str | None] = mapped_column(Text)
     stop_reason: Mapped[str | None] = mapped_column(String(50))
 
+    # Host-sealed invocation facts. Nullable for historical rows and for
+    # auxiliary checkpoint operations, which are not agent invocations.
+    origin_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    principal_projection_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    principal_projection_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    base_origin_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    accepted_context_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_revision_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    agent_revision_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    extension_generation: Mapped[int | None] = mapped_column(nullable=True)
+    decision_evidence_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     # Convenience fields (for listing pages without querying RunEventStore)
     message_count: Mapped[int] = mapped_column(default=0)
     first_human_message: Mapped[str | None] = mapped_column(Text)

@@ -619,10 +619,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     try:
         construction_config = get_app_config()
         configured_plugins = construction_config.plugins
+        required_capabilities = construction_config.required_capabilities
         construction_authorization = construction_config.authorization
     except FileNotFoundError:
         logger.debug("config.yaml not found while constructing Gateway app; loading no extensions for this app instance")
         configured_plugins = []
+        required_capabilities = []
         from deerflow.config.authorization_config import AuthorizationConfig
 
         construction_authorization = AuthorizationConfig()
@@ -636,6 +638,14 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     except Exception:
         logger.exception("Extension loading failed; continuing with no extensions")
         loaded_extensions, extension_diagnostics = EMPTY_EXTENSIONS, []
+    from deerflow.extensions.contributors import ContributorHost
+    from deerflow.extensions.loader import Diagnostic
+
+    contributor_host = ContributorHost(
+        loaded_extensions,
+        required_capabilities=required_capabilities,
+    )
+    extension_diagnostics.extend(Diagnostic.warning(item.capability_id, item.message) for item in contributor_host.startup_diagnostics)
     # One application-owned resolver supplies a coherent provider instance to
     # route checks and every durable-run authorization path. Extension-backed
     # factories are startup-only; legacy class-path providers may be replaced
@@ -650,6 +660,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.state.extensions = loaded_extensions
     app.state.extension_diagnostics = initialize_runtime_diagnostics(extension_diagnostics)
     app.state.authorization_provider_resolver = authorization_provider_resolver
+    app.state.contributor_host = contributor_host
 
     # Include routers
     # Models API is mounted at /api/models

@@ -10,6 +10,7 @@ from enum import StrEnum
 from typing import Any, Literal, Protocol
 
 from deerflow.runtime import CancelOutcome, DisconnectMode, RunRecord
+from deerflow.runtime.accepted_invocation import AcceptedInvocation
 
 WorkerCoroutine = Coroutine[Any, Any, None]
 WorkerFactory = Callable[[RunRecord], WorkerCoroutine]
@@ -77,6 +78,7 @@ class PreparedLaunch:
     model_name: str | None
     user_id: str | None
     worker: WorkerFactory = field(repr=False)
+    accepted_invocation: AcceptedInvocation | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
