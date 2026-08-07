@@ -21,6 +21,7 @@ from collections.abc import Iterable
 
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest
+from deerflow.authz.runtime import AuthorizedToolCallReceipt
 from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason, GuardrailRequest
 
 
@@ -102,13 +103,22 @@ class GuardrailAuthorizationAdapter:
         )
 
     @staticmethod
-    def _to_guardrail(d: AuthzDecision) -> GuardrailDecision:
+    def _to_guardrail(
+        d: AuthzDecision,
+        *,
+        provider: AuthorizationProvider,
+        request: AuthzRequest,
+    ) -> GuardrailDecision:
         """Convert an authorization decision to a guardrail decision."""
         return GuardrailDecision(
             allow=d.allow,
             reasons=[GuardrailReason(code=r.code, message=r.message) for r in d.reasons],
             policy_id=d.policy_id,
             metadata=d.metadata,
+            provider_receipt=AuthorizedToolCallReceipt(
+                provider=provider,
+                request=request,
+            ),
         )
 
     def evaluate(self, request: GuardrailRequest) -> GuardrailDecision:
@@ -124,8 +134,13 @@ class GuardrailAuthorizationAdapter:
         """
         if infrastructure_decision := self._infrastructure_decision(request):
             return infrastructure_decision
-        decision = self._provider.authorize(self._to_authz(request))
-        return self._to_guardrail(decision)
+        authz_request = self._to_authz(request)
+        decision = self._provider.authorize(authz_request)
+        return self._to_guardrail(
+            decision,
+            provider=self._provider,
+            request=authz_request,
+        )
 
     async def aevaluate(self, request: GuardrailRequest) -> GuardrailDecision:
         """Async evaluation: delegate to ``provider.aauthorize``.
@@ -134,5 +149,10 @@ class GuardrailAuthorizationAdapter:
         """
         if infrastructure_decision := self._infrastructure_decision(request):
             return infrastructure_decision
-        decision = await self._provider.aauthorize(self._to_authz(request))
-        return self._to_guardrail(decision)
+        authz_request = self._to_authz(request)
+        decision = await self._provider.aauthorize(authz_request)
+        return self._to_guardrail(
+            decision,
+            provider=self._provider,
+            request=authz_request,
+        )

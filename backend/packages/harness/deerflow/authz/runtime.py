@@ -8,13 +8,22 @@ per agent build and passes the same instance to Layer 1 and Layer 2).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
-from deerflow.authz.provider import AuthorizationProvider
+from deerflow.authz.provider import AuthorizationProvider, AuthzRequest
 from deerflow.config.authorization_config import AuthorizationConfig
 from deerflow.reflection import resolve_variable
 
 AUTHORIZATION_PROVIDER_CONTEXT_KEY = "__deerflow_authorization_provider"
+
+
+@dataclass(frozen=True)
+class AuthorizedToolCallReceipt:
+    """Exact provider/request pair allowed by the operation-time tool check."""
+
+    provider: AuthorizationProvider
+    request: AuthzRequest
 
 
 def authorization_provider_from_context(

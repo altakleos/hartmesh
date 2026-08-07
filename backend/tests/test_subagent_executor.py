@@ -3284,6 +3284,42 @@ class TestSubagentGuardrailAttribution:
         assert context["accepted_extension_manifest_digest"] == "d" * 64
 
     @pytest.mark.anyio
+    async def test_aexecute_propagates_mcp_provider_and_audit_sink(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
+        from deerflow.extensions.mcp import MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY
+
+        provider = object()
+        audit_sink = object()
+        executor = classes["SubagentExecutor"](
+            config=classes["SubagentConfig"](
+                name="general-purpose",
+                description="MCP propagation test agent",
+                system_prompt="Test MCP propagation.",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            parent_model="test-model",
+            authorization_provider=provider,
+            mcp_preparation_audit_sink=audit_sink,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context[AUTHORIZATION_PROVIDER_CONTEXT_KEY] is provider
+        assert context[MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY] is audit_sink
+
+    @pytest.mark.anyio
     async def test_aexecute_context_defaults_to_none_when_attribution_absent(
         self,
         classes,

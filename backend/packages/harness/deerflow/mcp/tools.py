@@ -17,6 +17,7 @@ from langgraph.config import get_config
 from deerflow.config.extensions_config import ExtensionsConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
+from deerflow.extensions.mcp import get_required_mcp_tool_interceptor
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import get_session_pool
@@ -655,10 +656,10 @@ async def get_mcp_tools() -> list[BaseTool]:
                 existing_headers["Authorization"] = auth_header
                 servers_config[server_name]["headers"] = existing_headers
 
-        tool_interceptors: list[Any] = []
+        compatibility_interceptors: list[Any] = []
         oauth_interceptor = build_oauth_tool_interceptor(extensions_config)
         if oauth_interceptor is not None:
-            tool_interceptors.append(oauth_interceptor)
+            compatibility_interceptors.append(oauth_interceptor)
 
         # Load custom interceptors declared in extensions_config.json
         # Format: "mcpInterceptors": ["pkg.module:builder_func", ...]
@@ -674,7 +675,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                 builder = resolve_variable(interceptor_path)
                 interceptor = builder()
                 if callable(interceptor):
-                    tool_interceptors.append(interceptor)
+                    compatibility_interceptors.append(interceptor)
                     logger.info(f"Loaded MCP interceptor: {interceptor_path}")
                 elif interceptor is not None:
                     logger.warning(f"Builder {interceptor_path} returned non-callable {type(interceptor).__name__}; skipping")
@@ -683,6 +684,14 @@ async def get_mcp_tools() -> list[BaseTool]:
                     f"Failed to load MCP interceptor {interceptor_path}: {e}",
                     exc_info=True,
                 )
+
+        # Required preparation owns the complete authorization-to-network
+        # boundary. Compatibility hooks run inside it, while trusted
+        # preparation is the final fence after their transient header changes.
+        required_interceptor = get_required_mcp_tool_interceptor(
+            compatibility_interceptors=tuple(compatibility_interceptors),
+        )
+        tool_interceptors = [required_interceptor] if required_interceptor is not None else compatibility_interceptors
 
         client = MultiServerMCPClient(
             servers_config,

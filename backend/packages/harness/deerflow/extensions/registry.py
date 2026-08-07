@@ -19,6 +19,8 @@ from deerflow_extension_api import (
     ExtensionData,
     InvocationConstraintsProvider,
     InvocationConstraintsProviderFactory,
+    McpInterceptor,
+    McpInterceptorDescriptor,
     MiddlewareContributor,
     OriginContributor,
     OriginContributorFactory,
@@ -89,6 +91,18 @@ class RegisteredInvocationConstraintsProviderFactory:
 
 
 @dataclass(frozen=True)
+class RegisteredMcpInterceptorDescriptor:
+    contribution_id: str
+    capability_api_version: str
+    factory: Callable[[], McpInterceptor]
+    kind: Literal["mcp_interceptor"]
+    source: str
+    package_name: str | None
+    package_version: str | None
+    health_probe: CapabilityHealthProbe | None = None
+
+
+@dataclass(frozen=True)
 class LoadedPluginRegistration:
     """Loader-owned provenance for one successfully installed plugin spec."""
 
@@ -105,6 +119,7 @@ class _RegistryMark:
     origin_contributor_count: int
     run_context_contributor_count: int
     invocation_constraints_provider_count: int
+    mcp_interceptor_count: int
 
 
 @dataclass(frozen=True)
@@ -123,6 +138,8 @@ class LoadedExtensions:
     origin_contributor_factories: tuple[RegisteredOriginContributorFactory, ...] = ()
     run_context_contributor_factories: tuple[RegisteredRunContextContributorFactory, ...] = ()
     invocation_constraints_provider_factories: tuple[RegisteredInvocationConstraintsProviderFactory, ...] = ()
+    mcp_interceptor_descriptors: tuple[RegisteredMcpInterceptorDescriptor, ...] = ()
+    mcp_interceptor_conflicts: frozenset[str] = frozenset()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
     # short-circuit, so the zero-extension path constructs nothing.
@@ -154,6 +171,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._origin_contributors: list[RegisteredOriginContributorFactory] = []
         self._run_context_contributors: list[RegisteredRunContextContributorFactory] = []
         self._invocation_constraints_providers: list[RegisteredInvocationConstraintsProviderFactory] = []
+        self._mcp_interceptors: list[RegisteredMcpInterceptorDescriptor] = []
+        self._mcp_interceptor_conflicts: set[str] = set()
         self._current_source: str | None = None
         self._current_package_name: str | None = None
         self._current_package_version: str | None = None
@@ -279,6 +298,29 @@ class ExtensionRegistry(ExtensionRegistryContract):
             )
         )
 
+    def mcp_interceptor(self, contribution: McpInterceptorDescriptor) -> None:
+        if not isinstance(contribution, McpInterceptorDescriptor):
+            raise TypeError("mcp_interceptor requires McpInterceptorDescriptor")
+        if any(item.contribution_id == contribution.contribution_id for item in self._mcp_interceptors):
+            # Keep this host-owned ambiguity marker even when the loader rolls
+            # back the failing plugin's positional registrations. Otherwise an
+            # earlier descriptor could silently satisfy a required capability
+            # after a duplicate trusted declaration was rejected.
+            self._mcp_interceptor_conflicts.add(contribution.contribution_id)
+            raise ValueError(f"duplicate MCP interceptor contribution_id {contribution.contribution_id!r}")
+        self._mcp_interceptors.append(
+            RegisteredMcpInterceptorDescriptor(
+                contribution_id=contribution.contribution_id,
+                capability_api_version=contribution.capability_api_version,
+                factory=contribution.factory,
+                kind=contribution.kind,
+                source=self._source(),
+                package_name=self._current_package_name,
+                package_version=self._current_package_version,
+                health_probe=contribution.health_probe,
+            )
+        )
+
     def discard(self, source: str) -> None:
         """Remove every entry registered by ``source``.
 
@@ -297,6 +339,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._origin_contributors[:] = [entry for entry in self._origin_contributors if entry.source != source]
         self._run_context_contributors[:] = [entry for entry in self._run_context_contributors if entry.source != source]
         self._invocation_constraints_providers[:] = [entry for entry in self._invocation_constraints_providers if entry.source != source]
+        self._mcp_interceptors[:] = [entry for entry in self._mcp_interceptors if entry.source != source]
 
     def mark(self) -> _RegistryMark:
         """Snapshot bucket lengths so one install() can be undone positionally."""
@@ -307,6 +350,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             len(self._origin_contributors),
             len(self._run_context_contributors),
             len(self._invocation_constraints_providers),
+            len(self._mcp_interceptors),
         )
 
     def rollback_to(self, mark: _RegistryMark) -> None:
@@ -322,6 +366,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         del self._origin_contributors[mark.origin_contributor_count :]
         del self._run_context_contributors[mark.run_context_contributor_count :]
         del self._invocation_constraints_providers[mark.invocation_constraints_provider_count :]
+        del self._mcp_interceptors[mark.mcp_interceptor_count :]
 
     def build(self, *, generation: int = 0) -> LoadedExtensions:
         return LoadedExtensions(
@@ -333,6 +378,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
             origin_contributor_factories=tuple(self._origin_contributors),
             run_context_contributor_factories=tuple(self._run_context_contributors),
             invocation_constraints_provider_factories=tuple(self._invocation_constraints_providers),
+            mcp_interceptor_descriptors=tuple(self._mcp_interceptors),
+            mcp_interceptor_conflicts=frozenset(self._mcp_interceptor_conflicts),
             has_middleware_contributors=bool(self._middlewares),
             needs_task_store=bool(self._middlewares),
         )

@@ -295,6 +295,43 @@ def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
     assert captured["executor_kwargs"]["extensions"] is loaded
 
 
+def test_task_tool_bridges_mcp_audit_to_the_parent_run_loop(monkeypatch):
+    runtime = _make_runtime()
+    journal = MagicMock()
+    runtime.context["__run_journal"] = journal
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(
+        runtime=runtime,
+        description="test",
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-mcp-audit",
+    )
+
+    sink = captured["executor_kwargs"]["mcp_preparation_audit_sink"]
+    assert sink.journal is journal
+
+
 def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):
     """Callers outside the Gateway run path (embedded client, standalone
     LangGraph Server) install no snapshot; the executor must keep its existing

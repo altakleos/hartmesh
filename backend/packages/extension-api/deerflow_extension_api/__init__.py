@@ -58,6 +58,17 @@ from deerflow_extension_api.health import (
     CapabilityHealthResult,
     CapabilityHealthStatus,
 )
+from deerflow_extension_api.mcp import (
+    MCP_INTERCEPTOR_CAPABILITY_API_VERSION,
+    MCP_INTERCEPTOR_KIND,
+    McpCallIndeterminateV1,
+    McpCallProjectionV1,
+    McpCallRejectedV1,
+    McpHeaderV1,
+    McpInterceptor,
+    McpInterceptorDescriptor,
+    PreparedMcpCallV1,
+)
 from deerflow_extension_api.placement import (
     AgentBuildContext,
     AgentScope,
@@ -73,7 +84,7 @@ from deerflow_extension_api.state import ExtensionData
 #: Contract version. Pre-1.0 minors may break and only patches promise to be
 #: additive. From 1.0 on, bump the major on any breaking change; see the spec's
 #: evolution rules for what counts as additive.
-API_VERSION = "0.5.0"
+API_VERSION = "0.6.0"
 
 __all__ = [
     "API_VERSION",
@@ -82,6 +93,8 @@ __all__ = [
     "INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION",
     "INVOCATION_CONSTRAINTS_KIND",
     "INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY",
+    "MCP_INTERCEPTOR_CAPABILITY_API_VERSION",
+    "MCP_INTERCEPTOR_KIND",
     "EXTENSION_TASK_STORE_KEY",
     "AgentBuildContext",
     "AgentScope",
@@ -107,6 +120,13 @@ __all__ = [
     "MiddlewarePlacement",
     "Placement",
     "Principal",
+    "McpCallIndeterminateV1",
+    "McpCallProjectionV1",
+    "McpCallRejectedV1",
+    "McpHeaderV1",
+    "McpInterceptor",
+    "McpInterceptorDescriptor",
+    "PreparedMcpCallV1",
     "ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION",
     "ORIGIN_CONTRIBUTOR_KIND",
     "RUN_CONTEXT_CONTRIBUTOR_CAPABILITY_API_VERSION",

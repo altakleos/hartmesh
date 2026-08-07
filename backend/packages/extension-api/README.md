@@ -4,7 +4,7 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
-Version 0.5.0 owns the authorization contracts `Principal`, `AuthzRequest`,
+Version 0.6.0 owns the authorization contracts `Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthzReason`, and `AuthorizationProvider`. Existing host code may keep
 using `deerflow.authz.provider`; those names are compatibility re-exports of the same
 objects. It also owns the versioned Origin and run-context contributor contracts described
@@ -116,3 +116,42 @@ immediately before the first graph stream. One invocation-scoped, concurrency-sa
 reservation counter is shared by lead and delegated subagents and reserves before every
 dispatch; retries with the same dispatch ID do not consume the ceiling twice. Token
 budgets remain post-response guards and are not advertised as exact constraints.
+
+## Required MCP call preparation
+
+Trusted operator plugins may register multiple `McpInterceptorDescriptor` values with
+`registry.mcp_interceptor(...)`. Each factory returns an async `McpInterceptor` whose
+`prepare_call(McpCallProjectionV1)` method receives only the sealed principal and Origin,
+bound thread/run, pinned agent revision and extension generation, MCP server/tool names,
+and a canonical arguments digest. It never receives or owns the network handler.
+
+The strict result union is `PreparedMcpCallV1`, `McpCallRejectedV1`, or
+`McpCallIndeterminateV1`. A prepared result may add at most 16 bounded transient headers
+and 32 bounded `SafeContextReferenceV1` audit references. Header values are used only for
+that underlying MCP call; they are excluded from run rows, checkpoints, lifecycle/rich
+events, manifests, diagnostics, and logs. Persistable evidence may identify a stable
+secret handle, but must never contain secret material.
+
+Operators require a contribution only from startup-controlled `config.yaml`:
+
+```yaml
+required_capabilities:
+  - mcp_interceptor:example.credential_broker
+```
+
+The host pins the required contribution set and extension generation at tool construction.
+It reuses the exact provider/request receipt already allowed by the operation-time tool
+authorization check; it neither reconstructs nor repeats that request. Optional legacy
+compatibility hooks run inside the host boundary, then the host checks fresh required
+health and invokes required interceptors under independent two-second timeouts in
+contribution-ID order as the final fence immediately before the handler. A policy deny, missing/mismatched generation,
+unhealthy or unavailable contribution, invalid/rejected/indeterminate preparation, header
+collision, exception, or timeout calls the MCP handler zero times. Preparation can only
+restrict or operationally fail a call; it cannot allow one denied by authorization.
+
+The older `extensions_config.json -> mcpInterceptors` class-path mechanism is an optional,
+warning-and-skip compatibility path. It is API-writable, is not an authoritative
+Capability Host registration, and cannot satisfy `required_capabilities`. When a required
+host is active, compatibility hooks run inside its authorization-to-network boundary,
+after the exact authorization receipt is verified and before the final trusted preparation
+fence.

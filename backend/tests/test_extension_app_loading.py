@@ -200,3 +200,31 @@ def test_create_app_fails_closed_for_required_extension_with_malformed_api_marke
 
     with pytest.raises(ExtensionLoadError, match="declares invalid api marker"):
         app_module.create_app()
+
+
+def test_create_app_wires_required_mcp_host_health_and_shared_authorization(
+    monkeypatch,
+    stub_app_config,
+):
+    import app.gateway.app as app_module
+    from deerflow.config.authorization_config import AuthorizationConfig
+
+    config = stub_app_config.model_copy(
+        update={
+            "plugins": [
+                ExtensionSpec(
+                    use=("extension_test_fixtures.demo_extensions:install_mcp_and_authorization"),
+                    required=True,
+                )
+            ],
+            "required_capabilities": ["mcp_interceptor:fixture.mcp"],
+            "authorization": AuthorizationConfig(enabled=True),
+        }
+    )
+    monkeypatch.setattr(app_module, "get_app_config", lambda: config)
+
+    app = app_module.create_app()
+
+    assert app.state.mcp_interceptor_host.required_capability_ids == frozenset({"mcp_interceptor:fixture.mcp"})
+    assert "mcp_interceptor:fixture.mcp" in {item.capability_id for item in app.state.capability_manifest.capabilities}
+    assert app.state.authorization_provider_resolver.snapshot().provider is not None

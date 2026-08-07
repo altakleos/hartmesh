@@ -433,6 +433,38 @@ Phase 1 最低验证要求：
   初始化失败只产生有界 startup diagnostic。
 - **延期：** readiness/manifest、其他 constraint 类型与 exact token ceiling。
 
+### 2026-08-07 — Required MCP call preparation
+
+- **背景：** API 可写的 `extensions_config.json -> mcpInterceptors` 只能作为可选兼容钩子；
+  它既没有可信 provenance/health/generation，也不能承载操作者要求的 fail-closed MCP
+  credential/evidence preparation。
+- **决策（契约与 host）：** `deerflow-extension-api==0.6.0` 新增 typed
+  `McpInterceptorDescriptor` 与严格 async preparation union。插件只接收 sealed
+  principal/Origin、thread/run/agent/generation、MCP server/tool 与 canonical arguments
+  digest；只可返回有界 transient headers 与安全 evidence references，永远不拥有 network
+  handler。
+- **决策（授权与顺序）：** `GuardrailAuthorizationAdapter` 把既有 operation-time
+  `tool:call` 的 exact `AuthzRequest` 与 coherent provider identity 绑定到该次 handler
+  scope；host-owned MCP boundary 复用 receipt，不重建或重复 policy call。legacy/OAuth
+  compatibility hooks 位于 boundary 内；其 header 变更完成后，host 才验证 pinned
+  generation、required set 与 fresh health，并按 contribution ID 顺序在各自两秒 timeout
+  内 prepare，作为 network handler 前最后一道 fence。preparation 只能收窄或
+  operationally fail，不能覆盖 policy deny。
+- **决策（失败与秘密）：** missing/stale/unhealthy、generation mismatch、invalid/reject/
+  indeterminate、exception/timeout、case-insensitive header collision 都在底层 MCP handler 前
+  fail closed；成功时 handler exactly once。header value 只存在于该 call，不进入 checkpoint、
+  RunRow、lifecycle/rich event、manifest、log 或 diagnostic。audit 仅记录有界 contribution、
+  generation 与 safe evidence（secret 只允许 stable handle ID）。
+- **决策（兼容性）：** legacy class-path interceptors 保持 warning-and-skip，位于
+  host-owned boundary 内、final trusted preparation 之前，不能满足
+  `required_capabilities: [mcp_interceptor:<id>]`。插件/generation 仍 startup-only，无
+  runtime install/hot reload/remote plugin process。
+- **证据：** `tests/test_required_mcp_interceptors.py`、
+  `tests/test_mcp_custom_interceptors.py`、Capability manifest/readiness 与 extension app-loading
+  回归测试。
+- **延期：** managed credential service、remote plugin runtime、MCP broker 与 generic
+  capability registry。
+
 ### 新记录模板
 
 ```markdown

@@ -377,6 +377,13 @@ async def task_tool(
     subagent_reservation = parent_context.get(SUBAGENT_RESERVATION_CONTEXT_KEY)
     accepted_extension_generation = parent_context.get("accepted_extension_generation")
     accepted_extension_manifest_digest = parent_context.get("accepted_extension_manifest_digest")
+    from deerflow.extensions.mcp import (
+        build_mcp_preparation_audit_sink,
+        mcp_invocation_facts_from_context,
+    )
+
+    mcp_invocation_facts = mcp_invocation_facts_from_context(parent_context)
+    mcp_preparation_audit_sink = build_mcp_preparation_audit_sink(parent_context)
     deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
@@ -444,6 +451,10 @@ async def task_tool(
         executor_kwargs["accepted_extension_generation"] = accepted_extension_generation
     if isinstance(accepted_extension_manifest_digest, str) and len(accepted_extension_manifest_digest) == 64 and all(character in "0123456789abcdef" for character in accepted_extension_manifest_digest):
         executor_kwargs["accepted_extension_manifest_digest"] = accepted_extension_manifest_digest
+    if mcp_invocation_facts is not None:
+        executor_kwargs["mcp_invocation_facts"] = mcp_invocation_facts
+    if mcp_preparation_audit_sink is not None:
+        executor_kwargs["mcp_preparation_audit_sink"] = mcp_preparation_audit_sink
     executor = SubagentExecutor(**executor_kwargs)
 
     # Start background execution (always async to prevent blocking)

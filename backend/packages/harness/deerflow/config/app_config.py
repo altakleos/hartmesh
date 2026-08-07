@@ -225,7 +225,8 @@ class AppConfig(BaseModel):
             field_doc=(
                 "Operator-only trusted extension capabilities required at startup. "
                 "Supported forms are origin_contributor:<id>, "
-                "run_context_contributor:<id>, and invocation_constraints.v1. "
+                "run_context_contributor:<id>, mcp_interceptor:<id>, and "
+                "invocation_constraints.v1. "
                 "This setting lives only in "
                 "config.yaml and is not part of extensions_config.json."
             ),
