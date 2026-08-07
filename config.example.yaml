@@ -2550,6 +2550,13 @@ authorization:
 # invocation_constraints.v1 provider. Constraints are checked after invocation-start
 # authorization and before durable admission; accepted projections are fenced again by
 # the worker before construction and immediately before graph streaming.
+#
+# Authoritative registrations and their loader-owned package provenance are sealed into
+# one generation at Gateway startup. Plugin/config changes require a restart; accepted
+# invocations keep their original generation and manifest digest. Optional descriptor
+# health probes are cached for 10 seconds and bounded to two seconds. A required
+# capability that is missing, failed, stale, or unhealthy makes the unauthenticated
+# `GET /ready` return only `{"status":"not_ready"}`; `GET /health` remains liveness.
 required_capabilities: []
 #
 # plugins:

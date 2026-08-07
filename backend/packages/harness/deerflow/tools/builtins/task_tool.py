@@ -376,6 +376,7 @@ async def task_tool(
     invocation_constraints = parent_context.get(INVOCATION_CONSTRAINTS_CONTEXT_KEY)
     subagent_reservation = parent_context.get(SUBAGENT_RESERVATION_CONTEXT_KEY)
     accepted_extension_generation = parent_context.get("accepted_extension_generation")
+    accepted_extension_manifest_digest = parent_context.get("accepted_extension_manifest_digest")
     deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
@@ -441,6 +442,8 @@ async def task_tool(
         executor_kwargs["subagent_reservation"] = subagent_reservation
     if type(accepted_extension_generation) is int and accepted_extension_generation >= 0:
         executor_kwargs["accepted_extension_generation"] = accepted_extension_generation
+    if isinstance(accepted_extension_manifest_digest, str) and len(accepted_extension_manifest_digest) == 64 and all(character in "0123456789abcdef" for character in accepted_extension_manifest_digest):
+        executor_kwargs["accepted_extension_manifest_digest"] = accepted_extension_manifest_digest
     executor = SubagentExecutor(**executor_kwargs)
 
     # Start background execution (always async to prevent blocking)

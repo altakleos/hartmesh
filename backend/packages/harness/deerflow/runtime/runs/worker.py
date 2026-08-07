@@ -481,6 +481,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
             "accepted_agent_revision_digest",
             "accepted_extension_generation",
+            "accepted_extension_manifest_digest",
         ):
             if internal_key in runtime_context:
                 existing_context[internal_key] = runtime_context[internal_key]
@@ -935,6 +936,8 @@ async def run_agent(
             runtime_ctx[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = pinned_material
             runtime_ctx["accepted_agent_revision_digest"] = actual_revision.digest
             runtime_ctx["accepted_extension_generation"] = accepted.extension_generation
+            if accepted.extension_manifest_digest is not None:
+                runtime_ctx["accepted_extension_manifest_digest"] = accepted.extension_manifest_digest
             _install_pinned_agent_facts(runtime_ctx, pinned_material)
             from deerflow.runtime.constraints import (
                 INVOCATION_CONSTRAINTS_CONTEXT_KEY,

@@ -25,6 +25,9 @@ image:
 
 # -- Gateway (backend) deployment.
 gateway:
+  # The chart probes /ready for traffic readiness and keeps /health for
+  # process liveness. Required authoritative capability health participates
+  # only in readiness; manifest/plugin changes require a pod restart.
   replicas: 1               # Safe default. Postgres + the Redis stream bridge are
                             # wired, but multi-replica needs issue #3948's run-control
                             # work (cancel/dedup/reconcile) — see README "Gateway replicas".

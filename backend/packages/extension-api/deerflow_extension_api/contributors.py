@@ -14,6 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
+from deerflow_extension_api.health import CapabilityHealthProbe
+
 ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION = "1.0"
 RUN_CONTEXT_CONTRIBUTOR_CAPABILITY_API_VERSION = "1.0"
 ORIGIN_CONTRIBUTOR_KIND = "origin_contributor"
@@ -186,6 +188,7 @@ class OriginContributorFactory:
     capability_api_version: str
     factory: Callable[[], OriginContributor]
     kind: Literal["origin_contributor"]
+    health_probe: CapabilityHealthProbe | None = None
 
     def __post_init__(self) -> None:
         _validate_identifier(self.contribution_id, field_name="origin contributor contribution_id")
@@ -195,6 +198,8 @@ class OriginContributorFactory:
             raise ValueError(f"origin contributor kind must be {ORIGIN_CONTRIBUTOR_KIND!r}")
         if not callable(self.factory):
             raise TypeError("origin contributor factory must be callable")
+        if self.health_probe is not None and not callable(self.health_probe):
+            raise TypeError("origin contributor health_probe must be callable")
 
 
 @dataclass(frozen=True)
@@ -203,6 +208,7 @@ class RunContextContributorFactory:
     capability_api_version: str
     factory: Callable[[], RunContextContributor]
     kind: Literal["run_context_contributor"]
+    health_probe: CapabilityHealthProbe | None = None
 
     def __post_init__(self) -> None:
         _validate_identifier(self.contribution_id, field_name="run-context contributor contribution_id")
@@ -212,3 +218,5 @@ class RunContextContributorFactory:
             raise ValueError(f"run-context contributor kind must be {RUN_CONTEXT_CONTRIBUTOR_KIND!r}")
         if not callable(self.factory):
             raise TypeError("run-context contributor factory must be callable")
+        if self.health_probe is not None and not callable(self.health_probe):
+            raise TypeError("run-context contributor health_probe must be callable")

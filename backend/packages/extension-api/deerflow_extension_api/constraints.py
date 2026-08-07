@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal, Protocol, runtime_checkable
 
+from deerflow_extension_api.health import CapabilityHealthProbe
+
 INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION = "1.0"
 INVOCATION_CONSTRAINTS_KIND = "invocation_constraints"
 INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY = "invocation_constraints.v1"
@@ -103,6 +105,7 @@ class InvocationConstraintsProviderFactory:
     capability_api_version: str
     factory: Callable[[], InvocationConstraintsProvider]
     kind: Literal["invocation_constraints"]
+    health_probe: CapabilityHealthProbe | None = None
 
     def __post_init__(self) -> None:
         _validate_identifier(self.contribution_id, field_name="constraint contribution_id")
@@ -112,6 +115,8 @@ class InvocationConstraintsProviderFactory:
             raise ValueError(f"invocation-constraints kind must be {INVOCATION_CONSTRAINTS_KIND!r}")
         if not callable(self.factory):
             raise TypeError("invocation-constraints factory must be callable")
+        if self.health_probe is not None and not callable(self.health_probe):
+            raise TypeError("invocation-constraints health_probe must be callable")
 
 
 __all__ = [

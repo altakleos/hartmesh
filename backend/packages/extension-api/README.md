@@ -4,11 +4,18 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
-Version 0.4.0 owns the authorization contracts `Principal`, `AuthzRequest`,
+Version 0.5.0 owns the authorization contracts `Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthzReason`, and `AuthorizationProvider`. Existing host code may keep
 using `deerflow.authz.provider`; those names are compatibility re-exports of the same
 objects. It also owns the versioned Origin and run-context contributor contracts described
 below.
+
+Every authoritative factory descriptor also has an optional `health_probe`. Existing
+plugins may omit it; a successfully initialized capability without a probe is healthy.
+When present, it is an async zero-argument callable returning only
+`CapabilityHealthResult(status="healthy"|"unhealthy", diagnostic_code=<bounded code>)`.
+The host applies its own timeout/cache/single-flight policy. Probes must not return
+credentials, identities, exception text, or request data.
 
 ## Authorization provider contribution
 
@@ -31,6 +38,7 @@ def install(registry: ExtensionRegistry, config) -> None:
             capability_api_version=AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION,
             factory=ExampleAuthorizationProvider,
             kind=AUTHORIZATION_PROVIDER_KIND,
+            health_probe=check_authorization_health,  # optional
         )
     )
 ```

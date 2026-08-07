@@ -827,6 +827,17 @@ the API-writable `extensions_config.json`. In Docker deployments, install the pl
 Gateway image rather than only in the host environment. See `config.example.yaml` for
 configuration.
 
+The Gateway seals authoritative plugin provenance into one immutable generation and
+manifest digest at startup. New durable invocations retain that generation/digest for their
+entire run; changing plugins requires a restart and never switches in-flight work. Optional
+authoritative descriptors may provide bounded health probes. `GET /health` remains minimal
+liveness, while unauthenticated `GET /ready` returns only `{"status":"ready"}` (200) or
+`{"status":"not_ready"}` (503) and fails closed for unhealthy operator-required
+capabilities or corrupt lifecycle ordering state. Administrators can inspect the safe
+manifest and separately labelled live health through
+`GET /api/runtime/v1/capabilities`; plugin configuration, secrets, identities, and request
+data are excluded.
+
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
@@ -1086,7 +1097,8 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 Authenticated integrations can use the versioned durable runtime surface at
 `/api/runtime/v1` without depending on the LangGraph compatibility routes:
 
-- `GET /capabilities` (administrator only)
+- `GET /capabilities` (administrator only; includes the immutable capability manifest and
+  separate current health snapshot)
 - `POST /invocations/ensure`
 - `GET /invocations/{run_id}`
 - `GET /contexts/{thread_id}/invocations`
@@ -1106,8 +1118,8 @@ requested cancellation, `200` for known/observed/already-finished outcomes,
 resources, `409` for conflict/thread-busy/stale state, `410` for a pruned cursor,
 `422` for invalid/ahead input, and `503` for indeterminate policy/runtime
 failures. Every non-2xx response is a bounded `runtime.error` record rather than
-a free-form `detail`. Context export, context retirement, readiness/provenance
-manifests, and controls other than fenced cancellation are not supported. See
+a free-form `detail`. Context export, context retirement, and controls other than
+fenced cancellation are not supported. See
 [the API reference](backend/docs/API.md#durable-invocation-runtime-api) for DTO
 and paging details.
 

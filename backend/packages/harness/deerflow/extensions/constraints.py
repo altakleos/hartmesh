@@ -65,6 +65,14 @@ class InvocationConstraintsHost:
         self.startup_diagnostics = tuple(diagnostics)
 
     @property
+    def initialized_capability_ids(self) -> frozenset[str]:
+        """Return the singular initialized capability, when present."""
+
+        if self._provider is None:
+            return frozenset()
+        return frozenset({INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY})
+
+    @property
     def clock(self) -> Callable[[], datetime]:
         return self._clock
 

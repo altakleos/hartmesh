@@ -87,7 +87,7 @@ same provider snapshot used by route, resource, tool, model, skill, and agent as
 
 ## Restrictive invocation constraints
 
-`deerflow-extension-api` 0.4.0 defines one optional, singular
+`deerflow-extension-api` 0.5.0 defines one optional, singular
 `InvocationConstraintsProvider`. Gateway invokes it only for a genuinely absent invocation,
 after invocation-start authorization allows and before atomic acceptance. The request binds
 the canonical request digest and pinned agent-revision digest. The strict v1 projection may

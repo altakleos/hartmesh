@@ -6,6 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from deerflow_extension_api.health import CapabilityHealthProbe
+
 AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION = "1.0"
 AUTHORIZATION_PROVIDER_KIND = "authorization_provider"
 
@@ -78,6 +80,7 @@ class AuthorizationProviderFactory:
     capability_api_version: str
     factory: Callable[[], AuthorizationProvider]
     kind: Literal["authorization_provider"]
+    health_probe: CapabilityHealthProbe | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.contribution_id, str) or not self.contribution_id.strip():
@@ -88,3 +91,5 @@ class AuthorizationProviderFactory:
             raise ValueError(f"authorization provider factory kind must be {AUTHORIZATION_PROVIDER_KIND!r}")
         if not callable(self.factory):
             raise TypeError("authorization provider factory must be callable")
+        if self.health_probe is not None and not callable(self.health_probe):
+            raise TypeError("authorization provider health_probe must be callable")
