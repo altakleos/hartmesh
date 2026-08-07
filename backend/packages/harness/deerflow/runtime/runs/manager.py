@@ -20,6 +20,7 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
+from .lifecycle_query import LifecyclePage, LifecycleQuery
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .store.base import (
     AdmissionOutcome,
@@ -809,6 +810,20 @@ class RunManager:
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
         return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
 
+    async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage:
+        """Read authoritative lifecycle evidence from the configured durable store."""
+
+        if self._store is None or not self._store.durable_lifecycle:
+            raise RuntimeError("the configured run store has no durable lifecycle query support")
+        return await self._store.query_lifecycle(query)
+
+    async def prune_lifecycle_through(self, cursor: str) -> str:
+        """Administratively prune a committed lifecycle prefix."""
+
+        if self._store is None or not self._store.durable_lifecycle:
+            raise RuntimeError("the configured run store has no durable lifecycle pruning support")
+        return await self._store.prune_lifecycle_through(cursor)
+
     async def list_successful_regenerate_sources(
         self,
         thread_id: str,
@@ -1379,6 +1394,37 @@ class RunManager:
             if task_active and record.status == RunStatus.running:
                 record.task.cancel()
         logger.info("Run %s cancellation signalled locally (action=%s)", run_id, action)
+
+    async def request_cancel_fenced(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        expected_state_version: int,
+        user_id: str | None = None,
+    ) -> CancellationRequestOutcome:
+        """Record a version-fenced cancellation and notify a local owner."""
+
+        if self._store is None or not self._store.durable_lifecycle:
+            raise RuntimeError("the configured run store has no fenced cancellation support")
+        result = await self._call_store_with_retry(
+            "request_cancel_fenced",
+            run_id,
+            lambda: self._store.request_cancel_fenced(
+                run_id,
+                action=action,
+                expected_state_version=expected_state_version,
+                user_id=user_id,
+            ),
+        )
+        if result.row is not None:
+            async with self._lock:
+                local_record = self._runs.get(run_id)
+                if local_record is not None:
+                    self._sync_record_from_store_row(local_record, result.row)
+        if result.outcome is CancellationRequestOutcome.requested:
+            await self._signal_local_cancel(run_id, action=action)
+        return result.outcome
 
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> CancelOutcome:
         """Request cancellation of a run.

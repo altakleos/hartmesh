@@ -98,6 +98,21 @@ def scope_for_scheduler(owner_id: str, task_id: str) -> str:
     )
 
 
+def scope_for_service(authenticated_service_id: str) -> str:
+    """Return the host-owned scope for one authenticated embedded service."""
+
+    return _scope(
+        "service",
+        [
+            "service",
+            _require_external_string(
+                authenticated_service_id,
+                field="authenticated service id",
+            ),
+        ],
+    )
+
+
 def canonical_request_digest(value: Any) -> str:
     """Hash canonical UTF-8 JSON with an explicit projector version tag."""
 
@@ -143,4 +158,5 @@ __all__ = [
     "scope_for_channel",
     "scope_for_http",
     "scope_for_scheduler",
+    "scope_for_service",
 ]

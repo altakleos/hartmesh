@@ -1,7 +1,7 @@
 # Durable Invocation Runtime
 
 `app.runtime.InvocationRuntime` is the single in-process application boundary for durable
-HTTP, Scheduled Task, and authenticated native-channel launches. Scheduling and channel
+HTTP, Scheduled Task, authenticated native-channel, and embedded-service launches. Scheduling and channel
 delivery remain source-owned; normalization, accepted-fact sealing, durable admission, and
 one worker attachment belong to the runtime. Checkpoint and artifact reservations are
 auxiliary thread operations, not accepted invocations.
@@ -147,6 +147,32 @@ state; a changed binding, authenticated source fact, input, or execution option 
 A different key still follows the independent active-thread rule (`reject` is thread-busy;
 `interrupt`/`rollback` supersede atomically). The replay guarantee ends when the retained row
 is deleted.
+
+## Embedded runtime API and lifecycle observation
+
+`deerflow-runtime-api==0.1.0` owns the frozen, strict, standard-library-only
+`deerflow.runtime/v1` records. `app.runtime.api.build_in_process_runtime_api()`
+binds those records to the Gateway application and one already-authenticated
+service ID. The adapter derives the service principal, Origin, and canonical
+hashed scope; a caller can provide only an external key, thread ID, optional
+agent hint, strict graph/resume input, and the finite v1 execution options.
+
+The API offers `ensure`, invocation/context `observe`, fenced cancellation via
+`control`, and truthful capabilities. It reuses the same idempotency,
+authorization, constraints, admission, worker attachment, visibility, and
+lifecycle stores as HTTP/channel/scheduler launches. Known requests return the
+retained normal run, while conflicts, thread-busy, denial, indeterminate policy,
+and safe request failures remain finite outcomes. Auxiliary operation rows are
+never visible. There is no runtime HTTP route.
+
+Lifecycle observations return a fixed safe snapshot projection plus authoritative
+events, opaque `next_cursor`, the `minimum_available_cursor`, and a captured
+`read_fence_cursor`. Visibility and optional observe authorization run before
+the store query. PostgreSQL pages use one read-only repeatable-read snapshot and
+SQLite pages one explicit read transaction; filtered empty pages advance to the
+global fence without skipping a future match. Administrative pruning is explicit
+and monotonic, and stale/ahead cursor conditions are typed. Reads are at least
+once, so consumers deduplicate with stable event IDs/cursors.
 
 ## Pinned agent construction
 

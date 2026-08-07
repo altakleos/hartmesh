@@ -13,7 +13,12 @@ from deerflow_extension_api import ConstraintProjectionV1
 
 from deerflow.runtime import CancelOutcome, DisconnectMode, RunRecord
 from deerflow.runtime.accepted_invocation import AcceptedInvocation
-from deerflow.runtime.runs.store.base import AdmissionOutcome
+from deerflow.runtime.runs.lifecycle_query import LifecyclePage, LifecycleQuery
+from deerflow.runtime.runs.store.base import (
+    AdmissionOutcome,
+    CancellationRequestOutcome,
+    lifecycle_owner_scope,
+)
 
 WorkerCoroutine = Coroutine[Any, Any, None]
 WorkerFactory = Callable[[RunRecord], WorkerCoroutine]
@@ -24,6 +29,7 @@ class InternalSourceKind(StrEnum):
     http = "http"
     scheduled_task = "scheduled_task"
     native_channel = "native_channel"
+    service = "service"
 
 
 @dataclass(frozen=True)
@@ -66,6 +72,7 @@ class InternalLaunchIntent:
     scheduled_trigger: Literal["scheduled", "manual"] | None = None
     owner_user_id: str | None = None
     native_channel: InternalNativeChannelFacts | None = None
+    trusted_service_id: str | None = None
     external_key: str | None = None
     scheduled_system_owned: bool = False
     thread_id_explicit: bool = True
@@ -222,12 +229,38 @@ class InternalCancelRequest:
     action: Literal["interrupt", "rollback"] = "interrupt"
     principal: InvocationPrincipal = field(default_factory=InvocationPrincipal)
     thread_id: str | None = None
+    expected_state_version: int | None = None
 
 
 @dataclass(frozen=True)
 class InternalCancelReceipt:
-    outcome: CancelOutcome
+    outcome: CancelOutcome | CancellationRequestOutcome
     record: RunRecord | None = None
+
+
+@dataclass(frozen=True)
+class InternalInvocationLifecycleQuery:
+    run_id: str
+    principal: InvocationPrincipal
+    cursor: str | None = None
+    limit: int = 100
+    include_snapshot: bool = True
+
+
+@dataclass(frozen=True)
+class InternalContextLifecycleQuery:
+    thread_id: str
+    principal: InvocationPrincipal
+    cursor: str | None = None
+    limit: int = 100
+    include_snapshot: bool = True
+
+
+@dataclass(frozen=True)
+class InternalLifecycleObservation:
+    record: RunRecord | None
+    page: LifecyclePage
+    authoritative_snapshot: dict[str, Any] | None = None
 
 
 class LaunchNormalizer(Protocol):
@@ -261,7 +294,18 @@ class DurableRuns(Protocol):
 
     async def observe(self, run_id: str, principal: InvocationPrincipal) -> RunRecord | None: ...
 
-    async def cancel(self, request: InternalCancelRequest) -> CancelOutcome: ...
+    async def context_visible(
+        self,
+        thread_id: str,
+        principal: InvocationPrincipal,
+    ) -> bool: ...
+
+    async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage: ...
+
+    async def cancel(
+        self,
+        request: InternalCancelRequest,
+    ) -> CancelOutcome | CancellationRequestOutcome: ...
 
 
 class InvocationAuthorization(Protocol):
@@ -281,6 +325,12 @@ class InvocationAuthorization(Protocol):
     async def authorize_cancel(
         self,
         record: RunRecord,
+        principal: InvocationPrincipal,
+    ) -> InternalAuthorizationDecision: ...
+
+    async def authorize_context_observe(
+        self,
+        thread_id: str,
         principal: InvocationPrincipal,
     ) -> InternalAuthorizationDecision: ...
 
@@ -305,6 +355,13 @@ class _DisabledInvocationAuthorization:
     async def authorize_cancel(
         self,
         _record: RunRecord,
+        _principal: InvocationPrincipal,
+    ) -> InternalAuthorizationDecision:
+        return InternalAuthorizationDecision.allowed()
+
+    async def authorize_context_observe(
+        self,
+        _thread_id: str,
         _principal: InvocationPrincipal,
     ) -> InternalAuthorizationDecision:
         return InternalAuthorizationDecision.allowed()
@@ -466,6 +523,71 @@ class InvocationRuntime:
             return rejection
         return record
 
+    @staticmethod
+    def _owner_scope(principal: InvocationPrincipal) -> str | None:
+        if principal.visibility_prevalidated or principal.role == "admin":
+            return None
+        return lifecycle_owner_scope(principal.user_id)
+
+    async def observe_invocation_lifecycle(
+        self,
+        query: InternalInvocationLifecycleQuery,
+    ) -> InternalLifecycleObservation | NotFoundOrInvisible | InvocationAuthorizationOutcome:
+        record = await self._runs.observe(query.run_id, query.principal)
+        if record is None:
+            return NotFoundOrInvisible.not_found_or_invisible
+        decision = await self._authorization.authorize_observe(record, query.principal)
+        if rejection := self._rejection(decision):
+            return rejection
+        page = await self._runs.query_lifecycle(
+            LifecycleQuery(
+                run_id=query.run_id,
+                owner_scope=self._owner_scope(query.principal),
+                cursor=query.cursor,
+                limit=query.limit,
+                # A singular observation always needs state from the same
+                # read snapshot as its fence, even when the caller omits the
+                # snapshot collection from the public response.
+                include_snapshot=True,
+            )
+        )
+        authoritative_snapshot = next(
+            (snapshot for snapshot in page.snapshots if snapshot.get("run_id") == query.run_id),
+            None,
+        )
+        if authoritative_snapshot is None:
+            return NotFoundOrInvisible.not_found_or_invisible
+        if not query.include_snapshot:
+            page = replace(page, snapshots=())
+        return InternalLifecycleObservation(
+            record=record,
+            page=page,
+            authoritative_snapshot=authoritative_snapshot,
+        )
+
+    async def observe_context_lifecycle(
+        self,
+        query: InternalContextLifecycleQuery,
+    ) -> InternalLifecycleObservation | NotFoundOrInvisible | InvocationAuthorizationOutcome:
+        if not await self._runs.context_visible(query.thread_id, query.principal):
+            return NotFoundOrInvisible.not_found_or_invisible
+        decision = await self._authorization.authorize_context_observe(
+            query.thread_id,
+            query.principal,
+        )
+        if rejection := self._rejection(decision):
+            return rejection
+        page = await self._runs.query_lifecycle(
+            LifecycleQuery(
+                thread_id=query.thread_id,
+                owner_scope=self._owner_scope(query.principal),
+                cursor=query.cursor,
+                limit=query.limit,
+                include_snapshot=query.include_snapshot,
+            )
+        )
+        return InternalLifecycleObservation(record=None, page=page)
+
     async def cancel_run(
         self,
         request: InternalCancelRequest,
@@ -477,4 +599,5 @@ class InvocationRuntime:
         if rejection := self._rejection(decision):
             return rejection
         outcome = await self._runs.cancel(request)
-        return InternalCancelReceipt(outcome=outcome, record=record)
+        fresh = await self._runs.observe(request.run_id, request.principal) if request.expected_state_version is not None else None
+        return InternalCancelReceipt(outcome=outcome, record=fresh or record)

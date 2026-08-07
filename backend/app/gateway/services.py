@@ -30,7 +30,14 @@ from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL
-from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import (
+    get_checkpointer,
+    get_local_provider,
+    get_run_context,
+    get_run_manager,
+    get_stream_bridge,
+    get_thread_store,
+)
 from app.gateway.internal_auth import (
     INTERNAL_SYSTEM_ROLE,
     get_internal_user,
@@ -48,6 +55,7 @@ from app.runtime.idempotency import (
     scope_for_channel,
     scope_for_http,
     scope_for_scheduler,
+    scope_for_service,
 )
 from app.runtime.invocation import (
     DurableAdmission,
@@ -105,8 +113,10 @@ from deerflow.runtime.checkpoint_mode import (
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
+from deerflow.runtime.runs.lifecycle_query import LifecyclePage, LifecycleQuery
 from deerflow.runtime.runs.manager import IdempotencyConflictError
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.runs.store.base import CancellationRequestOutcome
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
     redact_config_secrets,
@@ -1165,6 +1175,8 @@ def _base_origin_references(intent: InternalLaunchIntent) -> dict[str, str | int
             "provider_message_id": _bounded_source_value(facts.provider_message_id),
             "channel_user_id": _bounded_source_value(facts.channel_user_id),
         }
+    if intent.source_kind is InternalSourceKind.service:
+        return {"service_id": _bounded_source_value(intent.trusted_service_id)}
     return {}
 
 
@@ -1598,6 +1610,7 @@ class _GatewayLaunchNormalizer:
         if self._trust_internal_launch_facts and intent.source_kind in {
             InternalSourceKind.scheduled_task,
             InternalSourceKind.native_channel,
+            InternalSourceKind.service,
         }:
             return intent.owner_user_id
         return get_trusted_internal_owner_user_id(self._request)
@@ -1688,6 +1701,10 @@ class _GatewayLaunchNormalizer:
                 else:
                     raise ValueError("keyed scheduled admission requires a persisted owner")
                 external_scope = scope_for_scheduler(scope_owner, str(intent.trusted_task_id))
+            elif intent.source_kind is InternalSourceKind.service:
+                if not self._trust_internal_launch_facts or not intent.trusted_service_id or principal.user_id != intent.trusted_service_id or principal.role != "service":
+                    raise ValueError("service admission requires one matching authenticated service identity")
+                external_scope = scope_for_service(intent.trusted_service_id)
             else:  # pragma: no cover - closed enum
                 raise ValueError(f"unsupported invocation source {intent.source_kind}")
         except ValueError as exc:
@@ -2025,19 +2042,64 @@ class _GatewayDurableRuns:
         run_id: str,
         principal: InvocationPrincipal,
     ) -> RunRecord | None:
+        user_id = None if principal.visibility_prevalidated or principal.role == "admin" else principal.user_id
         record = await get_run_manager(self._request).get(
             run_id,
-            user_id=None if principal.visibility_prevalidated else principal.user_id,
+            user_id=user_id,
         )
         # RunManager applies ``user_id`` while hydrating from its durable
         # store, but an already-local record is returned before that store
         # filter runs. Recheck the owner here for facades that have not
         # already completed a route/thread visibility decision.
-        if record is not None and not principal.visibility_prevalidated and principal.user_id is not None and record.user_id != principal.user_id:
+        if record is not None and record.operation_kind is not ThreadOperationKind.run:
+            return None
+        if record is not None and user_id is not None and record.user_id != user_id:
             return None
         return record
 
-    async def cancel(self, cancel_request: InternalCancelRequest) -> CancelOutcome:
+    async def context_visible(
+        self,
+        thread_id: str,
+        principal: InvocationPrincipal,
+    ) -> bool:
+        if principal.visibility_prevalidated:
+            return True
+        user_id = None if principal.role == "admin" else principal.user_id
+        thread_store = get_thread_store(self._request)
+        if user_id is None:
+            if await thread_store.get(thread_id, user_id=None) is not None:
+                return True
+        elif await thread_store.check_access(
+            thread_id,
+            user_id,
+            require_existing=True,
+        ):
+            return True
+        # Preserve read access for legacy contexts that predate thread_meta,
+        # while keeping a truly unknown context indistinguishable from one
+        # owned by somebody else.
+        records = await get_run_manager(self._request).list_by_thread(
+            thread_id,
+            user_id=user_id,
+            limit=1,
+        )
+        return bool(records)
+
+    async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage:
+        return await get_run_manager(self._request).query_lifecycle(query)
+
+    async def cancel(
+        self,
+        cancel_request: InternalCancelRequest,
+    ) -> CancelOutcome | CancellationRequestOutcome:
+        if cancel_request.expected_state_version is not None:
+            user_id = None if cancel_request.principal.visibility_prevalidated or cancel_request.principal.role == "admin" else cancel_request.principal.user_id
+            return await get_run_manager(self._request).request_cancel_fenced(
+                cancel_request.run_id,
+                action=cancel_request.action,
+                expected_state_version=cancel_request.expected_state_version,
+                user_id=user_id,
+            )
         return await get_run_manager(self._request).cancel(
             cancel_request.run_id,
             action=cancel_request.action,
@@ -2143,6 +2205,41 @@ def build_channel_invocation_runtime(app: Any) -> InvocationRuntime:
         state=SimpleNamespace(
             user=get_internal_user(),
             auth_source=AUTH_SOURCE_INTERNAL,
+        ),
+        cookies={},
+    )
+    return InvocationRuntime(
+        normalizer=_GatewayLaunchNormalizer(
+            request,
+            trust_internal_launch_facts=True,
+        ),
+        runs=_GatewayDurableRuns(request),
+        authorization=_build_invocation_authorization(request),
+        constraints=_build_invocation_constraints(request),
+    )
+
+
+def build_service_invocation_runtime(
+    app: Any,
+    *,
+    authenticated_service_id: str,
+) -> InvocationRuntime:
+    """Construct an embedded-service runtime with a host-owned identity."""
+
+    if not authenticated_service_id:
+        raise ValueError("authenticated_service_id must not be empty")
+    request = SimpleNamespace(
+        app=app,
+        headers={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(
+                id=authenticated_service_id,
+                system_role="service",
+                oauth_provider=None,
+                oauth_id=None,
+            ),
+            auth_source=AUTH_SOURCE_INTERNAL,
+            principal_kind="service",
         ),
         cookies={},
     )

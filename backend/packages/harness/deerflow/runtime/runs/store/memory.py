@@ -12,6 +12,14 @@ from datetime import UTC, datetime, timedelta
 from functools import wraps
 from typing import Any
 
+from deerflow.runtime.runs.lifecycle_query import (
+    CursorAhead,
+    LifecyclePage,
+    LifecycleQuery,
+    decode_lifecycle_cursor,
+    encode_lifecycle_cursor,
+    validate_cursor_window,
+)
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
     CancellationRequestOutcome,
@@ -41,6 +49,7 @@ def _atomic_memory_mutation[**P, R](method: Callable[P, Awaitable[R]]) -> Callab
             copy.deepcopy(self._runs_by_external_identity),
             copy.deepcopy(self._lifecycle_events),
             self._lifecycle_cursor,
+            self._lifecycle_pruned_through,
         )
         try:
             return await method(*args, **kwargs)
@@ -51,6 +60,7 @@ def _atomic_memory_mutation[**P, R](method: Callable[P, Awaitable[R]]) -> Callab
                 self._runs_by_external_identity,
                 self._lifecycle_events,
                 self._lifecycle_cursor,
+                self._lifecycle_pruned_through,
             ) = snapshot
             raise
 
@@ -70,6 +80,7 @@ class MemoryRunStore(RunStore):
         self._runs_by_external_identity: dict[tuple[str, str], str] = {}
         self._lifecycle_events: list[dict[str, Any]] = []
         self._lifecycle_cursor = 0
+        self._lifecycle_pruned_through = 0
 
     async def initialize_lifecycle(self) -> None:
         return None
@@ -81,6 +92,52 @@ class MemoryRunStore(RunStore):
         thread_id: str | None = None,
     ) -> list[dict[str, Any]]:
         return [dict(event) for event in self._lifecycle_events if (run_id is None or event["run_id"] == run_id) and (thread_id is None or event["thread_id"] == thread_id)]
+
+    async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage:
+        requested = validate_cursor_window(
+            query.cursor,
+            pruned_through=self._lifecycle_pruned_through,
+            last_cursor=self._lifecycle_cursor,
+        )
+        snapshots: list[dict[str, Any]] = []
+        if query.include_snapshot:
+            if query.run_id is not None:
+                row = self._runs.get(query.run_id)
+                candidates = [row] if row is not None else []
+            else:
+                candidates = [self._runs[run_id] for run_id in self._runs_by_thread.get(query.thread_id or "", {}) if run_id in self._runs]
+            snapshots = [copy.deepcopy(row) for row in candidates if row.get("operation_kind", "run") == "run" and (query.owner_scope is None or lifecycle_owner_scope(row.get("user_id")) == query.owner_scope)]
+            snapshots.sort(key=lambda row: (row.get("created_at") or "", row["run_id"]))
+
+        matching = [
+            copy.deepcopy(event)
+            for event in self._lifecycle_events
+            if requested < event["cursor"] <= self._lifecycle_cursor
+            and (query.run_id is None or event["run_id"] == query.run_id)
+            and (query.thread_id is None or event["thread_id"] == query.thread_id)
+            and (query.owner_scope is None or event["owner_scope"] == query.owner_scope)
+        ]
+        window = matching[: query.limit + 1]
+        has_more = len(window) > query.limit
+        events = window[: query.limit]
+        next_value = events[-1]["cursor"] if has_more else self._lifecycle_cursor
+        return LifecyclePage(
+            snapshots=tuple(snapshots),
+            events=tuple(events),
+            next_cursor=encode_lifecycle_cursor(next_value),
+            minimum_available_cursor=encode_lifecycle_cursor(self._lifecycle_pruned_through),
+            read_fence_cursor=encode_lifecycle_cursor(self._lifecycle_cursor),
+        )
+
+    @_atomic_memory_mutation
+    async def prune_lifecycle_through(self, cursor: str) -> str:
+        requested = decode_lifecycle_cursor(cursor)
+        if requested > self._lifecycle_cursor:
+            raise CursorAhead(encode_lifecycle_cursor(self._lifecycle_cursor))
+        if requested > self._lifecycle_pruned_through:
+            self._lifecycle_events = [event for event in self._lifecycle_events if event["cursor"] > requested]
+            self._lifecycle_pruned_through = requested
+        return encode_lifecycle_cursor(self._lifecycle_pruned_through)
 
     def _append_lifecycle_event(
         self,
