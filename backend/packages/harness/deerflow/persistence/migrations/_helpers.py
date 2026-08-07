@@ -101,7 +101,12 @@ def _normalize_type(value: object) -> str:
 # proven to be a false positive in a deployment -- not pre-emptively, since
 # overly broad equivalence would re-open the silent-drift hole this helper
 # exists to close.
-_EQUIVALENT_TYPE_FAMILIES: tuple[frozenset[str], ...] = (frozenset({"JSON", "JSONB"}),)
+_EQUIVALENT_TYPE_FAMILIES: tuple[frozenset[str], ...] = (
+    frozenset({"JSON", "JSONB"}),
+    # ``sa.String`` renders as ``VARCHAR`` and is reflected as ``VARCHAR`` on
+    # SQLite/Postgres even though its Python type name is ``String``.
+    frozenset({"STRING", "VARCHAR"}),
+)
 
 
 def _type_equivalent(actual: object, desired: object) -> bool:

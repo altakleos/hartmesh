@@ -211,6 +211,8 @@ class ScheduledTaskService:
                     task_run_id=task_run_id,
                     scheduled_trigger=trigger,
                     owner_user_id=task.get("user_id"),
+                    external_key=task_run_id,
+                    scheduled_system_owned=(task.get("system_owned") is True and "user_id" in task and task.get("user_id") is None),
                 )
             )
             launch_succeeded = True

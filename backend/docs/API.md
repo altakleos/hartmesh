@@ -114,6 +114,29 @@ Content-Type: application/json
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
 
+**Idempotent creation:**
+
+All thread-scoped create/stream/wait routes and stateless stream/wait routes accept an
+optional `Idempotency-Key` header. The value must be a non-empty UTF-8 string without control
+characters. It is scoped to the authenticated server-side user/service identity (auth-disabled
+mode uses DeerFlow's configured default user), so clients cannot create a shared ownerless
+key space.
+
+An equal retry returns the original run, including after success, error, timeout, or
+interruption. Only the request that creates the row attaches a worker. Changing the bound
+thread, agent selector, input/command, checkpoint, multitask/interrupt settings, or effective
+execution context returns `409`; changing stream/wait route, stream mode, subgraph streaming,
+disconnect behavior, or other response-delivery preferences reuses the run. Stateless retries
+that originally omitted a thread also reuse the originally generated thread. Keyed requests
+return `422` for non-empty arbitrary metadata or config/context fields that the canonical
+projector cannot classify, rather than silently ignoring them.
+
+Keys through 255 UTF-8 bytes are retained exactly behind a `raw:` form marker; longer values
+are represented by a SHA-256 UTF-8 digest. Replay is guaranteed only while the original run
+row is retained. A different key targeting a thread with an active run keeps the existing
+multitask semantics: `reject` reports the thread as busy, while `interrupt` and `rollback`
+perform their normal atomic supersession.
+
 When outputs changed during the run, `run.delivery` events retain the Slice 1
 facts (`presented`, `paths`, and `by_tool`) and add `produced_paths`,
 `presented_paths`, `matched_paths`, plus an explicit verdict: `verification`,

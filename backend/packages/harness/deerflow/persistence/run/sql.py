@@ -12,11 +12,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import case, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.runs.store.base import (
+    AdmissionOutcome,
     LeaseRenewal,
+    RunEnsureResult,
     RunStore,
     StatusFinalization,
 )
@@ -115,6 +118,10 @@ class RunRepository(RunStore):
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
         decision_evidence_json: dict[str, Any] | None = None,
+        external_scope: str | None = None,
+        external_key: str | None = None,
+        request_digest: str | None = None,
+        request_digest_version: str | None = None,
     ):
         """Insert or update a run row.
 
@@ -150,6 +157,10 @@ class RunRepository(RunStore):
             "agent_revision_digest": agent_revision_digest if operation_kind == "run" else None,
             "extension_generation": extension_generation if operation_kind == "run" else None,
             "decision_evidence_json": self._safe_json(decision_evidence_json) if operation_kind == "run" else None,
+            "external_scope": external_scope if operation_kind == "run" else None,
+            "external_key": external_key if operation_kind == "run" else None,
+            "request_digest": request_digest if operation_kind == "run" else None,
+            "request_digest_version": request_digest_version if operation_kind == "run" else None,
             "updated_at": now,
         }
         async with self._sf() as session:
@@ -175,6 +186,18 @@ class RunRepository(RunStore):
             if resolved_user_id is not None and row.user_id != resolved_user_id:
                 return None
             return self._row_to_dict(row)
+
+    async def get_by_external_identity(self, external_scope: str, external_key: str):
+        async with self._sf() as session:
+            result = await session.execute(
+                select(RunRow).where(
+                    RunRow.external_scope == external_scope,
+                    RunRow.external_key == external_key,
+                    RunRow.operation_kind == "run",
+                )
+            )
+            row = result.scalar_one_or_none()
+            return self._row_to_dict(row) if row is not None else None
 
     async def list_by_thread(
         self,
@@ -713,6 +736,10 @@ class RunRepository(RunStore):
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
         decision_evidence_json: dict[str, Any] | None = None,
+        external_scope: str | None = None,
+        external_key: str | None = None,
+        request_digest: str | None = None,
+        request_digest_version: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -758,6 +785,10 @@ class RunRepository(RunStore):
             "agent_revision_digest": agent_revision_digest if operation_kind == "run" else None,
             "extension_generation": extension_generation if operation_kind == "run" else None,
             "decision_evidence_json": self._safe_json(decision_evidence_json) if operation_kind == "run" else None,
+            "external_scope": external_scope if operation_kind == "run" else None,
+            "external_key": external_key if operation_kind == "run" else None,
+            "request_digest": request_digest if operation_kind == "run" else None,
+            "request_digest_version": request_digest_version if operation_kind == "run" else None,
         }
 
         async with self._sf() as session:
@@ -808,3 +839,39 @@ class RunRepository(RunStore):
 
             new_row = await session.get(RunRow, run_id)
             return self._row_to_dict(new_row), claimed
+
+    async def ensure_run_atomic(
+        self,
+        run_id: str,
+        *,
+        external_scope: str,
+        external_key: str,
+        request_digest: str,
+        request_digest_version: str,
+        **kwargs: Any,
+    ) -> RunEnsureResult:
+        existing = await self.get_by_external_identity(external_scope, external_key)
+        if existing is not None:
+            outcome = AdmissionOutcome.known_same if existing.get("request_digest") == request_digest and existing.get("request_digest_version") == request_digest_version else AdmissionOutcome.key_conflict
+            return RunEnsureResult(outcome=outcome, row=existing)
+
+        try:
+            row, claimed = await self.create_thread_operation_atomic(
+                run_id,
+                operation_kind="run",
+                external_scope=external_scope,
+                external_key=external_key,
+                request_digest=request_digest,
+                request_digest_version=request_digest_version,
+                **kwargs,
+            )
+        except IntegrityError:
+            # The external-identity partial index is the race arbiter. If it
+            # did not win the conflict, preserve the independent thread-busy
+            # error by re-raising the original integrity failure.
+            existing = await self.get_by_external_identity(external_scope, external_key)
+            if existing is None:
+                raise
+            outcome = AdmissionOutcome.known_same if existing.get("request_digest") == request_digest and existing.get("request_digest_version") == request_digest_version else AdmissionOutcome.key_conflict
+            return RunEnsureResult(outcome=outcome, row=existing)
+        return RunEnsureResult(outcome=AdmissionOutcome.created, row=row, claimed=tuple(claimed))

@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from deerflow.runtime.runs.store.base import LeaseRenewal, RunStore, StatusFinalization
+from deerflow.runtime.runs.store.base import AdmissionOutcome, LeaseRenewal, RunEnsureResult, RunStore, StatusFinalization
 
 
 class MemoryRunStore(RunStore):
@@ -19,6 +19,7 @@ class MemoryRunStore(RunStore):
         # per-thread queries avoid O(total in-memory runs) full scans. Mirrors
         # the index ``RunManager`` keeps over its own in-memory records.
         self._runs_by_thread: dict[str, dict[str, None]] = {}
+        self._runs_by_external_identity: dict[tuple[str, str], str] = {}
 
     def _index_run(self, run_id: str, thread_id: str) -> None:
         """Register *run_id* under *thread_id* in the secondary index."""
@@ -59,6 +60,10 @@ class MemoryRunStore(RunStore):
         agent_revision_digest=None,
         extension_generation=None,
         decision_evidence_json=None,
+        external_scope=None,
+        external_key=None,
+        request_digest=None,
+        request_digest_version=None,
     ):
         now = datetime.now(UTC).isoformat()
         existing = self._runs.get(run_id)
@@ -88,12 +93,18 @@ class MemoryRunStore(RunStore):
             "agent_revision_digest": agent_revision_digest if operation_kind == "run" else None,
             "extension_generation": extension_generation if operation_kind == "run" else None,
             "decision_evidence_json": decision_evidence_json if operation_kind == "run" else None,
+            "external_scope": external_scope if operation_kind == "run" else None,
+            "external_key": external_key if operation_kind == "run" else None,
+            "request_digest": request_digest if operation_kind == "run" else None,
+            "request_digest_version": request_digest_version if operation_kind == "run" else None,
             # ``put`` is an idempotent snapshot write. Preserve a cancellation
             # request that may have raced a retry of an earlier snapshot.
             "cancel_action": existing.get("cancel_action") if existing else None,
             "cancel_requested_at": existing.get("cancel_requested_at") if existing else None,
         }
         self._index_run(run_id, thread_id)
+        if operation_kind == "run" and external_scope is not None and external_key is not None:
+            self._runs_by_external_identity[(external_scope, external_key)] = run_id
 
     async def get(self, run_id, *, user_id=None):
         run = self._runs.get(run_id)
@@ -102,6 +113,10 @@ class MemoryRunStore(RunStore):
         if user_id is not None and run.get("user_id") != user_id:
             return None
         return run
+
+    async def get_by_external_identity(self, external_scope: str, external_key: str):
+        run_id = self._runs_by_external_identity.get((external_scope, external_key))
+        return self._runs.get(run_id) if run_id is not None else None
 
     async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
         # Use the thread index for an O(runs-in-thread) lookup instead of
@@ -181,6 +196,10 @@ class MemoryRunStore(RunStore):
         run = self._runs.pop(run_id, None)
         if run is not None:
             self._unindex_run(run_id, run["thread_id"])
+            scope = run.get("external_scope")
+            key = run.get("external_key")
+            if scope is not None and key is not None:
+                self._runs_by_external_identity.pop((scope, key), None)
 
     async def update_run_completion(self, run_id, *, status, **kwargs):
         run = self._runs.get(run_id)
@@ -429,6 +448,10 @@ class MemoryRunStore(RunStore):
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
         decision_evidence_json: dict[str, Any] | None = None,
+        external_scope: str | None = None,
+        external_key: str | None = None,
+        request_digest: str | None = None,
+        request_digest_version: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
 
@@ -514,7 +537,39 @@ class MemoryRunStore(RunStore):
             "agent_revision_digest": agent_revision_digest if operation_kind == "run" else None,
             "extension_generation": extension_generation if operation_kind == "run" else None,
             "decision_evidence_json": decision_evidence_json if operation_kind == "run" else None,
+            "external_scope": external_scope if operation_kind == "run" else None,
+            "external_key": external_key if operation_kind == "run" else None,
+            "request_digest": request_digest if operation_kind == "run" else None,
+            "request_digest_version": request_digest_version if operation_kind == "run" else None,
         }
         self._runs[run_id] = new_row
         self._index_run(run_id, thread_id)
+        if operation_kind == "run" and external_scope is not None and external_key is not None:
+            self._runs_by_external_identity[(external_scope, external_key)] = run_id
         return new_row, claimed
+
+    async def ensure_run_atomic(
+        self,
+        run_id: str,
+        *,
+        external_scope: str,
+        external_key: str,
+        request_digest: str,
+        request_digest_version: str,
+        **kwargs: Any,
+    ) -> RunEnsureResult:
+        existing = await self.get_by_external_identity(external_scope, external_key)
+        if existing is not None:
+            outcome = AdmissionOutcome.known_same if existing.get("request_digest") == request_digest and existing.get("request_digest_version") == request_digest_version else AdmissionOutcome.key_conflict
+            return RunEnsureResult(outcome=outcome, row=existing)
+
+        row, claimed = await self.create_thread_operation_atomic(
+            run_id,
+            operation_kind="run",
+            external_scope=external_scope,
+            external_key=external_key,
+            request_digest=request_digest,
+            request_digest_version=request_digest_version,
+            **kwargs,
+        )
+        return RunEnsureResult(outcome=AdmissionOutcome.created, row=row, claimed=tuple(claimed))

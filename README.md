@@ -1126,6 +1126,8 @@ client.clear_goal("thread-1")
 
 The HTTP Gateway accepts `values`, `messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom` stream modes. Unsupported modes such as `messages` and `events`, unsupported non-default run options such as webhooks, delayed execution, or `multitask_strategy="enqueue"`, and undeclared SDK options such as checkpoint durability overrides return `422` before execution instead of being silently ignored or downgraded.
 
+HTTP create, stream, and wait routes also accept an optional `Idempotency-Key` header. Retrying the same effective request with the same key returns the retained run without starting another worker; reusing the key for a different thread, agent, input, or execution option returns `409`, while an invalid key or unclassifiable keyed request returns `422`. The guarantee lasts for as long as the run row is retained; see [the Gateway API reference](backend/docs/API.md#idempotent-creation) for scope and replay details.
+
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
 
 ## Scheduled Tasks

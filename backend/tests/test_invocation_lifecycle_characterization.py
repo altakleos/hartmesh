@@ -102,7 +102,7 @@ async def test_gateway_create_stream_wait_routes_share_durable_admission(monkeyp
 
     admissions: list[tuple[str, str]] = []
 
-    async def durable_start_run(body, thread_id, _request):
+    async def durable_start_run(body, thread_id, _request, **_kwargs):
         admissions.append((thread_id, body.multitask_strategy))
         return _record(f"run-{len(admissions)}", thread_id, body)
 

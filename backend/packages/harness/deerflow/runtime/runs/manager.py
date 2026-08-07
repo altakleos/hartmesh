@@ -21,7 +21,7 @@ from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
-from .store.base import EditReplayVisibility
+from .store.base import AdmissionOutcome, EditReplayVisibility
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -197,6 +197,18 @@ class RunRecord:
     ownership_lost: bool = False
     stop_reason: str | None = None
     accepted_invocation: Any | None = field(default=None, repr=False)
+    external_scope: str | None = None
+    external_key: str | None = None
+    request_digest: str | None = None
+    request_digest_version: str | None = None
+
+
+@dataclass(frozen=True)
+class RunAdmission:
+    """Result of durable normal-run admission."""
+
+    record: RunRecord
+    outcome: AdmissionOutcome
 
 
 class RunStartOutcome(StrEnum):
@@ -300,6 +312,13 @@ class RunManager:
             payload["stop_reason"] = record.stop_reason
         if record.operation_kind == ThreadOperationKind.run and record.accepted_invocation is not None:
             payload.update(record.accepted_invocation.to_persisted())
+        if record.operation_kind == ThreadOperationKind.run and record.external_scope is not None:
+            payload.update(
+                external_scope=record.external_scope,
+                external_key=record.external_key,
+                request_digest=record.request_digest,
+                request_digest_version=record.request_digest_version,
+            )
         return payload
 
     async def _call_store_with_retry(
@@ -472,6 +491,10 @@ class RunManager:
             lease_expires_at=row.get("lease_expires_at"),
             stop_reason=row.get("stop_reason"),
             accepted_invocation=AcceptedInvocation.from_persisted(row),
+            external_scope=row.get("external_scope"),
+            external_key=row.get("external_key"),
+            request_digest=row.get("request_digest"),
+            request_digest_version=row.get("request_digest_version"),
         )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
@@ -1393,6 +1416,62 @@ class RunManager:
         accepted_invocation: Any | None = None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
+        admission = await self._admit_thread_operation(
+            thread_id,
+            assistant_id,
+            operation_kind=ThreadOperationKind.run,
+            on_disconnect=on_disconnect,
+            metadata=metadata,
+            kwargs=kwargs,
+            multitask_strategy=multitask_strategy,
+            model_name=model_name,
+            user_id=user_id,
+            accepted_invocation=accepted_invocation,
+        )
+        return admission.record
+
+    async def get_by_external_identity(
+        self,
+        external_scope: str,
+        external_key: str,
+        *,
+        user_id: str | None = None,
+    ) -> RunRecord | None:
+        """Return a visible normal run for one normalized external identity."""
+
+        async with self._lock:
+            for record in self._runs.values():
+                if record.external_scope != external_scope or record.external_key != external_key:
+                    continue
+                if user_id is not None and record.user_id != user_id:
+                    return None
+                return record
+        if self._store is None:
+            return None
+        row = await self._store.get_by_external_identity(external_scope, external_key)
+        if row is None or (user_id is not None and row.get("user_id") != user_id):
+            return None
+        return self._record_from_store(row)
+
+    async def ensure_or_reject(
+        self,
+        thread_id: str,
+        assistant_id: str | None = None,
+        *,
+        external_scope: str,
+        external_key: str,
+        request_digest: str,
+        request_digest_version: str,
+        on_disconnect: DisconnectMode = DisconnectMode.cancel,
+        metadata: dict | None = None,
+        kwargs: dict | None = None,
+        multitask_strategy: str = "reject",
+        model_name: str | None = None,
+        user_id: str | None = None,
+        accepted_invocation: Any | None = None,
+    ) -> RunAdmission:
+        """Atomically ensure one normal run for an external identity."""
+
         return await self._admit_thread_operation(
             thread_id,
             assistant_id,
@@ -1404,6 +1483,10 @@ class RunManager:
             model_name=model_name,
             user_id=user_id,
             accepted_invocation=accepted_invocation,
+            external_scope=external_scope,
+            external_key=external_key,
+            request_digest=request_digest,
+            request_digest_version=request_digest_version,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -1464,7 +1547,11 @@ class RunManager:
         model_name: str | None = None,
         user_id: str | None = None,
         accepted_invocation: Any | None = None,
-    ) -> RunRecord:
+        external_scope: str | None = None,
+        external_key: str | None = None,
+        request_digest: str | None = None,
+        request_digest_version: str | None = None,
+    ) -> RunAdmission:
         """Atomically check for inflight runs and create a new one.
 
         For ``reject`` strategy, raises ``ConflictError`` if thread
@@ -1507,9 +1594,23 @@ class RunManager:
             owner_worker_id=self._worker_id,
             lease_expires_at=lease_expires_at,
             accepted_invocation=accepted_invocation if operation_kind == ThreadOperationKind.run else None,
+            external_scope=external_scope if operation_kind == ThreadOperationKind.run else None,
+            external_key=external_key if operation_kind == ThreadOperationKind.run else None,
+            request_digest=request_digest if operation_kind == ThreadOperationKind.run else None,
+            request_digest_version=request_digest_version if operation_kind == ThreadOperationKind.run else None,
         )
 
         async with self._lock:
+            local_keyed = next(
+                (current for current in self._runs.values() if external_scope is not None and external_key is not None and current.external_scope == external_scope and current.external_key == external_key),
+                None,
+            )
+            if local_keyed is not None:
+                if local_keyed.user_id != user_id:
+                    raise IdempotencyConflictError("Idempotency key is not visible to this principal")
+                outcome = AdmissionOutcome.known_same if local_keyed.request_digest == request_digest and local_keyed.request_digest_version == request_digest_version else AdmissionOutcome.key_conflict
+                return RunAdmission(record=local_keyed, outcome=outcome)
+
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
             local_inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing]
@@ -1531,7 +1632,45 @@ class RunManager:
             # 2) Persist to store while still holding the local lock. The
             #    store is the source of truth for cross-process atomicity.
             if self._store is not None:
-                if multitask_strategy == "reject":
+                accepted_persisted = accepted_invocation.to_persisted() if accepted_invocation is not None and operation_kind == ThreadOperationKind.run else {}
+                keyed = external_scope is not None and external_key is not None
+                if keyed:
+                    try:
+                        store_admission = await self._call_store_with_retry(
+                            "ensure_run_atomic",
+                            run_id,
+                            lambda: self._store.ensure_run_atomic(
+                                run_id=run_id,
+                                thread_id=thread_id,
+                                owner_worker_id=self._worker_id,
+                                lease_expires_at=lease_expires_at,
+                                external_scope=external_scope,
+                                external_key=external_key,
+                                request_digest=request_digest,
+                                request_digest_version=request_digest_version,
+                                multitask_strategy=multitask_strategy,
+                                assistant_id=assistant_id,
+                                user_id=user_id,
+                                model_name=model_name,
+                                metadata=metadata,
+                                kwargs=kwargs,
+                                created_at=now,
+                                grace_seconds=grace_seconds,
+                                **accepted_persisted,
+                            ),
+                        )
+                    except ConflictError:
+                        raise
+                    except Exception as exc:
+                        if _is_unique_violation(exc):
+                            raise ConflictError(f"Thread {thread_id} already has an active run") from exc
+                        raise
+                    if store_admission.outcome is not AdmissionOutcome.created:
+                        stored_record = self._record_from_store(store_admission.row)
+                        if stored_record.user_id != user_id:
+                            raise IdempotencyConflictError("Idempotency key is not visible to this principal")
+                        return RunAdmission(record=stored_record, outcome=store_admission.outcome)
+                elif multitask_strategy == "reject":
                     try:
                         await self._call_store_with_retry(
                             "create_thread_operation_atomic",
@@ -1550,7 +1689,7 @@ class RunManager:
                                 kwargs=kwargs,
                                 created_at=now,
                                 grace_seconds=grace_seconds,
-                                **(accepted_invocation.to_persisted() if accepted_invocation is not None and operation_kind == ThreadOperationKind.run else {}),
+                                **accepted_persisted,
                             ),
                         )
                     except ConflictError:
@@ -1583,7 +1722,7 @@ class RunManager:
                                     kwargs=kwargs,
                                     created_at=now,
                                     grace_seconds=grace_seconds,
-                                    **(accepted_invocation.to_persisted() if accepted_invocation is not None and operation_kind == ThreadOperationKind.run else {}),
+                                    **accepted_persisted,
                                 ),
                             )
                             break
@@ -1648,7 +1787,7 @@ class RunManager:
             raise
 
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
-        return record
+        return RunAdmission(record=record, outcome=AdmissionOutcome.created)
 
     @asynccontextmanager
     async def reserve_thread_operation(
@@ -1666,12 +1805,13 @@ class RunManager:
         """
         if kind == ThreadOperationKind.run:
             raise ValueError("Normal runs must be admitted with create_or_reject()")
-        record = await self._admit_thread_operation(
+        admission = await self._admit_thread_operation(
             thread_id,
             operation_kind=kind,
             multitask_strategy="reject",
             user_id=user_id,
         )
+        record = admission.record
         try:
             reservation_task = asyncio.current_task()
             if reservation_task is None:
@@ -2260,6 +2400,10 @@ class CancelOutcome(StrEnum):
 
 class ConflictError(Exception):
     """Raised when multitask_strategy=reject and thread has inflight runs."""
+
+
+class IdempotencyConflictError(ConflictError):
+    """Raised when an external identity is bound to a different request."""
 
 
 class UnsupportedStrategyError(Exception):

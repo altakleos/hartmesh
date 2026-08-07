@@ -47,9 +47,41 @@ or returns invalid data.
 Normal `runs` rows have nullable, backward-compatible columns for Origin and principal
 projections and digests, accepted-context and agent-revision digests, safe agent revision
 metadata, extension generation, and versioned empty decision evidence. Full resolved agent
-material, credentials, runtime-only references, and normalized request content are not
-serialized. Historical null rows remain readable. Auxiliary checkpoint/artifact operation
-rows carry none of these facts.
+material, credentials, and runtime-only contributor references are not serialized. A keyed
+run additionally stores an internal request projection in its existing run kwargs so
+retries can be compared against accepted routing and contributor evidence without resolving
+today's mutable host state; this internal projector is not returned by the run API.
+Historical null rows remain readable. Auxiliary checkpoint/artifact operation rows carry
+none of these facts.
+
+## Atomic idempotent admission
+
+A normal `RunRow` is both the accepted invocation and the executable run; auxiliary thread
+operation rows are never invocations. Keyed admission stores `external_scope`,
+`external_key`, and the `sha256-canonical-json-v1` request digest atomically with the pending
+row. A partial unique index over scope/key arbitrates concurrent processes. The store returns
+only `created`, `known_same`, or `key_conflict`, and `InvocationRuntime` attaches a worker only
+for `created`.
+
+HTTP create/stream/wait routes accept `Idempotency-Key`. Their scope is tied to the
+authenticated server subject; auth-disabled mode uses the configured default user and an
+ownerless keyed request is rejected. Native channels use only a verified stable provider
+event/message ID, scoped by provider, connection, workspace, and chat. Scheduled Tasks use
+their persisted `task_run_id`, scoped by persisted owner and task. Short keys are stored with
+an explicit `raw:` prefix; values longer than 255 UTF-8 bytes use `sha256:utf8:`. A missing
+channel provider ID leaves that launch unkeyed—content hashes are never substitutes.
+
+The request digest covers accepted principal/base-Origin/context evidence, bound thread,
+pinned agent revision, extension generation, normalized input/command and attachments,
+checkpoint selection, multitask/interrupt settings, effective execution context, and the
+clamped recursion limit. Stream mode, route choice, disconnect/delivery preferences,
+callbacks, trace data, temporary credentials, and temporary attachment URLs are excluded.
+Known visible rows are checked against stored accepted facts without rerunning contributors
+or current alias/plugin resolution. Equal requests return the same row in active or terminal
+state; a changed binding, authenticated source fact, input, or execution option conflicts.
+A different key still follows the independent active-thread rule (`reject` is thread-busy;
+`interrupt`/`rollback` supersede atomically). The replay guarantee ends when the retained row
+is deleted.
 
 ## Pinned agent construction
 

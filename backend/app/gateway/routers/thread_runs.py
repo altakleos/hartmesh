@@ -261,6 +261,7 @@ async def _raise_lease_valid_elsewhere(
 
 def _record_to_response(record: RunRecord) -> RunResponse:
     kwargs = dict(record.kwargs or {})
+    kwargs.pop("__accepted_request_projection_v1", None)
     if "config" in kwargs:
         kwargs["config"] = redact_config_secrets(kwargs["config"])
 
