@@ -1,6 +1,8 @@
 """Application-owned invocation lifecycle."""
 
 from .invocation import (
+    DurableAdmission,
+    InternalAdmissionIdentity,
     InternalCancelReceipt,
     InternalCancelRequest,
     InternalLaunchIntent,
@@ -14,6 +16,8 @@ from .invocation import (
 )
 
 __all__ = [
+    "DurableAdmission",
+    "InternalAdmissionIdentity",
     "InternalCancelReceipt",
     "InternalCancelRequest",
     "InternalLaunchIntent",

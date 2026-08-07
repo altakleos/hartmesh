@@ -1606,6 +1606,7 @@ class ChannelManager:
                 source_kind=InternalSourceKind.native_channel,
                 owner_user_id=_effective_owner_user_id(msg),
                 native_channel=facts,
+                external_key=facts.provider_message_id,
             )
         )
         return receipt.record

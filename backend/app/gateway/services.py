@@ -29,7 +29,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
-from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_SYSTEM_ROLE,
@@ -38,7 +38,19 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
+from app.runtime.idempotency import (
+    REQUEST_DIGEST_VERSION,
+    SYSTEM_TASK_OWNER,
+    canonical_request_digest,
+    canonical_request_value,
+    normalize_external_key,
+    scope_for_channel,
+    scope_for_http,
+    scope_for_scheduler,
+)
 from app.runtime.invocation import (
+    DurableAdmission,
+    InternalAdmissionIdentity,
     InternalCancelRequest,
     InternalLaunchIntent,
     InternalNativeChannelFacts,
@@ -90,6 +102,7 @@ from deerflow.runtime.checkpoint_mode import (
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
+from deerflow.runtime.runs.manager import IdempotencyConflictError
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
@@ -1140,6 +1153,244 @@ def _contribution_json(composed: Any) -> tuple[dict[str, Any], ...]:
     )
 
 
+_IDEMPOTENCY_PROJECTION_KEY = "__accepted_request_projection_v1"
+_KEYED_CONFIG_KEYS = frozenset({"recursion_limit", "configurable", "context"})
+_KEYED_CONFIGURABLE_KEYS = frozenset(
+    {
+        "thread_id",
+        "checkpoint_id",
+        "checkpoint_ns",
+        "checkpoint_map",
+        *_CONTEXT_CONFIGURABLE_KEYS,
+        *_CONTEXT_INTERNAL_CALLER_KEYS,
+    }
+)
+_KEYED_CONTEXT_KEYS = frozenset(
+    {
+        *_CONTEXT_CONFIGURABLE_KEYS,
+        *_CONTEXT_INTERNAL_CALLER_KEYS,
+        *_CONTEXT_RUNTIME_ONLY_KEYS,
+        "thread_id",
+        "user_id",
+        "channel_user_id",
+        "channel_name",
+    }
+)
+_DIGEST_CONTEXT_KEYS = frozenset(
+    {
+        "model_name",
+        "mode",
+        "thinking_enabled",
+        "reasoning_effort",
+        "is_plan_mode",
+        "subagent_enabled",
+        "max_concurrent_subagents",
+        "max_total_subagents",
+        "agent_name",
+        "is_bootstrap",
+        "non_interactive",
+        "disable_clarification",
+    }
+)
+
+
+def _keyed_request_error(detail: str) -> HTTPException:
+    return HTTPException(status_code=422, detail=detail)
+
+
+def _validate_keyed_request_shape(intent: InternalLaunchIntent) -> None:
+    if intent.metadata:
+        raise _keyed_request_error("Idempotency-Key does not support arbitrary metadata")
+    if intent.command is not None:
+        if not isinstance(intent.command, Mapping) or set(intent.command) != {"resume"}:
+            raise _keyed_request_error("Idempotency-Key supports only command.resume")
+    config = intent.config or {}
+    if not isinstance(config, Mapping):
+        raise _keyed_request_error("keyed request config must be an object")
+    unknown_config = set(config) - _KEYED_CONFIG_KEYS
+    if unknown_config:
+        raise _keyed_request_error(f"Idempotency-Key cannot classify config keys: {', '.join(sorted(unknown_config))}")
+    trusted_internal_keys = {"non_interactive", "disable_clarification"}
+    for section_name, allowed in (
+        ("configurable", _KEYED_CONFIGURABLE_KEYS),
+        ("context", _KEYED_CONTEXT_KEYS),
+    ):
+        section = config.get(section_name)
+        if section is None:
+            continue
+        if not isinstance(section, Mapping):
+            raise _keyed_request_error(f"keyed request config.{section_name} must be an object")
+        unknown = set(section) - allowed
+        if unknown:
+            raise _keyed_request_error(f"Idempotency-Key cannot classify config.{section_name} keys: {', '.join(sorted(unknown))}")
+        if intent.source_kind is InternalSourceKind.http and (forged := set(section) & trusted_internal_keys):
+            raise _keyed_request_error(f"Idempotency-Key cannot accept trusted internal config.{section_name} keys: {', '.join(sorted(forged))}")
+    context = intent.context or {}
+    if not isinstance(context, Mapping):
+        raise _keyed_request_error("keyed request context must be an object")
+    unknown_context = set(context) - _KEYED_CONTEXT_KEYS
+    if unknown_context:
+        raise _keyed_request_error(f"Idempotency-Key cannot classify context keys: {', '.join(sorted(unknown_context))}")
+    if intent.source_kind is InternalSourceKind.http and (forged := set(context) & trusted_internal_keys):
+        raise _keyed_request_error(f"Idempotency-Key cannot accept trusted internal context keys: {', '.join(sorted(forged))}")
+    try:
+        canonical_request_digest(
+            {
+                "input": canonical_request_value(intent.input),
+                "command": canonical_request_value(intent.command),
+                "checkpoint": canonical_request_value(intent.checkpoint),
+            }
+        )
+    except (TypeError, ValueError) as exc:
+        raise _keyed_request_error(f"Idempotency-Key request cannot be projected: {exc}") from exc
+
+
+def _requested_agent_id(intent: InternalLaunchIntent) -> str:
+    if intent.source_kind is InternalSourceKind.native_channel and intent.native_channel is not None:
+        return intent.native_channel.resolved_agent_name or "default"
+    context = intent.context or {}
+    if intent.source_kind is InternalSourceKind.http and context.get("is_bootstrap") is True:
+        return "bootstrap"
+    assistant_id = intent.assistant_id
+    if assistant_id in (None, _DEFAULT_ASSISTANT_ID):
+        return "default"
+    return assistant_id.strip().lower().replace("_", "-")
+
+
+def _request_projection(
+    intent: InternalLaunchIntent,
+    *,
+    accepted: AcceptedInvocation,
+    graph_input: Any,
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    configurable = config.get("configurable") if isinstance(config.get("configurable"), Mapping) else {}
+    runtime_context = config.get("context") if isinstance(config.get("context"), Mapping) else {}
+    execution_context: dict[str, Any] = {}
+    for key in sorted(_DIGEST_CONTEXT_KEYS):
+        if key in runtime_context:
+            execution_context[key] = runtime_context[key]
+        elif key in configurable:
+            execution_context[key] = configurable[key]
+    input_projection = {"resume": canonical_request_value(intent.command["resume"])} if intent.command and intent.command.get("resume") is not None else canonical_request_value(graph_input)
+    return {
+        "thread_id": accepted.thread_id,
+        "agent_selector": _requested_agent_id(intent),
+        "agent_revision_digest": accepted.agent_revision.digest,
+        "principal_digest": accepted.principal_digest,
+        "base_origin_digest": accepted.base_origin_digest,
+        "accepted_context_digest": accepted.accepted_context_digest,
+        "runtime_identity_digest": accepted.runtime_identity_digest,
+        "contributor_execution_digest": accepted.contributor_execution_digest,
+        "extension_generation": accepted.extension_generation,
+        "input": input_projection,
+        "command": canonical_request_value(intent.command),
+        "multitask_strategy": intent.multitask_strategy,
+        "checkpoint": canonical_request_value({key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map") if key in configurable}),
+        "interrupt_before": canonical_request_value(intent.interrupt_before),
+        "interrupt_after": canonical_request_value(intent.interrupt_after),
+        "execution_context": canonical_request_value(execution_context),
+        "recursion_limit": config.get("recursion_limit"),
+    }
+
+
+def _replay_projection(
+    intent: InternalLaunchIntent,
+    *,
+    record: RunRecord,
+) -> dict[str, Any]:
+    stored = (record.kwargs or {}).get(_IDEMPOTENCY_PROJECTION_KEY)
+    if not isinstance(stored, Mapping):
+        raise IdempotencyConflictError("The retained run predates replayable idempotency evidence")
+    projection = dict(stored)
+    projection["agent_selector"] = _requested_agent_id(intent)
+    if intent.thread_id_explicit:
+        projection["thread_id"] = intent.thread_id
+    if intent.command and intent.command.get("resume") is not None:
+        graph_input: Any = {"resume": canonical_request_value(intent.command["resume"])}
+    else:
+        trusted = intent.source_kind is not InternalSourceKind.http
+        graph_input = normalize_input(intent.input, trusted_internal=trusted)
+    projection["input"] = canonical_request_value(graph_input)
+    projection["command"] = canonical_request_value(intent.command)
+    projection["multitask_strategy"] = intent.multitask_strategy
+    projection["interrupt_before"] = canonical_request_value(intent.interrupt_before)
+    projection["interrupt_after"] = canonical_request_value(intent.interrupt_after)
+
+    requested_config = intent.config or {}
+    requested_configurable = requested_config.get("configurable") if isinstance(requested_config.get("configurable"), Mapping) else {}
+    requested_context = requested_config.get("context") if isinstance(requested_config.get("context"), Mapping) else {}
+    body_context = intent.context or {}
+    stored_context = dict(projection.get("execution_context") or {})
+    for key in _DIGEST_CONTEXT_KEYS:
+        if key in body_context:
+            stored_context[key] = body_context[key]
+        elif key in requested_context:
+            stored_context[key] = requested_context[key]
+        elif key in requested_configurable:
+            stored_context[key] = requested_configurable[key]
+    projection["execution_context"] = canonical_request_value(stored_context)
+
+    checkpoint = dict(projection.get("checkpoint") or {})
+    if intent.checkpoint_id is not None:
+        checkpoint["checkpoint_id"] = intent.checkpoint_id
+    if intent.checkpoint is not None:
+        for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map"):
+            if key in intent.checkpoint:
+                checkpoint[key] = intent.checkpoint[key]
+    for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map"):
+        if key in requested_configurable:
+            checkpoint[key] = requested_configurable[key]
+    projection["checkpoint"] = canonical_request_value(checkpoint)
+    if "recursion_limit" in requested_config:
+        projection["recursion_limit"] = _clamp_recursion_limit(
+            requested_config["recursion_limit"],
+            _resolve_max_recursion_limit(),
+        )
+    return projection
+
+
+async def _principal_projection_for_intent(
+    request: Any,
+    intent: InternalLaunchIntent,
+    *,
+    owner_user_id: str | None,
+) -> PrincipalProjection:
+    request_user = getattr(getattr(request, "state", None), "user", None)
+    request_role = getattr(request_user, "system_role", None)
+    internal = request_role == INTERNAL_SYSTEM_ROLE
+    if owner_user_id is not None and internal:
+        owner = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
+        return PrincipalProjection(
+            user_id=owner_user_id,
+            role=getattr(owner, "system_role", None),
+            oauth_provider=getattr(owner, "oauth_provider", None),
+            oauth_id=getattr(owner, "oauth_id", None),
+            channel_user_id=(intent.context or {}).get("channel_user_id"),
+            is_internal=True,
+        )
+    request_user_id = getattr(request_user, "id", None)
+    auth_source = getattr(getattr(request, "state", None), "auth_source", None)
+    if request_user_id is None and auth_source == AUTH_SOURCE_AUTH_DISABLED:
+        request_user_id = AUTH_DISABLED_USER_ID
+    return PrincipalProjection(
+        user_id=None if internal else (str(request_user_id) if request_user_id is not None else None),
+        role=None if internal else request_role,
+        oauth_provider=None if internal else getattr(request_user, "oauth_provider", None),
+        oauth_id=None if internal else getattr(request_user, "oauth_id", None),
+        channel_user_id=(intent.context or {}).get("channel_user_id") if internal else None,
+        is_internal=internal or auth_source == AUTH_SOURCE_INTERNAL,
+    )
+
+
+def _base_origin_digest(intent: InternalLaunchIntent) -> str:
+    origin = InvocationOrigin(
+        source_kind=intent.source_kind.value,
+        references=_base_origin_references(intent),
+    )
+    return canonical_digest({"version": 1, "origin": origin.base_json()})
+
+
 async def _seal_accepted_invocation(
     *,
     request: Any,
@@ -1232,7 +1483,7 @@ async def _seal_accepted_invocation(
                     agent_id=revision.agent_id,
                     digest=revision.digest,
                 ),
-                external_key_reference=None,
+                external_key_reference=(normalize_external_key(intent.external_key) if intent.external_key is not None else None),
             )
         )
     for diagnostic in context_contributions.diagnostics:
@@ -1300,6 +1551,7 @@ class _GatewayLaunchNormalizer:
     ) -> None:
         self._request = request
         self._trust_internal_launch_facts = trust_internal_launch_facts
+        self._identified: dict[int, tuple[InternalLaunchIntent, InternalAdmissionIdentity]] = {}
 
     def _owner_user_id(self, intent: InternalLaunchIntent) -> str | None:
         if self._trust_internal_launch_facts and intent.source_kind in {
@@ -1345,10 +1597,103 @@ class _GatewayLaunchNormalizer:
         try:
             yield
         finally:
+            cached = self._identified.get(id(intent))
+            if cached is not None and cached[0] is intent:
+                self._identified.pop(id(intent), None)
             if token is not None:
                 reset_current_user(token)
 
+    async def identify(self, intent: InternalLaunchIntent) -> InternalAdmissionIdentity | None:
+        if intent.external_key is None:
+            return None
+        _validate_keyed_request_shape(intent)
+        try:
+            external_key = normalize_external_key(intent.external_key)
+            owner_user_id = self._owner_user_id(intent)
+            principal = await _principal_projection_for_intent(
+                self._request,
+                intent,
+                owner_user_id=owner_user_id,
+            )
+            if intent.source_kind is InternalSourceKind.http:
+                subject_id = principal.user_id
+                if subject_id is None:
+                    raise ValueError("keyed HTTP admission requires an authenticated server subject")
+                auth_source = getattr(getattr(self._request, "state", None), "auth_source", None)
+                configured_kind = getattr(getattr(self._request, "state", None), "principal_kind", None)
+                if auth_source == AUTH_SOURCE_AUTH_DISABLED:
+                    principal_kind = "default-user"
+                elif configured_kind in {"user", "service"}:
+                    principal_kind = configured_kind
+                else:
+                    principal_kind = "service" if principal.role == "service" else "user"
+                external_scope = scope_for_http(principal_kind, subject_id)
+            elif intent.source_kind is InternalSourceKind.native_channel:
+                facts = self._validate_native_channel_facts(intent)
+                if not facts.connection_id:
+                    raise ValueError("keyed native-channel admission requires a verified connection")
+                external_scope = scope_for_channel(
+                    facts.provider,
+                    facts.connection_id,
+                    facts.workspace_id or "",
+                    facts.chat_id,
+                )
+            elif intent.source_kind is InternalSourceKind.scheduled_task:
+                self._metadata(intent)
+                if owner_user_id is not None:
+                    scope_owner = owner_user_id
+                elif intent.scheduled_system_owned:
+                    scope_owner = SYSTEM_TASK_OWNER
+                else:
+                    raise ValueError("keyed scheduled admission requires a persisted owner")
+                external_scope = scope_for_scheduler(scope_owner, str(intent.trusted_task_id))
+            else:  # pragma: no cover - closed enum
+                raise ValueError(f"unsupported invocation source {intent.source_kind}")
+        except ValueError as exc:
+            if intent.source_kind is InternalSourceKind.http:
+                raise _keyed_request_error(str(exc)) from exc
+            raise
+        identity = InternalAdmissionIdentity(
+            external_scope=external_scope,
+            external_key=external_key,
+            principal_digest=canonical_digest({"version": 1, "principal": principal.to_json()}),
+            base_origin_digest=_base_origin_digest(intent),
+            thread_id=intent.thread_id if intent.thread_id_explicit else None,
+            requested_agent_id=_requested_agent_id(intent),
+            user_id=principal.user_id,
+        )
+        # Retain the intent object alongside its identity: a strong reference
+        # prevents Python from recycling the object ID before normalization.
+        self._identified[id(intent)] = (intent, identity)
+        return identity
+
+    async def validate_replay(
+        self,
+        intent: InternalLaunchIntent,
+        identity: InternalAdmissionIdentity,
+        record: RunRecord,
+    ) -> None:
+        cached = self._identified.get(id(intent))
+        if cached is not None and cached[0] is intent:
+            self._identified.pop(id(intent), None)
+        accepted = record.accepted_invocation
+        if accepted is None:
+            raise IdempotencyConflictError("The retained run has no accepted invocation evidence")
+        if identity.principal_digest != accepted.principal_digest:
+            raise IdempotencyConflictError("Idempotency key has contradictory authenticated principal evidence")
+        if identity.base_origin_digest != accepted.base_origin_digest:
+            raise IdempotencyConflictError("Idempotency key has contradictory authenticated source evidence")
+        if identity.thread_id is not None and identity.thread_id != record.thread_id:
+            raise IdempotencyConflictError("Idempotency key is bound to a different thread")
+        if identity.requested_agent_id != accepted.agent_revision.agent_id:
+            raise IdempotencyConflictError("Idempotency key is bound to a different agent")
+        requested_digest = canonical_request_digest(_replay_projection(intent, record=record))
+        if record.request_digest_version != REQUEST_DIGEST_VERSION or record.request_digest != requested_digest:
+            raise IdempotencyConflictError("Idempotency key was already used for a different request")
+
     async def normalize(self, intent: InternalLaunchIntent) -> PreparedLaunch:
+        cached = self._identified.pop(id(intent), None)
+        identity = cached[1] if cached is not None and cached[0] is intent else None
         if self._trust_internal_launch_facts and intent.source_kind is InternalSourceKind.native_channel:
             self._validate_native_channel_facts(intent)
         try:
@@ -1464,6 +1809,16 @@ class _GatewayLaunchNormalizer:
             owner_user_id=owner_user_id,
             run_ctx=run_ctx,
         )
+        request_projection: dict[str, Any] | None = None
+        request_digest: str | None = None
+        if identity is not None:
+            request_projection = _request_projection(
+                intent,
+                accepted=accepted_invocation,
+                graph_input=graph_input,
+                config=config,
+            )
+            request_digest = canonical_request_digest(request_projection)
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
@@ -1543,12 +1898,17 @@ class _GatewayLaunchNormalizer:
                 # secret-redacted config while retaining live secrets above.
                 "input": intent.input,
                 "config": redact_config_secrets(intent.config),
+                **({_IDEMPOTENCY_PROJECTION_KEY: request_projection} if request_projection is not None else {}),
             },
             multitask_strategy=intent.multitask_strategy,
             model_name=model_name,
-            user_id=owner_user_id,
+            user_id=accepted_invocation.principal.user_id,
             worker=run_after_metadata,
             accepted_invocation=accepted_invocation,
+            external_scope=identity.external_scope if identity is not None else None,
+            external_key=identity.external_key if identity is not None else None,
+            request_digest=request_digest,
+            request_digest_version=(REQUEST_DIGEST_VERSION if identity is not None else None),
         )
 
 
@@ -1570,8 +1930,31 @@ class _GatewayDurableRuns:
             assistant_id=launch.assistant_id,
         )
 
-    async def admit(self, launch: PreparedLaunch) -> RunRecord:
-        return await get_run_manager(self._request).create_or_reject(
+    async def find_by_external_identity(
+        self,
+        identity: InternalAdmissionIdentity,
+    ) -> RunRecord | None:
+        return await get_run_manager(self._request).get_by_external_identity(
+            identity.external_scope,
+            identity.external_key,
+            user_id=identity.user_id,
+        )
+
+    async def admit(self, launch: PreparedLaunch) -> DurableAdmission | RunRecord:
+        run_manager = get_run_manager(self._request)
+        if launch.external_scope is None:
+            return await run_manager.create_or_reject(
+                launch.thread_id,
+                launch.assistant_id,
+                on_disconnect=launch.on_disconnect,
+                metadata=launch.metadata,
+                kwargs=launch.kwargs,
+                multitask_strategy=launch.multitask_strategy,
+                model_name=launch.model_name,
+                user_id=launch.user_id,
+                accepted_invocation=launch.accepted_invocation,
+            )
+        admission = await run_manager.ensure_or_reject(
             launch.thread_id,
             launch.assistant_id,
             on_disconnect=launch.on_disconnect,
@@ -1581,7 +1964,12 @@ class _GatewayDurableRuns:
             model_name=launch.model_name,
             user_id=launch.user_id,
             accepted_invocation=launch.accepted_invocation,
+            external_scope=launch.external_scope,
+            external_key=launch.external_key or "",
+            request_digest=launch.request_digest or "",
+            request_digest_version=launch.request_digest_version or "",
         )
+        return DurableAdmission(record=admission.record, outcome=admission.outcome)
 
     async def fail_start(self, record: RunRecord, error: str) -> None:
         await get_run_manager(self._request).fail_start_if_pending(
@@ -1654,7 +2042,13 @@ def build_channel_invocation_runtime(app: Any) -> InvocationRuntime:
     )
 
 
-def _launch_intent(body: RunCreateRequest, thread_id: str) -> InternalLaunchIntent:
+def _launch_intent(
+    body: RunCreateRequest,
+    thread_id: str,
+    *,
+    external_key: str | None = None,
+    thread_id_explicit: bool = True,
+) -> InternalLaunchIntent:
     return InternalLaunchIntent(
         thread_id=thread_id,
         assistant_id=getattr(body, "assistant_id", None),
@@ -1671,18 +2065,37 @@ def _launch_intent(body: RunCreateRequest, thread_id: str) -> InternalLaunchInte
         stream_subgraphs=getattr(body, "stream_subgraphs", False),
         on_disconnect=getattr(body, "on_disconnect", "cancel"),
         multitask_strategy=getattr(body, "multitask_strategy", "reject"),
+        external_key=external_key,
+        thread_id_explicit=thread_id_explicit,
     )
+
+
+def _http_idempotency_key(request: Request) -> str | None:
+    headers = getattr(request, "headers", {})
+    for name, value in headers.items():
+        if str(name).lower() == "idempotency-key":
+            return value
+    return None
 
 
 async def start_run(
     body: RunCreateRequest,
     thread_id: str,
     request: Request,
+    *,
+    thread_id_explicit: bool = True,
 ) -> RunRecord:
     """FastAPI compatibility adapter for application-owned invocation launch."""
     runtime = build_invocation_runtime(request)
     try:
-        receipt = await runtime.launch(_launch_intent(body, thread_id))
+        receipt = await runtime.launch(
+            _launch_intent(
+                body,
+                thread_id,
+                external_key=_http_idempotency_key(request),
+                thread_id_explicit=thread_id_explicit,
+            )
+        )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except UnsupportedStrategyError as exc:

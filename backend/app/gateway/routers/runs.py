@@ -30,6 +30,10 @@ def _resolve_thread_id(body: RunCreateRequest) -> str:
     return resolve_thread_id(thread_id)
 
 
+def _has_explicit_thread_id(body: RunCreateRequest) -> bool:
+    return ((body.config or {}).get("configurable") or {}).get("thread_id") is not None
+
+
 @router.post("/stream")
 async def stateless_stream(body: RunCreateRequest, request: Request) -> StreamingResponse:
     """Create a run and stream events via SSE.
@@ -41,7 +45,12 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
     thread_id = _resolve_thread_id(body)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(body, thread_id, request)
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        thread_id_explicit=_has_explicit_thread_id(body),
+    )
 
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
@@ -66,7 +75,12 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
     thread_id = _resolve_thread_id(body)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(body, thread_id, request)
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        thread_id_explicit=_has_explicit_thread_id(body),
+    )
 
     completed = True
     if record.task is not None:

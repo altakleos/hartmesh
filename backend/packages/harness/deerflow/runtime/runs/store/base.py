@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 
@@ -39,6 +40,21 @@ class StatusFinalization:
 
     finalized: bool
     cancel_action: str | None = None
+
+
+class AdmissionOutcome(StrEnum):
+    """Durable keyed-admission outcome."""
+
+    created = "created"
+    known_same = "known_same"
+    key_conflict = "key_conflict"
+
+
+@dataclass(frozen=True)
+class RunEnsureResult:
+    outcome: AdmissionOutcome
+    row: dict[str, Any]
+    claimed: tuple[dict[str, Any], ...] = ()
 
 
 class RunStore(abc.ABC):
@@ -70,6 +86,10 @@ class RunStore(abc.ABC):
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
         decision_evidence_json: dict[str, Any] | None = None,
+        external_scope: str | None = None,
+        external_key: str | None = None,
+        request_digest: str | None = None,
+        request_digest_version: str | None = None,
     ) -> None:
         pass
 
@@ -81,6 +101,15 @@ class RunStore(abc.ABC):
         user_id: str | None = None,
     ) -> dict[str, Any] | None:
         pass
+
+    async def get_by_external_identity(
+        self,
+        external_scope: str,
+        external_key: str,
+    ) -> dict[str, Any] | None:
+        """Return the normal run bound to one normalized external identity."""
+
+        raise NotImplementedError
 
     @abc.abstractmethod
     async def list_by_thread(
@@ -356,6 +385,10 @@ class RunStore(abc.ABC):
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
         decision_evidence_json: dict[str, Any] | None = None,
+        external_scope: str | None = None,
+        external_key: str | None = None,
+        request_digest: str | None = None,
+        request_digest_version: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -384,6 +417,10 @@ class RunStore(abc.ABC):
                 agent_revision_digest,
                 extension_generation,
                 decision_evidence_json,
+                external_scope,
+                external_key,
+                request_digest,
+                request_digest_version,
             )
         ):
             raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot persist accepted invocation facts")
@@ -401,6 +438,43 @@ class RunStore(abc.ABC):
             created_at=created_at,
             grace_seconds=grace_seconds,
         )
+
+    async def ensure_run_atomic(
+        self,
+        run_id: str,
+        *,
+        thread_id: str,
+        owner_worker_id: str,
+        lease_expires_at: str | None,
+        external_scope: str,
+        external_key: str,
+        request_digest: str,
+        request_digest_version: str,
+        multitask_strategy: str = "reject",
+        assistant_id: str | None = None,
+        user_id: str | None = None,
+        model_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        grace_seconds: int = 10,
+        origin_json: dict[str, Any] | None = None,
+        principal_projection_json: dict[str, Any] | None = None,
+        principal_projection_digest: str | None = None,
+        base_origin_digest: str | None = None,
+        accepted_context_digest: str | None = None,
+        agent_revision_json: dict[str, Any] | None = None,
+        agent_revision_digest: str | None = None,
+        extension_generation: int | None = None,
+        decision_evidence_json: dict[str, Any] | None = None,
+    ) -> RunEnsureResult:
+        """Atomically ensure one keyed normal run.
+
+        Implementations return only the three external-identity outcomes.
+        Independent active-thread conflicts remain exceptions.
+        """
+
+        raise NotImplementedError
 
     async def create_run_atomic(
         self,

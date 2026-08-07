@@ -108,6 +108,8 @@ async def test_scheduled_occurrence_enters_runtime_with_typed_execution_facts() 
     assert intent.source_kind == "scheduled_task"
     assert intent.trusted_task_id == "task-1"
     assert intent.task_run_id == task_run_id
+    assert intent.external_key == task_run_id
+    assert intent.scheduled_system_owned is False
     assert intent.scheduled_trigger == "scheduled"
     assert intent.owner_user_id == "owner-1"
     assert intent.assistant_id == "report-agent"

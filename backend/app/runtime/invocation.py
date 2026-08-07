@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol
 
 from deerflow.runtime import CancelOutcome, DisconnectMode, RunRecord
 from deerflow.runtime.accepted_invocation import AcceptedInvocation
+from deerflow.runtime.runs.store.base import AdmissionOutcome
 
 WorkerCoroutine = Coroutine[Any, Any, None]
 WorkerFactory = Callable[[RunRecord], WorkerCoroutine]
@@ -63,6 +64,22 @@ class InternalLaunchIntent:
     scheduled_trigger: Literal["scheduled", "manual"] | None = None
     owner_user_id: str | None = None
     native_channel: InternalNativeChannelFacts | None = None
+    external_key: str | None = None
+    scheduled_system_owned: bool = False
+    thread_id_explicit: bool = True
+
+
+@dataclass(frozen=True)
+class InternalAdmissionIdentity:
+    """Host-authenticated identity available before expensive normalization."""
+
+    external_scope: str
+    external_key: str
+    principal_digest: str
+    base_origin_digest: str
+    thread_id: str | None
+    requested_agent_id: str
+    user_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -79,11 +96,22 @@ class PreparedLaunch:
     user_id: str | None
     worker: WorkerFactory = field(repr=False)
     accepted_invocation: AcceptedInvocation | None = field(default=None, repr=False)
+    external_scope: str | None = None
+    external_key: str | None = None
+    request_digest: str | None = None
+    request_digest_version: str | None = None
+
+
+@dataclass(frozen=True)
+class DurableAdmission:
+    record: RunRecord
+    outcome: AdmissionOutcome = AdmissionOutcome.created
 
 
 @dataclass(frozen=True)
 class InternalLaunchReceipt:
     record: RunRecord
+    created: bool = True
 
 
 @dataclass(frozen=True)
@@ -111,13 +139,27 @@ class LaunchNormalizer(Protocol):
 
     async def normalize(self, intent: InternalLaunchIntent) -> PreparedLaunch: ...
 
+    async def identify(self, intent: InternalLaunchIntent) -> InternalAdmissionIdentity | None: ...
+
+    async def validate_replay(
+        self,
+        intent: InternalLaunchIntent,
+        identity: InternalAdmissionIdentity,
+        record: RunRecord,
+    ) -> None: ...
+
 
 class DurableRuns(Protocol):
     def admission_scope(self, thread_id: str) -> AbstractAsyncContextManager[None]: ...
 
     async def prepare_admission(self, launch: PreparedLaunch) -> None: ...
 
-    async def admit(self, launch: PreparedLaunch) -> RunRecord: ...
+    async def admit(self, launch: PreparedLaunch) -> DurableAdmission | RunRecord: ...
+
+    async def find_by_external_identity(
+        self,
+        identity: InternalAdmissionIdentity,
+    ) -> RunRecord | None: ...
 
     async def fail_start(self, record: RunRecord, error: str) -> None: ...
 
@@ -142,10 +184,36 @@ class InvocationRuntime:
 
     async def launch(self, intent: InternalLaunchIntent) -> InternalLaunchReceipt:
         with self._normalizer.scope(intent):
+            identity: InternalAdmissionIdentity | None = None
+            identify = getattr(self._normalizer, "identify", None)
+            find_existing = getattr(self._runs, "find_by_external_identity", None)
+            validate_replay = getattr(self._normalizer, "validate_replay", None)
+            if callable(identify) and callable(find_existing):
+                identity = await identify(intent)
+                if identity is not None:
+                    existing = await find_existing(identity)
+                    if existing is not None:
+                        if callable(validate_replay):
+                            await validate_replay(intent, identity, existing)
+                        return InternalLaunchReceipt(record=existing, created=False)
+
             launch = await self._normalizer.normalize(intent)
             async with self._runs.admission_scope(launch.thread_id):
                 await self._runs.prepare_admission(launch)
-                record = await self._runs.admit(launch)
+                admitted = await self._runs.admit(launch)
+                if isinstance(admitted, DurableAdmission):
+                    record = admitted.record
+                    if admitted.outcome is not AdmissionOutcome.created:
+                        # A concurrent creator may have bound server-resolved
+                        # facts (notably a generated stateless thread) that made
+                        # the provisional digest differ. Re-project against the
+                        # winning row before deciding replay versus conflict.
+                        if identity is not None and callable(validate_replay):
+                            await validate_replay(intent, identity, record)
+                        return InternalLaunchReceipt(record=record, created=False)
+                else:
+                    # Compatibility for host adapters predating keyed ensure.
+                    record = admitted
                 # Keep attachment adjacent to durable admission: no await may
                 # separate a successful admit from installing its worker task.
                 worker = launch.worker(record)
@@ -160,7 +228,7 @@ class InvocationRuntime:
                         f"Failed to attach run worker: {exc}",
                     )
                     raise
-        return InternalLaunchReceipt(record=record)
+        return InternalLaunchReceipt(record=record, created=True)
 
     async def observe_run(
         self,

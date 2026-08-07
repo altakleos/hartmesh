@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0011_accepted_invocation"
+HEAD = "0012_invocation_idempotency"
 BASELINE = "0001_baseline"
 
 
@@ -358,6 +358,7 @@ def test_type_equivalent_matches_known_dialect_synonyms() -> None:
     assert _type_equivalent(sa.JSON(), "JSONB()") is True
     assert _type_equivalent("JSON", "JSONB") is True
     assert _type_equivalent("JSONB", "JSON") is True
+    assert _type_equivalent(sa.String(length=96), "VARCHAR(96)") is True
 
 
 def test_type_equivalent_catches_wholesale_type_mismatch() -> None:
