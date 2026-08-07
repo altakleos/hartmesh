@@ -461,6 +461,8 @@ class SubagentExecutor:
         subagent_reservation: InvocationSubagentReservation | None = None,
         accepted_extension_generation: int | None = None,
         accepted_extension_manifest_digest: str | None = None,
+        mcp_invocation_facts: Any | None = None,
+        mcp_preparation_audit_sink: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -496,6 +498,10 @@ class SubagentExecutor:
                 accepted for the parent invocation.
             accepted_extension_manifest_digest: The matching immutable safe
                 manifest digest accepted for the parent invocation.
+            mcp_invocation_facts: Host-sealed MCP operation facts inherited
+                from the accepted parent invocation.
+            mcp_preparation_audit_sink: Thread-safe bridge to the parent run's
+                MCP preparation journal.
         """
         self.config = config
         self.app_config = app_config
@@ -539,6 +545,8 @@ class SubagentExecutor:
         self.subagent_reservation = subagent_reservation
         self.accepted_extension_generation = accepted_extension_generation
         self.accepted_extension_manifest_digest = accepted_extension_manifest_digest
+        self.mcp_invocation_facts = mcp_invocation_facts
+        self.mcp_preparation_audit_sink = mcp_preparation_audit_sink
 
         self._base_tools = _filter_tools(
             tools,
@@ -943,6 +951,20 @@ class SubagentExecutor:
                 context["accepted_extension_generation"] = self.accepted_extension_generation
             if self.accepted_extension_manifest_digest is not None:
                 context["accepted_extension_manifest_digest"] = self.accepted_extension_manifest_digest
+            if self.mcp_invocation_facts is not None:
+                from deerflow.extensions.mcp import MCP_INVOCATION_FACTS_CONTEXT_KEY
+
+                context[MCP_INVOCATION_FACTS_CONTEXT_KEY] = self.mcp_invocation_facts
+            if self.authorization_provider is not None:
+                from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
+
+                context[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = self.authorization_provider
+            if self.mcp_preparation_audit_sink is not None:
+                from deerflow.extensions.mcp import (
+                    MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY,
+                )
+
+                context[MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY] = self.mcp_preparation_audit_sink
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 

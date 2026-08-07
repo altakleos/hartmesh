@@ -838,6 +838,16 @@ manifest and separately labelled live health through
 `GET /api/runtime/v1/capabilities`; plugin configuration, secrets, identities, and request
 data are excluded.
 
+Trusted operator plugins can also provide required MCP credential/evidence preparation.
+Declare `mcp_interceptor:<contribution-id>` in startup-only `required_capabilities`; the
+Gateway then requires its fresh health and bounded preparation after the existing shared
+authorization provider allows, immediately before each MCP handler call. Failures are
+fail-closed and transient headers are never persisted. The older API-writable
+`extensions_config.json -> mcpInterceptors` mechanism remains optional compatibility only
+and cannot satisfy an operator requirement. See
+[`backend/docs/MCP_SERVER.md`](backend/docs/MCP_SERVER.md) for the contract and migration
+guidance.
+
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.

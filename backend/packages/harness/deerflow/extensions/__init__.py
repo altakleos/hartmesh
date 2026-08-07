@@ -89,6 +89,12 @@ def reset_loaded_extensions() -> None:
     """
     global _loaded
     _loaded = ExtensionRegistry().build()
+    # MCP tool construction reads a Gateway-owned process runtime. Reset it
+    # with the extension snapshot so tests and embedded hosts cannot retain a
+    # previous generation's required interceptor set.
+    from deerflow.extensions.mcp import reset_mcp_interceptor_runtime
+
+    reset_mcp_interceptor_runtime()
 
 
 _runtime_diagnostics: list[Diagnostic] = []

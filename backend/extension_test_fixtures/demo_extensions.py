@@ -7,9 +7,13 @@ from typing import Any
 
 from deerflow_extension_api import (
     AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION,
+    MCP_INTERCEPTOR_CAPABILITY_API_VERSION,
+    MCP_INTERCEPTOR_KIND,
     AuthorizationProviderFactory,
     AuthzDecision,
     ExtensionRegistry,
+    McpInterceptorDescriptor,
+    PreparedMcpCallV1,
     extension,
 )
 
@@ -27,7 +31,7 @@ def install_ok(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     registry.middlewares(_Contributor("ok"))
 
 
-@extension(api="0.5", name="stamped")
+@extension(api="0.6", name="stamped")
 def install_stamped(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     INSTALLED.append("stamped")
     registry.middlewares(_Contributor("stamped"))
@@ -39,7 +43,7 @@ def install_future_api(registry: ExtensionRegistry, config: Mapping[str, Any]) -
     registry.middlewares(_Contributor("future"))
 
 
-@extension(api="0.6", name="newer-minor")
+@extension(api="0.7", name="newer-minor")
 def install_newer_minor_api(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     """Written against a newer 0.x minor than the host provides: before 1.0,
     minors carry no compatibility promise in either direction."""
@@ -115,6 +119,34 @@ def install_authorization_then_raise(registry: ExtensionRegistry, config: Mappin
     install_authorization_provider(registry, config)
     registry.middlewares(_Contributor("partial-authz"))
     raise ValueError("boom-authz")
+
+
+class _PreparedMcpInterceptor:
+    async def prepare_call(self, request):
+        del request
+        return PreparedMcpCallV1()
+
+
+def install_mcp_interceptor(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    del config
+    registry.mcp_interceptor(
+        McpInterceptorDescriptor(
+            contribution_id="fixture.mcp",
+            capability_api_version=MCP_INTERCEPTOR_CAPABILITY_API_VERSION,
+            factory=_PreparedMcpInterceptor,
+            kind=MCP_INTERCEPTOR_KIND,
+        )
+    )
+
+
+def install_mcp_and_authorization(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    install_mcp_interceptor(registry, config)
+    install_authorization_provider(registry, config)
+
+
+def install_mcp_then_raise(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    install_mcp_interceptor(registry, config)
+    raise ValueError("boom-mcp")
 
 
 NOT_CALLABLE = "i am not a function"

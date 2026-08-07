@@ -224,6 +224,32 @@ def build_capability_manifest(
                 initialized_capability_ids=initialized,
             )
         )
+    for registration in extensions.mcp_interceptor_descriptors:
+        capability_id = f"mcp_interceptor:{registration.contribution_id}"
+        if registration.contribution_id in extensions.mcp_interceptor_conflicts:
+            entries.append(
+                CapabilityManifestEntry(
+                    contribution_id=registration.contribution_id,
+                    capability_id=capability_id,
+                    capability_type="mcp_interceptor",
+                    capability_api_version=registration.capability_api_version,
+                    package_name=registration.package_name,
+                    package_version=registration.package_version,
+                    operator_required=capability_id in required,
+                    initialization_status="failed",
+                    diagnostic_code="duplicate_registration",
+                )
+            )
+        else:
+            entries.append(
+                _registration_manifest_entry(
+                    registration,
+                    capability_id=capability_id,
+                    capability_type="mcp_interceptor",
+                    operator_required=capability_id in required,
+                    initialized_capability_ids=initialized,
+                )
+            )
 
     registered_ids = {item.capability_id for item in entries}
     for missing_id in sorted(required - registered_ids):
@@ -299,6 +325,8 @@ class CapabilityHealthMonitor:
             self._probes[f"{registration.kind}:{registration.contribution_id}"] = registration.health_probe
         for registration in extensions.invocation_constraints_provider_factories:
             self._probes["invocation_constraints.v1"] = registration.health_probe
+        for registration in extensions.mcp_interceptor_descriptors:
+            self._probes[f"mcp_interceptor:{registration.contribution_id}"] = registration.health_probe
         self._cache: dict[str, CapabilityHealthSnapshot] = {}
         self._inflight: dict[str, asyncio.Task[CapabilityHealthSnapshot]] = {}
         self._lock = asyncio.Lock()
@@ -392,6 +420,31 @@ class CapabilityHealthMonitor:
         refresh: bool = True,
     ) -> tuple[CapabilityHealthSnapshot, ...]:
         return tuple(await asyncio.gather(*(self._snapshot_for(entry, refresh=refresh) for entry in self._manifest.capabilities)))
+
+    async def health_for(
+        self,
+        capability_ids: Collection[str],
+        *,
+        refresh: bool = True,
+    ) -> tuple[CapabilityHealthSnapshot, ...]:
+        """Return bounded, fresh snapshots for an exact capability set."""
+
+        requested = frozenset(capability_ids)
+        entries = tuple(entry for entry in self._manifest.capabilities if entry.capability_id in requested)
+        snapshots = list(await asyncio.gather(*(self._snapshot_for(entry, refresh=refresh) for entry in entries)))
+        now = self._now()
+        for index, snapshot in enumerate(snapshots):
+            if now - snapshot.checked_at <= self._stale_after:
+                continue
+            snapshots[index] = CapabilityHealthSnapshot(
+                contribution_id=snapshot.contribution_id,
+                capability_id=snapshot.capability_id,
+                status="unknown",
+                diagnostic_code="snapshot_stale",
+                checked_at=snapshot.checked_at,
+                expires_at=snapshot.expires_at,
+            )
+        return tuple(snapshots)
 
     async def readiness(
         self,

@@ -661,6 +661,13 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         required_capabilities=required_capabilities,
     )
     extension_diagnostics.extend(Diagnostic.warning("invocation_constraints.v1", message) for message in invocation_constraints_host.startup_diagnostics)
+    from deerflow.extensions.mcp import McpInterceptorHost
+
+    mcp_interceptor_host = McpInterceptorHost(
+        loaded_extensions,
+        required_capabilities=required_capabilities,
+    )
+    extension_diagnostics.extend(Diagnostic.warning(item.capability_id, item.diagnostic_code) for item in mcp_interceptor_host.startup_diagnostics)
     # One application-owned resolver supplies a coherent provider instance to
     # route checks and every durable-run authorization path. Extension-backed
     # factories are startup-only; legacy class-path providers may be replaced
@@ -689,22 +696,30 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             construction_authorization.invocation_operations.cancel_enabled,
         )
     )
+    mcp_authorization_required = any(capability_id.startswith("mcp_interceptor:") for capability_id in required_capabilities)
     authorization_snapshot = authorization_provider_resolver.snapshot()
     initialized_capability_ids = set(contributor_host.initialized_capability_ids)
     initialized_capability_ids.update(invocation_constraints_host.initialized_capability_ids)
+    initialized_capability_ids.update(mcp_interceptor_host.initialized_capability_ids)
     registration = authorization_provider_resolver.snapshot().registration
     if registration is not None:
         initialized_capability_ids.add(f"authorization_provider:{registration.contribution_id}")
     capability_manifest = build_capability_manifest(
         loaded_extensions,
         required_capabilities=required_capabilities,
-        authorization_required=invocation_authorization_required,
+        authorization_required=(invocation_authorization_required or mcp_authorization_required),
         legacy_authorization_initialized=(authorization_snapshot.source_kind == "legacy" and authorization_snapshot.provider is not None),
         initialized_capability_ids=initialized_capability_ids,
     )
     capability_health_monitor = CapabilityHealthMonitor(
         capability_manifest,
         loaded_extensions,
+    )
+    from deerflow.extensions.mcp import configure_mcp_interceptor_runtime
+
+    configure_mcp_interceptor_runtime(
+        mcp_interceptor_host,
+        capability_health_monitor,
     )
     set_loaded_extensions(loaded_extensions)
     app.state.extensions = loaded_extensions
@@ -713,6 +728,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.state.invocation_authorization_config = construction_authorization.invocation_operations.model_copy(deep=True)
     app.state.contributor_host = contributor_host
     app.state.invocation_constraints_host = invocation_constraints_host
+    app.state.mcp_interceptor_host = mcp_interceptor_host
     app.state.capability_manifest = capability_manifest
     app.state.capability_health_monitor = capability_health_monitor
 

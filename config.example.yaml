@@ -2546,7 +2546,8 @@ authorization:
 # capability ID. This setting stays in operator-controlled config.yaml; it is
 # intentionally unavailable in API-writable extensions_config.json. Supported
 # IDs are origin_contributor:<contribution-id>,
-# run_context_contributor:<contribution-id>, and the singular
+# run_context_contributor:<contribution-id>, mcp_interceptor:<contribution-id>,
+# and the singular
 # invocation_constraints.v1 provider. Constraints are checked after invocation-start
 # authorization and before durable admission; accepted projections are fenced again by
 # the worker before construction and immediately before graph streaming.
@@ -2558,6 +2559,9 @@ authorization:
 # capability that is missing, failed, stale, or unhealthy makes the unauthenticated
 # `GET /ready` return only `{"status":"not_ready"}`; `GET /health` remains liveness.
 required_capabilities: []
+# Example required MCP credential/evidence preparation boundary:
+# required_capabilities:
+#   - mcp_interceptor:acme.credential_broker
 #
 # plugins:
 #   - use: acme_request_observer:install

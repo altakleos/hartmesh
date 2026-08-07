@@ -143,8 +143,11 @@ through run-event or specialized APIs:
 | `context:memory` | `context` | `record_memory_context()` |
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
 
-Current middleware tags are `guardrail`, `safety_termination`,
-`skill_activation`, and `skill_secrets`. The pattern is intentionally open so
+Current middleware tags are `guardrail`, `mcp_preparation`,
+`safety_termination`, `skill_activation`, and `skill_secrets`.
+`mcp_preparation` contains only the pinned capability generation,
+contribution IDs, and bounded persistable safe evidence references; transient
+headers and MCP arguments are excluded. The pattern is intentionally open so
 new middleware tags are additive. Because the full event type is limited to 32
 characters and `middleware:` uses 11, a tag must contain 1-21 characters.
 

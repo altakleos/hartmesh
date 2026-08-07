@@ -427,6 +427,9 @@ def _build_runtime_context(
     # an accepted projection or reservation.
     runtime_ctx.pop(INVOCATION_CONSTRAINTS_CONTEXT_KEY, None)
     runtime_ctx.pop(SUBAGENT_RESERVATION_CONTEXT_KEY, None)
+    from deerflow.extensions.mcp import MCP_INVOCATION_FACTS_CONTEXT_KEY
+
+    runtime_ctx.pop(MCP_INVOCATION_FACTS_CONTEXT_KEY, None)
     return runtime_ctx
 
 
@@ -498,6 +501,12 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
                 existing_context[internal_key] = runtime_context[internal_key]
             else:
                 existing_context.pop(internal_key, None)
+        from deerflow.extensions.mcp import MCP_INVOCATION_FACTS_CONTEXT_KEY
+
+        if MCP_INVOCATION_FACTS_CONTEXT_KEY in runtime_context:
+            existing_context[MCP_INVOCATION_FACTS_CONTEXT_KEY] = runtime_context[MCP_INVOCATION_FACTS_CONTEXT_KEY]
+        else:
+            existing_context.pop(MCP_INVOCATION_FACTS_CONTEXT_KEY, None)
         return
 
     config["context"] = dict(runtime_context)
@@ -938,6 +947,12 @@ async def run_agent(
             runtime_ctx["accepted_extension_generation"] = accepted.extension_generation
             if accepted.extension_manifest_digest is not None:
                 runtime_ctx["accepted_extension_manifest_digest"] = accepted.extension_manifest_digest
+            from deerflow.extensions.mcp import (
+                MCP_INVOCATION_FACTS_CONTEXT_KEY,
+                McpInvocationFacts,
+            )
+
+            runtime_ctx[MCP_INVOCATION_FACTS_CONTEXT_KEY] = McpInvocationFacts.from_accepted(accepted, run_id=run_id)
             _install_pinned_agent_facts(runtime_ctx, pinned_material)
             from deerflow.runtime.constraints import (
                 INVOCATION_CONSTRAINTS_CONTEXT_KEY,

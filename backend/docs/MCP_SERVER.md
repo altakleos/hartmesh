@@ -172,9 +172,56 @@ Example:
 }
 ```
 
-## Custom Tool Interceptors
+## Required Operator MCP Call Preparation
 
-You can register custom interceptors that run before every MCP tool call. This is useful for injecting per-request headers (e.g., user auth tokens from the LangGraph execution context), logging, or metrics.
+Operator-installed Python plugins can contribute authoritative MCP call preparation with
+the typed `McpInterceptorDescriptor` contract from `deerflow-extension-api`. Register the
+plugin under top-level `config.yaml -> plugins` and require its stable contribution ID:
+
+```yaml
+plugins:
+  - use: acme_mcp_credentials:install
+    required: true
+
+required_capabilities:
+  - mcp_interceptor:acme.credential_broker
+```
+
+The Gateway Capability Host owns this boundary. For every protected MCP call it first uses
+the exact provider identity and `AuthzRequest` already allowed by the operation-time
+`GuardrailAuthorizationAdapter`; it does not reconstruct or repeat the decision. Only an
+allow is followed by compatibility credential hooks, fresh health verification, and
+deterministic, two-second-bounded `prepare_call(...)` calls for every required contribution.
+Trusted preparation is the final fence after compatibility header changes and immediately
+before the network handler. The projection contains sealed
+principal/Origin, thread/run/agent/generation references, MCP server/tool names, and only a
+canonical arguments digest. A prepared result may add bounded transient headers and safe
+evidence references; the plugin never receives or invokes the network handler.
+
+The underlying MCP handler runs exactly once only when authorization allows and every
+required preparation succeeds. Missing or mismatched generation, missing/stale/unhealthy
+capability state, rejection, indeterminate or invalid output, exception, timeout, or
+conflicting case-insensitive header writes fails closed before the handler. Header values
+exist only for that call and are never stored in checkpoints, run rows, lifecycle or rich
+events, manifests, logs, or diagnostics. Audit evidence contains only bounded contribution
+IDs, the pinned generation, and safe evidence references.
+
+This is operational credential/evidence preparation, not another permission provider. It
+cannot override an authorization denial. Plugin changes require a Gateway restart and
+required health participates in `GET /ready`.
+
+## Legacy Optional Custom Tool Interceptors
+
+For compatibility, `extensions_config.json` may still name raw class-path interceptors that
+run before every MCP tool call. This path is API-writable, optional, and warning-and-skip;
+it is not a trusted Capability Host registration and can never satisfy
+`required_capabilities`. When a required operator interceptor is configured, these hooks
+run inside the host-owned authorization-to-network boundary: authorization is already
+fixed, then compatibility headers are applied, then trusted preparation is the final
+network fence. A compatibility hook therefore cannot override a policy denial, satisfy a
+required contribution, or write a conflicting trusted header.
+
+This legacy path can inject per-request headers, logging, or metrics:
 
 Declare interceptors in `extensions_config.json` using the `mcpInterceptors` field:
 

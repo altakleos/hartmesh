@@ -453,10 +453,11 @@ cannot load; optional plugins fail open with attributed diagnostics.
 The public package is `packages/extension-api/` and must never import `deerflow`. It owns
 the host-independent authorization contracts (`Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthorizationProvider`), invocation contributor contracts, and the
-restrictive invocation-constraints and health-probe contracts as of extension API 0.5.0; the old
+restrictive invocation-constraints, required MCP call-preparation, and health-probe contracts as of extension API 0.6.0; the old
 `deerflow.authz.provider` path is a compatibility re-export with object identity. Its
 registry exposes typed middleware, authorization-provider, `OriginContributor`,
-`RunContextContributor`, and singular `InvocationConstraintsProvider` contributions.
+`RunContextContributor`, singular `InvocationConstraintsProvider`, and multi-contributor
+`McpInterceptorDescriptor` contributions.
 Descriptors have no package-provenance fields: the
 loader stamps distribution name/version into immutable host registrations. Duplicate
 contribution IDs are rejected; duplicate provider factories are rejected, and an extension
@@ -475,7 +476,8 @@ while correlation values do not. Calls run concurrently with a two-second timeou
 composed in contribution-ID order. Optional failures are omitted with redacted diagnostics;
 required failures make the invocation indeterminate. Top-level `required_capabilities` is
 operator-only, restart-required configuration and accepts
-`origin_contributor:<id>` / `run_context_contributor:<id>` plus the singular
+`origin_contributor:<id>` / `run_context_contributor:<id>`,
+`mcp_interceptor:<id>`, plus the singular
 `invocation_constraints.v1`; it must never be exposed through API-writable
 `extensions_config.json`.
 
@@ -870,7 +872,7 @@ that cannot tell sibling branches apart.
 **Checkpointer isolation**: Subagent graphs are compiled with `checkpointer=False` to avoid inheriting the parent run's checkpointer, since subagents are one-shot and never resume.
 **Checkpoint lineage / stream isolation**: `_aexecute` deliberately omits checkpoint-coordinate keys (`thread_id`, `checkpoint_ns`, `checkpoint_id`, `checkpoint_map`) from the child `RunnableConfig`. LangGraph must inherit those coordinates from the copied parent ContextVar so the delegated graph retains a non-root subgraph namespace; explicitly re-supplying even the same parent `thread_id` starts a new root lineage on LangGraph 1.2.6+ and can route child AI/tool frames into the parent `messages` stream. DeerFlow business components still receive the parent `thread_id` through `runtime.context`, which is the preferred lookup path for sandbox, middleware, and attribution code. Regression coverage in `tests/test_subagent_executor.py::TestSubagentCheckpointLineage` keeps the invocation-contract assertion active on every supported version and version-gates the production-shaped parent-stream test to LangGraph 1.2.6+, where the leak exists.
 
-**Isolated-loop callback boundary**: sync delegation from an active event loop and `execute_async()` copy the ambient ContextVars into the persistent subagent loop so checkpoint lineage, user identity, tracing context, tags, metadata, and LangGraph's namespaced message-stream handler survive. Before submission, `_copy_isolated_subagent_context()` copies the callback manager/list and removes only handlers marked `deerflow_loop_bound`; `RunJournal` carries that marker because it owns parent-loop tasks and a SQL store/pool. LangGraph merges inherited callbacks with the child run's explicit `SubagentTokenCollector`/tracing callbacks, so letting `RunJournal` cross loops causes duplicate accounting and `Future attached to a different loop` failures, while dropping the whole callback chain silently removes child token frames. Do not replace the boundary with a blank `Context`; the inherited checkpoint namespace and framework stream callback are required by the stream-isolation contract above.
+**Isolated-loop callback boundary**: sync delegation from an active event loop and `execute_async()` copy the ambient ContextVars into the persistent subagent loop so checkpoint lineage, user identity, tracing context, tags, metadata, and LangGraph's namespaced message-stream handler survive. Before submission, `_copy_isolated_subagent_context()` copies the callback manager/list and removes only handlers marked `deerflow_loop_bound`; `RunJournal` carries that marker because it owns parent-loop tasks and a SQL store/pool. LangGraph merges inherited callbacks with the child run's explicit `SubagentTokenCollector`/tracing callbacks, so letting `RunJournal` cross loops causes duplicate accounting and `Future attached to a different loop` failures, while dropping the whole callback chain silently removes child token frames. Required MCP preparation uses a narrow exception that preserves the ownership rule: `McpPreparationAuditSink` crosses as a thread-safe proxy and schedules the bounded audit write on the parent event loop; the child loop never invokes or owns the `RunJournal` itself. Do not replace the boundary with a blank `Context`; the inherited checkpoint namespace and framework stream callback are required by the stream-isolation contract above.
 
 ### Tool System (`packages/harness/deerflow/tools/`)
 
@@ -917,6 +919,24 @@ E2B output sync records remote file versions and actual host file metadata in a 
 - **Transports**: stdio (command-based), SSE, HTTP
 - **Per-server tool-name prefixing**: `mcpServers.<server>.tool_name_prefix` defaults to `true`, preserving the collision-safe `<server_name>_` prefix. Servers whose tools already carry a stable namespace may set it to `false`; discovery then calls `langchain_mcp_adapters.tools.load_mcp_tools` with that server's flag. Source routing and stdio session-pool wrapping are based on the producing server and transport, never on whether the visible tool name starts with the server prefix.
 - **OAuth (HTTP/SSE)**: Supports token endpoint flows (`client_credentials`, `refresh_token`) with automatic token refresh + Authorization header injection
+- **Required call preparation**: Operator-installed plugins register typed
+  `McpInterceptorDescriptor` contributions through the Capability Host and require them
+  with `config.yaml -> required_capabilities: [mcp_interceptor:<id>]`. Tool construction
+  pins the startup extension generation and required set. `GuardrailAuthorizationAdapter`
+  binds the exact allowed `AuthzRequest` and provider identity only for the duration of the
+  tool call; the host-owned MCP boundary reuses that receipt instead of reconstructing or
+  repeating the policy request. Optional OAuth/API-writable compatibility hooks then run
+  inside that boundary. After their call-local header changes, and immediately before the
+  underlying MCP handler, the host verifies accepted generation/fresh required health and
+  calls each typed `prepare_call` in deterministic ID order under a two-second timeout.
+  Authorization allow plus every required preparation is mandatory; missing/unhealthy/stale state,
+  malformed/rejected/indeterminate output, timeout/exception, or case-insensitive header
+  collision calls the handler zero times. Transient headers are call-local and never enter
+  run/checkpoint/event/manifest/diagnostic storage; audit carries only bounded contribution,
+  generation, and safe evidence references. The API-writable
+  `extensions_config.json -> mcpInterceptors` class paths remain optional legacy
+  warning-and-skip adapters, execute inside the host boundary before the final trusted
+  preparation fence, and cannot satisfy a required capability.
 - **Routing hints**: `extensions_config.json -> mcpServers.<server>.routing` and
   `tools.<original_tool_name>.routing` are soft preference metadata. The effective
   routing is resolved while `mcp/tools.py::get_mcp_tools()` still has both

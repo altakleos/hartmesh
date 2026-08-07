@@ -214,6 +214,41 @@ def test_custom_interceptor_coexists_with_oauth_interceptor():
         assert interceptors[1] is custom_fn
 
 
+def test_required_host_owns_compatibility_to_network_boundary():
+    """Trusted host composes compatibility hooks behind one client interceptor."""
+
+    async def trusted_fn(request, handler):
+        return await handler(request)
+
+    async def oauth_fn(request, handler):
+        return await handler(request)
+
+    async def legacy_fn(request, handler):
+        return await handler(request)
+
+    p = _make_patches(interceptor_paths=["pkg.legacy:build_legacy"])
+
+    with (
+        p["client_cls"] as mock_cls,
+        p["from_file"],
+        p["build_servers"],
+        p["oauth_headers"],
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=oauth_fn),
+        patch("deerflow.mcp.tools.resolve_variable", return_value=lambda: legacy_fn),
+        patch(
+            "deerflow.mcp.tools.get_required_mcp_tool_interceptor",
+            return_value=trusted_fn,
+        ) as required_interceptor,
+    ):
+        asyncio.run(get_mcp_tools())
+
+        interceptors = _get_interceptors(mock_cls)
+        assert interceptors == [trusted_fn]
+        required_interceptor.assert_called_once_with(
+            compatibility_interceptors=(oauth_fn, legacy_fn),
+        )
+
+
 def test_mcp_interceptors_single_string_is_normalized():
     """A single string value for mcpInterceptors is normalized to a list."""
 

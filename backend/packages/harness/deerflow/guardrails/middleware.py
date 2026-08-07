@@ -13,7 +13,13 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.authz.principal import normalize_authz_attributes
-from deerflow.guardrails.provider import GuardrailDecision, GuardrailProvider, GuardrailReason, GuardrailRequest
+from deerflow.guardrails.provider import (
+    GuardrailDecision,
+    GuardrailProvider,
+    GuardrailReason,
+    GuardrailRequest,
+    bind_guardrail_provider_receipt,
+)
 from deerflow.runtime.events.catalog import MIDDLEWARE_GUARDRAIL_TAG
 
 logger = logging.getLogger(__name__)
@@ -85,8 +91,8 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
 
         This follows the optional-Journal pattern used by existing middleware:
         audit persistence is best-effort and must never change tool execution
-        behavior. Runtimes without ``__run_journal`` (including embedded and
-        subagent execution) skip persistence.
+        behavior. Runtimes without ``__run_journal`` (including embedded
+        execution) skip persistence.
         """
         journal = context.get("__run_journal")
         if journal is None:
@@ -99,8 +105,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             "tool_name": guardrail_request.tool_name,
             "tool_call_id": guardrail_request.tool_call_id,
             "agent_id": guardrail_request.agent_id,
-            # Native subagents do not currently inherit __run_journal; custom
-            # runtimes may still provide one with subagent attribution.
+            # Custom runtimes may provide a journal with subagent attribution.
             "is_subagent": guardrail_request.is_subagent,
             "user_role": guardrail_request.user_role,
             "allow": decision.allow,
@@ -156,7 +161,8 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
                     action="allow_tool_call_after_provider_error",
                     provider_error=True,
                 )
-                return handler(request)
+                with bind_guardrail_provider_receipt(decision.provider_receipt):
+                    return handler(request)
         if not decision.allow:
             logger.warning("Guardrail denied: tool=%s policy=%s code=%s", gr.tool_name, decision.policy_id, decision.reasons[0].code if decision.reasons else "unknown")
             self._record_guardrail_event(
@@ -167,7 +173,8 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
                 provider_error=False,
             )
             return self._build_denied_message(request, decision)
-        return handler(request)
+        with bind_guardrail_provider_receipt(decision.provider_receipt):
+            return handler(request)
 
     @override
     async def awrap_tool_call(
@@ -203,7 +210,8 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
                     action="allow_tool_call_after_provider_error",
                     provider_error=True,
                 )
-                return await handler(request)
+                with bind_guardrail_provider_receipt(decision.provider_receipt):
+                    return await handler(request)
         if not decision.allow:
             logger.warning("Guardrail denied: tool=%s policy=%s code=%s", gr.tool_name, decision.policy_id, decision.reasons[0].code if decision.reasons else "unknown")
             self._record_guardrail_event(
@@ -214,4 +222,5 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
                 provider_error=False,
             )
             return self._build_denied_message(request, decision)
-        return await handler(request)
+        with bind_guardrail_provider_receipt(decision.provider_receipt):
+            return await handler(request)

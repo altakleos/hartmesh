@@ -19,6 +19,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from deerflow_extension_api.authorization import AuthorizationProviderFactory
     from deerflow_extension_api.constraints import InvocationConstraintsProviderFactory
     from deerflow_extension_api.contributors import OriginContributorFactory, RunContextContributorFactory
+    from deerflow_extension_api.mcp import McpInterceptorDescriptor
     from deerflow_extension_api.placement import AgentBuildContext, MiddlewarePlacement
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -88,6 +89,10 @@ class ExtensionRegistry(Protocol):
 
     def invocation_constraints(self, contribution: InvocationConstraintsProviderFactory) -> None:
         """Register the process's single restrictive constraints factory."""
+        return None
+
+    def mcp_interceptor(self, contribution: McpInterceptorDescriptor) -> None:
+        """Register one trusted MCP call-preparation interceptor."""
         return None
 
 
