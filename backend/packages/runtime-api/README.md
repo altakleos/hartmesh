@@ -20,8 +20,9 @@ or extension API.
 All records include their exact kind and API version. `to_dict()`, each record's
 `from_dict()`, and `record_from_dict()` reject unknown fields, kinds, versions,
 non-finite numbers, and unsupported shapes. Observation snapshots and lifecycle
-events have fixed field sets; policy reasons and internal host types are never
-serialized.
+events have fixed field sets. Status values, lifecycle types, lifecycle/status
+pairs, and state versions are validated against the complete v1 state machine;
+policy reasons and internal host types are never serialized.
 
 The ensure request deliberately has no property bags. It accepts a service-
 supplied external key, thread, optional agent hint, strict graph or resume input,
