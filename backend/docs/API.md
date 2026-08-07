@@ -750,7 +750,7 @@ unknown and invisible resources both return `not_found_or_invisible`. Browser
 
 | Route | Contract |
 |---|---|
-| `GET /capabilities` | Administrator-only `runtime.capabilities`; reports ensure, invocation/context observation, cancel control, and that context export/retirement are unsupported. |
+| `GET /capabilities` | Administrator-only `runtime.capabilities`; reports ensure, invocation/context observation, cancel control, unsupported context export/retirement, the immutable capability manifest, and separately labelled mutable capability health. |
 | `POST /invocations/ensure` | Exact `invocation.ensure` body. `external_key` is required; the server derives its scope from the authenticated principal or service. |
 | `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. |
 | `GET /contexts/{thread_id}/invocations` | Access-filtered normal-run snapshots and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. |
@@ -762,6 +762,57 @@ Ensure accepts only an external key, thread ID, nullable agent hint, strict
 graph/resume input, and finite invocation options. It does not accept an
 external scope, principal, Origin, raw config/context/metadata, callbacks,
 credentials, commands, or delivery/stream properties.
+
+The exact ensure body is:
+
+```json
+{
+  "api_version": "deerflow.runtime/v1",
+  "kind": "invocation.ensure",
+  "external_key": "source-delivery-id",
+  "thread_id": "thread-123",
+  "agent_hint": null,
+  "input": {
+    "api_version": "deerflow.runtime/v1",
+    "kind": "invocation.input.graph",
+    "value": {"messages": []}
+  },
+  "options": {
+    "api_version": "deerflow.runtime/v1",
+    "kind": "invocation.options",
+    "model_name": null,
+    "thinking_enabled": null,
+    "multitask_strategy": "reject",
+    "checkpoint_id": null,
+    "interrupt_before": null,
+    "interrupt_after": null
+  }
+}
+```
+
+`input.kind` is exactly `invocation.input.graph` with an object value or
+`invocation.input.resume` with any finite JSON value. Multitask strategy is
+`reject|rollback|interrupt`; interrupt selectors are a string list, `"*"`, or
+null. Observation is represented by `invocation.query` (`run_id`) or
+`context.invocations.query` (`thread_id`) plus nullable cursor, limit, and
+`include_snapshot`. HTTP supplies the path identity and fixes
+`include_snapshot=true`; its only paging query parameters are `cursor` and
+`limit`. Control accepts exactly:
+
+```json
+{
+  "api_version": "deerflow.runtime/v1",
+  "kind": "invocation.cancel",
+  "run_id": "run-123",
+  "expected_state_version": 4,
+  "action": "interrupt"
+}
+```
+
+`action` is `interrupt|rollback`, and the path/body run IDs must match.
+Visible ensure/control receipts carry `run_id`, `thread_id`, `status`, and
+`state_version`. Observations carry fixed snapshots/events plus all three
+cursor values; auxiliary rows never enter either collection.
 
 Ensure uses the existing durable idempotency boundary. A new accepted request
 returns `201 created`; an equal retained request returns `200 known` without a
@@ -775,6 +826,12 @@ the captured read fence; a pruned cursor returns `410 cursor_gap` with
 `minimum_available_cursor`, while malformed and ahead cursors return `422`.
 Reads are at least once, so consumers should deduplicate stable event IDs and
 cursors.
+
+Lifecycle event types are exactly `accepted`, `started`,
+`cancellation_requested`, `cancelled`, `succeeded`, `failed`, `timed_out`, and
+`interrupted`. Each successful mutation increments the normal run's
+`state_version` and commits its matching safe event atomically; the run row,
+not the journal, remains authoritative.
 
 Success status mapping is `201` for `created`, `202` for cancellation
 `requested`, and `200` for `known`, observations, capabilities,
@@ -796,7 +853,10 @@ and CSRF middleware rejection—uses only this envelope:
 
 Only cursor-gap/ahead responses may add their allowlisted cursor detail. The
 transport never returns policy objects, exception text, private Origin data,
-secrets, or a free-form property bag. There is no readiness/provenance manifest,
+secrets, or a free-form property bag. The administrator-only capabilities
+response adds the host-owned immutable capability manifest and its digest plus
+separately labelled mutable capability health snapshots; live health never
+changes the manifest digest or an invocation's accepted generation. There is no
 context export, context retirement, event broker, or additional control in v1.
 
 ---

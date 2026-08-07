@@ -1135,10 +1135,21 @@ and paging details.
 
 The existing `/api/runs/*` and `/api/threads/*/runs/*` create, stream, and wait
 routes remain compatible and retain their optional `Idempotency-Key` behavior.
+Each accepted invocation is the normal durable run row itself; checkpoint and
+artifact reservation rows are internal operations and never appear in this API.
+`GET /health` is liveness, while `GET /ready` reports only ready/not-ready and
+includes operator-required authorization, constraints, MCP preparation, and
+lifecycle ordering in its decision. Administrators obtain the immutable
+capability manifest and separate live-health snapshot from `/capabilities`.
+
+This surface does not promise context export/retirement, dynamic outbound
+governance, scheduler HA, a general multi-replica Gateway ownership model, an
+artifact catalogue, a full profile registry, an event broker, or durable parity
+for the synchronous `DeerFlowClient` path.
 
 ## Embedded Python Client
 
-DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
+DeerFlow can be used as an embedded Python library without running the full HTTP services. The synchronous `DeerFlowClient` provides direct, non-durable local graph execution and does not enter `InvocationRuntime`; use the asynchronous `deerflow-runtime-api` in-process adapter when durable ensure/observe/control semantics are required. Its other methods return the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
 
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
 IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -640,6 +641,91 @@ async def test_required_missing_initialization_and_health_fail_readiness(failure
         "required_interceptor_unavailable",
         "required_interceptor_unhealthy",
     }
+
+
+@pytest.mark.asyncio
+async def test_stale_required_health_fails_readiness_and_mcp_call_before_preparation() -> None:
+    from deerflow_extension_api import CapabilityHealthResult, PreparedMcpCallV1
+
+    from deerflow.extensions.capabilities import CapabilityHealthMonitor, build_capability_manifest
+    from deerflow.extensions.mcp import McpCallPreparationError, McpInterceptorHost
+
+    current = [datetime(2026, 8, 7, tzinfo=UTC)]
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    probe_calls = 0
+    preparation_calls = 0
+    handler_calls = 0
+
+    async def health_probe() -> CapabilityHealthResult:
+        nonlocal probe_calls
+        probe_calls += 1
+        if probe_calls == 1:
+            return CapabilityHealthResult(status="healthy")
+        refresh_started.set()
+        await release_refresh.wait()
+        return CapabilityHealthResult(status="unhealthy", diagnostic_code="credential_backend_unavailable")
+
+    class _Prepared:
+        async def prepare_call(self, request):
+            nonlocal preparation_calls
+            del request
+            preparation_calls += 1
+            return PreparedMcpCallV1()
+
+    required = ("mcp_interceptor:required_one",)
+    extensions = _registered_extensions(
+        _descriptor("required_one", _Prepared(), health_probe=health_probe),
+    )
+    host = McpInterceptorHost(extensions, required_capabilities=required)
+    manifest = build_capability_manifest(
+        extensions,
+        required_capabilities=required,
+        authorization_required=True,
+        legacy_authorization_initialized=True,
+        initialized_capability_ids=host.initialized_capability_ids,
+    )
+    manifest_digest = manifest.digest
+    monitor = CapabilityHealthMonitor(
+        manifest,
+        extensions,
+        clock=lambda: current[0],
+    )
+
+    assert (await monitor.readiness()).status == "ready"
+    current[0] += timedelta(seconds=31)
+    stale = await monitor.readiness(refresh=False)
+    assert stale.status == "not_ready"
+    assert stale.health[0].diagnostic_code == "snapshot_stale"
+    assert manifest.digest == manifest_digest
+
+    refresh = asyncio.create_task(monitor.health_for(required, refresh=True))
+    await asyncio.wait_for(refresh_started.wait(), timeout=1)
+
+    async def handler(request):
+        nonlocal handler_calls
+        del request
+        handler_calls += 1
+
+    try:
+        provider = _AuthorizationProvider()
+        request = _request(provider)
+        with pytest.raises(McpCallPreparationError, match="required_interceptor_unhealthy"):
+            await _call_with_authorization(
+                host.build_tool_interceptor(health_monitor=monitor),
+                request,
+                handler,
+                provider,
+            )
+        assert preparation_calls == 0
+        assert handler_calls == 0
+    finally:
+        release_refresh.set()
+        refreshed = await refresh
+
+    assert refreshed[0].status == "unhealthy"
+    assert (await monitor.readiness(refresh=False)).status == "not_ready"
+    assert manifest.digest == manifest_digest
 
 
 @pytest.mark.asyncio

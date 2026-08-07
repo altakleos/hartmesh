@@ -183,6 +183,7 @@ async def test_sql_store_ensure_is_idempotent_across_response_loss_and_terminal_
 
 
 @pytest.mark.anyio
+@pytest.mark.postgres_contract
 @pytest.mark.skipif(
     not _POSTGRES_URL,
     reason="requires DEERFLOW_TEST_POSTGRES_URL for the independent-session race gate",
