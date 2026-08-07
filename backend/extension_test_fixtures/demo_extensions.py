@@ -5,9 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from deerflow_extension_api import ExtensionRegistry, extension
+from deerflow_extension_api import (
+    AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION,
+    AuthorizationProviderFactory,
+    AuthzDecision,
+    ExtensionRegistry,
+    extension,
+)
 
 INSTALLED: list[str] = []
+PROVIDER_INSTANCES: list[object] = []
 
 
 class _Contributor:
@@ -20,7 +27,7 @@ def install_ok(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     registry.middlewares(_Contributor("ok"))
 
 
-@extension(api="0.1", name="stamped")
+@extension(api="0.2", name="stamped")
 def install_stamped(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     INSTALLED.append("stamped")
     registry.middlewares(_Contributor("stamped"))
@@ -32,7 +39,7 @@ def install_future_api(registry: ExtensionRegistry, config: Mapping[str, Any]) -
     registry.middlewares(_Contributor("future"))
 
 
-@extension(api="0.2", name="newer-minor")
+@extension(api="0.3", name="newer-minor")
 def install_newer_minor_api(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     """Written against a newer 0.x minor than the host provides: before 1.0,
     minors carry no compatibility promise in either direction."""
@@ -70,6 +77,44 @@ def install_shared_use(registry: ExtensionRegistry, config: Mapping[str, Any]) -
     registry.middlewares(_Contributor(f"shared:{config.get('label', '')}"))
     if config.get("fail"):
         raise ValueError("boom-shared")
+
+
+class CountingAuthorizationProvider:
+    name = "fixture-counting"
+
+    def __init__(self, *, label: str = "default") -> None:
+        self.label = label
+        PROVIDER_INSTANCES.append(self)
+
+    def authorize(self, request):
+        return AuthzDecision(allow=True)
+
+    async def aauthorize(self, request):
+        return self.authorize(request)
+
+    def filter_resources(self, principal, resource_type, candidates):
+        return list(candidates)
+
+
+def _provider_factory() -> CountingAuthorizationProvider:
+    return CountingAuthorizationProvider(label="plugin")
+
+
+def install_authorization_provider(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    registry.authorization_provider(
+        AuthorizationProviderFactory(
+            contribution_id="fixture.authorization",
+            capability_api_version=AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION,
+            factory=_provider_factory,
+            kind="authorization_provider",
+        )
+    )
+
+
+def install_authorization_then_raise(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    install_authorization_provider(registry, config)
+    registry.middlewares(_Contributor("partial-authz"))
+    raise ValueError("boom-authz")
 
 
 NOT_CALLABLE = "i am not a function"

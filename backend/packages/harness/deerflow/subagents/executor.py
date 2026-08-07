@@ -25,6 +25,7 @@ from langgraph.errors import GraphRecursionError
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
+from deerflow.authz.provider import AuthorizationProvider
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
@@ -453,6 +454,7 @@ class SubagentExecutor:
         authz_attributes: Mapping[str, Any] | None = None,
         deerflow_trace_id: str | None = None,
         extensions: Any | None = None,
+        authorization_provider: AuthorizationProvider | None = None,
     ):
         """Initialize the executor.
 
@@ -481,6 +483,7 @@ class SubagentExecutor:
                 captured at ``task_tool`` dispatch. When None (embedded client,
                 standalone LangGraph Server), ``_aexecute`` falls back to the
                 process-wide singleton.
+            authorization_provider: The parent run's resolved provider instance.
         """
         self.config = config
         self.app_config = app_config
@@ -519,6 +522,7 @@ class SubagentExecutor:
         # the lead run's start and this subagent's execution must not swap the
         # generation underneath the delegated work.
         self.extensions = extensions
+        self.authorization_provider = authorization_provider
 
         self._base_tools = _filter_tools(
             tools,
@@ -713,6 +717,7 @@ class SubagentExecutor:
             authorization_candidates,
             context=authz_context,
             app_config=resolved_app_config,
+            authorization_provider=self.authorization_provider,
         )
         configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
         late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]

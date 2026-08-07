@@ -7,9 +7,24 @@ per agent build and passes the same instance to Layer 1 and Layer 2).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 from deerflow.authz.provider import AuthorizationProvider
 from deerflow.config.authorization_config import AuthorizationConfig
 from deerflow.reflection import resolve_variable
+
+AUTHORIZATION_PROVIDER_CONTEXT_KEY = "__deerflow_authorization_provider"
+
+
+def authorization_provider_from_context(
+    context: Mapping[str, Any] | None,
+) -> AuthorizationProvider | None:
+    """Return the host-supplied provider carried by a runtime context."""
+    if context is None:
+        return None
+    provider = context.get(AUTHORIZATION_PROVIDER_CONTEXT_KEY)
+    return provider if isinstance(provider, AuthorizationProvider) else None
 
 
 def resolve_authorization_provider(

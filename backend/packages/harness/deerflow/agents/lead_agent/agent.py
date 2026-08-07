@@ -50,8 +50,11 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import build_lea
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
-from deerflow.authz.provider import AuthzDecision, AuthzRequest
-from deerflow.authz.runtime import resolve_authorization_provider
+from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest
+from deerflow.authz.runtime import (
+    authorization_provider_from_context,
+    resolve_authorization_provider,
+)
 from deerflow.authz.tool_filter import apply_tool_authorization
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
@@ -145,6 +148,7 @@ def _authorize_model_name(
     *,
     context: Mapping[str, Any],
     app_config: AppConfig,
+    authorization_provider: AuthorizationProvider | None = None,
 ) -> str:
     """Enforce ``model:use`` authorization on the resolved model name.
 
@@ -167,7 +171,11 @@ def _authorize_model_name(
     if authz_config.enabled is not True:
         return model_name
 
-    provider = resolve_authorization_provider(authz_config)
+    provider = authorization_provider
+    if provider is None:
+        provider = authorization_provider_from_context(context)
+    if provider is None:
+        provider = resolve_authorization_provider(authz_config)
     if provider is None:
         return model_name
 
@@ -718,9 +726,18 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Final model name resolution: request → agent config → global default, with fallback for unknown names
     model_name = _resolve_model_name(requested_model_name or agent_model_name, app_config=resolved_app_config)
 
+    authorization_provider = authorization_provider_from_context(cfg)
+    if resolved_app_config.authorization.enabled is True and authorization_provider is None:
+        authorization_provider = resolve_authorization_provider(resolved_app_config.authorization)
+
     # Phase 3: enforce model:use authorization. On deny, fall back to the first
     # allowed model (graceful) rather than crashing the run (RFC §9).
-    model_name = _authorize_model_name(model_name, context=cfg, app_config=resolved_app_config)
+    model_name = _authorize_model_name(
+        model_name,
+        context=cfg,
+        app_config=resolved_app_config,
+        authorization_provider=authorization_provider,
+    )
 
     model_config = resolved_app_config.get_model_config(model_name)
 
@@ -805,6 +822,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             authorization_candidates,
             context=cfg,
             app_config=resolved_app_config,
+            authorization_provider=authorization_provider,
         )
         configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
         late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
@@ -885,6 +903,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         authorization_candidates,
         context=cfg,
         app_config=resolved_app_config,
+        authorization_provider=authorization_provider,
     )
     configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
     late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]

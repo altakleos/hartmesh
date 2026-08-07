@@ -96,7 +96,11 @@ async def list_models(
     user = await get_optional_user_from_request(request)
     if user is not None:
         try:
-            provider, principal = resolve_model_authorization(user, is_internal=_is_internal_caller(request, user))
+            provider, principal = resolve_model_authorization(
+                user,
+                is_internal=_is_internal_caller(request, user),
+                resolver=getattr(request.app.state, "authorization_provider_resolver", None),
+            )
         except _AuthorizationUnavailable as exc:
             if exc.fail_closed:
                 visible_models = []
@@ -174,7 +178,11 @@ async def get_model(
     user = await get_optional_user_from_request(request)
     if user is not None:
         try:
-            provider, principal = resolve_model_authorization(user, is_internal=_is_internal_caller(request, user))
+            provider, principal = resolve_model_authorization(
+                user,
+                is_internal=_is_internal_caller(request, user),
+                resolver=getattr(request.app.state, "authorization_provider_resolver", None),
+            )
         except _AuthorizationUnavailable:
             if fail_closed:
                 raise HTTPException(status_code=403, detail=f"Model '{model_name}' is not available for your role")

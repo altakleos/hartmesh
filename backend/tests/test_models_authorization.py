@@ -49,19 +49,28 @@ def _make_app_config(model_names: list[str]) -> AppConfig:
     )
 
 
-def _enable_authorization(monkeypatch, provider, *, fail_closed: bool = True, default_role: str = "user") -> None:
+class _FixedResolver:
+    def __init__(self, provider) -> None:
+        self.provider = provider
+
+    def resolve(self, config):
+        return SimpleNamespace(provider=self.provider)
+
+
+def _enable_authorization(monkeypatch, provider, *, fail_closed: bool = True, default_role: str = "user"):
     config = AuthorizationConfig(
         enabled=True,
         fail_closed=fail_closed,
         default_role=default_role,
     )
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
-    monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", lambda c: provider)
+    return _FixedResolver(provider)
 
 
-def _make_models_app(app_config: AppConfig) -> FastAPI:
+def _make_models_app(app_config: AppConfig, *, resolver=None) -> FastAPI:
     """Build a FastAPI app with the models router and a pinned config."""
     app = FastAPI()
+    app.state.authorization_provider_resolver = resolver
     app.include_router(models_router.router)
     # Pin the config dependency so routes use our test AppConfig.
     app.dependency_overrides[models_router.get_config] = lambda: app_config
@@ -106,8 +115,6 @@ def test_list_models_disabled_returns_all(monkeypatch):
     """When authorization is disabled, all models are visible."""
     config = AuthorizationConfig(enabled=False)
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
-    cached = AsyncMock(side_effect=AssertionError("disabled must not resolve provider"))
-    monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", cached)
 
     app_config = _make_app_config(["gpt-4", "claude-3"])
     monkeypatch.setattr(
@@ -121,13 +128,12 @@ def test_list_models_disabled_returns_all(monkeypatch):
     assert response.status_code == 200
     names = [m["name"] for m in response.json()["models"]]
     assert names == ["gpt-4", "claude-3"]
-    cached.assert_not_called()
 
 
 def test_list_models_anonymous_user_returns_all(monkeypatch):
     """Anonymous requests (user=None) are not filtered."""
     provider = _RecordingProvider()
-    _enable_authorization(monkeypatch, provider)
+    resolver = _enable_authorization(monkeypatch, provider)
 
     app_config = _make_app_config(["gpt-4", "claude-3"])
     monkeypatch.setattr(
@@ -135,7 +141,7 @@ def test_list_models_anonymous_user_returns_all(monkeypatch):
         AsyncMock(return_value=None),
     )
 
-    with TestClient(_make_models_app(app_config)) as client:
+    with TestClient(_make_models_app(app_config, resolver=resolver)) as client:
         response = client.get("/api/models")
 
     assert response.status_code == 200
@@ -149,7 +155,7 @@ def test_list_models_rbac_filters_by_allow(monkeypatch):
     provider = RbacAuthorizationProvider(
         roles={"user": {"models": {"allow": ["gpt-4"]}}},
     )
-    _enable_authorization(monkeypatch, provider)
+    resolver = _enable_authorization(monkeypatch, provider)
 
     app_config = _make_app_config(["gpt-4", "claude-3", "llama-3"])
     monkeypatch.setattr(
@@ -157,7 +163,7 @@ def test_list_models_rbac_filters_by_allow(monkeypatch):
         AsyncMock(return_value=_user()),
     )
 
-    with TestClient(_make_models_app(app_config)) as client:
+    with TestClient(_make_models_app(app_config, resolver=resolver)) as client:
         response = client.get("/api/models")
 
     assert response.status_code == 200
@@ -170,7 +176,7 @@ def test_list_models_rbac_filters_by_deny(monkeypatch):
     provider = RbacAuthorizationProvider(
         roles={"user": {"models": {"allow": "*", "deny": ["claude-3"]}}},
     )
-    _enable_authorization(monkeypatch, provider)
+    resolver = _enable_authorization(monkeypatch, provider)
 
     app_config = _make_app_config(["gpt-4", "claude-3", "llama-3"])
     monkeypatch.setattr(
@@ -178,7 +184,7 @@ def test_list_models_rbac_filters_by_deny(monkeypatch):
         AsyncMock(return_value=_user()),
     )
 
-    with TestClient(_make_models_app(app_config)) as client:
+    with TestClient(_make_models_app(app_config, resolver=resolver)) as client:
         response = client.get("/api/models")
 
     assert response.status_code == 200
@@ -191,7 +197,7 @@ def test_list_models_wildcard_returns_all(monkeypatch):
     provider = RbacAuthorizationProvider(
         roles={"user": {"models": {"allow": "*"}}},
     )
-    _enable_authorization(monkeypatch, provider)
+    resolver = _enable_authorization(monkeypatch, provider)
 
     app_config = _make_app_config(["gpt-4", "claude-3"])
     monkeypatch.setattr(
@@ -199,7 +205,7 @@ def test_list_models_wildcard_returns_all(monkeypatch):
         AsyncMock(return_value=_user()),
     )
 
-    with TestClient(_make_models_app(app_config)) as client:
+    with TestClient(_make_models_app(app_config, resolver=resolver)) as client:
         response = client.get("/api/models")
 
     assert response.status_code == 200
@@ -214,7 +220,7 @@ def test_list_models_wildcard_returns_all(monkeypatch):
 def test_list_models_provider_error_fail_closed_vs_open(monkeypatch, fail_closed, expected_count):
     """Provider error → empty (fail-closed) or all (fail-open)."""
     provider = _RecordingProvider(errors={"model"})
-    _enable_authorization(monkeypatch, provider, fail_closed=fail_closed)
+    resolver = _enable_authorization(monkeypatch, provider, fail_closed=fail_closed)
 
     app_config = _make_app_config(["gpt-4", "claude-3", "llama-3"])
     app_config.authorization.fail_closed = fail_closed
@@ -223,7 +229,7 @@ def test_list_models_provider_error_fail_closed_vs_open(monkeypatch, fail_closed
         AsyncMock(return_value=_user()),
     )
 
-    with TestClient(_make_models_app(app_config)) as client:
+    with TestClient(_make_models_app(app_config, resolver=resolver)) as client:
         response = client.get("/api/models")
 
     assert response.status_code == 200
@@ -254,7 +260,7 @@ def test_get_model_disabled_returns_model(monkeypatch):
 def test_get_model_404_when_not_found(monkeypatch):
     """Non-existent model returns 404 regardless of authorization."""
     provider = RbacAuthorizationProvider(roles={"user": {"models": {"allow": "*"}}})
-    _enable_authorization(monkeypatch, provider)
+    resolver = _enable_authorization(monkeypatch, provider)
 
     app_config = _make_app_config(["gpt-4"])
     monkeypatch.setattr(
@@ -262,7 +268,7 @@ def test_get_model_404_when_not_found(monkeypatch):
         AsyncMock(return_value=_user()),
     )
 
-    with TestClient(_make_models_app(app_config)) as client:
+    with TestClient(_make_models_app(app_config, resolver=resolver)) as client:
         response = client.get("/api/models/nonexistent")
 
     assert response.status_code == 404
@@ -273,7 +279,7 @@ def test_get_model_denied_returns_403(monkeypatch):
     provider = RbacAuthorizationProvider(
         roles={"user": {"models": {"allow": ["claude-3"]}}},
     )
-    _enable_authorization(monkeypatch, provider)
+    resolver = _enable_authorization(monkeypatch, provider)
 
     app_config = _make_app_config(["gpt-4", "claude-3"])
     monkeypatch.setattr(
@@ -281,7 +287,7 @@ def test_get_model_denied_returns_403(monkeypatch):
         AsyncMock(return_value=_user()),
     )
 
-    with TestClient(_make_models_app(app_config)) as client:
+    with TestClient(_make_models_app(app_config, resolver=resolver)) as client:
         response = client.get("/api/models/gpt-4")
 
     assert response.status_code == 403
@@ -292,7 +298,7 @@ def test_get_model_allowed_returns_200(monkeypatch):
     provider = RbacAuthorizationProvider(
         roles={"user": {"models": {"allow": ["gpt-4", "claude-3"]}}},
     )
-    _enable_authorization(monkeypatch, provider)
+    resolver = _enable_authorization(monkeypatch, provider)
 
     app_config = _make_app_config(["gpt-4", "claude-3"])
     monkeypatch.setattr(
@@ -300,7 +306,7 @@ def test_get_model_allowed_returns_200(monkeypatch):
         AsyncMock(return_value=_user()),
     )
 
-    with TestClient(_make_models_app(app_config)) as client:
+    with TestClient(_make_models_app(app_config, resolver=resolver)) as client:
         response = client.get("/api/models/gpt-4")
 
     assert response.status_code == 200
@@ -314,7 +320,7 @@ def test_get_model_allowed_returns_200(monkeypatch):
 def test_get_model_provider_error_fail_closed_vs_open(monkeypatch, fail_closed, expected_status):
     """Provider error on model:use → 403 (fail-closed) or 200 (fail-open)."""
     provider = _RecordingProvider(errors={"gpt-4"})
-    _enable_authorization(monkeypatch, provider, fail_closed=fail_closed)
+    resolver = _enable_authorization(monkeypatch, provider, fail_closed=fail_closed)
 
     app_config = _make_app_config(["gpt-4"])
     app_config.authorization.fail_closed = fail_closed
@@ -323,7 +329,7 @@ def test_get_model_provider_error_fail_closed_vs_open(monkeypatch, fail_closed, 
         AsyncMock(return_value=_user()),
     )
 
-    with TestClient(_make_models_app(app_config)) as client:
+    with TestClient(_make_models_app(app_config, resolver=resolver)) as client:
         response = client.get("/api/models/gpt-4")
 
     assert response.status_code == expected_status
@@ -350,11 +356,11 @@ def test_get_model_provider_unavailable_fail_closed_vs_open(monkeypatch, fail_cl
     )
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
 
-    # Force provider resolution to raise → _AuthorizationUnavailable.
-    def _boom(_config):
-        raise RuntimeError("provider class path invalid")
-
-    monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", _boom)
+    # Force lifecycle-owned provider resolution to raise →
+    # _AuthorizationUnavailable.
+    class _FailingResolver:
+        def resolve(self, config):
+            raise RuntimeError("provider class path invalid")
 
     app_config = _make_app_config(["gpt-4"])
     app_config.authorization.fail_closed = fail_closed
@@ -363,7 +369,7 @@ def test_get_model_provider_unavailable_fail_closed_vs_open(monkeypatch, fail_cl
         AsyncMock(return_value=_user()),
     )
 
-    with TestClient(_make_models_app(app_config)) as client:
+    with TestClient(_make_models_app(app_config, resolver=_FailingResolver())) as client:
         response = client.get("/api/models/gpt-4")
 
     assert response.status_code == expected_status

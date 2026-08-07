@@ -831,6 +831,11 @@ def build_checkpoint_state_accessor(
 
     if ctx.app_config is not None:
         config.setdefault("context", {})["app_config"] = ctx.app_config
+    authorization_provider = getattr(ctx, "authorization_provider", None)
+    if authorization_provider is not None:
+        from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
+
+        config.setdefault("context", {})[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = authorization_provider
     inject_checkpoint_mode(config, ctx.checkpoint_channel_mode)
 
     agent_factory = resolve_agent_factory(assistant_id)

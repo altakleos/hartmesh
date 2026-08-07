@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, packages_distributions, version
+from itertools import count
 from typing import Any, Literal
 
 from deerflow_extension_api import API_VERSION
@@ -20,6 +22,7 @@ from deerflow.extensions.registry import ExtensionRegistry, LoadedExtensions
 from deerflow.reflection import resolve_variable
 
 logger = logging.getLogger(__name__)
+_extension_generations = count(1)
 
 DiagnosticLevel = Literal["debug", "info", "warning", "error"]
 
@@ -73,6 +76,23 @@ class ExtensionLoadError(RuntimeError):
     """Raised when an extension marked `required: true` fails to load."""
 
 
+def _distribution_provenance(install: object) -> tuple[str | None, str | None]:
+    """Resolve installed distribution provenance without trusting plugin input."""
+    module_name = getattr(install, "__module__", None)
+    if not isinstance(module_name, str) or not module_name:
+        return None, None
+    top_level = module_name.partition(".")[0]
+    candidates = sorted(packages_distributions().get(top_level, ()))
+    if not candidates:
+        return None, None
+    package_name = candidates[0]
+    try:
+        package_version = version(package_name)
+    except PackageNotFoundError:
+        package_version = None
+    return package_name, package_version
+
+
 def _parse_version(version: object) -> tuple[int, ...] | None:
     if not isinstance(version, str):
         return None
@@ -85,8 +105,8 @@ def _parse_version(version: object) -> tuple[int, ...] | None:
 def _compatible(declared: str, current: str) -> bool:
     """One-directional, with the semver window for the contract's life stage.
 
-    Pre-1.0 the contract surface is observational only and minors may break,
-    so the window is same major.minor with patches additive: host >= declared.
+    Pre-1.0 minors may break, so the window is same major.minor with patches
+    additive: host >= declared.
     From 1.0 on contracts only grow within a major, so a newer host stays
     compatible with older extensions while an extension written against a
     newer minor is refused — it would reach for contract additions the host
@@ -183,8 +203,13 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
         # discard-by-source would also erase an earlier, successfully
         # installed instance that happens to share this spec's `use`.
         mark = registry.mark()
+        package_name, package_version = _distribution_provenance(install)
         try:
-            with registry.attributed_to(spec.use):
+            with registry.attributed_to(
+                spec.use,
+                package_name=package_name,
+                package_version=package_version,
+            ):
                 install(registry, _frozen_config(spec.config))
         except Exception as exc:
             registry.rollback_to(mark)
@@ -210,7 +235,7 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
         # every deployment, and an unconditional line would be pure boot noise.
         logger.debug("No extensions configured")
 
-    return registry.build(), diagnostics
+    return registry.build(generation=next(_extension_generations)), diagnostics
 
 
 def _frozen_config(config: dict[str, Any]) -> Mapping[str, Any]:

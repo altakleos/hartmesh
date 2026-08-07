@@ -19,9 +19,9 @@ so the wrapper supplies a silent pass-through counterpart when the inner
 implements only one side; otherwise the base class raises
 ``NotImplementedError`` before isolation can fail open.
 
-All first-version contributions are observational, hence fail-open. A future
-intercepting (decision-making) contribution would need to fail closed and must
-opt out of this wrapper explicitly.
+Middleware contributions are observational, hence fail-open. Authoritative
+capabilities such as ``AuthorizationProviderFactory`` are resolved by their
+host-owned call sites and never pass through this wrapper.
 """
 
 from __future__ import annotations
