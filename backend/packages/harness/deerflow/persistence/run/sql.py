@@ -8,20 +8,29 @@ minutes -- we don't hold connections across long execution.
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.run.model import RunLifecycleCursorStateRow, RunLifecycleEventRow, RunRow
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
+    CancellationRequestOutcome,
+    CancellationRequestResult,
     LeaseRenewal,
+    LifecycleTransition,
+    LifecycleTransitionResult,
+    LifecycleType,
     RunEnsureResult,
     RunStore,
     StatusFinalization,
+    build_lifecycle_payload,
+    lifecycle_owner_scope,
+    lifecycle_type_for_status,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -33,8 +42,213 @@ def _lease_expired_or_null(lease_col, cutoff: datetime):
 
 
 class RunRepository(RunStore):
+    durable_lifecycle = True
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
+
+    async def _begin_lifecycle_write(self, session: AsyncSession) -> None:
+        bind = session.get_bind()
+        if bind.dialect.name == "sqlite":
+            # SQLite has no row-level FOR UPDATE. Acquiring the write lock
+            # before reading the singleton provides the equivalent ordering.
+            await session.execute(text("BEGIN IMMEDIATE"))
+        else:
+            await session.begin()
+
+    async def _lock_cursor_state(self, session: AsyncSession) -> RunLifecycleCursorStateRow:
+        stmt = select(RunLifecycleCursorStateRow).where(RunLifecycleCursorStateRow.singleton_id == 1)
+        if session.get_bind().dialect.name == "postgresql":
+            stmt = stmt.with_for_update()
+        state = (await session.execute(stmt)).scalar_one_or_none()
+        if state is not None:
+            return state
+        event_count = await session.scalar(select(func.count()).select_from(RunLifecycleEventRow))
+        if event_count:
+            raise RuntimeError("lifecycle events exist without cursor singleton; ordering state is corrupt")
+        state = RunLifecycleCursorStateRow(singleton_id=1, last_cursor=0, pruned_through=0)
+        session.add(state)
+        await session.flush()
+        return state
+
+    async def initialize_lifecycle(self) -> None:
+        async with self._sf() as session:
+            await self._begin_lifecycle_write(session)
+            await self._lock_cursor_state(session)
+            await session.commit()
+
+    @staticmethod
+    def _event_to_dict(row: RunLifecycleEventRow) -> dict[str, Any]:
+        return {
+            "event_id": row.event_id,
+            "cursor": row.cursor,
+            "run_id": row.run_id,
+            "thread_id": row.thread_id,
+            "owner_scope": row.owner_scope,
+            "lifecycle_type": LifecycleType(row.lifecycle_type),
+            "state_version": row.state_version,
+            "status": row.status,
+            "created_at": coerce_iso(row.created_at),
+            "payload": row.payload_json,
+        }
+
+    async def _append_lifecycle_event(
+        self,
+        session: AsyncSession,
+        cursor_state: RunLifecycleCursorStateRow,
+        row: RunRow,
+        transition: LifecycleTransition,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> RunLifecycleEventRow:
+        cursor_state.last_cursor += 1
+        event = RunLifecycleEventRow(
+            event_id=str(uuid.uuid4()),
+            cursor=cursor_state.last_cursor,
+            run_id=row.run_id,
+            thread_id=row.thread_id,
+            owner_scope=lifecycle_owner_scope(row.user_id),
+            lifecycle_type=transition.lifecycle_type.value,
+            state_version=row.state_version,
+            status=row.status,
+            created_at=datetime.now(UTC),
+            payload_json=payload if payload is not None else build_lifecycle_payload(transition),
+        )
+        session.add(event)
+        return event
+
+    async def list_lifecycle_events(
+        self,
+        *,
+        run_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        stmt = select(RunLifecycleEventRow)
+        if run_id is not None:
+            stmt = stmt.where(RunLifecycleEventRow.run_id == run_id)
+        if thread_id is not None:
+            stmt = stmt.where(RunLifecycleEventRow.thread_id == thread_id)
+        stmt = stmt.order_by(RunLifecycleEventRow.cursor.asc())
+        async with self._sf() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            return [self._event_to_dict(row) for row in rows]
+
+    async def transition_run_atomic(
+        self,
+        run_id: str,
+        *,
+        expected_state_version: int,
+        expected_statuses: tuple[str, ...] | None,
+        transition: LifecycleTransition,
+        user_id: str | None = None,
+    ) -> LifecycleTransitionResult:
+        payload = build_lifecycle_payload(transition)
+        async with self._sf() as session:
+            await self._begin_lifecycle_write(session)
+            stmt = select(RunRow).where(RunRow.run_id == run_id, RunRow.operation_kind == "run")
+            if user_id is not None:
+                stmt = stmt.where(RunRow.user_id == user_id)
+            if session.get_bind().dialect.name == "postgresql":
+                stmt = stmt.with_for_update()
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                await session.rollback()
+                return LifecycleTransitionResult(applied=False)
+            if row.state_version != expected_state_version or (expected_statuses is not None and row.status not in expected_statuses):
+                result_row = self._row_to_dict(row)
+                await session.rollback()
+                return LifecycleTransitionResult(applied=False, row=result_row)
+            cursor_state = await self._lock_cursor_state(session)
+            row.status = transition.status
+            row.state_version += 1
+            if transition.error is not None:
+                row.error = transition.error
+            if transition.stop_reason is not None:
+                row.stop_reason = transition.stop_reason
+            row.updated_at = datetime.now(UTC)
+            event = await self._append_lifecycle_event(session, cursor_state, row, transition, payload=payload)
+            await session.flush()
+            result_row = self._row_to_dict(row)
+            result_event = self._event_to_dict(event)
+            await session.commit()
+            return LifecycleTransitionResult(applied=True, row=result_row, event=result_event)
+
+    async def request_cancel_fenced(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        expected_state_version: int,
+        user_id: str | None = None,
+    ) -> CancellationRequestResult:
+        return await self._request_cancel_atomic(
+            run_id,
+            action=action,
+            expected_state_version=expected_state_version,
+            user_id=user_id,
+        )
+
+    async def request_cancel_compat(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        user_id: str | None = None,
+    ) -> CancellationRequestResult:
+        return await self._request_cancel_atomic(run_id, action=action, user_id=user_id)
+
+    async def _request_cancel_atomic(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        expected_state_version: int | None = None,
+        user_id: str | None = None,
+    ) -> CancellationRequestResult:
+        if action not in ("interrupt", "rollback"):
+            raise ValueError(f"Unsupported cancellation action: {action}")
+        async with self._sf() as session:
+            await self._begin_lifecycle_write(session)
+            stmt = select(RunRow).where(RunRow.run_id == run_id, RunRow.operation_kind == "run")
+            if user_id is not None:
+                stmt = stmt.where(RunRow.user_id == user_id)
+            if session.get_bind().dialect.name == "postgresql":
+                stmt = stmt.with_for_update()
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                await session.rollback()
+                return CancellationRequestResult(CancellationRequestOutcome.not_found_or_invisible)
+            result_row = self._row_to_dict(row)
+            if row.cancel_action == action:
+                await session.rollback()
+                return CancellationRequestResult(CancellationRequestOutcome.already_requested, row=result_row)
+            if row.status in ("success", "error", "timeout", "interrupted"):
+                await session.rollback()
+                return CancellationRequestResult(CancellationRequestOutcome.already_terminal, row=result_row)
+            if row.cancel_action is not None or (expected_state_version is not None and row.state_version != expected_state_version):
+                await session.rollback()
+                return CancellationRequestResult(CancellationRequestOutcome.stale, row=result_row)
+            cursor_state = await self._lock_cursor_state(session)
+            now = datetime.now(UTC)
+            row.cancel_action = action
+            row.cancel_requested_at = now
+            row.state_version += 1
+            row.updated_at = now
+            transition = LifecycleTransition(
+                lifecycle_type=LifecycleType.cancellation_requested,
+                status=row.status,
+                evidence={"action": action},
+            )
+            event = await self._append_lifecycle_event(session, cursor_state, row, transition)
+            await session.flush()
+            result_row = self._row_to_dict(row)
+            result_event = self._event_to_dict(event)
+            await session.commit()
+            return CancellationRequestResult(
+                CancellationRequestOutcome.requested,
+                row=result_row,
+                event=result_event,
+            )
 
     @staticmethod
     def _normalize_model_name(model_name: str | None) -> str | None:
@@ -133,12 +347,18 @@ class RunRepository(RunStore):
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
+        requested_status = status
+        lifecycle_row = operation_kind == "run" and requested_status is not None
         values = {
             "thread_id": thread_id,
             "assistant_id": assistant_id,
             "user_id": resolved_user_id,
             "model_name": self._normalize_model_name(model_name),
-            "status": status,
+            # Non-pending compatibility snapshots still begin as an accepted
+            # pending invocation and transition to their requested status in
+            # this transaction. ``None`` is reserved for historical-row test
+            # fixtures and remains a version-zero legacy shape.
+            "status": "pending" if lifecycle_row else requested_status,
             "operation_kind": operation_kind,
             "multitask_strategy": multitask_strategy,
             "metadata_json": self._safe_json(metadata) or {},
@@ -164,12 +384,59 @@ class RunRepository(RunStore):
             "updated_at": now,
         }
         async with self._sf() as session:
-            row = await session.get(RunRow, run_id)
+            await self._begin_lifecycle_write(session)
+            row_stmt = select(RunRow).where(RunRow.run_id == run_id)
+            if session.get_bind().dialect.name == "postgresql":
+                row_stmt = row_stmt.with_for_update()
+            row = (await session.execute(row_stmt)).scalar_one_or_none()
             if row is None:
-                session.add(RunRow(run_id=run_id, created_at=created, **values))
+                row = RunRow(
+                    run_id=run_id,
+                    created_at=created,
+                    state_version=1 if lifecycle_row else 0,
+                    **values,
+                )
+                session.add(row)
+                if lifecycle_row:
+                    await session.flush()
+                    cursor_state = await self._lock_cursor_state(session)
+                    await self._append_lifecycle_event(
+                        session,
+                        cursor_state,
+                        row,
+                        LifecycleTransition(
+                            lifecycle_type=LifecycleType.accepted,
+                            status="pending",
+                        ),
+                    )
+                    if requested_status != "pending":
+                        row.status = requested_status
+                        row.state_version += 1
+                        await self._append_lifecycle_event(
+                            session,
+                            cursor_state,
+                            row,
+                            LifecycleTransition(
+                                lifecycle_type=lifecycle_type_for_status(requested_status),
+                                status=requested_status,
+                                error=error,
+                                stop_reason=stop_reason,
+                                reason=stop_reason,
+                            ),
+                        )
             else:
+                # Snapshot repair is idempotent but may not rewrite the
+                # authoritative status/version pair outside a transition.
+                values.pop("status")
+                values.pop("operation_kind", None)
+                if row.operation_kind == "run":
+                    values.pop("error", None)
+                    values.pop("stop_reason", None)
                 for key, value in values.items():
                     setattr(row, key, value)
+                if row.status != requested_status:
+                    if row.operation_kind != "run":
+                        row.status = requested_status
             await session.commit()
 
     async def get(
@@ -276,34 +543,58 @@ class RunRepository(RunStore):
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
 
     async def update_status(self, run_id, status, *, error=None, stop_reason=None) -> bool:
-        values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
-        if error is not None:
-            values["error"] = error
-        if stop_reason is not None:
-            values["stop_reason"] = stop_reason
-        # Guard: only transition rows that are still active. ``interrupted`` is
-        # included because the rollback path goes ``running → interrupted``
-        # (cancel acknowledged) then ``interrupted → error`` (task finalize).
-        # ``error`` and ``success`` remain locked so a peer's takeover (or a
-        # completed run) cannot be overwritten by a late writer.
-        async with self._sf() as session:
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status.in_(("pending", "running", "interrupted"))).values(**values))
-            await session.commit()
-            return result.rowcount != 0
+        current = await self.get(run_id, user_id=None)
+        if current is None:
+            return False
+        if current.get("operation_kind", "run") != "run":
+            values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
+            if error is not None:
+                values["error"] = error
+            if stop_reason is not None:
+                values["stop_reason"] = stop_reason
+            async with self._sf() as session:
+                result = await session.execute(
+                    update(RunRow)
+                    .where(
+                        RunRow.run_id == run_id,
+                        RunRow.operation_kind != "run",
+                        RunRow.status.in_(("pending", "running", "interrupted")),
+                    )
+                    .values(**values)
+                )
+                await session.commit()
+                return result.rowcount != 0
+        lifecycle_type = lifecycle_type_for_status(status)
+        result = await self.transition_run_atomic(
+            run_id,
+            expected_state_version=current["state_version"],
+            expected_statuses=("pending", "running", "interrupted"),
+            transition=LifecycleTransition(
+                lifecycle_type=lifecycle_type,
+                status=status,
+                error=error,
+                stop_reason=stop_reason,
+                reason=stop_reason,
+            ),
+        )
+        return result.applied
 
     async def start_run(self, run_id: str) -> bool:
         """Start only a still-pending run; cancelled rows must not be resurrected."""
-        async with self._sf() as session:
-            result = await session.execute(
-                update(RunRow)
-                .where(
-                    RunRow.run_id == run_id,
-                    RunRow.status == "pending",
-                )
-                .values(status="running", updated_at=datetime.now(UTC))
-            )
-            await session.commit()
-            return result.rowcount != 0
+        current = await self.get(run_id, user_id=None)
+        if current is None:
+            return False
+        if current.get("operation_kind", "run") != "run":
+            return False
+        if current.get("cancel_action") is not None:
+            return False
+        result = await self.transition_run_atomic(
+            run_id,
+            expected_state_version=current["state_version"],
+            expected_statuses=("pending",),
+            transition=LifecycleTransition(lifecycle_type=LifecycleType.started, status="running"),
+        )
+        return result.applied
 
     async def update_model_name(self, run_id, model_name):
         async with self._sf() as session:
@@ -385,8 +676,30 @@ class RunRepository(RunStore):
         Returns ``False`` when the row is missing or already has a conflicting
         terminal outcome.
         """
+        current = await self.get(run_id, user_id=None)
+        if current is None:
+            return False
+        allowed_sources = {"pending", "running", status}
+        if status == "error":
+            allowed_sources.add("interrupted")
+        if current["status"] not in allowed_sources:
+            return False
+        if current["status"] != status and current.get("operation_kind", "run") == "run":
+            lifecycle_type = lifecycle_type_for_status(status)
+            transition_result = await self.transition_run_atomic(
+                run_id,
+                expected_state_version=current["state_version"],
+                expected_statuses=(current["status"],),
+                transition=LifecycleTransition(
+                    lifecycle_type=lifecycle_type,
+                    status=status,
+                    error=error,
+                ),
+            )
+            if not transition_result.applied:
+                return False
+
         values: dict[str, Any] = {
-            "status": status,
             "total_input_tokens": total_input_tokens,
             "total_output_tokens": total_output_tokens,
             "total_tokens": total_tokens,
@@ -404,17 +717,12 @@ class RunRepository(RunStore):
             values["first_human_message"] = first_human_message[:2000]
         if error is not None:
             values["error"] = error
-        allowed_sources = ["pending", "running"]
-        if status not in allowed_sources:
-            allowed_sources.append(status)
-        if status == "error" and "interrupted" not in allowed_sources:
-            allowed_sources.append("interrupted")
         async with self._sf() as session:
             result = await session.execute(
                 update(RunRow)
                 .where(
                     RunRow.run_id == run_id,
-                    RunRow.status.in_(tuple(allowed_sources)),
+                    RunRow.status == status,
                 )
                 .values(**values)
             )
@@ -587,33 +895,14 @@ class RunRepository(RunStore):
         return LeaseRenewal(renewed=True, cancel_action=row.cancel_action)
 
     async def request_cancel(self, run_id: str, *, action: str) -> str | None:
-        """Atomically persist the first cancellation action on an active run."""
-        if action not in ("interrupt", "rollback"):
-            raise ValueError(f"Unsupported cancellation action: {action}")
-        now = datetime.now(UTC)
-        async with self._sf() as session:
-            result = await session.execute(
-                update(RunRow)
-                .where(
-                    RunRow.run_id == run_id,
-                    RunRow.status.in_(("pending", "running")),
-                )
-                .values(
-                    cancel_action=case(
-                        (RunRow.cancel_action.is_(None), action),
-                        else_=RunRow.cancel_action,
-                    ),
-                    cancel_requested_at=case(
-                        (RunRow.cancel_requested_at.is_(None), now),
-                        else_=RunRow.cancel_requested_at,
-                    ),
-                    updated_at=now,
-                )
-                .returning(RunRow.cancel_action)
-            )
-            row = result.first()
-            await session.commit()
-        return row.cancel_action if row is not None else None
+        result = await self.request_cancel_compat(run_id, action=action)
+        if result.outcome in (
+            CancellationRequestOutcome.requested,
+            CancellationRequestOutcome.already_requested,
+            CancellationRequestOutcome.stale,
+        ):
+            return result.row.get("cancel_action") if result.row is not None else None
+        return None
 
     async def finalize_if_not_cancelled(
         self,
@@ -624,37 +913,33 @@ class RunRepository(RunStore):
         stop_reason: str | None = None,
     ) -> StatusFinalization:
         """Atomically let completion win only before cancellation."""
-        values: dict[str, Any] = {
-            "status": status,
-            "updated_at": datetime.now(UTC),
-        }
-        if error is not None:
-            values["error"] = error
-        if stop_reason is not None:
-            values["stop_reason"] = stop_reason
-
-        async with self._sf() as session:
-            result = await session.execute(
-                update(RunRow)
-                .where(
-                    RunRow.run_id == run_id,
-                    RunRow.status.in_(("pending", "running")),
-                    RunRow.cancel_action.is_(None),
-                )
-                .values(**values)
-                .returning(RunRow.run_id)
-            )
-            if result.first() is not None:
-                await session.commit()
-                return StatusFinalization(finalized=True)
-
-            current = await session.execute(select(RunRow.cancel_action).where(RunRow.run_id == run_id))
-            cancel_action = current.scalar_one_or_none()
-            await session.commit()
-            return StatusFinalization(
-                finalized=False,
-                cancel_action=cancel_action,
-            )
+        current = await self.get(run_id, user_id=None)
+        if current is None:
+            return StatusFinalization(finalized=False)
+        if current.get("cancel_action") is not None:
+            return StatusFinalization(finalized=False, cancel_action=current["cancel_action"])
+        if current["status"] not in ("pending", "running"):
+            return StatusFinalization(finalized=False)
+        lifecycle_type = lifecycle_type_for_status(status)
+        result = await self.transition_run_atomic(
+            run_id,
+            expected_state_version=current["state_version"],
+            expected_statuses=("pending", "running"),
+            transition=LifecycleTransition(
+                lifecycle_type=lifecycle_type,
+                status=status,
+                error=error,
+                stop_reason=stop_reason,
+                reason=stop_reason,
+            ),
+        )
+        if result.applied:
+            return StatusFinalization(finalized=True)
+        latest = await self.get(run_id, user_id=None)
+        return StatusFinalization(
+            finalized=False,
+            cancel_action=latest.get("cancel_action") if latest else None,
+        )
 
     async def claim_for_takeover(
         self,
@@ -663,27 +948,50 @@ class RunRepository(RunStore):
         grace_seconds: int,
         error: str,
         stop_reason: str | None = None,
+        expected_state_version: int | None = None,
     ) -> bool:
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
-        values: dict[str, Any] = {
-            "status": "error",
-            "error": error,
-            "updated_at": datetime.now(UTC),
-        }
-        if stop_reason is not None:
-            values["stop_reason"] = stop_reason
         async with self._sf() as session:
-            result = await session.execute(
-                update(RunRow)
-                .where(
-                    RunRow.run_id == run_id,
-                    RunRow.status.in_(("pending", "running")),
-                    _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
-                )
-                .values(**values)
+            await self._begin_lifecycle_write(session)
+            stmt = select(RunRow).where(
+                RunRow.run_id == run_id,
+                RunRow.status.in_(("pending", "running")),
+                _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
             )
+            if session.get_bind().dialect.name == "postgresql":
+                stmt = stmt.with_for_update()
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                await session.rollback()
+                return False
+            if expected_state_version is not None and row.state_version != expected_state_version:
+                await session.rollback()
+                return False
+            if row.operation_kind != "run":
+                row.status = "error"
+                row.error = error
+                if stop_reason is not None:
+                    row.stop_reason = stop_reason
+                row.updated_at = datetime.now(UTC)
+                await session.commit()
+                return True
+            cursor_state = await self._lock_cursor_state(session)
+            row.status = "error"
+            row.state_version += 1
+            row.error = error
+            if stop_reason is not None:
+                row.stop_reason = stop_reason
+            row.updated_at = datetime.now(UTC)
+            transition = LifecycleTransition(
+                lifecycle_type=LifecycleType.failed,
+                status="error",
+                error=error,
+                stop_reason=stop_reason,
+                reason=stop_reason,
+            )
+            await self._append_lifecycle_event(session, cursor_state, row, transition)
             await session.commit()
-            return result.rowcount != 0
+            return True
 
     async def list_inflight_with_expired_lease(
         self,
@@ -789,10 +1097,13 @@ class RunRepository(RunStore):
             "external_key": external_key if operation_kind == "run" else None,
             "request_digest": request_digest if operation_kind == "run" else None,
             "request_digest_version": request_digest_version if operation_kind == "run" else None,
+            "state_version": 1 if operation_kind == "run" else 0,
         }
 
         async with self._sf() as session:
+            await self._begin_lifecycle_write(session)
             claimed: list[dict[str, Any]] = []
+            cursor_state: RunLifecycleCursorStateRow | None = None
 
             if multitask_strategy in ("interrupt", "rollback"):
                 stmt = (
@@ -801,6 +1112,7 @@ class RunRepository(RunStore):
                         RunRow.thread_id == thread_id,
                         RunRow.status.in_(("pending", "running")),
                     )
+                    .order_by(RunRow.created_at.asc(), RunRow.run_id.asc())
                     .with_for_update()
                 )
                 result = await session.execute(stmt)
@@ -828,13 +1140,41 @@ class RunRepository(RunStore):
                             raise ConflictError(f"Thread {thread_id} already has an active run owned by another worker")
                     if row.operation_kind != "run" and not lease_expired:
                         raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
-                    row.status = "interrupted"
-                    row.error = "Cancelled by newer run"
+                    replacement_status = "error" if multitask_strategy == "rollback" else "interrupted"
+                    replacement_error = "Rolled back by user" if multitask_strategy == "rollback" else "Cancelled by newer run"
+                    row.status = replacement_status
+                    row.error = replacement_error
                     row.owner_worker_id = owner_worker_id
                     row.updated_at = now
+                    if row.operation_kind == "run":
+                        if cursor_state is None:
+                            cursor_state = await self._lock_cursor_state(session)
+                        row.state_version += 1
+                        await self._append_lifecycle_event(
+                            session,
+                            cursor_state,
+                            row,
+                            LifecycleTransition(
+                                lifecycle_type=LifecycleType.interrupted,
+                                status=replacement_status,
+                                error=replacement_error,
+                                reason="rollback" if multitask_strategy == "rollback" else "replacement",
+                            ),
+                        )
                     claimed.append(self._row_to_dict(row))
 
-            session.add(RunRow(run_id=run_id, **values))
+            new_run = RunRow(run_id=run_id, **values)
+            session.add(new_run)
+            if operation_kind == "run":
+                await session.flush()
+                if cursor_state is None:
+                    cursor_state = await self._lock_cursor_state(session)
+                await self._append_lifecycle_event(
+                    session,
+                    cursor_state,
+                    new_run,
+                    LifecycleTransition(lifecycle_type=LifecycleType.accepted, status="pending"),
+                )
             await session.commit()
 
             new_row = await session.get(RunRow, run_id)

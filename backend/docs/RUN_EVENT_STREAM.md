@@ -37,6 +37,44 @@ monotonically for their supported deployment modes. JSONL only provides this
 guarantee within one process; shared multi-process deployments must use the
 database store.
 
+## Authoritative Lifecycle Evidence
+
+`RunEventStore` is the rich, callback-derived stream described by the rest of
+this document. It is deliberately separate from the safe authoritative journal
+in `run_lifecycle_events`:
+
+| Lifecycle field | Meaning |
+| --- | --- |
+| `event_id` | Stable event UUID. |
+| `cursor` | Globally ordered committed-transition cursor. |
+| `run_id` / `thread_id` | Normal invocation and bound context identity. |
+| `owner_scope` | Bounded, non-identifying access scope. |
+| `lifecycle_type` | One of `accepted`, `started`, `cancellation_requested`, `cancelled`, `succeeded`, `failed`, `timed_out`, or `interrupted`. |
+| `state_version` / `status` | The exact resulting authoritative `RunRow` version and status. |
+| `payload_json` | Versioned bounded safe reason/evidence references only. |
+
+A new normal `RunRow(operation_kind="run")` commits at `state_version=1`
+with `accepted`. Each successful compare-and-set increments the row version
+once and inserts one lifecycle row in the same transaction; a stale CAS changes
+neither. `RunRow.status` remains authoritative, so this is not event sourcing.
+Historical and auxiliary operation rows use version 0, and checkpoint/artifact
+reservations never emit lifecycle rows.
+
+Global cursor allocation is transaction ordered through the singleton
+`run_lifecycle_cursor_state` row: PostgreSQL writers use `SELECT ... FOR
+UPDATE`; SQLite writers acquire `BEGIN IMMEDIATE` before reading it. A missing
+singleton may be repaired only while no lifecycle event exists. Lifecycle
+events without that singleton are corrupt ordering state and fail Gateway
+initialization.
+
+The lifecycle payload never stores prompts, messages, reasoning, tool payloads,
+credentials, artifact contents, or the rich bodies below. Reasons are selected
+from host-owned safe codes; v1 evidence accepts only the cancellation `action`
+reference (`interrupt` or `rollback`). Lifecycle type/resulting-status pairs are
+validated before a row can change. It currently has no public cursor query or
+feed API. Internal store inspection exists for tests; startup validation checks
+the cursor singleton directly.
+
 ## Categories
 
 `category="message"` means an event is eligible for a message projection; it
@@ -171,8 +209,10 @@ be used by new producers.
   not a first-class event. A missing or timed-out result may have no dedicated
   outcome event.
 - `run.end.metadata.status` is only a root graph completion marker and is
-  always `success`. `RunRow.status` remains authoritative for lifecycle state,
-  and worker loss may leave no terminal event.
+  always `success`. `RunRow.status` remains authoritative for lifecycle state.
+  The separate lifecycle journal records authoritative worker-loss recovery as
+  `failed` with reason `orphan_recovered`; this rich callback stream may still
+  have no matching terminal `run.end`/`run.error` event.
 - Nested non-JSON values in `run.end.content` have backend-dependent
   representations: memory retains Python values, while JSONL and database
   stores read them back as strings.

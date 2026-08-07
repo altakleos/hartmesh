@@ -129,8 +129,12 @@ class TestRunRepository:
 
         row = await repo.get("r1")
         assert row["assistant_id"] == "new-agent"
-        assert row["status"] == "running"
-        assert row["error"] == "retry"
+        # Snapshot retries may refresh non-lifecycle fields, but status,
+        # reason, and version remain owned by the transition primitive.
+        assert row["status"] == "pending"
+        assert row["error"] is None
+        assert row["state_version"] == 1
+        assert len(await repo.list_lifecycle_events(run_id="r1")) == 1
         await _cleanup()
 
     @pytest.mark.anyio

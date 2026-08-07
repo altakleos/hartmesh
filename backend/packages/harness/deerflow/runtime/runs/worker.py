@@ -86,6 +86,7 @@ from deerflow.workspace_changes.types import WorkspaceSnapshot
 from .manager import RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
 from .schemas import RunStatus
+from .store.base import LifecycleType
 
 logger = logging.getLogger(__name__)
 
@@ -663,6 +664,7 @@ async def run_agent(
                 run_id,
                 RunStatus.error,
                 error="Rolled back by user",
+                lifecycle_type=LifecycleType.cancelled,
                 **terminal_status_kwargs,
             )
             if not restore_checkpoint:
@@ -691,6 +693,7 @@ async def run_agent(
             await run_manager.set_status(
                 run_id,
                 RunStatus.interrupted,
+                lifecycle_type=LifecycleType.cancelled,
                 **terminal_status_kwargs,
             )
             logger.info("Run %s was cancelled", run_id)

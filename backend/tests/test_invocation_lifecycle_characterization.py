@@ -217,13 +217,13 @@ async def test_multitask_strategies_preserve_current_active_thread_behavior():
     with pytest.raises(ConflictError, match="already has an active run"):
         await reject_manager.create_or_reject("thread-reject", multitask_strategy="reject")
 
-    for strategy in ("interrupt", "rollback"):
+    for strategy, expected_status in (("interrupt", "interrupted"), ("rollback", "error")):
         store = MemoryRunStore()
         manager = RunManager(store=store)
         previous = await manager.create_or_reject(f"thread-{strategy}")
         replacement = await manager.create_or_reject(f"thread-{strategy}", multitask_strategy=strategy)
 
-        assert (await store.get(previous.run_id))["status"] == "interrupted"
+        assert (await store.get(previous.run_id))["status"] == expected_status
         assert (await store.get(replacement.run_id))["status"] == "pending"
         assert replacement.multitask_strategy == strategy
 

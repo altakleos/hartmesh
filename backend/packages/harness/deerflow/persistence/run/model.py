@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, Index, String, Text, text
+from sqlalchemy import JSON, BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, event, inspect, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql.schema import MetaData
 
 from deerflow.persistence.base import Base
 
@@ -18,6 +20,7 @@ class RunRow(Base):
     assistant_id: Mapped[str | None] = mapped_column(String(128))
     user_id: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     # "pending" | "running" | "success" | "error" | "timeout" | "interrupted"
     operation_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="run", server_default=text("'run'"))
 
@@ -78,6 +81,7 @@ class RunRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     __table_args__ = (
+        CheckConstraint("state_version >= 0", name="ck_runs_state_version_nonnegative"),
         CheckConstraint(
             "(external_scope IS NULL) = (external_key IS NULL)",
             name="ck_runs_external_key_pair",
@@ -132,3 +136,72 @@ class RunRow(Base):
             postgresql_where=text("external_scope IS NOT NULL AND external_key IS NOT NULL"),
         ),
     )
+
+
+class RunLifecycleCursorStateRow(Base):
+    __tablename__ = "run_lifecycle_cursor_state"
+
+    singleton_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    last_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    pruned_through: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+
+    __table_args__ = (
+        CheckConstraint("singleton_id = 1", name="ck_run_lifecycle_cursor_singleton"),
+        CheckConstraint("last_cursor >= 0", name="ck_run_lifecycle_cursor_nonnegative"),
+        CheckConstraint("pruned_through >= 0 AND pruned_through <= last_cursor", name="ck_run_lifecycle_pruned_range"),
+    )
+
+
+class RunLifecycleEventRow(Base):
+    __tablename__ = "run_lifecycle_events"
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    cursor: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("runs.run_id", ondelete="CASCADE"), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_scope: Mapped[str] = mapped_column(String(96), nullable=False)
+    lifecycle_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default=text("'{}'"))
+
+    __table_args__ = (
+        CheckConstraint("cursor > 0", name="ck_run_lifecycle_event_cursor_positive"),
+        CheckConstraint("state_version > 0", name="ck_run_lifecycle_event_version_positive"),
+        CheckConstraint(
+            "lifecycle_type IN ('accepted', 'started', 'cancellation_requested', 'cancelled', 'succeeded', 'failed', 'timed_out', 'interrupted')",
+            name="ck_run_lifecycle_event_type",
+        ),
+        Index("ix_run_lifecycle_events_run_cursor", "run_id", "cursor"),
+        Index("ix_run_lifecycle_events_thread_cursor", "thread_id", "cursor"),
+        Index("ix_run_lifecycle_events_owner_cursor", "owner_scope", "cursor"),
+    )
+
+
+def _seed_lifecycle_cursor_after_create(
+    _target: MetaData,
+    connection: Connection,
+    **_kwargs: object,
+) -> None:
+    """Seed fresh full schemas without repairing corrupt partial schemas."""
+
+    tables = set(inspect(connection).get_table_names())
+    if not {"run_lifecycle_cursor_state", "run_lifecycle_events"} <= tables:
+        # Legacy bootstrap deliberately creates only the baseline table subset.
+        return
+    if connection.scalar(text("SELECT count(*) FROM run_lifecycle_events")):
+        return
+    connection.execute(text("INSERT INTO run_lifecycle_cursor_state (singleton_id, last_cursor, pruned_through) SELECT 1, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM run_lifecycle_cursor_state WHERE singleton_id = 1)"))
+
+
+# Empty-database bootstrap uses ``Base.metadata.create_all`` and stamps the
+# Alembic head, so the singleton seed belongs to ORM metadata as well as the
+# migration. Seed only after all full-schema tables exist, and never repair the
+# ordering state when lifecycle evidence already exists.
+event.listen(Base.metadata, "after_create", _seed_lifecycle_cursor_after_create)
