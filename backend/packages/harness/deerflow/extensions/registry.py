@@ -16,6 +16,8 @@ from deerflow_extension_api import (
     AuthorizationProvider,
     AuthorizationProviderFactory,
     ExtensionData,
+    InvocationConstraintsProvider,
+    InvocationConstraintsProviderFactory,
     MiddlewareContributor,
     OriginContributor,
     OriginContributorFactory,
@@ -29,6 +31,10 @@ _Entry = tuple[str, Any]
 
 class DuplicateAuthorizationProviderFactoryError(ValueError):
     """Raised when more than one authoritative provider factory is registered."""
+
+
+class DuplicateInvocationConstraintsProviderFactoryError(ValueError):
+    """Raised when more than one restrictive constraints factory is registered."""
 
 
 @dataclass(frozen=True)
@@ -67,11 +73,23 @@ class RegisteredRunContextContributorFactory:
 
 
 @dataclass(frozen=True)
+class RegisteredInvocationConstraintsProviderFactory:
+    contribution_id: str
+    capability_api_version: str
+    factory: Callable[[], InvocationConstraintsProvider]
+    kind: Literal["invocation_constraints"]
+    source: str
+    package_name: str | None
+    package_version: str | None
+
+
+@dataclass(frozen=True)
 class _RegistryMark:
     middleware_count: int
     authorization_provider_count: int
     origin_contributor_count: int
     run_context_contributor_count: int
+    invocation_constraints_provider_count: int
 
 
 @dataclass(frozen=True)
@@ -88,6 +106,7 @@ class LoadedExtensions:
     authorization_provider_factories: tuple[RegisteredAuthorizationProviderFactory, ...] = ()
     origin_contributor_factories: tuple[RegisteredOriginContributorFactory, ...] = ()
     run_context_contributor_factories: tuple[RegisteredRunContextContributorFactory, ...] = ()
+    invocation_constraints_provider_factories: tuple[RegisteredInvocationConstraintsProviderFactory, ...] = ()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
     # short-circuit, so the zero-extension path constructs nothing.
@@ -97,6 +116,10 @@ class LoadedExtensions:
     @property
     def authorization_provider_factory(self) -> RegisteredAuthorizationProviderFactory | None:
         return self.authorization_provider_factories[0] if self.authorization_provider_factories else None
+
+    @property
+    def invocation_constraints_provider_factory(self) -> RegisteredInvocationConstraintsProviderFactory | None:
+        return self.invocation_constraints_provider_factories[0] if self.invocation_constraints_provider_factories else None
 
 
 class ExtensionRegistry(ExtensionRegistryContract):
@@ -113,6 +136,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._authorization_providers: list[RegisteredAuthorizationProviderFactory] = []
         self._origin_contributors: list[RegisteredOriginContributorFactory] = []
         self._run_context_contributors: list[RegisteredRunContextContributorFactory] = []
+        self._invocation_constraints_providers: list[RegisteredInvocationConstraintsProviderFactory] = []
         self._current_source: str | None = None
         self._current_package_name: str | None = None
         self._current_package_version: str | None = None
@@ -199,6 +223,24 @@ class ExtensionRegistry(ExtensionRegistryContract):
             )
         )
 
+    def invocation_constraints(self, contribution: InvocationConstraintsProviderFactory) -> None:
+        if not isinstance(contribution, InvocationConstraintsProviderFactory):
+            raise TypeError("invocation_constraints requires InvocationConstraintsProviderFactory")
+        if self._invocation_constraints_providers:
+            existing = self._invocation_constraints_providers[0]
+            raise DuplicateInvocationConstraintsProviderFactoryError(f"invocation constraints provider factory already registered by {existing.source} ({existing.contribution_id}); duplicate {contribution.contribution_id} is not allowed")
+        self._invocation_constraints_providers.append(
+            RegisteredInvocationConstraintsProviderFactory(
+                contribution_id=contribution.contribution_id,
+                capability_api_version=contribution.capability_api_version,
+                factory=contribution.factory,
+                kind=contribution.kind,
+                source=self._source(),
+                package_name=self._current_package_name,
+                package_version=self._current_package_version,
+            )
+        )
+
     def discard(self, source: str) -> None:
         """Remove every entry registered by ``source``.
 
@@ -216,6 +258,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._authorization_providers[:] = [entry for entry in self._authorization_providers if entry.source != source]
         self._origin_contributors[:] = [entry for entry in self._origin_contributors if entry.source != source]
         self._run_context_contributors[:] = [entry for entry in self._run_context_contributors if entry.source != source]
+        self._invocation_constraints_providers[:] = [entry for entry in self._invocation_constraints_providers if entry.source != source]
 
     def mark(self) -> _RegistryMark:
         """Snapshot bucket lengths so one install() can be undone positionally."""
@@ -224,6 +267,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             len(self._authorization_providers),
             len(self._origin_contributors),
             len(self._run_context_contributors),
+            len(self._invocation_constraints_providers),
         )
 
     def rollback_to(self, mark: _RegistryMark) -> None:
@@ -237,6 +281,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         del self._authorization_providers[mark.authorization_provider_count :]
         del self._origin_contributors[mark.origin_contributor_count :]
         del self._run_context_contributors[mark.run_context_contributor_count :]
+        del self._invocation_constraints_providers[mark.invocation_constraints_provider_count :]
 
     def build(self, *, generation: int = 0) -> LoadedExtensions:
         return LoadedExtensions(
@@ -246,6 +291,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             authorization_provider_factories=tuple(self._authorization_providers),
             origin_contributor_factories=tuple(self._origin_contributors),
             run_context_contributor_factories=tuple(self._run_context_contributors),
+            invocation_constraints_provider_factories=tuple(self._invocation_constraints_providers),
             has_middleware_contributors=bool(self._middlewares),
             needs_task_store=bool(self._middlewares),
         )

@@ -4,7 +4,7 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
-Version 0.3.0 owns the authorization contracts `Principal`, `AuthzRequest`,
+Version 0.4.0 owns the authorization contracts `Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthzReason`, and `AuthorizationProvider`. Existing host code may keep
 using `deerflow.authz.provider`; those names are compatibility re-exports of the same
 objects. It also owns the versioned Origin and run-context contributor contracts described
@@ -83,3 +83,28 @@ redacted diagnostics. Operators can make a contribution mandatory in startup-onl
 `[run_context_contributor:<id>]`; missing or initialization-failed requirements stop
 startup, and required invocation-time failure closes that invocation as indeterminate.
 This setting is intentionally absent from API-writable `extensions_config.json`.
+
+## Invocation constraints contribution
+
+A trusted plugin may register the process's single
+`InvocationConstraintsProviderFactory`. Its async provider receives only the canonical
+request digest and pinned agent-revision digest. It returns the strict v1 union:
+`ConstraintProjectionV1`, `ConstraintRejected`, or `ConstraintIndeterminate`. The sole v1
+control is an optional positive `max_total_subagents`; authorization remains the only
+binary permission authority.
+
+The Capability Host calls the provider directly, outside observational fail-open
+middleware, under a host-owned two-second timeout and an injected timezone-aware clock.
+It rejects digest mismatches, naive/future/expired timestamps, validity beyond 15 minutes,
+unknown fields, malformed evidence, and impossible limits. The effective subagent ceiling
+is the lower of the provider projection and the static host ceiling. Registration is
+singular and loader-attributed. Operators may require it only through startup-controlled
+`required_capabilities: [invocation_constraints.v1]`; the API-writable extension config
+cannot activate or require trusted constraint code.
+
+The accepted run persists only the normalized projection and safe evidence ID/digest.
+Workers validate the accepted binding and freshness before graph construction and again
+immediately before the first graph stream. One invocation-scoped, concurrency-safe
+reservation counter is shared by lead and delegated subagents and reserves before every
+dispatch; retries with the same dispatch ID do not consume the ceiling twice. Token
+budgets remain post-response guards and are not advertised as exact constraints.

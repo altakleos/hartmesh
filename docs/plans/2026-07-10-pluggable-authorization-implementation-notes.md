@@ -404,6 +404,35 @@ Phase 1 最低验证要求：
   admission、status 与 HTTP 行为。
 - **延期：** constraints、readiness/manifest、public runtime API、policy cache。
 
+### 2026-08-07 — Invocation constraints v1
+
+- **背景：** durable invocation 已有可信 accepted facts、start authorization、幂等 admission
+  与原子 lifecycle，但尚无一个只做收窄、并在执行前精确落地的 constraints capability。
+- **决策（契约与 host）：** `deerflow-extension-api==0.4.0` 新增单数 async
+  `InvocationConstraintsProvider` 及强类型 factory。v1 只允许短时、绑定 request/agent-revision
+  digest 的 `max_total_subagents`；Gateway 使用 host clock 与两秒 timeout 直接调用，不经过
+  观测型 `IsolatedMiddleware`。`invocation_constraints.v1` 只能由 operator 的
+  `required_capabilities` 要求，不能由 `extensions_config.json` 启用。
+- **决策（顺序与 replay）：** fresh invocation 在 start authorization allow 后、atomic
+  admission 前投影；reject → denied，timeout/exception/malformed/不可执行 → indeterminate，均不
+  创建 `RunRow`。有效 ceiling 与 host static ceiling 取较小值并把规范化安全 evidence 封入
+  accepted invocation。known replay 不重跑 provider，也不因 projection 过期创建第二次执行。
+- **决策（执行 fence）：** worker 在 pinned agent digest 比较之后、graph factory 之前验证
+  binding/freshness，并在第一次 `astream` 前再次验证。非过期 evidence 错误使用
+  `constraint_evidence_mismatch`，过期使用 `constraint_expired_before_start`，两者都在 model/tool
+  work 前终止。
+- **决策（精确 subagent ceiling）：** 每个 invocation 创建一个并发安全 reservation counter，
+  lead 与 delegated subagent 共享同一对象；`task` dispatch 用稳定 tool-call ID 在 dispatch 前
+  reserve，同 ID retry 不重复计数，超限 dispatch 被拒。现有 `TokenBudgetMiddleware` 与 delegation
+  ledger 仍是事后/观测 guard，不宣称 exact constraint。
+- **证据：** `tests/test_invocation_constraints_contracts.py`、
+  `tests/test_invocation_constraint_enforcement.py`，并回归 invocation authorization/lifecycle。
+- **否决方案：** 未新增第二个 permission provider、通用 obligation language、token/resource/
+  model/tool/deadline 字段、runtime HTTP API、readiness 或 MCP 改动。
+- **兼容性：** 未注册 provider 时完全保持既有 admission/worker 行为；optional provider
+  初始化失败只产生有界 startup diagnostic。
+- **延期：** readiness/manifest、其他 constraint 类型与 exact token ceiling。
+
 ### 新记录模板
 
 ```markdown

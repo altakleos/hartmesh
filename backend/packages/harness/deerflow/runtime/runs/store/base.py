@@ -21,6 +21,8 @@ from typing import Any
 _LIFECYCLE_EVIDENCE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 _LIFECYCLE_SAFE_REASONS = {
     "agent_revision_drift",
+    "constraint_evidence_mismatch",
+    "constraint_expired_before_start",
     "loop_capped",
     "model_length_capped",
     "orphan_recovered",

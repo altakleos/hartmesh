@@ -22,6 +22,7 @@ from deerflow.extensions.registry import LoadedExtensions
 
 _TIMEOUT_SECONDS = 2.0
 _SUPPORTED_REQUIRED_KINDS = frozenset({"origin_contributor", "run_context_contributor"})
+_PASSTHROUGH_REQUIRED_CAPABILITIES = frozenset({"invocation_constraints.v1"})
 
 
 class RequiredCapabilityError(RuntimeError):
@@ -85,15 +86,18 @@ class ContributorHost:
         if len(required) != len(set(required)):
             raise RequiredCapabilityError("required_capabilities contains a duplicate capability ID")
         for capability_id in required:
+            if capability_id in _PASSTHROUGH_REQUIRED_CAPABILITIES:
+                continue
             kind, separator, contribution_id = capability_id.partition(":")
             if separator != ":" or kind not in _SUPPORTED_REQUIRED_KINDS or not contribution_id:
                 raise RequiredCapabilityError(f"unsupported required capability {capability_id!r}")
         required_set = frozenset(required)
+        contributor_required = required_set - _PASSTHROUGH_REQUIRED_CAPABILITIES
         available = {
             *(f"origin_contributor:{item.contribution_id}" for item in extensions.origin_contributor_factories),
             *(f"run_context_contributor:{item.contribution_id}" for item in extensions.run_context_contributor_factories),
         }
-        missing = sorted(required_set - available)
+        missing = sorted(contributor_required - available)
         if missing:
             raise RequiredCapabilityError(f"required capability is not registered: {missing[0]}")
 
@@ -101,13 +105,13 @@ class ContributorHost:
         self._origin = self._initialize(
             "origin_contributor",
             extensions.origin_contributor_factories,
-            required_set,
+            contributor_required,
             diagnostics,
         )
         self._run_context = self._initialize(
             "run_context_contributor",
             extensions.run_context_contributor_factories,
-            required_set,
+            contributor_required,
             diagnostics,
         )
         self.startup_diagnostics = tuple(diagnostics)

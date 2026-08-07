@@ -9,6 +9,8 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Literal, Protocol
 
+from deerflow_extension_api import ConstraintProjectionV1
+
 from deerflow.runtime import CancelOutcome, DisconnectMode, RunRecord
 from deerflow.runtime.accepted_invocation import AcceptedInvocation
 from deerflow.runtime.runs.store.base import AdmissionOutcome
@@ -135,6 +137,61 @@ class InvocationAuthorizationOutcome(StrEnum):
     indeterminate = "indeterminate"
 
 
+class InvocationConstraintOutcome(StrEnum):
+    """Finite restrictive-projection outcomes."""
+
+    allowed = "allowed"
+    denied = "denied"
+    indeterminate = "indeterminate"
+
+
+def _constraint_projection_evidence(projection: ConstraintProjectionV1) -> dict[str, Any]:
+    from deerflow.runtime.accepted_invocation import canonical_digest
+
+    normalized = {
+        "version": 1,
+        "request_digest": projection.request_digest,
+        "agent_revision_digest": projection.agent_revision_digest,
+        "projection_revision": projection.projection_revision,
+        "issued_at": projection.issued_at.isoformat(),
+        "valid_until": projection.valid_until.isoformat(),
+        "evidence_id": projection.evidence_id,
+        "evidence_digest": projection.evidence_digest,
+        "max_total_subagents": projection.max_total_subagents,
+    }
+    normalized["projection_digest"] = canonical_digest(normalized)
+    return {"version": 1, "constraints": normalized}
+
+
+@dataclass(frozen=True)
+class InternalConstraintDecision:
+    outcome: InvocationConstraintOutcome
+    evidence: dict[str, Any] | None = None
+
+    @classmethod
+    def absent(cls) -> InternalConstraintDecision:
+        return cls(InvocationConstraintOutcome.allowed)
+
+    @classmethod
+    def projected(cls, projection: ConstraintProjectionV1) -> InternalConstraintDecision:
+        return cls(
+            InvocationConstraintOutcome.allowed,
+            evidence=_constraint_projection_evidence(projection),
+        )
+
+    @classmethod
+    def projected_evidence(cls, evidence: dict[str, Any]) -> InternalConstraintDecision:
+        return cls(InvocationConstraintOutcome.allowed, evidence=evidence)
+
+    @classmethod
+    def denied(cls) -> InternalConstraintDecision:
+        return cls(InvocationConstraintOutcome.denied)
+
+    @classmethod
+    def indeterminate(cls) -> InternalConstraintDecision:
+        return cls(InvocationConstraintOutcome.indeterminate)
+
+
 @dataclass(frozen=True)
 class InternalAuthorizationDecision:
     """Host-owned authorization result and optional safe persisted evidence."""
@@ -228,6 +285,10 @@ class InvocationAuthorization(Protocol):
     ) -> InternalAuthorizationDecision: ...
 
 
+class InvocationConstraints(Protocol):
+    async def project(self, launch: PreparedLaunch) -> InternalConstraintDecision: ...
+
+
 class _DisabledInvocationAuthorization:
     async def authorize_start(self, _launch: PreparedLaunch) -> InternalAuthorizationDecision:
         return InternalAuthorizationDecision.allowed()
@@ -249,6 +310,30 @@ class _DisabledInvocationAuthorization:
         return InternalAuthorizationDecision.allowed()
 
 
+class _AbsentInvocationConstraints:
+    async def project(self, _launch: PreparedLaunch) -> InternalConstraintDecision:
+        return InternalConstraintDecision.absent()
+
+
+def _merge_decision_evidence(
+    accepted: AcceptedInvocation,
+    evidence: dict[str, Any] | None,
+) -> AcceptedInvocation:
+    if evidence is None:
+        return accepted
+    current = dict(accepted.decision_evidence)
+    incoming = dict(evidence)
+    current_decisions = list(current.pop("decisions", ()) or ())
+    incoming_decisions = list(incoming.pop("decisions", ()) or ())
+    merged = {
+        "version": 1,
+        "decisions": [*current_decisions, *incoming_decisions],
+        **current,
+        **incoming,
+    }
+    return replace(accepted, decision_evidence=merged)
+
+
 class InvocationRuntime:
     """Deep application module for launch, observation, and cancellation."""
 
@@ -258,11 +343,13 @@ class InvocationRuntime:
         normalizer: LaunchNormalizer,
         runs: DurableRuns,
         authorization: InvocationAuthorization | None = None,
+        constraints: InvocationConstraints | None = None,
         task_factory: TaskFactory = asyncio.create_task,
     ) -> None:
         self._normalizer = normalizer
         self._runs = runs
         self._authorization = authorization or _DisabledInvocationAuthorization()
+        self._constraints = constraints or _AbsentInvocationConstraints()
         self._task_factory = task_factory
 
     @staticmethod
@@ -304,9 +391,22 @@ class InvocationRuntime:
             if start_decision.evidence is not None and launch.accepted_invocation is not None:
                 launch = replace(
                     launch,
-                    accepted_invocation=replace(
+                    accepted_invocation=_merge_decision_evidence(
                         launch.accepted_invocation,
-                        decision_evidence=start_decision.evidence,
+                        start_decision.evidence,
+                    ),
+                )
+            constraint_decision = await self._constraints.project(launch)
+            if constraint_decision.outcome is InvocationConstraintOutcome.denied:
+                return InvocationAuthorizationOutcome.denied
+            if constraint_decision.outcome is InvocationConstraintOutcome.indeterminate:
+                return InvocationAuthorizationOutcome.indeterminate
+            if constraint_decision.evidence is not None and launch.accepted_invocation is not None:
+                launch = replace(
+                    launch,
+                    accepted_invocation=_merge_decision_evidence(
+                        launch.accepted_invocation,
+                        constraint_decision.evidence,
                     ),
                 )
             async with self._runs.admission_scope(launch.thread_id):

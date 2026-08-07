@@ -15,6 +15,7 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from deerflow_extension_api import ConstraintProjectionV1
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.callbacks.base import BaseCallbackManager
@@ -29,6 +30,7 @@ from deerflow.authz.provider import AuthorizationProvider
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.runtime.constraints import InvocationSubagentReservation
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -455,6 +457,9 @@ class SubagentExecutor:
         deerflow_trace_id: str | None = None,
         extensions: Any | None = None,
         authorization_provider: AuthorizationProvider | None = None,
+        invocation_constraints: ConstraintProjectionV1 | None = None,
+        subagent_reservation: InvocationSubagentReservation | None = None,
+        accepted_extension_generation: int | None = None,
     ):
         """Initialize the executor.
 
@@ -484,6 +489,10 @@ class SubagentExecutor:
                 standalone LangGraph Server), ``_aexecute`` falls back to the
                 process-wide singleton.
             authorization_provider: The parent run's resolved provider instance.
+            invocation_constraints: The accepted immutable constraint projection.
+            subagent_reservation: The invocation-scoped exact dispatch counter.
+            accepted_extension_generation: The immutable extension generation
+                accepted for the parent invocation.
         """
         self.config = config
         self.app_config = app_config
@@ -523,6 +532,9 @@ class SubagentExecutor:
         # generation underneath the delegated work.
         self.extensions = extensions
         self.authorization_provider = authorization_provider
+        self.invocation_constraints = invocation_constraints
+        self.subagent_reservation = subagent_reservation
+        self.accepted_extension_generation = accepted_extension_generation
 
         self._base_tools = _filter_tools(
             tools,
@@ -915,6 +927,16 @@ class SubagentExecutor:
             if self.deerflow_trace_id:
                 context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
             context["is_subagent"] = True
+            if self.invocation_constraints is not None:
+                from deerflow.runtime.constraints import INVOCATION_CONSTRAINTS_CONTEXT_KEY
+
+                context[INVOCATION_CONSTRAINTS_CONTEXT_KEY] = self.invocation_constraints
+            if self.subagent_reservation is not None:
+                from deerflow.runtime.constraints import SUBAGENT_RESERVATION_CONTEXT_KEY
+
+                context[SUBAGENT_RESERVATION_CONTEXT_KEY] = self.subagent_reservation
+            if self.accepted_extension_generation is not None:
+                context["accepted_extension_generation"] = self.accepted_extension_generation
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 

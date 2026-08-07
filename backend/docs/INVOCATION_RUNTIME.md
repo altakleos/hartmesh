@@ -85,6 +85,40 @@ contributors. A concurrent admission loser repeats visibility, observe authoriza
 digest comparison; only the creator attaches a worker. Invocation checks resolve through the
 same provider snapshot used by route, resource, tool, model, skill, and agent assembly paths.
 
+## Restrictive invocation constraints
+
+`deerflow-extension-api` 0.4.0 defines one optional, singular
+`InvocationConstraintsProvider`. Gateway invokes it only for a genuinely absent invocation,
+after invocation-start authorization allows and before atomic acceptance. The request binds
+the canonical request digest and pinned agent-revision digest. The strict v1 projection may
+only provide a positive `max_total_subagents`, short-lived evidence timestamps/revision, and
+safe evidence ID/digest. Authorization remains the sole binary permission authority.
+
+The Capability Host runs the provider directly—not through observational fail-open
+middleware—with its own two-second timeout and timezone-aware clock. It rejects unknown
+fields, malformed/binding evidence, future skew beyond 30 seconds, expired or over-15-minute
+projections, and ceilings the active runtime cannot enforce. A provider rejection is denied;
+timeout, exception, malformed output, or uncertainty is indeterminate. Either outcome stops
+before row creation and graph/model/tool work. Optional provider absence preserves existing
+behavior. Operators can make the provider startup-required only with
+`required_capabilities: [invocation_constraints.v1]` in `config.yaml`.
+
+An allowed projection is intersected with the static host ceiling and only that normalized
+effective projection is persisted in `decision_evidence_json`. A visible matching known
+invocation bypasses projection and reuses the stored result, even after it expires; expiry
+never creates a second execution under the same key. The worker checks the stored request,
+revision, and evidence binding plus freshness before graph construction, then checks
+freshness again immediately before the first graph `astream`. Non-expiry evidence failures
+end the run with `constraint_evidence_mismatch`; queue/pre-stream expiry uses
+`constraint_expired_before_start`; both occur with zero graph/model work.
+
+For `max_total_subagents`, the worker installs one invocation-scoped, concurrency-safe
+reservation counter into the lead runtime. The task tool reserves a stable tool-call ID
+immediately before each dispatch, shares that same object with delegated subagents, rejects
+the dispatch that would exceed the limit, and does not double-count a retry of an already
+reserved ID. The existing token-budget and delegation-ledger middleware remain useful
+observational/post-response guards, but neither is advertised as this exact boundary.
+
 ## Atomic idempotent admission
 
 A normal `RunRow` is both the accepted invocation and the executable run; auxiliary thread

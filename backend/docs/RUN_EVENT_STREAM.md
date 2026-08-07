@@ -73,7 +73,9 @@ from host-owned safe codes; v1 evidence accepts only the cancellation `action`
 reference (`interrupt` or `rollback`). Lifecycle type/resulting-status pairs are
 validated before a row can change. It currently has no public cursor query or
 feed API. Internal store inspection exists for tests; startup validation checks
-the cursor singleton directly.
+the cursor singleton directly. Constraint-fence failures use the safe reason
+`constraint_evidence_mismatch` or `constraint_expired_before_start` and map to
+the ordinary `failed` lifecycle type; they do not add lifecycle vocabulary.
 
 ## Categories
 
