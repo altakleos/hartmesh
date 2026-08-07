@@ -212,6 +212,23 @@ def test_empty_data_when_no_messages():
     assert body["has_more"] is False
 
 
+def test_disabled_invocation_observe_preserves_unknown_run_feed_compatibility():
+    """Without the opt-in, an unknown run keeps the legacy empty feed response."""
+    run_manager = AsyncMock()
+    run_manager.get.return_value = None
+    app = _make_app(
+        event_store=_make_event_store([]),
+        run_manager=run_manager,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-missing/runs/run-missing/messages")
+
+    assert response.status_code == 200
+    assert response.json() == {"data": [], "has_more": False}
+    run_manager.get.assert_not_awaited()
+
+
 def test_get_run_hydrates_store_only_run():
     """GET /api/threads/{tid}/runs/{rid} should read historical store rows."""
     app = _make_app(run_manager=_make_store_only_run_manager())

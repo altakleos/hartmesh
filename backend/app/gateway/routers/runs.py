@@ -13,11 +13,20 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import build_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
-from deerflow.runtime import serialize_channel_values_for_api
+from app.gateway.services import (
+    build_checkpoint_state_accessor,
+    build_invocation_runtime,
+    invocation_principal_from_request,
+    raise_for_invocation_authorization,
+    sse_consumer,
+    start_run,
+    wait_for_run_completion,
+)
+from app.runtime import NotFoundOrInvisible
+from deerflow.runtime import RunRecord, serialize_channel_values_for_api
 from deerflow.utils.thread_id import resolve_thread_id
 
 logger = logging.getLogger(__name__)
@@ -108,13 +117,19 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_run(run_id: str, request: Request) -> dict:
+async def _resolve_run(run_id: str, request: Request) -> RunRecord:
     """Fetch run by run_id with user ownership check. Raises 404 if not found."""
-    run_store = get_run_store(request)
-    record = await run_store.get(run_id)  # user_id=AUTO filters by contextvar
-    if record is None:
+    result = await build_invocation_runtime(request).observe_run(
+        run_id,
+        invocation_principal_from_request(
+            request,
+            user_id=await get_current_user(request),
+        ),
+    )
+    raise_for_invocation_authorization(result, operation="observe")
+    if result is NotFoundOrInvisible.not_found_or_invisible:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    return record
+    return result
 
 
 @router.get("/{run_id}/messages")
@@ -138,7 +153,7 @@ async def run_messages(
     run = await _resolve_run(run_id, request)
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
-        run["thread_id"],
+        run.thread_id,
         run_id,
         limit=limit + 1,
         before_seq=before_seq,
@@ -154,4 +169,4 @@ async def run_feedback(run_id: str, request: Request) -> list[dict]:
     """Return all feedback for a run."""
     run = await _resolve_run(run_id, request)
     feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.list_by_run(run["thread_id"], run_id)
+    return await feedback_repo.list_by_run(run.thread_id, run_id)

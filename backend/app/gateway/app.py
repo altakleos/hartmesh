@@ -656,10 +656,17 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         loaded_extensions,
         construction_authorization,
     )
+    from app.runtime.authorization import validate_invocation_authorization_startup
+
+    validate_invocation_authorization_startup(
+        construction_authorization,
+        authorization_provider_resolver.snapshot(),
+    )
     set_loaded_extensions(loaded_extensions)
     app.state.extensions = loaded_extensions
     app.state.extension_diagnostics = initialize_runtime_diagnostics(extension_diagnostics)
     app.state.authorization_provider_resolver = authorization_provider_resolver
+    app.state.invocation_authorization_config = construction_authorization.invocation_operations.model_copy(deep=True)
     app.state.contributor_host = contributor_host
 
     # Include routers

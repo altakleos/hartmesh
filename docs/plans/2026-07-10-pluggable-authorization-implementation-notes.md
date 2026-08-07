@@ -376,6 +376,34 @@ Phase 1 最低验证要求：
 - **延期：** invocation start/observe/cancel decisions、Origin/run-context contributors、accepted
   invocation persistence、constraints、MCP behavior/readiness。两个 generation 均不写入 run。
 
+### 2026-08-07 — Durable invocation start / observe / cancel authorization
+
+- **背景：** Capability Host 已统一 provider identity，durable runtime 也已有 accepted facts、
+  幂等 admission 与原子 lifecycle transition，但 invocation 操作仍只依赖 route/owner gate；
+  provider 无法基于 sealed Origin、agent revision 或当前 run 状态做决定。
+- **决策（配置与 lifetime）：** 新增仅来自操作者 `config.yaml`、Gateway 启动时快照的
+  `authorization.invocation_operations`。三个开关默认 false；任一启用都要求
+  `authorization.enabled=true` 和 resolver 中恰好一个已初始化 provider。开关不进入 legacy
+  provider 热更新 signature，避免 startup-only 变化制造新的 provider instance/generation。
+- **决策（顺序）：** fresh start 在 principal/Origin/context、canonical request digest 与 agent
+  revision 封存后、durable admission 前调用 `invocation:start`。observe/cancel 先执行既有可见性，
+  再分别调用 `invocation:observe` / `invocation:cancel`；context feed 每个请求只决策一次。
+  cancel 决策先于原子 receipt/CAS。unknown/invisible 不调用 policy。
+- **决策（幂等 replay）：** known key 跳过 start，fresh observe 后使用已存 accepted evidence
+  比较 digest；race loser 也重复 visibility/observe/digest，且只有 creator attach worker。
+- **失败与证据：** deny 与 indeterminate（timeout/exception/malformed/unavailable）均在操作边界
+  fail closed。allowed start 在既有 `decision_evidence_json` 中仅保存有界 generation、policy ID、
+  reason codes 与 evidence digest；不保存 metadata、message、claim。observe/cancel 不缓存。
+- **证据：** `tests/test_invocation_start_authorization.py`、
+  `tests/test_invocation_idempotency.py`、`tests/test_invocation_lifecycle_transitions.py`，以及
+  Gateway run/feed compatibility tests。
+- **否决方案：** 未新增第二个可配置 policy/provider 或 constraints；未把 caller metadata
+  合并进 policy context；未对 known replay 重跑 start/contributors；未让开关从
+  `extensions_config.json` 热启用。
+- **兼容性：** 三个开关全 false 时不解析或调用 invocation provider，保留既有 owner/route、
+  admission、status 与 HTTP 行为。
+- **延期：** constraints、readiness/manifest、public runtime API、policy cache。
+
 ### 新记录模板
 
 ```markdown

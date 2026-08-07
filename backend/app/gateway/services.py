@@ -38,6 +38,7 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
+from app.runtime.authorization import ProviderInvocationAuthorization
 from app.runtime.idempotency import (
     REQUEST_DIGEST_VERSION,
     SYSTEM_TASK_OWNER,
@@ -55,8 +56,10 @@ from app.runtime.invocation import (
     InternalLaunchIntent,
     InternalNativeChannelFacts,
     InternalSourceKind,
+    InvocationAuthorizationOutcome,
     InvocationPrincipal,
     InvocationRuntime,
+    NotFoundOrInvisible,
     PreparedLaunch,
 )
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
@@ -115,6 +118,44 @@ from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
+
+
+def _invocation_principal_from_projection(
+    principal: PrincipalProjection,
+    *,
+    visibility_prevalidated: bool = False,
+) -> InvocationPrincipal:
+    return InvocationPrincipal(
+        user_id=principal.user_id,
+        role=principal.role,
+        oauth_provider=principal.oauth_provider,
+        oauth_id=principal.oauth_id,
+        channel_user_id=principal.channel_user_id,
+        is_internal=principal.is_internal,
+        visibility_prevalidated=visibility_prevalidated,
+    )
+
+
+def invocation_principal_from_request(
+    request: Request,
+    *,
+    user_id: str | None = None,
+    visibility_prevalidated: bool = False,
+) -> InvocationPrincipal:
+    """Project the authenticated request principal for runtime authorization."""
+    user = getattr(getattr(request, "state", None), "user", None)
+    resolved_user_id = user_id if user_id is not None else getattr(user, "id", None)
+    auth_source = getattr(getattr(request, "state", None), "auth_source", None)
+    if resolved_user_id is None and auth_source == AUTH_SOURCE_AUTH_DISABLED:
+        resolved_user_id = AUTH_DISABLED_USER_ID
+    return InvocationPrincipal(
+        user_id=str(resolved_user_id) if resolved_user_id is not None else None,
+        role=getattr(user, "system_role", None),
+        oauth_provider=getattr(user, "oauth_provider", None),
+        oauth_id=getattr(user, "oauth_id", None),
+        is_internal=getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE,
+        visibility_prevalidated=visibility_prevalidated,
+    )
 
 
 @asynccontextmanager
@@ -1661,6 +1702,7 @@ class _GatewayLaunchNormalizer:
             thread_id=intent.thread_id if intent.thread_id_explicit else None,
             requested_agent_id=_requested_agent_id(intent),
             user_id=principal.user_id,
+            principal=_invocation_principal_from_projection(principal),
         )
         # Retain the intent object alongside its identity: a strong reference
         # prevents Python from recycling the object ID before normalization.
@@ -1809,16 +1851,16 @@ class _GatewayLaunchNormalizer:
             owner_user_id=owner_user_id,
             run_ctx=run_ctx,
         )
-        request_projection: dict[str, Any] | None = None
-        request_digest: str | None = None
-        if identity is not None:
-            request_projection = _request_projection(
-                intent,
-                accepted=accepted_invocation,
-                graph_input=graph_input,
-                config=config,
-            )
-            request_digest = canonical_request_digest(request_projection)
+        # Start authorization receives a canonical digest for every launch,
+        # including unkeyed calls. Only keyed admission persists the internal
+        # projection and uses it for replay comparison.
+        request_projection = _request_projection(
+            intent,
+            accepted=accepted_invocation,
+            graph_input=graph_input,
+            config=config,
+        )
+        request_digest = canonical_request_digest(request_projection)
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
@@ -1898,7 +1940,7 @@ class _GatewayLaunchNormalizer:
                 # secret-redacted config while retaining live secrets above.
                 "input": intent.input,
                 "config": redact_config_secrets(intent.config),
-                **({_IDEMPOTENCY_PROJECTION_KEY: request_projection} if request_projection is not None else {}),
+                **({_IDEMPOTENCY_PROJECTION_KEY: request_projection} if identity is not None else {}),
             },
             multitask_strategy=intent.multitask_strategy,
             model_name=model_name,
@@ -1908,7 +1950,8 @@ class _GatewayLaunchNormalizer:
             external_scope=identity.external_scope if identity is not None else None,
             external_key=identity.external_key if identity is not None else None,
             request_digest=request_digest,
-            request_digest_version=(REQUEST_DIGEST_VERSION if identity is not None else None),
+            request_digest_version=REQUEST_DIGEST_VERSION,
+            principal=_invocation_principal_from_projection(accepted_invocation.principal),
         )
 
 
@@ -1982,10 +2025,17 @@ class _GatewayDurableRuns:
         run_id: str,
         principal: InvocationPrincipal,
     ) -> RunRecord | None:
-        return await get_run_manager(self._request).get(
+        record = await get_run_manager(self._request).get(
             run_id,
-            user_id=principal.user_id,
+            user_id=None if principal.visibility_prevalidated else principal.user_id,
         )
+        # RunManager applies ``user_id`` while hydrating from its durable
+        # store, but an already-local record is returned before that store
+        # filter runs. Recheck the owner here for facades that have not
+        # already completed a route/thread visibility decision.
+        if record is not None and not principal.visibility_prevalidated and principal.user_id is not None and record.user_id != principal.user_id:
+            return None
+        return record
 
     async def cancel(self, cancel_request: InternalCancelRequest) -> CancelOutcome:
         return await get_run_manager(self._request).cancel(
@@ -1994,11 +2044,64 @@ class _GatewayDurableRuns:
         )
 
 
+def _build_invocation_authorization(request: Any) -> ProviderInvocationAuthorization:
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    settings = getattr(app_state, "invocation_authorization_config", None)
+    if settings is None:
+        from deerflow.config.authorization_config import InvocationOperationsAuthorizationConfig
+
+        settings = InvocationOperationsAuthorizationConfig()
+    resolver = getattr(app_state, "authorization_provider_resolver", None)
+
+    def resolve():
+        if resolver is None:
+            raise RuntimeError("Gateway authorization provider resolver is unavailable")
+        return resolver.resolve(get_app_config().authorization)
+
+    return ProviderInvocationAuthorization(settings, resolve)
+
+
+def raise_for_invocation_authorization(
+    result: Any,
+    *,
+    operation: str,
+) -> None:
+    """Translate finite internal authorization failures at the HTTP facade."""
+    if result is InvocationAuthorizationOutcome.denied:
+        raise HTTPException(status_code=403, detail=f"Invocation {operation} denied")
+    if result is InvocationAuthorizationOutcome.indeterminate:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Invocation {operation} authorization indeterminate",
+        )
+
+
+def invocation_observation_enabled(request: Any) -> bool:
+    """Return the Gateway's startup-snapshotted observe opt-in."""
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    settings = getattr(app_state, "invocation_authorization_config", None)
+    return settings is not None and settings.observe_enabled is True
+
+
+async def authorize_context_observation(
+    request: Request,
+    thread_id: str,
+    principal: InvocationPrincipal,
+) -> None:
+    """Authorize one already-visible context feed with the coherent provider."""
+    decision = await _build_invocation_authorization(request).authorize_context_observe(
+        thread_id,
+        principal,
+    )
+    raise_for_invocation_authorization(decision.outcome, operation="observe")
+
+
 def build_invocation_runtime(request: Request) -> InvocationRuntime:
     """Construct a request-scoped runtime from typed Gateway adapters."""
     return InvocationRuntime(
         normalizer=_GatewayLaunchNormalizer(request),
         runs=_GatewayDurableRuns(request),
+        authorization=_build_invocation_authorization(request),
     )
 
 
@@ -2019,6 +2122,7 @@ def build_scheduled_invocation_runtime(app: Any) -> InvocationRuntime:
             trust_internal_launch_facts=True,
         ),
         runs=_GatewayDurableRuns(request),
+        authorization=_build_invocation_authorization(request),
     )
 
 
@@ -2039,6 +2143,7 @@ def build_channel_invocation_runtime(app: Any) -> InvocationRuntime:
             trust_internal_launch_facts=True,
         ),
         runs=_GatewayDurableRuns(request),
+        authorization=_build_invocation_authorization(request),
     )
 
 
@@ -2100,6 +2205,9 @@ async def start_run(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except UnsupportedStrategyError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
+    raise_for_invocation_authorization(receipt, operation="start")
+    if receipt is NotFoundOrInvisible.not_found_or_invisible:
+        raise HTTPException(status_code=404, detail="Invocation not found")
     return receipt.record
 
 

@@ -433,6 +433,31 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 - 本地文件路径必须通过 `Paths` 和 sandbox path validation 解析，不能拼接未校验的用户输入。
 - 捕获认证、迁移、后台任务异常必须记录日志；不能空 catch。
 
+## Durable invocation 操作授权
+
+`config.yaml` 中的 `authorization.invocation_operations` 是仅由操作者配置、启动时快照的
+完整 opt-in：`start_enabled`、`observe_enabled`、`cancel_enabled` 默认均为 `false`，
+`timeout_seconds` 默认 2 秒。任一开关启用时，Gateway 要求
+`authorization.enabled=true` 且 Capability Host 恰好解析出一个 provider，否则启动失败。
+这组开关不从 API 可写的 `extensions_config.json` 读取，也不参与 legacy provider 的热更新
+signature；provider 配置变化仍可原子替换同一个 resolver generation。
+
+三种请求统一使用既有 `AuthorizationProvider`，不引入第二套 policy 接口：
+
+- start：`resource="invocation"`、`action="start"`、
+  `target="agent:<id>@sha256:<revision>"`；在可信 principal、Origin、thread/context、
+  request digest 与 agent revision 封存后、`RunRow` admission 前执行。
+- observe：先执行既有 owner/route 可见性，再对单 run 使用 `run:<run-id>`，对 thread feed
+  每个请求只使用一次 `context:<thread-id>`。
+- cancel：先执行可见性，再以 `run:<run-id>` 授权，之后才进入原有原子 cancel receipt/CAS。
+
+deny 返回拒绝；timeout、exception、malformed decision 或 provider unavailable 返回
+indeterminate，两者都 fail closed。未知或不可见资源不调用 provider。observe/cancel 不缓存，
+始终采用当前 policy。已知幂等 row 不重跑 start，而是在 fresh observe 后使用 row 中已接受的
+revision/generation/contributor evidence 比较 digest。允许的 start 只在
+`decision_evidence_json` 保存有界 authorization generation、policy ID、reason code 与 evidence
+digest；不保存 provider metadata、message 或 claim。
+
 ## 已知边界
 
 | 边界 | 当前行为 | 后续方向 |

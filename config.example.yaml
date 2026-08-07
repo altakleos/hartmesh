@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 34
+config_version: 35
 
 # ============================================================================
 # Logging
@@ -2366,6 +2366,11 @@ run_ownership:
 #   enabled: true
 #   fail_closed: true            # block on provider error / unresolved identity
 #   default_role: user           # applied when user_role is None; built-in RBAC requires this role below
+#   invocation_operations:       # startup-only; omitted/all false preserves current behavior
+#     start_enabled: false
+#     observe_enabled: false
+#     cancel_enabled: false
+#     timeout_seconds: 2.0
 #   provider:
 #     use: deerflow.authz.rbac:RbacAuthorizationProvider
 #     config:
@@ -2386,6 +2391,11 @@ run_ownership:
 #           models: {allow: ["gpt-4o-mini"]}
 authorization:
   enabled: false
+  invocation_operations:
+    start_enabled: false
+    observe_enabled: false
+    cancel_enabled: false
+    timeout_seconds: 2.0
 
 # ============================================================================
 # Circuit Breaker Configuration
