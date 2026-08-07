@@ -54,6 +54,37 @@ today's mutable host state; this internal projector is not returned by the run A
 Historical null rows remain readable. Auxiliary checkpoint/artifact operation rows carry
 none of these facts.
 
+## Invocation-operation authorization
+
+`authorization.invocation_operations` is an operator-only, startup-snapshotted opt-in.
+Its `start_enabled`, `observe_enabled`, and `cancel_enabled` flags default to false, so
+existing owner and route checks remain the complete behavior unless an operator enables a
+control. Enabling any flag requires `authorization.enabled: true` and exactly one provider
+from the Gateway's coherent `AuthorizationProviderResolver`; startup fails if that provider
+is missing, ambiguous, or cannot initialize. Each enabled decision uses the provider's async
+API under `timeout_seconds` (default 2.0). Denial is distinct from an indeterminate timeout,
+exception, malformed response, or unavailable provider, and both fail closed.
+
+Fresh starts authorize `resource="invocation"`, `action="start"`, and target the sealed
+`agent:<id>@sha256:<revision>` after principal, Origin, thread/context, request digest, and
+agent revision resolution but before `RunRow` admission. Only host-built safe facts reach the
+provider. Allowed rows persist bounded authorization generation, policy ID, reason codes,
+and an evidence digest in `decision_evidence_json`; provider metadata, messages, and claims
+are never stored. A denial or indeterminate result creates no run or lifecycle event and
+does no graph/model/tool work.
+
+Observation first applies the existing owner/route visibility boundary. A visible run uses
+`action="observe"`, target `run:<run-id>`; a visible thread feed makes one decision for
+`context:<thread-id>`. Cancellation similarly applies visibility, then `action="cancel"`
+for `run:<run-id>` before the atomic cancellation receipt/state mutation. Unknown or
+owner-invisible rows do not call policy. Observe/cancel decisions are not cached.
+
+For keyed replay, lookup and visibility happen first. A known row receives a fresh observe
+decision and is compared with its stored accepted evidence without rerunning start policy or
+contributors. A concurrent admission loser repeats visibility, observe authorization, and
+digest comparison; only the creator attaches a worker. Invocation checks resolve through the
+same provider snapshot used by route, resource, tool, model, skill, and agent assembly paths.
+
 ## Atomic idempotent admission
 
 A normal `RunRow` is both the accepted invocation and the executable run; auxiliary thread

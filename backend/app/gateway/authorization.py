@@ -32,8 +32,11 @@ class AuthorizationResolutionSnapshot:
 
 
 def _config_signature(config: AuthorizationConfig) -> str:
+    # Invocation-operation flags are startup-only and are snapshotted by the
+    # Gateway application. They must not participate in the legacy provider's
+    # hot-reload signature or manufacture a second provider generation.
     return json.dumps(
-        config.model_dump(mode="json"),
+        config.model_dump(mode="json", exclude={"invocation_operations"}),
         sort_keys=True,
         separators=(",", ":"),
     )

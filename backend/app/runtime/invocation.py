@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Coroutine
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Literal, Protocol
 
@@ -80,6 +80,7 @@ class InternalAdmissionIdentity:
     thread_id: str | None
     requested_agent_id: str
     user_id: str | None = None
+    principal: InvocationPrincipal = field(default_factory=lambda: InvocationPrincipal())
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ class PreparedLaunch:
     external_key: str | None = None
     request_digest: str | None = None
     request_digest_version: str | None = None
+    principal: InvocationPrincipal = field(default_factory=lambda: InvocationPrincipal())
 
 
 @dataclass(frozen=True)
@@ -116,7 +118,41 @@ class InternalLaunchReceipt:
 
 @dataclass(frozen=True)
 class InvocationPrincipal:
-    user_id: str | None
+    user_id: str | None = None
+    role: str | None = None
+    oauth_provider: str | None = None
+    oauth_id: str | None = None
+    channel_user_id: str | None = None
+    is_internal: bool = False
+    visibility_prevalidated: bool = False
+
+
+class InvocationAuthorizationOutcome(StrEnum):
+    """Finite invocation-operation authorization outcomes."""
+
+    allowed = "allowed"
+    denied = "denied"
+    indeterminate = "indeterminate"
+
+
+@dataclass(frozen=True)
+class InternalAuthorizationDecision:
+    """Host-owned authorization result and optional safe persisted evidence."""
+
+    outcome: InvocationAuthorizationOutcome
+    evidence: dict[str, Any] | None = None
+
+    @classmethod
+    def allowed(cls, *, evidence: dict[str, Any] | None = None) -> InternalAuthorizationDecision:
+        return cls(InvocationAuthorizationOutcome.allowed, evidence=evidence)
+
+    @classmethod
+    def denied(cls) -> InternalAuthorizationDecision:
+        return cls(InvocationAuthorizationOutcome.denied)
+
+    @classmethod
+    def indeterminate(cls) -> InternalAuthorizationDecision:
+        return cls(InvocationAuthorizationOutcome.indeterminate)
 
 
 class NotFoundOrInvisible(StrEnum):
@@ -127,11 +163,14 @@ class NotFoundOrInvisible(StrEnum):
 class InternalCancelRequest:
     run_id: str
     action: Literal["interrupt", "rollback"] = "interrupt"
+    principal: InvocationPrincipal = field(default_factory=InvocationPrincipal)
+    thread_id: str | None = None
 
 
 @dataclass(frozen=True)
 class InternalCancelReceipt:
     outcome: CancelOutcome
+    record: RunRecord | None = None
 
 
 class LaunchNormalizer(Protocol):
@@ -168,6 +207,48 @@ class DurableRuns(Protocol):
     async def cancel(self, request: InternalCancelRequest) -> CancelOutcome: ...
 
 
+class InvocationAuthorization(Protocol):
+    async def authorize_start(
+        self,
+        launch: PreparedLaunch,
+    ) -> InternalAuthorizationDecision: ...
+
+    async def authorize_observe(
+        self,
+        record: RunRecord,
+        principal: InvocationPrincipal,
+        *,
+        target_kind: Literal["run", "context"] = "run",
+    ) -> InternalAuthorizationDecision: ...
+
+    async def authorize_cancel(
+        self,
+        record: RunRecord,
+        principal: InvocationPrincipal,
+    ) -> InternalAuthorizationDecision: ...
+
+
+class _DisabledInvocationAuthorization:
+    async def authorize_start(self, _launch: PreparedLaunch) -> InternalAuthorizationDecision:
+        return InternalAuthorizationDecision.allowed()
+
+    async def authorize_observe(
+        self,
+        _record: RunRecord,
+        _principal: InvocationPrincipal,
+        *,
+        target_kind: Literal["run", "context"] = "run",
+    ) -> InternalAuthorizationDecision:
+        return InternalAuthorizationDecision.allowed()
+
+    async def authorize_cancel(
+        self,
+        _record: RunRecord,
+        _principal: InvocationPrincipal,
+    ) -> InternalAuthorizationDecision:
+        return InternalAuthorizationDecision.allowed()
+
+
 class InvocationRuntime:
     """Deep application module for launch, observation, and cancellation."""
 
@@ -176,13 +257,26 @@ class InvocationRuntime:
         *,
         normalizer: LaunchNormalizer,
         runs: DurableRuns,
+        authorization: InvocationAuthorization | None = None,
         task_factory: TaskFactory = asyncio.create_task,
     ) -> None:
         self._normalizer = normalizer
         self._runs = runs
+        self._authorization = authorization or _DisabledInvocationAuthorization()
         self._task_factory = task_factory
 
-    async def launch(self, intent: InternalLaunchIntent) -> InternalLaunchReceipt:
+    @staticmethod
+    def _rejection(
+        decision: InternalAuthorizationDecision,
+    ) -> InvocationAuthorizationOutcome | None:
+        if decision.outcome is InvocationAuthorizationOutcome.allowed:
+            return None
+        return decision.outcome
+
+    async def launch(
+        self,
+        intent: InternalLaunchIntent,
+    ) -> InternalLaunchReceipt | NotFoundOrInvisible | InvocationAuthorizationOutcome:
         with self._normalizer.scope(intent):
             identity: InternalAdmissionIdentity | None = None
             identify = getattr(self._normalizer, "identify", None)
@@ -193,24 +287,53 @@ class InvocationRuntime:
                 if identity is not None:
                     existing = await find_existing(identity)
                     if existing is not None:
+                        observation = await self._authorization.authorize_observe(
+                            existing,
+                            identity.principal,
+                        )
+                        if rejection := self._rejection(observation):
+                            return rejection
                         if callable(validate_replay):
                             await validate_replay(intent, identity, existing)
                         return InternalLaunchReceipt(record=existing, created=False)
 
             launch = await self._normalizer.normalize(intent)
+            start_decision = await self._authorization.authorize_start(launch)
+            if rejection := self._rejection(start_decision):
+                return rejection
+            if start_decision.evidence is not None and launch.accepted_invocation is not None:
+                launch = replace(
+                    launch,
+                    accepted_invocation=replace(
+                        launch.accepted_invocation,
+                        decision_evidence=start_decision.evidence,
+                    ),
+                )
             async with self._runs.admission_scope(launch.thread_id):
                 await self._runs.prepare_admission(launch)
                 admitted = await self._runs.admit(launch)
                 if isinstance(admitted, DurableAdmission):
                     record = admitted.record
                     if admitted.outcome is not AdmissionOutcome.created:
+                        visible = await self._runs.observe(
+                            record.run_id,
+                            launch.principal,
+                        )
+                        if visible is None:
+                            return NotFoundOrInvisible.not_found_or_invisible
+                        observation = await self._authorization.authorize_observe(
+                            visible,
+                            launch.principal,
+                        )
+                        if rejection := self._rejection(observation):
+                            return rejection
                         # A concurrent creator may have bound server-resolved
                         # facts (notably a generated stateless thread) that made
                         # the provisional digest differ. Re-project against the
                         # winning row before deciding replay versus conflict.
                         if identity is not None and callable(validate_replay):
                             await validate_replay(intent, identity, record)
-                        return InternalLaunchReceipt(record=record, created=False)
+                        return InternalLaunchReceipt(record=visible, created=False)
                 else:
                     # Compatibility for host adapters predating keyed ensure.
                     record = admitted
@@ -234,15 +357,24 @@ class InvocationRuntime:
         self,
         run_id: str,
         principal: InvocationPrincipal,
-    ) -> RunRecord | NotFoundOrInvisible:
+    ) -> RunRecord | NotFoundOrInvisible | InvocationAuthorizationOutcome:
         record = await self._runs.observe(run_id, principal)
         if record is None:
             return NotFoundOrInvisible.not_found_or_invisible
+        decision = await self._authorization.authorize_observe(record, principal)
+        if rejection := self._rejection(decision):
+            return rejection
         return record
 
     async def cancel_run(
         self,
         request: InternalCancelRequest,
-    ) -> InternalCancelReceipt:
+    ) -> InternalCancelReceipt | NotFoundOrInvisible | InvocationAuthorizationOutcome:
+        record = await self._runs.observe(request.run_id, request.principal)
+        if record is None or (request.thread_id is not None and record.thread_id != request.thread_id):
+            return NotFoundOrInvisible.not_found_or_invisible
+        decision = await self._authorization.authorize_cancel(record, request.principal)
+        if rejection := self._rejection(decision):
+            return rejection
         outcome = await self._runs.cancel(request)
-        return InternalCancelReceipt(outcome=outcome)
+        return InternalCancelReceipt(outcome=outcome, record=record)

@@ -389,6 +389,11 @@ class _KeyedRuns:
     async def fail_start(self, *_args):
         raise AssertionError("worker attachment must not fail")
 
+    async def observe(self, run_id, _principal):
+        if self.admission is not None and self.admission.record.run_id == run_id:
+            return self.admission.record
+        return self.existing if self.existing is not None and self.existing.run_id == run_id else None
+
 
 class _TwoCallerPreflightBarrierStore(MemoryRunStore):
     """Force two independent managers past the optimistic lookup together."""

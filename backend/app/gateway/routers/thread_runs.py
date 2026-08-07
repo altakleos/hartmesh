@@ -37,7 +37,18 @@ from app.gateway.context_usage import build_context_usage
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import build_checkpoint_state_accessor, build_invocation_runtime, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import (
+    authorize_context_observation,
+    build_checkpoint_state_accessor,
+    build_invocation_runtime,
+    build_thread_checkpoint_state_accessor,
+    invocation_observation_enabled,
+    invocation_principal_from_request,
+    raise_for_invocation_authorization,
+    sse_consumer,
+    start_run,
+    wait_for_run_completion,
+)
 from app.gateway.utils import sanitize_log_param
 from app.runtime import InternalCancelRequest, InvocationPrincipal, NotFoundOrInvisible
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
@@ -284,6 +295,68 @@ def _record_to_response(record: RunRecord) -> RunResponse:
         middleware_tokens=record.middleware_tokens,
         message_count=record.message_count,
         stop_reason=record.stop_reason,
+    )
+
+
+async def _invocation_principal(
+    request: Request,
+    *,
+    visibility_prevalidated: bool = True,
+) -> InvocationPrincipal:
+    if getattr(request, "_deerflow_test_bypass_auth", False) and not hasattr(request, "cookies"):
+        return InvocationPrincipal(visibility_prevalidated=True)
+    return invocation_principal_from_request(
+        request,
+        user_id=await get_current_user(request),
+        visibility_prevalidated=visibility_prevalidated,
+    )
+
+
+async def _observe_run_or_404(
+    request: Request,
+    *,
+    thread_id: str,
+    run_id: str,
+    visibility_prevalidated: bool = False,
+) -> RunRecord:
+    result = await build_invocation_runtime(request).observe_run(
+        run_id,
+        await _invocation_principal(
+            request,
+            visibility_prevalidated=visibility_prevalidated,
+        ),
+    )
+    raise_for_invocation_authorization(result, operation="observe")
+    if result is NotFoundOrInvisible.not_found_or_invisible or result.thread_id != thread_id:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return result
+
+
+async def _authorize_thread_feed(request: Request, thread_id: str) -> None:
+    await authorize_context_observation(
+        request,
+        thread_id,
+        await _invocation_principal(request),
+    )
+
+
+async def _authorize_run_feed(
+    request: Request,
+    *,
+    thread_id: str,
+    run_id: str,
+) -> None:
+    # These feeds historically required only visible-thread ownership and did
+    # not require a retained RunRow. Preserve that behavior while the operation
+    # control is disabled; the enabled path must establish run visibility
+    # before consulting policy.
+    if not invocation_observation_enabled(request):
+        return
+    await _observe_run_or_404(
+        request,
+        thread_id=thread_id,
+        run_id=run_id,
+        visibility_prevalidated=True,
     )
 
 
@@ -904,6 +977,7 @@ async def wait_run(thread_id: ThreadId, body: RunCreateRequest, request: Request
 @require_permission("runs", "read", owner_check=True)
 async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
     """List all runs for a thread."""
+    await _authorize_thread_feed(request, thread_id)
     run_mgr = get_run_manager(request)
     user_id = await get_current_user(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
@@ -914,13 +988,12 @@ async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
 @require_permission("runs", "read", owner_check=True)
 async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
-    user_id = await get_current_user(request)
-    record = await build_invocation_runtime(request).observe_run(
-        run_id,
-        InvocationPrincipal(user_id=user_id),
+    record = await _observe_run_or_404(
+        request,
+        thread_id=thread_id,
+        run_id=run_id,
+        visibility_prevalidated=True,
     )
-    if record is NotFoundOrInvisible.not_found_or_invisible or record.thread_id != thread_id:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return _record_to_response(record)
 
 
@@ -944,19 +1017,20 @@ async def cancel_run(
     durably notifies the owner when its lease is live, or takes over and
     terminalizes the run when that lease has expired.
     """
-    runtime = build_invocation_runtime(request)
-    record = await runtime.observe_run(
-        run_id,
-        InvocationPrincipal(user_id=None),
+    result = await build_invocation_runtime(request).cancel_run(
+        InternalCancelRequest(
+            run_id=run_id,
+            action=action,
+            principal=await _invocation_principal(request),
+            thread_id=thread_id,
+        ),
     )
-    if record is NotFoundOrInvisible.not_found_or_invisible or record.thread_id != thread_id:
+    raise_for_invocation_authorization(result, operation="cancel")
+    if result is NotFoundOrInvisible.not_found_or_invisible:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-
-    outcome = (
-        await runtime.cancel_run(
-            InternalCancelRequest(run_id=run_id, action=action),
-        )
-    ).outcome
+    outcome = result.outcome
+    record = result.record
+    assert record is not None
 
     # Success paths — the run was cancelled locally, durably requested from
     # a live owner, or taken over from a dead worker.
@@ -997,12 +1071,12 @@ async def cancel_run(
 @require_permission("runs", "read", owner_check=True)
 async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> StreamingResponse:
     """Join an existing run's SSE stream."""
-    record = await build_invocation_runtime(request).observe_run(
-        run_id,
-        InvocationPrincipal(user_id=None),
+    record = await _observe_run_or_404(
+        request,
+        thread_id=thread_id,
+        run_id=run_id,
+        visibility_prevalidated=True,
     )
-    if record is NotFoundOrInvisible.not_found_or_invisible or record.thread_id != thread_id:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
     if record.store_only and not bridge.supports_cross_process:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
@@ -1041,23 +1115,30 @@ async def stream_existing_run(
     remaining buffered events so the client observes a clean shutdown.
     """
     runtime = build_invocation_runtime(request)
-    record = await runtime.observe_run(
-        run_id,
-        InvocationPrincipal(user_id=None),
+    record = await _observe_run_or_404(
+        request,
+        thread_id=thread_id,
+        run_id=run_id,
+        visibility_prevalidated=True,
     )
-    if record is NotFoundOrInvisible.not_found_or_invisible or record.thread_id != thread_id:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
     if record.store_only and action is None and not bridge.supports_cross_process:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     # Cancel if an action was requested (stop-button / interrupt flow)
     if action is not None:
-        outcome = (
-            await runtime.cancel_run(
-                InternalCancelRequest(run_id=run_id, action=action),
-            )
-        ).outcome
+        cancellation = await runtime.cancel_run(
+            InternalCancelRequest(
+                run_id=run_id,
+                action=action,
+                principal=await _invocation_principal(request),
+                thread_id=thread_id,
+            ),
+        )
+        raise_for_invocation_authorization(cancellation, operation="cancel")
+        if cancellation is NotFoundOrInvisible.not_found_or_invisible:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        outcome = cancellation.outcome
         if outcome == CancelOutcome.taken_over:
             # The run was on another worker and is now marked ``error`` in the
             # store.  There is no local stream to drain — return immediately so
@@ -1117,6 +1198,7 @@ async def list_thread_messages(
     after_seq: int | None = Query(default=None, ge=1),
 ) -> list[dict]:
     """Return displayable messages for a thread (across all runs), with feedback attached."""
+    await _authorize_thread_feed(request, thread_id)
     # Resolve the caller once; it is needed both to scope the feedback query
     # below and to list the thread's runs for turn-duration injection.
     user_id = await get_current_user(request)
@@ -1370,6 +1452,7 @@ async def list_thread_messages_page(
     before_seq: int | None = Query(default=None, ge=1),
 ) -> ThreadMessagesPageResponse:
     """Return a backward page ordered by the thread-global event sequence."""
+    await _authorize_thread_feed(request, thread_id)
     if "after_seq" in request.query_params:
         raise HTTPException(status_code=422, detail="after_seq is not supported by this backward-only endpoint")
 
@@ -1403,6 +1486,7 @@ async def list_run_messages(
 
     Response: { data: [...], has_more: bool }
     """
+    await _authorize_run_feed(request, thread_id=thread_id, run_id=run_id)
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
         thread_id,
@@ -1440,6 +1524,7 @@ async def list_run_events(
     ``task_id`` + ``after_seq`` let the subtask card page through one subagent
     task's persisted steps without the run-wide ``limit`` truncating the tail (#3779).
     """
+    await _authorize_run_feed(request, thread_id=thread_id, run_id=run_id)
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
     events = await event_store.list_events(
@@ -1471,6 +1556,7 @@ async def get_run_workspace_changes(
     include_diff: bool = Query(default=True),
 ) -> dict:
     """Return workspace/output file changes recorded for one run."""
+    await _authorize_run_feed(request, thread_id=thread_id, run_id=run_id)
     event_store = get_run_event_store(request)
     return await get_workspace_changes_response(
         event_store,
@@ -1489,6 +1575,7 @@ async def thread_token_usage(
     include_active: bool = Query(default=False, description="Include running run progress snapshots"),
 ) -> ThreadTokenUsageResponse:
     """Thread-level token usage aggregation."""
+    await _authorize_thread_feed(request, thread_id)
     run_store = get_run_store(request)
     if include_active:
         agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True)

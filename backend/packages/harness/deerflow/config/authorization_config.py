@@ -18,6 +18,15 @@ class AuthorizationProviderConfig(BaseModel):
     config: dict = Field(default_factory=dict, description="Provider-specific settings passed as kwargs")
 
 
+class InvocationOperationsAuthorizationConfig(BaseModel):
+    """Startup-only authorization controls for durable invocation operations."""
+
+    start_enabled: bool = Field(default=False, description="Authorize new durable invocation admission")
+    observe_enabled: bool = Field(default=False, description="Authorize visible run and context observation")
+    cancel_enabled: bool = Field(default=False, description="Authorize visible run cancellation")
+    timeout_seconds: float = Field(default=2.0, gt=0, description="Host timeout for each invocation authorization decision")
+
+
 class AuthorizationConfig(BaseModel):
     """Configuration for fine-grained resource authorization.
 
@@ -30,6 +39,10 @@ class AuthorizationConfig(BaseModel):
     fail_closed: bool = Field(default=True, description="Block access if the provider errors or identity is unresolved")
     default_role: str = Field(default="user", description="Role applied when user_role is None (e.g. unbound IM channels)")
     provider: AuthorizationProviderConfig | None = Field(default=None, description="Authorization provider configuration")
+    invocation_operations: InvocationOperationsAuthorizationConfig = Field(
+        default_factory=InvocationOperationsAuthorizationConfig,
+        description="Startup-only durable invocation operation controls",
+    )
 
 
 _authorization_config: AuthorizationConfig | None = None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -10,6 +11,7 @@ from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import runs
+from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -23,6 +25,21 @@ def _make_app(run_store=None, event_store=None, feedback_repo=None):
 
     if run_store is not None:
         app.state.run_store = run_store
+
+        async def get_run(run_id, *, user_id=None):
+            row = await run_store.get(run_id)
+            if row is None:
+                return None
+            return RunRecord(
+                run_id=row["run_id"],
+                thread_id=row["thread_id"],
+                assistant_id=None,
+                status=RunStatus.pending,
+                on_disconnect=DisconnectMode.cancel,
+                user_id=user_id,
+            )
+
+        app.state.run_manager = SimpleNamespace(get=get_run)
     if event_store is not None:
         app.state.run_event_store = event_store
     if feedback_repo is not None:

@@ -41,6 +41,7 @@ from app.gateway.github import run_policy as _github_run_policy  # noqa: F401
 from app.gateway.internal_auth import create_internal_auth_headers
 from app.runtime import (
     InternalLaunchIntent,
+    InternalLaunchReceipt,
     InternalNativeChannelFacts,
     InternalSourceKind,
     InvocationRuntime,
@@ -1609,6 +1610,8 @@ class ChannelManager:
                 external_key=facts.provider_message_id,
             )
         )
+        if not isinstance(receipt, InternalLaunchReceipt):
+            raise RuntimeError(f"native-channel invocation start {receipt.value}")
         return receipt.record
 
     # -- LangGraph SDK client (lazy) ----------------------------------------

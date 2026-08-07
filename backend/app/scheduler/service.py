@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from fastapi import HTTPException
 
-from app.runtime.invocation import InternalLaunchIntent, InternalSourceKind, InvocationRuntime
+from app.runtime.invocation import InternalLaunchIntent, InternalLaunchReceipt, InternalSourceKind, InvocationRuntime
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.schedules import next_run_at
@@ -215,6 +215,8 @@ class ScheduledTaskService:
                     scheduled_system_owned=(task.get("system_owned") is True and "user_id" in task and task.get("user_id") is None),
                 )
             )
+            if not isinstance(receipt, InternalLaunchReceipt):
+                raise RuntimeError(f"scheduled invocation start {receipt.value}")
             launch_succeeded = True
             launched_run_id = receipt.record.run_id
             launched_thread_id = receipt.record.thread_id

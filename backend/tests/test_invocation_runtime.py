@@ -172,7 +172,10 @@ async def test_observation_and_cancellation_delegate_with_finite_results() -> No
     cancellation = await runtime.cancel_run(InternalCancelRequest(run_id="run-1", action="rollback"))
 
     assert observed is runs.record
-    assert runs.observations == [("run-1", principal)]
+    assert runs.observations == [
+        ("run-1", principal),
+        ("run-1", InvocationPrincipal()),
+    ]
     assert cancellation.outcome is CancelOutcome.cancelled
     assert runs.cancellations == [InternalCancelRequest(run_id="run-1", action="rollback")]
 
@@ -225,9 +228,11 @@ async def test_dependency_failures_propagate_without_runtime_translation() -> No
         await runtime.observe_run("run-1", InvocationPrincipal(user_id=None))
     assert exc_info.value is observe_failure
 
+    # Cancellation now applies the visibility boundary before mutating. Its
+    # lookup failure therefore wins before the cancel dependency is reached.
     with pytest.raises(RuntimeError) as exc_info:
         await runtime.cancel_run(InternalCancelRequest(run_id="run-1"))
-    assert exc_info.value is cancel_failure
+    assert exc_info.value is observe_failure
 
 
 @pytest.mark.anyio
@@ -290,7 +295,7 @@ async def test_thread_http_facade_observes_and_cancels_through_runtime(
 
     record = _record()
     observe_run = AsyncMock(return_value=record)
-    cancel_run = AsyncMock(return_value=InternalCancelReceipt(outcome=CancelOutcome.cancelled))
+    cancel_run = AsyncMock(return_value=InternalCancelReceipt(outcome=CancelOutcome.cancelled, record=record))
     runtime = SimpleNamespace(observe_run=observe_run, cancel_run=cancel_run)
     request = SimpleNamespace()
     monkeypatch.setattr(
@@ -321,10 +326,17 @@ async def test_thread_http_facade_observes_and_cancels_through_runtime(
     assert cancelled.status_code == 202
     assert observe_run.await_args_list[0].args == (
         "run-1",
-        InvocationPrincipal(user_id="owner-1"),
+        InvocationPrincipal(user_id="owner-1", visibility_prevalidated=True),
     )
-    assert observe_run.await_args_list[1].args == (
-        "run-1",
-        InvocationPrincipal(user_id=None),
+    assert len(observe_run.await_args_list) == 1
+    cancel_run.assert_awaited_once_with(
+        InternalCancelRequest(
+            run_id="run-1",
+            action="rollback",
+            principal=InvocationPrincipal(
+                user_id="owner-1",
+                visibility_prevalidated=True,
+            ),
+            thread_id="thread-1",
+        )
     )
-    cancel_run.assert_awaited_once_with(InternalCancelRequest(run_id="run-1", action="rollback"))
