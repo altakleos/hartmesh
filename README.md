@@ -1081,6 +1081,39 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Multimodal inputs** for image understanding and video comprehension
 - **Strong tool-use** for reliable function calling and structured outputs
 
+## Durable Invocation HTTP API
+
+Authenticated integrations can use the versioned durable runtime surface at
+`/api/runtime/v1` without depending on the LangGraph compatibility routes:
+
+- `GET /capabilities` (administrator only)
+- `POST /invocations/ensure`
+- `GET /invocations/{run_id}`
+- `GET /contexts/{thread_id}/invocations`
+- `POST /invocations/{run_id}/control`
+
+Every body and response uses strict `deerflow.runtime/v1` records. Ensure
+requires an `external_key`, while DeerFlow derives its scope from the
+authenticated user/service; equal retries return the retained run and never
+attach a second worker. Invocation/context reads apply owner/admin visibility.
+Lifecycle pages expose opaque `next_cursor`, `minimum_available_cursor`, and
+`read_fence_cursor` values; reads are at least once, so consumers deduplicate by
+stable event ID/cursor.
+
+The transport returns `201` for a created invocation, `202` for a newly
+requested cancellation, `200` for known/observed/already-finished outcomes,
+`403` for an explicit visible-resource denial, `404` for unknown or invisible
+resources, `409` for conflict/thread-busy/stale state, `410` for a pruned cursor,
+`422` for invalid/ahead input, and `503` for indeterminate policy/runtime
+failures. Every non-2xx response is a bounded `runtime.error` record rather than
+a free-form `detail`. Context export, context retirement, readiness/provenance
+manifests, and controls other than fenced cancellation are not supported. See
+[the API reference](backend/docs/API.md#durable-invocation-runtime-api) for DTO
+and paging details.
+
+The existing `/api/runs/*` and `/api/threads/*/runs/*` create, stream, and wait
+routes remain compatible and retain their optional `Idempotency-Key` behavior.
+
 ## Embedded Python Client
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:

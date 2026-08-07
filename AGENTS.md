@@ -80,7 +80,9 @@ kept out of the API-writable `extensions_config.json`). See the Extension System
 Embedded Python hosts can use the versioned, transport-neutral records in
 `deerflow-runtime-api` with the Gateway-owned in-process adapter. This supported surface
 reuses the same durable admission, visibility, authorization, constraints, lifecycle
-paging, and fenced cancellation behavior as Gateway. It does not add an HTTP endpoint.
+paging, and fenced cancellation behavior as Gateway. The Gateway also publishes those
+same records at authenticated `/api/runtime/v1/*` routes; the contract package itself
+remains host- and transport-independent.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP

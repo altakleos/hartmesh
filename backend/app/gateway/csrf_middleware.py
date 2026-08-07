@@ -9,6 +9,7 @@ import secrets
 from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit
 
+from deerflow_runtime_api import FailureCode
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -17,6 +18,7 @@ from starlette.types import ASGIApp
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.session_cookie_state import SESSION_COOKIE_ISSUED_STATE_ATTR, SESSION_COOKIE_MAX_AGE_STATE_ATTR, SESSION_COOKIE_SECURE_STATE_ATTR, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth_disabled import is_auth_disabled
+from app.gateway.runtime_http import is_runtime_api_path, runtime_error_response
 
 CSRF_COOKIE_NAME = "csrf_token"
 CSRF_HEADER_NAME = "X-CSRF-Token"
@@ -223,12 +225,16 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             header_token = request.headers.get(CSRF_HEADER_NAME)
 
             if not cookie_token or not header_token:
+                if is_runtime_api_path(request.url.path):
+                    return runtime_error_response(403, FailureCode.denied)
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "CSRF token missing. Include X-CSRF-Token header."},
                 )
 
             if not secrets.compare_digest(cookie_token, header_token):
+                if is_runtime_api_path(request.url.path):
+                    return runtime_error_response(403, FailureCode.denied)
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "CSRF token mismatch."},

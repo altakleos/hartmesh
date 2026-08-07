@@ -738,9 +738,73 @@ GET /api/threads/{thread_id}/artifacts/{path}
 
 ---
 
+## Durable Invocation Runtime API
+
+Base URL: `/api/runtime/v1`
+
+This transport publishes the strict `deerflow.runtime/v1` contract used by the
+embedded runtime adapter. All routes use current Gateway authentication and
+permissions; invocation and context reads retain owner/admin visibility, and
+unknown and invisible resources both return `not_found_or_invisible`. Browser
+`POST` requests also require the normal CSRF cookie/header pair.
+
+| Route | Contract |
+|---|---|
+| `GET /capabilities` | Administrator-only `runtime.capabilities`; reports ensure, invocation/context observation, cancel control, and that context export/retirement are unsupported. |
+| `POST /invocations/ensure` | Exact `invocation.ensure` body. `external_key` is required; the server derives its scope from the authenticated principal or service. |
+| `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. |
+| `GET /contexts/{thread_id}/invocations` | Access-filtered normal-run snapshots and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. |
+| `POST /invocations/{run_id}/control` | Exact `invocation.cancel` body with required `expected_state_version`; body and path run IDs must match. |
+
+Every request record includes `api_version="deerflow.runtime/v1"` and its exact
+`kind`; unknown versions, kinds, fields, or nested input/options are rejected.
+Ensure accepts only an external key, thread ID, nullable agent hint, strict
+graph/resume input, and finite invocation options. It does not accept an
+external scope, principal, Origin, raw config/context/metadata, callbacks,
+credentials, commands, or delivery/stream properties.
+
+Ensure uses the existing durable idempotency boundary. A new accepted request
+returns `201 created`; an equal retained request returns `200 known` without a
+second worker; a changed digest returns `409 conflict`; and an independently
+busy thread returns `409 thread_busy`. The guarantee lasts while the retained
+normal run row exists. Auxiliary operation rows are never visible.
+
+Observation pages contain `next_cursor`, `minimum_available_cursor`, and
+`read_fence_cursor`. Cursor tokens are opaque. Empty filtered pages advance to
+the captured read fence; a pruned cursor returns `410 cursor_gap` with
+`minimum_available_cursor`, while malformed and ahead cursors return `422`.
+Reads are at least once, so consumers should deduplicate stable event IDs and
+cursors.
+
+Success status mapping is `201` for `created`, `202` for cancellation
+`requested`, and `200` for `known`, observations, capabilities,
+`already_requested`, and `already_terminal`. Failures use `403 denied` only
+after an authenticated visible-resource decision, `404
+not_found_or_invisible`, `409 conflict|thread_busy|stale`, `410 cursor_gap`,
+`422 invalid_request|cursor_ahead`, or `503 indeterminate`.
+
+Unlike legacy Gateway endpoints, every non-2xx runtime response—including auth
+and CSRF middleware rejection—uses only this envelope:
+
+```json
+{
+  "api_version": "deerflow.runtime/v1",
+  "kind": "runtime.error",
+  "code": "invalid_request"
+}
+```
+
+Only cursor-gap/ahead responses may add their allowlisted cursor detail. The
+transport never returns policy objects, exception text, private Origin data,
+secrets, or a free-form property bag. There is no readiness/provenance manifest,
+context export, context retirement, event broker, or additional control in v1.
+
+---
+
 ## Error Responses
 
-All APIs return errors in a consistent format:
+Legacy APIs return errors in this format (the durable runtime namespace uses
+the versioned `runtime.error` envelope documented above):
 
 ```json
 {

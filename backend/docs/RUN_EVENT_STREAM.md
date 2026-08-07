@@ -72,7 +72,9 @@ credentials, artifact contents, or the rich bodies below. Reasons are selected
 from host-owned safe codes; v1 evidence accepts only the cancellation `action`
 reference (`interrupt` or `rollback`). Lifecycle type/resulting-status pairs are
 validated before a row can change. A host-independent in-process API can query
-this journal; there is still no lifecycle HTTP endpoint or broker.
+this journal, and the Gateway exposes the same access-filtered query through
+`GET /api/runtime/v1/invocations/{run_id}` and
+`GET /api/runtime/v1/contexts/{thread_id}/invocations`. There is no broker.
 Constraint-fence failures use the safe reason
 `constraint_evidence_mismatch` or `constraint_expired_before_start` and map to
 the ordinary `failed` lifecycle type; they do not add lifecycle vocabulary.
