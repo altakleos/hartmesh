@@ -21,7 +21,14 @@ from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
-from .store.base import AdmissionOutcome, EditReplayVisibility
+from .store.base import (
+    AdmissionOutcome,
+    CancellationRequestOutcome,
+    EditReplayVisibility,
+    LifecycleTransition,
+    LifecycleType,
+    lifecycle_type_for_status,
+)
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -201,6 +208,8 @@ class RunRecord:
     external_key: str | None = None
     request_digest: str | None = None
     request_digest_version: str | None = None
+    state_version: int = 0
+    pending_lifecycle_type: LifecycleType | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -271,6 +280,16 @@ class RunManager:
             bucket.pop(run_id, None)
             if not bucket:
                 self._runs_by_thread.pop(thread_id, None)
+
+    @staticmethod
+    def _sync_record_from_store_row(record: RunRecord, row: dict[str, Any]) -> None:
+        record.status = RunStatus(row.get("status") or RunStatus.pending.value)
+        record.state_version = row.get("state_version") or 0
+        record.error = row.get("error")
+        record.stop_reason = row.get("stop_reason")
+        record.owner_worker_id = row.get("owner_worker_id")
+        record.lease_expires_at = row.get("lease_expires_at")
+        record.updated_at = row.get("updated_at") or record.updated_at
 
     def _thread_records_locked(self, thread_id: str) -> list[RunRecord]:
         """Return live in-memory records for *thread_id*. Caller must hold ``self._lock``.
@@ -390,7 +409,15 @@ class RunManager:
             self._store_put_payload(record, error=error),
         )
 
-    async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None, stop_reason: str | None = None) -> bool:
+    async def _persist_status(
+        self,
+        record: RunRecord,
+        status: RunStatus,
+        *,
+        error: str | None = None,
+        stop_reason: str | None = None,
+        lifecycle_type: LifecycleType | None = None,
+    ) -> bool:
         """Best-effort persist a status transition to the backing store."""
         if record.ownership_lost:
             logger.warning(
@@ -403,15 +430,74 @@ class RunManager:
             return True
         row_recovery_payload = self._store_put_payload(record, error=error, stop_reason=stop_reason)
         try:
-            updated = await self._call_store_with_retry(
-                "update_status",
-                record.run_id,
-                lambda: self._store.update_status(record.run_id, status.value, error=error, stop_reason=stop_reason),
-            )
+            if self._store.durable_lifecycle and record.operation_kind == ThreadOperationKind.run:
+                # Cancellation callers identify themselves explicitly. Abort
+                # state is also used for timeout, attachment failure, worker
+                # loss, and shutdown, so it cannot safely choose a lifecycle
+                # type on its own.
+                mapped_type = lifecycle_type or lifecycle_type_for_status(status.value)
+                desired_transition = LifecycleTransition(
+                    lifecycle_type=mapped_type,
+                    status=status.value,
+                    error=error,
+                    stop_reason=stop_reason,
+                    reason=stop_reason,
+                )
+                transition_result = await self._call_store_with_retry(
+                    "transition_run_atomic",
+                    record.run_id,
+                    lambda: self._store.transition_run_atomic(
+                        record.run_id,
+                        expected_state_version=record.state_version,
+                        expected_statuses=("pending", "running", "interrupted"),
+                        transition=desired_transition,
+                    ),
+                )
+                updated = transition_result.applied
+                if not updated and transition_result.row is not None and transition_result.row.get("status") in ("pending", "running") and transition_result.row.get("cancel_action") is not None:
+                    # A remote cancellation request increments the version
+                    # without changing status. Let that committed request win
+                    # regardless of which terminal write discovered it, then
+                    # finalize against its returned version.
+                    retry_state_version = transition_result.row["state_version"]
+                    cancel_action = transition_result.row["cancel_action"]
+                    cancelled_transition = LifecycleTransition(
+                        lifecycle_type=LifecycleType.cancelled,
+                        status=("error" if cancel_action == "rollback" else "interrupted"),
+                        error=("Rolled back by user" if cancel_action == "rollback" else None),
+                    )
+                    transition_result = await self._call_store_with_retry(
+                        "transition_run_atomic",
+                        record.run_id,
+                        lambda: self._store.transition_run_atomic(
+                            record.run_id,
+                            expected_state_version=retry_state_version,
+                            expected_statuses=("pending", "running"),
+                            transition=cancelled_transition,
+                        ),
+                    )
+                    updated = transition_result.applied
+                if transition_result.row is not None:
+                    self._sync_record_from_store_row(record, transition_result.row)
+                if updated:
+                    record.pending_lifecycle_type = None
+            else:
+                updated = await self._call_store_with_retry(
+                    "update_status",
+                    record.run_id,
+                    lambda: self._store.update_status(
+                        record.run_id,
+                        status.value,
+                        error=error,
+                        stop_reason=stop_reason,
+                    ),
+                )
             if updated is False:
-                # ``update_status`` is now guarded by ``status IN ('pending','running')``.
+                # Status transitions are guarded by active status (and, for
+                # lifecycle stores, state version).
                 # False can mean either:
-                #   (a) the row was never persisted (initial ``put()`` failed) → recreate.
+                #   (a) the row is missing; compatibility stores may recreate
+                #       it, but lifecycle stores fail closed.
                 #   (b) the row is terminal — either a peer takeover (``error``)
                 #       or a local cancel/completion race (``interrupted`` /
                 #       ``success``). The log severity branches on which.
@@ -444,6 +530,12 @@ class RunManager:
                             status.value,
                             existing_status,
                         )
+                    return False
+                if self._store.durable_lifecycle and record.operation_kind == ThreadOperationKind.run:
+                    logger.error(
+                        "Refused to recreate missing authoritative lifecycle row for run %s",
+                        record.run_id,
+                    )
                     return False
                 return await self._persist_snapshot_to_store(record.run_id, row_recovery_payload)
             return True
@@ -495,6 +587,7 @@ class RunManager:
             external_key=row.get("external_key"),
             request_digest=row.get("request_digest"),
             request_digest_version=row.get("request_digest_version"),
+            state_version=row.get("state_version") or 0,
         )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
@@ -541,6 +634,12 @@ class RunManager:
                     return
                 if row_recovery_payload is None:
                     logger.warning("Failed to recreate missing run %s for completion persistence", run_id)
+                    return
+                if self._store.durable_lifecycle:
+                    logger.error(
+                        "Refused to recreate missing authoritative lifecycle row %s during completion persistence",
+                        run_id,
+                    )
                     return
                 if not await self._persist_snapshot_to_store(run_id, row_recovery_payload):
                     return
@@ -616,6 +715,12 @@ class RunManager:
             persisted = False
             try:
                 await self._persist_new_run_to_store(record)
+                if self._store is not None and self._store.durable_lifecycle:
+                    stored = await self._store.get(run_id)
+                    if stored is None:
+                        raise RuntimeError(f"Durable admission for run {run_id} committed no row")
+                    self._sync_record_from_store_row(record, stored)
+                    record.store_only = False
                 persisted = True
             except Exception:
                 logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
@@ -819,12 +924,23 @@ class RunManager:
                 except Exception as exc:
                     raise RunStartupError(f"Failed to start run {run_id}: {exc}") from exc
                 if updated is False:
+                    try:
+                        stored = await self._store.get(run_id)
+                    except Exception:
+                        stored = None
                     async with self._lock:
                         if record.status == RunStatus.pending:
-                            record.status = RunStatus.interrupted
+                            if stored is not None:
+                                self._sync_record_from_store_row(record, stored)
+                                if stored.get("cancel_action") is not None:
+                                    record.abort_action = stored["cancel_action"]
                             record.abort_event.set()
                             record.updated_at = _now_iso()
                     return RunStartOutcome.cancelled
+                if self._store.durable_lifecycle:
+                    stored = await self._store.get(run_id)
+                    if stored is not None:
+                        record.state_version = stored.get("state_version") or record.state_version
 
             async with self._lock:
                 if record.abort_event.is_set() or record.status != RunStatus.pending:
@@ -854,10 +970,17 @@ class RunManager:
                 return False
             record.status = RunStatus.error
             record.error = error
+            record.stop_reason = "worker_attachment_failed"
             record.abort_event.set()
             record.updated_at = _now_iso()
 
-        await self._persist_status(record, RunStatus.error, error=error)
+        await self._persist_status(
+            record,
+            RunStatus.error,
+            error=error,
+            stop_reason="worker_attachment_failed",
+            lifecycle_type=LifecycleType.failed,
+        )
         return True
 
     async def get_many_by_thread(
@@ -903,6 +1026,7 @@ class RunManager:
         error: str | None = None,
         stop_reason: str | None = None,
         persist: bool = True,
+        lifecycle_type: LifecycleType | None = None,
     ) -> None:
         """Transition a run to a new status."""
         async with self._lock:
@@ -923,8 +1047,15 @@ class RunManager:
                 record.error = error
             if stop_reason is not None:
                 record.stop_reason = stop_reason
+            record.pending_lifecycle_type = lifecycle_type
         if persist:
-            persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+            persisted = await self._persist_status(
+                record,
+                status,
+                error=error,
+                stop_reason=stop_reason,
+                lifecycle_type=lifecycle_type,
+            )
             if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
                 await self._mark_ownership_lost(
                     record,
@@ -945,7 +1076,14 @@ class RunManager:
             status = record.status
             error = record.error
             stop_reason = record.stop_reason
-        persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+            lifecycle_type = record.pending_lifecycle_type
+        persisted = await self._persist_status(
+            record,
+            status,
+            error=error,
+            stop_reason=stop_reason,
+            lifecycle_type=lifecycle_type,
+        )
         if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
             await self._mark_ownership_lost(
                 record,
@@ -964,7 +1102,7 @@ class RunManager:
         persist: bool = True,
     ) -> str | None:
         """Set a terminal status unless a durable cancellation won first."""
-        if not persist or not self.heartbeat_enabled or self._store is None:
+        if not persist or self._store is None or (not self._store.durable_lifecycle and not self.heartbeat_enabled):
             await self.set_status(
                 run_id,
                 status,
@@ -1011,6 +1149,13 @@ class RunManager:
             stop_reason=stop_reason,
             persist=not result.finalized,
         )
+        if result.finalized and self._store.durable_lifecycle:
+            stored = await self._store.get(run_id)
+            if stored is not None:
+                async with self._lock:
+                    record = self._runs.get(run_id)
+                    if record is not None:
+                        self._sync_record_from_store_row(record, stored)
         return None
 
     async def _ensure_delivery_receipt(self, record: RunRecord) -> bool:
@@ -1135,11 +1280,33 @@ class RunManager:
         if self._store is None:
             return CancelOutcome.unknown, None
         try:
-            winning_action = await self._call_store_with_retry(
-                "request_cancel",
-                run_id,
-                lambda: self._store.request_cancel(run_id, action=action),
-            )
+            if self._store.durable_lifecycle:
+                result = await self._call_store_with_retry(
+                    "request_cancel_compat",
+                    run_id,
+                    lambda: self._store.request_cancel_compat(run_id, action=action),
+                )
+                if result.row is not None:
+                    async with self._lock:
+                        local_record = self._runs.get(run_id)
+                        if local_record is not None:
+                            self._sync_record_from_store_row(local_record, result.row)
+                if result.outcome in (
+                    CancellationRequestOutcome.requested,
+                    CancellationRequestOutcome.already_requested,
+                    CancellationRequestOutcome.stale,
+                ):
+                    winning_action = result.row.get("cancel_action") if result.row is not None else action
+                elif result.outcome == CancellationRequestOutcome.already_terminal:
+                    return CancelOutcome.not_cancellable, None
+                else:
+                    return CancelOutcome.unknown, None
+            else:
+                winning_action = await self._call_store_with_retry(
+                    "request_cancel",
+                    run_id,
+                    lambda: self._store.request_cancel(run_id, action=action),
+                )
         except NotImplementedError:
             # Keep third-party stores that predate durable cancellation on the
             # old safe behavior instead of pretending the owner was notified.
@@ -1249,13 +1416,14 @@ class RunManager:
         async with self._lock:
             record = self._runs.get(run_id)
             if record is not None:
-                if record.status == RunStatus.interrupted:
+                if record.status == RunStatus.interrupted or (record.abort_event.is_set() and record.status in (RunStatus.error, RunStatus.timeout)):
                     return CancelOutcome.cancelled  # idempotent
                 if record.status not in (RunStatus.pending, RunStatus.running) and (not self.heartbeat_enabled or self._store is None):
                     return CancelOutcome.not_cancellable
 
         durable_cancel_won = False
-        if record is not None and self.heartbeat_enabled and self._store is not None:
+        durable_cancel_supported = self._store is not None and (self._store.durable_lifecycle or self.heartbeat_enabled)
+        if record is not None and durable_cancel_supported:
             outcome, winning_action = await self._request_durable_cancel(
                 run_id,
                 action=action,
@@ -1284,12 +1452,21 @@ class RunManager:
                 record.finalizing = task_active
                 if task_active and record.status == RunStatus.running:
                     record.task.cancel()
-                record.status = RunStatus.interrupted
+                cancel_status = RunStatus.error if action == "rollback" else RunStatus.interrupted
+                record.status = cancel_status
+                if action == "rollback":
+                    record.error = "Rolled back by user"
+                record.pending_lifecycle_type = LifecycleType.cancelled
                 record.updated_at = _now_iso()
 
         # Persist outside the lock so store calls don't block other mutations.
         if record is not None:
-            persisted = await self._persist_status(record, RunStatus.interrupted)
+            persisted = await self._persist_status(
+                record,
+                record.status,
+                error=record.error,
+                lifecycle_type=LifecycleType.cancelled,
+            )
             if not persisted and self._store is not None:
                 # ``_persist_status`` already fetched ``existing`` internally;
                 # re-check the store to see if a peer takeover flipped the
@@ -1335,6 +1512,8 @@ class RunManager:
             return CancelOutcome.unknown
 
         store_status = row.get("status")
+        if row.get("cancel_action") == action:
+            return CancelOutcome.requested
         if store_status == "interrupted":
             return CancelOutcome.requested
         if store_status not in ("pending", "running"):
@@ -1347,14 +1526,20 @@ class RunManager:
             return await self._request_remote_cancel(run_id, action=action)
 
         take_over_msg = f"Run reclaimed by worker {self._worker_id}: the owning worker ({row.get('owner_worker_id') or 'unknown'}) stopped renewing its lease and is presumed dead."
+        takeover_kwargs: dict[str, Any] = {
+            "grace_seconds": grace_seconds,
+            "error": take_over_msg,
+            "stop_reason": ORPHAN_RECOVERY_STOP_REASON,
+        }
+        if self._store.durable_lifecycle:
+            takeover_kwargs["expected_state_version"] = row.get("state_version") or 0
         try:
             taken = await self._call_store_with_retry(
                 "claim_for_takeover",
                 run_id,
                 lambda: self._store.claim_for_takeover(
                     run_id,
-                    grace_seconds=grace_seconds,
-                    error=take_over_msg,
+                    **takeover_kwargs,
                 ),
             )
         except Exception:
@@ -1506,11 +1691,40 @@ class RunManager:
             # path needs a strict second CAS attempt because the caller never
             # receives the record and no worker can attach after it returns.
             # A peer terminal transition wins the CAS and is preserved below.
-            await self._call_store_with_retry(
-                "terminalize cancelled admission",
-                record.run_id,
-                lambda: self._store.update_status(record.run_id, RunStatus.interrupted.value),
-            )
+            if self._store.durable_lifecycle:
+                cancel_request = await self._call_store_with_retry(
+                    "record cancelled admission request",
+                    record.run_id,
+                    lambda: self._store.request_cancel_compat(
+                        record.run_id,
+                        action="interrupt",
+                        user_id=record.user_id,
+                    ),
+                )
+                winning_row = cancel_request.row
+                if winning_row is not None and winning_row.get("status") in active_statuses:
+                    winning_action = winning_row.get("cancel_action") or "interrupt"
+                    await self._call_store_with_retry(
+                        "terminalize cancelled admission",
+                        record.run_id,
+                        lambda: self._store.transition_run_atomic(
+                            record.run_id,
+                            expected_state_version=winning_row["state_version"],
+                            expected_statuses=active_statuses,
+                            transition=LifecycleTransition(
+                                lifecycle_type=LifecycleType.cancelled,
+                                status=("error" if winning_action == "rollback" else "interrupted"),
+                                error=("Rolled back by user" if winning_action == "rollback" else None),
+                            ),
+                            user_id=record.user_id,
+                        ),
+                    )
+            else:
+                await self._call_store_with_retry(
+                    "terminalize cancelled admission",
+                    record.run_id,
+                    lambda: self._store.update_status(record.run_id, RunStatus.interrupted.value),
+                )
             stored = await self._call_store_with_retry(
                 "verify terminal cancelled admission",
                 record.run_id,
@@ -1526,13 +1740,9 @@ class RunManager:
                     self._unindex_run_locked(record.run_id, record.thread_id)
             return
 
-        stored_status = RunStatus(stored.get("status") or RunStatus.pending.value)
         async with self._lock:
             if self._runs.get(record.run_id) is record:
-                record.status = stored_status
-                record.error = stored.get("error")
-                record.stop_reason = stored.get("stop_reason")
-                record.updated_at = _now_iso()
+                self._sync_record_from_store_row(record, stored)
 
     async def _admit_thread_operation(
         self,
@@ -1577,6 +1787,8 @@ class RunManager:
         grace_seconds = self._run_ownership_config.grace_seconds if self._run_ownership_config else 10
 
         interrupted_records: list[RunRecord] = []
+        created_store_row: dict[str, Any] | None = None
+        claimed_store_rows: dict[str, dict[str, Any]] = {}
         record = RunRecord(
             run_id=run_id,
             thread_id=thread_id,
@@ -1670,9 +1882,11 @@ class RunManager:
                         if stored_record.user_id != user_id:
                             raise IdempotencyConflictError("Idempotency key is not visible to this principal")
                         return RunAdmission(record=stored_record, outcome=store_admission.outcome)
+                    created_store_row = store_admission.row
+                    claimed_store_rows = {row["run_id"]: row for row in store_admission.claimed}
                 elif multitask_strategy == "reject":
                     try:
-                        await self._call_store_with_retry(
+                        created_store_row, claimed_rows = await self._call_store_with_retry(
                             "create_thread_operation_atomic",
                             run_id,
                             lambda: self._store.create_thread_operation_atomic(
@@ -1692,6 +1906,7 @@ class RunManager:
                                 **accepted_persisted,
                             ),
                         )
+                        claimed_store_rows = {row["run_id"]: row for row in claimed_rows}
                     except ConflictError:
                         raise
                     except Exception as exc:
@@ -1705,7 +1920,7 @@ class RunManager:
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
-                            await self._call_store_with_retry(
+                            created_store_row, claimed_rows = await self._call_store_with_retry(
                                 "create_thread_operation_atomic",
                                 run_id,
                                 lambda: self._store.create_thread_operation_atomic(
@@ -1725,6 +1940,7 @@ class RunManager:
                                     **accepted_persisted,
                                 ),
                             )
+                            claimed_store_rows = {row["run_id"]: row for row in claimed_rows}
                             break
                         except Exception as exc:
                             is_unique = _is_unique_violation(exc)
@@ -1740,6 +1956,10 @@ class RunManager:
                     # ``create_thread_operation_atomic`` already marked any claimed store
                     # rows as interrupted in the same transaction; no extra
                     # store write is needed for them.
+
+                if created_store_row is not None:
+                    self._sync_record_from_store_row(record, created_store_row)
+                    record.store_only = False
 
             # 3) Only now safe to register locally — store insert succeeded.
             self._runs[run_id] = record
@@ -1757,7 +1977,12 @@ class RunManager:
                     r.finalizing = task_active
                     if task_active:
                         r.task.cancel()
-                    r.status = RunStatus.interrupted
+                    claimed_row = claimed_store_rows.get(r.run_id)
+                    if claimed_row is not None and self._store.durable_lifecycle:
+                        self._sync_record_from_store_row(r, claimed_row)
+                    else:
+                        r.status = RunStatus.error if multitask_strategy == "rollback" else RunStatus.interrupted
+                        r.error = "Rolled back by user" if multitask_strategy == "rollback" else "Cancelled by newer run"
                     r.updated_at = now
                     interrupted_records.append(r)
 
@@ -1767,7 +1992,11 @@ class RunManager:
         # new run before propagating cancellation to the caller.
         try:
             for interrupted_record in interrupted_records:
-                await self._persist_status(interrupted_record, RunStatus.interrupted)
+                if self._store is None or not self._store.durable_lifecycle:
+                    await self._persist_status(
+                        interrupted_record,
+                        interrupted_record.status,
+                    )
         except asyncio.CancelledError:
             cleanup = asyncio.create_task(self._close_cancelled_admission(record))
             cleanup.set_name(f"deerflow-close-cancelled-admission-{record.run_id}")
@@ -1872,6 +2101,7 @@ class RunManager:
         """
         if self._store is None:
             return []
+        effective_stop_reason = stop_reason or ORPHAN_RECOVERY_STOP_REASON
         grace_seconds = self._run_ownership_config.grace_seconds if self._run_ownership_config else 10
         try:
             rows = await self._call_store_with_retry(
@@ -1899,14 +2129,19 @@ class RunManager:
                     continue
 
             try:
+                takeover_kwargs = {
+                    "grace_seconds": grace_seconds,
+                    "error": error,
+                    "stop_reason": effective_stop_reason,
+                }
+                if self._store.durable_lifecycle:
+                    takeover_kwargs["expected_state_version"] = row.get("state_version") or 0
                 claimed = await self._call_store_with_retry(
                     "claim_for_takeover",
                     record.run_id,
                     lambda: self._store.claim_for_takeover(
                         record.run_id,
-                        grace_seconds=grace_seconds,
-                        error=error,
-                        stop_reason=stop_reason,
+                        **takeover_kwargs,
                     ),
                 )
             except Exception:
@@ -1920,8 +2155,12 @@ class RunManager:
                 continue
             record.status = RunStatus.error
             record.error = error
-            record.stop_reason = stop_reason
+            record.stop_reason = effective_stop_reason
             record.updated_at = now
+            if self._store.durable_lifecycle:
+                stored = await self._store.get(record.run_id)
+                if stored is not None:
+                    self._sync_record_from_store_row(record, stored)
             if record.operation_kind == ThreadOperationKind.run:
                 # The atomic takeover above must win before writing a zero-delivery
                 # receipt; otherwise a stale scan could race a heartbeat renewal and

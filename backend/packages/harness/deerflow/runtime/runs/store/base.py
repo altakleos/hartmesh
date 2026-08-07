@@ -11,9 +11,26 @@ When user_id is None, no user filtering is applied (single-user mode).
 from __future__ import annotations
 
 import abc
+import hashlib
+import json
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+
+_LIFECYCLE_EVIDENCE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
+_LIFECYCLE_SAFE_REASONS = {
+    "agent_revision_drift",
+    "loop_capped",
+    "model_length_capped",
+    "orphan_recovered",
+    "replacement",
+    "rollback",
+    "safety_capped",
+    "subagent_limit_capped",
+    "token_capped",
+    "worker_attachment_failed",
+}
 
 
 @dataclass(frozen=True)
@@ -50,6 +67,133 @@ class AdmissionOutcome(StrEnum):
     key_conflict = "key_conflict"
 
 
+class LifecycleType(StrEnum):
+    """The complete v1 authoritative invocation lifecycle vocabulary."""
+
+    accepted = "accepted"
+    started = "started"
+    cancellation_requested = "cancellation_requested"
+    cancelled = "cancelled"
+    succeeded = "succeeded"
+    failed = "failed"
+    timed_out = "timed_out"
+    interrupted = "interrupted"
+
+
+_LIFECYCLE_TYPE_BY_STATUS = {
+    "running": LifecycleType.started,
+    "success": LifecycleType.succeeded,
+    "error": LifecycleType.failed,
+    "timeout": LifecycleType.timed_out,
+    "interrupted": LifecycleType.interrupted,
+}
+_LIFECYCLE_STATUSES_BY_TYPE = {
+    LifecycleType.accepted: frozenset({"pending"}),
+    LifecycleType.started: frozenset({"running"}),
+    LifecycleType.cancellation_requested: frozenset({"pending", "running"}),
+    LifecycleType.cancelled: frozenset({"error", "interrupted"}),
+    LifecycleType.succeeded: frozenset({"success"}),
+    LifecycleType.failed: frozenset({"error"}),
+    LifecycleType.timed_out: frozenset({"timeout"}),
+    LifecycleType.interrupted: frozenset({"error", "interrupted"}),
+}
+
+
+def lifecycle_type_for_status(status: str) -> LifecycleType:
+    """Return the ordinary lifecycle type for one persisted run status."""
+
+    try:
+        return _LIFECYCLE_TYPE_BY_STATUS[status]
+    except KeyError as exc:
+        raise ValueError(f"No lifecycle mapping for run status {status!r}") from exc
+
+
+def validate_lifecycle_transition(transition: LifecycleTransition) -> None:
+    """Reject evidence whose lifecycle meaning contradicts its row status."""
+
+    allowed_statuses = _LIFECYCLE_STATUSES_BY_TYPE[transition.lifecycle_type]
+    if transition.status not in allowed_statuses:
+        raise ValueError(f"Lifecycle type {transition.lifecycle_type.value!r} cannot produce status {transition.status!r}")
+
+
+@dataclass(frozen=True)
+class LifecycleTransition:
+    """One safe state mutation and its matching lifecycle evidence."""
+
+    lifecycle_type: LifecycleType
+    status: str
+    error: str | None = None
+    stop_reason: str | None = None
+    reason: str | None = None
+    evidence: dict[str, str | int | bool | None | list[str | int | bool | None]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class LifecycleTransitionResult:
+    applied: bool
+    row: dict[str, Any] | None = None
+    event: dict[str, Any] | None = None
+
+
+class CancellationRequestOutcome(StrEnum):
+    requested = "requested"
+    already_requested = "already_requested"
+    already_terminal = "already_terminal"
+    stale = "stale"
+    not_found_or_invisible = "not_found_or_invisible"
+
+
+@dataclass(frozen=True)
+class CancellationRequestResult:
+    outcome: CancellationRequestOutcome
+    row: dict[str, Any] | None = None
+    event: dict[str, Any] | None = None
+
+
+def lifecycle_owner_scope(user_id: str | None) -> str:
+    """Create a bounded, non-identifying access scope for lifecycle evidence."""
+
+    if user_id is None:
+        return "unscoped"
+    return f"user:sha256:{hashlib.sha256(user_id.encode('utf-8')).hexdigest()}"
+
+
+def build_lifecycle_payload(transition: LifecycleTransition) -> dict[str, Any]:
+    """Validate and project the deliberately small lifecycle v1 payload."""
+
+    validate_lifecycle_transition(transition)
+    payload: dict[str, Any] = {"version": 1}
+    if transition.reason is not None:
+        if transition.reason not in _LIFECYCLE_SAFE_REASONS:
+            raise ValueError(f"unsupported lifecycle reason: {transition.reason!r}")
+        payload["reason"] = transition.reason
+    if transition.evidence:
+        if transition.lifecycle_type != LifecycleType.cancellation_requested:
+            raise ValueError("lifecycle evidence is only supported for cancellation_requested")
+        if len(transition.evidence) > 16:
+            raise ValueError("lifecycle evidence exceeds 16 references")
+        safe_evidence: dict[str, str | int | bool | None | list[str | int | bool | None]] = {}
+        for key, value in transition.evidence.items():
+            if not isinstance(key, str) or not _LIFECYCLE_EVIDENCE_KEY.fullmatch(key):
+                raise ValueError(f"invalid lifecycle evidence key: {key!r}")
+            if key != "action":
+                raise ValueError(f"unsupported lifecycle evidence key: {key!r}")
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                if not isinstance(item, (str, int, bool, type(None))):
+                    raise ValueError("lifecycle evidence values must be safe scalars or lists")
+                if isinstance(item, str) and len(item.encode("utf-8")) > 256:
+                    raise ValueError("lifecycle evidence string exceeds 256 UTF-8 bytes")
+            if value not in ("interrupt", "rollback"):
+                raise ValueError("lifecycle action evidence must be interrupt or rollback")
+            safe_evidence[key] = list(values) if isinstance(value, list) else value
+        payload["evidence"] = safe_evidence
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    if len(encoded) > 4096:
+        raise ValueError("lifecycle payload exceeds 4096 UTF-8 bytes")
+    return payload
+
+
 @dataclass(frozen=True)
 class RunEnsureResult:
     outcome: AdmissionOutcome
@@ -58,6 +202,71 @@ class RunEnsureResult:
 
 
 class RunStore(abc.ABC):
+    # Custom stores retain their compatibility behavior until they implement
+    # the same row+journal transaction and explicitly override this flag.
+    durable_lifecycle = False
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Inheriting implementation code is not proof that a custom store
+        # preserves its backing system's row+journal transaction. Every
+        # lifecycle-capable implementation opts in on its own class body.
+        if "durable_lifecycle" not in cls.__dict__:
+            cls.durable_lifecycle = False
+
+    async def initialize_lifecycle(self) -> None:
+        """Validate or initialize lifecycle cursor ordering state."""
+
+    async def list_lifecycle_events(
+        self,
+        *,
+        run_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Internal inspection seam; no public cursor API is implied."""
+
+        raise NotImplementedError
+
+    async def transition_run_atomic(
+        self,
+        run_id: str,
+        *,
+        expected_state_version: int,
+        expected_statuses: tuple[str, ...] | None,
+        transition: LifecycleTransition,
+        user_id: str | None = None,
+    ) -> LifecycleTransitionResult:
+        """Compare-and-set one normal run and append its evidence atomically."""
+
+        raise NotImplementedError
+
+    async def request_cancel_fenced(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        expected_state_version: int,
+        user_id: str | None = None,
+    ) -> CancellationRequestResult:
+        """Record a version-fenced cancellation request with precise precedence."""
+
+        raise NotImplementedError
+
+    async def request_cancel_compat(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        user_id: str | None = None,
+    ) -> CancellationRequestResult:
+        """Atomically record the first request for the existing unfenced API."""
+
+        winning = await self.request_cancel(run_id, action=action)
+        if winning is None:
+            return CancellationRequestResult(CancellationRequestOutcome.already_terminal)
+        outcome = CancellationRequestOutcome.requested if winning == action else CancellationRequestOutcome.stale
+        return CancellationRequestResult(outcome)
+
     @abc.abstractmethod
     async def put(
         self,
@@ -334,14 +543,15 @@ class RunStore(abc.ABC):
         grace_seconds: int,
         error: str,
         stop_reason: str | None = None,
+        expected_state_version: int | None = None,
     ) -> bool:
         """Atomically mark an expired-lease active run as ``error``.
 
         Only rows whose lease has expired past *grace_seconds* (or whose
-        lease is NULL — pre-ownership data) are updated.  The conditional
-        WHERE closes the race between the caller's stale read of the lease
-        and a concurrent heartbeat renewal by the owning worker. When
-        provided, *stop_reason* is persisted in the same atomic update.
+        lease is NULL — pre-ownership data) are updated. The conditional
+        status, lease, and optional version fence close races with heartbeat,
+        cancellation, and terminal writers. When provided, *stop_reason* is
+        persisted in the same atomic update.
 
         Returns ``False`` when:
           - the run is no longer ``pending`` / ``running``,

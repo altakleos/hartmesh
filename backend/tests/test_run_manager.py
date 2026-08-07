@@ -1000,7 +1000,11 @@ async def test_create_or_reject_cancellation_after_registration_interrupts_repla
     strategy: str,
 ) -> None:
     """Cancellation after admission must not leave the replacement active."""
-    store = MemoryRunStore()
+
+    class LegacyMemoryRunStore(MemoryRunStore):
+        pass
+
+    store = LegacyMemoryRunStore()
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
@@ -1037,7 +1041,11 @@ async def test_create_or_reject_repeated_cancellation_drains_replacement_cleanup
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Repeated cancellation must not abandon the durable cleanup task."""
-    store = MemoryRunStore()
+
+    class LegacyMemoryRunStore(MemoryRunStore):
+        pass
+
+    store = LegacyMemoryRunStore()
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
@@ -1233,8 +1241,8 @@ async def test_create_or_reject_preserves_peer_terminal_status_during_cancel_ret
 
 
 @pytest.mark.anyio
-async def test_create_or_reject_rollback_persists_interrupted_status_to_store():
-    """rollback strategy should persist interrupted status for old runs."""
+async def test_create_or_reject_rollback_persists_error_status_to_store():
+    """Rollback preserves its authoritative error mapping for old runs."""
     store = MemoryRunStore()
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
@@ -1244,9 +1252,10 @@ async def test_create_or_reject_rollback_persists_interrupted_status_to_store():
 
     stored_old = await store.get(old.run_id)
     assert new.run_id != old.run_id
-    assert old.status == RunStatus.interrupted
+    assert old.status == RunStatus.error
     assert stored_old is not None
-    assert stored_old["status"] == "interrupted"
+    assert stored_old["status"] == "error"
+    assert stored_old["error"] == "Rolled back by user"
 
 
 @pytest.mark.anyio

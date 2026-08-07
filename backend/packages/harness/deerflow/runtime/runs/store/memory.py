@@ -5,13 +5,61 @@ Equivalent to the original RunManager._runs dict behavior.
 
 from __future__ import annotations
 
+import copy
+import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from functools import wraps
 from typing import Any
 
-from deerflow.runtime.runs.store.base import AdmissionOutcome, LeaseRenewal, RunEnsureResult, RunStore, StatusFinalization
+from deerflow.runtime.runs.store.base import (
+    AdmissionOutcome,
+    CancellationRequestOutcome,
+    CancellationRequestResult,
+    LeaseRenewal,
+    LifecycleTransition,
+    LifecycleTransitionResult,
+    LifecycleType,
+    RunEnsureResult,
+    RunStore,
+    StatusFinalization,
+    build_lifecycle_payload,
+    lifecycle_owner_scope,
+    lifecycle_type_for_status,
+)
+
+_TERMINAL_STATUSES = {"success", "error", "timeout", "interrupted"}
+
+
+def _atomic_memory_mutation[**P, R](method: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+    @wraps(method)
+    async def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        self = args[0]
+        snapshot = (
+            copy.deepcopy(self._runs),
+            copy.deepcopy(self._runs_by_thread),
+            copy.deepcopy(self._runs_by_external_identity),
+            copy.deepcopy(self._lifecycle_events),
+            self._lifecycle_cursor,
+        )
+        try:
+            return await method(*args, **kwargs)
+        except BaseException:
+            (
+                self._runs,
+                self._runs_by_thread,
+                self._runs_by_external_identity,
+                self._lifecycle_events,
+                self._lifecycle_cursor,
+            ) = snapshot
+            raise
+
+    return wrapped
 
 
 class MemoryRunStore(RunStore):
+    durable_lifecycle = True
+
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
         # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
@@ -20,6 +68,129 @@ class MemoryRunStore(RunStore):
         # the index ``RunManager`` keeps over its own in-memory records.
         self._runs_by_thread: dict[str, dict[str, None]] = {}
         self._runs_by_external_identity: dict[tuple[str, str], str] = {}
+        self._lifecycle_events: list[dict[str, Any]] = []
+        self._lifecycle_cursor = 0
+
+    async def initialize_lifecycle(self) -> None:
+        return None
+
+    async def list_lifecycle_events(
+        self,
+        *,
+        run_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return [dict(event) for event in self._lifecycle_events if (run_id is None or event["run_id"] == run_id) and (thread_id is None or event["thread_id"] == thread_id)]
+
+    def _append_lifecycle_event(
+        self,
+        row: dict[str, Any],
+        transition: LifecycleTransition,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._lifecycle_cursor += 1
+        event = {
+            "event_id": str(uuid.uuid4()),
+            "cursor": self._lifecycle_cursor,
+            "run_id": row["run_id"],
+            "thread_id": row["thread_id"],
+            "owner_scope": lifecycle_owner_scope(row.get("user_id")),
+            "lifecycle_type": transition.lifecycle_type,
+            "state_version": row["state_version"],
+            "status": row["status"],
+            "created_at": datetime.now(UTC).isoformat(),
+            "payload": payload if payload is not None else build_lifecycle_payload(transition),
+        }
+        self._lifecycle_events.append(event)
+        return event
+
+    @_atomic_memory_mutation
+    async def transition_run_atomic(
+        self,
+        run_id: str,
+        *,
+        expected_state_version: int,
+        expected_statuses: tuple[str, ...] | None,
+        transition: LifecycleTransition,
+        user_id: str | None = None,
+    ) -> LifecycleTransitionResult:
+        payload = build_lifecycle_payload(transition)
+        row = self._runs.get(run_id)
+        if row is None or row.get("operation_kind", "run") != "run":
+            return LifecycleTransitionResult(applied=False)
+        if user_id is not None and row.get("user_id") != user_id:
+            return LifecycleTransitionResult(applied=False)
+        if row["state_version"] != expected_state_version:
+            return LifecycleTransitionResult(applied=False, row=row)
+        if expected_statuses is not None and row["status"] not in expected_statuses:
+            return LifecycleTransitionResult(applied=False, row=row)
+        row["status"] = transition.status
+        row["state_version"] += 1
+        if transition.error is not None:
+            row["error"] = transition.error
+        if transition.stop_reason is not None:
+            row["stop_reason"] = transition.stop_reason
+        row["updated_at"] = datetime.now(UTC).isoformat()
+        event = self._append_lifecycle_event(row, transition, payload=payload)
+        return LifecycleTransitionResult(applied=True, row=row, event=event)
+
+    @_atomic_memory_mutation
+    async def request_cancel_fenced(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        expected_state_version: int,
+        user_id: str | None = None,
+    ) -> CancellationRequestResult:
+        return self._request_cancel_atomic(
+            run_id,
+            action=action,
+            expected_state_version=expected_state_version,
+            user_id=user_id,
+        )
+
+    @_atomic_memory_mutation
+    async def request_cancel_compat(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        user_id: str | None = None,
+    ) -> CancellationRequestResult:
+        return self._request_cancel_atomic(run_id, action=action, user_id=user_id)
+
+    def _request_cancel_atomic(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        expected_state_version: int | None = None,
+        user_id: str | None = None,
+    ) -> CancellationRequestResult:
+        if action not in ("interrupt", "rollback"):
+            raise ValueError(f"Unsupported cancellation action: {action}")
+        row = self._runs.get(run_id)
+        if row is None or row.get("operation_kind", "run") != "run" or (user_id is not None and row.get("user_id") != user_id):
+            return CancellationRequestResult(CancellationRequestOutcome.not_found_or_invisible)
+        if row.get("cancel_action") == action:
+            return CancellationRequestResult(CancellationRequestOutcome.already_requested, row=row)
+        if row["status"] in _TERMINAL_STATUSES:
+            return CancellationRequestResult(CancellationRequestOutcome.already_terminal, row=row)
+        if row.get("cancel_action") is not None or (expected_state_version is not None and row["state_version"] != expected_state_version):
+            return CancellationRequestResult(CancellationRequestOutcome.stale, row=row)
+        row["cancel_action"] = action
+        row["cancel_requested_at"] = datetime.now(UTC).isoformat()
+        row["state_version"] += 1
+        row["updated_at"] = datetime.now(UTC).isoformat()
+        transition = LifecycleTransition(
+            lifecycle_type=LifecycleType.cancellation_requested,
+            status=row["status"],
+            evidence={"action": action},
+        )
+        event = self._append_lifecycle_event(row, transition)
+        return CancellationRequestResult(CancellationRequestOutcome.requested, row=row, event=event)
 
     def _index_run(self, run_id: str, thread_id: str) -> None:
         """Register *run_id* under *thread_id* in the secondary index."""
@@ -33,6 +204,7 @@ class MemoryRunStore(RunStore):
             if not bucket:
                 self._runs_by_thread.pop(thread_id, None)
 
+    @_atomic_memory_mutation
     async def put(
         self,
         run_id,
@@ -67,13 +239,14 @@ class MemoryRunStore(RunStore):
     ):
         now = datetime.now(UTC).isoformat()
         existing = self._runs.get(run_id)
-        self._runs[run_id] = {
+        lifecycle_row = operation_kind == "run" and status is not None
+        new_row = {
             "run_id": run_id,
             "thread_id": thread_id,
             "assistant_id": assistant_id,
             "user_id": user_id,
             "model_name": model_name,
-            "status": status,
+            "status": "pending" if lifecycle_row else status,
             "operation_kind": operation_kind,
             "multitask_strategy": multitask_strategy,
             "metadata": metadata or {},
@@ -101,10 +274,41 @@ class MemoryRunStore(RunStore):
             # request that may have raced a retry of an earlier snapshot.
             "cancel_action": existing.get("cancel_action") if existing else None,
             "cancel_requested_at": existing.get("cancel_requested_at") if existing else None,
+            "state_version": existing.get("state_version", 0) if existing else (1 if lifecycle_row else 0),
         }
+        if existing is not None:
+            # Snapshot repair must never overwrite authoritative lifecycle
+            # state. Dedicated transition primitives own status/version.
+            new_row["status"] = existing["status"]
+            new_row["state_version"] = existing.get("state_version", 0)
+            if existing.get("operation_kind", "run") == "run":
+                new_row["error"] = existing.get("error")
+                new_row["stop_reason"] = existing.get("stop_reason")
+        self._runs[run_id] = new_row
         self._index_run(run_id, thread_id)
         if operation_kind == "run" and external_scope is not None and external_key is not None:
             self._runs_by_external_identity[(external_scope, external_key)] = run_id
+        if existing is None and lifecycle_row:
+            self._append_lifecycle_event(
+                new_row,
+                LifecycleTransition(lifecycle_type=LifecycleType.accepted, status="pending"),
+            )
+            if status != "pending":
+                new_row["status"] = status
+                new_row["state_version"] += 1
+                self._append_lifecycle_event(
+                    new_row,
+                    LifecycleTransition(
+                        lifecycle_type=lifecycle_type_for_status(status),
+                        status=status,
+                        error=error,
+                        stop_reason=stop_reason,
+                        reason=stop_reason,
+                    ),
+                )
+        elif existing is not None and existing["status"] != status:
+            if operation_kind != "run":
+                new_row["status"] = status
 
     async def get(self, run_id, *, user_id=None):
         run = self._runs.get(run_id)
@@ -171,21 +375,40 @@ class MemoryRunStore(RunStore):
         # is included for the rollback path (``interrupted → error`` finalize).
         if run["status"] not in ("pending", "running", "interrupted"):
             return False
-        run["status"] = status
-        if error is not None:
-            run["error"] = error
-        if stop_reason is not None:
-            run["stop_reason"] = stop_reason
-        run["updated_at"] = datetime.now(UTC).isoformat()
-        return True
+        if run.get("operation_kind", "run") != "run":
+            run["status"] = status
+            if error is not None:
+                run["error"] = error
+            if stop_reason is not None:
+                run["stop_reason"] = stop_reason
+            run["updated_at"] = datetime.now(UTC).isoformat()
+            return True
+        lifecycle_type = lifecycle_type_for_status(status)
+        result = await self.transition_run_atomic(
+            run_id,
+            expected_state_version=run["state_version"],
+            expected_statuses=("pending", "running", "interrupted"),
+            transition=LifecycleTransition(
+                lifecycle_type=lifecycle_type,
+                status=status,
+                error=error,
+                stop_reason=stop_reason,
+                reason=stop_reason,
+            ),
+        )
+        return result.applied
 
     async def start_run(self, run_id) -> bool:
         run = self._runs.get(run_id)
-        if run is None or run["status"] != "pending":
+        if run is None or run["status"] != "pending" or run.get("cancel_action") is not None:
             return False
-        run["status"] = "running"
-        run["updated_at"] = datetime.now(UTC).isoformat()
-        return True
+        result = await self.transition_run_atomic(
+            run_id,
+            expected_state_version=run["state_version"],
+            expected_statuses=("pending",),
+            transition=LifecycleTransition(lifecycle_type=LifecycleType.started, status="running"),
+        )
+        return result.applied
 
     async def update_model_name(self, run_id, model_name):
         if run_id in self._runs:
@@ -200,6 +423,7 @@ class MemoryRunStore(RunStore):
             key = run.get("external_key")
             if scope is not None and key is not None:
                 self._runs_by_external_identity.pop((scope, key), None)
+            self._lifecycle_events = [event for event in self._lifecycle_events if event["run_id"] != run_id]
 
     async def update_run_completion(self, run_id, *, status, **kwargs):
         run = self._runs.get(run_id)
@@ -211,7 +435,24 @@ class MemoryRunStore(RunStore):
             allowed_sources.add("interrupted")
         if current_status not in allowed_sources:
             return False
-        run["status"] = status
+        if current_status != status and run.get("operation_kind", "run") == "run":
+            lifecycle_type = lifecycle_type_for_status(status)
+            result = await self.transition_run_atomic(
+                run_id,
+                expected_state_version=run["state_version"],
+                expected_statuses=(current_status,),
+                transition=LifecycleTransition(
+                    lifecycle_type=lifecycle_type,
+                    status=status,
+                    error=kwargs.get("error"),
+                    stop_reason=kwargs.get("stop_reason"),
+                    reason=kwargs.get("stop_reason"),
+                ),
+            )
+            if not result.applied:
+                return False
+        else:
+            run["status"] = status
         for key, value in kwargs.items():
             if value is not None:
                 run[key] = value
@@ -319,16 +560,14 @@ class MemoryRunStore(RunStore):
         )
 
     async def request_cancel(self, run_id: str, *, action: str) -> str | None:
-        if action not in ("interrupt", "rollback"):
-            raise ValueError(f"Unsupported cancellation action: {action}")
-        run = self._runs.get(run_id)
-        if run is None or run["status"] not in ("pending", "running"):
-            return None
-        if run.get("cancel_action") is None:
-            run["cancel_action"] = action
-            run["cancel_requested_at"] = datetime.now(UTC).isoformat()
-        run["updated_at"] = datetime.now(UTC).isoformat()
-        return run["cancel_action"]
+        result = await self.request_cancel_compat(run_id, action=action)
+        if result.outcome in (
+            CancellationRequestOutcome.requested,
+            CancellationRequestOutcome.already_requested,
+            CancellationRequestOutcome.stale,
+        ):
+            return result.row.get("cancel_action") if result.row is not None else None
+        return None
 
     async def finalize_if_not_cancelled(
         self,
@@ -348,13 +587,20 @@ class MemoryRunStore(RunStore):
             )
         if run["status"] not in ("pending", "running"):
             return StatusFinalization(finalized=False)
-        run["status"] = status
-        if error is not None:
-            run["error"] = error
-        if stop_reason is not None:
-            run["stop_reason"] = stop_reason
-        run["updated_at"] = datetime.now(UTC).isoformat()
-        return StatusFinalization(finalized=True)
+        lifecycle_type = lifecycle_type_for_status(status)
+        result = await self.transition_run_atomic(
+            run_id,
+            expected_state_version=run["state_version"],
+            expected_statuses=("pending", "running"),
+            transition=LifecycleTransition(
+                lifecycle_type=lifecycle_type,
+                status=status,
+                error=error,
+                stop_reason=stop_reason,
+                reason=stop_reason,
+            ),
+        )
+        return StatusFinalization(finalized=result.applied)
 
     async def claim_for_takeover(
         self,
@@ -363,6 +609,7 @@ class MemoryRunStore(RunStore):
         grace_seconds: int,
         error: str,
         stop_reason: str | None = None,
+        expected_state_version: int | None = None,
     ) -> bool:
         from deerflow.utils.time import is_lease_expired
 
@@ -371,15 +618,31 @@ class MemoryRunStore(RunStore):
             return False
         if run["status"] not in ("pending", "running"):
             return False
+        if expected_state_version is not None and run["state_version"] != expected_state_version:
+            return False
         lease = run.get("lease_expires_at")
         if not is_lease_expired(lease, grace_seconds=grace_seconds):
             return False
-        run["status"] = "error"
-        run["error"] = error
-        if stop_reason is not None:
-            run["stop_reason"] = stop_reason
-        run["updated_at"] = datetime.now(UTC).isoformat()
-        return True
+        if run.get("operation_kind", "run") != "run":
+            run["status"] = "error"
+            run["error"] = error
+            if stop_reason is not None:
+                run["stop_reason"] = stop_reason
+            run["updated_at"] = datetime.now(UTC).isoformat()
+            return True
+        result = await self.transition_run_atomic(
+            run_id,
+            expected_state_version=run["state_version"],
+            expected_statuses=("pending", "running"),
+            transition=LifecycleTransition(
+                lifecycle_type=LifecycleType.failed,
+                status="error",
+                error=error,
+                stop_reason=stop_reason,
+                reason=stop_reason,
+            ),
+        )
+        return result.applied
 
     async def list_inflight_with_expired_lease(
         self,
@@ -423,6 +686,7 @@ class MemoryRunStore(RunStore):
         results.sort(key=lambda r: r["created_at"])
         return results
 
+    @_atomic_memory_mutation
     async def create_thread_operation_atomic(
         self,
         run_id: str,
@@ -503,11 +767,25 @@ class MemoryRunStore(RunStore):
                 if r.get("operation_kind", "run") != "run" and not lease_expired:
                     raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
                 candidates.append(r)
+            candidates.sort(key=lambda row: (row["created_at"], row["run_id"]))
             for r in candidates:
-                r["status"] = "interrupted"
-                r["error"] = "Cancelled by newer run"
+                replacement_status = "error" if multitask_strategy == "rollback" else "interrupted"
+                replacement_error = "Rolled back by user" if multitask_strategy == "rollback" else "Cancelled by newer run"
+                r["status"] = replacement_status
+                r["error"] = replacement_error
                 r["owner_worker_id"] = owner_worker_id
                 r["updated_at"] = now
+                if r.get("operation_kind", "run") == "run":
+                    r["state_version"] += 1
+                    self._append_lifecycle_event(
+                        r,
+                        LifecycleTransition(
+                            lifecycle_type=LifecycleType.interrupted,
+                            status=replacement_status,
+                            error=replacement_error,
+                            reason="rollback" if multitask_strategy == "rollback" else "replacement",
+                        ),
+                    )
                 claimed.append(r)
 
         new_row = {
@@ -541,11 +819,17 @@ class MemoryRunStore(RunStore):
             "external_key": external_key if operation_kind == "run" else None,
             "request_digest": request_digest if operation_kind == "run" else None,
             "request_digest_version": request_digest_version if operation_kind == "run" else None,
+            "state_version": 1 if operation_kind == "run" else 0,
         }
         self._runs[run_id] = new_row
         self._index_run(run_id, thread_id)
         if operation_kind == "run" and external_scope is not None and external_key is not None:
             self._runs_by_external_identity[(external_scope, external_key)] = run_id
+        if operation_kind == "run":
+            self._append_lifecycle_event(
+                new_row,
+                LifecycleTransition(lifecycle_type=LifecycleType.accepted, status="pending"),
+            )
         return new_row, claimed
 
     async def ensure_run_atomic(

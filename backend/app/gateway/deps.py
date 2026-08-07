@@ -411,6 +411,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
+        await app.state.run_store.initialize_lifecycle()
 
         from deerflow.persistence.thread_meta import make_thread_store
 

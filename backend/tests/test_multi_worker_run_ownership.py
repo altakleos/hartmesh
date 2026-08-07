@@ -22,6 +22,7 @@ import pytest
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, _generate_worker_id
+from deerflow.runtime.runs.store.base import LifecycleTransition, LifecycleType
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 # ---------------------------------------------------------------------------
@@ -1773,7 +1774,8 @@ async def test_local_owner_cancel_falls_back_when_durable_request_fails():
 
         stored = await store.get(record.run_id)
         assert stored is not None
-        assert stored["status"] == "interrupted"
+        assert stored["status"] == "error"
+        assert stored["error"] == "Rolled back by user"
         assert stored["cancel_action"] is None
     finally:
         if not record.task.done():
@@ -1794,11 +1796,11 @@ async def test_owner_cancel_retry_on_peer_is_accepted():
     await owner.set_status(record.run_id, RunStatus.running)
 
     assert await owner.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
-    assert await peer.cancel(record.run_id, action="interrupt") == CancelOutcome.requested
+    assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
 
     stored = await store.get(record.run_id)
     assert stored is not None
-    assert stored["status"] == "interrupted"
+    assert stored["status"] == "error"
     assert stored["cancel_action"] == "rollback"
 
 
@@ -1819,7 +1821,7 @@ async def test_owner_cancel_uses_store_while_terminal_status_is_staged_locally()
     assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
     stored = await store.get(record.run_id)
     assert stored is not None
-    assert stored["status"] == "running"
+    assert stored["status"] == "error"
     assert stored["cancel_action"] == "rollback"
 
 
@@ -1855,12 +1857,18 @@ async def test_cancel_takeover_race_owner_renewed_lease():
     # simulate the lease having been renewed.
     original = store.claim_for_takeover
 
-    async def race_lost(run_id, *, grace_seconds, error):
+    async def race_lost(run_id, *, grace_seconds, error, stop_reason=None, expected_state_version=None):
         # Simulate a heartbeat renewal between the read and the write
         run = store._runs.get(run_id)
         if run and run["status"] in ("pending", "running"):
             run["lease_expires_at"] = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+        return await original(
+            run_id,
+            grace_seconds=grace_seconds,
+            error=error,
+            stop_reason=stop_reason,
+            expected_state_version=expected_state_version,
+        )
 
     store.claim_for_takeover = race_lost
     manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
@@ -2207,22 +2215,29 @@ async def test_cancel_returns_taken_over_when_peer_claims_during_local_cancel():
     record = await mgr.create("thread-1")
     await mgr.set_status(record.run_id, RunStatus.running)
 
-    # Wrap update_status so that the first call (from cancel's _persist_status)
-    # is rejected as if a peer already marked the row error. This simulates
-    # the race: in-memory cancel succeeds, but store write is blocked.
-    original = store.update_status
+    original = store.transition_run_atomic
+    injected = False
 
-    async def race_update(run_id, status, *, error=None, stop_reason=None):
-        # Simulate peer takeover: flip to error before our write lands
-        run = store._runs.get(run_id)
-        if run and run["status"] == "running" and status == "interrupted":
-            run["status"] = "error"
-            run["error"] = "peer takeover"
-            run["updated_at"] = datetime.now(UTC).isoformat()
-            return False  # our write was blocked
-        return await original(run_id, status, error=error, stop_reason=stop_reason)
+    async def race_transition(run_id, **kwargs):
+        nonlocal injected
+        transition = kwargs["transition"]
+        if not injected and transition.lifecycle_type == LifecycleType.cancelled:
+            injected = True
+            current = await store.get(run_id)
+            await original(
+                run_id,
+                expected_state_version=current["state_version"],
+                expected_statuses=("running",),
+                transition=LifecycleTransition(
+                    lifecycle_type=LifecycleType.failed,
+                    status="error",
+                    error="peer takeover",
+                    reason=ORPHAN_RECOVERY_STOP_REASON,
+                ),
+            )
+        return await original(run_id, **kwargs)
 
-    store.update_status = race_update
+    store.transition_run_atomic = race_transition
 
     outcome = await mgr.cancel(record.run_id)
     assert outcome == CancelOutcome.taken_over
@@ -2248,16 +2263,10 @@ async def test_cancel_action_rollback_finalizes_to_error_in_store():
     record = await mgr.create("thread-1")
     await mgr.set_status(record.run_id, RunStatus.running)
 
-    # Step 1: cancel(action=rollback) flips running → interrupted
+    # Cancellation request and rollback finalization are distinct journal
+    # transitions, while the authoritative row lands directly at error.
     outcome = await mgr.cancel(record.run_id, action="rollback")
     assert outcome == CancelOutcome.cancelled
-    row = await store.get(record.run_id)
-    assert row["status"] == "interrupted"
-
-    # Step 2: worker.py finalize path — task raises CancelledError, then
-    # set_status(error, "Rolled back by user"). The widened guard
-    # (interrupted is in the whitelist) must let this through.
-    await mgr.set_status(record.run_id, RunStatus.error, error="Rolled back by user")
     row = await store.get(record.run_id)
     assert row["status"] == "error"
     assert row["error"] == "Rolled back by user"
@@ -2306,7 +2315,7 @@ async def test_unconfirmed_success_is_fenced_when_heartbeat_is_enabled():
     async def fail_status_write(*_args, **_kwargs):
         raise OSError("database unreachable")
 
-    store.update_status = fail_status_write
+    store.transition_run_atomic = fail_status_write
 
     await manager.set_status(record.run_id, RunStatus.success)
 
@@ -2333,7 +2342,7 @@ async def test_unconfirmed_staged_success_is_fenced_on_deferred_persistence():
     async def fail_status_write(*_args, **_kwargs):
         raise OSError("database unreachable")
 
-    store.update_status = fail_status_write
+    store.transition_run_atomic = fail_status_write
 
     persisted = await manager.persist_current_status(record.run_id)
 
@@ -2373,9 +2382,15 @@ async def test_cancel_claim_lost_to_terminal_returns_not_cancellable():
     # conditional UPDATE so it matches 0 rows.
     original = store.claim_for_takeover
 
-    async def race_claim(run_id, *, grace_seconds, error):
-        store._runs[run_id]["status"] = "success"
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+    async def race_claim(run_id, *, grace_seconds, error, stop_reason=None, expected_state_version=None):
+        await store.update_status(run_id, "success")
+        return await original(
+            run_id,
+            grace_seconds=grace_seconds,
+            error=error,
+            stop_reason=stop_reason,
+            expected_state_version=expected_state_version,
+        )
 
     store.claim_for_takeover = race_claim
 
@@ -2405,10 +2420,20 @@ async def test_cancel_claim_lost_to_takeover_returns_taken_over():
     # UPDATE so it matches 0 rows (peer already took it over).
     original = store.claim_for_takeover
 
-    async def race_takeover(run_id, *, grace_seconds, error):
-        store._runs[run_id]["status"] = "error"
-        store._runs[run_id]["error"] = "peer claim"
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+    async def race_takeover(run_id, *, grace_seconds, error, stop_reason=None, expected_state_version=None):
+        await store.update_status(
+            run_id,
+            "error",
+            error="peer claim",
+            stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+        )
+        return await original(
+            run_id,
+            grace_seconds=grace_seconds,
+            error=error,
+            stop_reason=stop_reason,
+            expected_state_version=expected_state_version,
+        )
 
     store.claim_for_takeover = race_takeover
 
