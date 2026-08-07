@@ -813,6 +813,7 @@ def get_skills_prompt_section(
     app_config: AppConfig | None = None,
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    resolved_skills: tuple[Skill, ...] | None = None,
 ) -> str:
     """Generate the skills prompt section.
 
@@ -854,14 +855,17 @@ def get_skills_prompt_section(
         )
 
     # ── Legacy full-metadata path — load ALL skills for disabled-skill section
-    if user_id:
-        storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
+    if resolved_skills is None:
+        if user_id:
+            storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
+        else:
+            storage = get_or_new_skill_storage(app_config=app_config)
+        all_skills = storage.load_skills(enabled_only=False)
     else:
-        storage = get_or_new_skill_storage(app_config=app_config)
-    all_skills = storage.load_skills(enabled_only=False)
+        all_skills = list(resolved_skills)
     disabled_skills = [s for s in all_skills if not s.enabled]
 
-    skills = get_enabled_skills_for_config(app_config, user_id=user_id)
+    skills = get_enabled_skills_for_config(app_config, user_id=user_id) if resolved_skills is None else [skill for skill in resolved_skills if skill.enabled]
 
     if not skills and not disabled_skills and not skill_evolution_enabled:
         return ""
@@ -877,9 +881,11 @@ def get_skills_prompt_section(
     return _get_cached_skills_prompt_section(skill_signature, disabled_skill_signature, available_key, container_base_path, skill_evolution_section)
 
 
-def get_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str:
+def get_agent_soul(agent_name: str | None, *, user_id: str | None = None, resolved_soul: str | bytes | None = None) -> str:
     # Append SOUL.md (agent personality) if present
-    soul = load_agent_soul(agent_name, user_id=user_id)
+    soul = load_agent_soul(agent_name, user_id=user_id) if resolved_soul is None else resolved_soul
+    if isinstance(soul, bytes):
+        soul = soul.decode("utf-8")
     if soul:
         # SOUL.md is agent-editable (setup_agent / update_agent persist it) and is
         # rendered into the <soul> block of the lead-agent system prompt. Escape it
@@ -1002,6 +1008,8 @@ def apply_prompt_template(
     mcp_routing_hints_section: str = "",
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    resolved_soul: str | bytes | None = None,
+    resolved_skills: tuple[Skill, ...] | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = clamp_subagent_concurrency(max_concurrent_subagents)
@@ -1044,6 +1052,7 @@ def apply_prompt_template(
         app_config=app_config,
         user_id=user_id,
         skill_names=skill_names,
+        resolved_skills=resolved_skills,
     )
 
     # Get deferred tools section (tool_search)
@@ -1070,7 +1079,7 @@ def apply_prompt_template(
     # identical across users and sessions for maximum prefix-cache reuse.
     return SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
-        soul=get_agent_soul(agent_name, user_id=user_id),
+        soul=(get_agent_soul(agent_name, user_id=user_id) if resolved_soul is None else get_agent_soul(agent_name, user_id=user_id, resolved_soul=resolved_soul)),
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,

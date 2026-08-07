@@ -449,14 +449,30 @@ cannot load; optional plugins fail open with attributed diagnostics.
 
 The public package is `packages/extension-api/` and must never import `deerflow`. It owns
 the host-independent authorization contracts (`Principal`, `AuthzRequest`,
-`AuthzDecision`, `AuthorizationProvider`) as of extension API 0.2.0; the old
+`AuthzDecision`, `AuthorizationProvider`) and the invocation contributor contracts as of
+extension API 0.3.0; the old
 `deerflow.authz.provider` path is a compatibility re-export with object identity. Its
-registry exposes typed middleware contributions and exactly one typed, versioned
-`AuthorizationProviderFactory` contribution. The descriptor has no package-provenance
-fields: the loader stamps distribution name/version into the immutable host registration.
-Duplicate provider factories are rejected, and an extension factory is mutually exclusive
-with legacy `authorization.provider.use`. Do not add a generic untyped registry; each new
-authoritative capability needs a typed descriptor and a host-owned production call site.
+registry exposes typed middleware, authorization-provider, `OriginContributor`, and
+`RunContextContributor` contributions. Descriptors have no package-provenance fields: the
+loader stamps distribution name/version into immutable host registrations. Duplicate
+contribution IDs are rejected; duplicate provider factories are rejected, and an extension
+provider is mutually exclusive with legacy `authorization.provider.use`. Do not add a
+generic untyped registry; each new authoritative capability needs a typed descriptor and a
+host-owned production call site.
+
+The Gateway initializes contributor factories once from the startup extension snapshot.
+Origin contributors receive only source kind, authenticated subject reference, and
+host-selected safe source references; run-context contributors receive the immutable
+principal projection, sealed Origin, bound thread, resolved agent revision, and optional
+external-key reference. Results are namespaced and limited to 32 scalar/list references,
+64-character ASCII keys, 1 KiB strings, and 8 KiB canonical output. Runtime-only values are
+never persisted; execution values and stable secret-handle IDs affect the aggregate digest,
+while correlation values do not. Calls run concurrently with a two-second timeout and are
+composed in contribution-ID order. Optional failures are omitted with redacted diagnostics;
+required failures make the invocation indeterminate. Top-level `required_capabilities` is
+operator-only, restart-required configuration and accepts
+`origin_contributor:<id>` / `run_context_contributor:<id>`; it must never be exposed through
+API-writable `extensions_config.json`.
 Each middleware contribution declares lead/subagent scope, stable order, and a semantic placement (`MODEL_LOGICAL`,
 `MODEL_PHYSICAL`, `TOOL_VISIBLE`, `TOOL_RAW`, or `STANDARD`) rather than a fragile list
 index. `extensions/stack.py` is the single final composition point; do not inject inside
@@ -661,6 +677,8 @@ JSONL event stores when `GATEWAY_WORKERS > 1`.
 **RunManager / RunStore contract**:
 - `tests/test_invocation_lifecycle_characterization.py` is the regression boundary for the current durable invocation lifecycle, with source-specific routing pinned further by `tests/test_invocation_runtime_scheduled_tasks.py` and `tests/test_invocation_runtime_channels.py`. The normal graph-entry inventory is the stateless `/api/runs/stream` and `/api/runs/wait` routes; thread-scoped create, stream, and wait routes; native-channel wait, stream, fire-and-forget, and buffered-follow-up dispatch; and Scheduled Task dispatch. HTTP retains `services.start_run()` as its compatibility adapter; the in-process scheduler and native-channel manager construct `InternalLaunchIntent` directly. Every path converges on `InvocationRuntime.launch()` -> `RunManager.create_or_reject()` -> `RunStore.create_thread_operation_atomic()` before worker attachment. The scheduler decides when an occurrence should run, channels decide routing/delivery, and `InvocationRuntime` owns durable execution. The other production sources of durable `RunRow` records are temporary checkpoint-write and artifact-write reservations through `RunManager.reserve_thread_operation()`. `RunManager.create()` and missing-row persistence repair can use the idempotent `RunRepository.put()` constructor, but no inspected production entry point calls `RunManager.create()`; it remains a compatibility/testing primitive, and repair restores an already-admitted record rather than launching graph execution.
 - `app/runtime/invocation.py::InvocationRuntime` owns the application-layer launch/observe/cancel lifecycle. Its three host-internal operations normalize through explicitly injected collaborators, keep durable admission before single worker attachment, and delegate visibility/cancellation without exposing `RunManager` to callers. The Module never accepts `FastAPI.Request`, reads `app.state`, or installs a process-global singleton; Gateway constructs request-scoped adapters in `app/gateway/services.py`. `services.start_run()` remains the thin FastAPI compatibility adapter that maps the validated HTTP model to `InternalLaunchIntent` and preserves the existing HTTP error translations. Keep the dependency direction `app -> deerflow`: neither the harness nor `deerflow-extension-api` may import this application Module.
+- Every HTTP, Scheduled Task, and authenticated native-channel launch is sealed before durable admission as one immutable host-owned `AcceptedInvocation`. Caller thread/assistant/agent/context values remain hints until Gateway resolution; native-channel source facts are built only after provider authentication, connection lookup, and owner revalidation. The accepted record owns a minimal principal projection, bounded `InvocationOrigin`, resolved thread/context, normalized input/options, extension generation, and a `ResolvedAgentRevision` digest. Normal `RunRow` rows persist only the bounded safe projections and versioned empty decision evidence; checkpoint/artifact reservation rows carry none, and historical nullable rows remain readable.
+- `ResolvedAgentMaterialV1` captures the exact graph-factory inputs used in the accepting process: agent storage source/version and validated config, SOUL bytes, model execution profile with opaque secret-handle IDs, effective tools and skill content digests, and planning/reasoning/subagent defaults. The worker constructs lead and delegated agents from that captured object without rereading mutable agent/config storage. After restart, it resolves current material once and may bind that exact object only when its digest equals the persisted revision. A mismatch terminates before graph construction with `stop_reason=agent_revision_drift`; do not compare and then call a factory that rereads mutable state. See `docs/INVOCATION_RUNTIME.md`.
 - LangGraph-compatible run requests validate their supported subset before creating a run. `runtime/stream_modes.py` is the shared backend contract for public stream modes and the worker's `graph.astream` mapping; the public `messages-tuple` mode maps to LangGraph's internal `messages` mode, while public `messages`, `events`, and other unsupported modes are rejected instead of being dropped or replaced with `values`. `app/gateway/run_models.py::RunCreateRequest` is the HTTP/SDK compatibility model; the scheduler and in-process native-channel manager construct `InternalLaunchIntent` directly. `RunCreateRequest` retains only truthful compatibility defaults for unimplemented options (`if_not_exists="create"` plus `None` placeholders), returns 422 for unsupported values including `on_completion="complete"`, `on_completion="continue"`, and `multitask_strategy="enqueue"`, and forbids undeclared SDK options so fields such as `checkpoint_during` and `durability` cannot be silently discarded. A placeholder must still accept the stock SDK's own default: `langgraph_sdk` drops only `None` from its run payload, so `stream_resumable=False` reaches every request and means "non-resumable", which is what DeerFlow serves. `tests/test_run_request_validation.py::test_gateway_accepts_langgraph_sdk_default_payload` pins the real SDK payload against this boundary.
 - `RunManager.get()` is async; direct callers must `await` it.
 - The history batch helpers `list_successful_regenerate_sources()`, `list_edit_regenerate_runs()`, and `get_many_by_thread()` default to `user_id=AUTO`: they resolve the request user and fail closed when no user context exists. Migration/admin callers that intentionally need an unscoped read must pass `user_id=None` explicitly.

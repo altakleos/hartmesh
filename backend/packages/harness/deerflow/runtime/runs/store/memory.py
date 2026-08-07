@@ -50,6 +50,15 @@ class MemoryRunStore(RunStore):
         created_at=None,
         owner_worker_id=None,
         lease_expires_at=None,
+        origin_json=None,
+        principal_projection_json=None,
+        principal_projection_digest=None,
+        base_origin_digest=None,
+        accepted_context_digest=None,
+        agent_revision_json=None,
+        agent_revision_digest=None,
+        extension_generation=None,
+        decision_evidence_json=None,
     ):
         now = datetime.now(UTC).isoformat()
         existing = self._runs.get(run_id)
@@ -70,6 +79,15 @@ class MemoryRunStore(RunStore):
             "updated_at": now,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
+            "origin_json": origin_json if operation_kind == "run" else None,
+            "principal_projection_json": principal_projection_json if operation_kind == "run" else None,
+            "principal_projection_digest": principal_projection_digest if operation_kind == "run" else None,
+            "base_origin_digest": base_origin_digest if operation_kind == "run" else None,
+            "accepted_context_digest": accepted_context_digest if operation_kind == "run" else None,
+            "agent_revision_json": agent_revision_json if operation_kind == "run" else None,
+            "agent_revision_digest": agent_revision_digest if operation_kind == "run" else None,
+            "extension_generation": extension_generation if operation_kind == "run" else None,
+            "decision_evidence_json": decision_evidence_json if operation_kind == "run" else None,
             # ``put`` is an idempotent snapshot write. Preserve a cancellation
             # request that may have raced a retry of an earlier snapshot.
             "cancel_action": existing.get("cancel_action") if existing else None,
@@ -402,6 +420,15 @@ class MemoryRunStore(RunStore):
         kwargs: dict[str, Any] | None = None,
         created_at: str | None = None,
         grace_seconds: int = 10,
+        origin_json: dict[str, Any] | None = None,
+        principal_projection_json: dict[str, Any] | None = None,
+        principal_projection_digest: str | None = None,
+        base_origin_digest: str | None = None,
+        accepted_context_digest: str | None = None,
+        agent_revision_json: dict[str, Any] | None = None,
+        agent_revision_digest: str | None = None,
+        extension_generation: int | None = None,
+        decision_evidence_json: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
 
@@ -478,6 +505,15 @@ class MemoryRunStore(RunStore):
             "cancel_requested_at": None,
             "created_at": created_at or now,
             "updated_at": now,
+            "origin_json": origin_json if operation_kind == "run" else None,
+            "principal_projection_json": principal_projection_json if operation_kind == "run" else None,
+            "principal_projection_digest": principal_projection_digest if operation_kind == "run" else None,
+            "base_origin_digest": base_origin_digest if operation_kind == "run" else None,
+            "accepted_context_digest": accepted_context_digest if operation_kind == "run" else None,
+            "agent_revision_json": agent_revision_json if operation_kind == "run" else None,
+            "agent_revision_digest": agent_revision_digest if operation_kind == "run" else None,
+            "extension_generation": extension_generation if operation_kind == "run" else None,
+            "decision_evidence_json": decision_evidence_json if operation_kind == "run" else None,
         }
         self._runs[run_id] = new_row
         self._index_run(run_id, thread_id)

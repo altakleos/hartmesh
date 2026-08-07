@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 33
+config_version: 34
 
 # ============================================================================
 # Logging
@@ -2531,6 +2531,13 @@ authorization:
 # This initial extension-system slice accepts middleware contributors. Their
 # install functions register semantically placed middlewares for the lead and/or
 # subagent stack; the examples below intentionally cover only that surface.
+#
+# Trusted invocation contributors may be made mandatory with their typed
+# capability ID. This setting stays in operator-controlled config.yaml; it is
+# intentionally unavailable in API-writable extensions_config.json. Supported
+# IDs are origin_contributor:<contribution-id> and
+# run_context_contributor:<contribution-id>.
+required_capabilities: []
 #
 # plugins:
 #   - use: acme_request_observer:install

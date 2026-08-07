@@ -4,10 +4,11 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
-Version 0.2.0 owns the authorization contracts `Principal`, `AuthzRequest`,
+Version 0.3.0 owns the authorization contracts `Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthzReason`, and `AuthorizationProvider`. Existing host code may keep
 using `deerflow.authz.provider`; those names are compatibility re-exports of the same
-objects.
+objects. It also owns the versioned Origin and run-context contributor contracts described
+below.
 
 ## Authorization provider contribution
 
@@ -49,3 +50,36 @@ replaced when their hot-reloaded configuration changes.
 Extensions may also contribute observational middleware. Its existing isolation remains
 fail-open; authorization-provider factories are authoritative startup capabilities and do
 not use that observational failure policy.
+
+## Invocation contributor contributions
+
+Trusted plugins may register typed `OriginContributorFactory` and
+`RunContextContributorFactory` descriptors. The Capability Host stamps package
+provenance, initializes each factory once at startup, invokes contributors concurrently,
+and composes valid results deterministically by stable `contribution_id`.
+
+Origin contributors receive only source kind, an authenticated internal subject reference,
+and host-selected safe source references. Run-context contributors receive an immutable
+principal projection, sealed Origin, bound thread, resolved agent revision reference, and
+an optional external-key reference. Neither contract receives Gateway objects, raw
+credentials, or caller request metadata.
+
+Contributor results own one namespace and contain `SafeContextReferenceV1` values only.
+Keys are 1–64 character ASCII identifiers; values are strings, integers, booleans, null,
+or lists of those values. Each result is limited to 32 references, 1 KiB per string, and
+8 KiB canonical JSON. A reference declares:
+
+- `storage_class`: `persistable` or `runtime_only`;
+- `purpose`: `execution`, `correlation`, or `secret_handle`.
+
+Execution references affect replay identity. Correlation references do not. Secret handles
+must be stable string identifiers and contribute the identifier, never secret material.
+Runtime-only values are redacted from persistence while their safe execution aggregate is
+included in the accepted-context digest.
+
+Each call has a host-owned two-second timeout. Optional failures are omitted with bounded,
+redacted diagnostics. Operators can make a contribution mandatory in startup-only
+`config.yaml` with `required_capabilities: [origin_contributor:<id>]` or
+`[run_context_contributor:<id>]`; missing or initialization-failed requirements stop
+startup, and required invocation-time failure closes that invocation as indeterminate.
+This setting is intentionally absent from API-writable `extensions_config.json`.

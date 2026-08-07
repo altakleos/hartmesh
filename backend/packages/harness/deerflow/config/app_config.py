@@ -218,6 +218,18 @@ class AppConfig(BaseModel):
             ),
         ),
     )
+    required_capabilities: list[str] = Field(
+        default_factory=list,
+        description=format_field_description(
+            "required_capabilities",
+            field_doc=(
+                "Operator-only trusted extension capabilities required at startup. "
+                "Supported forms are origin_contributor:<id> and "
+                "run_context_contributor:<id>. This setting lives only in "
+                "config.yaml and is not part of extensions_config.json."
+            ),
+        ),
+    )
     max_recursion_limit: int = Field(
         default=1000,
         ge=1,

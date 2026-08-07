@@ -106,6 +106,15 @@ class RunRepository(RunStore):
         follow_up_to_run_id=None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
+        origin_json: dict[str, Any] | None = None,
+        principal_projection_json: dict[str, Any] | None = None,
+        principal_projection_digest: str | None = None,
+        base_origin_digest: str | None = None,
+        accepted_context_digest: str | None = None,
+        agent_revision_json: dict[str, Any] | None = None,
+        agent_revision_digest: str | None = None,
+        extension_generation: int | None = None,
+        decision_evidence_json: dict[str, Any] | None = None,
     ):
         """Insert or update a run row.
 
@@ -132,6 +141,15 @@ class RunRepository(RunStore):
             "follow_up_to_run_id": follow_up_to_run_id,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
+            "origin_json": self._safe_json(origin_json) if operation_kind == "run" else None,
+            "principal_projection_json": self._safe_json(principal_projection_json) if operation_kind == "run" else None,
+            "principal_projection_digest": principal_projection_digest if operation_kind == "run" else None,
+            "base_origin_digest": base_origin_digest if operation_kind == "run" else None,
+            "accepted_context_digest": accepted_context_digest if operation_kind == "run" else None,
+            "agent_revision_json": self._safe_json(agent_revision_json) if operation_kind == "run" else None,
+            "agent_revision_digest": agent_revision_digest if operation_kind == "run" else None,
+            "extension_generation": extension_generation if operation_kind == "run" else None,
+            "decision_evidence_json": self._safe_json(decision_evidence_json) if operation_kind == "run" else None,
             "updated_at": now,
         }
         async with self._sf() as session:
@@ -686,6 +704,15 @@ class RunRepository(RunStore):
         kwargs: dict[str, Any] | None = None,
         created_at: str | None = None,
         grace_seconds: int = 10,
+        origin_json: dict[str, Any] | None = None,
+        principal_projection_json: dict[str, Any] | None = None,
+        principal_projection_digest: str | None = None,
+        base_origin_digest: str | None = None,
+        accepted_context_digest: str | None = None,
+        agent_revision_json: dict[str, Any] | None = None,
+        agent_revision_digest: str | None = None,
+        extension_generation: int | None = None,
+        decision_evidence_json: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -722,6 +749,15 @@ class RunRepository(RunStore):
             "lease_expires_at": lease_dt,
             "created_at": created,
             "updated_at": now,
+            "origin_json": self._safe_json(origin_json) if operation_kind == "run" else None,
+            "principal_projection_json": self._safe_json(principal_projection_json) if operation_kind == "run" else None,
+            "principal_projection_digest": principal_projection_digest if operation_kind == "run" else None,
+            "base_origin_digest": base_origin_digest if operation_kind == "run" else None,
+            "accepted_context_digest": accepted_context_digest if operation_kind == "run" else None,
+            "agent_revision_json": self._safe_json(agent_revision_json) if operation_kind == "run" else None,
+            "agent_revision_digest": agent_revision_digest if operation_kind == "run" else None,
+            "extension_generation": extension_generation if operation_kind == "run" else None,
+            "decision_evidence_json": self._safe_json(decision_evidence_json) if operation_kind == "run" else None,
         }
 
         async with self._sf() as session:

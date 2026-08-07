@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from deerflow.persistence.agents.base import (
     AgentDeleteOutcome,
     AgentExistsError,
+    AgentSnapshot,
     AgentStore,
     parse_agent_config,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "AgentExistsError",
     "AgentRow",
     "AgentStore",
+    "AgentSnapshot",
     "get_agent_store",
     "make_agent_store",
     "parse_agent_config",

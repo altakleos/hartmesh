@@ -648,7 +648,10 @@ def _load_enabled_available_skills(available_skills: set[str] | None, *, app_con
 def make_lead_agent(config: RunnableConfig):
     """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
     runtime_config = _get_runtime_config(config)
-    runtime_app_config = runtime_config.get("app_config")
+    from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+
+    resolved_material = runtime_config.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+    runtime_app_config = getattr(resolved_material, "app_config", None) or runtime_config.get("app_config")
     if not isinstance(runtime_app_config, AppConfig):
         runtime_app_config = get_app_config()
     # Mode selection precedence, pinned by test_checkpoint_mode.py:
@@ -683,7 +686,13 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 
     cfg = _get_runtime_config(config)
-    resolved_app_config = app_config
+    from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+    from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+
+    resolved_material = cfg.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+    if not isinstance(resolved_material, ResolvedAgentMaterialV1):
+        resolved_material = None
+    resolved_app_config = resolved_material.app_config if resolved_material is not None else app_config
     mode = (config.get("configurable", {}) or {}).get(
         INTERNAL_CHECKPOINT_MODE_KEY,
         resolved_app_config.database.checkpoint_channel_mode,
@@ -694,7 +703,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # context/configurable values; the embedded Gateway path uses context.user_id.
     from deerflow.runtime.user_context import resolve_config_user_id
 
-    resolved_user_id = resolve_config_user_id(config)
+    resolved_user_id = resolved_material.user_id if resolved_material is not None else resolve_config_user_id(config)
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
@@ -705,7 +714,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     non_interactive = bool(cfg.get("non_interactive", False))
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
-    agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
+    agent_config = resolved_material.agent_config_object if resolved_material is not None else (load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None)
     available_skills = _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
@@ -789,7 +798,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    enabled_skills = _load_enabled_available_skills(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
+    enabled_skills = list(resolved_material.enabled_skill_objects) if resolved_material is not None else _load_enabled_available_skills(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
 
     # Build skill search setup (deferred skill discovery).
     # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
@@ -858,6 +867,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 deferred_names=setup.deferred_names,
                 user_id=resolved_user_id,
                 skill_names=skill_setup.skill_names or None,
+                resolved_soul=resolved_material.soul if resolved_material is not None else None,
+                resolved_skills=resolved_material.all_skill_objects if resolved_material is not None else None,
             ),
             state_schema=get_thread_state_schema(mode),
         )
@@ -943,6 +954,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             mcp_routing_hints_section=mcp_routing_hints_section,
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
+            resolved_soul=resolved_material.soul if resolved_material is not None else None,
+            resolved_skills=resolved_material.all_skill_objects if resolved_material is not None else None,
         ),
         state_schema=get_thread_state_schema(mode),
     )

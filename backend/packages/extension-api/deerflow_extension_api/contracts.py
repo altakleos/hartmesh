@@ -17,6 +17,7 @@ from deerflow_extension_api.state import ExtensionData
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from deerflow_extension_api.authorization import AuthorizationProviderFactory
+    from deerflow_extension_api.contributors import OriginContributorFactory, RunContextContributorFactory
     from deerflow_extension_api.placement import AgentBuildContext, MiddlewarePlacement
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -74,6 +75,14 @@ class ExtensionRegistry(Protocol):
 
     def authorization_provider(self, contribution: AuthorizationProviderFactory) -> None:
         """Register the process's single authoritative authorization factory."""
+        return None
+
+    def origin_contributor(self, contribution: OriginContributorFactory) -> None:
+        """Register one trusted Origin contributor factory."""
+        return None
+
+    def run_context_contributor(self, contribution: RunContextContributorFactory) -> None:
+        """Register one trusted accepted-run-context contributor factory."""
         return None
 
 
