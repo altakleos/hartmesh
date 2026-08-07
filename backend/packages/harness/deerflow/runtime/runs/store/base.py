@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from deerflow.runtime.runs.lifecycle_query import LifecyclePage, LifecycleQuery
+
 _LIFECYCLE_EVIDENCE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 _LIFECYCLE_SAFE_REASONS = {
     "agent_revision_drift",
@@ -226,6 +228,16 @@ class RunStore(abc.ABC):
         thread_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Internal inspection seam; no public cursor API is implied."""
+
+        raise NotImplementedError
+
+    async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage:
+        """Read one authorized lifecycle page from one consistent snapshot."""
+
+        raise NotImplementedError
+
+    async def prune_lifecycle_through(self, cursor: str) -> str:
+        """Administratively prune a committed global lifecycle prefix."""
 
         raise NotImplementedError
 

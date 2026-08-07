@@ -88,7 +88,12 @@ class InvocationOrigin:
     contributor_references: tuple[dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
-        if self.source_kind not in {"http", "scheduled_task", "native_channel"}:
+        if self.source_kind not in {
+            "http",
+            "scheduled_task",
+            "native_channel",
+            "service",
+        }:
             raise ValueError(f"unsupported invocation source kind {self.source_kind!r}")
         object.__setattr__(self, "references", _frozen_json_mapping(self.references))
         object.__setattr__(

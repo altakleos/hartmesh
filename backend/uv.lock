@@ -15,6 +15,7 @@ members = [
     "deer-flow",
     "deerflow-extension-api",
     "deerflow-harness",
+    "deerflow-runtime-api",
 ]
 overrides = [{ name = "websockets", specifier = "==16.0" }]
 
@@ -809,6 +810,7 @@ dependencies = [
     { name = "bcrypt" },
     { name = "deerflow-extension-api" },
     { name = "deerflow-harness" },
+    { name = "deerflow-runtime-api" },
     { name = "dingtalk-stream" },
     { name = "e2b-code-interpreter" },
     { name = "email-validator" },
@@ -874,6 +876,7 @@ requires-dist = [
     { name = "deerflow-harness", extras = ["monocle"], marker = "extra == 'monocle'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["redis"], marker = "extra == 'redis'", editable = "packages/harness" },
+    { name = "deerflow-runtime-api", editable = "packages/runtime-api" },
     { name = "dingtalk-stream", specifier = ">=0.24.3" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.7.0" },
     { name = "e2b-code-interpreter", specifier = ">=2.8.1" },
@@ -1045,6 +1048,11 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.8.0" },
 ]
 provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "monocle", "browser", "memory-zh"]
+
+[[package]]
+name = "deerflow-runtime-api"
+version = "0.1.0"
+source = { editable = "packages/runtime-api" }
 
 [[package]]
 name = "defusedxml"

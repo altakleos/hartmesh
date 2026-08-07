@@ -12,11 +12,20 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunLifecycleCursorStateRow, RunLifecycleEventRow, RunRow
+from deerflow.runtime.runs.lifecycle_query import (
+    CursorAhead,
+    LifecycleOrderingCorruption,
+    LifecyclePage,
+    LifecycleQuery,
+    decode_lifecycle_cursor,
+    encode_lifecycle_cursor,
+    validate_cursor_window,
+)
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
     CancellationRequestOutcome,
@@ -78,6 +87,24 @@ class RunRepository(RunStore):
             await session.commit()
 
     @staticmethod
+    async def _begin_lifecycle_read(session: AsyncSession) -> None:
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            # This must be the first statement in the transaction. A default
+            # READ COMMITTED transaction can observe a row snapshot and a
+            # later cursor/page from different commits.
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+        elif dialect == "sqlite":
+            # SQLite pins its read snapshot at the first read in this explicit
+            # transaction and retains it through the page query.
+            await session.execute(text("BEGIN"))
+        else:
+            await session.begin()
+
+    async def _after_lifecycle_snapshot(self) -> None:
+        """Behavior-neutral deterministic interleaving seam for snapshot tests."""
+
+    @staticmethod
     def _event_to_dict(row: RunLifecycleEventRow) -> dict[str, Any]:
         return {
             "event_id": row.event_id,
@@ -132,6 +159,78 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             rows = (await session.execute(stmt)).scalars().all()
             return [self._event_to_dict(row) for row in rows]
+
+    async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage:
+        async with self._sf() as session:
+            await self._begin_lifecycle_read(session)
+
+            snapshots: list[dict[str, Any]] = []
+            if query.include_snapshot:
+                snapshot_stmt = select(RunRow).where(RunRow.operation_kind == "run")
+                if query.run_id is not None:
+                    snapshot_stmt = snapshot_stmt.where(RunRow.run_id == query.run_id)
+                else:
+                    snapshot_stmt = snapshot_stmt.where(RunRow.thread_id == query.thread_id)
+                snapshot_stmt = snapshot_stmt.order_by(RunRow.created_at.asc(), RunRow.run_id.asc())
+                rows = (await session.execute(snapshot_stmt)).scalars().all()
+                snapshots = [self._row_to_dict(row) for row in rows if query.owner_scope is None or lifecycle_owner_scope(row.user_id) == query.owner_scope]
+
+            await self._after_lifecycle_snapshot()
+
+            cursor_state = await session.get(RunLifecycleCursorStateRow, 1)
+            if cursor_state is None:
+                event_count = await session.scalar(select(func.count()).select_from(RunLifecycleEventRow))
+                await session.rollback()
+                detail = "events exist without cursor metadata" if event_count else "cursor metadata is missing"
+                raise LifecycleOrderingCorruption(detail)
+            requested = validate_cursor_window(
+                query.cursor,
+                pruned_through=cursor_state.pruned_through,
+                last_cursor=cursor_state.last_cursor,
+            )
+            fence = cursor_state.last_cursor
+
+            event_stmt = select(RunLifecycleEventRow).where(
+                RunLifecycleEventRow.cursor > requested,
+                RunLifecycleEventRow.cursor <= fence,
+            )
+            if query.run_id is not None:
+                event_stmt = event_stmt.where(RunLifecycleEventRow.run_id == query.run_id)
+            else:
+                event_stmt = event_stmt.where(RunLifecycleEventRow.thread_id == query.thread_id)
+            if query.owner_scope is not None:
+                event_stmt = event_stmt.where(RunLifecycleEventRow.owner_scope == query.owner_scope)
+            event_stmt = event_stmt.order_by(RunLifecycleEventRow.cursor.asc()).limit(query.limit + 1)
+            rows = (await session.execute(event_stmt)).scalars().all()
+            pruned_through = cursor_state.pruned_through
+            has_more = len(rows) > query.limit
+            events = [self._event_to_dict(row) for row in rows[: query.limit]]
+            await session.rollback()
+
+        next_value = events[-1]["cursor"] if has_more else fence
+        return LifecyclePage(
+            snapshots=tuple(snapshots),
+            events=tuple(events),
+            next_cursor=encode_lifecycle_cursor(next_value),
+            minimum_available_cursor=encode_lifecycle_cursor(pruned_through),
+            read_fence_cursor=encode_lifecycle_cursor(fence),
+        )
+
+    async def prune_lifecycle_through(self, cursor: str) -> str:
+        requested = decode_lifecycle_cursor(cursor)
+        async with self._sf() as session:
+            await self._begin_lifecycle_write(session)
+            cursor_state = await self._lock_cursor_state(session)
+            if requested > cursor_state.last_cursor:
+                fence = encode_lifecycle_cursor(cursor_state.last_cursor)
+                await session.rollback()
+                raise CursorAhead(fence)
+            if requested > cursor_state.pruned_through:
+                await session.execute(delete(RunLifecycleEventRow).where(RunLifecycleEventRow.cursor <= requested))
+                cursor_state.pruned_through = requested
+            result = encode_lifecycle_cursor(cursor_state.pruned_through)
+            await session.commit()
+            return result
 
     async def transition_run_atomic(
         self,

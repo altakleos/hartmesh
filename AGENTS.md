@@ -59,6 +59,7 @@ deer-flow/
 │   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
 │   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
+│   ├── packages/runtime-api/       # deerflow-runtime-api — stdlib-only embedded durable runtime contracts
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
 ├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
 ├── docker/                         # docker-compose files, nginx config, provisioner
@@ -75,6 +76,11 @@ Third-party extensions are loaded from a top-level `plugins:` list in `config.ya
 (operator-controlled on purpose — that list causes code to be imported, so it is deliberately
 kept out of the API-writable `extensions_config.json`). See the Extension System section in
 [backend/AGENTS.md](backend/AGENTS.md).
+
+Embedded Python hosts can use the versioned, transport-neutral records in
+`deerflow-runtime-api` with the Gateway-owned in-process adapter. This supported surface
+reuses the same durable admission, visibility, authorization, constraints, lifecycle
+paging, and fenced cancellation behavior as Gateway. It does not add an HTTP endpoint.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP

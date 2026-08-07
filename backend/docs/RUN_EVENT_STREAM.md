@@ -71,11 +71,36 @@ The lifecycle payload never stores prompts, messages, reasoning, tool payloads,
 credentials, artifact contents, or the rich bodies below. Reasons are selected
 from host-owned safe codes; v1 evidence accepts only the cancellation `action`
 reference (`interrupt` or `rollback`). Lifecycle type/resulting-status pairs are
-validated before a row can change. It currently has no public cursor query or
-feed API. Internal store inspection exists for tests; startup validation checks
-the cursor singleton directly. Constraint-fence failures use the safe reason
+validated before a row can change. A host-independent in-process API can query
+this journal; there is still no lifecycle HTTP endpoint or broker.
+Constraint-fence failures use the safe reason
 `constraint_evidence_mismatch` or `constraint_expired_before_start` and map to
 the ordinary `failed` lifecycle type; they do not add lifecycle vocabulary.
+
+### Lifecycle paging and pruning
+
+Invocation and context queries apply owner/admin visibility and optional current
+`invocation:observe` authorization before reading a snapshot or event. Unknown,
+auxiliary, and owner-invisible rows are indistinguishable. A context feed makes
+one authorization decision for the bound context and returns only normal runs.
+
+Opaque `deerflow.lifecycle.cursor/v1` tokens encode the last-seen global integer
+cursor. One page captures `read_fence_cursor=last_cursor`, reads matching events
+in `(C,F]` with `limit + 1`, and never returns an event above the fence. If a
+matching event remains, `next_cursor` is the last returned event; otherwise it
+advances to the fence, including for a filtered empty page. Repeating a page is
+therefore at least once and harmless through stable event IDs/cursors without
+skipping a later match.
+
+PostgreSQL begins a read-only `REPEATABLE READ` transaction before the first
+SELECT; SQLite uses one explicit read transaction. Snapshot, cursor metadata,
+and events consequently represent one database snapshot across process restarts.
+A malformed/wrong-version token is invalid, a token above the fence is ahead,
+and a token below `pruned_through` reports a gap plus the minimum available
+cursor. Equality with the minimum resumes at the first retained event.
+`prune_through()` locks cursor metadata, deletes the eligible prefix, and moves
+the marker monotonically but never beyond `last_cursor`. Pruning is operator-
+initiated only; no retention timer or worker exists.
 
 ## Categories
 

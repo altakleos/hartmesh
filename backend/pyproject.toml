@@ -9,6 +9,7 @@ dependencies = [
     # exact so its Capability Host and the harness implement one API version.
     "deerflow-extension-api==0.4.0",
     "deerflow-harness",
+    "deerflow-runtime-api==0.1.0",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
     "python-multipart>=0.0.31",
@@ -85,8 +86,9 @@ index-url = "https://pypi.org/simple"
 override-dependencies = ["websockets==16.0"]
 
 [tool.uv.workspace]
-members = ["packages/harness", "packages/extension-api"]
+members = ["packages/harness", "packages/extension-api", "packages/runtime-api"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
 deerflow-extension-api = { workspace = true }
+deerflow-runtime-api = { workspace = true }
