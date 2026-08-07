@@ -248,6 +248,13 @@ class AuthorizationProvider(Protocol):
     ) -> list[str]: ...
 ```
 
+> **Current ownership (2026-08-06):** these host-independent contracts now live in
+> `deerflow-extension-api==0.2.0`; `deerflow.authz.provider` is an object-identical
+> compatibility re-export. Gateway constructs one application-lifecycle
+> `AuthorizationProviderResolver`. It adapts the class-path configuration described below
+> as a legacy factory, or consumes one typed extension factory, never both. The synchronous
+> `DeerFlowClient` remains outside that Gateway resolver boundary.
+
 **Design notes:**
 
 - `Principal` is built once per run (from `request.state.user` + context) and threaded to both layers, so providers don't re-resolve identity per call.

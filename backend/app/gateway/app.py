@@ -617,10 +617,15 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # import time, and lifespan still performs strict config loading before
     # serving.
     try:
-        configured_plugins = get_app_config().plugins
+        construction_config = get_app_config()
+        configured_plugins = construction_config.plugins
+        construction_authorization = construction_config.authorization
     except FileNotFoundError:
         logger.debug("config.yaml not found while constructing Gateway app; loading no extensions for this app instance")
         configured_plugins = []
+        from deerflow.config.authorization_config import AuthorizationConfig
+
+        construction_authorization = AuthorizationConfig()
 
     try:
         loaded_extensions, extension_diagnostics = load_extensions(configured_plugins)
@@ -631,9 +636,20 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     except Exception:
         logger.exception("Extension loading failed; continuing with no extensions")
         loaded_extensions, extension_diagnostics = EMPTY_EXTENSIONS, []
+    # One application-owned resolver supplies a coherent provider instance to
+    # route checks and every durable-run authorization path. Extension-backed
+    # factories are startup-only; legacy class-path providers may be replaced
+    # atomically when the hot-reloaded authorization config changes.
+    from app.gateway.authorization import AuthorizationProviderResolver
+
+    authorization_provider_resolver = AuthorizationProviderResolver(
+        loaded_extensions,
+        construction_authorization,
+    )
     set_loaded_extensions(loaded_extensions)
     app.state.extensions = loaded_extensions
     app.state.extension_diagnostics = initialize_runtime_diagnostics(extension_diagnostics)
+    app.state.authorization_provider_resolver = authorization_provider_resolver
 
     # Include routers
     # Models API is mounted at /api/models

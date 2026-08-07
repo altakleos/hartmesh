@@ -604,6 +604,18 @@ def get_run_context(request: Request) -> RunContext:
     captured in :func:`langgraph_runtime` so callers never see a store bound
     to one backend paired with a config pointing at another.
     """
+    app_config = get_config()
+    authorization_config = getattr(app_config, "authorization", None)
+    resolver = getattr(request.app.state, "authorization_provider_resolver", None)
+    if resolver is None:
+        if getattr(authorization_config, "enabled", False) is True:
+            raise HTTPException(status_code=503, detail="Authorization provider resolver not available")
+        authorization_provider = None
+    elif authorization_config is None:
+        authorization_provider = None
+    else:
+        authorization_provider = resolver.resolve(authorization_config).provider
+
     return RunContext(
         checkpointer=get_checkpointer(request),
         store=get_store(request),
@@ -612,7 +624,8 @@ def get_run_context(request: Request) -> RunContext:
         checkpoint_channel_mode=getattr(request.app.state, "checkpoint_channel_mode", "full"),
         checkpoint_snapshot_frequency=getattr(request.app.state, "checkpoint_snapshot_frequency", None),
         thread_store=get_thread_store(request),
-        app_config=get_config(),
+        app_config=app_config,
+        authorization_provider=authorization_provider,
         extensions=getattr(request.app.state, "extensions", None),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
     )

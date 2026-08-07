@@ -13,6 +13,7 @@ from langgraph.config import get_stream_writer
 from langgraph.types import Command
 
 from deerflow.authz.principal import normalize_authz_attributes
+from deerflow.authz.runtime import authorization_provider_from_context
 from deerflow.config import get_app_config
 from deerflow.extensions import resolve_run_extensions
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -365,6 +366,7 @@ async def task_tool(
     # None outside that path (embedded client, standalone LangGraph Server), where
     # the executor keeps its process-singleton fallback.
     run_extensions = resolve_run_extensions(parent_context)
+    authorization_provider = authorization_provider_from_context(parent_context)
     deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
@@ -422,6 +424,8 @@ async def task_tool(
         executor_kwargs["app_config"] = resolved_app_config
     if run_extensions is not None:
         executor_kwargs["extensions"] = run_extensions
+    if authorization_provider is not None:
+        executor_kwargs["authorization_provider"] = authorization_provider
     executor = SubagentExecutor(**executor_kwargs)
 
     # Start background execution (always async to prevent blocking)

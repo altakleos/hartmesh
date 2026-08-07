@@ -349,6 +349,33 @@ Phase 1 最低验证要求：
 - **延期：** Skills、Sandbox 权限（Phase 3 后续 PR）；前端 effective-permissions 展示；
   management route 的 provider 迁移。
 
+### 2026-08-06 — Capability Host / 统一 authorization provider
+
+- **背景：** authorization 公共协议仍在 harness 私有路径，Gateway route 又维护独立
+  provider cache，lead/subagent 组装还可以各自构造 provider，同一进程的决策可以
+  落在不同实例上。
+- **决策（协议归属）：** `Principal` / `AuthzRequest` / `AuthzDecision` /
+  `AuthzReason` / `AuthorizationProvider` 移至 `deerflow-extension-api==0.2.0`；
+  `deerflow.authz.provider` 保留对象同一的兼容 re-export。harness 和 Gateway application
+  都精确 pin 0.2.0。
+- **决策（Capability Host）：** 新增带稳定 contribution ID、capability API
+  version、declared kind 和 factory 的强类型 `AuthorizationProviderFactory`。描述符不
+  包 package 字段；loader 从已安装 distribution 盖章名称/版本，并在不可变
+  extension snapshot 上发布独立 generation。拒绝重复 factory，保留加载顺序、
+  位置 rollback 与观测 middleware fail-open。
+- **决策（Gateway lifetime）：** `AuthorizationProviderResolver` 属于 Gateway app
+  lifecycle。extension factory 与 legacy `authorization.provider.use` 互斥；前者只在
+  startup 构造一次，后者在配置 signature 变化时在锁内构造完整替换，然后
+  原子发布新的不可变 resolution snapshot/generation。读者不会看到半构造
+  provider。
+- **一致性：** route/resource checks、Gateway model routes、durable-run lead model/tool/skill
+  discovery 组装、Layer 2 middleware 与 delegated subagents 传递同一 provider 对象。
+  `DeerFlowClient` 是 Gateway durable runtime 之外的同步 library 入口，保留 legacy 解析。
+- **证据：** `tests/test_capability_host_authorization.py`、extension loader/registry/stack
+  回归、`tests/test_authorization_route_permissions.py` 和 `tests/test_models_authorization.py`。
+- **延期：** invocation start/observe/cancel decisions、Origin/run-context contributors、accepted
+  invocation persistence、constraints、MCP behavior/readiness。两个 generation 均不写入 run。
+
 ### 新记录模板
 
 ```markdown

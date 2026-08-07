@@ -34,6 +34,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
+from deerflow.authz.provider import AuthorizationProvider
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.constants import TOOL_RESULTS_DIRNAME
@@ -371,6 +372,7 @@ def _build_runtime_context(
     app_config: AppConfig | None = None,
     task_store: Any | None = None,
     extensions: Any | None = None,
+    authorization_provider: AuthorizationProvider | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -407,6 +409,12 @@ def _build_runtime_context(
         runtime_ctx[EXTENSION_SNAPSHOT_CONTEXT_KEY] = extensions
     else:
         runtime_ctx.pop(EXTENSION_SNAPSHOT_CONTEXT_KEY, None)
+    from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
+
+    if authorization_provider is not None:
+        runtime_ctx[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = authorization_provider
+    else:
+        runtime_ctx.pop(AUTHORIZATION_PROVIDER_CONTEXT_KEY, None)
     return runtime_ctx
 
 
@@ -425,6 +433,7 @@ class RunContext:
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
+    authorization_provider: AuthorizationProvider | None = field(default=None)
     extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
     # Delta snapshot cadence frozen at startup; ``None`` means "not frozen in
@@ -442,6 +451,10 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             existing_context.setdefault(DEERFLOW_TRACE_METADATA_KEY, runtime_context[DEERFLOW_TRACE_METADATA_KEY])
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
+        from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
+
+        if AUTHORIZATION_PROVIDER_CONTEXT_KEY in runtime_context:
+            existing_context[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = runtime_context[AUTHORIZATION_PROVIDER_CONTEXT_KEY]
         if CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY in runtime_context:
             existing_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = runtime_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY]
         return
@@ -759,6 +772,7 @@ async def run_agent(
             ctx.app_config,
             task_store,
             extensions,
+            ctx.authorization_provider,
         )
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = resolve_deerflow_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY))

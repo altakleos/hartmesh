@@ -41,11 +41,11 @@ from fastapi import HTTPException, Request
 
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
-from deerflow.authz.runtime import resolve_authorization_provider
 from deerflow.config.authorization_config import AuthorizationConfig
 
 if TYPE_CHECKING:
     from app.gateway.auth.models import User
+    from app.gateway.authorization import AuthorizationProviderResolver
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -150,64 +150,27 @@ def _get_route_authorization_config() -> AuthorizationConfig:
         return AuthorizationConfig()
 
 
-# --- Provider cache (W1/F1) ---
-# Keyed by config object identity (id) so the expensive model_dump() signature
-# is only recomputed when get_app_config() returns a new object (hot-reload).
-_route_provider_cache: dict[str, AuthorizationProvider] = {}
-_route_provider_config_id: int | None = None
-_route_provider_config_sig: str | None = None
-
-
-def _get_cached_route_provider(config: AuthorizationConfig) -> AuthorizationProvider | None:
-    """Resolve (or reuse) the authorization provider for route permissions.
-
-    The provider is cached per config object identity. When ``get_app_config()``
-    returns a new object (hot-reload), the signature is recomputed and compared;
-    only an actual content change triggers re-resolution. This avoids calling
-    ``model_dump()`` on every request — the fast path is a single ``id()`` check.
-    """
-    global _route_provider_config_id, _route_provider_config_sig, _route_provider_cache
-
-    config_id = id(config)
-
-    # Fast path: same config object as last time → return cached provider.
-    if config_id == _route_provider_config_id and _route_provider_cache:
-        return _route_provider_cache.get("provider")
-
-    # Config object changed (hot-reload): compute signature to check if
-    # content actually changed or just the wrapper object identity.
-    sig = repr(sorted(config.model_dump().items()))
-    if sig == _route_provider_config_sig and _route_provider_cache:
-        # Same content, different object — update id, reuse provider.
-        _route_provider_config_id = config_id
-        return _route_provider_cache.get("provider")
-
-    # Content changed (or first call): re-resolve into a local first,
-    # then publish id + sig + provider together to avoid a race window.
-    _route_provider_cache.clear()
-
-    provider = resolve_authorization_provider(config)
-    if provider is not None:
-        _route_provider_cache["provider"] = provider
-    _route_provider_config_id = config_id
-    _route_provider_config_sig = sig
-    return provider
-
-
-async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[str]:
+async def resolve_route_permissions(
+    user: User,
+    *,
+    is_internal: bool,
+    resolver: AuthorizationProviderResolver | None = None,
+) -> list[str]:
     """Return the route permissions granted to an authenticated user.
 
     Disabled authorization preserves the legacy all-permissions behavior.
     When enabled, every registered ``resource:action`` permission is evaluated
     independently so a provider failure affects only the route being checked.
-    Provider instances are cached per config signature (hot-reload safe).
+    Provider instances come from the Gateway lifecycle-owned resolver.
     """
     config = _get_route_authorization_config()
     if config.enabled is not True:
         return list(_ALL_PERMISSIONS)
 
     try:
-        provider = _get_cached_route_provider(config)
+        if resolver is None:
+            raise ValueError("Gateway authorization provider resolver is unavailable")
+        provider = resolver.resolve(config).provider
         if provider is None:
             raise ValueError("authorization is enabled but provider resolution returned None")
     except Exception:
@@ -274,7 +237,13 @@ class _AuthorizationUnavailable(Exception):
         self.fail_closed = fail_closed
 
 
-def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+def resolve_model_authorization(
+    user: User,
+    *,
+    is_internal: bool,
+    resolver: AuthorizationProviderResolver | None = None,
+    config: AuthorizationConfig | None = None,
+) -> tuple[AuthorizationProvider | None, Principal | None]:
     """Return ``(provider, principal)`` for model-route authorization.
 
     When authorization is disabled, returns ``(None, None)`` so callers can
@@ -287,12 +256,14 @@ def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[Autho
     when the provider cannot be resolved; callers translate that into the
     appropriate deny response (empty list / 403).
     """
-    config = _get_route_authorization_config()
+    config = config or _get_route_authorization_config()
     if config.enabled is not True:
         return None, None
 
     try:
-        provider = _get_cached_route_provider(config)
+        if resolver is None:
+            raise ValueError("Gateway authorization provider resolver is unavailable")
+        provider = resolver.resolve(config).provider
         if provider is None:
             raise ValueError("authorization is enabled but provider resolution returned None")
     except Exception:
@@ -331,7 +302,11 @@ async def _authenticate(request: Request) -> AuthContext:
         return AuthContext(user=None, permissions=[])
 
     is_internal = _is_internal_caller(request, user)
-    permissions = await resolve_route_permissions(user, is_internal=is_internal)
+    permissions = await resolve_route_permissions(
+        user,
+        is_internal=is_internal,
+        resolver=getattr(request.app.state, "authorization_provider_resolver", None),
+    )
     return AuthContext(user=user, permissions=permissions)
 
 

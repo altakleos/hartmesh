@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 from deerflow_extension_api.state import ExtensionData
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from deerflow_extension_api.authorization import AuthorizationProviderFactory
     from deerflow_extension_api.placement import AgentBuildContext, MiddlewarePlacement
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -61,14 +62,18 @@ class MiddlewareContributor(Protocol):
 class ExtensionRegistry(Protocol):
     """The write-only registration surface handed to ``install()``.
 
-    Structural and minimal on purpose. This first capability slice exposes
-    middleware contribution only; later slices can add defaulted registration
-    methods without breaking existing implementations. The host's concrete
-    registry additionally carries host-only machinery (attribution, positional
-    rollback, build) that is deliberately absent here.
+    Structural and minimal on purpose. It exposes typed middleware and
+    authorization-provider contributions; later capabilities add their own
+    defaulted methods rather than an untyped generic registry. The host's
+    concrete registry additionally carries host-only machinery (attribution,
+    positional rollback, build) that is deliberately absent here.
     """
 
     def middlewares(self, contributor: MiddlewareContributor) -> None:
+        return None
+
+    def authorization_provider(self, contribution: AuthorizationProviderFactory) -> None:
+        """Register the process's single authoritative authorization factory."""
         return None
 
 

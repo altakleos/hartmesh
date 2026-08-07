@@ -260,7 +260,7 @@ def test_compatible_string_subclass_api_marker_can_load(monkeypatch):
     monkeypatch.setattr(
         demo_extensions.install_ok,
         "__deerflow_api__",
-        _HostileString("0.1.0"),
+        _HostileString("0.2.0"),
         raising=False,
     )
 
