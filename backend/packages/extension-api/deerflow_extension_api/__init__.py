@@ -53,6 +53,11 @@ from deerflow_extension_api.contributors import (
     SafeContextReferenceV1,
     SealedOriginV1,
 )
+from deerflow_extension_api.health import (
+    CapabilityHealthProbe,
+    CapabilityHealthResult,
+    CapabilityHealthStatus,
+)
 from deerflow_extension_api.placement import (
     AgentBuildContext,
     AgentScope,
@@ -68,7 +73,7 @@ from deerflow_extension_api.state import ExtensionData
 #: Contract version. Pre-1.0 minors may break and only patches promise to be
 #: additive. From 1.0 on, bump the major on any breaking change; see the spec's
 #: evolution rules for what counts as additive.
-API_VERSION = "0.4.0"
+API_VERSION = "0.5.0"
 
 __all__ = [
     "API_VERSION",
@@ -85,6 +90,9 @@ __all__ = [
     "AuthzDecision",
     "AuthzReason",
     "AuthzRequest",
+    "CapabilityHealthProbe",
+    "CapabilityHealthResult",
+    "CapabilityHealthStatus",
     "ConstraintIndeterminate",
     "ConstraintProjectionRequestV1",
     "ConstraintProjectionV1",

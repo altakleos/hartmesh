@@ -86,6 +86,16 @@ class RunRepository(RunStore):
             await self._lock_cursor_state(session)
             await session.commit()
 
+    async def lifecycle_ready(self) -> bool:
+        """Check ordering metadata without repairing or mutating it."""
+
+        async with self._sf() as session:
+            state = await session.get(RunLifecycleCursorStateRow, 1)
+            if state is not None:
+                return True
+            event_count = await session.scalar(select(func.count()).select_from(RunLifecycleEventRow))
+            return not bool(event_count)
+
     @staticmethod
     async def _begin_lifecycle_read(session: AsyncSession) -> None:
         dialect = session.get_bind().dialect.name

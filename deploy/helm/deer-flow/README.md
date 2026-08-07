@@ -202,6 +202,14 @@ kubectl -n deer-flow port-forward svc/nginx 2026:2026
 curl http://localhost:2026/health          # gateway health via nginx
 ```
 
+The Gateway pod uses `GET /ready` for readiness and `GET /health` for liveness.
+Readiness includes operator-required authoritative capability health and lifecycle-cursor
+integrity, but its unauthenticated body is deliberately only `{"status":"ready"}` or
+`{"status":"not_ready"}`. Safe provenance and diagnostics are available only to an
+authenticated administrator at `GET /api/runtime/v1/capabilities`. Plugin registrations
+and their manifest generation are startup-only; deploy a restart to adopt changes, while
+in-flight invocations stay pinned to the generation they accepted.
+
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 
 Provisioner sanity check:

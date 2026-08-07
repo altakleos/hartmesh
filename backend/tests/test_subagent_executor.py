@@ -3268,6 +3268,7 @@ class TestSubagentGuardrailAttribution:
             invocation_constraints=projection,
             subagent_reservation=reservation,
             accepted_extension_generation=7,
+            accepted_extension_manifest_digest="d" * 64,
         )
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
@@ -3280,6 +3281,7 @@ class TestSubagentGuardrailAttribution:
         assert context[INVOCATION_CONSTRAINTS_CONTEXT_KEY] is projection
         assert context[SUBAGENT_RESERVATION_CONTEXT_KEY] is reservation
         assert context["accepted_extension_generation"] == 7
+        assert context["accepted_extension_manifest_digest"] == "d" * 64
 
     @pytest.mark.anyio
     async def test_aexecute_context_defaults_to_none_when_attribution_absent(

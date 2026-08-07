@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
@@ -676,6 +677,35 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         construction_authorization,
         authorization_provider_resolver.snapshot(),
     )
+    from deerflow.extensions.capabilities import (
+        CapabilityHealthMonitor,
+        build_capability_manifest,
+    )
+
+    invocation_authorization_required = any(
+        (
+            construction_authorization.invocation_operations.start_enabled,
+            construction_authorization.invocation_operations.observe_enabled,
+            construction_authorization.invocation_operations.cancel_enabled,
+        )
+    )
+    authorization_snapshot = authorization_provider_resolver.snapshot()
+    initialized_capability_ids = set(contributor_host.initialized_capability_ids)
+    initialized_capability_ids.update(invocation_constraints_host.initialized_capability_ids)
+    registration = authorization_provider_resolver.snapshot().registration
+    if registration is not None:
+        initialized_capability_ids.add(f"authorization_provider:{registration.contribution_id}")
+    capability_manifest = build_capability_manifest(
+        loaded_extensions,
+        required_capabilities=required_capabilities,
+        authorization_required=invocation_authorization_required,
+        legacy_authorization_initialized=(authorization_snapshot.source_kind == "legacy" and authorization_snapshot.provider is not None),
+        initialized_capability_ids=initialized_capability_ids,
+    )
+    capability_health_monitor = CapabilityHealthMonitor(
+        capability_manifest,
+        loaded_extensions,
+    )
     set_loaded_extensions(loaded_extensions)
     app.state.extensions = loaded_extensions
     app.state.extension_diagnostics = initialize_runtime_diagnostics(extension_diagnostics)
@@ -683,6 +713,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.state.invocation_authorization_config = construction_authorization.invocation_operations.model_copy(deep=True)
     app.state.contributor_host = contributor_host
     app.state.invocation_constraints_host = invocation_constraints_host
+    app.state.capability_manifest = capability_manifest
+    app.state.capability_health_monitor = capability_health_monitor
 
     # Include routers
     # Models API is mounted at /api/models
@@ -780,6 +812,29 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             Service health status information.
         """
         return {"status": "healthy", "service": "deer-flow-gateway"}
+
+    @app.get("/ready", tags=["health"])
+    async def readiness_check() -> JSONResponse:
+        """Return a deliberately minimal deployable readiness result."""
+
+        lifecycle_ready = False
+        run_store = getattr(app.state, "run_store", None)
+        if run_store is not None:
+            try:
+                lifecycle_ready = bool(await run_store.lifecycle_ready())
+            except Exception:
+                logger.warning(
+                    "Lifecycle readiness check failed",
+                    exc_info=True,
+                )
+        readiness = await app.state.capability_health_monitor.readiness(
+            lifecycle_ready=lifecycle_ready,
+        )
+        ready = readiness.status == "ready"
+        return JSONResponse(
+            status_code=200 if ready else 503,
+            content={"status": "ready" if ready else "not_ready"},
+        )
 
     return app
 

@@ -116,6 +116,12 @@ class ContributorHost:
         )
         self.startup_diagnostics = tuple(diagnostics)
 
+    @property
+    def initialized_capability_ids(self) -> frozenset[str]:
+        """Capability IDs whose factories produced valid contributor objects."""
+
+        return frozenset(item.capability_id for item in (*self._origin, *self._run_context))
+
     @staticmethod
     def _initialize(
         kind: Literal["origin_contributor", "run_context_contributor"],

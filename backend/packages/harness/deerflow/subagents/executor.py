@@ -460,6 +460,7 @@ class SubagentExecutor:
         invocation_constraints: ConstraintProjectionV1 | None = None,
         subagent_reservation: InvocationSubagentReservation | None = None,
         accepted_extension_generation: int | None = None,
+        accepted_extension_manifest_digest: str | None = None,
     ):
         """Initialize the executor.
 
@@ -493,6 +494,8 @@ class SubagentExecutor:
             subagent_reservation: The invocation-scoped exact dispatch counter.
             accepted_extension_generation: The immutable extension generation
                 accepted for the parent invocation.
+            accepted_extension_manifest_digest: The matching immutable safe
+                manifest digest accepted for the parent invocation.
         """
         self.config = config
         self.app_config = app_config
@@ -535,6 +538,7 @@ class SubagentExecutor:
         self.invocation_constraints = invocation_constraints
         self.subagent_reservation = subagent_reservation
         self.accepted_extension_generation = accepted_extension_generation
+        self.accepted_extension_manifest_digest = accepted_extension_manifest_digest
 
         self._base_tools = _filter_tools(
             tools,
@@ -937,6 +941,8 @@ class SubagentExecutor:
                 context[SUBAGENT_RESERVATION_CONTEXT_KEY] = self.subagent_reservation
             if self.accepted_extension_generation is not None:
                 context["accepted_extension_generation"] = self.accepted_extension_generation
+            if self.accepted_extension_manifest_digest is not None:
+                context["accepted_extension_manifest_digest"] = self.accepted_extension_manifest_digest
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 

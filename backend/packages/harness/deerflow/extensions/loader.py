@@ -220,6 +220,11 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
                 raise ExtensionLoadError(f"required extension {spec.use} failed to install") from exc
             continue
 
+        registry.record_loaded_plugin(
+            package_name=package_name,
+            package_version=package_version,
+            required=spec.required,
+        )
         loaded_sources.append(spec.use)
 
     # Loading third-party code is exactly the event an operator needs positive

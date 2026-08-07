@@ -1566,6 +1566,8 @@ async def _seal_accepted_invocation(
     }
     extensions = getattr(app_state, "extensions", None)
     extension_generation = int(getattr(extensions, "generation", 0))
+    capability_manifest = getattr(app_state, "capability_manifest", None)
+    extension_manifest_digest = getattr(capability_manifest, "digest", None)
     accepted = AcceptedInvocation.seal(
         principal=principal,
         origin=origin,
@@ -1581,6 +1583,7 @@ async def _seal_accepted_invocation(
             "recursion_limit": config.get("recursion_limit"),
         },
         extension_generation=extension_generation,
+        extension_manifest_digest=extension_manifest_digest,
         contributor_execution_digest=contributor_execution_digest,
     )
     # These objects are server-owned and installed after all caller context is
@@ -1589,6 +1592,8 @@ async def _seal_accepted_invocation(
     runtime_context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = revision.material
     runtime_context["accepted_agent_revision_digest"] = revision.digest
     runtime_context["accepted_extension_generation"] = extension_generation
+    if extension_manifest_digest is not None:
+        runtime_context["accepted_extension_manifest_digest"] = extension_manifest_digest
     config["context"] = runtime_context
     return accepted
 

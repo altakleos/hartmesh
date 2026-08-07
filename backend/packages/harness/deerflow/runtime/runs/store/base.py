@@ -221,6 +221,11 @@ class RunStore(abc.ABC):
     async def initialize_lifecycle(self) -> None:
         """Validate or initialize lifecycle cursor ordering state."""
 
+    async def lifecycle_ready(self) -> bool:
+        """Report whether lifecycle ordering metadata is internally coherent."""
+
+        return True
+
     async def list_lifecycle_events(
         self,
         *,

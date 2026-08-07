@@ -15,6 +15,7 @@ from typing import Any, Literal
 from deerflow_extension_api import (
     AuthorizationProvider,
     AuthorizationProviderFactory,
+    CapabilityHealthProbe,
     ExtensionData,
     InvocationConstraintsProvider,
     InvocationConstraintsProviderFactory,
@@ -48,6 +49,7 @@ class RegisteredAuthorizationProviderFactory:
     source: str
     package_name: str | None
     package_version: str | None
+    health_probe: CapabilityHealthProbe | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,7 @@ class RegisteredOriginContributorFactory:
     source: str
     package_name: str | None
     package_version: str | None
+    health_probe: CapabilityHealthProbe | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,7 @@ class RegisteredRunContextContributorFactory:
     source: str
     package_name: str | None
     package_version: str | None
+    health_probe: CapabilityHealthProbe | None = None
 
 
 @dataclass(frozen=True)
@@ -81,10 +85,21 @@ class RegisteredInvocationConstraintsProviderFactory:
     source: str
     package_name: str | None
     package_version: str | None
+    health_probe: CapabilityHealthProbe | None = None
+
+
+@dataclass(frozen=True)
+class LoadedPluginRegistration:
+    """Loader-owned provenance for one successfully installed plugin spec."""
+
+    package_name: str | None
+    package_version: str | None
+    required: bool
 
 
 @dataclass(frozen=True)
 class _RegistryMark:
+    loaded_plugin_count: int
     middleware_count: int
     authorization_provider_count: int
     origin_contributor_count: int
@@ -102,6 +117,7 @@ class LoadedExtensions:
 
     app_store: ExtensionData
     generation: int = 0
+    loaded_plugins: tuple[LoadedPluginRegistration, ...] = ()
     middleware_contributors: tuple[tuple[str, MiddlewareContributor], ...] = ()
     authorization_provider_factories: tuple[RegisteredAuthorizationProviderFactory, ...] = ()
     origin_contributor_factories: tuple[RegisteredOriginContributorFactory, ...] = ()
@@ -132,6 +148,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
     """
 
     def __init__(self) -> None:
+        self._loaded_plugins: list[LoadedPluginRegistration] = []
         self._middlewares: list[_Entry] = []
         self._authorization_providers: list[RegisteredAuthorizationProviderFactory] = []
         self._origin_contributors: list[RegisteredOriginContributorFactory] = []
@@ -171,6 +188,23 @@ class ExtensionRegistry(ExtensionRegistryContract):
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         self._middlewares.append((self._source(), contributor))
 
+    def record_loaded_plugin(
+        self,
+        *,
+        package_name: str | None,
+        package_version: str | None,
+        required: bool,
+    ) -> None:
+        """Record successful install provenance after install() returns."""
+
+        self._loaded_plugins.append(
+            LoadedPluginRegistration(
+                package_name=package_name,
+                package_version=package_version,
+                required=required,
+            )
+        )
+
     def authorization_provider(self, contribution: AuthorizationProviderFactory) -> None:
         if not isinstance(contribution, AuthorizationProviderFactory):
             raise TypeError("authorization_provider requires AuthorizationProviderFactory")
@@ -186,6 +220,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 source=self._source(),
                 package_name=self._current_package_name,
                 package_version=self._current_package_version,
+                health_probe=contribution.health_probe,
             )
         )
 
@@ -203,6 +238,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 source=self._source(),
                 package_name=self._current_package_name,
                 package_version=self._current_package_version,
+                health_probe=contribution.health_probe,
             )
         )
 
@@ -220,6 +256,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 source=self._source(),
                 package_name=self._current_package_name,
                 package_version=self._current_package_version,
+                health_probe=contribution.health_probe,
             )
         )
 
@@ -238,6 +275,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 source=self._source(),
                 package_name=self._current_package_name,
                 package_version=self._current_package_version,
+                health_probe=contribution.health_probe,
             )
         )
 
@@ -263,6 +301,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
     def mark(self) -> _RegistryMark:
         """Snapshot bucket lengths so one install() can be undone positionally."""
         return _RegistryMark(
+            len(self._loaded_plugins),
             len(self._middlewares),
             len(self._authorization_providers),
             len(self._origin_contributors),
@@ -277,6 +316,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         a ``use`` string with different config, and deleting by source would
         take the other instance's successful registrations with it.
         """
+        del self._loaded_plugins[mark.loaded_plugin_count :]
         del self._middlewares[mark.middleware_count :]
         del self._authorization_providers[mark.authorization_provider_count :]
         del self._origin_contributors[mark.origin_contributor_count :]
@@ -287,6 +327,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         return LoadedExtensions(
             app_store=ExtensionData("app"),
             generation=generation,
+            loaded_plugins=tuple(self._loaded_plugins),
             middleware_contributors=tuple(self._middlewares),
             authorization_provider_factories=tuple(self._authorization_providers),
             origin_contributor_factories=tuple(self._origin_contributors),

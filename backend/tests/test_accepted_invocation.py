@@ -350,6 +350,7 @@ async def test_every_launch_source_is_sealed_with_host_selected_origin(
         app=SimpleNamespace(
             state=SimpleNamespace(
                 extensions=SimpleNamespace(generation=9),
+                capability_manifest=SimpleNamespace(digest="f" * 64),
                 contributor_host=contributor_spy,
             )
         ),
@@ -378,6 +379,7 @@ async def test_every_launch_source_is_sealed_with_host_selected_origin(
     assert accepted.principal.user_id == "u1"
     assert accepted.principal.role == "member"
     assert accepted.extension_generation == 9
+    assert accepted.extension_manifest_digest == "f" * 64
     assert accepted.agent_revision.material is revision.material
     assert [item.source_kind for item in contributor_spy.origin_requests] == [expected["source_kind"]]
     assert [item.thread_id for item in contributor_spy.context_requests] == [intent.thread_id]

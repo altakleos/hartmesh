@@ -221,6 +221,18 @@ class AcceptedInvocation:
         object.__setattr__(self, "normalized_input", _deep_freeze(_canonical_value(self.normalized_input)))
         object.__setattr__(self, "decision_evidence", _frozen_json_mapping(self.decision_evidence))
 
+    @property
+    def extension_manifest_digest(self) -> str | None:
+        """Digest of the immutable Capability Host manifest accepted for this run."""
+
+        evidence = self.decision_evidence.get("capability_manifest")
+        if not isinstance(evidence, Mapping):
+            return None
+        digest = evidence.get("digest")
+        if not isinstance(digest, str) or len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            return None
+        return digest
+
     @classmethod
     def seal(
         cls,
@@ -233,8 +245,11 @@ class AcceptedInvocation:
         normalized_input: Any,
         execution_options: Mapping[str, Any],
         extension_generation: int,
+        extension_manifest_digest: str | None = None,
         contributor_execution_digest: str,
     ) -> AcceptedInvocation:
+        if extension_manifest_digest is not None and (len(extension_manifest_digest) != 64 or any(character not in "0123456789abcdef" for character in extension_manifest_digest)):
+            raise ValueError("extension_manifest_digest must be a lowercase SHA-256 digest")
         principal_digest = canonical_digest({"version": _DIGEST_VERSION, "principal": principal.to_json()})
         base_origin_digest = canonical_digest({"version": _DIGEST_VERSION, "origin": origin.base_json()})
         accepted_context_digest = canonical_digest(
@@ -254,9 +269,17 @@ class AcceptedInvocation:
                 "input": normalized_input,
                 "execution_options": execution_options,
                 "extension_generation": extension_generation,
+                "extension_manifest_digest": extension_manifest_digest,
                 "accepted_context_digest": accepted_context_digest,
             }
         )
+        decision_evidence = copy.deepcopy(_DECISION_EVIDENCE_V1)
+        if extension_manifest_digest is not None:
+            decision_evidence["capability_manifest"] = {
+                "version": 1,
+                "generation": extension_generation,
+                "digest": extension_manifest_digest,
+            }
         return cls(
             principal=principal,
             origin=origin,
@@ -271,7 +294,7 @@ class AcceptedInvocation:
             accepted_context_digest=accepted_context_digest,
             runtime_identity_digest=runtime_identity_digest,
             contributor_execution_digest=contributor_execution_digest,
-            decision_evidence=copy.deepcopy(_DECISION_EVIDENCE_V1),
+            decision_evidence=decision_evidence,
         )
 
     def to_persisted(self) -> dict[str, Any]:

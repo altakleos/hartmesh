@@ -453,7 +453,7 @@ cannot load; optional plugins fail open with attributed diagnostics.
 The public package is `packages/extension-api/` and must never import `deerflow`. It owns
 the host-independent authorization contracts (`Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthorizationProvider`), invocation contributor contracts, and the
-restrictive invocation-constraints contract as of extension API 0.4.0; the old
+restrictive invocation-constraints and health-probe contracts as of extension API 0.5.0; the old
 `deerflow.authz.provider` path is a compatibility re-export with object identity. Its
 registry exposes typed middleware, authorization-provider, `OriginContributor`,
 `RunContextContributor`, and singular `InvocationConstraintsProvider` contributions.
@@ -478,6 +478,23 @@ operator-only, restart-required configuration and accepts
 `origin_contributor:<id>` / `run_context_contributor:<id>` plus the singular
 `invocation_constraints.v1`; it must never be exposed through API-writable
 `extensions_config.json`.
+
+Authoritative contribution descriptors may expose a defaulted optional async health
+probe. The Capability Host publishes one startup-only manifest containing only
+loader-owned package provenance, typed contribution identity/version, required status,
+bounded initialization codes, extension generation, and a canonical SHA-256 digest.
+Neither plugin configuration nor loaded objects enter that projection. New accepted
+invocations persist the generation and digest in existing safe acceptance evidence, and
+workers/subagents stay pinned to them for the run. There is no plugin hot reload.
+
+Live health is separate mutable state: probes run outside observational middleware with a
+two-second timeout, a ten-second cache, one in-flight call per contribution, and a
+thirty-second required-snapshot staleness fence. Required unhealthy/missing/failed
+capabilities and lifecycle-cursor corruption make unauthenticated `GET /ready` return the
+minimal 503 body; `GET /health` remains independent liveness. Admin-only
+`GET /api/runtime/v1/capabilities` exposes the safe immutable manifest plus separately
+labelled current health. Optional middleware and optional capability failures remain
+diagnostic/fail-open and do not make the Gateway unready.
 
 The constraints provider is an authoritative restrictive projection, not a second binary
 permission provider. Gateway calls it after enabled invocation-start authorization allows
@@ -585,7 +602,7 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 
 ### Gateway API (`app/gateway/`)
 
-FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled).
+FastAPI application on port 8001 with independent liveness at `GET /health` and minimal unauthenticated readiness at `GET /ready`. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled).
 
 CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (comma-separated exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed. The LangGraph SDK resolves run metadata from that header alone — withhold it and `useStream`'s `onCreated` never fires, a new thread keeps its placeholder route, and every action gated on an established thread (edit, regenerate, branch) stays hidden until the page is reloaded. Same-origin nginx deployments never hit this because CORS does not apply.
 

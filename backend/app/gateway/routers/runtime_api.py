@@ -114,7 +114,18 @@ async def runtime_capabilities(request: Request) -> JSONResponse:
         )
     except HTTPException as exc:
         return runtime_error_response(exc.status_code, FailureCode.denied)
-    return JSONResponse(content=RuntimeCapabilities().to_dict())
+    payload = RuntimeCapabilities().to_dict()
+    manifest = getattr(request.app.state, "capability_manifest", None)
+    monitor = getattr(request.app.state, "capability_health_monitor", None)
+    if manifest is not None and monitor is not None:
+        from deerflow.extensions.capabilities import (
+            capability_health_to_dict,
+            capability_manifest_to_dict,
+        )
+
+        payload["capability_manifest"] = capability_manifest_to_dict(manifest)
+        payload["capability_health"] = capability_health_to_dict(await monitor.health())
+    return JSONResponse(content=payload)
 
 
 @router.post("/invocations/ensure")
