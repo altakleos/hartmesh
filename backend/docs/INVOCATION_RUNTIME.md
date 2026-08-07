@@ -163,7 +163,15 @@ authorization, constraints, admission, worker attachment, visibility, and
 lifecycle stores as HTTP/channel/scheduler launches. Known requests return the
 retained normal run, while conflicts, thread-busy, denial, indeterminate policy,
 and safe request failures remain finite outcomes. Auxiliary operation rows are
-never visible. There is no runtime HTTP route.
+never visible.
+
+The Gateway publishes the same adapter at `/api/runtime/v1`: capabilities,
+ensure, one-invocation observation, one-context observation, and fenced control.
+Authentication supplies the principal and external-key scope; HTTP bodies cannot
+provide either. The capabilities route is administrator-only, observation and
+control retain owner/admin visibility, and every non-success response uses the
+bounded versioned `runtime.error` envelope. The existing LangGraph-compatible
+create/stream/wait routes remain unchanged.
 
 Lifecycle observations return a fixed safe snapshot projection plus authoritative
 events, opaque `next_cursor`, the `minimum_available_cursor`, and a captured

@@ -30,6 +30,7 @@ from app.gateway.routers import (
     memory,
     models,
     runs,
+    runtime_api,
     scheduled_tasks,
     skills,
     suggestions,
@@ -37,6 +38,7 @@ from app.gateway.routers import (
     threads,
     uploads,
 )
+from app.gateway.runtime_http import install_runtime_error_handlers
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
@@ -559,11 +561,16 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
             },
             {
+                "name": "runtime",
+                "description": "Versioned durable invocation ensure, observe, and control API",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
         ],
     )
+    install_runtime_error_handlers(app)
 
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
     app.add_middleware(AuthMiddleware)
@@ -743,6 +750,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
+
+    # Versioned durable invocation HTTP API
+    app.include_router(runtime_api.router)
 
     # GitHub webhooks API is mounted at /api/webhooks/github
     # Exempt from auth and CSRF middleware (see auth_middleware._PUBLIC_PATH_PREFIXES

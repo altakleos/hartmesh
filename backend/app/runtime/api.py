@@ -51,26 +51,28 @@ def _failure(code: FailureCode, **detail: Any) -> RuntimeFailure:
     return RuntimeFailure(code=code, detail={"version": 1, **detail})
 
 
-class InProcessInvocationRuntime:
-    """Transport-neutral adapter bound to one authenticated service identity."""
+class InvocationRuntimeAPI:
+    """Transport-neutral adapter bound to one host-authenticated principal."""
 
     def __init__(
         self,
         runtime: InvocationRuntime,
         *,
-        authenticated_service_id: str,
+        principal: InvocationPrincipal,
+        source_kind: InternalSourceKind,
+        trusted_service_id: str | None = None,
     ) -> None:
-        if not authenticated_service_id:
-            raise ValueError("authenticated_service_id must not be empty")
+        if source_kind is InternalSourceKind.service and not trusted_service_id:
+            raise ValueError("service runtime adapters require an authenticated service id")
+        if source_kind is not InternalSourceKind.service and trusted_service_id is not None:
+            raise ValueError("trusted_service_id is valid only for service runtime adapters")
         self._runtime = runtime
-        self._authenticated_service_id = authenticated_service_id
+        self._authenticated_principal = principal
+        self._source_kind = source_kind
+        self._trusted_service_id = trusted_service_id
 
     def _principal(self) -> InvocationPrincipal:
-        return InvocationPrincipal(
-            user_id=self._authenticated_service_id,
-            role="service",
-            is_internal=True,
-        )
+        return self._authenticated_principal
 
     async def ensure(
         self,
@@ -95,8 +97,8 @@ class InProcessInvocationRuntime:
                     interrupt_before=(list(options.interrupt_before) if isinstance(options.interrupt_before, tuple) else options.interrupt_before),
                     interrupt_after=(list(options.interrupt_after) if isinstance(options.interrupt_after, tuple) else options.interrupt_after),
                     multitask_strategy=options.multitask_strategy,
-                    source_kind=InternalSourceKind.service,
-                    trusted_service_id=self._authenticated_service_id,
+                    source_kind=self._source_kind,
+                    trusted_service_id=self._trusted_service_id,
                     external_key=request.external_key,
                 )
             )
@@ -269,6 +271,29 @@ class InProcessInvocationRuntime:
         return RuntimeCapabilities()
 
 
+class InProcessInvocationRuntime(InvocationRuntimeAPI):
+    """Supported embedded facade bound to one authenticated service identity."""
+
+    def __init__(
+        self,
+        runtime: InvocationRuntime,
+        *,
+        authenticated_service_id: str,
+    ) -> None:
+        if not authenticated_service_id:
+            raise ValueError("authenticated_service_id must not be empty")
+        super().__init__(
+            runtime,
+            principal=InvocationPrincipal(
+                user_id=authenticated_service_id,
+                role="service",
+                is_internal=True,
+            ),
+            source_kind=InternalSourceKind.service,
+            trusted_service_id=authenticated_service_id,
+        )
+
+
 def build_in_process_runtime_api(
     app: Any,
     *,
@@ -287,4 +312,8 @@ def build_in_process_runtime_api(
     )
 
 
-__all__ = ["InProcessInvocationRuntime", "build_in_process_runtime_api"]
+__all__ = [
+    "InProcessInvocationRuntime",
+    "InvocationRuntimeAPI",
+    "build_in_process_runtime_api",
+]

@@ -11,6 +11,7 @@ Fine-grained permission checks remain in authz.py decorators.
 
 from collections.abc import Callable
 
+from deerflow_runtime_api import FailureCode
 from fastapi import HTTPException, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -26,6 +27,7 @@ from app.gateway.auth_disabled import (
 )
 from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
+from app.gateway.runtime_http import is_runtime_api_path, runtime_error_response
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # Paths that never require authentication.
@@ -128,6 +130,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 user = await get_current_user_from_request(request)
             except HTTPException as exc:
                 if not is_auth_disabled():
+                    if is_runtime_api_path(request.url.path):
+                        return runtime_error_response(exc.status_code, FailureCode.denied)
                     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
                 user = get_auth_disabled_user()
                 auth_source = AUTH_SOURCE_AUTH_DISABLED
@@ -135,6 +139,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             user = get_auth_disabled_user()
             auth_source = AUTH_SOURCE_AUTH_DISABLED
         else:
+            if is_runtime_api_path(request.url.path):
+                return runtime_error_response(401, FailureCode.denied)
             return JSONResponse(
                 status_code=401,
                 content={
