@@ -49,6 +49,7 @@ from deerflow.runtime.checkpoint_state import (
     graph_state_schema,
     graph_writable_channels,
 )
+from deerflow.runtime.constraints import ConstraintFenceError
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -416,6 +417,16 @@ def _build_runtime_context(
         runtime_ctx[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = authorization_provider
     else:
         runtime_ctx.pop(AUTHORIZATION_PROVIDER_CONTEXT_KEY, None)
+    from deerflow.runtime.constraints import (
+        INVOCATION_CONSTRAINTS_CONTEXT_KEY,
+        SUBAGENT_RESERVATION_CONTEXT_KEY,
+    )
+
+    # These objects exist only after accepted evidence passes the construction
+    # fence below. A caller-provided value, including an in-process one, is not
+    # an accepted projection or reservation.
+    runtime_ctx.pop(INVOCATION_CONSTRAINTS_CONTEXT_KEY, None)
+    runtime_ctx.pop(SUBAGENT_RESERVATION_CONTEXT_KEY, None)
     return runtime_ctx
 
 
@@ -445,6 +456,8 @@ class RunContext:
     # accepted revision. The accepting process uses the captured material on
     # RunRecord and does not call this resolver.
     agent_revision_resolver: Any | None = field(default=None, repr=False)
+    # Host-owned clock used by both accepted-constraint worker fences.
+    constraint_clock: Any | None = field(default=None, repr=False)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -471,6 +484,19 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         ):
             if internal_key in runtime_context:
                 existing_context[internal_key] = runtime_context[internal_key]
+        from deerflow.runtime.constraints import (
+            INVOCATION_CONSTRAINTS_CONTEXT_KEY,
+            SUBAGENT_RESERVATION_CONTEXT_KEY,
+        )
+
+        for internal_key in (
+            INVOCATION_CONSTRAINTS_CONTEXT_KEY,
+            SUBAGENT_RESERVATION_CONTEXT_KEY,
+        ):
+            if internal_key in runtime_context:
+                existing_context[internal_key] = runtime_context[internal_key]
+            else:
+                existing_context.pop(internal_key, None)
         return
 
     config["context"] = dict(runtime_context)
@@ -651,6 +677,7 @@ async def run_agent(
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
     started = False
+    accepted_constraints = None
 
     async def _finish_cancellation(
         action: str,
@@ -909,8 +936,31 @@ async def run_agent(
             runtime_ctx["accepted_agent_revision_digest"] = actual_revision.digest
             runtime_ctx["accepted_extension_generation"] = accepted.extension_generation
             _install_pinned_agent_facts(runtime_ctx, pinned_material)
+            from deerflow.runtime.constraints import (
+                INVOCATION_CONSTRAINTS_CONTEXT_KEY,
+                SUBAGENT_RESERVATION_CONTEXT_KEY,
+                InvocationSubagentReservation,
+                validate_constraint_fence,
+            )
+
+            accepted_constraints = validate_constraint_fence(
+                accepted,
+                request_digest=record.request_digest,
+                clock=ctx.constraint_clock,
+            )
+            if accepted_constraints is not None:
+                runtime_ctx[INVOCATION_CONSTRAINTS_CONTEXT_KEY] = accepted_constraints
+                limit = accepted_constraints.max_total_subagents
+                if limit is not None:
+                    runtime_ctx["max_total_subagents"] = limit
+                    runtime_ctx[SUBAGENT_RESERVATION_CONTEXT_KEY] = InvocationSubagentReservation(limit)
             _install_runtime_context(config, runtime_ctx)
             _install_pinned_agent_facts(config["context"], pinned_material)
+            if accepted_constraints is not None:
+                config["context"][INVOCATION_CONSTRAINTS_CONTEXT_KEY] = accepted_constraints
+                if accepted_constraints.max_total_subagents is not None:
+                    config["context"]["max_total_subagents"] = accepted_constraints.max_total_subagents
+                    config["context"][SUBAGENT_RESERVATION_CONTEXT_KEY] = runtime_ctx[SUBAGENT_RESERVATION_CONTEXT_KEY]
             initial_runnable_config = RunnableConfig(**config)
 
         agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
@@ -1013,11 +1063,22 @@ async def run_agent(
                 )
             return goal_evaluator_model
 
+        constraint_start_validated = False
+
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
-            nonlocal llm_error_fallback_message
+            nonlocal llm_error_fallback_message, constraint_start_validated
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
+                    if not constraint_start_validated and accepted_constraints is not None:
+                        from deerflow.runtime.constraints import validate_constraint_fence
+
+                        validate_constraint_fence(
+                            accepted,
+                            request_digest=record.request_digest,
+                            clock=ctx.constraint_clock,
+                        )
+                        constraint_start_validated = True
                     if len(lg_modes) == 1 and not stream_subgraphs:
                         # Single mode, no subgraphs: astream yields raw chunks
                         single_mode = lg_modes[0]
@@ -1154,6 +1215,26 @@ async def run_agent(
 
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
+
+    except ConstraintFenceError as exc:
+        error_msg = f"Invocation constraint fence failed: {exc.reason}"
+        logger.warning("Run %s failed constraint fence: %s", run_id, exc.reason)
+        await _ensure_finalizing_before_edit_failure(run_manager, record)
+        cancel_action = await run_manager.set_status_if_not_cancelled(
+            run_id,
+            RunStatus.error,
+            error=error_msg,
+            stop_reason=exc.reason,
+            **terminal_status_kwargs,
+        )
+        if cancel_action is not None:
+            await _finish_cancellation(cancel_action)
+        else:
+            await bridge.publish(
+                run_id,
+                "error",
+                {"message": error_msg, "name": "ConstraintFenceError"},
+            )
 
     except Exception as exc:
         error_msg = f"{exc}"

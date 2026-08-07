@@ -646,6 +646,13 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         required_capabilities=required_capabilities,
     )
     extension_diagnostics.extend(Diagnostic.warning(item.capability_id, item.message) for item in contributor_host.startup_diagnostics)
+    from deerflow.extensions.constraints import InvocationConstraintsHost
+
+    invocation_constraints_host = InvocationConstraintsHost(
+        loaded_extensions,
+        required_capabilities=required_capabilities,
+    )
+    extension_diagnostics.extend(Diagnostic.warning("invocation_constraints.v1", message) for message in invocation_constraints_host.startup_diagnostics)
     # One application-owned resolver supplies a coherent provider instance to
     # route checks and every durable-run authorization path. Extension-backed
     # factories are startup-only; legacy class-path providers may be replaced
@@ -668,6 +675,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.state.authorization_provider_resolver = authorization_provider_resolver
     app.state.invocation_authorization_config = construction_authorization.invocation_operations.model_copy(deep=True)
     app.state.contributor_host = contributor_host
+    app.state.invocation_constraints_host = invocation_constraints_host
 
     # Include routers
     # Models API is mounted at /api/models

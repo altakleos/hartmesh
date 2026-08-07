@@ -17,6 +17,7 @@ from deerflow_extension_api.state import ExtensionData
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from deerflow_extension_api.authorization import AuthorizationProviderFactory
+    from deerflow_extension_api.constraints import InvocationConstraintsProviderFactory
     from deerflow_extension_api.contributors import OriginContributorFactory, RunContextContributorFactory
     from deerflow_extension_api.placement import AgentBuildContext, MiddlewarePlacement
 
@@ -83,6 +84,10 @@ class ExtensionRegistry(Protocol):
 
     def run_context_contributor(self, contribution: RunContextContributorFactory) -> None:
         """Register one trusted accepted-run-context contributor factory."""
+        return None
+
+    def invocation_constraints(self, contribution: InvocationConstraintsProviderFactory) -> None:
+        """Register the process's single restrictive constraints factory."""
         return None
 
 

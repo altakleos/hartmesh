@@ -2061,6 +2061,13 @@ def _build_invocation_authorization(request: Any) -> ProviderInvocationAuthoriza
     return ProviderInvocationAuthorization(settings, resolve)
 
 
+def _build_invocation_constraints(request: Any):
+    from app.runtime.constraints import ProviderInvocationConstraints
+
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    return ProviderInvocationConstraints(getattr(app_state, "invocation_constraints_host", None))
+
+
 def raise_for_invocation_authorization(
     result: Any,
     *,
@@ -2102,6 +2109,7 @@ def build_invocation_runtime(request: Request) -> InvocationRuntime:
         normalizer=_GatewayLaunchNormalizer(request),
         runs=_GatewayDurableRuns(request),
         authorization=_build_invocation_authorization(request),
+        constraints=_build_invocation_constraints(request),
     )
 
 
@@ -2123,6 +2131,7 @@ def build_scheduled_invocation_runtime(app: Any) -> InvocationRuntime:
         ),
         runs=_GatewayDurableRuns(request),
         authorization=_build_invocation_authorization(request),
+        constraints=_build_invocation_constraints(request),
     )
 
 
@@ -2144,6 +2153,7 @@ def build_channel_invocation_runtime(app: Any) -> InvocationRuntime:
         ),
         runs=_GatewayDurableRuns(request),
         authorization=_build_invocation_authorization(request),
+        constraints=_build_invocation_constraints(request),
     )
 
 

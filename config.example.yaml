@@ -2545,8 +2545,11 @@ authorization:
 # Trusted invocation contributors may be made mandatory with their typed
 # capability ID. This setting stays in operator-controlled config.yaml; it is
 # intentionally unavailable in API-writable extensions_config.json. Supported
-# IDs are origin_contributor:<contribution-id> and
-# run_context_contributor:<contribution-id>.
+# IDs are origin_contributor:<contribution-id>,
+# run_context_contributor:<contribution-id>, and the singular
+# invocation_constraints.v1 provider. Constraints are checked after invocation-start
+# authorization and before durable admission; accepted projections are fenced again by
+# the worker before construction and immediately before graph streaming.
 required_capabilities: []
 #
 # plugins:

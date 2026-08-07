@@ -451,11 +451,12 @@ cannot load; optional plugins fail open with attributed diagnostics.
 
 The public package is `packages/extension-api/` and must never import `deerflow`. It owns
 the host-independent authorization contracts (`Principal`, `AuthzRequest`,
-`AuthzDecision`, `AuthorizationProvider`) and the invocation contributor contracts as of
-extension API 0.3.0; the old
+`AuthzDecision`, `AuthorizationProvider`), invocation contributor contracts, and the
+restrictive invocation-constraints contract as of extension API 0.4.0; the old
 `deerflow.authz.provider` path is a compatibility re-export with object identity. Its
-registry exposes typed middleware, authorization-provider, `OriginContributor`, and
-`RunContextContributor` contributions. Descriptors have no package-provenance fields: the
+registry exposes typed middleware, authorization-provider, `OriginContributor`,
+`RunContextContributor`, and singular `InvocationConstraintsProvider` contributions.
+Descriptors have no package-provenance fields: the
 loader stamps distribution name/version into immutable host registrations. Duplicate
 contribution IDs are rejected; duplicate provider factories are rejected, and an extension
 provider is mutually exclusive with legacy `authorization.provider.use`. Do not add a
@@ -473,8 +474,23 @@ while correlation values do not. Calls run concurrently with a two-second timeou
 composed in contribution-ID order. Optional failures are omitted with redacted diagnostics;
 required failures make the invocation indeterminate. Top-level `required_capabilities` is
 operator-only, restart-required configuration and accepts
-`origin_contributor:<id>` / `run_context_contributor:<id>`; it must never be exposed through
-API-writable `extensions_config.json`.
+`origin_contributor:<id>` / `run_context_contributor:<id>` plus the singular
+`invocation_constraints.v1`; it must never be exposed through API-writable
+`extensions_config.json`.
+
+The constraints provider is an authoritative restrictive projection, not a second binary
+permission provider. Gateway calls it after enabled invocation-start authorization allows
+and before durable admission, directly outside observational `IsolatedMiddleware`, with a
+host-owned two-second timeout and injected timezone-aware clock. It binds the canonical
+request and pinned agent-revision digests, may only narrow `max_total_subagents`, and
+persists only normalized projection/evidence facts. Known keyed replays reuse stored
+evidence without calling the provider again. The worker validates binding/freshness before
+graph construction and again immediately before the first `astream`; failures use
+`constraint_evidence_mismatch` or `constraint_expired_before_start`. A single
+invocation-scoped, lock-protected reservation object is shared through lead and delegated
+subagent contexts, reserves by stable tool-call ID immediately before dispatch, and treats
+the same ID as a retry rather than additional capacity. Token-budget middleware remains a
+post-response guard and is not an exact invocation constraint.
 Each middleware contribution declares lead/subagent scope, stable order, and a semantic placement (`MODEL_LOGICAL`,
 `MODEL_PHYSICAL`, `TOOL_VISIBLE`, `TOOL_RAW`, or `STANDARD`) rather than a fragile list
 index. `extensions/stack.py` is the single final composition point; do not inject inside
@@ -685,6 +701,7 @@ JSONL event stores when `GATEWAY_WORKERS > 1`.
 - Lifecycle cursors are global commit-order evidence. SQL writers lock the singleton `run_lifecycle_cursor_state(singleton_id=1)` row (`SELECT ... FOR UPDATE` on PostgreSQL; `BEGIN IMMEDIATE` before the read on SQLite), increment the cursor, mutate the run row, and insert the safe event in one transaction. Startup may repair a missing singleton only while the lifecycle table is empty; events without the singleton are ordering corruption and fail initialization. Event payloads contain only a version, an allowlisted host-owned reason code, and the allowlisted cancellation `action` evidence (`interrupt|rollback`)—never prompts, messages, reasoning, tool bodies, credentials, artifacts, or rich `RunEventStore` content. Lifecycle type/resulting-status pairs are validated before mutation. There is no lifecycle cursor HTTP/feed API yet.
 - `RunStore.transition_run_atomic()` owns normal-run state changes. Interrupt/rollback admission is one transition batch: it locks and revalidates thread/cursor state, emits predecessor `interrupted` evidence in `(created_at, run_id)` order, then admits the replacement with `accepted`; callers synchronize memory only from the committed rows. Interrupt predecessors end with status `interrupted`; rollback predecessors keep the existing status `error` and `Rolled back by user` text. Start maps to `started`; user cancellation finalization to `cancelled`; success/error/timeout/shutdown map to `succeeded`/`failed`/`timed_out`/`interrupted`; attachment failure, revision drift, and orphan recovery use safe reasons `worker_attachment_failed`, `agent_revision_drift`, and `orphan_recovered`. Custom stores inherit `durable_lifecycle=false` and keep compatibility behavior until they explicitly implement and advertise this complete transaction contract.
 - `ResolvedAgentMaterialV1` captures the exact graph-factory inputs used in the accepting process: agent storage source/version and validated config, SOUL bytes, model execution profile with opaque secret-handle IDs, effective tools and skill content digests, and planning/reasoning/subagent defaults. The worker constructs lead and delegated agents from that captured object without rereading mutable agent/config storage. After restart, it resolves current material once and may bind that exact object only when its digest equals the persisted revision. A mismatch terminates before graph construction with `stop_reason=agent_revision_drift`; do not compare and then call a factory that rereads mutable state. See `docs/INVOCATION_RUNTIME.md`.
+- `InvocationRuntime` projects optional restrictive invocation constraints only for a genuinely absent invocation, after start authorization and before atomic acceptance. Provider rejection maps to denied; timeout, exception, malformed/binding/freshness failure, or an unenforceable ceiling maps to indeterminate, and neither creates a row. The accepted safe projection is immutable replay evidence: known retries bypass the provider even after expiry. Worker construction and first-stream fences consume that exact evidence without provider/database transactions, and an effective `max_total_subagents` is enforced by the shared pre-dispatch reservation counter rather than the observational `SubagentLimitMiddleware` ledger.
 - LangGraph-compatible run requests validate their supported subset before creating a run. `runtime/stream_modes.py` is the shared backend contract for public stream modes and the worker's `graph.astream` mapping; the public `messages-tuple` mode maps to LangGraph's internal `messages` mode, while public `messages`, `events`, and other unsupported modes are rejected instead of being dropped or replaced with `values`. `app/gateway/run_models.py::RunCreateRequest` is the HTTP/SDK compatibility model; the scheduler and in-process native-channel manager construct `InternalLaunchIntent` directly. `RunCreateRequest` retains only truthful compatibility defaults for unimplemented options (`if_not_exists="create"` plus `None` placeholders), returns 422 for unsupported values including `on_completion="complete"`, `on_completion="continue"`, and `multitask_strategy="enqueue"`, and forbids undeclared SDK options so fields such as `checkpoint_during` and `durability` cannot be silently discarded. A placeholder must still accept the stock SDK's own default: `langgraph_sdk` drops only `None` from its run payload, so `stream_resumable=False` reaches every request and means "non-resumable", which is what DeerFlow serves. `tests/test_run_request_validation.py::test_gateway_accepts_langgraph_sdk_default_payload` pins the real SDK payload against this boundary.
 - `RunManager.get()` is async; direct callers must `await` it.
 - The history batch helpers `list_successful_regenerate_sources()`, `list_edit_regenerate_runs()`, and `get_many_by_thread()` default to `user_id=AUTO`: they resolve the request user and fail closed when no user context exists. Migration/admin callers that intentionally need an unscoped read must pass `user_id=None` explicitly.

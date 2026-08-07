@@ -3225,6 +3225,63 @@ class TestSubagentGuardrailAttribution:
         assert context.get("channel_user_id") == "ou_group_sender_1"
 
     @pytest.mark.anyio
+    async def test_aexecute_propagates_accepted_constraints_and_generation(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        from datetime import UTC, timedelta
+
+        from deerflow_extension_api import ConstraintProjectionV1
+
+        from deerflow.runtime.constraints import (
+            INVOCATION_CONSTRAINTS_CONTEXT_KEY,
+            SUBAGENT_RESERVATION_CONTEXT_KEY,
+            InvocationSubagentReservation,
+        )
+
+        now = datetime.now(UTC)
+        projection = ConstraintProjectionV1(
+            request_digest="a" * 64,
+            agent_revision_digest="b" * 64,
+            projection_revision="policy-1",
+            issued_at=now,
+            valid_until=now + timedelta(minutes=5),
+            evidence_id="evidence-1",
+            evidence_digest="c" * 64,
+            max_total_subagents=2,
+        )
+        reservation = InvocationSubagentReservation(2)
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="general-purpose",
+                description="Constraint inheritance test agent",
+                system_prompt="Test constraints.",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            parent_model="test-model",
+            invocation_constraints=projection,
+            subagent_reservation=reservation,
+            accepted_extension_generation=7,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context[INVOCATION_CONSTRAINTS_CONTEXT_KEY] is projection
+        assert context[SUBAGENT_RESERVATION_CONTEXT_KEY] is reservation
+        assert context["accepted_extension_generation"] == 7
+
+    @pytest.mark.anyio
     async def test_aexecute_context_defaults_to_none_when_attribution_absent(
         self,
         classes,

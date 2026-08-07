@@ -17,6 +17,17 @@ from deerflow_extension_api.authorization import (
     AuthzRequest,
     Principal,
 )
+from deerflow_extension_api.constraints import (
+    INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION,
+    INVOCATION_CONSTRAINTS_KIND,
+    INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY,
+    ConstraintIndeterminate,
+    ConstraintProjectionRequestV1,
+    ConstraintProjectionV1,
+    ConstraintRejected,
+    InvocationConstraintsProvider,
+    InvocationConstraintsProviderFactory,
+)
 from deerflow_extension_api.contracts import (
     ExtensionInstall,
     ExtensionRegistry,
@@ -57,12 +68,15 @@ from deerflow_extension_api.state import ExtensionData
 #: Contract version. Pre-1.0 minors may break and only patches promise to be
 #: additive. From 1.0 on, bump the major on any breaking change; see the spec's
 #: evolution rules for what counts as additive.
-API_VERSION = "0.3.0"
+API_VERSION = "0.4.0"
 
 __all__ = [
     "API_VERSION",
     "AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION",
     "AUTHORIZATION_PROVIDER_KIND",
+    "INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION",
+    "INVOCATION_CONSTRAINTS_KIND",
+    "INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY",
     "EXTENSION_TASK_STORE_KEY",
     "AgentBuildContext",
     "AgentScope",
@@ -71,10 +85,16 @@ __all__ = [
     "AuthzDecision",
     "AuthzReason",
     "AuthzRequest",
+    "ConstraintIndeterminate",
+    "ConstraintProjectionRequestV1",
+    "ConstraintProjectionV1",
+    "ConstraintRejected",
     "ExtensionData",
     "ExtensionInstall",
     "ExtensionRegistry",
     "HostPolicySnapshot",
+    "InvocationConstraintsProvider",
+    "InvocationConstraintsProviderFactory",
     "MiddlewareContributor",
     "MiddlewarePlacement",
     "Placement",
