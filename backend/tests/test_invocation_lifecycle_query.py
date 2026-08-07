@@ -219,6 +219,7 @@ async def test_sql_prune_is_monotonic_and_cursor_state_corruption_fails_read(tmp
 
 
 @pytest.mark.anyio
+@pytest.mark.postgres_contract
 @pytest.mark.skipif(
     not _POSTGRES_URL,
     reason="requires DEERFLOW_TEST_POSTGRES_URL for repeatable-read interleaving",

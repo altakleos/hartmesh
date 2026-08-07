@@ -421,6 +421,7 @@ async def test_sql_replacement_failure_rolls_back_rows_events_and_cursor(tmp_pat
 
 
 @pytest.mark.anyio
+@pytest.mark.postgres_contract
 @pytest.mark.skipif(
     not _POSTGRES_URL,
     reason="requires DEERFLOW_TEST_POSTGRES_URL for the lifecycle CAS race gate",
@@ -474,6 +475,7 @@ async def test_postgres_concurrent_cas_has_one_row_event_winner() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.postgres_contract
 @pytest.mark.skipif(
     not _POSTGRES_URL,
     reason="requires DEERFLOW_TEST_POSTGRES_URL for the global lifecycle cursor race gate",

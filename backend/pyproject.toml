@@ -64,6 +64,7 @@ markers = [
     "allow_blocking_io: opt out of the strict Blockbuster gate in tests/blocking_io/",
     "integration: tests that require an external service (e.g. Redis); skipped when unavailable",
     "live: tests that call real external APIs and require explicit opt-in",
+    "postgres_contract: required PostgreSQL durable-runtime contract gate when DEERFLOW_TEST_POSTGRES_URL is configured",
 ]
 
 [tool.uv]

@@ -4,7 +4,8 @@
 HTTP, Scheduled Task, authenticated native-channel, and embedded-service launches. Scheduling and channel
 delivery remain source-owned; normalization, accepted-fact sealing, durable admission, and
 one worker attachment belong to the runtime. Checkpoint and artifact reservations are
-auxiliary thread operations, not accepted invocations.
+auxiliary thread operations, not accepted invocations. Each invocation is one normal
+`RunRow(operation_kind="run")`; there is no separate invocation row or table.
 
 ## Trust and sealing
 
@@ -117,7 +118,8 @@ reservation counter into the lead runtime. The task tool reserves a stable tool-
 immediately before each dispatch, shares that same object with delegated subagents, rejects
 the dispatch that would exceed the limit, and does not double-count a retry of an already
 reserved ID. The existing token-budget and delegation-ledger middleware remain useful
-observational/post-response guards, but neither is advertised as this exact boundary.
+observational/post-response guards, but neither is advertised as this exact boundary;
+exact token limits are deferred.
 
 ## Atomic idempotent admission
 
@@ -182,6 +184,23 @@ global fence without skipping a future match. Administrative pruning is explicit
 and monotonic, and stale/ahead cursor conditions are typed. Reads are at least
 once, so consumers deduplicate with stable event IDs/cursors.
 
+## Authoritative lifecycle and failure recovery
+
+Normal admissions commit at `state_version=1` with `accepted`. Each successful start,
+first cancellation request, terminal completion, supersession, attachment failure, or
+orphan recovery increments `state_version` once and writes exactly one matching safe
+lifecycle row in the same transaction. The complete v1 vocabulary is `accepted`, `started`,
+`cancellation_requested`, `cancelled`, `succeeded`, `failed`, `timed_out`, and
+`interrupted`; `RunRow.status` remains authoritative. A stale compare-and-set changes
+neither row nor journal. Interrupt/rollback replacement commits every predecessor
+transition and the replacement acceptance as one ordered batch.
+
+Process death after acceptance is recovered by the current lease/orphan scan as `failed`
+with `orphan_recovered`; attachment failure is `worker_attachment_failed`. These guarantees
+make retained keyed retries converge, but do not provide scheduler HA or a multi-replica
+Gateway ownership design beyond the explicitly configured PostgreSQL lease and stream
+primitives. Kubernetes pod-termination qualification remains a deployment release gate.
+
 ## Pinned agent construction
 
 Acceptance resolves `ResolvedAgentMaterialV1` once. Its versioned projector covers agent
@@ -197,3 +216,35 @@ the pinned factory input. A mismatch sets terminal error state with
 `stop_reason=agent_revision_drift` immediately before construction, so no graph or model work
 occurs. The runtime never reconstructs historical material or performs a compare followed by
 a mutable-state reread.
+
+## Capability health and required MCP preparation
+
+The Capability Host publishes a restart-only immutable manifest, generation, and digest.
+New accepted invocations pin that generation/digest, while live health is a separate mutable
+snapshot and cannot change it. `GET /health` remains minimal liveness; `GET /ready` fails
+closed for missing, failed, stale, or unhealthy operator-required authorization,
+contributors, invocation constraints, or required MCP preparation, and for corrupt lifecycle
+cursor ordering. The administrator-only runtime capabilities route exposes the safe manifest
+and separately labelled health snapshots.
+
+Required MCP interceptors run only after the coherent authorization provider allows. At the
+final network fence, the host verifies the pinned generation and fresh required health, then
+composes bounded preparation in contribution-ID order. Failure or conflicting transient
+headers call the handler zero times. Preparation cannot grant permission, and transient
+credentials never enter run rows, checkpoints, lifecycle/rich events, manifests, or logs.
+The API-writable legacy interceptor path remains optional warning-and-skip compatibility and
+cannot satisfy an operator requirement.
+
+## Compatibility and deferred scope
+
+Existing LangGraph SDK and DeerFlow REST create/stream/wait response contracts remain
+compatible facades over the durable Gateway path. The synchronous `DeerFlowClient` remains a
+documented non-durable local graph path; applications that need durable embedded parity use
+the supported asynchronous `deerflow-runtime-api` adapter instead.
+
+The following are deferred and are not implemented or promised by this contract: context
+export or retirement, group/dynamic outbound governance, scheduler HA, a general
+multi-replica Gateway ownership model, an artifact catalogue, a full profile registry, an
+event sink or broker, and durable embedded parity for synchronous `DeerFlowClient`. Exact
+token constraints are also deferred; v1 enforces only the exact total-subagent count ceiling
+described above.

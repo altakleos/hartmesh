@@ -2551,6 +2551,8 @@ authorization:
 # invocation_constraints.v1 provider. Constraints are checked after invocation-start
 # authorization and before durable admission; accepted projections are fenced again by
 # the worker before construction and immediately before graph streaming.
+# V1 can enforce only an exact max_total_subagents ceiling before dispatch. Token
+# budgets remain observational/post-response controls; exact token limits are deferred.
 #
 # Authoritative registrations and their loader-owned package provenance are sealed into
 # one generation at Gateway startup. Plugin/config changes require a restart; accepted

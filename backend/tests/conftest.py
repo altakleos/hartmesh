@@ -7,12 +7,37 @@ issues when unit-testing lightweight config/registry code in isolation.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+
+_SKIPPED_POSTGRES_CONTRACTS: list[str] = []
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Record required PostgreSQL contract skips for the CI session gate."""
+
+    if report.skipped and "postgres_contract" in report.keywords:
+        _SKIPPED_POSTGRES_CONTRACTS.append(report.nodeid)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Fail CI if a configured PostgreSQL qualification was silently skipped."""
+
+    del exitstatus
+    if os.environ.get("DEERFLOW_TEST_POSTGRES_URL") and _SKIPPED_POSTGRES_CONTRACTS:
+        warnings.warn(
+            "Configured PostgreSQL contract tests skipped: " + ", ".join(_SKIPPED_POSTGRES_CONTRACTS),
+            RuntimeWarning,
+            stacklevel=1,
+        )
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
 
 # Make 'app' and 'deerflow' importable from any working directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
