@@ -12,6 +12,8 @@ API_VERSION = "deerflow.runtime/v1"
 type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 
+_RUN_STATUSES = frozenset({"pending", "running", "success", "error", "timeout", "interrupted"})
+
 
 class EnsureDisposition(StrEnum):
     created = "created"
@@ -72,6 +74,12 @@ def _optional_nonempty(value: Any, name: str) -> str | None:
     if value is None:
         return None
     return _nonempty(value, name)
+
+
+def _run_status(value: Any) -> str:
+    if not isinstance(value, str) or value not in _RUN_STATUSES:
+        raise ValueError("unsupported run status")
+    return value
 
 
 def _state_version(value: Any, *, nullable: bool = False) -> int | None:
@@ -221,7 +229,7 @@ class InvocationEnsureReceipt(_Record):
         if visible:
             _nonempty(self.run_id, "run_id")
             _nonempty(self.thread_id, "thread_id")
-            _nonempty(self.status, "status")
+            _run_status(self.status)
             _state_version(self.state_version)
         elif any(value is not None for value in (self.run_id, self.thread_id, self.status, self.state_version)):
             raise ValueError("non-visible ensure receipts cannot carry invocation fields")
@@ -277,6 +285,16 @@ _EVENT_FIELDS = {
     "created_at",
     "payload",
 }
+_LIFECYCLE_STATUSES_BY_TYPE = {
+    "accepted": frozenset({"pending"}),
+    "started": frozenset({"running"}),
+    "cancellation_requested": frozenset({"pending", "running"}),
+    "cancelled": frozenset({"error", "interrupted"}),
+    "succeeded": frozenset({"success"}),
+    "failed": frozenset({"error"}),
+    "timed_out": frozenset({"timeout"}),
+    "interrupted": frozenset({"error", "interrupted"}),
+}
 
 
 def _fixed_public_rows(
@@ -293,6 +311,29 @@ def _fixed_public_rows(
             raise ValueError(f"{label} contain invalid fields")
         result.append(_json_value(row, object_only=True))
     return tuple(result)
+
+
+def _validate_lifecycle_event(row: dict[str, JsonValue]) -> None:
+    for name in ("event_id", "cursor", "run_id", "thread_id", "created_at"):
+        _nonempty(row[name], name)
+    lifecycle_type = row["lifecycle_type"]
+    status = row["status"]
+    allowed_statuses = _LIFECYCLE_STATUSES_BY_TYPE.get(lifecycle_type) if isinstance(lifecycle_type, str) else None
+    if allowed_statuses is None:
+        raise ValueError("unsupported lifecycle type")
+    _run_status(status)
+    if status not in allowed_statuses:
+        raise ValueError("lifecycle type and status are incompatible")
+    state_version = _state_version(row["state_version"])
+    if state_version == 0:
+        raise ValueError("lifecycle event state_version must be positive")
+
+
+def _validate_snapshot(row: dict[str, JsonValue]) -> None:
+    _nonempty(row["run_id"], "run_id")
+    _nonempty(row["thread_id"], "thread_id")
+    _run_status(row["status"])
+    _state_version(row["state_version"])
 
 
 @dataclass(frozen=True)
@@ -314,20 +355,18 @@ class InvocationObservation(_Record):
         _nonempty(self.thread_id, "thread_id")
         if self.run_id is not None:
             _nonempty(self.run_id, "run_id")
-            _nonempty(self.status, "status")
+            _run_status(self.status)
             _state_version(self.state_version)
         elif self.status is not None or self.state_version is not None:
             raise ValueError("context observations cannot carry singular run state")
-        object.__setattr__(
-            self,
-            "snapshots",
-            _fixed_public_rows(self.snapshots, expected=_SNAPSHOT_FIELDS, label="snapshots"),
-        )
-        object.__setattr__(
-            self,
-            "events",
-            _fixed_public_rows(self.events, expected=_EVENT_FIELDS, label="events"),
-        )
+        snapshots = _fixed_public_rows(self.snapshots, expected=_SNAPSHOT_FIELDS, label="snapshots")
+        for snapshot in snapshots:
+            _validate_snapshot(snapshot)
+        object.__setattr__(self, "snapshots", snapshots)
+        events = _fixed_public_rows(self.events, expected=_EVENT_FIELDS, label="events")
+        for event in events:
+            _validate_lifecycle_event(event)
+        object.__setattr__(self, "events", events)
         _nonempty(self.next_cursor, "next_cursor")
         _nonempty(self.minimum_available_cursor, "minimum_available_cursor")
         _nonempty(self.read_fence_cursor, "read_fence_cursor")
@@ -374,7 +413,7 @@ class InvocationControlReceipt(_Record):
         else:
             _nonempty(self.run_id, "run_id")
             _nonempty(self.thread_id, "thread_id")
-            _nonempty(self.status, "status")
+            _run_status(self.status)
             _state_version(self.state_version)
 
 

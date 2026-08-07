@@ -120,6 +120,235 @@ def test_every_public_record_round_trips_strictly() -> None:
         record_from_dict({"api_version": "deerflow.runtime/v1", "kind": "invocation.unknown"})
 
 
+@pytest.mark.parametrize(
+    ("lifecycle_type", "status"),
+    [
+        ("downstream_custom_state", "running"),
+        ("succeeded", "running"),
+    ],
+)
+def test_observation_rejects_unknown_or_contradictory_lifecycle_values(
+    lifecycle_type: str,
+    status: str,
+) -> None:
+    from deerflow_runtime_api import InvocationObservation, record_from_dict
+
+    observation = {
+        "api_version": "deerflow.runtime/v1",
+        "kind": "invocation.observation",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "running",
+        "state_version": 2,
+        "snapshots": [
+            {
+                "run_id": "run-1",
+                "thread_id": "thread-1",
+                "status": "running",
+                "state_version": 2,
+            }
+        ],
+        "events": [
+            {
+                "event_id": "event-1",
+                "cursor": "opaque-1",
+                "run_id": "run-1",
+                "thread_id": "thread-1",
+                "lifecycle_type": lifecycle_type,
+                "state_version": 2,
+                "status": status,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "payload": {"version": 1},
+            }
+        ],
+        "next_cursor": "opaque-1",
+        "minimum_available_cursor": "opaque-0",
+        "read_fence_cursor": "opaque-1",
+    }
+
+    with pytest.raises(ValueError, match="lifecycle"):
+        record_from_dict(observation)
+    with pytest.raises(ValueError, match="lifecycle"):
+        InvocationObservation(
+            run_id="run-1",
+            thread_id="thread-1",
+            status="running",
+            state_version=2,
+            snapshots=tuple(observation["snapshots"]),
+            events=tuple(observation["events"]),
+            next_cursor="opaque-1",
+            minimum_available_cursor="opaque-0",
+            read_fence_cursor="opaque-1",
+        )
+
+
+def test_public_runtime_records_reject_unknown_run_statuses() -> None:
+    from deerflow_runtime_api import InvocationControlReceipt, InvocationEnsureReceipt, InvocationObservation
+
+    with pytest.raises(ValueError, match="status"):
+        InvocationEnsureReceipt(
+            disposition="created",
+            run_id="run-1",
+            thread_id="thread-1",
+            status="downstream_custom_state",
+            state_version=1,
+        )
+    with pytest.raises(ValueError, match="status"):
+        InvocationControlReceipt(
+            disposition="requested",
+            run_id="run-1",
+            thread_id="thread-1",
+            status="downstream_custom_state",
+            state_version=2,
+        )
+    with pytest.raises(ValueError, match="status"):
+        InvocationObservation(
+            run_id="run-1",
+            thread_id="thread-1",
+            status="downstream_custom_state",
+            state_version=2,
+            snapshots=(),
+            events=(),
+            next_cursor="opaque-1",
+            minimum_available_cursor="opaque-0",
+            read_fence_cursor="opaque-1",
+        )
+    with pytest.raises(ValueError, match="status"):
+        InvocationObservation(
+            run_id=None,
+            thread_id="thread-1",
+            status=None,
+            state_version=None,
+            snapshots=(
+                {
+                    "run_id": "run-1",
+                    "thread_id": "thread-1",
+                    "status": "downstream_custom_state",
+                    "state_version": 1,
+                },
+            ),
+            events=(),
+            next_cursor="opaque-1",
+            minimum_available_cursor="opaque-0",
+            read_fence_cursor="opaque-1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("event_id", ""),
+        ("cursor", ""),
+        ("run_id", ""),
+        ("thread_id", ""),
+        ("created_at", ""),
+        ("state_version", 0),
+        ("state_version", True),
+    ],
+)
+def test_lifecycle_event_rejects_invalid_identity_or_state_version(field: str, value: object) -> None:
+    from deerflow_runtime_api import InvocationObservation
+
+    event = {
+        "event_id": "event-1",
+        "cursor": "opaque-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "lifecycle_type": "started",
+        "state_version": 2,
+        "status": "running",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "payload": {"version": 1},
+        field: value,
+    }
+
+    with pytest.raises(ValueError):
+        InvocationObservation(
+            run_id="run-1",
+            thread_id="thread-1",
+            status="running",
+            state_version=2,
+            snapshots=(),
+            events=(event,),
+            next_cursor="opaque-1",
+            minimum_available_cursor="opaque-0",
+            read_fence_cursor="opaque-1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("lifecycle_type", "status"),
+    [
+        ("accepted", "pending"),
+        ("started", "running"),
+        ("cancellation_requested", "pending"),
+        ("cancellation_requested", "running"),
+        ("cancelled", "error"),
+        ("cancelled", "interrupted"),
+        ("succeeded", "success"),
+        ("failed", "error"),
+        ("timed_out", "timeout"),
+        ("interrupted", "error"),
+        ("interrupted", "interrupted"),
+    ],
+)
+def test_every_legal_lifecycle_status_pair_round_trips(
+    lifecycle_type: str,
+    status: str,
+) -> None:
+    from deerflow_runtime_api import InvocationObservation, record_from_dict
+
+    observation = InvocationObservation(
+        run_id="run-1",
+        thread_id="thread-1",
+        status=status,
+        state_version=2,
+        snapshots=(),
+        events=(
+            {
+                "event_id": "event-1",
+                "cursor": "opaque-1",
+                "run_id": "run-1",
+                "thread_id": "thread-1",
+                "lifecycle_type": lifecycle_type,
+                "state_version": 2,
+                "status": status,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "payload": {"version": 1},
+            },
+        ),
+        next_cursor="opaque-1",
+        minimum_available_cursor="opaque-0",
+        read_fence_cursor="opaque-1",
+    )
+
+    assert record_from_dict(observation.to_dict()) == observation
+
+
+def test_public_lifecycle_vocabulary_matches_the_harness() -> None:
+    from deerflow.runtime import RunStatus
+    from deerflow.runtime.runs.store.base import LifecycleType
+
+    assert {status.value for status in RunStatus} == {
+        "pending",
+        "running",
+        "success",
+        "error",
+        "timeout",
+        "interrupted",
+    }
+    assert {lifecycle_type.value for lifecycle_type in LifecycleType} == {
+        "accepted",
+        "started",
+        "cancellation_requested",
+        "cancelled",
+        "succeeded",
+        "failed",
+        "timed_out",
+        "interrupted",
+    }
+
+
 def test_runtime_failure_detail_is_code_specific_and_cannot_carry_policy_text() -> None:
     from deerflow_runtime_api import RuntimeFailure
 
