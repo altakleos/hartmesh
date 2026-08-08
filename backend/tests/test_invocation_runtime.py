@@ -315,6 +315,49 @@ async def test_launch_admits_before_attaching_worker() -> None:
 
 
 @pytest.mark.anyio
+async def test_kubernetes_commit_barriers_bracket_worker_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.runtime import kubernetes_qualification
+
+    events: list[str] = []
+    runs = _Runs(events)
+
+    async def barrier(point: str, _record: RunRecord) -> bool:
+        events.append(f"barrier:{point}")
+        return True
+
+    async def counter(name: str, _record: RunRecord) -> bool:
+        events.append(f"counter:{name}")
+        return True
+
+    def attach(worker):
+        events.append("attach")
+        worker.close()
+        return object()
+
+    monkeypatch.setattr(kubernetes_qualification, "qualification_barrier", barrier)
+    monkeypatch.setattr(kubernetes_qualification, "qualification_counter", counter)
+    runtime = InvocationRuntime(
+        normalizer=_Normalizer(events),
+        runs=runs,
+        task_factory=attach,
+    )
+
+    receipt = await runtime.launch(InternalLaunchIntent(thread_id="thread-1"))
+
+    assert receipt.created is True
+    assert events == [
+        "prepare",
+        "admit",
+        "barrier:accepted_before_worker_start",
+        "attach",
+        "counter:worker_attachments",
+        "barrier:accepted_before_client_response",
+    ]
+
+
+@pytest.mark.anyio
 async def test_attachment_failure_closes_worker_and_preserves_failure_semantics() -> None:
     events: list[str] = []
     runs = _Runs(events)

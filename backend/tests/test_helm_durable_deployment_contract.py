@@ -9,6 +9,10 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support.kubernetes_qualification import (
+    KubernetesQualificationConfig,
+    KubernetesQualificationRunner,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CHART = _REPO_ROOT / "deploy" / "helm" / "deer-flow"
@@ -538,6 +542,32 @@ def test_production_provenance_and_qualification_reach_trusted_environment(
     assert "sha256:" + ("e" * 64) in env["DEER_FLOW_QUALIFICATION_EVIDENCE"]
 
 
+def test_kubernetes_qualification_scope_and_status_are_strict(
+    tmp_path: Path,
+) -> None:
+    values = _production_values()
+    values["deployment"]["qualificationEvidence"] = [
+        {
+            "qualificationId": "pod-recovery-2026-08",
+            "artifactDigest": "sha256:" + ("e" * 64),
+            "completedAt": "2026-08-08T12:00:00Z",
+            "scope": "durable_one_replica_pod_recovery",
+            "status": "passed",
+        }
+    ]
+
+    rendered = _render(tmp_path, values)
+    assert "durable_one_replica_pod_recovery" in rendered.stdout
+
+    values["deployment"]["qualificationEvidence"][0]["status"] = "collected"
+    result = _render(tmp_path, values, expect_success=False)
+    assert "qualification status must be passed" in result.stderr
+
+    del values["deployment"]["qualificationEvidence"][0]["status"]
+    result = _render(tmp_path, values, expect_success=False)
+    assert "scope and status must be supplied together" in result.stderr
+
+
 def test_default_profile_is_explicitly_local_and_unqualified(tmp_path: Path) -> None:
     result = _render(tmp_path)
     config_map = next(document for document in _documents(result.stdout) if document.get("kind") == "ConfigMap" and document.get("metadata", {}).get("name") == "deer-flow-deer-flow-config")
@@ -546,3 +576,26 @@ def test_default_profile_is_explicitly_local_and_unqualified(tmp_path: Path) -> 
     assert _VALUES["deployment"]["mode"] == "local_evaluation"
     assert config["deployment"]["profile"] == "local_development"
     assert _VALUES["deployment"]["qualificationEvidence"] == []
+
+
+def test_live_qualification_values_render_the_exact_one_replica_profile(
+    tmp_path: Path,
+) -> None:
+    config = KubernetesQualificationConfig(
+        kubeconfig=(tmp_path / "kubeconfig").resolve(),
+        context="qualification-context",
+        namespace="hartmesh-qualification-a1b2c3",
+        image_repository="registry.example/hartmesh/gateway",
+        image_digest="sha256:" + ("a" * 64),
+        evidence_path=(tmp_path / "evidence.json").resolve(),
+        qualification_id="pod-recovery-20260808",
+    )
+
+    result = _render(tmp_path, KubernetesQualificationRunner(config).values())
+    gateway = _workload(result.stdout, kind="Deployment", component="gateway")
+
+    assert gateway["spec"]["replicas"] == 1
+    assert gateway["spec"]["template"]["spec"]["containers"][0]["image"] == ("registry.example/hartmesh/gateway@sha256:" + ("a" * 64))
+    assert gateway["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] == 12
+    assert "qualification-password" not in result.stdout
+    assert "postgresql+asyncpg://" not in result.stdout

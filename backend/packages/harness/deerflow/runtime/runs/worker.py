@@ -1179,9 +1179,10 @@ async def run_agent(
             return goal_evaluator_model
 
         constraint_start_validated = False
+        qualification_graph_start_recorded = False
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
-            nonlocal llm_error_fallback_message, constraint_start_validated
+            nonlocal llm_error_fallback_message, constraint_start_validated, qualification_graph_start_recorded
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
@@ -1194,6 +1195,11 @@ async def run_agent(
                             clock=ctx.constraint_clock,
                         )
                         constraint_start_validated = True
+                    if not qualification_graph_start_recorded:
+                        from deerflow.runtime.kubernetes_qualification import qualification_counter
+
+                        await qualification_counter("graph_starts", record)
+                        qualification_graph_start_recorded = True
                     if len(lg_modes) == 1 and not stream_subgraphs:
                         # Single mode, no subgraphs: astream yields raw chunks
                         single_mode = lg_modes[0]
@@ -1458,6 +1464,12 @@ async def run_agent(
 
         if not record.ownership_lost and event_store is not None:
             try:
+                from deerflow.runtime.kubernetes_qualification import qualification_barrier
+
+                await qualification_barrier(
+                    "terminal_before_lifecycle_commit",
+                    record,
+                )
                 # Even after bounded receipt retries are exhausted, persist the
                 # real worker outcome. Leaving a successful row inflight would
                 # let lease recovery rewrite it as an error with a synthetic

@@ -302,8 +302,8 @@ write it, and process dependencies close last. Configure phase budgets under
 `deployment.shutdown`; the Helm chart derives its termination grace period from
 those budgets, the memory flush budget, preStop delay, and scheduling headroom.
 Runs that cannot settle inside the deadline retain the existing durable orphan-
-recovery semantics. This is graceful-shutdown behavior, not live pod-termination
-qualification or multi-replica coordination.
+recovery semantics. Repository tests alone are graceful-shutdown/process-loss
+evidence, not live pod qualification or multi-replica coordination.
 
 The Helm chart defaults to an explicitly unqualified `local_evaluation` mode
 with one Gateway replica. Its validated `durable_one_replica` mode requires
@@ -318,6 +318,14 @@ the portable capabilities record remains unchanged. The chart intentionally
 adds no PodDisruptionBudget, topology spread, leader election, or zero-downtime
 claim until the runtime has a real multi-replica design. See the
 [Helm deployment guide](deploy/helm/deer-flow/README.md).
+
+Release operators can additionally run the opt-in `kubernetes_contract` suite
+against an explicitly supplied disposable cluster and exact Gateway image digest.
+It kills the real one-replica Gateway at six durable commit boundaries while
+retaining shared PostgreSQL and Redis, then publishes bounded passing evidence
+only after every replay/lifecycle/authorization check succeeds. The ordinary test
+run merely collects and skips this suite, which remains an unpassed release gate;
+see the Helm guide for required environment variables and the manual workflow.
 
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 

@@ -186,11 +186,28 @@ def test_deployment_qualification_reads_bounded_trusted_environment(
         "evidence": [
             {
                 "qualification_id": "durable-contract-2026-08",
+                "scope": "legacy_unspecified",
+                "status": "passed",
                 "artifact_digest": "sha256:" + ("c" * 64),
                 "completed_at": "2026-08-08T12:00:00Z",
             }
         ],
     }
+
+
+def test_kubernetes_qualification_evidence_declares_bounded_scope_and_pass_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DEER_FLOW_QUALIFICATION_EVIDENCE",
+        '[{"qualificationId":"pod-recovery-20260808","scope":"durable_one_replica_pod_recovery","status":"passed","artifactDigest":"sha256:' + ("d" * 64) + '","completedAt":"2026-08-08T12:00:00Z"}]',
+    )
+
+    qualification = DeploymentQualification.from_environment().to_dict()
+
+    assert qualification["status"] == "qualified"
+    assert qualification["evidence"][0]["scope"] == "durable_one_replica_pod_recovery"
+    assert qualification["evidence"][0]["status"] == "passed"
 
 
 @pytest.mark.parametrize(

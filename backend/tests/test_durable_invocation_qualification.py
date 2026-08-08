@@ -63,8 +63,11 @@ Each matrix row maps to the named tests below or to an explicit release gate:
   ``test_gateway_create_stream_wait_routes_share_durable_admission``, and
   ``test_gateway_mounts_runtime_routes_without_replacing_legacy_runs``.
 
-Kubernetes pod termination is an explicit unpassed release gate: offline tests
-simulate durable process loss but never create or terminate pods. Synchronous
+Kubernetes pod termination is covered by the separate opt-in
+``kubernetes_contract`` suite in
+``tests/kubernetes/test_durable_invocation_pod_recovery.py``. Its default skip
+is an explicit unpassed release gate; only a completed real-cluster run writes
+passing evidence. Offline tests here still make no live-pod claim. Synchronous
 ``DeerFlowClient`` remains separately tested and documented as non-durable.
 """
 

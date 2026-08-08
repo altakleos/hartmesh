@@ -342,7 +342,8 @@ Process death after acceptance is recovered by the current lease/orphan scan as 
 with `orphan_recovered`; attachment failure is `worker_attachment_failed`. These guarantees
 make retained keyed retries converge, but do not provide scheduler HA or a multi-replica
 Gateway ownership design beyond the explicitly configured PostgreSQL lease and stream
-primitives. Kubernetes pod-termination qualification remains a deployment release gate.
+primitives. Live pod termination is qualified only by the separate opt-in
+`kubernetes_contract` suite; its default skip remains an unpassed release gate.
 
 The PostgreSQL migration qualification starts both from an empty schema and from
 the real main-line predecessor `0010_run_cancel_request` with representative
@@ -388,7 +389,34 @@ process loss after committed acceptance but before attachment remains an
 terminal commit that wins the race is preserved, and already-terminal rows are
 untouched. These guarantees cover the supported one-replica
 topology and repository process-loss simulations only, not live Kubernetes pod
-termination qualification.
+termination qualification by themselves.
+
+## Opt-in Kubernetes recovery evidence
+
+`tests/kubernetes/test_durable_invocation_pod_recovery.py` drives the actual Helm
+chart and pinned Gateway image in a disposable, explicitly confirmed Kubernetes
+context. The runner creates one isolated `hartmesh-qualification-*` namespace,
+keeps PostgreSQL and Redis outside the killed Gateway pod, and exercises accepted
+commit before response, accepted before worker attachment, active execution,
+terminal-before-lifecycle-commit, graceful rollout termination, and forced kill
+after the graceful deadline. Each restart retries the same external key and
+requires one run identity, coherent lifecycle, no duplicate terminal evidence,
+no duplicate graph/model start, and preserved observe/cancel visibility.
+
+The `kubernetes_contract` marker is skipped by default with a precise opt-in
+message. Exact `DEERFLOW_TEST_KUBERNETES=1` turns every missing prerequisite,
+scenario skip, timeout, unreached barrier, or evidence-write failure into a
+failed qualification. Runtime barriers and the deterministic no-network model
+exist only behind the test-only `DEERFLOW_TEST_KUBERNETES_RUNTIME=1` environment
+injected by the qualification ConfigMap; there is no diagnostic HTTP endpoint.
+Passing machine-readable evidence binds the image digest, chart version/digest,
+safe configuration digest, Alembic head, exact database/cache pod, volume, and
+image identities plus their versions, confirmed context, operator-reported
+driver, scenario outcomes, and timestamp. Only after all
+scenarios pass does the chart feed the bounded identifier, scope, artifact
+digest, and pass state into the administrator deployment report. Collection or
+skip never produces qualification. This is one-replica pod recovery evidence,
+not scheduler HA, failover, active-active execution, or zero-downtime rollout.
 
 ## Pinned agent construction
 

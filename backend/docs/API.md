@@ -910,10 +910,14 @@ event broker, or additional control in v1.
 Trusted deployers may stamp `DEER_FLOW_IMAGE_REFERENCE`,
 `DEER_FLOW_IMAGE_DIGEST`, `DEER_FLOW_SOURCE_REVISION`, and bounded
 `DEER_FLOW_QUALIFICATION_EVIDENCE` JSON. Qualification evidence is a finite list
-of exact ID, SHA-256 artifact digest, and RFC3339 completion-time records. Invalid
-input is ignored with a safe server diagnostic and cannot manufacture a
-qualified report. The Helm chart validates and supplies these fields from its
-non-secret deployment values; they never enter portable capabilities.
+of exact ID, SHA-256 artifact digest, and RFC3339 completion-time records. New
+scoped records additionally carry a bounded scope and exact `passed` state;
+legacy three-field records remain readable as `legacy_unspecified`. The opt-in
+real-pod suite uses scope `durable_one_replica_pod_recovery` and supplies it only
+after all required scenarios pass. Collection or default skip cannot manufacture
+a qualified report. Invalid input is ignored with a safe server diagnostic. The
+Helm chart validates and supplies these fields from its non-secret deployment
+values; they never enter portable capabilities.
 
 `GET /health` is independent process liveness. Unauthenticated `GET /ready` returns only
 `{"status":"ready"}` or `{"status":"not_ready"}` and uses the same bounded proof that fences

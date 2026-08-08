@@ -17,22 +17,41 @@ from unittest.mock import MagicMock
 import pytest
 
 _SKIPPED_POSTGRES_CONTRACTS: list[str] = []
+_SKIPPED_KUBERNETES_CONTRACTS: list[str] = []
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    """Record required PostgreSQL contract skips for the CI session gate."""
+    """Record required opt-in contract skips for their session gates."""
 
     if report.skipped and "postgres_contract" in report.keywords:
         _SKIPPED_POSTGRES_CONTRACTS.append(report.nodeid)
+    if report.skipped and "kubernetes_contract" in report.keywords:
+        _SKIPPED_KUBERNETES_CONTRACTS.append(report.nodeid)
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Collect Kubernetes contracts by default but run them only by opt-in."""
+
+    if item.get_closest_marker("kubernetes_contract") is None:
+        return
+    if os.environ.get("DEERFLOW_TEST_KUBERNETES") != "1":
+        pytest.skip("Kubernetes qualification is opt-in; set DEERFLOW_TEST_KUBERNETES=1 with an explicit KUBECONFIG and qualification context")
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Fail CI if a configured PostgreSQL qualification was silently skipped."""
+    """Fail an explicitly configured qualification if any contract skipped."""
 
     del exitstatus
     if os.environ.get("DEERFLOW_TEST_POSTGRES_URL") and _SKIPPED_POSTGRES_CONTRACTS:
         warnings.warn(
             "Configured PostgreSQL contract tests skipped: " + ", ".join(_SKIPPED_POSTGRES_CONTRACTS),
+            RuntimeWarning,
+            stacklevel=1,
+        )
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    if os.environ.get("DEERFLOW_TEST_KUBERNETES") == "1" and _SKIPPED_KUBERNETES_CONTRACTS:
+        warnings.warn(
+            "Configured Kubernetes contract tests skipped: " + ", ".join(_SKIPPED_KUBERNETES_CONTRACTS),
             RuntimeWarning,
             stacklevel=1,
         )

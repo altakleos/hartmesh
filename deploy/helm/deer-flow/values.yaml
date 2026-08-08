@@ -40,6 +40,8 @@ deployment:
   # - qualificationId: durable-contract-2026-08
   #   artifactDigest: sha256:<64 lowercase hex characters>
   #   completedAt: "2026-08-08T12:00:00Z"
+  #   scope: durable_one_replica_pod_recovery
+  #   status: passed
 
 # -- Gateway ServiceAccount. The default account has no chart-created RBAC and
 #    does not mount an API token. Set create=false/name to select an existing

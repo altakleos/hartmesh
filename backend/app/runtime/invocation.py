@@ -609,6 +609,14 @@ class InvocationRuntime:
                     return InternalLaunchReceipt(record=visible, created=False)
             else:
                 record = admitted
+            # Real-pod qualification barriers are inert unless the dedicated
+            # test image is started with its explicit environment gate.
+            from deerflow.runtime.kubernetes_qualification import (
+                qualification_barrier,
+                qualification_counter,
+            )
+
+            await qualification_barrier("accepted_before_worker_start", record)
             worker = launch.worker(record)
             try:
                 record.task = self._task_factory(worker)
@@ -621,6 +629,8 @@ class InvocationRuntime:
                     f"Failed to attach run worker: {exc}",
                 )
                 raise
+            await qualification_counter("worker_attachments", record)
+            await qualification_barrier("accepted_before_client_response", record)
         return InternalLaunchReceipt(record=record, created=True)
 
     async def launch(
