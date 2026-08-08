@@ -293,6 +293,9 @@ class MemoryRunStore(RunStore):
         external_key=None,
         request_digest=None,
         request_digest_version=None,
+        caller_intent_json=None,
+        caller_intent_digest=None,
+        caller_intent_digest_version=None,
     ):
         now = datetime.now(UTC).isoformat()
         existing = self._runs.get(run_id)
@@ -327,6 +330,9 @@ class MemoryRunStore(RunStore):
             "external_key": external_key if operation_kind == "run" else None,
             "request_digest": request_digest if operation_kind == "run" else None,
             "request_digest_version": request_digest_version if operation_kind == "run" else None,
+            "caller_intent_json": caller_intent_json if operation_kind == "run" else None,
+            "caller_intent_digest": caller_intent_digest if operation_kind == "run" else None,
+            "caller_intent_digest_version": caller_intent_digest_version if operation_kind == "run" else None,
             # ``put`` is an idempotent snapshot write. Preserve a cancellation
             # request that may have raced a retry of an earlier snapshot.
             "cancel_action": existing.get("cancel_action") if existing else None,
@@ -773,6 +779,9 @@ class MemoryRunStore(RunStore):
         external_key: str | None = None,
         request_digest: str | None = None,
         request_digest_version: str | None = None,
+        caller_intent_json: dict[str, Any] | None = None,
+        caller_intent_digest: str | None = None,
+        caller_intent_digest_version: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
 
@@ -876,6 +885,9 @@ class MemoryRunStore(RunStore):
             "external_key": external_key if operation_kind == "run" else None,
             "request_digest": request_digest if operation_kind == "run" else None,
             "request_digest_version": request_digest_version if operation_kind == "run" else None,
+            "caller_intent_json": caller_intent_json if operation_kind == "run" else None,
+            "caller_intent_digest": caller_intent_digest if operation_kind == "run" else None,
+            "caller_intent_digest_version": caller_intent_digest_version if operation_kind == "run" else None,
             "state_version": 1 if operation_kind == "run" else 0,
         }
         self._runs[run_id] = new_row
@@ -897,11 +909,15 @@ class MemoryRunStore(RunStore):
         external_key: str,
         request_digest: str,
         request_digest_version: str,
+        caller_intent_json: dict[str, Any],
+        caller_intent_digest: str,
+        caller_intent_digest_version: str,
         **kwargs: Any,
     ) -> RunEnsureResult:
         existing = await self.get_by_external_identity(external_scope, external_key)
         if existing is not None:
-            outcome = AdmissionOutcome.known_same if existing.get("request_digest") == request_digest and existing.get("request_digest_version") == request_digest_version else AdmissionOutcome.key_conflict
+            same_intent = existing.get("caller_intent_json") == caller_intent_json and existing.get("caller_intent_digest") == caller_intent_digest and existing.get("caller_intent_digest_version") == caller_intent_digest_version
+            outcome = AdmissionOutcome.known_same if same_intent else AdmissionOutcome.key_conflict
             return RunEnsureResult(outcome=outcome, row=existing)
 
         row, claimed = await self.create_thread_operation_atomic(
@@ -911,6 +927,9 @@ class MemoryRunStore(RunStore):
             external_key=external_key,
             request_digest=request_digest,
             request_digest_version=request_digest_version,
+            caller_intent_json=caller_intent_json,
+            caller_intent_digest=caller_intent_digest,
+            caller_intent_digest_version=caller_intent_digest_version,
             **kwargs,
         )
         return RunEnsureResult(outcome=AdmissionOutcome.created, row=row, claimed=tuple(claimed))

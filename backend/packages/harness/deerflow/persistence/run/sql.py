@@ -445,6 +445,9 @@ class RunRepository(RunStore):
         external_key: str | None = None,
         request_digest: str | None = None,
         request_digest_version: str | None = None,
+        caller_intent_json: dict[str, Any] | None = None,
+        caller_intent_digest: str | None = None,
+        caller_intent_digest_version: str | None = None,
     ):
         """Insert or update a run row.
 
@@ -490,6 +493,9 @@ class RunRepository(RunStore):
             "external_key": external_key if operation_kind == "run" else None,
             "request_digest": request_digest if operation_kind == "run" else None,
             "request_digest_version": request_digest_version if operation_kind == "run" else None,
+            "caller_intent_json": self._safe_json(caller_intent_json) if operation_kind == "run" else None,
+            "caller_intent_digest": caller_intent_digest if operation_kind == "run" else None,
+            "caller_intent_digest_version": caller_intent_digest_version if operation_kind == "run" else None,
             "updated_at": now,
         }
         async with self._sf() as session:
@@ -1157,6 +1163,9 @@ class RunRepository(RunStore):
         external_key: str | None = None,
         request_digest: str | None = None,
         request_digest_version: str | None = None,
+        caller_intent_json: dict[str, Any] | None = None,
+        caller_intent_digest: str | None = None,
+        caller_intent_digest_version: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -1206,6 +1215,9 @@ class RunRepository(RunStore):
             "external_key": external_key if operation_kind == "run" else None,
             "request_digest": request_digest if operation_kind == "run" else None,
             "request_digest_version": request_digest_version if operation_kind == "run" else None,
+            "caller_intent_json": self._safe_json(caller_intent_json) if operation_kind == "run" else None,
+            "caller_intent_digest": caller_intent_digest if operation_kind == "run" else None,
+            "caller_intent_digest_version": caller_intent_digest_version if operation_kind == "run" else None,
             "state_version": 1 if operation_kind == "run" else 0,
         }
 
@@ -1297,11 +1309,15 @@ class RunRepository(RunStore):
         external_key: str,
         request_digest: str,
         request_digest_version: str,
+        caller_intent_json: dict[str, Any],
+        caller_intent_digest: str,
+        caller_intent_digest_version: str,
         **kwargs: Any,
     ) -> RunEnsureResult:
         existing = await self.get_by_external_identity(external_scope, external_key)
         if existing is not None:
-            outcome = AdmissionOutcome.known_same if existing.get("request_digest") == request_digest and existing.get("request_digest_version") == request_digest_version else AdmissionOutcome.key_conflict
+            same_intent = existing.get("caller_intent_json") == caller_intent_json and existing.get("caller_intent_digest") == caller_intent_digest and existing.get("caller_intent_digest_version") == caller_intent_digest_version
+            outcome = AdmissionOutcome.known_same if same_intent else AdmissionOutcome.key_conflict
             return RunEnsureResult(outcome=outcome, row=existing)
 
         try:
@@ -1312,6 +1328,9 @@ class RunRepository(RunStore):
                 external_key=external_key,
                 request_digest=request_digest,
                 request_digest_version=request_digest_version,
+                caller_intent_json=caller_intent_json,
+                caller_intent_digest=caller_intent_digest,
+                caller_intent_digest_version=caller_intent_digest_version,
                 **kwargs,
             )
         except IntegrityError:
@@ -1321,6 +1340,7 @@ class RunRepository(RunStore):
             existing = await self.get_by_external_identity(external_scope, external_key)
             if existing is None:
                 raise
-            outcome = AdmissionOutcome.known_same if existing.get("request_digest") == request_digest and existing.get("request_digest_version") == request_digest_version else AdmissionOutcome.key_conflict
+            same_intent = existing.get("caller_intent_json") == caller_intent_json and existing.get("caller_intent_digest") == caller_intent_digest and existing.get("caller_intent_digest_version") == caller_intent_digest_version
+            outcome = AdmissionOutcome.known_same if same_intent else AdmissionOutcome.key_conflict
             return RunEnsureResult(outcome=outcome, row=existing)
         return RunEnsureResult(outcome=AdmissionOutcome.created, row=row, claimed=tuple(claimed))

@@ -1116,8 +1116,11 @@ Authenticated integrations can use the versioned durable runtime surface at
 
 Every body and response uses strict `deerflow.runtime/v1` records. Ensure
 requires an `external_key`, while DeerFlow derives its scope from the
-authenticated user/service; equal retries return the retained run and never
-attach a second worker. Invocation/context reads apply owner/admin visibility.
+authenticated user/service; equal retries compare the complete canonical caller
+intent, return the retained run, and never attach a second worker. Adding,
+removing, or changing an execution option conflicts; accepted server defaults
+and pinned facts are retained separately and reused. Invocation/context reads
+apply owner/admin visibility.
 Lifecycle pages expose opaque `next_cursor`, `minimum_available_cursor`, and
 `read_fence_cursor` values; reads are at least once, so consumers deduplicate by
 stable event ID/cursor.
@@ -1192,7 +1195,7 @@ client.clear_goal("thread-1")
 
 The HTTP Gateway accepts `values`, `messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom` stream modes. Unsupported modes such as `messages` and `events`, unsupported non-default run options such as webhooks, delayed execution, or `multitask_strategy="enqueue"`, and undeclared SDK options such as checkpoint durability overrides return `422` before execution instead of being silently ignored or downgraded.
 
-HTTP create, stream, and wait routes also accept an optional `Idempotency-Key` header. Retrying the same effective request with the same key returns the retained run without starting another worker; reusing the key for a different thread, agent, input, or execution option returns `409`, while an invalid key or unclassifiable keyed request returns `422`. The guarantee lasts for as long as the run row is retained; see [the Gateway API reference](backend/docs/API.md#idempotent-creation) for scope and replay details.
+HTTP create, stream, and wait routes also accept an optional `Idempotency-Key` header. Retrying the same canonical caller intent with the same key returns the retained run without starting another worker; adding, removing, or changing a thread selection, agent, input, or execution option returns `409`, while an invalid key or unclassifiable keyed request returns `422`. Response-delivery choices are excluded. The guarantee lasts for as long as the run row is retained; see [the Gateway API reference](backend/docs/API.md#idempotent-creation) for the exact null/default, scope, and replay rules.
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
 

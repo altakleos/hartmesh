@@ -123,13 +123,27 @@ mode uses DeerFlow's configured default user), so clients cannot create a shared
 key space.
 
 An equal retry returns the original run, including after success, error, timeout, or
-interruption. Only the request that creates the row attaches a worker. Changing the bound
-thread, agent selector, input/command, checkpoint, multitask/interrupt settings, or effective
-execution context returns `409`; changing stream/wait route, stream mode, subgraph streaming,
-disconnect behavior, or other response-delivery preferences reuses the run. Stateless retries
-that originally omitted a thread also reuse the originally generated thread. Keyed requests
-return `422` for non-empty arbitrary metadata or config/context fields that the canonical
-projector cannot classify, rather than silently ignoring them.
+interruption. Only the request that creates the row attaches a worker. Equality compares a
+persisted canonical projection of caller intent, never a partial merge into the accepted
+effective execution values. Changing or removing the bound-thread selection, agent selector,
+input/command, checkpoint, multitask/interrupt settings, recursion-limit selection, or a
+non-null execution-context option returns `409`. Repeating an omitted stateless thread remains
+equal and reuses the generated thread, but changing that selection to an explicit thread does
+not. Mapping order is irrelevant; sequence order remains significant.
+
+For nullable model/thinking/reasoning/planning/subagent, checkpoint, and interrupt fields,
+explicit null means omission. For recursion limit, omitted or null means the Gateway default;
+every non-null supplied value remains distinct before server clamping. Explicit
+`multitask_strategy="reject"` equals its default. Changing stream/wait route, stream mode,
+subgraph streaming, disconnect behavior, or other response-delivery preferences reuses the
+run because those fields are transient transport choices. Keyed requests return `422` for
+non-empty arbitrary metadata or config/context fields that the canonical projector cannot
+classify, rather than silently ignoring them.
+
+An equal replay reuses the original accepted effective projection and lifecycle without
+rerunning defaults, alias resolution, contributors, authorization-start, constraints, or graph
+execution. Historical keyed rows that predate canonical caller-intent evidence remain readable,
+but replay returns `409` because equality cannot be proven safely.
 
 Keys through 255 UTF-8 bytes are retained exactly behind a `raw:` form marker; longer values
 are represented by a SHA-256 UTF-8 digest. Replay is guaranteed only while the original run
@@ -814,11 +828,15 @@ Visible ensure/control receipts carry `run_id`, `thread_id`, `status`, and
 `state_version`. Observations carry fixed snapshots/events plus all three
 cursor values; auxiliary rows never enter either collection.
 
-Ensure uses the existing durable idempotency boundary. A new accepted request
-returns `201 created`; an equal retained request returns `200 known` without a
-second worker; a changed digest returns `409 conflict`; and an independently
-busy thread returns `409 thread_busy`. The guarantee lasts while the retained
-normal run row exists. Auxiliary operation rows are never visible.
+Ensure uses the existing durable idempotency boundary. Its strict v1 record always carries the
+complete option record: null model/thinking/checkpoint/interrupt values mean omission, while
+the serialized `multitask_strategy="reject"` is the defaulted caller intent. Object-key order
+does not affect equality; array order does. A new accepted request returns `201 created`; an
+equal retained caller intent returns `200 known` without a second worker; a changed or removed
+intent field returns `409 conflict`; and an independently busy thread returns
+`409 thread_busy`. Transport details outside the strict DTO do not participate. The accepted
+effective execution projection is retained separately and reused on replay. The guarantee lasts
+while the retained normal run row exists. Auxiliary operation rows are never visible.
 
 Observation pages contain `next_cursor`, `minimum_available_cursor`, and
 `read_fence_cursor`. Cursor tokens are opaque. Empty filtered pages advance to

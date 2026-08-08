@@ -6,9 +6,12 @@ import hashlib
 import json
 import unicodedata
 from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 REQUEST_DIGEST_VERSION = "sha256-canonical-json-v1"
+CALLER_INTENT_DIGEST_VERSION = "caller-intent-canonical-json-v1"
 SYSTEM_TASK_OWNER = "__deerflow_system__"
 _RAW_EXTERNAL_KEY_MAX_BYTES = 255
 _ATTACHMENT_FIELDS = frozenset(
@@ -149,7 +152,79 @@ def canonical_request_value(value: Any, *, attachment: bool = False) -> Any:
     raise ValueError(f"request value of type {type(value).__name__} cannot be projected")
 
 
+def _freeze_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class CanonicalCallerIntent:
+    """Immutable v1 projection of only the caller-controlled execution intent."""
+
+    value: Mapping[str, Any]
+    digest: str = field(init=False)
+    digest_version: str = field(default=CALLER_INTENT_DIGEST_VERSION, init=False)
+
+    def __post_init__(self) -> None:
+        normalized = canonical_request_value(self.value)
+        if not isinstance(normalized, dict):  # pragma: no cover - type contract
+            raise TypeError("caller intent must be an object")
+        persisted = {
+            "kind": "caller_intent",
+            "version": 1,
+            "value": normalized,
+        }
+        object.__setattr__(self, "value", _freeze_json(normalized))
+        object.__setattr__(self, "digest", canonical_request_digest(persisted))
+
+    def to_persisted(self) -> dict[str, Any]:
+        return {
+            "kind": "caller_intent",
+            "version": 1,
+            "value": _thaw_json(self.value),
+        }
+
+    @classmethod
+    def from_persisted(cls, value: Mapping[str, Any]) -> CanonicalCallerIntent:
+        if set(value) != {"kind", "version", "value"} or value.get("kind") != "caller_intent" or value.get("version") != 1 or not isinstance(value.get("value"), Mapping):
+            raise ValueError("unsupported caller-intent projection")
+        return cls(value=value["value"])
+
+
+@dataclass(frozen=True)
+class EffectiveExecutionProjection:
+    """Immutable accepted execution projection with resolved and pinned facts."""
+
+    value: Mapping[str, Any]
+    digest: str = field(init=False)
+    digest_version: str = field(default=REQUEST_DIGEST_VERSION, init=False)
+
+    def __post_init__(self) -> None:
+        normalized = canonical_request_value(self.value)
+        if not isinstance(normalized, dict):  # pragma: no cover - type contract
+            raise TypeError("effective execution projection must be an object")
+        object.__setattr__(self, "value", _freeze_json(normalized))
+        object.__setattr__(self, "digest", canonical_request_digest(normalized))
+
+    def to_persisted(self) -> dict[str, Any]:
+        return _thaw_json(self.value)
+
+
 __all__ = [
+    "CALLER_INTENT_DIGEST_VERSION",
+    "CanonicalCallerIntent",
+    "EffectiveExecutionProjection",
     "REQUEST_DIGEST_VERSION",
     "SYSTEM_TASK_OWNER",
     "canonical_request_digest",

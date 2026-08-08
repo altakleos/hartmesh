@@ -20,6 +20,7 @@ from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import _GatewayLaunchNormalizer, build_channel_invocation_runtime, start_run
 from app.runtime.idempotency import (
     REQUEST_DIGEST_VERSION,
+    CanonicalCallerIntent,
     canonical_request_digest,
     normalize_external_key,
     scope_for_channel,
@@ -48,6 +49,15 @@ from deerflow.runtime.runs.store.base import AdmissionOutcome
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
+
+
+def _caller_intent_fields(value: dict[str, object]) -> dict[str, object]:
+    intent = CanonicalCallerIntent(value)
+    return {
+        "caller_intent_json": intent.to_persisted(),
+        "caller_intent_digest": intent.digest,
+        "caller_intent_digest_version": intent.digest_version,
+    }
 
 
 def _postgres_async_url(url: str) -> str:
@@ -117,6 +127,7 @@ async def _assert_store_ensure_contract(store) -> None:
         external_key=key,
         request_digest=digest,
         request_digest_version=REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "hello"}),
         user_id="owner-1",
     )
     assert created.outcome is AdmissionOutcome.created
@@ -131,6 +142,7 @@ async def _assert_store_ensure_contract(store) -> None:
         external_key=key,
         request_digest=digest,
         request_digest_version=REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "hello"}),
         user_id="owner-1",
     )
     assert same.outcome is AdmissionOutcome.known_same
@@ -145,6 +157,7 @@ async def _assert_store_ensure_contract(store) -> None:
         external_key=key,
         request_digest=canonical_request_digest({"input": "changed"}),
         request_digest_version=REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "changed"}),
         user_id="owner-1",
     )
     assert conflict.outcome is AdmissionOutcome.key_conflict
@@ -160,6 +173,7 @@ async def _assert_store_ensure_contract(store) -> None:
         external_key=key,
         request_digest=digest,
         request_digest_version=REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "hello"}),
         user_id="owner-1",
     )
     assert terminal_replay.outcome is AdmissionOutcome.known_same
@@ -209,6 +223,7 @@ async def test_postgres_two_independent_sessions_race_to_one_run_row() -> None:
         "external_key": key,
         "request_digest": digest,
         "request_digest_version": REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "race"}),
         "user_id": f"owner-{unique}",
     }
     try:
@@ -232,6 +247,59 @@ async def test_postgres_two_independent_sessions_race_to_one_run_row() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for the independent-session race gate",
+)
+async def test_postgres_concurrent_unequal_caller_intents_have_one_winner_and_one_conflict() -> None:
+    assert _POSTGRES_URL is not None
+    engine = create_async_engine(_postgres_async_url(_POSTGRES_URL))
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    unique = uuid.uuid4().hex
+    thread_id = f"unequal-intent-thread-{unique}"
+    common = {
+        "thread_id": thread_id,
+        "lease_expires_at": None,
+        "external_scope": scope_for_http("user", f"owner-{unique}"),
+        "external_key": normalize_external_key(f"request-{unique}"),
+        "request_digest_version": REQUEST_DIGEST_VERSION,
+        "user_id": f"owner-{unique}",
+    }
+    left_intent = _caller_intent_fields({"input": "left"})
+    right_intent = _caller_intent_fields({"input": "right"})
+    try:
+        left, right = await asyncio.gather(
+            RunRepository(session_factory).ensure_run_atomic(
+                f"run-left-{unique}",
+                owner_worker_id="worker-left",
+                request_digest=canonical_request_digest({"effective": "left"}),
+                **left_intent,
+                **common,
+            ),
+            RunRepository(session_factory).ensure_run_atomic(
+                f"run-right-{unique}",
+                owner_worker_id="worker-right",
+                request_digest=canonical_request_digest({"effective": "right"}),
+                **right_intent,
+                **common,
+            ),
+        )
+        assert {left.outcome, right.outcome} == {
+            AdmissionOutcome.created,
+            AdmissionOutcome.key_conflict,
+        }
+        assert left.row["run_id"] == right.row["run_id"]
+    finally:
+        async with session_factory() as session:
+            await session.execute(delete(RunRow).where(RunRow.thread_id == thread_id))
+            await session.commit()
+        await engine.dispose()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("supersession", ["interrupt", "rollback"])
 async def test_different_key_retains_thread_busy_and_supersession_semantics(
     supersession: str,
@@ -243,6 +311,7 @@ async def test_different_key_retains_thread_busy_and_supersession_semantics(
         "lease_expires_at": None,
         "request_digest": canonical_request_digest({"input": "same"}),
         "request_digest_version": REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "same"}),
         "user_id": "owner-1",
     }
     await store.ensure_run_atomic(
@@ -283,6 +352,7 @@ async def test_different_key_thread_races_keep_current_multitask_semantics(
         "lease_expires_at": None,
         "request_digest": canonical_request_digest({"input": "same"}),
         "request_digest_version": REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "same"}),
         "user_id": "owner-1",
         "multitask_strategy": strategy,
     }
@@ -463,6 +533,7 @@ async def test_run_manager_replays_same_row_active_and_after_every_terminal_stat
         "external_key": normalize_external_key("request-1"),
         "request_digest": canonical_request_digest({"input": "hello"}),
         "request_digest_version": REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "hello"}),
         "user_id": "owner-1",
     }
 
@@ -489,6 +560,7 @@ async def test_run_manager_distinguishes_key_conflict_from_thread_busy() -> None
         external_key=normalize_external_key("key-1"),
         request_digest=canonical_request_digest({"input": "hello"}),
         request_digest_version=REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "hello"}),
         user_id="owner-1",
     )
 
@@ -498,6 +570,7 @@ async def test_run_manager_distinguishes_key_conflict_from_thread_busy() -> None
         external_key=normalize_external_key("key-1"),
         request_digest=canonical_request_digest({"input": "changed"}),
         request_digest_version=REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "changed"}),
         user_id="owner-1",
     )
     assert conflict.outcome is AdmissionOutcome.key_conflict
@@ -509,6 +582,7 @@ async def test_run_manager_distinguishes_key_conflict_from_thread_busy() -> None
             external_key=normalize_external_key("key-2"),
             request_digest=canonical_request_digest({"input": "hello"}),
             request_digest_version=REQUEST_DIGEST_VERSION,
+            **_caller_intent_fields({"input": "hello"}),
             user_id="owner-1",
         )
     assert not isinstance(exc_info.value, IdempotencyConflictError)
@@ -696,6 +770,65 @@ async def test_failed_preflight_lookup_discards_cached_admission_identity() -> N
 
 
 @pytest.mark.anyio
+async def test_http_replay_conflicts_when_retry_omits_original_thinking_option() -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    store = InMemoryStore()
+    run_manager = RunManager(store=MemoryRunStore())
+    request = SimpleNamespace(
+        headers={"Idempotency-Key": "request-removes-thinking"},
+        state=SimpleNamespace(
+            auth_source=AUTH_SOURCE_SESSION,
+            user=SimpleNamespace(id="owner-1", system_role="user", oauth_provider=None, oauth_id=None),
+        ),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                stream_bridge=SimpleNamespace(),
+                run_manager=run_manager,
+                checkpointer=InMemorySaver(),
+                store=store,
+                run_event_store=MemoryRunEventStore(),
+                run_events_config=None,
+                thread_store=MemoryThreadMetaStore(store),
+            )
+        ),
+    )
+    revision = ResolvedAgentRevision.from_material(
+        ResolvedAgentMaterialV1(
+            agent_id="default",
+            storage_source="builtin",
+            storage_version="v1",
+            agent_config=None,
+            soul="test",
+            model_profile={},
+        )
+    )
+    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
+    try:
+        with (
+            patch("app.gateway.services.resolve_agent_revision", return_value=revision),
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", new_callable=AsyncMock),
+        ):
+            original = RunCreateRequest(
+                input={"messages": [{"role": "user", "content": "hello"}]},
+                context={"thinking_enabled": False},
+            )
+            first = await start_run(original, "thread-removes-thinking", request)
+            assert first.task is not None
+            await first.task
+
+            retry_without_option = RunCreateRequest(input=original.input)
+            with pytest.raises(Exception) as conflict:
+                await start_run(retry_without_option, "thread-removes-thinking", request)
+
+            assert getattr(conflict.value, "status_code", None) == 409
+    finally:
+        reset_app_config()
+
+
+@pytest.mark.anyio
 async def test_http_replay_returns_one_run_and_attaches_exactly_one_worker() -> None:
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
@@ -765,13 +898,14 @@ async def test_http_replay_returns_one_run_and_attaches_exactly_one_worker() -> 
 
             assert "__accepted_request_projection_v1" not in _record_to_response(first).kwargs
 
-            stateless_retry = await start_run(
-                body,
-                "newly-generated-thread-id",
-                request,
-                thread_id_explicit=False,
-            )
-            assert stateless_retry is first
+            with pytest.raises(Exception) as explicit_thread_removed:
+                await start_run(
+                    body,
+                    "newly-generated-thread-id",
+                    request,
+                    thread_id_explicit=False,
+                )
+            assert getattr(explicit_thread_removed.value, "status_code", None) == 409
 
             with pytest.raises(Exception) as exc_info:
                 await start_run(

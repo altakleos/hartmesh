@@ -318,6 +318,9 @@ class RunStore(abc.ABC):
         external_key: str | None = None,
         request_digest: str | None = None,
         request_digest_version: str | None = None,
+        caller_intent_json: dict[str, Any] | None = None,
+        caller_intent_digest: str | None = None,
+        caller_intent_digest_version: str | None = None,
     ) -> None:
         pass
 
@@ -618,6 +621,9 @@ class RunStore(abc.ABC):
         external_key: str | None = None,
         request_digest: str | None = None,
         request_digest_version: str | None = None,
+        caller_intent_json: dict[str, Any] | None = None,
+        caller_intent_digest: str | None = None,
+        caller_intent_digest_version: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -650,6 +656,9 @@ class RunStore(abc.ABC):
                 external_key,
                 request_digest,
                 request_digest_version,
+                caller_intent_json,
+                caller_intent_digest,
+                caller_intent_digest_version,
             )
         ):
             raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot persist accepted invocation facts")
@@ -679,6 +688,9 @@ class RunStore(abc.ABC):
         external_key: str,
         request_digest: str,
         request_digest_version: str,
+        caller_intent_json: dict[str, Any],
+        caller_intent_digest: str,
+        caller_intent_digest_version: str,
         multitask_strategy: str = "reject",
         assistant_id: str | None = None,
         user_id: str | None = None,

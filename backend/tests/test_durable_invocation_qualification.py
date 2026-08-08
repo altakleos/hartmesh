@@ -84,6 +84,7 @@ from deerflow_extension_api import (
 
 from app.runtime.idempotency import (
     REQUEST_DIGEST_VERSION,
+    CanonicalCallerIntent,
     canonical_request_digest,
     normalize_external_key,
     scope_for_channel,
@@ -98,6 +99,15 @@ from deerflow.runtime.runs.store.base import AdmissionOutcome, CancellationReque
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _caller_intent_fields(value: dict[str, object]) -> dict[str, object]:
+    intent = CanonicalCallerIntent(value)
+    return {
+        "caller_intent_json": intent.to_persisted(),
+        "caller_intent_digest": intent.digest,
+        "caller_intent_digest_version": intent.digest_version,
+    }
 
 
 def test_runtime_api_docs_publish_manifest_and_health_contract() -> None:
@@ -123,6 +133,7 @@ async def test_same_key_and_digest_returns_one_row_before_during_and_after_every
         "external_key": normalize_external_key("delivery-1"),
         "request_digest": canonical_request_digest({"input": "hello"}),
         "request_digest_version": REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "hello"}),
         "user_id": "owner-1",
     }
 
@@ -154,6 +165,7 @@ async def test_same_key_different_digest_conflicts_and_external_encodings_remain
         external_key=key,
         request_digest=canonical_request_digest({"input": "hello"}),
         request_digest_version=REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "hello"}),
         user_id="owner-1",
     )
     conflict = await manager.ensure_or_reject(
@@ -162,6 +174,7 @@ async def test_same_key_different_digest_conflicts_and_external_encodings_remain
         external_key=key,
         request_digest=canonical_request_digest({"input": "changed"}),
         request_digest_version=REQUEST_DIGEST_VERSION,
+        **_caller_intent_fields({"input": "changed"}),
         user_id="owner-1",
     )
 
@@ -189,6 +202,7 @@ async def test_channel_and_persisted_scheduler_keys_replay_without_content_hash_
             "external_key": normalize_external_key(external_key),
             "request_digest": digest,
             "request_digest_version": REQUEST_DIGEST_VERSION,
+            **_caller_intent_fields({"input": "same accepted request"}),
             "user_id": "owner-1",
         }
         first = await manager.ensure_or_reject(thread_id, **common)
