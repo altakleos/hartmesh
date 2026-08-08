@@ -259,10 +259,19 @@ concurrent processes. The store returns only `created`, `known_same`, or `key_co
 HTTP create/stream/wait routes accept `Idempotency-Key`. Their scope is tied to the
 authenticated server subject; auth-disabled mode uses the configured default user and an
 ownerless keyed request is rejected. Native channels use only a verified stable provider
-event/message ID, scoped by provider, connection, workspace, and chat. Scheduled Tasks use
+event/message ID, scoped by provider, verified binding kind/reference, workspace, and chat.
+Interactive channels mint a `connection` binding only after repository owner revalidation
+(normally in the manager, or in Buzz's signed adapter through the same lookup helper);
+signed webhooks mint a distinct `webhook_route` binding only after request authentication and
+trusted route lookup. The historical connection tuple is unchanged for retained-row replay.
+The safe binding evidence is sealed into Origin and trusted run context; messages without a
+verified binding stay unkeyed even if they carry a stable-looking ID. Scheduled Tasks use
 their persisted `task_run_id`, scoped by persisted owner and task. Short keys are stored with
 an explicit `raw:` prefix; values longer than 255 UTF-8 bytes use `sha256:utf8:`. A missing
 channel provider ID leaves that launch unkeyed—content hashes are never substitutes.
+For a historical connection-backed row whose Origin predates the redundant binding fields,
+replay compares the original connection-based Origin digest; this compatibility rule never
+applies to webhook-route bindings or partially populated binding evidence.
 
 Caller-intent equality is exact after these contract-defined normalizations:
 

@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import unicodedata
+from dataclasses import dataclass
 from typing import Any
 
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
@@ -33,9 +35,27 @@ from app.gateway.github.identity import extract_target, resolve_thread_id
 from app.gateway.github.prompts import build_prompt
 from app.gateway.github.registry import build_github_agent_registry, lookup_agents
 from app.gateway.github.triggers import event_should_fire
+from app.runtime.native_binding import build_verified_webhook_route_binding
 from deerflow.config.agents_config import GitHubAgentConfig, GitHubTriggerConfig
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedGitHubWebhookRequest:
+    """Host attestation created only after the route verifies the HMAC."""
+
+    delivery_id: str | None
+
+    def __post_init__(self) -> None:
+        if self.delivery_id is None:
+            return
+        if not isinstance(self.delivery_id, str) or not self.delivery_id:
+            raise ValueError("verified GitHub delivery id must be a non-empty string")
+        if len(self.delivery_id.encode("utf-8")) > 255:
+            raise ValueError("verified GitHub delivery id must not exceed 255 UTF-8 bytes")
+        if any(unicodedata.category(character) == "Cc" for character in self.delivery_id):
+            raise ValueError("verified GitHub delivery id must not contain control characters")
 
 
 def _is_self_event(
@@ -188,10 +208,11 @@ def _is_redundant_review_comment(payload: dict[str, Any]) -> bool:
 async def fanout_event(
     bus: MessageBus,
     event: str,
-    delivery_id: str,
+    delivery_id: str | None,
     payload: dict[str, Any],
     *,
     operator_default_mention_login: str | None = None,
+    verified_request: VerifiedGitHubWebhookRequest | None = None,
 ) -> dict[str, Any]:
     """Translate one webhook delivery into N inbound messages.
 
@@ -208,12 +229,20 @@ async def fanout_event(
             from the live channel config and passes it through so the
             dispatcher stays decoupled from ``get_app_config()`` and
             remains testable without a singleton.
+        verified_request: Host attestation created by the route only after HMAC
+            verification. When present, each fired match must also prove the
+            configured installation and receives a server-derived route binding.
+            Its provider delivery id may be absent; that leaves admission unkeyed
+            without discarding the authenticated route evidence.
 
     Returns:
         A summary dict for the route response: ``{"matched_agents": [...],
         "fired_agents": [...], "skipped": [{"agent": "...", "reason": "..."}]}``.
         Useful for operator visibility when redelivering events via smee.
     """
+    if verified_request is not None and verified_request.delivery_id != delivery_id:
+        raise ValueError("verified GitHub delivery identity does not match dispatch input")
+
     # 1. Extract (repo, number).
     target = extract_target(event, payload)
     if target is None:
@@ -241,6 +270,18 @@ async def fanout_event(
     skipped: list[dict[str, str]] = []
 
     sender_login = (payload.get("sender") or {}).get("login")
+
+    if verified_request is not None:
+        route_coordinates = [(match.user_id, match.agent.name, repo) for match in matches]
+        if len(route_coordinates) != len(set(route_coordinates)):
+            return {
+                "matched_agents": matched_names,
+                "fired_agents": [],
+                "skipped": [{"agent": match.agent.name, "reason": "ambiguous_route_binding"} for match in matches],
+            }
+
+    payload_installation = payload.get("installation")
+    payload_installation_id = payload_installation.get("id") if isinstance(payload_installation, dict) else None
 
     # 3. Redundant review-comment fan-out filter — see
     #    :func:`_is_redundant_review_comment`. Whether the PAYLOAD has the
@@ -274,6 +315,22 @@ async def fanout_event(
         github = agent.github
         assert github is not None
         trigger = match.trigger
+
+        verified_source_binding = None
+        if verified_request is not None:
+            if github.installation_id is None:
+                skipped.append({"agent": agent.name, "reason": "installation_unconfigured"})
+                continue
+            if not isinstance(payload_installation_id, int) or isinstance(payload_installation_id, bool) or payload_installation_id <= 0 or payload_installation_id != github.installation_id:
+                skipped.append({"agent": agent.name, "reason": "installation_mismatch"})
+                continue
+            verified_source_binding = build_verified_webhook_route_binding(
+                provider="github",
+                installation_reference=github.installation_id,
+                owner_user_id=match.user_id,
+                agent_id=agent.name,
+                repository_reference=repo,
+            )
 
         # 4. Self-event gate — skip events triggered by this agent's own
         #    bot account. Other bots (Copilot, CodeRabbit, Dependabot, …)
@@ -442,6 +499,7 @@ async def fanout_event(
             # unique and always present — mirrors Telegram/WeChat keying the
             # workspace on the chat id.
             workspace_id=repo,
+            verified_source_binding=verified_source_binding,
             metadata={
                 # Stable inbound-dedupe id keyed by the manager — see
                 # ``dedupe_message_id`` above.

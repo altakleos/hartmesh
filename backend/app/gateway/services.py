@@ -79,6 +79,7 @@ from app.runtime.invocation import (
     PreparedLaunch,
     thaw_host_value,
 )
+from app.runtime.native_binding import InternalVerifiedNativeBindingKind
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.agents_config import validate_agent_name
@@ -1214,7 +1215,11 @@ def _bounded_source_value(value: Any) -> str | int | bool | None:
     return encoded.decode("utf-8", errors="ignore")
 
 
-def _base_origin_references(intent: InternalLaunchIntent) -> dict[str, str | int | bool | None]:
+def _base_origin_references(
+    intent: InternalLaunchIntent,
+    *,
+    include_verified_binding: bool = True,
+) -> dict[str, str | int | bool | None]:
     if intent.source_kind is InternalSourceKind.scheduled_task:
         return {
             "task_id": _bounded_source_value(intent.trusted_task_id),
@@ -1225,7 +1230,7 @@ def _base_origin_references(intent: InternalLaunchIntent) -> dict[str, str | int
         facts = intent.native_channel
         if facts is None:
             return {}
-        return {
+        references: dict[str, str | int | bool | None] = {
             "provider": _bounded_source_value(facts.provider),
             "connection_id": _bounded_source_value(facts.connection_id),
             "workspace_id": _bounded_source_value(facts.workspace_id),
@@ -1234,6 +1239,10 @@ def _base_origin_references(intent: InternalLaunchIntent) -> dict[str, str | int
             "provider_message_id": _bounded_source_value(facts.provider_message_id),
             "channel_user_id": _bounded_source_value(facts.channel_user_id),
         }
+        if include_verified_binding and facts.verified_binding is not None:
+            references["binding_kind"] = _bounded_source_value(facts.verified_binding.kind.value)
+            references["binding_reference"] = _bounded_source_value(facts.verified_binding.reference)
+        return references
     if intent.source_kind is InternalSourceKind.service:
         return {"service_id": _bounded_source_value(intent.trusted_service_id)}
     return {}
@@ -1615,10 +1624,17 @@ async def _principal_projection_for_intent(
     )
 
 
-def _base_origin_digest(intent: InternalLaunchIntent) -> str:
+def _base_origin_digest(
+    intent: InternalLaunchIntent,
+    *,
+    include_verified_binding: bool = True,
+) -> str:
     origin = InvocationOrigin(
         source_kind=intent.source_kind.value,
-        references=_base_origin_references(intent),
+        references=_base_origin_references(
+            intent,
+            include_verified_binding=include_verified_binding,
+        ),
     )
     return canonical_digest({"version": 1, "origin": origin.base_json()})
 
@@ -1873,6 +1889,18 @@ class _GatewayLaunchNormalizer:
             raise ValueError("native channel launch provider does not match its authenticated source facts")
         if context.get("agent_name") != facts.resolved_agent_name:
             raise ValueError("native channel launch agent does not match its resolved route")
+        binding = facts.verified_binding
+        if binding is not None:
+            if binding.kind is InternalVerifiedNativeBindingKind.connection:
+                if not facts.connection_id or binding.reference != facts.connection_id:
+                    raise ValueError("native channel connection binding conflicts with its verified source facts")
+            elif binding.kind is InternalVerifiedNativeBindingKind.webhook_route:
+                if facts.connection_id is not None:
+                    raise ValueError("native channel launch has conflicting verified binding sources")
+            else:  # pragma: no cover - enum construction is closed
+                raise ValueError("native channel launch has an unsupported verified binding")
+        if intent.external_key is not None and binding is None:
+            raise ValueError("keyed native-channel admission requires a verified source binding")
         return facts
 
     def _metadata(self, intent: InternalLaunchIntent) -> dict[str, Any]:
@@ -1928,13 +1956,15 @@ class _GatewayLaunchNormalizer:
                 external_scope = scope_for_http(principal_kind, subject_id)
             elif intent.source_kind is InternalSourceKind.native_channel:
                 facts = self._validate_native_channel_facts(intent)
-                if not facts.connection_id:
-                    raise ValueError("keyed native-channel admission requires a verified connection")
+                binding = facts.verified_binding
+                if binding is None:  # guarded by _validate_native_channel_facts
+                    raise ValueError("keyed native-channel admission requires a verified source binding")
                 external_scope = scope_for_channel(
                     facts.provider,
-                    facts.connection_id,
+                    binding.reference,
                     facts.workspace_id or "",
                     facts.chat_id,
+                    binding_kind=binding.kind.value,
                 )
             elif intent.source_kind is InternalSourceKind.scheduled_task:
                 self._metadata(intent)
@@ -1986,7 +2016,19 @@ class _GatewayLaunchNormalizer:
         if identity.principal_digest != accepted.principal_digest:
             raise IdempotencyConflictError("Idempotency key has contradictory authenticated principal evidence")
         if identity.base_origin_digest != accepted.base_origin_digest:
-            raise IdempotencyConflictError("Idempotency key has contradictory authenticated source evidence")
+            facts = intent.native_channel
+            accepted_references = accepted.origin.references
+            legacy_connection_evidence = (
+                intent.source_kind is InternalSourceKind.native_channel
+                and facts is not None
+                and facts.verified_binding is not None
+                and facts.verified_binding.kind is InternalVerifiedNativeBindingKind.connection
+                and "binding_kind" not in accepted_references
+                and "binding_reference" not in accepted_references
+                and _base_origin_digest(intent, include_verified_binding=False) == accepted.base_origin_digest
+            )
+            if not legacy_connection_evidence:
+                raise IdempotencyConflictError("Idempotency key has contradictory authenticated source evidence")
         if identity.thread_id is not None and identity.thread_id != record.thread_id:
             raise IdempotencyConflictError("Idempotency key is bound to a different thread")
         caller_intent = identity.caller_intent

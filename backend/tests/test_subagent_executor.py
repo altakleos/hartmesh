@@ -3298,9 +3298,19 @@ class TestSubagentGuardrailAttribution:
                 purpose="execution",
             ),
         )
+        binding_reference = SafeContextReferenceV1(
+            key="binding_reference",
+            value="route:v1:sha256:" + "a" * 64,
+            storage_class="persistable",
+            purpose="correlation",
+        )
         trusted = TrustedRunContextV1(
             identity=InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="human", subject_id="owner-1", role="member")),
-            origin=SealedOriginV1(source_kind="http", digest="a" * 64),
+            origin=SealedOriginV1(
+                source_kind="native_channel",
+                references=(binding_reference,),
+                digest="a" * 64,
+            ),
             thread_id="thread-1",
             external_key_reference="raw:request-1",
             agent_revision=ResolvedAgentRevisionReferenceV1(agent_id="lead_agent", digest="b" * 64),
@@ -3332,6 +3342,7 @@ class TestSubagentGuardrailAttribution:
         context = fake_agent.captured_context
         assert context is not None
         assert context[TRUSTED_RUN_CONTEXT_KEY] is trusted
+        assert context[TRUSTED_RUN_CONTEXT_KEY].origin.references == (binding_reference,)
         assert "authz_attributes" not in context
         assert executor.authz_attributes == {"routing.target": "runtime-route"}
         assert context["accepted_extension_generation"] == 8

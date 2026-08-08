@@ -153,6 +153,9 @@ async def test_authenticated_channel_launch_enters_runtime_with_typed_source_fac
     assert intent.native_channel.topic_id == "topic-1"
     assert intent.native_channel.provider_message_id == "provider-message-1"
     assert intent.external_key == "provider-message-1"
+    assert intent.native_channel.verified_binding is not None
+    assert intent.native_channel.verified_binding.kind == "connection"
+    assert intent.native_channel.verified_binding.reference == "connection-1"
     assert intent.native_channel.resolved_assistant_id == "lead_agent"
     assert intent.native_channel.resolved_agent_name == "incident-agent"
     assert intent.owner_user_id == "owner-1"

@@ -6,6 +6,7 @@ This document covers the **architecture** of that pipeline:
 
 - Per-agent bindings (`config.yaml` → `github:` block)
 - Webhook → fan-out → `InboundMessage` dispatch
+- HMAC/registry-derived verified route bindings for durable replay
 - Mention-handle precedence for `require_mention` triggers
 - `preferred_thread_id = UUID5(repo, number, agent_name)` thread determinism
 - GH token lifecycle (`GITHUB_APP_ID` + `PRIVATE_KEY` → `run_context["github_token"]` → sandbox `GH_TOKEN`/`GITHUB_TOKEN`)
@@ -40,6 +41,24 @@ still invalidates the registry when two writes share the same timestamp.
 
 Each agent binding lists the **events it cares about** under `triggers:`. Events absent from `triggers:` are not delivered to that agent — the dispatcher never loads the agent for them. `DEFAULT_TRIGGERS` only supplies **field-level defaults** (e.g. `require_mention: true`) for events a binding did declare; it is no longer an enablement list.
 
+For the signed production path, `github.installation_id` is also part of the
+source trust boundary. The HMAC-authenticated payload's installation must equal
+the configured strict positive integer installation before a matching agent can
+fire. Quoted, boolean, zero, and negative installation values are invalid; update
+legacy YAML to a positive unquoted integer before startup. The dispatcher
+then derives one opaque `webhook_route` binding from the provider, installation,
+registry owner, canonical agent, and repository. It never uses sender login,
+prompt text, or payload metadata as authority, and it leaves
+`InboundMessage.connection_id` unset. The binding kind/reference—not a webhook
+secret or token—is sealed into Origin and used with workspace/conversation to
+scope the stable delivery key. Explicit unverified development mode can still
+exercise the channel locally, but it has no verified binding and remains
+unkeyed. A signed request without `X-GitHub-Delivery` still receives the verified
+route binding but remains unkeyed because it has no provider-stable event identity.
+Historical accepted Origins without these optional references remain readable;
+connection-backed rows also replay through their original Origin digest because
+the new binding reference repeats their already-authenticated `connection_id`.
+
 ## Webhook → Fan-out → Dispatch
 
 The webhook handler stays cheap — no LangGraph calls — so GitHub's 10-second delivery timeout is never at risk. Verification, fan-out, and the bus publish are all in-process and bounded.
@@ -55,13 +74,14 @@ sequenceDiagram
     participant Bus as MessageBus
     participant Mgr as ChannelManager
     participant Client as langgraph_sdk client
-    participant Gateway as Gateway<br/>/api/webhooks/github
+    participant Gateway as Gateway thread API
+    participant Runtime as InvocationRuntime
 
     GH->>Router: delivery (event, delivery_id, payload,<br/>X-Hub-Signature-256, X-GitHub-Event)
     Router->>Router: _verify_signature()<br/>hmac.compare_digest(sha256, secret)
-    Router->>Disp: fanout_event(bus, event, delivery_id, payload,<br/>operator_default_mention_login)
+    Router->>Disp: fanout_event(bus, event, delivery_id, payload,<br/>verified_request attestation)
     Disp->>Reg: build_github_agent_registry() (to_thread)
-    Reg-->>Disp: agents bound to (repo, event)
+    Reg-->>Disp: agents bound to (repo, event)<br/>with owner + installation
     loop each matched agent
         Disp->>Disp: _is_self_event(sender.login)?
         alt self event
@@ -71,7 +91,8 @@ sequenceDiagram
             Trg-->>Disp: (fire, reason)
             opt fire
                 Disp->>Disp: build_prompt() + resolve_thread_id()<br/>UUID5(repo, number, agent)
-                Disp->>Bus: publish_inbound(InboundMessage(<br/>channel=github, chat_id=repo,<br/>topic_id="{number}:{agent}",<br/>owner_user_id=match.user_id,<br/>metadata.agent_name=agent,<br/>metadata.preferred_thread_id=...,<br/>metadata.github={...}))
+                Disp->>Disp: verify payload installation;<br/>derive webhook_route binding
+                Disp->>Bus: publish_inbound(InboundMessage(<br/>channel=github, connection_id=None,<br/>verified_source_binding=route,<br/>chat_id=repo, topic_id="{number}:{agent}",<br/>owner_user_id=match.user_id,<br/>metadata.agent_name=agent,<br/>metadata.preferred_thread_id=...,<br/>metadata.github={...}))
             end
         end
     end
@@ -83,9 +104,8 @@ sequenceDiagram
     Mgr->>Client: client.threads.create(thread_id=preferred_thread_id)
     Client->>Gateway: threads.create (with owner headers)
     Gateway-->>Client: thread_id (or 409)
-    Mgr->>Client: runs.create() [fire_and_forget=True]
-    Client->>Gateway: start run
-    Gateway-->>Client: pending
+    Mgr->>Runtime: launch(InternalLaunchIntent)<br/>verified route binding + stable delivery key
+    Runtime-->>Mgr: created or known retained run
     Note over Mgr: Manager returns immediately.<br/>Agent posts to GitHub via gh CLI.
 ```
 

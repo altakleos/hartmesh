@@ -10,7 +10,7 @@ per-user layout.
 import logging
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from deerflow_extension_api.identifiers import (
     AGENT_IDENTIFIER_PATTERN,
@@ -92,10 +92,12 @@ class GitHubAgentConfig(BaseModel):
     # into ``run_context["github_token"]``, which the ``bash`` tool exposes to
     # the agent's sandbox as ``GH_TOKEN`` / ``GITHUB_TOKEN``. The agent then
     # uses ``gh`` to read repo state, push branches, and post comments itself.
-    # None means no token is minted: the agent still runs but cannot push or
-    # post (effectively read-only via unauthenticated ``gh`` for public repos,
-    # or fully blind for private ones).
-    installation_id: int | None = None
+    # A signed production webhook must carry the same strict positive integer
+    # installation id in its authenticated payload before the dispatcher can
+    # construct a verified route binding. None is retained for explicit
+    # unverified local development, where the launch remains unkeyed and no
+    # token is minted. Quoted numeric strings are rejected rather than coerced.
+    installation_id: Annotated[int, Field(strict=True, gt=0)] | None = None
     # GitHub App login this agent posts as (e.g. ``llm-gateway-ai`` for the
     # ``llm-gateway-ai[bot]`` App identity, without the ``[bot]`` suffix).
     # The dispatcher's self-event gate uses this to recognize webhook

@@ -43,6 +43,8 @@ from app.runtime import (
     InternalLaunchReceipt,
     InternalNativeChannelFacts,
     InternalSourceKind,
+    InternalVerifiedNativeBinding,
+    InternalVerifiedNativeBindingKind,
     InvocationRuntime,
 )
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
@@ -1599,6 +1601,7 @@ class ChannelManager:
             channel_user_id=msg.user_id,
             resolved_assistant_id=assistant_id,
             resolved_agent_name=resolved_agent_name,
+            verified_binding=msg.verified_source_binding,
         )
         receipt = await self._invocation_runtime.launch(
             InternalLaunchIntent(
@@ -1612,7 +1615,7 @@ class ChannelManager:
                 source_kind=InternalSourceKind.native_channel,
                 owner_user_id=_effective_owner_user_id(msg),
                 native_channel=facts,
-                external_key=facts.provider_message_id,
+                external_key=(facts.provider_message_id if facts.verified_binding is not None else None),
             )
         )
         if not isinstance(receipt, InternalLaunchReceipt):
@@ -1852,15 +1855,32 @@ class ChannelManager:
         """
         if not self._require_bound_identity:
             return None
-        # Webhook-authenticated channels (GitHub) opt out via
-        # ChannelRunPolicy.requires_bound_identity=False. Authenticity is
-        # enforced at the webhook route by HMAC, and the "sender → DeerFlow
-        # user" binding is encoded in the agent's config.yaml ownership, not
-        # in the channel-connections table — there is no per-sender
-        # /connect handshake to perform.
+        # Webhook-authenticated channels (GitHub) opt out of the interactive
+        # connection lookup via ChannelRunPolicy.requires_bound_identity=False.
+        # A production keyed delivery instead carries the route binding created
+        # after HMAC verification and trusted registry resolution. Explicit
+        # unverified development mode has no such binding and stays unkeyed.
         policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
         if policy is not None and not policy.requires_bound_identity:
-            return None
+            binding = msg.verified_source_binding
+            if binding is None:
+                # Explicit local-development webhook and unbound Buzz modes
+                # remain unkeyed.
+                return None
+            if binding.kind is InternalVerifiedNativeBindingKind.webhook_route:
+                if msg.connection_id is not None:
+                    return _BoundIdentityRejection()
+                return None
+            if binding.kind is InternalVerifiedNativeBindingKind.connection:
+                if not msg.connection_id or binding.reference != msg.connection_id or not msg.owner_user_id:
+                    return _BoundIdentityRejection()
+                # Buzz's signed adapter has already re-read this connection
+                # through attach_connection_identity(). It intentionally skips
+                # the manager's second lookup because its relay-scoped pubkey
+                # allowlist is the adapter identity gate.
+                return None
+            else:
+                return _BoundIdentityRejection()
         if _auth_disabled_owner_user_id():
             return None
 
@@ -1887,6 +1907,16 @@ class ChannelManager:
         connection_id = connection.get("id")
         owner_user_id = connection.get("owner_user_id")
         if connection_id == msg.connection_id and owner_user_id == msg.owner_user_id:
+            asserted_binding = msg.verified_source_binding
+            if asserted_binding is not None and (asserted_binding.kind is not InternalVerifiedNativeBindingKind.connection or asserted_binding.reference != connection_id):
+                return _BoundIdentityRejection(
+                    outbound_connection_id=connection_id,
+                    outbound_owner_user_id=owner_user_id,
+                )
+            msg.verified_source_binding = InternalVerifiedNativeBinding(
+                kind=InternalVerifiedNativeBindingKind.connection,
+                reference=connection_id,
+            )
             return None
         return _BoundIdentityRejection(outbound_connection_id=connection_id, outbound_owner_user_id=owner_user_id)
 

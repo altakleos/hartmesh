@@ -1224,6 +1224,11 @@ and paging details.
 
 The existing `/api/runs/*` and `/api/threads/*/runs/*` create, stream, and wait
 routes remain compatible and retain their optional `Idempotency-Key` behavior.
+Native-channel retries become durably keyed only after the Gateway verifies the
+source binding: interactive channels revalidate their connection/owner row,
+while signed GitHub deliveries match the configured installation and trusted
+agent/repository registry route. Unverified local webhook mode remains unkeyed,
+and no webhook creates a synthetic interactive connection.
 Each accepted invocation is the normal durable run row itself; checkpoint and
 artifact reservation rows are internal operations and never appear in this API.
 `GET /health` is process liveness and remains healthy during a recoverable authority or
