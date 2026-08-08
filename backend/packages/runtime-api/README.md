@@ -90,6 +90,12 @@ the requested page rather than total thread history. Events, cursor metadata,
 and joined summaries come from one database snapshot; filtered empty pages
 still advance to the captured global fence.
 
+Polling `DurableInvocationPort.observe` is the supported durable evidence path. The
+transactional journal and authoritative snapshot do not depend on an event sink or broker;
+push delivery is deferred and is not a correctness requirement. A clarification result is a
+successful completion of its invocation, and the caller's answer is a new invocation on the
+same thread. V1 deliberately has no `input_required` lifecycle state.
+
 Gateway's authenticated `/api/runtime/v1` routes consume the same Protocol and
 records. The transport-neutral conformance suite runs against both the embedded
 adapter and an HTTP adapter. HTTP authentication supplies the principal and

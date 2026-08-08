@@ -99,7 +99,7 @@ def test_manifest_uses_loader_owned_provenance_and_safe_initialization_codes(
 ) -> None:
     monkeypatch.setattr(
         "deerflow.extensions.loader._distribution_provenance",
-        lambda _install: ("acme-policy", "3.2.1"),
+        lambda _install: ("example-policy", "3.2.1"),
     )
     loaded, diagnostics = load_extensions(
         [
@@ -119,7 +119,7 @@ def test_manifest_uses_loader_owned_provenance_and_safe_initialization_codes(
     )
 
     assert diagnostics == []
-    assert [(item.package_name, item.package_version) for item in manifest.plugins] == [("acme-policy", "3.2.1")]
+    assert [(item.package_name, item.package_version) for item in manifest.plugins] == [("example-policy", "3.2.1")]
     assert manifest.plugins[0].load_required is True
     assert len(manifest.capabilities) == 1
     capability = manifest.capabilities[0]
@@ -138,7 +138,7 @@ def test_loaded_plugin_without_authoritative_registration_remains_visible(
 ) -> None:
     monkeypatch.setattr(
         "deerflow.extensions.loader._distribution_provenance",
-        lambda _install: ("acme-observer", "1.0.0"),
+        lambda _install: ("example-observer", "1.0.0"),
     )
     loaded, diagnostics = load_extensions(
         [
@@ -155,7 +155,7 @@ def test_loaded_plugin_without_authoritative_registration_remains_visible(
     )
 
     assert diagnostics == []
-    assert manifest.plugins[0].package_name == "acme-observer"
+    assert manifest.plugins[0].package_name == "example-observer"
     assert manifest.plugins[0].load_required is True
     assert manifest.capabilities[0].capability_id == ("origin_contributor:missing_origin")
     assert manifest.capabilities[0].initialization_status == "missing"
@@ -165,7 +165,7 @@ def test_manifest_serialization_excludes_source_config_and_high_cardinality_data
     registry = ExtensionRegistry()
     with registry.attributed_to(
         "private.module:install?token=secret",
-        package_name="acme-policy",
+        package_name="example-policy",
         package_version="1.2.3",
     ):
         registry.origin_contributor(
@@ -186,7 +186,7 @@ def test_manifest_serialization_excludes_source_config_and_high_cardinality_data
 
     assert payload["manifest_digest"] == manifest.digest
     assert payload["extension_generation"] == 9
-    assert "acme-policy" in rendered
+    assert "example-policy" in rendered
     assert "private.module" not in rendered
     assert "token=secret" not in rendered
     assert "user_id" not in rendered

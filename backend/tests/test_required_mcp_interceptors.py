@@ -105,14 +105,14 @@ def test_registry_stamps_mcp_provenance_rejects_duplicates_and_rolls_back() -> N
     registry = ExtensionRegistry()
     mark = registry.mark()
     with registry.attributed_to(
-        "acme.plugin:install",
-        package_name="acme-mcp",
+        "example.plugin:install",
+        package_name="example-mcp",
         package_version="2.4.1",
     ):
         registry.mcp_interceptor(descriptor)
     registration = registry.build().mcp_interceptor_descriptors[0]
     assert registration.contribution_id == "credential_broker"
-    assert registration.package_name == "acme-mcp"
+    assert registration.package_name == "example-mcp"
     assert registration.package_version == "2.4.1"
 
     with registry.attributed_to("duplicate.plugin:install"):
@@ -195,7 +195,7 @@ def _registered_extensions(*descriptors, generation: int = 7):
     for index, descriptor in enumerate(descriptors):
         with registry.attributed_to(
             f"plugin{index}:install",
-            package_name=f"acme-plugin-{index}",
+            package_name=f"example-plugin-{index}",
             package_version=f"1.{index}.0",
         ):
             registry.mcp_interceptor(descriptor)
@@ -627,7 +627,7 @@ async def test_required_interceptor_is_attributed_healthy_and_ready() -> None:
     )
     entry = next(item for item in manifest.capabilities if item.capability_type == "mcp_interceptor")
     assert entry.capability_id == "mcp_interceptor:credential_broker"
-    assert entry.package_name == "acme-plugin-0"
+    assert entry.package_name == "example-plugin-0"
     assert entry.package_version == "1.0.0"
     assert entry.operator_required is True
     assert (await monitor.readiness()).status == "ready"

@@ -103,7 +103,7 @@ async def test_concurrent_readiness_requests_share_one_health_probe_and_cache() 
     registry = ExtensionRegistry()
     with registry.attributed_to(
         "secret.module:install",
-        package_name="acme-policy",
+        package_name="example-policy",
         package_version="1.0.0",
     ):
         registry.origin_contributor(
@@ -151,7 +151,7 @@ async def test_required_authorization_and_constraints_health_fail_closed_while_o
     registry = ExtensionRegistry()
     with registry.attributed_to(
         "fixture:install",
-        package_name="acme-authority",
+        package_name="example-authority",
         package_version="2.0.0",
     ):
         registry.authorization_provider(

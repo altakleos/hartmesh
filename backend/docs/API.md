@@ -868,6 +868,11 @@ Lifecycle event types are exactly `accepted`, `started`,
 `state_version` and commits its matching safe event atomically; the run row,
 not the journal, remains authoritative.
 
+Polling either observation route is the supported durable evidence path; no event sink or
+broker is required for correctness. A clarification request completes its current invocation
+successfully, and the answer starts a new invocation on the same thread. The v1 lifecycle does
+not define `input_required` or same-invocation suspension/resumption.
+
 Success status mapping is `201` for `created`, `202` for cancellation
 `requested`, and `200` for `known`, observations, capabilities,
 `already_requested`, and `already_terminal`. Failures use `403 denied` only

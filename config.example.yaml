@@ -2595,18 +2595,18 @@ authorization:
 required_capabilities: []
 # Example required MCP credential/evidence preparation boundary:
 # required_capabilities:
-#   - mcp_interceptor:acme.credential_broker
+#   - mcp_interceptor:example.credential_broker
 #
 # plugins:
-#   - use: acme_request_observer:install
+#   - use: example_request_observer:install
 #     config:
 #       enabled: true
 #       placement: model_logical
-#   - use: acme_tool_observer:install
+#   - use: example_tool_observer:install
 #     config:
 #       enabled: true
 #       placement: tool_raw
 #   # `required: true` turns a load failure into a startup failure. Use it for
 #   # packages whose absence changes behaviour rather than just observability.
-#   - use: acme_required_middleware:install
+#   - use: example_required_middleware:install
 #     required: true

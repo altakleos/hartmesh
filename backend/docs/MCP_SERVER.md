@@ -180,11 +180,11 @@ plugin under top-level `config.yaml -> plugins` and require its stable contribut
 
 ```yaml
 plugins:
-  - use: acme_mcp_credentials:install
+  - use: example_mcp_credentials:install
     required: true
 
 required_capabilities:
-  - mcp_interceptor:acme.credential_broker
+  - mcp_interceptor:example.credential_broker
 ```
 
 The Gateway Capability Host owns this boundary. For every protected MCP call it first uses

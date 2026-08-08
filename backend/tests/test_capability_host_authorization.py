@@ -68,7 +68,7 @@ def test_public_factory_descriptor_is_typed_versioned_and_frozen():
             return list(candidates)
 
     descriptor = AuthorizationProviderFactory(
-        contribution_id="acme.authorization",
+        contribution_id="example.authorization",
         capability_api_version=AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION,
         factory=_Provider,
         kind="authorization_provider",
@@ -86,7 +86,7 @@ def test_loader_owns_authorization_factory_package_attribution(monkeypatch):
 
     monkeypatch.setattr(
         "deerflow.extensions.loader._distribution_provenance",
-        lambda install: ("acme-policy", "4.2.1"),
+        lambda install: ("example-policy", "4.2.1"),
     )
     loaded, diagnostics = load_extensions([ExtensionSpec(use="extension_test_fixtures.demo_extensions:install_authorization_provider")])
 
@@ -96,7 +96,7 @@ def test_loader_owns_authorization_factory_package_attribution(monkeypatch):
     assert registration is not None
     assert registration.contribution_id == "fixture.authorization"
     assert registration.source == "extension_test_fixtures.demo_extensions:install_authorization_provider"
-    assert registration.package_name == "acme-policy"
+    assert registration.package_name == "example-policy"
     assert registration.package_version == "4.2.1"
 
 
