@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 from deerflow_runtime_api import (
     CancelInvocationRequest,
     ContextInvocationsQuery,
@@ -288,6 +289,13 @@ class InProcessInvocationRuntime(InvocationRuntimeAPI):
                 user_id=authenticated_service_id,
                 role="service",
                 is_internal=True,
+                identity=InvocationIdentityV1(
+                    effective_subject=EffectiveSubjectV1(
+                        kind="service",
+                        subject_id=authenticated_service_id,
+                        role="service",
+                    )
+                ),
             ),
             source_kind=InternalSourceKind.service,
             trusted_service_id=authenticated_service_id,

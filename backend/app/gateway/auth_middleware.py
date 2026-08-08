@@ -162,6 +162,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             user,
             is_internal=auth_source == AUTH_SOURCE_INTERNAL,
             resolver=getattr(request.app.state, "authorization_provider_resolver", None),
+            request=request,
         )
         request.state.auth = AuthContext(user=user, permissions=permissions)
         token = set_current_user(user)

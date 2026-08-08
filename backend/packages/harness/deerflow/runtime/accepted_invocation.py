@@ -6,13 +6,20 @@ import copy
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
+
+from deerflow_extension_api import InvocationIdentityV1
 
 _DIGEST_VERSION = 1
 _AGENT_REVISION_VERSION = 1
 _DECISION_EVIDENCE_V1 = {"version": 1, "decisions": []}
+
+# Host-internal runtime context keys. Callers may not supply either value;
+# the worker installs them only from the accepted record after its fences pass.
+INVOCATION_IDENTITY_CONTEXT_KEY = "__deerflow_invocation_identity"
+INVOCATION_ORIGIN_CONTEXT_KEY = "__deerflow_invocation_origin"
 
 
 def _canonical_value(value: Any) -> Any:
@@ -68,10 +75,26 @@ class PrincipalProjection:
     oauth_id: str | None = None
     channel_user_id: str | None = None
     is_internal: bool = False
+    identity: InvocationIdentityV1 | None = None
+
+    def __post_init__(self) -> None:
+        identity = self.identity
+        if identity is None:
+            if self.is_internal and (self.channel_user_id is not None or self.role not in {"internal", "service"}):
+                object.__setattr__(self, "is_internal", False)
+            return
+        if not isinstance(identity, InvocationIdentityV1):
+            raise TypeError("identity must be InvocationIdentityV1 or None")
+        subject = identity.effective_subject
+        object.__setattr__(self, "user_id", subject.subject_id)
+        object.__setattr__(self, "role", subject.role)
+        object.__setattr__(self, "oauth_provider", subject.oauth_provider)
+        object.__setattr__(self, "oauth_id", subject.oauth_id)
+        object.__setattr__(self, "is_internal", subject.kind == "service")
 
     def to_json(self) -> dict[str, Any]:
-        return {
-            "version": 1,
+        result = {
+            "version": 2 if self.identity is not None else 1,
             "user_id": self.user_id,
             "role": self.role,
             "oauth_provider": self.oauth_provider,
@@ -79,6 +102,9 @@ class PrincipalProjection:
             "channel_user_id": self.channel_user_id,
             "is_internal": self.is_internal,
         }
+        if self.identity is not None:
+            result["identity"] = self.identity.to_json()
+        return result
 
 
 @dataclass(frozen=True)
@@ -318,6 +344,7 @@ class AcceptedInvocation:
         principal_json = row.get("principal_projection_json")
         if not revision_digest or not isinstance(revision_json, Mapping) or not isinstance(origin_json, Mapping) or not isinstance(principal_json, Mapping):
             return None
+        identity_json = principal_json.get("identity")
         principal = PrincipalProjection(
             user_id=principal_json.get("user_id"),
             role=principal_json.get("role"),
@@ -325,12 +352,19 @@ class AcceptedInvocation:
             oauth_id=principal_json.get("oauth_id"),
             channel_user_id=principal_json.get("channel_user_id"),
             is_internal=bool(principal_json.get("is_internal", False)),
+            identity=(InvocationIdentityV1.from_json(identity_json) if isinstance(identity_json, Mapping) else None),
         )
         origin = InvocationOrigin(
             source_kind=str(origin_json.get("source_kind")),
             references=origin_json.get("references") or {},
             contributor_references=tuple(origin_json.get("contributor_references") or ()),
         )
+        if principal.identity is None and principal.user_id is not None and origin.source_kind in {"native_channel", "scheduled_task"}:
+            # Legacy rows did not distinguish a represented human from the
+            # internal worker that delivered it. Source evidence can safely
+            # remove that historical privilege, but never prove service
+            # authority or reconstruct an acting service.
+            principal = replace(principal, is_internal=False)
         revision = ResolvedAgentRevision(
             agent_id=str(revision_json.get("agent_id") or "default"),
             digest=str(revision_digest),
@@ -358,6 +392,8 @@ class AcceptedInvocation:
 __all__ = [
     "AcceptedInvocation",
     "InvocationOrigin",
+    "INVOCATION_IDENTITY_CONTEXT_KEY",
+    "INVOCATION_ORIGIN_CONTEXT_KEY",
     "PrincipalProjection",
     "ResolvedAgentMaterialV1",
     "ResolvedAgentRevision",

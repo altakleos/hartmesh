@@ -146,10 +146,12 @@ async def test_gateway_create_stream_wait_routes_share_durable_admission(monkeyp
 
 
 def _make_start_request(run_manager: RunManager):
+    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED
+
     store = InMemoryStore()
     return SimpleNamespace(
         headers={},
-        state=SimpleNamespace(auth_source=None),
+        state=SimpleNamespace(auth_source=AUTH_SOURCE_AUTH_DISABLED),
         app=SimpleNamespace(
             state=SimpleNamespace(
                 stream_bridge=SimpleNamespace(),

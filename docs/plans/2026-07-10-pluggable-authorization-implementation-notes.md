@@ -465,6 +465,32 @@ Phase 1 最低验证要求：
 - **延期：** managed credential service、remote plugin runtime、MCP broker 与 generic
   capability registry。
 
+### 2026-08-07 — Invocation subject / acting-service split
+
+- **背景：** 旧 `Principal.is_internal` 同时表达 subject authority 与内部 transport，导致
+  channel worker 代表 human 时可能把 transport trust 误当成 human privilege。
+- **决策（公共契约）：** `deerflow-extension-api==0.7.0` 新增 immutable
+  `InvocationIdentityV1`：`EffectiveSubjectV1` 表示被行使权限的 human/service，optional
+  `ActingServiceV1` 表示已认证的代理/委托 service；provider/connection/chat/event/task 等
+  source evidence 只存在于 sealed Origin。attribute mapping 被递归冻结且 identity 有界、可安全
+  序列化。
+- **决策（四种映射）：** direct human = human/no actor；native channel 与 user-owned schedule =
+  human + channel/scheduler actor；system schedule = scheduler service/no invented human；embedded
+  service = authenticated service subject。所有 trusted actor/source 字段由 host 构造，caller
+  context/config 中的 identity、Origin 与 internal flag 被清除。
+- **决策（传播与证据）：** start/observe/cancel、Origin/run-context contributor、constraints、
+  Layer 1/2 tool authz、required MCP preparation、lead/nested subagent 共用 accepted identity 与
+  final Origin。principal/source digest 与 v2 principal JSON 在同一 admission transaction 中封存。
+- **兼容性：** `Principal.is_internal` 保留为 deprecated view；有 v1 identity 时只由 effective
+  subject kind 决定。legacy principal 若带 channel sender 或 role 非 `service|internal`，flag
+  fail-safe 降为 false，因此旧 provider 可能少获权限但不能把 external human 提升成 internal
+  service。历史 v1 principal projection 可读，不猜 acting service。
+- **证据：** `tests/test_invocation_identity_separation.py`、authorization principal/provider、
+  runtime in-process、MCP、task tool 与 subagent executor 回归测试。
+- **否决方案：** 未把 acting service 塞回 Principal role，未从 Origin/transport 推断 subject，
+  未新增通用 delegation policy 或 caller-writable actor 字段。
+- **延期：** multi-hop delegation chain、external identity directory 与 multi-replica topology。
+
 ### 新记录模板
 
 ```markdown

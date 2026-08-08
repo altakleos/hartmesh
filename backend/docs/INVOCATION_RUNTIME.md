@@ -12,7 +12,8 @@ auxiliary thread operations, not accepted invocations. Each invocation is one no
 Every source constructs an internal launch intent, but caller thread, assistant, agent,
 body context, headers, queries, and metadata remain hints. Before admission the host:
 
-1. authenticates the principal and, for channels, authenticates the provider event, looks
+1. authenticates the effective subject and optional acting service and, for channels,
+   authenticates the provider event, looks
    up the connection, and revalidates its current owner;
 2. resolves the thread, agent, source facts, normalized input, and execution-significant
    options;
@@ -22,11 +23,26 @@ body context, headers, queries, and metadata remain hints. Before admission the 
 5. seals an immutable `AcceptedInvocation` and admits it with the normal active-thread
    conflict rule before attaching one worker.
 
-The accepted object contains a minimal principal projection, sealed Origin, bound
+The accepted object contains a minimal split identity projection, sealed Origin, bound
 thread/context references, resolved agent revision, normalized input/options, immutable
 extension generation, and versioned principal, base-Origin, accepted-context,
 runtime-identity, and contributor-execution digests. Contributors cannot replace host-owned
 principal, thread, agent, source kind, or base-source fields.
+
+Identity has three non-interchangeable parts. `EffectiveSubjectV1` is the human or service
+whose authority the invocation exercises. `ActingServiceV1` is optional and identifies the
+authenticated/delegating service representing that subject. `InvocationOrigin` contains
+only trusted source/transport evidence. Direct humans have no acting service; a channel user
+and user-owned schedule remain human with `channel:<provider>` or `scheduler` as actor; a
+system-owned schedule has service subject `scheduler` and no invented human; and the
+embedded adapter has its authenticated service ID as the service subject. Provider,
+connection, chat, event, and task facts never confer subject authority.
+
+Gateway code builds all three parts after authentication and removes caller-supplied
+identity, actor, Origin, and legacy internal flags. The same immutable identity and final
+Origin flow to Gateway route and start/observe/cancel policy, contributors, constraints,
+tool/MCP policy and preparation, and lead/nested subagents. Their principal and Origin digests are accepted
+evidence persisted in the same admission transaction.
 
 ## Contributor data and redaction
 
@@ -54,6 +70,13 @@ retries can be compared against accepted routing and contributor evidence withou
 today's mutable host state; this internal projector is not returned by the run API.
 Historical null rows remain readable. Auxiliary checkpoint/artifact operation rows carry
 none of these facts.
+
+Principal projection v2 stores the nested v1 split identity. Historical v1 projections
+remain readable, but their legacy `is_internal` flag is treated conservatively: an
+attributed channel user or a principal whose role is not `service`/`internal` is never
+promoted. New providers should use `Principal.identity`; older providers continue to receive
+the flattened fields and a compatibility boolean that can remove privilege but cannot grant
+service authority to a represented human.
 
 ## Invocation-operation authorization
 
@@ -88,7 +111,7 @@ same provider snapshot used by route, resource, tool, model, skill, and agent as
 
 ## Restrictive invocation constraints
 
-`deerflow-extension-api` 0.6.0 defines one optional, singular
+`deerflow-extension-api` 0.7.0 defines one optional, singular
 `InvocationConstraintsProvider`. Gateway invokes it only for a genuinely absent invocation,
 after invocation-start authorization allows and before atomic acceptance. The request binds
 the canonical request digest and pinned agent-revision digest. The strict v1 projection may
@@ -182,7 +205,8 @@ retained row is deleted.
 `deerflow-runtime-api==0.1.0` owns the frozen, strict, standard-library-only
 `deerflow.runtime/v1` records. `app.runtime.api.build_in_process_runtime_api()`
 binds those records to the Gateway application and one already-authenticated
-service ID. The adapter derives the service principal, Origin, and canonical
+service ID. The adapter derives one service effective subject (used consistently for
+start, observe, and cancel), Origin, and canonical
 hashed scope; a caller can provide only an external key, thread ID, optional
 agent hint, strict graph/resume input, and the finite v1 execution options.
 

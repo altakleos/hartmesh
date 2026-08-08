@@ -10,7 +10,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from deerflow_extension_api import InvocationIdentityV1
+
 from deerflow.authz.provider import Principal
+from deerflow.runtime.accepted_invocation import INVOCATION_IDENTITY_CONTEXT_KEY
 
 
 def normalize_authz_attributes(raw: Any) -> dict[str, Any]:
@@ -50,6 +53,15 @@ def build_principal_from_context(
     resolved_role = context.get("user_role")
     if resolved_role is None or resolved_role == "":
         resolved_role = default_role
+
+    identity = context.get(INVOCATION_IDENTITY_CONTEXT_KEY)
+    if identity is not None and not isinstance(identity, InvocationIdentityV1):
+        raise TypeError("accepted invocation identity must be InvocationIdentityV1")
+    if identity is not None:
+        return Principal.from_identity(
+            identity,
+            channel_user_id=context.get("channel_user_id"),
+        )
 
     return Principal(
         user_id=context.get("user_id"),

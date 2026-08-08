@@ -4,6 +4,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from deerflow_extension_api import (
+    ActingServiceV1,
+    EffectiveSubjectV1,
+    InvocationIdentityV1,
+)
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -127,7 +132,34 @@ async def test_route_permissions_use_async_provider_and_trusted_principal(monkey
     assert principal.role == "user"
     assert principal.oauth_provider == "github"
     assert principal.oauth_id == "oauth-456"
-    assert principal.is_internal is True
+    assert principal.is_internal is False
+
+
+@pytest.mark.asyncio
+async def test_route_permissions_preserve_split_human_and_acting_service(
+    monkeypatch,
+):
+    provider = _RecordingProvider()
+    resolver = _enable_authorization(monkeypatch, provider)
+    identity = InvocationIdentityV1(
+        effective_subject=EffectiveSubjectV1(
+            kind="human",
+            subject_id="owner-1",
+            role="member",
+        ),
+        acting_service=ActingServiceV1(service_id="gateway-internal"),
+    )
+
+    await resolve_route_permissions(
+        _user(system_role="internal"),
+        is_internal=True,
+        resolver=resolver,
+        identity=identity,
+    )
+
+    assert all(request.principal.identity is identity for request in provider.requests)
+    assert all(request.principal.user_id == "owner-1" for request in provider.requests)
+    assert all(request.principal.is_internal is False for request in provider.requests)
 
 
 @pytest.mark.asyncio
@@ -229,7 +261,12 @@ async def test_authenticate_uses_route_permission_resolution(monkeypatch):
 
     assert auth_context.user is user
     assert auth_context.permissions == [Permissions.THREADS_READ]
-    permission_resolver.assert_awaited_once_with(user, is_internal=False, resolver=None)
+    permission_resolver.assert_awaited_once_with(
+        user,
+        is_internal=False,
+        resolver=None,
+        request=request,
+    )
 
 
 def _make_middleware_app() -> FastAPI:
@@ -260,7 +297,9 @@ def test_auth_middleware_stamps_provider_derived_permissions(monkeypatch):
 
     assert permission_resolver.await_count == 2
     for call in permission_resolver.await_args_list:
-        assert call.kwargs == {"is_internal": False, "resolver": None}
+        assert call.kwargs["is_internal"] is False
+        assert call.kwargs["resolver"] is None
+        assert call.kwargs["request"] is not None
 
 
 def test_auth_middleware_marks_internal_route_principal(monkeypatch):
@@ -274,7 +313,9 @@ def test_auth_middleware_marks_internal_route_principal(monkeypatch):
 
     assert response.status_code == 200
     permission_resolver.assert_awaited_once()
-    assert permission_resolver.await_args.kwargs == {"is_internal": True, "resolver": None}
+    assert permission_resolver.await_args.kwargs["is_internal"] is True
+    assert permission_resolver.await_args.kwargs["resolver"] is None
+    assert permission_resolver.await_args.kwargs["request"] is not None
 
 
 # ── Provider cache tests ────────────────────────────────────────────────

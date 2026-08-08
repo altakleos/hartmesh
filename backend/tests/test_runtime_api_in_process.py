@@ -144,6 +144,9 @@ async def test_observe_maps_only_fixed_public_snapshot_and_event_fields() -> Non
     assert observation.events[0]["cursor"] == encode_lifecycle_cursor(2)
     assert "owner_scope" not in observation.events[0]
     assert runtime.query.principal.user_id == "service-1"
+    assert runtime.query.principal.identity.effective_subject.kind == "service"
+    assert runtime.query.principal.identity.effective_subject.subject_id == "service-1"
+    assert runtime.query.principal.identity.acting_service is None
     assert runtime.query.limit == 25
 
 
@@ -253,6 +256,8 @@ async def test_control_is_version_fenced_and_maps_every_finite_outcome() -> None
     assert [receipt.disposition.value for receipt in receipts] == [outcome.value for outcome in CancellationRequestOutcome]
     assert runtime.cancel_request.expected_state_version == 2
     assert runtime.cancel_request.principal.user_id == "service-1"
+    assert runtime.cancel_request.principal.identity.effective_subject.kind == "service"
+    assert runtime.cancel_request.principal.identity.effective_subject.subject_id == "service-1"
 
 
 def test_capabilities_are_exact_and_do_not_advertise_http_or_retirement() -> None:

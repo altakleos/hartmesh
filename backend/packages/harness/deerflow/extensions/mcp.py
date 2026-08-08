@@ -63,6 +63,7 @@ class McpInvocationFacts:
                 oauth_id=principal.oauth_id,
                 channel_user_id=principal.channel_user_id,
                 is_internal=principal.is_internal,
+                identity=principal.identity,
             ),
             origin=SealedOriginV1(
                 source_kind=origin.source_kind,
@@ -288,6 +289,8 @@ class McpInterceptorHost:
                 or principal.oauth_id != facts.principal.oauth_id
                 or principal.channel_user_id != facts.principal.channel_user_id
                 or principal.is_internal is not facts.principal.is_internal
+                or principal.identity != facts.principal.identity
+                or authz_request.context.get("origin") != facts.origin
                 or authz_request.context.get("thread_id") != facts.thread_id
                 or authz_request.context.get("run_id") != facts.run_id
             ):

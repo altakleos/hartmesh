@@ -430,6 +430,13 @@ def _build_runtime_context(
     from deerflow.extensions.mcp import MCP_INVOCATION_FACTS_CONTEXT_KEY
 
     runtime_ctx.pop(MCP_INVOCATION_FACTS_CONTEXT_KEY, None)
+    from deerflow.runtime.accepted_invocation import (
+        INVOCATION_IDENTITY_CONTEXT_KEY,
+        INVOCATION_ORIGIN_CONTEXT_KEY,
+    )
+
+    runtime_ctx.pop(INVOCATION_IDENTITY_CONTEXT_KEY, None)
+    runtime_ctx.pop(INVOCATION_ORIGIN_CONTEXT_KEY, None)
     return runtime_ctx
 
 
@@ -507,6 +514,33 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             existing_context[MCP_INVOCATION_FACTS_CONTEXT_KEY] = runtime_context[MCP_INVOCATION_FACTS_CONTEXT_KEY]
         else:
             existing_context.pop(MCP_INVOCATION_FACTS_CONTEXT_KEY, None)
+        from deerflow.runtime.accepted_invocation import (
+            INVOCATION_IDENTITY_CONTEXT_KEY,
+            INVOCATION_ORIGIN_CONTEXT_KEY,
+        )
+
+        for internal_key in (
+            INVOCATION_IDENTITY_CONTEXT_KEY,
+            INVOCATION_ORIGIN_CONTEXT_KEY,
+        ):
+            if internal_key in runtime_context:
+                existing_context[internal_key] = runtime_context[internal_key]
+            else:
+                existing_context.pop(internal_key, None)
+        if INVOCATION_ORIGIN_CONTEXT_KEY in runtime_context:
+            for compatibility_key in (
+                "user_id",
+                "user_role",
+                "oauth_provider",
+                "oauth_id",
+                "channel_user_id",
+                "is_internal",
+                "authz_attributes",
+            ):
+                if compatibility_key in runtime_context:
+                    existing_context[compatibility_key] = runtime_context[compatibility_key]
+                else:
+                    existing_context.pop(compatibility_key, None)
         return
 
     config["context"] = dict(runtime_context)
@@ -947,6 +981,44 @@ async def run_agent(
             runtime_ctx["accepted_extension_generation"] = accepted.extension_generation
             if accepted.extension_manifest_digest is not None:
                 runtime_ctx["accepted_extension_manifest_digest"] = accepted.extension_manifest_digest
+            from deerflow_extension_api import SafeContextReferenceV1, SealedOriginV1
+            from deerflow_extension_api.identity import thaw_identity_value
+
+            from deerflow.runtime.accepted_invocation import (
+                INVOCATION_IDENTITY_CONTEXT_KEY,
+                INVOCATION_ORIGIN_CONTEXT_KEY,
+            )
+
+            if accepted.principal.identity is not None:
+                runtime_ctx[INVOCATION_IDENTITY_CONTEXT_KEY] = accepted.principal.identity
+                runtime_ctx["authz_attributes"] = thaw_identity_value(accepted.principal.identity.effective_subject.attributes)
+            else:
+                runtime_ctx.pop("authz_attributes", None)
+            for field_name, field_value in (
+                ("user_id", accepted.principal.user_id),
+                ("user_role", accepted.principal.role),
+                ("oauth_provider", accepted.principal.oauth_provider),
+                ("oauth_id", accepted.principal.oauth_id),
+                ("channel_user_id", accepted.principal.channel_user_id),
+            ):
+                if field_value is None:
+                    runtime_ctx.pop(field_name, None)
+                else:
+                    runtime_ctx[field_name] = field_value
+            runtime_ctx["is_internal"] = accepted.principal.is_internal
+            runtime_ctx[INVOCATION_ORIGIN_CONTEXT_KEY] = SealedOriginV1(
+                source_kind=accepted.origin.source_kind,
+                references=tuple(
+                    SafeContextReferenceV1(
+                        key=key,
+                        value=value,
+                        storage_class="persistable",
+                        purpose="correlation",
+                    )
+                    for key, value in sorted(accepted.origin.references.items())
+                ),
+                digest=accepted.base_origin_digest,
+            )
             from deerflow.extensions.mcp import (
                 MCP_INVOCATION_FACTS_CONTEXT_KEY,
                 McpInvocationFacts,

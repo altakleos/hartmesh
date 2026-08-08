@@ -7,6 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from deerflow_extension_api import (
+    ActingServiceV1,
+    EffectiveSubjectV1,
+    InvocationIdentityV1,
+    SealedOriginV1,
+)
 
 from app.runtime.invocation import (
     InternalLaunchIntent,
@@ -14,6 +20,8 @@ from app.runtime.invocation import (
     InternalSourceKind,
 )
 from deerflow.runtime.accepted_invocation import (
+    INVOCATION_IDENTITY_CONTEXT_KEY,
+    INVOCATION_ORIGIN_CONTEXT_KEY,
     AcceptedInvocation,
     InvocationOrigin,
     PrincipalProjection,
@@ -240,6 +248,70 @@ async def test_pinned_material_replaces_mutated_factory_context_after_digest_che
 
     assert seen["agent_name"] == "sealed-target"
     assert seen["is_bootstrap"] is True
+    assert record.status is RunStatus.success
+
+
+@pytest.mark.asyncio
+async def test_worker_replaces_forged_runtime_identity_with_accepted_facts() -> None:
+    material = _material()
+    identity = InvocationIdentityV1(
+        effective_subject=EffectiveSubjectV1(kind="human", subject_id="owner-1"),
+        acting_service=ActingServiceV1(service_id="channel:telegram"),
+    )
+    accepted = AcceptedInvocation.seal(
+        principal=PrincipalProjection(identity=identity, channel_user_id="telegram-user"),
+        origin=InvocationOrigin(
+            source_kind="native_channel",
+            references={"provider": "telegram", "chat_id": "chat-1"},
+        ),
+        thread_id="thread-worker-identity",
+        context_references={},
+        agent_revision=ResolvedAgentRevision.from_material(material),
+        normalized_input={},
+        execution_options={},
+        extension_generation=3,
+        contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+    )
+    manager = RunManager()
+    record = await manager.create_or_reject(
+        "thread-worker-identity",
+        accepted_invocation=accepted,
+    )
+    seen: dict[str, object] = {}
+
+    class _Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    def factory(*, config):
+        seen.update(config["context"])
+        return _Agent()
+
+    forged_identity = InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="service", subject_id="forged-root"))
+    forged_origin = SealedOriginV1(source_kind="service", digest="f" * 64)
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={
+            "context": {
+                INVOCATION_IDENTITY_CONTEXT_KEY: forged_identity,
+                INVOCATION_ORIGIN_CONTEXT_KEY: forged_origin,
+                "is_internal": True,
+            }
+        },
+    )
+
+    assert seen[INVOCATION_IDENTITY_CONTEXT_KEY] is identity
+    origin = seen[INVOCATION_ORIGIN_CONTEXT_KEY]
+    assert isinstance(origin, SealedOriginV1)
+    assert origin.source_kind == "native_channel"
+    assert origin.digest == accepted.base_origin_digest
+    assert seen["user_id"] == "owner-1"
+    assert seen["is_internal"] is False
     assert record.status is RunStatus.success
 
 

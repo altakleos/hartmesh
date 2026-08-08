@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 
 from app.runtime.invocation import (
     InternalCancelReceipt,
@@ -326,7 +327,16 @@ async def test_thread_http_facade_observes_and_cancels_through_runtime(
     assert cancelled.status_code == 202
     assert observe_run.await_args_list[0].args == (
         "run-1",
-        InvocationPrincipal(user_id="owner-1", visibility_prevalidated=True),
+        InvocationPrincipal(
+            user_id="owner-1",
+            visibility_prevalidated=True,
+            identity=InvocationIdentityV1(
+                effective_subject=EffectiveSubjectV1(
+                    kind="human",
+                    subject_id="owner-1",
+                )
+            ),
+        ),
     )
     assert len(observe_run.await_args_list) == 1
     cancel_run.assert_awaited_once_with(
@@ -336,6 +346,12 @@ async def test_thread_http_facade_observes_and_cancels_through_runtime(
             principal=InvocationPrincipal(
                 user_id="owner-1",
                 visibility_prevalidated=True,
+                identity=InvocationIdentityV1(
+                    effective_subject=EffectiveSubjectV1(
+                        kind="human",
+                        subject_id="owner-1",
+                    )
+                ),
             ),
             thread_id="thread-1",
         )

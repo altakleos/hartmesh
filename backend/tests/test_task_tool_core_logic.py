@@ -404,6 +404,58 @@ def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
     assert captured["executor_kwargs"]["channel_user_id"] == "ou_group_sender_1"
 
 
+def test_task_tool_forwards_sealed_identity_and_origin_to_executor(monkeypatch):
+    """Delegation retains subject authority, service attribution, and Origin."""
+    from deerflow_extension_api import ActingServiceV1, EffectiveSubjectV1, InvocationIdentityV1, SealedOriginV1
+
+    from deerflow.runtime.accepted_invocation import (
+        INVOCATION_IDENTITY_CONTEXT_KEY,
+        INVOCATION_ORIGIN_CONTEXT_KEY,
+    )
+
+    identity = InvocationIdentityV1(
+        effective_subject=EffectiveSubjectV1(kind="human", subject_id="channel-owner"),
+        acting_service=ActingServiceV1(service_id="channel:telegram"),
+    )
+    origin = SealedOriginV1(source_kind="native_channel", digest="a" * 64)
+    runtime = _make_runtime()
+    runtime.context[INVOCATION_IDENTITY_CONTEXT_KEY] = identity
+    runtime.context[INVOCATION_ORIGIN_CONTEXT_KEY] = origin
+    runtime.context["is_internal"] = True
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(
+        runtime=runtime,
+        description="test",
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-identity",
+    )
+
+    assert captured["executor_kwargs"]["invocation_identity"] is identity
+    assert captured["executor_kwargs"]["invocation_origin"] is origin
+    assert captured["executor_kwargs"]["is_internal"] is False
+
+
 def test_task_tool_forwards_is_internal_true_to_executor(monkeypatch):
     """is_internal=True must propagate to SubagentExecutor."""
     runtime = _make_runtime()

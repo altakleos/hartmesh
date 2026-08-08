@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Literal, Protocol
 
-from deerflow_extension_api import ConstraintProjectionV1
+from deerflow_extension_api import ConstraintProjectionV1, InvocationIdentityV1
 
 from app.runtime.idempotency import CanonicalCallerIntent
 from deerflow.runtime import CancelOutcome, DisconnectMode, RunRecord
@@ -139,6 +139,22 @@ class InvocationPrincipal:
     channel_user_id: str | None = None
     is_internal: bool = False
     visibility_prevalidated: bool = False
+    identity: InvocationIdentityV1 | None = None
+
+    def __post_init__(self) -> None:
+        identity = self.identity
+        if identity is None:
+            if self.is_internal and (self.channel_user_id is not None or self.role not in {"internal", "service"}):
+                object.__setattr__(self, "is_internal", False)
+            return
+        if not isinstance(identity, InvocationIdentityV1):
+            raise TypeError("identity must be InvocationIdentityV1 or None")
+        subject = identity.effective_subject
+        object.__setattr__(self, "user_id", subject.subject_id)
+        object.__setattr__(self, "role", subject.role)
+        object.__setattr__(self, "oauth_provider", subject.oauth_provider)
+        object.__setattr__(self, "oauth_id", subject.oauth_id)
+        object.__setattr__(self, "is_internal", subject.kind == "service")
 
 
 class InvocationAuthorizationOutcome(StrEnum):

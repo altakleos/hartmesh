@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -92,7 +92,24 @@ def _client(user):
     run_manager = MagicMock()
     run_manager.create_or_reject = AsyncMock(side_effect=ConflictError("sentinel: owner check passed"))
     app.state.run_manager = run_manager
-    with TestClient(app) as client:
+
+    async def resolve_owner(_request, owner_user_id):
+        if not owner_user_id:
+            return None
+        return SimpleNamespace(
+            id=owner_user_id,
+            system_role="user",
+            oauth_provider=None,
+            oauth_id=None,
+        )
+
+    with (
+        patch(
+            "app.gateway.services.resolve_trusted_internal_owner_for_attribution",
+            side_effect=resolve_owner,
+        ),
+        TestClient(app) as client,
+    ):
         yield client, run_manager.create_or_reject
 
 

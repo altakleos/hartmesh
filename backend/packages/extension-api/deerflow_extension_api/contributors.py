@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
 from deerflow_extension_api.health import CapabilityHealthProbe
+from deerflow_extension_api.identity import InvocationIdentityV1
 
 ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION = "1.0"
 RUN_CONTEXT_CONTRIBUTOR_CAPABILITY_API_VERSION = "1.0"
@@ -116,6 +117,12 @@ class OriginContributionRequestV1:
     source_kind: str
     authenticated_subject_reference: str | None = None
     source_references: tuple[SafeContextReferenceV1, ...] = ()
+    identity: InvocationIdentityV1 | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_references", tuple(self.source_references))
+        if self.identity is not None and not isinstance(self.identity, InvocationIdentityV1):
+            raise TypeError("identity must be InvocationIdentityV1 or None")
 
 
 @dataclass(frozen=True)
@@ -136,6 +143,22 @@ class PrincipalProjectionV1:
     oauth_id: str | None = None
     channel_user_id: str | None = None
     is_internal: bool = False
+    identity: InvocationIdentityV1 | None = None
+
+    def __post_init__(self) -> None:
+        identity = self.identity
+        if identity is None:
+            if self.is_internal and (self.channel_user_id is not None or self.role not in {"internal", "service"}):
+                object.__setattr__(self, "is_internal", False)
+            return
+        if not isinstance(identity, InvocationIdentityV1):
+            raise TypeError("identity must be InvocationIdentityV1 or None")
+        subject = identity.effective_subject
+        object.__setattr__(self, "user_id", subject.subject_id)
+        object.__setattr__(self, "role", subject.role)
+        object.__setattr__(self, "oauth_provider", subject.oauth_provider)
+        object.__setattr__(self, "oauth_id", subject.oauth_id)
+        object.__setattr__(self, "is_internal", subject.kind == "service")
 
 
 @dataclass(frozen=True)
