@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any
 
 from deerflow_runtime_api import (
@@ -29,11 +30,13 @@ from app.gateway.services import (
     build_invocation_runtime,
     invocation_principal_from_request,
 )
-from app.runtime.api import InvocationRuntimeAPI
+from app.runtime.api import InvocationRuntimeAPI, unexpected_adapter_failure
+from app.runtime.deployment import DeploymentReportPort
 from app.runtime.invocation import InternalSourceKind
 from deerflow.utils.thread_id import ThreadId
 
 router = APIRouter(prefix="/api/runtime/v1", tags=["runtime"])
+logger = logging.getLogger(__name__)
 
 
 async def get_runtime_api(request: Request) -> DurableInvocationPort:
@@ -107,7 +110,10 @@ def _paging_values(request: Request) -> tuple[str | None, int] | JSONResponse:
 
 
 @router.get("/capabilities")
-async def runtime_capabilities(request: Request) -> JSONResponse:
+async def runtime_capabilities(
+    request: Request,
+    runtime: Annotated[DurableInvocationPort, Depends(get_runtime_api)],
+) -> JSONResponse:
     try:
         await require_admin_user(
             request,
@@ -115,18 +121,35 @@ async def runtime_capabilities(request: Request) -> JSONResponse:
         )
     except HTTPException as exc:
         return runtime_error_response(exc.status_code, FailureCode.denied)
-    payload = RuntimeCapabilities().to_dict()
-    manifest = getattr(request.app.state, "capability_manifest", None)
-    monitor = getattr(request.app.state, "capability_health_monitor", None)
-    if manifest is not None and monitor is not None:
-        from deerflow.extensions.capabilities import (
-            capability_health_to_dict,
-            capability_manifest_to_dict,
-        )
+    try:
+        capabilities = runtime.capabilities()
+    except Exception:
+        return _runtime_failure_response(unexpected_adapter_failure("capabilities"))
+    if not isinstance(capabilities, RuntimeCapabilities):
+        return _runtime_failure_response(unexpected_adapter_failure("capabilities", exc_info=False))
+    return JSONResponse(content=capabilities.to_dict())
 
-        payload["capability_manifest"] = capability_manifest_to_dict(manifest)
-        payload["capability_health"] = capability_health_to_dict(await monitor.health())
-    return JSONResponse(content=payload)
+
+@router.get("/deployment")
+async def runtime_deployment_report(request: Request) -> JSONResponse:
+    """Return deployment-only capability and durability facts to admins."""
+
+    try:
+        await require_admin_user(
+            request,
+            detail="Runtime deployment reports require administrator access",
+        )
+    except HTTPException as exc:
+        return runtime_error_response(exc.status_code, FailureCode.denied)
+    reporter = getattr(request.app.state, "deployment_reporter", None)
+    if not isinstance(reporter, DeploymentReportPort):
+        return runtime_error_response(503, FailureCode.indeterminate)
+    try:
+        report = await reporter.deployment_report()
+    except Exception:
+        logger.exception("Runtime deployment report collection failed")
+        return runtime_error_response(503, FailureCode.indeterminate)
+    return JSONResponse(content=report.to_dict())
 
 
 @router.post("/invocations/ensure")

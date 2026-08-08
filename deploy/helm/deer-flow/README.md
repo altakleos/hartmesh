@@ -203,12 +203,16 @@ curl http://localhost:2026/health          # gateway health via nginx
 ```
 
 The Gateway pod uses `GET /ready` for readiness and `GET /health` for liveness.
-Readiness includes operator-required authoritative capability health and lifecycle-cursor
-integrity, but its unauthenticated body is deliberately only `{"status":"ready"}` or
-`{"status":"not_ready"}`. Safe provenance and diagnostics are available only to an
-authenticated administrator at `GET /api/runtime/v1/capabilities`. Plugin registrations
-and their manifest generation are startup-only; deploy a restart to adopt changes, while
-in-flight invocations stay pinned to the generation they accepted.
+Readiness includes operator-required authoritative capability health, lifecycle-cursor
+integrity, and the configured deployment durability promise, but its unauthenticated body
+is deliberately only `{"status":"ready"}` or `{"status":"not_ready"}`. The chart selects
+`deployment.profile: durable_production`, uses PostgreSQL shared state, and stamps the
+Gateway image reference for bounded provenance. Safe provenance, persistence tier,
+qualification state, and diagnostics are available only to an authenticated administrator
+at `GET /api/runtime/v1/deployment`; portable runtime support remains the strict
+`GET /api/runtime/v1/capabilities` record. Plugin registrations and their manifest
+generation are startup-only; deploy a restart to adopt changes, while in-flight invocations
+stay pinned to the generation they accepted.
 
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 

@@ -290,6 +290,10 @@ For persistent deployments, configure `database.backend` as `sqlite` or
 `postgres`. The selected backend is shared by the LangGraph checkpointer,
 LangGraph Store, and DeerFlow application data. The deprecated `checkpointer`
 section, when present, overrides the first two for backward compatibility.
+Set `deployment.profile: durable_production` to make the Gateway refuse
+process-local invocation state at startup and readiness. The default
+`local_development` profile keeps memory storage convenient but does not claim
+restart or pod-loss durability.
 
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
@@ -843,8 +847,12 @@ liveness, while unauthenticated `GET /ready` returns only `{"status":"ready"}` (
 `{"status":"not_ready"}` (503) and fails closed for unhealthy operator-required
 capabilities or corrupt lifecycle ordering state. Administrators can inspect the safe
 manifest and separately labelled live health through
-`GET /api/runtime/v1/capabilities`; plugin configuration, secrets, identities, and request
-data are excluded.
+`GET /api/runtime/v1/deployment`; that report also distinguishes lifecycle atomicity
+from process-local, node-durable, and shared-durable storage, exposes bounded image/source
+provenance when supplied, and says `unqualified` unless completed evidence exists. The
+portable `GET /api/runtime/v1/capabilities` response remains the exact strict
+transport-independent runtime record. Plugin configuration, secrets, identities, raw
+exceptions, and request data are excluded.
 
 Trusted operator plugins can also provide required MCP credential/evidence preparation.
 Declare `mcp_interceptor:<contribution-id>` in startup-only `required_capabilities`; the
@@ -1115,8 +1123,9 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 Authenticated integrations can use the versioned durable runtime surface at
 `/api/runtime/v1` without depending on the LangGraph compatibility routes:
 
-- `GET /capabilities` (administrator only; includes the immutable capability manifest and
-  separate current health snapshot)
+- `GET /capabilities` (administrator only; exact portable runtime support)
+- `GET /deployment` (administrator only; manifest/health, persistence,
+  provenance, and qualification truth)
 - `POST /invocations/ensure`
 - `GET /invocations/{run_id}`
 - `GET /contexts/{thread_id}/invocations`
@@ -1150,8 +1159,11 @@ Each accepted invocation is the normal durable run row itself; checkpoint and
 artifact reservation rows are internal operations and never appear in this API.
 `GET /health` is liveness, while `GET /ready` reports only ready/not-ready and
 includes operator-required authorization, constraints, MCP preparation, and
-lifecycle ordering in its decision. Administrators obtain the immutable
-capability manifest and separate live-health snapshot from `/capabilities`.
+lifecycle ordering plus the configured durability promise in its decision.
+Administrators obtain the immutable capability manifest, separate live-health
+snapshot, bounded provenance, persistence tier, and qualification state from
+`/deployment`; `/capabilities` remains strict and transport-identical to the
+in-process Adapter.
 
 This surface does not promise context export/retirement, dynamic outbound
 governance, scheduler HA, a general multi-replica Gateway ownership model, an

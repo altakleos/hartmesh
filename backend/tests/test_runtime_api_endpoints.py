@@ -16,6 +16,7 @@ from deerflow_runtime_api import (
     InvocationEnsureReceipt,
     InvocationObservation,
     InvocationQuery,
+    RuntimeCapabilities,
     RuntimeFailure,
 )
 from fastapi.testclient import TestClient
@@ -36,6 +37,7 @@ def _admin_user() -> User:
 def test_admin_can_read_exact_runtime_capabilities() -> None:
     app = make_authed_test_app(user_factory=_admin_user)
     app.include_router(runtime_api.router)
+    app.dependency_overrides[runtime_api.get_runtime_api] = lambda: _CapabilitiesAdapter()
 
     with TestClient(app) as client:
         response = client.get("/api/runtime/v1/capabilities")
@@ -51,6 +53,11 @@ def test_admin_can_read_exact_runtime_capabilities() -> None:
         "context_export": False,
         "context_retirement": False,
     }
+
+
+class _CapabilitiesAdapter:
+    def capabilities(self) -> RuntimeCapabilities:
+        return RuntimeCapabilities()
 
 
 def _ensure_payload() -> dict:
@@ -235,6 +242,7 @@ def test_gateway_mounts_runtime_routes_without_replacing_legacy_runs() -> None:
     paths = {route.path for route in create_app().routes}
 
     assert "/api/runtime/v1/capabilities" in paths
+    assert "/api/runtime/v1/deployment" in paths
     assert "/api/runtime/v1/invocations/ensure" in paths
     assert "/api/runtime/v1/invocations/{run_id}" in paths
     assert "/api/runtime/v1/contexts/{thread_id}/invocations" in paths

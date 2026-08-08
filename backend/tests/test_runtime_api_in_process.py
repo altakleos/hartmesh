@@ -2,22 +2,54 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 import pytest
 from deerflow_runtime_api import (
     CancelInvocationRequest,
     ContextInvocationsQuery,
+    FailureCode,
     GraphInputV1,
     InvocationEnsureRequest,
     InvocationOptionsV1,
     InvocationQuery,
+    RuntimeFailure,
 )
 from support.runtime_api_conformance import assert_runtime_adapter_conformance
 
 from app.runtime.invocation import InternalLaunchReceipt
 from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 from deerflow.runtime.runs.store.base import CancellationRequestOutcome, LifecycleType
+
+
+@pytest.mark.anyio
+async def test_unexpected_adapter_failure_is_publicly_bounded_and_internally_correlated(
+    caplog,
+) -> None:
+    from app.runtime.api import InProcessInvocationRuntime
+
+    class ExplodingRuntime:
+        async def observe_invocation_lifecycle(self, _query):
+            raise RuntimeError("database password=never-return-this")
+
+    adapter = InProcessInvocationRuntime(
+        ExplodingRuntime(),
+        authenticated_service_id="service-1",
+    )
+
+    with caplog.at_level(logging.ERROR, logger="app.runtime.api"):
+        result = await adapter.observe(InvocationQuery(run_id="run-1"))
+
+    assert isinstance(result, RuntimeFailure)
+    assert result.code is FailureCode.indeterminate
+    public = result.to_dict()
+    assert "never-return-this" not in str(public)
+    correlation_id = public["detail"]["correlation_id"]
+    assert len(correlation_id) == 32
+    matching = [record for record in caplog.records if getattr(record, "correlation_id", None) == correlation_id]
+    assert len(matching) == 1
+    assert matching[0].runtime_operation == "observe"
 
 
 def _record(*, status: RunStatus = RunStatus.pending, state_version: int = 1) -> RunRecord:

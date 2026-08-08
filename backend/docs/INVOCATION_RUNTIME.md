@@ -241,6 +241,18 @@ control retain owner/admin visibility, and every non-success response uses the
 bounded versioned `runtime.error` envelope. The existing LangGraph-compatible
 create/stream/wait routes remain unchanged.
 
+`runtime.capabilities` is one strict portable record and is byte-shape identical
+across in-process and HTTP Adapters. It never contains deployment state. The
+administrator-only `GET /api/runtime/v1/deployment` uses a separate
+`deerflow.deployment/v1` Interface for extension manifest/health, bounded
+provenance, persistence tier, and explicit qualification status. Persistence
+atomicity is independent from restart/pod-loss durability: memory is
+`process_local`, SQLite is `node_durable`, and PostgreSQL is `shared_durable`.
+The `durable_production` deployment profile fails startup/readiness with
+process-local state; `local_development` remains an explicit convenience profile.
+Unexpected Adapter exceptions become bounded indeterminate failures with a
+correlation ID matching a safe internal diagnostic; exception text is never public.
+
 Lifecycle observations return a fixed safe snapshot projection plus authoritative
 events, opaque `next_cursor`, the `minimum_available_cursor`, and a captured
 `read_fence_cursor`. Visibility and optional observe authorization run before
@@ -290,8 +302,10 @@ New accepted invocations pin that generation/digest, while live health is a sepa
 snapshot and cannot change it. `GET /health` remains minimal liveness; `GET /ready` fails
 closed for missing, failed, stale, or unhealthy operator-required authorization,
 contributors, invocation constraints, or required MCP preparation, and for corrupt lifecycle
-cursor ordering. The administrator-only runtime capabilities route exposes the safe manifest
-and separately labelled health snapshots.
+cursor ordering and an unsatisfied durable deployment profile. The administrator-only
+deployment report exposes the safe manifest, separately labelled health snapshots,
+persistence truth, optional artifact provenance, and qualification state; the portable
+runtime capabilities record deliberately does not.
 
 Required MCP interceptors run only after the coherent authorization provider allows. At the
 final network fence, the host verifies the pinned generation and fresh required health, then

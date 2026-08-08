@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 35
+config_version: 36
 
 # ============================================================================
 # Logging
@@ -1993,6 +1993,12 @@ database:
   #                           # thread-delete purge fails (purge itself is immediate).
   #                           # 0 explicitly disables expiry (redis maxmemory only)
   #   key_prefix: ""          # default: hash of the database identity
+
+# Deployment promise checked once at Gateway startup. The local profile keeps
+# process-local memory convenient for development. durable_production refuses
+# process-local invocation state and also participates in /ready.
+deployment:
+  profile: local_development
 
 # ============================================================================
 # Run Events Configuration

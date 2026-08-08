@@ -73,6 +73,7 @@ APP_CONFIG_FACTORY_EXCLUDED_FIELDS = frozenset(
         "channel_connections",
         "auth",
         "run_events",
+        "deployment",
         "agent_storage",
         "scheduler",
         "mcp_tasks",

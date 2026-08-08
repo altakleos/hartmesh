@@ -83,6 +83,11 @@ reuses the same durable admission, visibility, authorization, constraints, lifec
 paging, and fenced cancellation behavior as Gateway. The Gateway also publishes those
 same records at authenticated `/api/runtime/v1/*` routes; the contract package itself
 remains host- and transport-independent.
+The portable capabilities record contains only runtime operations and is strict/identical
+over both Adapters. Deployment manifest/health, bounded provenance, persistence tier, and
+qualification state belong to the separate administrator-only
+`GET /api/runtime/v1/deployment` report. `deployment.profile: durable_production` rejects
+process-local invocation state; `local_development` permits it without a durability claim.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP

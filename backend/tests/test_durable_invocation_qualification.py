@@ -110,12 +110,14 @@ def _caller_intent_fields(value: dict[str, object]) -> dict[str, object]:
     }
 
 
-def test_runtime_api_docs_publish_manifest_and_health_contract() -> None:
+def test_runtime_api_docs_separate_portable_capabilities_from_deployment_truth() -> None:
     api_docs = (_BACKEND_ROOT / "docs" / "API.md").read_text(encoding="utf-8")
 
-    assert "immutable capability manifest" in api_docs
-    assert "mutable capability health" in api_docs
-    assert "no readiness/provenance manifest" not in api_docs
+    assert "GET /deployment" in api_docs
+    assert "Portable capabilities are transport-identical" in api_docs
+    assert "process_local" in api_docs
+    assert "atomic_lifecycle" in api_docs
+    assert "Qualification remains `unqualified`" in api_docs
 
 
 @pytest.mark.anyio

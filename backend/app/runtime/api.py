@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+from uuid import uuid4
 
 from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 from deerflow_runtime_api import (
@@ -44,6 +46,8 @@ from deerflow.runtime.runs.lifecycle_query import (
 )
 from deerflow.runtime.runs.manager import ConflictError, IdempotencyConflictError
 
+logger = logging.getLogger(__name__)
+
 
 def _status_value(value: Any) -> str:
     return value.value if hasattr(value, "value") else str(value)
@@ -51,6 +55,21 @@ def _status_value(value: Any) -> str:
 
 def _failure(code: FailureCode, **detail: Any) -> RuntimeFailure:
     return RuntimeFailure(code=code, detail={"version": 1, **detail})
+
+
+def unexpected_adapter_failure(operation: str, *, exc_info: bool = True) -> RuntimeFailure:
+    """Correlate an internal diagnostic without exposing exception text."""
+
+    correlation_id = uuid4().hex
+    logger.error(
+        "Unexpected durable invocation adapter failure",
+        exc_info=exc_info,
+        extra={
+            "correlation_id": correlation_id,
+            "runtime_operation": operation,
+        },
+    )
+    return _failure(FailureCode.indeterminate, correlation_id=correlation_id)
 
 
 class InvocationRuntimeAPI(DurableInvocationPort):
@@ -113,7 +132,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
         except Exception as exc:
             if getattr(exc, "status_code", None) == 422:
                 return _failure(FailureCode.invalid_request)
-            return InvocationEnsureReceipt(disposition=EnsureDisposition.indeterminate)
+            return unexpected_adapter_failure("ensure")
         if isinstance(result, InternalLaunchReceipt):
             record = result.record
             return InvocationEnsureReceipt(
@@ -129,7 +148,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
             return InvocationEnsureReceipt(disposition=EnsureDisposition.indeterminate)
         if result is NotFoundOrInvisible.not_found_or_invisible:
             return InvocationEnsureReceipt(disposition=EnsureDisposition.conflict)
-        raise RuntimeError("unexpected invocation launch result")
+        return unexpected_adapter_failure("ensure", exc_info=False)
 
     async def observe(
         self,
@@ -173,7 +192,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
         except (InvalidLifecycleCursor, ValueError, TypeError):
             return _failure(FailureCode.invalid_request)
         except Exception:
-            return _failure(FailureCode.indeterminate)
+            return unexpected_adapter_failure("observe")
 
         if result is NotFoundOrInvisible.not_found_or_invisible:
             return _failure(FailureCode.not_found_or_invisible)
@@ -182,7 +201,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
         if result is InvocationAuthorizationOutcome.indeterminate:
             return _failure(FailureCode.indeterminate)
         if not isinstance(result, InternalLifecycleObservation):
-            return _failure(FailureCode.indeterminate)
+            return unexpected_adapter_failure("observe", exc_info=False)
 
         record = result.record
         authoritative_snapshot = result.authoritative_snapshot
@@ -246,7 +265,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                 )
             )
         except Exception:
-            return InvocationControlReceipt(disposition=ControlDisposition.indeterminate)
+            return unexpected_adapter_failure("control")
         if result is NotFoundOrInvisible.not_found_or_invisible:
             return InvocationControlReceipt(disposition=ControlDisposition.not_found_or_invisible)
         if result is InvocationAuthorizationOutcome.denied:
@@ -254,7 +273,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
         if result is InvocationAuthorizationOutcome.indeterminate:
             return InvocationControlReceipt(disposition=ControlDisposition.indeterminate)
         if not isinstance(result, InternalCancelReceipt):
-            return InvocationControlReceipt(disposition=ControlDisposition.indeterminate)
+            return unexpected_adapter_failure("control", exc_info=False)
         disposition = ControlDisposition(result.outcome.value)
         hidden = disposition is ControlDisposition.not_found_or_invisible
         record = result.record
@@ -325,4 +344,5 @@ __all__ = [
     "InProcessInvocationRuntime",
     "InvocationRuntimeAPI",
     "build_in_process_runtime_api",
+    "unexpected_adapter_failure",
 ]

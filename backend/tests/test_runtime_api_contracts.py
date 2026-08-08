@@ -477,6 +477,18 @@ def test_runtime_failure_detail_is_code_specific_and_cannot_carry_policy_text() 
             code="cursor_gap",
             detail={"version": 1},
         )
+    assert (
+        RuntimeFailure(
+            code="indeterminate",
+            detail={"version": 1, "correlation_id": "a" * 32},
+        ).detail["correlation_id"]
+        == "a" * 32
+    )
+    with pytest.raises(ValueError, match="correlation_id"):
+        RuntimeFailure(
+            code="indeterminate",
+            detail={"version": 1, "correlation_id": "raw exception text"},
+        )
 
 
 def test_runtime_api_is_a_standard_library_only_workspace_dependency() -> None:
