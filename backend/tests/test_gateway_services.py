@@ -15,6 +15,11 @@ from deerflow.config.app_config import AppConfig, reset_app_config, set_app_conf
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 
 
+class _ReadyAdmissionFence:
+    async def ready_for_admission(self) -> bool:
+        return True
+
+
 @pytest.fixture
 def _stub_app_config():
     """Keep run-context tests independent from a developer-local config.yaml."""
@@ -40,6 +45,7 @@ def _make_start_run_request(
         state=SimpleNamespace(auth_source=auth_source),
         app=SimpleNamespace(
             state=SimpleNamespace(
+                runtime_readiness=_ReadyAdmissionFence(),
                 stream_bridge=SimpleNamespace(),
                 run_manager=run_manager,
                 checkpointer=InMemorySaver(),
@@ -1641,6 +1647,7 @@ async def _capture_start_run_graph_input(
 
     run_manager = RunManager(store=MemoryRunStore())
     state = SimpleNamespace(
+        runtime_readiness=_ReadyAdmissionFence(),
         stream_bridge=SimpleNamespace(),
         run_manager=run_manager,
         checkpointer=InMemorySaver(),
@@ -1685,6 +1692,7 @@ def _make_start_run_persistence_context():
     run_store = MemoryRunStore()
     thread_store = MemoryThreadMetaStore(InMemoryStore())
     state = SimpleNamespace(
+        runtime_readiness=_ReadyAdmissionFence(),
         stream_bridge=SimpleNamespace(),
         run_manager=RunManager(store=run_store),
         checkpointer=InMemorySaver(),
@@ -1938,6 +1946,7 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
         await thread_store.create("channel-thread", user_id="default", metadata={"legacy": True})
         run_manager = RunManager(store=run_store)
         state = SimpleNamespace(
+            runtime_readiness=_ReadyAdmissionFence(),
             stream_bridge=SimpleNamespace(),
             run_manager=run_manager,
             checkpointer=InMemorySaver(),
@@ -2036,6 +2045,7 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
         await thread_store.create("channel-thread", user_id="owner-1", metadata={})
         run_manager = RunManager(store=MemoryRunStore())
         state = SimpleNamespace(
+            runtime_readiness=_ReadyAdmissionFence(),
             stream_bridge=SimpleNamespace(),
             run_manager=run_manager,
             checkpointer=InMemorySaver(),
@@ -2118,6 +2128,7 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
         await thread_store.create("thread-session-authz", user_id="u1", metadata={})
         run_manager = RunManager(store=MemoryRunStore())
         state = SimpleNamespace(
+            runtime_readiness=_ReadyAdmissionFence(),
             stream_bridge=SimpleNamespace(),
             run_manager=run_manager,
             checkpointer=InMemorySaver(),
@@ -2267,7 +2278,11 @@ def test_scheduled_invocation_runtime_rejects_legacy_auth_token():
     from app.runtime.invocation import InternalLaunchIntent, InternalSourceKind
 
     async def _scenario():
-        runtime = build_scheduled_invocation_runtime(SimpleNamespace(state=SimpleNamespace()))
+        runtime = build_scheduled_invocation_runtime(
+            SimpleNamespace(
+                state=SimpleNamespace(runtime_readiness=_ReadyAdmissionFence()),
+            )
+        )
         with pytest.raises(HTTPException) as exc_info:
             await runtime.launch(
                 InternalLaunchIntent(

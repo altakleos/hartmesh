@@ -51,6 +51,11 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
 
 
+class _ReadyAdmissionFence:
+    async def ready_for_admission(self) -> bool:
+        return True
+
+
 def _caller_intent_fields(value: dict[str, object]) -> dict[str, object]:
     intent = CanonicalCallerIntent(value)
     return {
@@ -492,7 +497,20 @@ class _LookupFailureRuns:
 async def test_known_invocation_skips_normalization_and_worker_attachment() -> None:
     normalizer = _KeyedNormalizer()
     existing = _runtime_record()
-    runtime = InvocationRuntime(normalizer=normalizer, runs=_KeyedRuns(existing=existing))
+
+    class RejectNewAdmission:
+        calls = 0
+
+        async def ready_for_admission(self) -> bool:
+            self.calls += 1
+            return False
+
+    fence = RejectNewAdmission()
+    runtime = InvocationRuntime(
+        normalizer=normalizer,
+        runs=_KeyedRuns(existing=existing),
+        admission_fence=fence,
+    )
 
     receipt = await runtime.launch(InternalLaunchIntent(thread_id="thread-runtime"))
 
@@ -502,6 +520,7 @@ async def test_known_invocation_skips_normalization_and_worker_attachment() -> N
     assert normalizer.normalize_calls == 0
     assert normalizer.worker_calls == 0
     assert existing.task is None
+    assert fence.calls == 0, "an accepted replay must not be silently re-authorized"
 
 
 @pytest.mark.anyio
@@ -710,7 +729,9 @@ async def test_http_key_rejects_every_unclassified_request_container(request_bod
             auth_source=AUTH_SOURCE_SESSION,
             user=SimpleNamespace(id="owner-1", system_role="user", oauth_provider=None, oauth_id=None),
         ),
-        app=SimpleNamespace(state=SimpleNamespace()),
+        app=SimpleNamespace(
+            state=SimpleNamespace(runtime_readiness=_ReadyAdmissionFence()),
+        ),
     )
     request_body = request_body.model_copy(
         update={"input": {"messages": [{"role": "user", "content": "hello"}]}},
@@ -725,7 +746,9 @@ async def test_empty_http_idempotency_key_is_422_before_admission() -> None:
     request = SimpleNamespace(
         headers={"Idempotency-Key": ""},
         state=SimpleNamespace(),
-        app=SimpleNamespace(state=SimpleNamespace()),
+        app=SimpleNamespace(
+            state=SimpleNamespace(runtime_readiness=_ReadyAdmissionFence()),
+        ),
     )
     with pytest.raises(Exception) as exc_info:
         await start_run(RunCreateRequest(), "thread-1", request)
@@ -784,6 +807,7 @@ async def test_http_replay_conflicts_when_retry_omits_original_thinking_option()
         ),
         app=SimpleNamespace(
             state=SimpleNamespace(
+                runtime_readiness=_ReadyAdmissionFence(),
                 stream_bridge=SimpleNamespace(),
                 run_manager=run_manager,
                 checkpointer=InMemorySaver(),
@@ -844,6 +868,7 @@ async def test_http_replay_returns_one_run_and_attaches_exactly_one_worker() -> 
         ),
         app=SimpleNamespace(
             state=SimpleNamespace(
+                runtime_readiness=_ReadyAdmissionFence(),
                 stream_bridge=SimpleNamespace(),
                 run_manager=run_manager,
                 checkpointer=InMemorySaver(),
@@ -952,6 +977,7 @@ async def test_simultaneous_stateless_http_retries_converge_after_thread_binding
             ),
             app=SimpleNamespace(
                 state=SimpleNamespace(
+                    runtime_readiness=_ReadyAdmissionFence(),
                     stream_bridge=SimpleNamespace(),
                     run_manager=manager,
                     checkpointer=InMemorySaver(),
@@ -1011,6 +1037,7 @@ async def test_channel_redelivery_bypasses_ttl_and_converges_in_sql_store(
     store = InMemoryStore()
     app = SimpleNamespace(
         state=SimpleNamespace(
+            runtime_readiness=_ReadyAdmissionFence(),
             stream_bridge=SimpleNamespace(),
             run_manager=run_manager,
             checkpointer=InMemorySaver(),

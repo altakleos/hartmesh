@@ -852,8 +852,13 @@ manifest digest at startup. New durable invocations retain that generation/diges
 entire run; changing plugins requires a restart and never switches in-flight work. Optional
 authoritative descriptors may provide bounded health probes. `GET /health` remains minimal
 liveness, while unauthenticated `GET /ready` returns only `{"status":"ready"}` (200) or
-`{"status":"not_ready"}` (503) and fails closed for unhealthy operator-required
-capabilities or corrupt lifecycle ordering state. Administrators can inspect the safe
+`{"status":"not_ready"}` (503) and fails closed for unhealthy, stale, missing, or
+generation-mismatched operator-required capabilities, an unsatisfied persistence profile,
+or corrupt lifecycle ordering state. The same bounded proof fences every genuinely new
+HTTP, channel, scheduled, and embedded-service admission before contributor, policy, or
+constraint work; an already accepted keyed replay reuses its sealed evidence and is not
+silently re-authorized. `deployment.readiness` sets the health cache/admission windows and
+the per-probe/overall timeouts. Administrators can inspect the safe
 manifest and separately labelled live health through
 `GET /api/runtime/v1/deployment`; that report also distinguishes lifecycle atomicity
 from process-local, node-durable, and shared-durable storage, exposes bounded image/source
@@ -1170,9 +1175,12 @@ The existing `/api/runs/*` and `/api/threads/*/runs/*` create, stream, and wait
 routes remain compatible and retain their optional `Idempotency-Key` behavior.
 Each accepted invocation is the normal durable run row itself; checkpoint and
 artifact reservation rows are internal operations and never appear in this API.
-`GET /health` is liveness, while `GET /ready` reports only ready/not-ready and
-includes operator-required authorization, constraints, MCP preparation, and
-lifecycle ordering plus the configured durability promise in its decision.
+`GET /health` is process liveness and remains healthy during a recoverable authority or
+database outage. `GET /ready` reports only ready/not-ready and proves fresh current-generation
+health for operator-required authorization, contributors, constraints, and MCP preparation,
+plus bounded lifecycle cursor/pruning/event-edge integrity and the configured durability
+promise. The exact same proof fences new admission; accepted replay remains available under
+its stored evidence.
 Administrators obtain the immutable capability manifest, separate live-health
 snapshot, bounded provenance, persistence tier, and qualification state from
 `/deployment`; `/capabilities` remains strict and transport-identical to the

@@ -204,15 +204,24 @@ curl http://localhost:2026/health          # gateway health via nginx
 
 The Gateway pod uses `GET /ready` for readiness and `GET /health` for liveness.
 Readiness includes operator-required authoritative capability health, lifecycle-cursor
-integrity, and the configured deployment durability promise, but its unauthenticated body
+and retained event-edge integrity, database availability, and the configured deployment
+durability promise, but its unauthenticated body
 is deliberately only `{"status":"ready"}` or `{"status":"not_ready"}`. The chart selects
 `deployment.profile: durable_production`, uses PostgreSQL shared state, and stamps the
 Gateway image reference for bounded provenance. Safe provenance, persistence tier,
-qualification state, and diagnostics are available only to an authenticated administrator
+qualification state, and safe admission-readiness reason codes are available only to an authenticated administrator
 at `GET /api/runtime/v1/deployment`; portable runtime support remains the strict
 `GET /api/runtime/v1/capabilities` record. Plugin registrations and their manifest
 generation are startup-only; deploy a restart to adopt changes, while in-flight invocations
 stay pinned to the generation they accepted.
+
+The default internal health probe timeout is 2 seconds and the complete readiness evaluation
+is capped at 5 seconds. The chart's Gateway readiness probe uses `timeoutSeconds: 6`, so
+Kubernetes supplies bounded headroom rather than aborting an evaluation first. Readiness
+fails on its first unsafe result; liveness uses an independent failure threshold of three.
+Override these through `config.deployment.readiness` and `gateway.readinessProbe` only while
+preserving `readinessProbe.timeoutSeconds > overall_timeout_seconds >
+capability_probe_timeout_seconds`.
 
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 

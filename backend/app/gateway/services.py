@@ -2435,6 +2435,7 @@ def build_invocation_runtime(request: Request) -> InvocationRuntime:
         runs=_GatewayDurableRuns(request),
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
+        admission_fence=request.app.state.runtime_readiness,
     )
 
 
@@ -2457,6 +2458,7 @@ def build_scheduled_invocation_runtime(app: Any) -> InvocationRuntime:
         runs=_GatewayDurableRuns(request),
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
+        admission_fence=app.state.runtime_readiness,
     )
 
 
@@ -2479,6 +2481,7 @@ def build_channel_invocation_runtime(app: Any) -> InvocationRuntime:
         runs=_GatewayDurableRuns(request),
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
+        admission_fence=app.state.runtime_readiness,
     )
 
 
@@ -2514,6 +2517,7 @@ def build_service_invocation_runtime(
         runs=_GatewayDurableRuns(request),
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
+        admission_fence=app.state.runtime_readiness,
     )
 
 
@@ -2561,6 +2565,10 @@ async def start_run(
     thread_id_explicit: bool = True,
 ) -> RunRecord:
     """FastAPI compatibility adapter for application-owned invocation launch."""
+    try:
+        validate_thread_id(thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     runtime = build_invocation_runtime(request)
     try:
         receipt = await runtime.launch(

@@ -43,6 +43,14 @@ When present, it is an async zero-argument callable returning only
 The host applies its own timeout/cache/single-flight policy. Probes must not return
 credentials, identities, exception text, or request data.
 
+For every operator-required authoritative capability, Gateway readiness and genuinely new
+invocation admission require a successful observation from the current immutable extension
+generation inside the configured admission window. That health observation is only a
+pre-fence: the subsequent `authorize`, `contribute`, `project`, or MCP `prepare_call` remains
+authoritative and independently fail-closed. Accepted keyed replay reuses sealed evidence and
+does not call a provider again. Health failures expose only bounded codes and correlation IDs;
+raw provider exceptions remain in correlated internal diagnostics.
+
 ## Authorization provider contribution
 
 An installed plugin contributes the process's single authoritative provider through a

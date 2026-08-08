@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import yaml
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GATEWAY_DEPLOYMENT = _REPO_ROOT / "deploy" / "helm" / "deer-flow" / "templates" / "gateway-deployment.yaml"
 _HELM_VALUES = _REPO_ROOT / "deploy" / "helm" / "deer-flow" / "values.yaml"
@@ -55,3 +57,21 @@ def test_gateway_chart_declares_durable_profile_and_image_provenance() -> None:
     assert "profile: durable_production" in values
     assert "name: DEER_FLOW_IMAGE_REFERENCE" in template
     assert 'include "deer-flow.gatewayImage"' in template
+
+
+def test_gateway_probe_timeouts_bound_internal_readiness_work() -> None:
+    values = yaml.safe_load(_HELM_VALUES.read_text(encoding="utf-8"))
+    template = _GATEWAY_DEPLOYMENT.read_text(encoding="utf-8")
+
+    rendered_config = yaml.safe_load(values["config"])
+    internal = rendered_config["deployment"]["readiness"]
+    readiness_probe = values["gateway"]["readinessProbe"]
+    liveness_probe = values["gateway"]["livenessProbe"]
+
+    assert readiness_probe["timeoutSeconds"] > internal["overall_timeout_seconds"]
+    assert internal["overall_timeout_seconds"] > internal["capability_probe_timeout_seconds"]
+    assert readiness_probe["failureThreshold"] == 1
+    assert liveness_probe["failureThreshold"] >= 1
+    assert ".Values.gateway.readinessProbe.timeoutSeconds" in template
+    assert ".Values.gateway.readinessProbe.failureThreshold" in template
+    assert ".Values.gateway.livenessProbe.failureThreshold" in template

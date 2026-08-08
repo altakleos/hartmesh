@@ -453,6 +453,12 @@ class InvocationConstraints(Protocol):
     async def project(self, launch: PreparedLaunch) -> InternalConstraintDecision: ...
 
 
+class InvocationAdmissionFence(Protocol):
+    """Fail-closed deployment-safety check for genuinely new admissions."""
+
+    async def ready_for_admission(self) -> bool: ...
+
+
 class _DisabledInvocationAuthorization:
     async def authorize_start(self, _launch: PreparedLaunch) -> InternalAuthorizationDecision:
         return InternalAuthorizationDecision.allowed()
@@ -515,12 +521,14 @@ class InvocationRuntime:
         runs: DurableRuns,
         authorization: InvocationAuthorization | None = None,
         constraints: InvocationConstraints | None = None,
+        admission_fence: InvocationAdmissionFence | None = None,
         task_factory: TaskFactory = asyncio.create_task,
     ) -> None:
         self._normalizer = normalizer
         self._runs = runs
         self._authorization = authorization or _DisabledInvocationAuthorization()
         self._constraints = constraints or _AbsentInvocationConstraints()
+        self._admission_fence = admission_fence
         self._task_factory = task_factory
 
     @staticmethod
@@ -554,6 +562,9 @@ class InvocationRuntime:
                         if callable(validate_replay):
                             await validate_replay(intent, identity, existing)
                         return InternalLaunchReceipt(record=existing, created=False)
+
+            if self._admission_fence is not None and not await self._admission_fence.ready_for_admission():
+                return InvocationAuthorizationOutcome.indeterminate
 
             launch = await self._normalizer.normalize(intent)
             start_decision = await self._authorization.authorize_start(launch)

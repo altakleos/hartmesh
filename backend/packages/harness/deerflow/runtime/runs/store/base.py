@@ -16,7 +16,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from deerflow.runtime.runs.lifecycle_query import LifecyclePage, LifecycleQuery
 
@@ -205,6 +205,35 @@ class RunEnsureResult:
     claimed: tuple[dict[str, Any], ...] = ()
 
 
+@dataclass(frozen=True)
+class LifecycleReadiness:
+    """Bounded structural health result for authoritative lifecycle storage."""
+
+    ready: bool
+    reason_code: Literal[
+        "ready",
+        "lifecycle_cursor_missing",
+        "lifecycle_pruning_invalid",
+        "lifecycle_event_bounds_invalid",
+        "lifecycle_event_sequence_invalid",
+        "lifecycle_store_unavailable",
+    ] = "ready"
+
+    def __post_init__(self) -> None:
+        allowed = {
+            "ready",
+            "lifecycle_cursor_missing",
+            "lifecycle_pruning_invalid",
+            "lifecycle_event_bounds_invalid",
+            "lifecycle_event_sequence_invalid",
+            "lifecycle_store_unavailable",
+        }
+        if self.reason_code not in allowed:
+            raise ValueError("invalid lifecycle readiness reason code")
+        if self.ready != (self.reason_code == "ready"):
+            raise ValueError("lifecycle readiness status and reason disagree")
+
+
 class RunStore(abc.ABC):
     # Custom stores retain their compatibility behavior until they implement
     # the same row+journal transaction and explicitly override this flag.
@@ -224,7 +253,12 @@ class RunStore(abc.ABC):
     async def lifecycle_ready(self) -> bool:
         """Report whether lifecycle ordering metadata is internally coherent."""
 
-        return True
+        return (await self.lifecycle_readiness()).ready
+
+    async def lifecycle_readiness(self) -> LifecycleReadiness:
+        """Return one safe bounded structural readiness result."""
+
+        return LifecycleReadiness(ready=True)
 
     async def list_lifecycle_events(
         self,

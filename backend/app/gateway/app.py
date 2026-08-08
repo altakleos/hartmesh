@@ -735,6 +735,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     capability_health_monitor = CapabilityHealthMonitor(
         capability_manifest,
         loaded_extensions,
+        cache_seconds=(construction_deployment.readiness.capability_cache_seconds),
+        timeout_seconds=(construction_deployment.readiness.capability_probe_timeout_seconds),
+        stale_seconds=(construction_deployment.readiness.required_health_stale_seconds),
+        admission_max_age_seconds=(construction_deployment.readiness.admission_health_max_age_seconds),
     )
     from deerflow.extensions.mcp import configure_mcp_interceptor_runtime
 
@@ -768,7 +772,27 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         atomic_lifecycle=False,
         manifest=capability_manifest,
         health_monitor=capability_health_monitor,
+        readiness_supplier=lambda: getattr(
+            getattr(app.state, "runtime_readiness", None),
+            "last_snapshot",
+            None,
+        ),
         provenance=deployment_provenance,
+    )
+    from app.runtime.readiness import RuntimeReadinessCoordinator
+
+    app.state.runtime_readiness = RuntimeReadinessCoordinator(
+        health_monitor=capability_health_monitor,
+        lifecycle_store=lambda: getattr(app.state, "run_store", None),
+        persistence_ready=lambda: bool(
+            getattr(
+                getattr(app.state, "deployment_reporter", None),
+                "persistence_ready",
+                False,
+            )
+        ),
+        extension_generation=lambda: int(getattr(app.state.capability_manifest, "extension_generation")),
+        overall_timeout_seconds=(construction_deployment.readiness.overall_timeout_seconds),
     )
 
     # Include routers
@@ -872,28 +896,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     async def readiness_check() -> JSONResponse:
         """Return a deliberately minimal deployable readiness result."""
 
-        lifecycle_ready = False
-        run_store = getattr(app.state, "run_store", None)
-        if run_store is not None:
-            try:
-                lifecycle_ready = bool(await run_store.lifecycle_ready())
-            except Exception:
-                logger.warning(
-                    "Lifecycle readiness check failed",
-                    exc_info=True,
-                )
-        readiness = await app.state.capability_health_monitor.readiness(
-            lifecycle_ready=(
-                lifecycle_ready
-                and bool(
-                    getattr(
-                        app.state.deployment_reporter,
-                        "persistence_ready",
-                        False,
-                    )
-                )
-            ),
-        )
+        readiness = await app.state.runtime_readiness.readiness()
         ready = readiness.status == "ready"
         return JSONResponse(
             status_code=200 if ready else 503,

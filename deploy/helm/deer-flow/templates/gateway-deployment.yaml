@@ -141,14 +141,18 @@ spec:
             httpGet:
               path: /ready
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: {{ .Values.gateway.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.gateway.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.gateway.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.gateway.readinessProbe.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 30
-            periodSeconds: 20
+            initialDelaySeconds: {{ .Values.gateway.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.gateway.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.gateway.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.gateway.livenessProbe.failureThreshold }}
           {{- /* preStop sleep so the Service/ingress deregisters the pod and
                   in-flight requests drain before SIGTERM begins graceful shutdown
                   (which runs the memory queue drain). 0 / unset disables it.
