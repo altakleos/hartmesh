@@ -1173,6 +1173,14 @@ snapshot, bounded provenance, persistence tier, and qualification state from
 `/deployment`; `/capabilities` remains strict and transport-identical to the
 in-process Adapter.
 
+Operator-installed invocation-constraint providers should use the v2 extension contract.
+It receives only sealed identity, source, thread, revision, and manifest references and can
+only narrow the exact per-invocation total-subagent ceiling (including zero). Unknown
+mandatory obligations and unhealthy required providers fail closed, accepted evidence is
+fenced again by the worker, and keyed replay reuses that evidence without consulting live
+health or the provider again. The separate v1 contract remains a positive-only
+subagent-ceiling compatibility path.
+
 This surface does not promise context export/retirement, dynamic outbound
 governance, scheduler HA, a general multi-replica Gateway ownership model, an
 artifact catalogue, a full profile registry, an event broker, or durable parity

@@ -454,7 +454,7 @@ The public package is `packages/extension-api/` and must never import `deerflow`
 the host-independent authorization contracts (`Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthorizationProvider`), invocation contributor contracts, and the
 restrictive invocation-constraints, required MCP call-preparation, split invocation identity,
-trusted run-context, and health-probe contracts as of extension API 0.8.0; the old
+trusted run-context, and health-probe contracts as of extension API 0.9.0; the old
 `deerflow.authz.provider` path is a compatibility re-export with object identity. Its
 registry exposes typed middleware, authorization-provider, `OriginContributor`,
 `RunContextContributor`, singular `InvocationConstraintsProvider`, and multi-contributor
@@ -483,9 +483,9 @@ only a stable code, exception class, contribution ID, and correlation ID;
 required failures make the invocation indeterminate. Top-level `required_capabilities` is
 operator-only, restart-required configuration and accepts
 `origin_contributor:<id>` / `run_context_contributor:<id>`,
-`mcp_interceptor:<id>`, plus the singular
-`invocation_constraints.v1`; it must never be exposed through API-writable
-`extensions_config.json`.
+`mcp_interceptor:<id>`, plus one singular constraints contract version:
+`invocation_constraints.v1` or `invocation_constraints.v2`; it must never be exposed
+through API-writable `extensions_config.json`.
 
 After both contributor phases, the Gateway creates one immutable
 `TrustedRunContextV1`. It contains the accepted split identity, final Origin (including
@@ -533,12 +533,22 @@ Gateway unready.
 The constraints provider is an authoritative restrictive projection, not a second binary
 permission provider. Gateway calls it after enabled invocation-start authorization allows
 and before durable admission, directly outside observational `IsolatedMiddleware`, with a
-host-owned two-second timeout and injected timezone-aware clock. It binds the canonical
-request and pinned agent-revision digests, may only narrow `max_total_subagents`, and
-persists only normalized projection/evidence facts. Known keyed replays reuse stored
-evidence without calling the provider again. The worker validates binding/freshness before
-graph construction and again immediately before the first `astream`; failures use
-`constraint_evidence_mismatch` or `constraint_expired_before_start`. A single
+host-owned two-second timeout and injected timezone-aware clock. V2 receives only sealed
+identity, final Origin, bounded correlation lookup references, thread/external-key binding,
+pinned agent/profile revisions, request/trusted-context/manifest digests, extension
+generation, and the host subagent ceiling. It binds every one of those execution facts,
+uses an explicit mandatory-obligation list, and supports only
+`max_total_subagents`; zero prohibits delegation, unknown obligations fail closed, and the
+provider can only narrow the host ceiling. V1 remains a separate positive-only,
+subagent-ceiling compatibility contract and cannot satisfy a v2 requirement. Known keyed
+replays reuse stored evidence without checking health or calling either provider again. A
+genuinely absent invocation for an operator-required constraints version first requires a
+fresh healthy snapshot for that exact capability ID; missing, stale, unknown, or unhealthy
+state is indeterminate and stops before projection/admission. The accepted evidence
+and projection digest commit with admission. The worker validates binding, generation,
+supported obligations, and freshness before graph construction and again immediately before
+the first `astream`; failures use `constraint_evidence_mismatch` or
+`constraint_expired_before_start`. A single
 invocation-scoped, lock-protected reservation object is shared through lead and delegated
 subagent contexts, reserves by stable tool-call ID immediately before dispatch, and treats
 the same ID as a retry rather than additional capacity. Token-budget middleware remains a

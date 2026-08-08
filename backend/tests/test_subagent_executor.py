@@ -3396,6 +3396,69 @@ class TestSubagentGuardrailAttribution:
         assert context["accepted_extension_manifest_digest"] == "d" * 64
 
     @pytest.mark.anyio
+    async def test_aexecute_propagates_v2_constraints_without_resetting_the_aggregate_counter(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        from datetime import UTC, timedelta
+
+        from deerflow_extension_api import ConstraintProjectionV2
+
+        from deerflow.runtime.constraints import (
+            INVOCATION_CONSTRAINTS_CONTEXT_KEY,
+            SUBAGENT_RESERVATION_CONTEXT_KEY,
+            InvocationSubagentReservation,
+        )
+
+        now = datetime.now(UTC)
+        projection = ConstraintProjectionV2(
+            request_digest="a" * 64,
+            trusted_context_digest="b" * 64,
+            thread_id="thread-1",
+            agent_revision_digest="c" * 64,
+            profile_revision_digest="d" * 64,
+            extension_manifest_digest="e" * 64,
+            extension_generation=8,
+            projection_revision="policy-2",
+            issued_at=now,
+            valid_until=now + timedelta(minutes=5),
+            evidence_id="evidence-2",
+            evidence_digest="f" * 64,
+            mandatory_obligations=("max_total_subagents",),
+            max_total_subagents=1,
+        )
+        reservation = InvocationSubagentReservation(1)
+        assert reservation.reserve("lead-dispatch") is True
+        executor = classes["SubagentExecutor"](
+            config=classes["SubagentConfig"](
+                name="general-purpose",
+                description="Constraint v2 inheritance test agent",
+                system_prompt="Test constraints.",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            parent_model="test-model",
+            invocation_constraints=projection,
+            subagent_reservation=reservation,
+            accepted_extension_generation=8,
+            accepted_extension_manifest_digest="e" * 64,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context[INVOCATION_CONSTRAINTS_CONTEXT_KEY] is projection
+        assert context[SUBAGENT_RESERVATION_CONTEXT_KEY] is reservation
+        assert context[SUBAGENT_RESERVATION_CONTEXT_KEY].reserve("nested-dispatch") is False
+
+    @pytest.mark.anyio
     async def test_aexecute_propagates_mcp_provider_and_audit_sink(
         self,
         classes,

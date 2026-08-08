@@ -6,7 +6,7 @@ import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
-from deerflow_extension_api import ConstraintProjectionV1, InvocationIdentityV1, SealedOriginV1, TrustedRunContextV1
+from deerflow_extension_api import ConstraintProjectionV1, ConstraintProjectionV2, InvocationIdentityV1, SealedOriginV1, TrustedRunContextV1
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
 from langchain_core.messages import ToolMessage
@@ -467,7 +467,7 @@ async def task_tool(
         executor_kwargs["extensions"] = run_extensions
     if authorization_provider is not None:
         executor_kwargs["authorization_provider"] = authorization_provider
-    if isinstance(invocation_constraints, ConstraintProjectionV1):
+    if isinstance(invocation_constraints, (ConstraintProjectionV1, ConstraintProjectionV2)):
         executor_kwargs["invocation_constraints"] = invocation_constraints
     if isinstance(subagent_reservation, InvocationSubagentReservation):
         executor_kwargs["subagent_reservation"] = subagent_reservation

@@ -2387,7 +2387,10 @@ def _build_invocation_constraints(request: Any):
     from app.runtime.constraints import ProviderInvocationConstraints
 
     app_state = getattr(getattr(request, "app", None), "state", None)
-    return ProviderInvocationConstraints(getattr(app_state, "invocation_constraints_host", None))
+    return ProviderInvocationConstraints(
+        getattr(app_state, "invocation_constraints_host", None),
+        getattr(app_state, "capability_health_monitor", None),
+    )
 
 
 def raise_for_invocation_authorization(

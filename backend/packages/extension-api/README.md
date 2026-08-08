@@ -4,7 +4,7 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
-Version 0.8.0 owns the authorization contracts `Principal`, `AuthzRequest`,
+Version 0.9.0 owns the authorization contracts `Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthzReason`, and `AuthorizationProvider`. Existing host code may keep
 using `deerflow.authz.provider`; those names are compatibility re-exports of the same
 objects. It also owns the versioned Origin and run-context contributor contracts described
@@ -147,21 +147,33 @@ This setting is intentionally absent from API-writable `extensions_config.json`.
 ## Invocation constraints contribution
 
 A trusted plugin may register the process's single
-`InvocationConstraintsProviderFactory`. Its async provider receives the canonical split
-identity and sealed Origin together with the canonical request digest and pinned
-agent-revision digest. It returns the strict v1 union:
-`ConstraintProjectionV1`, `ConstraintRejected`, or `ConstraintIndeterminate`. The sole v1
-control is an optional positive `max_total_subagents`; authorization remains the only
-binary permission authority.
+`InvocationConstraintsProviderFactory`. Version 2 is a distinct contract rather than a
+widening of v1. Its async `InvocationConstraintsProviderV2` receives an immutable
+`ConstraintProjectionRequestV2` containing only the split identity, finalized sealed
+Origin, bounded namespaced correlation references, thread/external-key reference,
+agent/profile revisions, request/trusted-context/manifest digests, extension generation,
+and the host's enforceable subagent ceiling. It receives no prompt, credential, arbitrary
+kwargs, or host object.
+
+`ConstraintProjectionV2` binds those request, thread, revision, manifest, and generation
+facts to short-lived evidence. Its explicit `mandatory_obligations` discriminator accepts
+only `max_total_subagents`; an unknown obligation fails closed. A non-negative ceiling is
+mandatory when that obligation is present, so zero prohibits subagent dispatch. The host
+intersects it with its own ceiling and never permits a projection to widen local policy.
+Authorization and operation-time MCP enforcement remain the only authorities for binary
+permission and future dynamic effects.
 
 The Capability Host calls the provider directly, outside observational fail-open
 middleware, under a host-owned two-second timeout and an injected timezone-aware clock.
-It rejects digest mismatches, naive/future/expired timestamps, validity beyond 15 minutes,
-unknown fields, malformed evidence, and impossible limits. The effective subagent ceiling
-is the lower of the provider projection and the static host ceiling. Registration is
-singular and loader-attributed. Operators may require it only through startup-controlled
-`required_capabilities: [invocation_constraints.v1]`; the API-writable extension config
-cannot activate or require trusted constraint code.
+When the selected version is operator-required, admission first requires one fresh healthy
+snapshot for that exact capability ID; unhealthy, unknown, stale, or unavailable health is
+indeterminate and the provider is not called.
+It rejects binding mismatches, naive/future/expired timestamps, validity beyond 15 minutes,
+unknown fields, malformed evidence, unsupported obligations, and impossible limits. The
+effective subagent ceiling is the lower of the provider projection and the static host
+ceiling. Registration is singular and loader-attributed. Operators require v2 only through
+startup-controlled `required_capabilities: [invocation_constraints.v2]`; the API-writable
+extension config cannot activate or require trusted constraint code.
 
 The accepted run persists only the normalized projection and safe evidence ID/digest.
 Workers validate the accepted binding and freshness before graph construction and again
@@ -169,6 +181,11 @@ immediately before the first graph stream. One invocation-scoped, concurrency-sa
 reservation counter is shared by lead and delegated subagents and reserves before every
 dispatch; retries with the same dispatch ID do not consume the ceiling twice. Token
 budgets remain post-response guards and are not advertised as exact constraints.
+
+Version 1 remains a deliberate compatibility contract with its original request and
+projection types, positive-only `max_total_subagents`, and
+`required_capabilities: [invocation_constraints.v1]`. A v1 registration cannot satisfy a
+v2 requirement and is never represented as full v2 context or obligation support.
 
 ## Required MCP call preparation
 

@@ -2553,11 +2553,14 @@ authorization:
 # intentionally unavailable in API-writable extensions_config.json. Supported
 # IDs are origin_contributor:<contribution-id>,
 # run_context_contributor:<contribution-id>, mcp_interceptor:<contribution-id>,
-# and the singular
-# invocation_constraints.v1 provider. Constraints are checked after invocation-start
-# authorization and before durable admission; accepted projections are fenced again by
-# the worker before construction and immediately before graph streaming.
-# V1 can enforce only an exact max_total_subagents ceiling before dispatch. Token
+# and one singular constraints provider version: invocation_constraints.v1 or
+# invocation_constraints.v2. V2 is recommended for new providers. Constraints are checked
+# after invocation-start authorization and before durable admission; accepted projections
+# are fenced again by the worker before construction and immediately before graph streaming.
+# V2 binds sealed identity/source/thread/revision/manifest facts and can enforce only an
+# exact non-negative max_total_subagents ceiling before dispatch; zero prohibits subagents.
+# Unknown mandatory obligations fail closed. A required provider must have fresh healthy
+# capability state before a new admission. V1 remains a positive-only compatibility path. Token
 # budgets remain observational/post-response controls; exact token limits are deferred.
 #
 # Authoritative registrations and their loader-owned package provenance are sealed into

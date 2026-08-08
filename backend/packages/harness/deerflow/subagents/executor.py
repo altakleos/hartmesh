@@ -15,7 +15,7 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from deerflow_extension_api import ConstraintProjectionV1, InvocationIdentityV1, SealedOriginV1, TrustedRunContextV1
+from deerflow_extension_api import ConstraintProjectionV1, ConstraintProjectionV2, InvocationIdentityV1, SealedOriginV1, TrustedRunContextV1
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.callbacks.base import BaseCallbackManager
@@ -465,7 +465,7 @@ class SubagentExecutor:
         deerflow_trace_id: str | None = None,
         extensions: Any | None = None,
         authorization_provider: AuthorizationProvider | None = None,
-        invocation_constraints: ConstraintProjectionV1 | None = None,
+        invocation_constraints: ConstraintProjectionV1 | ConstraintProjectionV2 | None = None,
         subagent_reservation: InvocationSubagentReservation | None = None,
         accepted_extension_generation: int | None = None,
         accepted_extension_manifest_digest: str | None = None,
