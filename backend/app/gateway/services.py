@@ -73,6 +73,7 @@ from app.runtime.invocation import (
     InvocationRuntime,
     NotFoundOrInvisible,
     PreparedLaunch,
+    thaw_host_value,
 )
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -1419,7 +1420,7 @@ def _canonical_caller_intent(intent: InternalLaunchIntent) -> CanonicalCallerInt
         }
     else:
         graph_input = normalize_input(
-            intent.input,
+            thaw_host_value(intent.input),
             trusted_internal=intent.source_kind is not InternalSourceKind.http,
         )
         input_projection = {
@@ -1774,7 +1775,7 @@ class _GatewayLaunchNormalizer:
         return facts
 
     def _metadata(self, intent: InternalLaunchIntent) -> dict[str, Any]:
-        metadata = dict(intent.metadata or {})
+        metadata = thaw_host_value(intent.metadata or {})
         if not self._trust_internal_launch_facts or intent.source_kind is not InternalSourceKind.scheduled_task:
             return metadata
         if not intent.trusted_task_id or not intent.task_run_id or intent.scheduled_trigger not in {"scheduled", "manual"}:
@@ -1909,14 +1910,14 @@ class _GatewayLaunchNormalizer:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         metadata = self._metadata(intent)
-        config_metadata = intent.config.get("metadata") if isinstance(intent.config, dict) else None
+        config_metadata = thaw_host_value(intent.config.get("metadata")) if isinstance(intent.config, Mapping) else None
         try:
             validate_run_metadata_secrets(metadata)
             validate_run_metadata_secrets(config_metadata)
         except LegacyRunMetadataSecretError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        stream_modes = normalize_stream_modes(intent.stream_mode)
+        stream_modes = normalize_stream_modes(thaw_host_value(intent.stream_mode))
         bridge = get_stream_bridge(self._request)
         run_mgr = get_run_manager(self._request)
         run_ctx = get_run_context(self._request)
@@ -1955,12 +1956,15 @@ class _GatewayLaunchNormalizer:
         agent_factory = resolve_agent_factory(intent.assistant_id)
         is_internal_caller = getattr(getattr(self._request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
         if intent.command and intent.command.get("resume") is not None:
-            graph_input = Command(resume=intent.command["resume"])
+            graph_input = Command(resume=thaw_host_value(intent.command["resume"]))
         else:
-            graph_input = normalize_input(intent.input, trusted_internal=is_internal_caller)
+            graph_input = normalize_input(
+                thaw_host_value(intent.input),
+                trusted_internal=is_internal_caller,
+            )
         config = build_run_config(
             intent.thread_id,
-            intent.config,
+            thaw_host_value(intent.config),
             metadata,
             assistant_id=intent.assistant_id,
         )
@@ -2089,10 +2093,10 @@ class _GatewayLaunchNormalizer:
                 agent_factory=agent_factory,
                 graph_input=graph_input,
                 config=config,
-                stream_modes=stream_modes,
+                stream_modes=list(stream_modes),
                 stream_subgraphs=intent.stream_subgraphs,
-                interrupt_before=intent.interrupt_before,
-                interrupt_after=intent.interrupt_after,
+                interrupt_before=thaw_host_value(intent.interrupt_before),
+                interrupt_after=thaw_host_value(intent.interrupt_after),
             )
 
         return PreparedLaunch(
@@ -2103,8 +2107,8 @@ class _GatewayLaunchNormalizer:
             kwargs={
                 # The stored kwargs are echoed by the run API, so persist a
                 # secret-redacted config while retaining live secrets above.
-                "input": intent.input,
-                "config": redact_config_secrets(intent.config),
+                "input": thaw_host_value(intent.input),
+                "config": redact_config_secrets(thaw_host_value(intent.config)),
                 **({_EFFECTIVE_EXECUTION_PROJECTION_KEY: effective_execution.to_persisted()} if identity is not None else {}),
             },
             multitask_strategy=intent.multitask_strategy,
@@ -2158,8 +2162,8 @@ class _GatewayDurableRuns:
                 launch.thread_id,
                 launch.assistant_id,
                 on_disconnect=launch.on_disconnect,
-                metadata=launch.metadata,
-                kwargs=launch.kwargs,
+                metadata=thaw_host_value(launch.metadata),
+                kwargs=thaw_host_value(launch.kwargs),
                 multitask_strategy=launch.multitask_strategy,
                 model_name=launch.model_name,
                 user_id=launch.user_id,
@@ -2171,8 +2175,8 @@ class _GatewayDurableRuns:
             launch.thread_id,
             launch.assistant_id,
             on_disconnect=launch.on_disconnect,
-            metadata=launch.metadata,
-            kwargs=launch.kwargs,
+            metadata=thaw_host_value(launch.metadata),
+            kwargs=thaw_host_value(launch.kwargs),
             multitask_strategy=launch.multitask_strategy,
             model_name=launch.model_name,
             user_id=launch.user_id,
@@ -2181,7 +2185,7 @@ class _GatewayDurableRuns:
             external_key=launch.external_key,
             request_digest=launch.request_digest,
             request_digest_version=launch.request_digest_version,
-            caller_intent_json=launch.caller_intent_json,
+            caller_intent_json=thaw_host_value(launch.caller_intent_json),
             caller_intent_digest=launch.caller_intent_digest,
             caller_intent_digest_version=launch.caller_intent_digest_version,
         )

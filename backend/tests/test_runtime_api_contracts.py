@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 import sys
 import tomllib
@@ -27,6 +28,120 @@ def test_runtime_api_records_are_versioned_and_frozen() -> None:
     assert request.kind == "invocation.ensure"
     with pytest.raises(FrozenInstanceError):
         request.thread_id = "forged"  # type: ignore[misc]
+
+
+def test_runtime_api_nested_values_are_immutable_defensive_snapshots() -> None:
+    from deerflow_runtime_api import (
+        GraphInputV1,
+        InvocationObservation,
+        InvocationOptionsV1,
+        ResumeInputV1,
+        RuntimeCapabilities,
+        RuntimeFailure,
+        record_from_dict,
+    )
+
+    caller_input = {
+        "messages": [
+            {
+                "role": "user",
+                "content": {"parts": ["original"]},
+            }
+        ]
+    }
+    caller_snapshot = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "running",
+        "state_version": 2,
+    }
+    caller_payload = {"version": 1, "evidence": ["accepted"]}
+    caller_event = {
+        "event_id": "event-1",
+        "cursor": "opaque-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "lifecycle_type": "started",
+        "state_version": 2,
+        "status": "running",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "payload": caller_payload,
+    }
+    caller_controls = ["cancel"]
+    caller_resume = {"answers": [{"parts": ["original"]}]}
+    caller_interrupts = ["tools"]
+    caller_failure_detail = {"version": 1}
+
+    graph_input = GraphInputV1(value=caller_input)
+    resume_input = ResumeInputV1(value=caller_resume)
+    options = InvocationOptionsV1(interrupt_before=caller_interrupts)
+    observation = InvocationObservation(
+        run_id="run-1",
+        thread_id="thread-1",
+        status="running",
+        state_version=2,
+        snapshots=[caller_snapshot],
+        events=[caller_event],
+        next_cursor="opaque-1",
+        minimum_available_cursor="opaque-0",
+        read_fence_cursor="opaque-1",
+    )
+    capabilities = RuntimeCapabilities(controls=caller_controls)
+    failure = RuntimeFailure(
+        code="invalid_request",
+        detail=caller_failure_detail,
+    )
+    original_input_wire = graph_input.to_dict()
+    original_observation_wire = observation.to_dict()
+    equivalent_input = GraphInputV1.from_dict(original_input_wire)
+
+    caller_input["messages"][0]["content"]["parts"][0] = "mutated"
+    caller_input["messages"].append({"role": "user", "content": "late"})
+    caller_snapshot["status"] = "success"
+    caller_payload["evidence"].append("mutated")
+    caller_controls.clear()
+    caller_resume["answers"][0]["parts"].append("mutated")
+    caller_interrupts.append("late")
+    caller_failure_detail["forged"] = True
+
+    assert graph_input.to_dict() == original_input_wire
+    assert graph_input == equivalent_input
+    assert observation.to_dict() == original_observation_wire
+    assert capabilities.controls == ("cancel",)
+    assert resume_input.to_dict()["value"] == {"answers": [{"parts": ["original"]}]}
+    assert options.interrupt_before == ("tools",)
+    assert failure.to_dict()["detail"] == {"version": 1}
+    with pytest.raises(TypeError):
+        graph_input.value["forged"] = True  # type: ignore[index]
+    with pytest.raises(TypeError):
+        graph_input.value["messages"][0]["content"]["parts"][0] = "forged"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        observation.events[0]["payload"]["forged"] = True  # type: ignore[index]
+
+    first_wire = observation.to_dict()
+    second_wire = observation.to_dict()
+    first_wire["events"][0]["payload"]["evidence"].append("wire-only")
+    assert second_wire == original_observation_wire
+    assert observation.to_dict() == original_observation_wire
+    assert record_from_dict(second_wire).to_dict() == second_wire
+
+
+def test_exported_runtime_contract_classes_are_documented_and_annotated() -> None:
+    import deerflow_runtime_api as runtime_api
+
+    for name in runtime_api.__all__:
+        exported = getattr(runtime_api, name)
+        if not inspect.isclass(exported):
+            continue
+        assert inspect.getdoc(exported), f"{name} needs a public contract docstring"
+        annotations = getattr(exported, "__annotations__", {})
+        if hasattr(exported, "__dataclass_fields__"):
+            assert annotations, f"{name} needs public field annotations"
+
+    protocol = runtime_api.DurableInvocationPort
+    for method_name in ("ensure", "observe", "control", "capabilities"):
+        signature = inspect.signature(getattr(protocol, method_name))
+        assert signature.return_annotation is not inspect.Signature.empty
 
 
 def test_every_public_record_round_trips_strictly() -> None:

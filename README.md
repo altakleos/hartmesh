@@ -1160,7 +1160,7 @@ for the synchronous `DeerFlowClient` path.
 
 ## Embedded Python Client
 
-DeerFlow can be used as an embedded Python library without running the full HTTP services. The synchronous `DeerFlowClient` provides direct, non-durable local graph execution and does not enter `InvocationRuntime`; use the asynchronous `deerflow-runtime-api` in-process adapter when durable ensure/observe/control semantics are required. Its other methods return the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
+DeerFlow can be used as an embedded Python library without running the full HTTP services. The synchronous `DeerFlowClient` provides direct, non-durable local graph execution and does not enter `InvocationRuntime`; use the asynchronous `deerflow-runtime-api` in-process adapter through its standard-library-only `DurableInvocationPort` Protocol when durable ensure/observe/control semantics are required. Its validated records are transitively immutable snapshots, and `to_dict()` returns a fresh mutable wire copy. Its other methods return the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
 
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
 IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores

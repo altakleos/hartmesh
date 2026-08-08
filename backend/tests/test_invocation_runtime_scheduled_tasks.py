@@ -114,7 +114,7 @@ async def test_scheduled_occurrence_enters_runtime_with_typed_execution_facts() 
     assert intent.owner_user_id == "owner-1"
     assert intent.assistant_id == "report-agent"
     assert intent.thread_id == "thread-1"
-    assert intent.input == {"messages": [{"role": "user", "content": "prepare report"}]}
+    assert intent.input == {"messages": ({"role": "user", "content": "prepare report"},)}
     assert intent.context == {"non_interactive": True, "user_id": "owner-1"}
     assert intent.on_disconnect == "continue"
     assert intent.multitask_strategy == "reject"

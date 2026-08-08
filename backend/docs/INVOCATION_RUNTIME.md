@@ -202,13 +202,28 @@ retained row is deleted.
 
 ## Embedded runtime API and lifecycle observation
 
-`deerflow-runtime-api==0.1.0` owns the frozen, strict, standard-library-only
-`deerflow.runtime/v1` records. `app.runtime.api.build_in_process_runtime_api()`
-binds those records to the Gateway application and one already-authenticated
-service ID. The adapter derives one service effective subject (used consistently for
+`deerflow-runtime-api==0.1.0` owns the strict, standard-library-only
+`deerflow.runtime/v1` records and the `DurableInvocationPort` Protocol. The
+Protocol is the complete transport-neutral seam: `ensure`, invocation/context
+`observe`, fenced `control`, and `capabilities`; it exposes no application,
+storage, worker, graph, session, or framework type. All public records are
+transitively immutable snapshots. Parsing freezes nested JSON mappings and
+sequences, while every `to_dict()` call returns a fresh mutable wire copy.
+
+`app.runtime.api.build_in_process_runtime_api()` binds that Protocol to the
+Gateway application and one already-authenticated service ID. The HTTP facade
+depends on the same Protocol, and the shared conformance suite exercises both
+adapters. The adapter derives one service effective subject (used consistently for
 start, observe, and cancel), Origin, and canonical
 hashed scope; a caller can provide only an external key, thread ID, optional
 agent hint, strict graph/resume input, and the finite v1 execution options.
+
+The host-internal trust seam applies the same defensive rule to launch values:
+`InternalLaunchIntent` and `PreparedLaunch` recursively snapshot mappings,
+sequences, sets, checkpoint/config/context values, and callback collections.
+Only fresh mutable container copies cross into Gateway normalization,
+RunManager persistence, and graph execution. Opaque callback objects retain
+their operational identity; their caller-owned containing collections do not.
 
 The API offers `ensure`, invocation/context `observe`, fenced cancellation via
 `control`, and truthful capabilities. It reuses the same idempotency,

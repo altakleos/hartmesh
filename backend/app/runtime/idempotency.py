@@ -119,8 +119,9 @@ def scope_for_service(authenticated_service_id: str) -> str:
 def canonical_request_digest(value: Any) -> str:
     """Hash canonical UTF-8 JSON with an explicit projector version tag."""
 
+    normalized = canonical_request_value(value)
     canonical = json.dumps(
-        {"version": REQUEST_DIGEST_VERSION, "request": value},
+        {"version": REQUEST_DIGEST_VERSION, "request": normalized},
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,

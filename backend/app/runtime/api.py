@@ -9,6 +9,7 @@ from deerflow_runtime_api import (
     CancelInvocationRequest,
     ContextInvocationsQuery,
     ControlDisposition,
+    DurableInvocationPort,
     EnsureDisposition,
     FailureCode,
     GraphInputV1,
@@ -52,7 +53,7 @@ def _failure(code: FailureCode, **detail: Any) -> RuntimeFailure:
     return RuntimeFailure(code=code, detail={"version": 1, **detail})
 
 
-class InvocationRuntimeAPI:
+class InvocationRuntimeAPI(DurableInvocationPort):
     """Transport-neutral adapter bound to one host-authenticated principal."""
 
     def __init__(

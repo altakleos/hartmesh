@@ -201,7 +201,7 @@ async def test_each_channel_launch_mode_uses_runtime_instead_of_sdk_admission(
     assert len(runtime.intents) == 1
     intent = runtime.intents[0]
     assert intent.native_channel.provider == channel_name
-    assert intent.stream_mode == (["messages-tuple", "values"] if launch_mode == "stream" else None)
+    assert intent.stream_mode == (("messages-tuple", "values") if launch_mode == "stream" else None)
     client.runs.create.assert_not_awaited()
     client.runs.wait.assert_not_awaited()
     client.runs.stream.assert_not_called()

@@ -36,6 +36,76 @@ def _record() -> RunRecord:
     )
 
 
+def test_internal_launch_records_snapshot_and_freeze_nested_caller_values() -> None:
+    from app.runtime.idempotency import canonical_request_digest
+
+    caller_input = {"messages": [{"content": {"parts": ["original"]}}]}
+    caller_callbacks = [lambda: None]
+    caller_config = {
+        "context": {"nested": ["original"]},
+        "callbacks": caller_callbacks,
+        "tags": {"one"},
+    }
+    caller_checkpoint = {"checkpoint_id": "checkpoint-1", "checkpoint_map": {"root": ["checkpoint-0"]}}
+    caller_modes = ["values"]
+    intent = InternalLaunchIntent(
+        thread_id="thread-1",
+        input=caller_input,
+        config=caller_config,
+        checkpoint=caller_checkpoint,
+        interrupt_before=["tools"],
+        stream_mode=caller_modes,
+    )
+    intent_digest = canonical_request_digest(intent.input)
+
+    caller_input["messages"][0]["content"]["parts"][0] = "mutated"
+    caller_callbacks.clear()
+    caller_config["context"]["nested"].append("mutated")
+    caller_config["tags"].add("mutated")
+    caller_checkpoint["checkpoint_map"]["root"].append("mutated")
+    caller_modes.append("debug")
+
+    assert intent.input["messages"][0]["content"]["parts"] == ("original",)
+    assert intent.config["callbacks"] != ()
+    assert intent.config["context"]["nested"] == ("original",)
+    assert intent.config["tags"] == frozenset({"one"})
+    assert intent.checkpoint["checkpoint_map"]["root"] == ("checkpoint-0",)
+    assert intent.stream_mode == ("values",)
+    assert canonical_request_digest(intent.input) == intent_digest
+    with pytest.raises(TypeError):
+        intent.input["forged"] = True  # type: ignore[index]
+    with pytest.raises(TypeError):
+        intent.config["context"]["forged"] = True  # type: ignore[index]
+
+    async def worker(_record: RunRecord) -> None:
+        return None
+
+    caller_metadata = {"labels": ["one"]}
+    caller_kwargs = {"config": {"callbacks": [lambda: None]}}
+    caller_intent = {"kind": "caller_intent", "version": 1, "value": {"input": ["one"]}}
+    launch = PreparedLaunch(
+        thread_id="thread-1",
+        assistant_id=None,
+        on_disconnect=DisconnectMode.cancel,
+        metadata=caller_metadata,
+        kwargs=caller_kwargs,
+        multitask_strategy="reject",
+        model_name=None,
+        user_id=None,
+        worker=worker,
+        caller_intent_json=caller_intent,
+    )
+    caller_metadata["labels"].append("mutated")
+    caller_kwargs["config"]["callbacks"].clear()
+    caller_intent["value"]["input"].append("mutated")
+
+    assert launch.metadata["labels"] == ("one",)
+    assert len(launch.kwargs["config"]["callbacks"]) == 1
+    assert launch.caller_intent_json["value"]["input"] == ("one",)
+    with pytest.raises(TypeError):
+        launch.kwargs["forged"] = True  # type: ignore[index]
+
+
 class _Normalizer:
     def __init__(self, events: list[str]) -> None:
         self.events = events
