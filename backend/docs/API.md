@@ -762,6 +762,11 @@ permissions; invocation and context reads retain owner/admin visibility, and
 unknown and invisible resources both return `not_found_or_invisible`. Browser
 `POST` requests also require the normal CSRF cookie/header pair.
 
+The standard-library-only package exports `DurableInvocationPort`, the shared
+Protocol implemented by the embedded and HTTP adapters. Its records are
+transitively immutable defensive snapshots; parsing freezes every nested JSON
+container, while each `to_dict()` call returns a new mutable JSON wire copy.
+
 | Route | Contract |
 |---|---|
 | `GET /capabilities` | Administrator-only `runtime.capabilities`; reports ensure, invocation/context observation, cancel control, unsupported context export/retirement, the immutable capability manifest, and separately labelled mutable capability health. |

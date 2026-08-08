@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from deerflow_runtime_api import (
     CancelInvocationRequest,
     ContextInvocationsQuery,
+    DurableInvocationPort,
     InvocationControlReceipt,
     InvocationEnsureReceipt,
     InvocationEnsureRequest,
@@ -19,7 +18,7 @@ from deerflow_runtime_api import (
 
 
 async def assert_runtime_adapter_conformance(
-    adapter: Any,
+    adapter: DurableInvocationPort,
     *,
     ensure: InvocationEnsureRequest,
     invocation_query: InvocationQuery,

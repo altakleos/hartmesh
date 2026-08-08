@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 from deerflow_extension_api import ConstraintProjectionV1, InvocationIdentityV1
@@ -24,6 +25,30 @@ from deerflow.runtime.runs.store.base import (
 WorkerCoroutine = Coroutine[Any, Any, None]
 WorkerFactory = Callable[[RunRecord], WorkerCoroutine]
 TaskFactory = Callable[[WorkerCoroutine], asyncio.Task[None]]
+
+
+def _freeze_host_value(value: Any) -> Any:
+    """Snapshot nested host values without retaining caller-owned containers."""
+
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_host_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_host_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_host_value(item) for item in value)
+    return value
+
+
+def thaw_host_value(value: Any) -> Any:
+    """Return a fresh mutable copy of a frozen host-internal value."""
+
+    if isinstance(value, Mapping):
+        return {key: thaw_host_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [thaw_host_value(item) for item in value]
+    if isinstance(value, frozenset):
+        return {thaw_host_value(item) for item in value}
+    return value
 
 
 class InternalSourceKind(StrEnum):
@@ -50,20 +75,20 @@ class InternalNativeChannelFacts:
 
 @dataclass(frozen=True)
 class InternalLaunchIntent:
-    """Finite, host-internal request for one invocation."""
+    """Finite host request that snapshots every caller-owned container."""
 
     thread_id: str
     assistant_id: str | None = None
-    input: dict[str, Any] | None = None
-    command: dict[str, Any] | None = None
-    metadata: dict[str, Any] | None = None
-    config: dict[str, Any] | None = None
-    context: dict[str, Any] | None = None
+    input: Mapping[str, Any] | None = None
+    command: Mapping[str, Any] | None = None
+    metadata: Mapping[str, Any] | None = None
+    config: Mapping[str, Any] | None = None
+    context: Mapping[str, Any] | None = None
     checkpoint_id: str | None = None
-    checkpoint: dict[str, Any] | None = None
-    interrupt_before: list[str] | Literal["*"] | None = None
-    interrupt_after: list[str] | Literal["*"] | None = None
-    stream_mode: list[str] | str | None = None
+    checkpoint: Mapping[str, Any] | None = None
+    interrupt_before: tuple[str, ...] | Literal["*"] | None = None
+    interrupt_after: tuple[str, ...] | Literal["*"] | None = None
+    stream_mode: tuple[str, ...] | str | None = None
     stream_subgraphs: bool = False
     on_disconnect: Literal["cancel", "continue"] = "cancel"
     multitask_strategy: Literal["reject", "rollback", "interrupt"] = "reject"
@@ -77,6 +102,20 @@ class InternalLaunchIntent:
     external_key: str | None = None
     scheduled_system_owned: bool = False
     thread_id_explicit: bool = True
+
+    def __post_init__(self) -> None:
+        for name in ("input", "command", "metadata", "config", "context", "checkpoint"):
+            value = getattr(self, name)
+            if value is not None:
+                if not isinstance(value, Mapping):
+                    raise TypeError(f"{name} must be a mapping or None")
+                object.__setattr__(self, name, _freeze_host_value(value))
+        for name in ("interrupt_before", "interrupt_after", "stream_mode"):
+            value = getattr(self, name)
+            if isinstance(value, (list, tuple)):
+                object.__setattr__(self, name, tuple(_freeze_host_value(item) for item in value))
+            elif value is not None and not isinstance(value, str):
+                raise TypeError(f"{name} must be a sequence, string, or None")
 
 
 @dataclass(frozen=True)
@@ -96,13 +135,18 @@ class InternalAdmissionIdentity:
 
 @dataclass(frozen=True)
 class PreparedLaunch:
-    """Normalized admission data plus the deferred worker factory."""
+    """Sealed admission data plus one deferred worker factory.
+
+    Metadata, persisted kwargs, callbacks, and caller-intent evidence are
+    defensive immutable snapshots. Adapters thaw fresh copies only at the
+    mutable RunManager/persistence boundary.
+    """
 
     thread_id: str
     assistant_id: str | None
     on_disconnect: DisconnectMode
-    metadata: dict[str, Any]
-    kwargs: dict[str, Any]
+    metadata: Mapping[str, Any]
+    kwargs: Mapping[str, Any]
     multitask_strategy: str
     model_name: str | None
     user_id: str | None
@@ -112,10 +156,21 @@ class PreparedLaunch:
     external_key: str | None = None
     request_digest: str | None = None
     request_digest_version: str | None = None
-    caller_intent_json: dict[str, Any] | None = None
+    caller_intent_json: Mapping[str, Any] | None = None
     caller_intent_digest: str | None = None
     caller_intent_digest_version: str | None = None
     principal: InvocationPrincipal = field(default_factory=lambda: InvocationPrincipal())
+
+    def __post_init__(self) -> None:
+        for name in ("metadata", "kwargs"):
+            value = getattr(self, name)
+            if not isinstance(value, Mapping):
+                raise TypeError(f"{name} must be a mapping")
+            object.__setattr__(self, name, _freeze_host_value(value))
+        if self.caller_intent_json is not None:
+            if not isinstance(self.caller_intent_json, Mapping):
+                raise TypeError("caller_intent_json must be a mapping or None")
+            object.__setattr__(self, "caller_intent_json", _freeze_host_value(self.caller_intent_json))
 
 
 @dataclass(frozen=True)
@@ -194,7 +249,13 @@ def _constraint_projection_evidence(projection: ConstraintProjectionV1) -> dict[
 @dataclass(frozen=True)
 class InternalConstraintDecision:
     outcome: InvocationConstraintOutcome
-    evidence: dict[str, Any] | None = None
+    evidence: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.evidence is not None:
+            if not isinstance(self.evidence, Mapping):
+                raise TypeError("constraint evidence must be a mapping or None")
+            object.__setattr__(self, "evidence", _freeze_host_value(self.evidence))
 
     @classmethod
     def absent(cls) -> InternalConstraintDecision:
@@ -208,7 +269,7 @@ class InternalConstraintDecision:
         )
 
     @classmethod
-    def projected_evidence(cls, evidence: dict[str, Any]) -> InternalConstraintDecision:
+    def projected_evidence(cls, evidence: Mapping[str, Any]) -> InternalConstraintDecision:
         return cls(InvocationConstraintOutcome.allowed, evidence=evidence)
 
     @classmethod
@@ -225,10 +286,16 @@ class InternalAuthorizationDecision:
     """Host-owned authorization result and optional safe persisted evidence."""
 
     outcome: InvocationAuthorizationOutcome
-    evidence: dict[str, Any] | None = None
+    evidence: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.evidence is not None:
+            if not isinstance(self.evidence, Mapping):
+                raise TypeError("authorization evidence must be a mapping or None")
+            object.__setattr__(self, "evidence", _freeze_host_value(self.evidence))
 
     @classmethod
-    def allowed(cls, *, evidence: dict[str, Any] | None = None) -> InternalAuthorizationDecision:
+    def allowed(cls, *, evidence: Mapping[str, Any] | None = None) -> InternalAuthorizationDecision:
         return cls(InvocationAuthorizationOutcome.allowed, evidence=evidence)
 
     @classmethod
@@ -281,7 +348,13 @@ class InternalContextLifecycleQuery:
 class InternalLifecycleObservation:
     record: RunRecord | None
     page: LifecyclePage
-    authoritative_snapshot: dict[str, Any] | None = None
+    authoritative_snapshot: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.authoritative_snapshot is not None:
+            if not isinstance(self.authoritative_snapshot, Mapping):
+                raise TypeError("authoritative_snapshot must be a mapping or None")
+            object.__setattr__(self, "authoritative_snapshot", _freeze_host_value(self.authoritative_snapshot))
 
 
 class LaunchNormalizer(Protocol):
@@ -395,7 +468,7 @@ class _AbsentInvocationConstraints:
 
 def _merge_decision_evidence(
     accepted: AcceptedInvocation,
-    evidence: dict[str, Any] | None,
+    evidence: Mapping[str, Any] | None,
 ) -> AcceptedInvocation:
     if evidence is None:
         return accepted

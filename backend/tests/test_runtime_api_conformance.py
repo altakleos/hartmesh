@@ -10,6 +10,7 @@ from _router_auth_helpers import make_authed_test_app
 from deerflow_runtime_api import (
     CancelInvocationRequest,
     ContextInvocationsQuery,
+    DurableInvocationPort,
     FailureCode,
     GraphInputV1,
     InvocationEnsureRequest,
@@ -94,7 +95,7 @@ def _admin_user() -> User:
     )
 
 
-class _HttpAdapter:
+class _HttpAdapter(DurableInvocationPort):
     """Client-side test adapter that decodes the public HTTP representation."""
 
     def __init__(self, delegate: InProcessInvocationRuntime) -> None:
@@ -156,7 +157,7 @@ def _semantic_outcome(result) -> str:
     return "observed"
 
 
-def _transport_adapter(runtime, transport: str):
+def _transport_adapter(runtime, transport: str) -> DurableInvocationPort:
     in_process = InProcessInvocationRuntime(
         runtime,
         authenticated_service_id="service-1",
@@ -174,6 +175,7 @@ def _close_adapter(adapter) -> None:
 async def test_runtime_transport_conformance(transport: str) -> None:
     adapter = _transport_adapter(_Runtime(), transport)
     try:
+        assert isinstance(adapter, DurableInvocationPort)
         await assert_runtime_adapter_conformance(
             adapter,
             ensure=InvocationEnsureRequest(

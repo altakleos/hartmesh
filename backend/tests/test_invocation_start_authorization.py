@@ -600,14 +600,14 @@ async def test_start_request_uses_only_sealed_host_facts_and_returns_bounded_evi
     assert decision.outcome is InvocationAuthorizationOutcome.allowed
     assert decision.evidence == {
         "version": 1,
-        "decisions": [
+        "decisions": (
             {
                 "authorization_generation": 12,
                 "policy_id": "policy.start.v1",
-                "reason_codes": ["allowed"],
+                "reason_codes": ("allowed",),
                 "evidence_digest": decision.evidence["decisions"][0]["evidence_digest"],
-            }
-        ],
+            },
+        ),
     }
     assert len(decision.evidence["decisions"][0]["evidence_digest"]) == 64
     request = provider.requests[0]

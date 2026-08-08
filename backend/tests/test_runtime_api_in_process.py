@@ -77,7 +77,7 @@ async def test_ensure_builds_a_host_trusted_service_launch_intent() -> None:
     assert runtime.intent.source_kind is InternalSourceKind.service
     assert runtime.intent.trusted_service_id == "service-1"
     assert runtime.intent.external_key == "delivery-1"
-    assert runtime.intent.input == {"messages": [{"role": "user", "content": "hello"}]}
+    assert runtime.intent.input == {"messages": ({"role": "user", "content": "hello"},)}
     assert runtime.intent.context == {"model_name": "fast", "thinking_enabled": True}
     assert runtime.intent.multitask_strategy == "interrupt"
     assert runtime.intent.checkpoint_id == "checkpoint-1"

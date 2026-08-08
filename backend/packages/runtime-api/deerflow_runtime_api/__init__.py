@@ -1,4 +1,9 @@
-"""Standard-library-only contracts for DeerFlow's in-process runtime API."""
+"""Immutable, standard-library-only contracts for durable invocations.
+
+The records in this module are the wire-neutral Interface shared by embedded
+and HTTP adapters. Construction snapshots every caller-owned JSON container;
+``to_dict()`` returns a fresh mutable JSON-compatible copy.
+"""
 
 from __future__ import annotations
 
@@ -6,16 +11,20 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
-from typing import Any, ClassVar, Literal
+from types import MappingProxyType
+from typing import Any, ClassVar, Literal, Protocol, Self, runtime_checkable
 
 API_VERSION = "deerflow.runtime/v1"
 type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
+type ImmutableJsonValue = JsonScalar | tuple[ImmutableJsonValue, ...] | Mapping[str, ImmutableJsonValue]
 
 _RUN_STATUSES = frozenset({"pending", "running", "success", "error", "timeout", "interrupted"})
 
 
 class EnsureDisposition(StrEnum):
+    """Finite outcomes for idempotent durable admission."""
+
     created = "created"
     known = "known"
     conflict = "conflict"
@@ -25,6 +34,8 @@ class EnsureDisposition(StrEnum):
 
 
 class ControlDisposition(StrEnum):
+    """Finite outcomes for version-fenced cancellation."""
+
     requested = "requested"
     already_requested = "already_requested"
     already_terminal = "already_terminal"
@@ -35,6 +46,8 @@ class ControlDisposition(StrEnum):
 
 
 class FailureCode(StrEnum):
+    """Stable, safe failure codes exposed by every portable adapter."""
+
     invalid_request = "invalid_request"
     denied = "denied"
     indeterminate = "indeterminate"
@@ -46,8 +59,8 @@ class FailureCode(StrEnum):
     cursor_ahead = "cursor_ahead"
 
 
-def _json_value(value: Any, *, object_only: bool = False) -> JsonValue:
-    if object_only and not isinstance(value, dict):
+def _json_value(value: Any, *, object_only: bool = False) -> ImmutableJsonValue:
+    if object_only and not isinstance(value, Mapping):
         raise TypeError("value must be a JSON object")
     if value is None or isinstance(value, (str, bool, int)):
         return value
@@ -56,11 +69,11 @@ def _json_value(value: Any, *, object_only: bool = False) -> JsonValue:
             raise ValueError("JSON numbers must be finite")
         return value
     if isinstance(value, (list, tuple)):
-        return [_json_value(item) for item in value]
-    if isinstance(value, dict):
+        return tuple(_json_value(item) for item in value)
+    if isinstance(value, Mapping):
         if not all(isinstance(key, str) for key in value):
             raise TypeError("JSON object keys must be strings")
-        return {key: _json_value(item) for key, item in value.items()}
+        return MappingProxyType({key: _json_value(item) for key, item in value.items()})
     raise TypeError(f"unsupported JSON value: {type(value).__name__}")
 
 
@@ -90,17 +103,15 @@ def _state_version(value: Any, *, nullable: bool = False) -> int | None:
     return value
 
 
-def _wire(value: Any) -> Any:
+def _wire(value: Any) -> JsonValue:
     if isinstance(value, _Record):
         return value.to_dict()
     if isinstance(value, StrEnum):
         return value.value
-    if isinstance(value, tuple):
+    if isinstance(value, (list, tuple)):
         return [_wire(item) for item in value]
-    if isinstance(value, list):
-        return [_wire(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _wire(item) for key, item in value.items()}
+    if isinstance(value, Mapping):
+        return {str(key): _wire(item) for key, item in value.items()}
     return value
 
 
@@ -111,7 +122,7 @@ class _Record:
         return {item.name: _wire(getattr(self, item.name)) for item in fields(self)}
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]):
+    def from_dict(cls, payload: Mapping[str, Any]) -> Self:
         if not isinstance(payload, Mapping):
             raise TypeError("runtime API record must be an object")
         expected = {item.name for item in fields(cls)}
@@ -131,14 +142,16 @@ class _Record:
         return cls._from_wire(values)
 
     @classmethod
-    def _from_wire(cls, values: dict[str, Any]):
+    def _from_wire(cls, values: dict[str, Any]) -> Self:
         return cls(**values)
 
 
 @dataclass(frozen=True)
 class GraphInputV1(_Record):
+    """A validated immutable snapshot of graph input JSON."""
+
     KIND: ClassVar[str] = "invocation.input.graph"
-    value: dict[str, JsonValue]
+    value: Mapping[str, ImmutableJsonValue]
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["invocation.input.graph"] = field(default=KIND, init=False)
 
@@ -148,8 +161,10 @@ class GraphInputV1(_Record):
 
 @dataclass(frozen=True)
 class ResumeInputV1(_Record):
+    """A validated immutable snapshot of a graph resume value."""
+
     KIND: ClassVar[str] = "invocation.input.resume"
-    value: JsonValue
+    value: ImmutableJsonValue
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["invocation.input.resume"] = field(default=KIND, init=False)
 
@@ -159,6 +174,8 @@ class ResumeInputV1(_Record):
 
 @dataclass(frozen=True)
 class InvocationOptionsV1(_Record):
+    """Finite execution options whose values participate in replay identity."""
+
     KIND: ClassVar[str] = "invocation.options"
     model_name: str | None = None
     thinking_enabled: bool | None = None
@@ -187,6 +204,12 @@ class InvocationOptionsV1(_Record):
 
 @dataclass(frozen=True)
 class InvocationEnsureRequest(_Record):
+    """One source-keyed durable invocation request.
+
+    Equal retries reuse the retained invocation; changed caller intent returns
+    a conflict. Principal, scope, Origin, and accepted facts are host supplied.
+    """
+
     KIND: ClassVar[str] = "invocation.ensure"
     external_key: str
     thread_id: str
@@ -206,7 +229,7 @@ class InvocationEnsureRequest(_Record):
             raise TypeError("options must be InvocationOptionsV1")
 
     @classmethod
-    def _from_wire(cls, values: dict[str, Any]):
+    def _from_wire(cls, values: dict[str, Any]) -> Self:
         values["input"] = record_from_dict(values["input"])
         values["options"] = InvocationOptionsV1.from_dict(values["options"])
         return cls(**values)
@@ -214,6 +237,8 @@ class InvocationEnsureRequest(_Record):
 
 @dataclass(frozen=True)
 class InvocationEnsureReceipt(_Record):
+    """Admission result, with invocation identity only for created/known rows."""
+
     KIND: ClassVar[str] = "invocation.ensure.receipt"
     disposition: EnsureDisposition | str
     run_id: str | None = None
@@ -237,6 +262,12 @@ class InvocationEnsureReceipt(_Record):
 
 @dataclass(frozen=True)
 class InvocationQuery(_Record):
+    """Access-filtered lifecycle page query for one invocation.
+
+    ``cursor`` is opaque and ``include_snapshot`` controls snapshot inclusion;
+    events remain ordered after the cursor through the adapter's read fence.
+    """
+
     KIND: ClassVar[str] = "invocation.query"
     run_id: str
     cursor: str | None = None
@@ -256,6 +287,8 @@ class InvocationQuery(_Record):
 
 @dataclass(frozen=True)
 class ContextInvocationsQuery(_Record):
+    """Access-filtered lifecycle page query for one visible thread/context."""
+
     KIND: ClassVar[str] = "context.invocations.query"
     thread_id: str
     cursor: str | None = None
@@ -302,18 +335,21 @@ def _fixed_public_rows(
     *,
     expected: set[str],
     label: str,
-) -> tuple[dict[str, JsonValue], ...]:
+) -> tuple[Mapping[str, ImmutableJsonValue], ...]:
     if not isinstance(rows, (list, tuple)):
         raise TypeError(f"{label} must be a list")
-    result: list[dict[str, JsonValue]] = []
+    result: list[Mapping[str, ImmutableJsonValue]] = []
     for row in rows:
-        if not isinstance(row, dict) or set(row) != expected:
+        if not isinstance(row, Mapping) or set(row) != expected:
             raise ValueError(f"{label} contain invalid fields")
-        result.append(_json_value(row, object_only=True))
+        frozen = _json_value(row, object_only=True)
+        if not isinstance(frozen, Mapping):  # pragma: no cover - object_only contract
+            raise TypeError(f"{label} must contain JSON objects")
+        result.append(frozen)
     return tuple(result)
 
 
-def _validate_lifecycle_event(row: dict[str, JsonValue]) -> None:
+def _validate_lifecycle_event(row: Mapping[str, ImmutableJsonValue]) -> None:
     for name in ("event_id", "cursor", "run_id", "thread_id", "created_at"):
         _nonempty(row[name], name)
     lifecycle_type = row["lifecycle_type"]
@@ -329,7 +365,7 @@ def _validate_lifecycle_event(row: dict[str, JsonValue]) -> None:
         raise ValueError("lifecycle event state_version must be positive")
 
 
-def _validate_snapshot(row: dict[str, JsonValue]) -> None:
+def _validate_snapshot(row: Mapping[str, ImmutableJsonValue]) -> None:
     _nonempty(row["run_id"], "run_id")
     _nonempty(row["thread_id"], "thread_id")
     _run_status(row["status"])
@@ -338,13 +374,20 @@ def _validate_snapshot(row: dict[str, JsonValue]) -> None:
 
 @dataclass(frozen=True)
 class InvocationObservation(_Record):
+    """An authoritative snapshot plus one at-least-once lifecycle page.
+
+    Event IDs/cursors make repeated pages harmless. ``next_cursor`` advances
+    within ``read_fence_cursor`` and ``minimum_available_cursor`` identifies
+    the retention boundary after pruning.
+    """
+
     KIND: ClassVar[str] = "invocation.observation"
     run_id: str | None
     thread_id: str
     status: str | None
     state_version: int | None
-    snapshots: tuple[dict[str, JsonValue], ...]
-    events: tuple[dict[str, JsonValue], ...]
+    snapshots: tuple[Mapping[str, ImmutableJsonValue], ...]
+    events: tuple[Mapping[str, ImmutableJsonValue], ...]
     next_cursor: str
     minimum_available_cursor: str
     read_fence_cursor: str
@@ -374,6 +417,8 @@ class InvocationObservation(_Record):
 
 @dataclass(frozen=True)
 class CancelInvocationRequest(_Record):
+    """Request cancellation fenced by the caller's observed state version."""
+
     KIND: ClassVar[str] = "invocation.cancel"
     run_id: str
     expected_state_version: int
@@ -390,6 +435,8 @@ class CancelInvocationRequest(_Record):
 
 @dataclass(frozen=True)
 class InvocationControlReceipt(_Record):
+    """Cancellation result with current state only when visibility permits."""
+
     KIND: ClassVar[str] = "invocation.control.receipt"
     disposition: ControlDisposition | str
     run_id: str | None = None
@@ -419,6 +466,8 @@ class InvocationControlReceipt(_Record):
 
 @dataclass(frozen=True)
 class RuntimeCapabilities(_Record):
+    """Truthful feature support for one durable invocation adapter."""
+
     KIND: ClassVar[str] = "runtime.capabilities"
     ensure: bool = True
     observe_invocation: bool = True
@@ -447,9 +496,11 @@ class RuntimeCapabilities(_Record):
 
 @dataclass(frozen=True)
 class RuntimeFailure(_Record):
+    """Safe portable failure without exception text or private policy reasons."""
+
     KIND: ClassVar[str] = "runtime.failure"
     code: FailureCode | str
-    detail: dict[str, JsonValue]
+    detail: Mapping[str, ImmutableJsonValue]
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["runtime.failure"] = field(default=KIND, init=False)
 
@@ -473,6 +524,46 @@ class RuntimeFailure(_Record):
         object.__setattr__(self, "detail", detail)
 
 
+@runtime_checkable
+class DurableInvocationPort(Protocol):
+    """Portable durable-invocation Seam implemented by every adapter.
+
+    Implementations authenticate and bind the caller outside this Interface.
+    They preserve idempotent ensure semantics, access-filter observations,
+    version-fenced control, and finite safe failures without exposing stores,
+    workers, graph objects, framework responses, or deployment state.
+    """
+
+    async def ensure(
+        self,
+        request: InvocationEnsureRequest,
+    ) -> InvocationEnsureReceipt | RuntimeFailure:
+        """Create or reuse one invocation for the request's external key."""
+
+        ...
+
+    async def observe(
+        self,
+        request: InvocationQuery | ContextInvocationsQuery,
+    ) -> InvocationObservation | RuntimeFailure:
+        """Read one access-filtered invocation or context lifecycle page."""
+
+        ...
+
+    async def control(
+        self,
+        request: CancelInvocationRequest,
+    ) -> InvocationControlReceipt | RuntimeFailure:
+        """Apply the supported version-fenced invocation control."""
+
+        ...
+
+    def capabilities(self) -> RuntimeCapabilities:
+        """Return the adapter's finite supported operation set."""
+
+        ...
+
+
 _RECORDS: dict[str, type[_Record]] = {
     record.KIND: record
     for record in (
@@ -492,7 +583,24 @@ _RECORDS: dict[str, type[_Record]] = {
 }
 
 
-def record_from_dict(payload: Mapping[str, Any]) -> _Record:
+def record_from_dict(
+    payload: Mapping[str, Any],
+) -> (
+    GraphInputV1
+    | ResumeInputV1
+    | InvocationOptionsV1
+    | InvocationEnsureRequest
+    | InvocationEnsureReceipt
+    | InvocationQuery
+    | ContextInvocationsQuery
+    | InvocationObservation
+    | CancelInvocationRequest
+    | InvocationControlReceipt
+    | RuntimeCapabilities
+    | RuntimeFailure
+):
+    """Parse one strict v1 wire object into its immutable public record."""
+
     if not isinstance(payload, Mapping):
         raise TypeError("runtime API record must be an object")
     if payload.get("api_version") != API_VERSION:
@@ -508,6 +616,7 @@ __all__ = [
     "CancelInvocationRequest",
     "ContextInvocationsQuery",
     "ControlDisposition",
+    "DurableInvocationPort",
     "EnsureDisposition",
     "FailureCode",
     "GraphInputV1",
@@ -517,6 +626,7 @@ __all__ = [
     "InvocationObservation",
     "InvocationOptionsV1",
     "InvocationQuery",
+    "ImmutableJsonValue",
     "JsonValue",
     "ResumeInputV1",
     "RuntimeCapabilities",

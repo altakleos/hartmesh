@@ -8,6 +8,7 @@ from deerflow_runtime_api import (
     CancelInvocationRequest,
     ContextInvocationsQuery,
     ControlDisposition,
+    DurableInvocationPort,
     EnsureDisposition,
     FailureCode,
     InvocationControlReceipt,
@@ -35,7 +36,7 @@ from deerflow.utils.thread_id import ThreadId
 router = APIRouter(prefix="/api/runtime/v1", tags=["runtime"])
 
 
-async def get_runtime_api(request: Request) -> InvocationRuntimeAPI:
+async def get_runtime_api(request: Request) -> DurableInvocationPort:
     """Bind the transport to the current authenticated Gateway principal."""
 
     principal = await invocation_principal_from_request(
@@ -131,7 +132,7 @@ async def runtime_capabilities(request: Request) -> JSONResponse:
 @router.post("/invocations/ensure")
 async def ensure_invocation(
     request: Request,
-    runtime: Annotated[InvocationRuntimeAPI, Depends(get_runtime_api)],
+    runtime: Annotated[DurableInvocationPort, Depends(get_runtime_api)],
 ) -> JSONResponse:
     if error := _permission_error(request, "runs", "create"):
         return error
@@ -166,7 +167,7 @@ async def ensure_invocation(
 async def observe_invocation(
     run_id: str,
     request: Request,
-    runtime: Annotated[InvocationRuntimeAPI, Depends(get_runtime_api)],
+    runtime: Annotated[DurableInvocationPort, Depends(get_runtime_api)],
 ) -> JSONResponse:
     if error := _permission_error(request, "runs", "read"):
         return error
@@ -190,7 +191,7 @@ async def observe_invocation(
 async def observe_context_invocations(
     thread_id: ThreadId,
     request: Request,
-    runtime: Annotated[InvocationRuntimeAPI, Depends(get_runtime_api)],
+    runtime: Annotated[DurableInvocationPort, Depends(get_runtime_api)],
 ) -> JSONResponse:
     if error := _permission_error(request, "runs", "read"):
         return error
@@ -218,7 +219,7 @@ async def observe_context_invocations(
 async def control_invocation(
     run_id: str,
     request: Request,
-    runtime: Annotated[InvocationRuntimeAPI, Depends(get_runtime_api)],
+    runtime: Annotated[DurableInvocationPort, Depends(get_runtime_api)],
 ) -> JSONResponse:
     if error := _permission_error(request, "runs", "cancel"):
         return error
