@@ -437,6 +437,17 @@ imagePullSecrets:
 {{- fail "deployment qualificationEvidence is limited to 16 KiB of canonical JSON" -}}
 {{- end -}}
 {{- range .Values.deployment.qualificationEvidence -}}
+  {{- $hasScope := hasKey . "scope" -}}
+  {{- $hasStatus := hasKey . "status" -}}
+  {{- if ne $hasScope $hasStatus -}}
+  {{- fail "deployment qualification scope and status must be supplied together" -}}
+  {{- end -}}
+  {{- if and (not $hasScope) (ne (len .) 3) -}}
+  {{- fail "legacy deployment qualification evidence accepts exactly qualificationId, artifactDigest, and completedAt" -}}
+  {{- end -}}
+  {{- if and $hasScope (ne (len .) 5) -}}
+  {{- fail "scoped deployment qualification evidence accepts exactly qualificationId, artifactDigest, completedAt, scope, and status" -}}
+  {{- end -}}
   {{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$" .qualificationId) -}}
   {{- fail "deployment qualificationId must be a bounded safe identifier" -}}
   {{- end -}}
@@ -445,6 +456,14 @@ imagePullSecrets:
   {{- end -}}
   {{- if or (gt (len .completedAt) 64) (not (regexMatch "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$" .completedAt)) -}}
   {{- fail "deployment qualification completedAt must be an RFC3339 timestamp" -}}
+  {{- end -}}
+  {{- if $hasScope -}}
+    {{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$" .scope) -}}
+    {{- fail "deployment qualification scope must be a bounded safe identifier" -}}
+    {{- end -}}
+    {{- if ne .status "passed" -}}
+    {{- fail "deployment qualification status must be passed" -}}
+    {{- end -}}
   {{- end -}}
 {{- end -}}
 

@@ -1,0 +1,92 @@
+name: Kubernetes Durable Invocation Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_repository:
+        description: Gateway OCI repository without tag or digest
+        required: true
+        type: string
+      image_digest:
+        description: Exact Gateway sha256 digest
+        required: true
+        type: string
+      kube_context:
+        description: Explicit disposable-cluster context to confirm
+        required: true
+        type: string
+      namespace:
+        description: Fresh namespace beginning hartmesh-qualification-
+        required: true
+        type: string
+      qualification_id:
+        description: Stable safe identifier for this qualification run
+        required: true
+        type: string
+      cluster_driver:
+        description: Optional operator-reported cluster driver (kind, k3d, k3s, other)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  qualify-one-replica-pod-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DEERFLOW_TEST_KUBERNETES: "1"
+      DEERFLOW_TEST_KUBERNETES_CONTEXT: ${{ inputs.kube_context }}
+      DEERFLOW_TEST_KUBERNETES_CONFIRM_CONTEXT: ${{ inputs.kube_context }}
+      DEERFLOW_TEST_KUBERNETES_NAMESPACE: ${{ inputs.namespace }}
+      DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID: ${{ inputs.qualification_id }}
+      DEERFLOW_TEST_KUBERNETES_DRIVER: ${{ inputs.cluster_driver }}
+      DEERFLOW_TEST_GATEWAY_IMAGE_REPOSITORY: ${{ inputs.image_repository }}
+      DEERFLOW_TEST_GATEWAY_IMAGE_DIGEST: ${{ inputs.image_digest }}
+      DEERFLOW_TEST_KUBERNETES_EVIDENCE: ${{ github.workspace }}/artifacts/kubernetes-qualification.json
+      KUBECONFIG: ${{ runner.temp }}/qualification-kubeconfig
+
+    steps:
+      - name: Checkout exact chart and harness
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Helm CLI for the opt-in job
+        uses: azure/setup-helm@v4.3.1
+
+      - name: Install kubectl CLI for the opt-in job
+        uses: azure/setup-kubectl@v4.0.1
+
+      - name: Materialize the explicitly supplied disposable-cluster config
+        env:
+          QUALIFICATION_KUBECONFIG_B64: ${{ secrets.QUALIFICATION_KUBECONFIG_B64 }}
+        run: |
+          test -n "$QUALIFICATION_KUBECONFIG_B64"
+          umask 077
+          printf '%s' "$QUALIFICATION_KUBECONFIG_B64" | base64 --decode > "$KUBECONFIG"
+
+      - name: Install existing backend test dependencies
+        working-directory: backend
+        run: uv sync --group dev --extra postgres
+
+      - name: Run every real-pod fault scenario
+        working-directory: backend
+        run: PYTHONPATH=. uv run pytest -m kubernetes_contract -v -s
+
+      - name: Publish bounded evidence and failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: kubernetes-qualification-${{ inputs.qualification_id }}
+          if-no-files-found: error
+          path: |
+            artifacts/kubernetes-qualification.json
+            artifacts/kubernetes-qualification.failure-artifacts/

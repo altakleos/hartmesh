@@ -189,6 +189,8 @@ class QualificationEvidence:
     qualification_id: str
     artifact_digest: str
     completed_at: datetime
+    scope: str = "legacy_unspecified"
+    status: Literal["passed"] = "passed"
 
     def __post_init__(self) -> None:
         if _SAFE_ID_RE.fullmatch(self.qualification_id) is None:
@@ -197,10 +199,16 @@ class QualificationEvidence:
             raise ValueError("artifact_digest must be a SHA-256 digest")
         if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
             raise ValueError("completed_at must be timezone-aware")
+        if _SAFE_ID_RE.fullmatch(self.scope) is None:
+            raise ValueError("qualification scope must be a bounded safe identifier")
+        if self.status != "passed":
+            raise ValueError("only completed passing qualification evidence is accepted")
 
     def to_dict(self) -> dict[str, object]:
         return {
             "qualification_id": self.qualification_id,
+            "scope": self.scope,
+            "status": self.status,
             "artifact_digest": self.artifact_digest,
             "completed_at": self.completed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         }
@@ -224,6 +232,7 @@ class DeploymentQualification:
                     evidence,
                     key=lambda item: (
                         item.qualification_id,
+                        item.scope,
                         item.completed_at,
                         item.artifact_digest,
                     ),
@@ -247,13 +256,17 @@ class DeploymentQualification:
         if not isinstance(payload, list) or len(payload) > 16:
             raise ValueError("qualification evidence must be a list of at most 16 items")
         evidence: list[QualificationEvidence] = []
-        expected_fields = {
+        legacy_fields = {
             "qualificationId",
             "artifactDigest",
             "completedAt",
         }
+        current_fields = legacy_fields | {"scope", "status"}
         for item in payload:
-            if not isinstance(item, dict) or set(item) != expected_fields:
+            if not isinstance(item, dict) or frozenset(item) not in {
+                frozenset(legacy_fields),
+                frozenset(current_fields),
+            }:
                 raise ValueError("qualification evidence fields are invalid")
             try:
                 completed_at_raw = item["completedAt"]
@@ -265,6 +278,8 @@ class DeploymentQualification:
                         qualification_id=item["qualificationId"],
                         artifact_digest=item["artifactDigest"],
                         completed_at=completed_at,
+                        scope=item.get("scope", "legacy_unspecified"),
+                        status=item.get("status", "passed"),
                     )
                 )
             except (AttributeError, TypeError, ValueError) as exc:

@@ -113,8 +113,13 @@ migration and runtime persistence evidence in
 `postgres_contract` marker includes that migration path and the independent-session
 arbitration tests; any marked skip fails when `DEERFLOW_TEST_POSTGRES_URL` is
 configured, while an absent local URL leaves an explicit unpassed release gate.
-Offline tests simulate process loss but do not claim Kubernetes pod-loss,
-scheduler-HA, or general multi-replica Gateway qualification.
+The separate `kubernetes_contract` suite at
+`backend/tests/kubernetes/test_durable_invocation_pod_recovery.py` is opt-in via
+`DEERFLOW_TEST_KUBERNETES=1`; it uses an explicitly confirmed KUBECONFIG context,
+the exact pinned Gateway image and chart, and a fresh
+`hartmesh-qualification-*` namespace. Its default skip is an unpassed release
+gate, and only all-scenario real-pod completion creates passing administrative
+evidence. Neither suite claims scheduler HA or a general multi-replica Gateway.
 
 Skill quality review note:
 - `skills/public/skill-reviewer/` is the built-in read-only skill quality reviewer.

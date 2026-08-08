@@ -65,6 +65,7 @@ markers = [
     "integration: tests that require an external service (e.g. Redis); skipped when unavailable",
     "live: tests that call real external APIs and require explicit opt-in",
     "postgres_contract: required PostgreSQL durable-runtime contract gate when DEERFLOW_TEST_POSTGRES_URL is configured",
+    "kubernetes_contract: opt-in real-cluster durable invocation pod-loss qualification gated by DEERFLOW_TEST_KUBERNETES=1",
 ]
 
 [tool.uv]

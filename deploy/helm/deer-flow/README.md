@@ -274,9 +274,47 @@ application shutdown budget, preStop delay, and scheduling headroom.
 `deployment.provenance.sourceRevision` and a pinned Gateway digest are injected
 through bounded trusted environment fields and appear only in the administrator
 deployment report. `deployment.qualificationEvidence` accepts completed safe
-identifiers, artifact SHA-256 digests, and RFC3339 completion times. It is empty
-by default, so the report says `unqualified`; Helm never invents evidence.
-Neither configuration accepts credentials or arbitrary metadata.
+identifiers, artifact SHA-256 digests, and RFC3339 completion times. Scoped
+evidence additionally requires a bounded `scope` and exact `status: passed`;
+legacy three-field records remain readable. It is empty by default, so the
+report says `unqualified`; Helm never invents evidence. Neither configuration
+accepts credentials or arbitrary metadata.
+
+#### Opt-in real-pod recovery qualification
+
+`backend/tests/kubernetes/test_durable_invocation_pod_recovery.py` qualifies the
+exact chart checkout and `repository@sha256` Gateway image against a disposable
+cluster supplied through `KUBECONFIG`. It uses only Helm and kubectl, never
+changes the current context, creates only the explicitly named
+`hartmesh-qualification-*` namespace, and keeps its PostgreSQL and Redis pods
+alive while replacing the one Gateway pod. The ordinary test suite collects and
+skips it; that skip is an unpassed release gate, not evidence.
+
+```bash
+export DEERFLOW_TEST_KUBERNETES=1
+export KUBECONFIG=/absolute/path/to/disposable-kubeconfig
+export DEERFLOW_TEST_KUBERNETES_CONTEXT=kind-hartmesh-qualification
+export DEERFLOW_TEST_KUBERNETES_CONFIRM_CONTEXT="$DEERFLOW_TEST_KUBERNETES_CONTEXT"
+export DEERFLOW_TEST_KUBERNETES_NAMESPACE=hartmesh-qualification-20260808
+export DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID=pod-recovery-20260808
+export DEERFLOW_TEST_GATEWAY_IMAGE_REPOSITORY=registry.example/hartmesh/gateway
+export DEERFLOW_TEST_GATEWAY_IMAGE_DIGEST=sha256:<64-lowercase-hex>
+export DEERFLOW_TEST_KUBERNETES_EVIDENCE="$PWD/artifacts/kubernetes-qualification.json"
+cd backend
+PYTHONPATH=. uv run pytest -m kubernetes_contract -v -s
+```
+
+An enabled run fails for missing CLIs or inputs, unreachable infrastructure,
+any skipped scenario, an unreached barrier, timeout, incomplete coverage, or an
+unwritable evidence file. Failure preserves bounded namespace logs and the
+namespace; success deletes only the namespace the runner created.
+`.github/workflows/kubernetes-qualification.yml` exposes the same path as a
+manual job using the `QUALIFICATION_KUBECONFIG_B64` secret. Evidence records the
+image/chart/config/schema identities, exact PostgreSQL/Redis pod, volume, and
+image continuity plus their versions, confirmed context, operator-reported
+driver, all six scenario outcomes, and timestamp. It proves
+one-replica pod recovery only—not failover, active-active operation, scheduler
+HA, or zero-downtime rollout.
 
 ### ServiceAccount, metadata, and referenced configuration
 
@@ -315,7 +353,7 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
     external:
       existingSecret: deer-flow-managed-postgres # key: database-url
   ```
-- **Graceful shutdown & memory drain.** The Gateway owns one ordered deadline: freeze admission; stop channels and scheduler; interrupt/drain local runs; flush memory; close dependencies. Application phase budgets live in `config -> deployment.shutdown`, while `memory.shutdown_flush_timeout_seconds` owns the memory phase. By default the chart computes `terminationGracePeriodSeconds` from their sum plus `gateway.preStopSleepSeconds` (default 5s) and `gateway.shutdownSchedulingHeadroomSeconds` (default 3s). Set `gateway.terminationGracePeriodSeconds` only for an explicit override, and never below that derived requirement. A timed-out run remains subject to durable orphan recovery after restart. This documents the supported single-replica sequence; it is not live-pod termination qualification.
+- **Graceful shutdown & memory drain.** The Gateway owns one ordered deadline: freeze admission; stop channels and scheduler; interrupt/drain local runs; flush memory; close dependencies. Application phase budgets live in `config -> deployment.shutdown`, while `memory.shutdown_flush_timeout_seconds` owns the memory phase. By default the chart computes `terminationGracePeriodSeconds` from their sum plus `gateway.preStopSleepSeconds` (default 5s) and `gateway.shutdownSchedulingHeadroomSeconds` (default 3s). Set `gateway.terminationGracePeriodSeconds` only for an explicit override, and never below that derived requirement. A timed-out run remains subject to durable orphan recovery after restart. The opt-in suite above, not this configuration statement, is the live one-replica pod-termination evidence.
 - **Gateway replicas.** The supported local and production topology is one
   Gateway replica. `durable_one_replica` rejects any other count. The chart does
   not install a PodDisruptionBudget, topology spread, leader election, or a
