@@ -47,8 +47,9 @@ from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
 from app.runtime.authorization import ProviderInvocationAuthorization
 from app.runtime.idempotency import (
-    REQUEST_DIGEST_VERSION,
     SYSTEM_TASK_OWNER,
+    CanonicalCallerIntent,
+    EffectiveExecutionProjection,
     canonical_request_digest,
     canonical_request_value,
     normalize_external_key,
@@ -1206,7 +1207,7 @@ def _contribution_json(composed: Any) -> tuple[dict[str, Any], ...]:
     )
 
 
-_IDEMPOTENCY_PROJECTION_KEY = "__accepted_request_projection_v1"
+_EFFECTIVE_EXECUTION_PROJECTION_KEY = "__accepted_request_projection_v1"
 _KEYED_CONFIG_KEYS = frozenset({"recursion_limit", "configurable", "context"})
 _KEYED_CONFIGURABLE_KEYS = frozenset(
     {
@@ -1303,20 +1304,104 @@ def _requested_agent_id(intent: InternalLaunchIntent) -> str:
         return intent.native_channel.resolved_agent_name or "default"
     context = intent.context or {}
     if intent.source_kind is InternalSourceKind.http and context.get("is_bootstrap") is True:
-        return "bootstrap"
+        # Bootstrap routing is selected by both the mode bit and its validated
+        # agent name. Keep the name in caller intent so two different
+        # bootstrap agents cannot share an idempotency key merely because both
+        # used the bootstrap path. The separator cannot collide with a valid
+        # agent name (agent names are alphanumeric/hyphen only).
+        agent_name = context.get("agent_name")
+        return f"bootstrap:{agent_name}" if isinstance(agent_name, str) else "bootstrap"
     assistant_id = intent.assistant_id
     if assistant_id in (None, _DEFAULT_ASSISTANT_ID):
         return "default"
     return assistant_id.strip().lower().replace("_", "-")
 
 
-def _request_projection(
+def _caller_execution_context(intent: InternalLaunchIntent) -> dict[str, Any]:
+    requested_config = intent.config or {}
+    if "context" in requested_config:
+        configured = requested_config.get("context")
+    else:
+        configured = requested_config.get("configurable")
+    configured = configured if isinstance(configured, Mapping) else {}
+    body_context = intent.context if isinstance(intent.context, Mapping) else {}
+    result = {key: configured[key] for key in sorted(_DIGEST_CONTEXT_KEYS) if key in configured and configured[key] is not None}
+    for key in sorted(_DIGEST_CONTEXT_KEYS):
+        if key not in result and key in body_context and body_context[key] is not None:
+            result[key] = body_context[key]
+    if intent.source_kind is InternalSourceKind.http:
+        # External agent hints are normalized into ``agent_selector`` below;
+        # these raw context aliases never independently bind a revision.
+        result.pop("agent_name", None)
+        result.pop("is_bootstrap", None)
+    return result
+
+
+def _caller_checkpoint_selection(intent: InternalLaunchIntent) -> dict[str, Any]:
+    requested_config = intent.config or {}
+    configurable = requested_config.get("configurable") if "context" not in requested_config else None
+    configured = configurable if isinstance(configurable, Mapping) else {}
+    inherited = {key: configured[key] for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map") if key in configured and configured[key] is not None}
+
+    checkpoint_id: Any = intent.checkpoint_id
+    checkpoint = intent.checkpoint
+    if checkpoint:
+        checkpoint_id = checkpoint.get("checkpoint_id") or checkpoint_id
+        if checkpoint_id:
+            selected = {
+                "checkpoint_id": str(checkpoint_id),
+                "checkpoint_ns": str(checkpoint.get("checkpoint_ns") or ""),
+            }
+            if checkpoint.get("checkpoint_map") is not None:
+                selected["checkpoint_map"] = checkpoint["checkpoint_map"]
+            return selected
+    elif checkpoint_id:
+        return {"checkpoint_id": str(checkpoint_id), "checkpoint_ns": ""}
+    return inherited
+
+
+def _canonical_caller_intent(intent: InternalLaunchIntent) -> CanonicalCallerIntent:
+    if intent.command and intent.command.get("resume") is not None:
+        input_projection: dict[str, Any] = {
+            "kind": "resume",
+            "value": canonical_request_value(intent.command["resume"]),
+        }
+    else:
+        graph_input = normalize_input(
+            intent.input,
+            trusted_internal=intent.source_kind is not InternalSourceKind.http,
+        )
+        input_projection = {
+            "kind": "graph",
+            "value": canonical_request_value(graph_input),
+        }
+    requested_config = intent.config or {}
+    recursion_limit = requested_config.get("recursion_limit") if "recursion_limit" in requested_config else None
+    return CanonicalCallerIntent(
+        {
+            "thread": ({"selection": "explicit", "thread_id": intent.thread_id} if intent.thread_id_explicit else {"selection": "server_assigned"}),
+            "agent_selector": _requested_agent_id(intent),
+            "input": input_projection,
+            "multitask_strategy": intent.multitask_strategy,
+            "checkpoint": canonical_request_value(_caller_checkpoint_selection(intent)),
+            "interrupt_before": canonical_request_value(intent.interrupt_before),
+            "interrupt_after": canonical_request_value(intent.interrupt_after),
+            "execution_context": canonical_request_value(_caller_execution_context(intent)),
+            # A missing or explicit-null limit both select the documented
+            # Gateway default. Every other supplied value remains caller
+            # intent; server clamping belongs only to the effective projection.
+            "recursion_limit": ({"selection": "default"} if recursion_limit is None else {"selection": "explicit", "value": canonical_request_value(recursion_limit)}),
+        }
+    )
+
+
+def _effective_execution_projection(
     intent: InternalLaunchIntent,
     *,
     accepted: AcceptedInvocation,
     graph_input: Any,
     config: Mapping[str, Any],
-) -> dict[str, Any]:
+) -> EffectiveExecutionProjection:
     configurable = config.get("configurable") if isinstance(config.get("configurable"), Mapping) else {}
     runtime_context = config.get("context") if isinstance(config.get("context"), Mapping) else {}
     execution_context: dict[str, Any] = {}
@@ -1326,81 +1411,27 @@ def _request_projection(
         elif key in configurable:
             execution_context[key] = configurable[key]
     input_projection = {"resume": canonical_request_value(intent.command["resume"])} if intent.command and intent.command.get("resume") is not None else canonical_request_value(graph_input)
-    return {
-        "thread_id": accepted.thread_id,
-        "agent_selector": _requested_agent_id(intent),
-        "agent_revision_digest": accepted.agent_revision.digest,
-        "principal_digest": accepted.principal_digest,
-        "base_origin_digest": accepted.base_origin_digest,
-        "accepted_context_digest": accepted.accepted_context_digest,
-        "runtime_identity_digest": accepted.runtime_identity_digest,
-        "contributor_execution_digest": accepted.contributor_execution_digest,
-        "extension_generation": accepted.extension_generation,
-        "input": input_projection,
-        "command": canonical_request_value(intent.command),
-        "multitask_strategy": intent.multitask_strategy,
-        "checkpoint": canonical_request_value({key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map") if key in configurable}),
-        "interrupt_before": canonical_request_value(intent.interrupt_before),
-        "interrupt_after": canonical_request_value(intent.interrupt_after),
-        "execution_context": canonical_request_value(execution_context),
-        "recursion_limit": config.get("recursion_limit"),
-    }
-
-
-def _replay_projection(
-    intent: InternalLaunchIntent,
-    *,
-    record: RunRecord,
-) -> dict[str, Any]:
-    stored = (record.kwargs or {}).get(_IDEMPOTENCY_PROJECTION_KEY)
-    if not isinstance(stored, Mapping):
-        raise IdempotencyConflictError("The retained run predates replayable idempotency evidence")
-    projection = dict(stored)
-    projection["agent_selector"] = _requested_agent_id(intent)
-    if intent.thread_id_explicit:
-        projection["thread_id"] = intent.thread_id
-    if intent.command and intent.command.get("resume") is not None:
-        graph_input: Any = {"resume": canonical_request_value(intent.command["resume"])}
-    else:
-        trusted = intent.source_kind is not InternalSourceKind.http
-        graph_input = normalize_input(intent.input, trusted_internal=trusted)
-    projection["input"] = canonical_request_value(graph_input)
-    projection["command"] = canonical_request_value(intent.command)
-    projection["multitask_strategy"] = intent.multitask_strategy
-    projection["interrupt_before"] = canonical_request_value(intent.interrupt_before)
-    projection["interrupt_after"] = canonical_request_value(intent.interrupt_after)
-
-    requested_config = intent.config or {}
-    requested_configurable = requested_config.get("configurable") if isinstance(requested_config.get("configurable"), Mapping) else {}
-    requested_context = requested_config.get("context") if isinstance(requested_config.get("context"), Mapping) else {}
-    body_context = intent.context or {}
-    stored_context = dict(projection.get("execution_context") or {})
-    for key in _DIGEST_CONTEXT_KEYS:
-        if key in body_context:
-            stored_context[key] = body_context[key]
-        elif key in requested_context:
-            stored_context[key] = requested_context[key]
-        elif key in requested_configurable:
-            stored_context[key] = requested_configurable[key]
-    projection["execution_context"] = canonical_request_value(stored_context)
-
-    checkpoint = dict(projection.get("checkpoint") or {})
-    if intent.checkpoint_id is not None:
-        checkpoint["checkpoint_id"] = intent.checkpoint_id
-    if intent.checkpoint is not None:
-        for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map"):
-            if key in intent.checkpoint:
-                checkpoint[key] = intent.checkpoint[key]
-    for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map"):
-        if key in requested_configurable:
-            checkpoint[key] = requested_configurable[key]
-    projection["checkpoint"] = canonical_request_value(checkpoint)
-    if "recursion_limit" in requested_config:
-        projection["recursion_limit"] = _clamp_recursion_limit(
-            requested_config["recursion_limit"],
-            _resolve_max_recursion_limit(),
-        )
-    return projection
+    return EffectiveExecutionProjection(
+        {
+            "thread_id": accepted.thread_id,
+            "agent_selector": _requested_agent_id(intent),
+            "agent_revision_digest": accepted.agent_revision.digest,
+            "principal_digest": accepted.principal_digest,
+            "base_origin_digest": accepted.base_origin_digest,
+            "accepted_context_digest": accepted.accepted_context_digest,
+            "runtime_identity_digest": accepted.runtime_identity_digest,
+            "contributor_execution_digest": accepted.contributor_execution_digest,
+            "extension_generation": accepted.extension_generation,
+            "input": input_projection,
+            "command": canonical_request_value(intent.command),
+            "multitask_strategy": intent.multitask_strategy,
+            "checkpoint": canonical_request_value({key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map") if key in configurable}),
+            "interrupt_before": canonical_request_value(intent.interrupt_before),
+            "interrupt_after": canonical_request_value(intent.interrupt_after),
+            "execution_context": canonical_request_value(execution_context),
+            "recursion_limit": config.get("recursion_limit"),
+        }
+    )
 
 
 async def _principal_projection_for_intent(
@@ -1723,6 +1754,7 @@ class _GatewayLaunchNormalizer:
             base_origin_digest=_base_origin_digest(intent),
             thread_id=intent.thread_id if intent.thread_id_explicit else None,
             requested_agent_id=_requested_agent_id(intent),
+            caller_intent=_canonical_caller_intent(intent),
             user_id=principal.user_id,
             principal=_invocation_principal_from_projection(principal),
         )
@@ -1749,10 +1781,15 @@ class _GatewayLaunchNormalizer:
             raise IdempotencyConflictError("Idempotency key has contradictory authenticated source evidence")
         if identity.thread_id is not None and identity.thread_id != record.thread_id:
             raise IdempotencyConflictError("Idempotency key is bound to a different thread")
-        if identity.requested_agent_id != accepted.agent_revision.agent_id:
-            raise IdempotencyConflictError("Idempotency key is bound to a different agent")
-        requested_digest = canonical_request_digest(_replay_projection(intent, record=record))
-        if record.request_digest_version != REQUEST_DIGEST_VERSION or record.request_digest != requested_digest:
+        caller_intent = identity.caller_intent
+        stored_caller_intent = record.caller_intent_json
+        if caller_intent is None or not isinstance(stored_caller_intent, Mapping):
+            raise IdempotencyConflictError("The retained run predates canonical caller-intent evidence")
+        try:
+            persisted = CanonicalCallerIntent.from_persisted(stored_caller_intent)
+        except (TypeError, ValueError) as exc:
+            raise IdempotencyConflictError("The retained run has invalid caller-intent evidence") from exc
+        if record.caller_intent_digest_version != caller_intent.digest_version or record.caller_intent_digest != caller_intent.digest or persisted.digest != record.caller_intent_digest:
             raise IdempotencyConflictError("Idempotency key was already used for a different request")
 
     async def normalize(self, intent: InternalLaunchIntent) -> PreparedLaunch:
@@ -1876,13 +1913,13 @@ class _GatewayLaunchNormalizer:
         # Start authorization receives a canonical digest for every launch,
         # including unkeyed calls. Only keyed admission persists the internal
         # projection and uses it for replay comparison.
-        request_projection = _request_projection(
+        effective_execution = _effective_execution_projection(
             intent,
             accepted=accepted_invocation,
             graph_input=graph_input,
             config=config,
         )
-        request_digest = canonical_request_digest(request_projection)
+        caller_intent = identity.caller_intent if identity is not None else None
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
@@ -1962,7 +1999,7 @@ class _GatewayLaunchNormalizer:
                 # secret-redacted config while retaining live secrets above.
                 "input": intent.input,
                 "config": redact_config_secrets(intent.config),
-                **({_IDEMPOTENCY_PROJECTION_KEY: request_projection} if identity is not None else {}),
+                **({_EFFECTIVE_EXECUTION_PROJECTION_KEY: effective_execution.to_persisted()} if identity is not None else {}),
             },
             multitask_strategy=intent.multitask_strategy,
             model_name=model_name,
@@ -1971,8 +2008,11 @@ class _GatewayLaunchNormalizer:
             accepted_invocation=accepted_invocation,
             external_scope=identity.external_scope if identity is not None else None,
             external_key=identity.external_key if identity is not None else None,
-            request_digest=request_digest,
-            request_digest_version=REQUEST_DIGEST_VERSION,
+            request_digest=effective_execution.digest,
+            request_digest_version=effective_execution.digest_version,
+            caller_intent_json=caller_intent.to_persisted() if caller_intent is not None else None,
+            caller_intent_digest=caller_intent.digest if caller_intent is not None else None,
+            caller_intent_digest_version=caller_intent.digest_version if caller_intent is not None else None,
             principal=_invocation_principal_from_projection(accepted_invocation.principal),
         )
 
@@ -2019,6 +2059,8 @@ class _GatewayDurableRuns:
                 user_id=launch.user_id,
                 accepted_invocation=launch.accepted_invocation,
             )
+        if launch.external_key is None or launch.request_digest is None or launch.request_digest_version is None or launch.caller_intent_json is None or launch.caller_intent_digest is None or launch.caller_intent_digest_version is None:
+            raise RuntimeError("keyed launch is missing canonical admission evidence")
         admission = await run_manager.ensure_or_reject(
             launch.thread_id,
             launch.assistant_id,
@@ -2030,9 +2072,12 @@ class _GatewayDurableRuns:
             user_id=launch.user_id,
             accepted_invocation=launch.accepted_invocation,
             external_scope=launch.external_scope,
-            external_key=launch.external_key or "",
-            request_digest=launch.request_digest or "",
-            request_digest_version=launch.request_digest_version or "",
+            external_key=launch.external_key,
+            request_digest=launch.request_digest,
+            request_digest_version=launch.request_digest_version,
+            caller_intent_json=launch.caller_intent_json,
+            caller_intent_digest=launch.caller_intent_digest,
+            caller_intent_digest_version=launch.caller_intent_digest_version,
         )
         return DurableAdmission(record=admission.record, outcome=admission.outcome)
 

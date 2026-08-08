@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0013_invocation_lifecycle"
+HEAD = "0014_canonical_caller_intent"
 
 
 def _url(tmp_path: Path) -> str:

@@ -30,6 +30,14 @@ and `InvocationOptionsV1`. It cannot carry scope, principal, Origin, accepted
 digests, revision, raw config/context/metadata, callbacks, delivery settings, or
 credentials.
 
+Idempotent equality is the canonical caller intent expressed by that complete strict record,
+not the host's accepted effective execution projection. Object-key order is insignificant and
+array order is significant. Null `agent_hint`, model/thinking, checkpoint, and interrupt values
+mean omission; `multitask_strategy="reject"` is the explicit wire default. Adding, removing, or
+changing any other intent conflicts. HTTP-only delivery metadata cannot participate because it
+is not part of this contract. An equal replay returns the retained invocation in any lifecycle
+state and reuses its pinned effective projection without resolving defaults or executing again.
+
 ## Host adapters
 
 The production adapter is `app.runtime.api.build_in_process_runtime_api(app,

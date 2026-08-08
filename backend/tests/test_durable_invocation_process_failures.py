@@ -25,7 +25,7 @@ from deerflow_extension_api import ConstraintProjectionV1
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.runtime.idempotency import REQUEST_DIGEST_VERSION, canonical_request_digest, normalize_external_key, scope_for_http
+from app.runtime.idempotency import REQUEST_DIGEST_VERSION, CanonicalCallerIntent, canonical_request_digest, normalize_external_key, scope_for_http
 from app.runtime.invocation import (
     DurableAdmission,
     InternalAdmissionIdentity,
@@ -75,6 +75,7 @@ class _Normalizer:
     async def identify(self, intent: InternalLaunchIntent) -> InternalAdmissionIdentity | None:
         if intent.external_key is None:
             return None
+        caller_intent = CanonicalCallerIntent({"input": intent.input})
         return InternalAdmissionIdentity(
             external_scope=scope_for_http("user", "owner-1"),
             external_key=normalize_external_key(intent.external_key),
@@ -82,12 +83,14 @@ class _Normalizer:
             base_origin_digest="b" * 64,
             thread_id=intent.thread_id,
             requested_agent_id="lead_agent",
+            caller_intent=caller_intent,
             user_id="owner-1",
             principal=InvocationPrincipal(user_id="owner-1"),
         )
 
     async def normalize(self, intent: InternalLaunchIntent) -> PreparedLaunch:
         self.counts["normalizations"] += 1
+        caller_intent = CanonicalCallerIntent({"input": intent.input})
 
         async def worker(_record) -> None:
             self.counts["worker_bodies"] += 1
@@ -106,6 +109,9 @@ class _Normalizer:
             external_key=normalize_external_key(intent.external_key or ""),
             request_digest=canonical_request_digest({"input": intent.input}),
             request_digest_version=REQUEST_DIGEST_VERSION,
+            caller_intent_json=caller_intent.to_persisted(),
+            caller_intent_digest=caller_intent.digest,
+            caller_intent_digest_version=caller_intent.digest_version,
             principal=InvocationPrincipal(user_id="owner-1"),
         )
 
@@ -115,7 +121,8 @@ class _Normalizer:
         _identity: InternalAdmissionIdentity,
         record,
     ) -> None:
-        if record.request_digest != canonical_request_digest({"input": intent.input}):
+        caller_intent = CanonicalCallerIntent({"input": intent.input})
+        if record.caller_intent_digest != caller_intent.digest:
             from deerflow.runtime.runs.manager import IdempotencyConflictError
 
             raise IdempotencyConflictError("request digest differs")
@@ -140,6 +147,9 @@ class _DurableRuns:
             external_key=launch.external_key or "",
             request_digest=launch.request_digest or "",
             request_digest_version=launch.request_digest_version or "",
+            caller_intent_json=launch.caller_intent_json or {},
+            caller_intent_digest=launch.caller_intent_digest or "",
+            caller_intent_digest_version=launch.caller_intent_digest_version or "",
             on_disconnect=launch.on_disconnect,
             multitask_strategy=launch.multitask_strategy,
             user_id=launch.user_id,
@@ -530,6 +540,7 @@ async def test_postgres_independent_sessions_force_key_and_thread_arbitration() 
     busy_thread = f"two-key-thread-{unique}"
     scope = scope_for_http("user", f"owner-{unique}")
     digest = canonical_request_digest({"input": "qualification"})
+    caller_intent = CanonicalCallerIntent({"input": "qualification"})
     common = {
         "thread_id": same_thread,
         "owner_worker_id": "worker-left",
@@ -538,6 +549,9 @@ async def test_postgres_independent_sessions_force_key_and_thread_arbitration() 
         "external_key": normalize_external_key(f"same-key-{unique}"),
         "request_digest": digest,
         "request_digest_version": REQUEST_DIGEST_VERSION,
+        "caller_intent_json": caller_intent.to_persisted(),
+        "caller_intent_digest": caller_intent.digest,
+        "caller_intent_digest_version": caller_intent.digest_version,
         "user_id": f"owner-{unique}",
     }
     try:
@@ -571,6 +585,9 @@ async def test_postgres_independent_sessions_force_key_and_thread_arbitration() 
                 external_key=normalize_external_key(f"key-{suffix}-{unique}"),
                 request_digest=digest,
                 request_digest_version=REQUEST_DIGEST_VERSION,
+                caller_intent_json=caller_intent.to_persisted(),
+                caller_intent_digest=caller_intent.digest,
+                caller_intent_digest_version=caller_intent.digest_version,
                 user_id=f"owner-{unique}",
             )
 

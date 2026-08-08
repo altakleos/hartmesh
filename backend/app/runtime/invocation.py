@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol
 
 from deerflow_extension_api import ConstraintProjectionV1
 
+from app.runtime.idempotency import CanonicalCallerIntent
 from deerflow.runtime import CancelOutcome, DisconnectMode, RunRecord
 from deerflow.runtime.accepted_invocation import AcceptedInvocation
 from deerflow.runtime.runs.lifecycle_query import LifecyclePage, LifecycleQuery
@@ -88,6 +89,7 @@ class InternalAdmissionIdentity:
     base_origin_digest: str
     thread_id: str | None
     requested_agent_id: str
+    caller_intent: CanonicalCallerIntent | None = None
     user_id: str | None = None
     principal: InvocationPrincipal = field(default_factory=lambda: InvocationPrincipal())
 
@@ -110,6 +112,9 @@ class PreparedLaunch:
     external_key: str | None = None
     request_digest: str | None = None
     request_digest_version: str | None = None
+    caller_intent_json: dict[str, Any] | None = None
+    caller_intent_digest: str | None = None
+    caller_intent_digest_version: str | None = None
     principal: InvocationPrincipal = field(default_factory=lambda: InvocationPrincipal())
 
 

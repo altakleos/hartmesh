@@ -209,6 +209,9 @@ class RunRecord:
     external_key: str | None = None
     request_digest: str | None = None
     request_digest_version: str | None = None
+    caller_intent_json: dict[str, Any] | None = None
+    caller_intent_digest: str | None = None
+    caller_intent_digest_version: str | None = None
     state_version: int = 0
     pending_lifecycle_type: LifecycleType | None = field(default=None, repr=False)
 
@@ -338,6 +341,9 @@ class RunManager:
                 external_key=record.external_key,
                 request_digest=record.request_digest,
                 request_digest_version=record.request_digest_version,
+                caller_intent_json=record.caller_intent_json,
+                caller_intent_digest=record.caller_intent_digest,
+                caller_intent_digest_version=record.caller_intent_digest_version,
             )
         return payload
 
@@ -588,6 +594,9 @@ class RunManager:
             external_key=row.get("external_key"),
             request_digest=row.get("request_digest"),
             request_digest_version=row.get("request_digest_version"),
+            caller_intent_json=row.get("caller_intent_json"),
+            caller_intent_digest=row.get("caller_intent_digest"),
+            caller_intent_digest_version=row.get("caller_intent_digest_version"),
             state_version=row.get("state_version") or 0,
         )
 
@@ -1693,6 +1702,9 @@ class RunManager:
         external_key: str,
         request_digest: str,
         request_digest_version: str,
+        caller_intent_json: dict[str, Any],
+        caller_intent_digest: str,
+        caller_intent_digest_version: str,
         on_disconnect: DisconnectMode = DisconnectMode.cancel,
         metadata: dict | None = None,
         kwargs: dict | None = None,
@@ -1718,6 +1730,9 @@ class RunManager:
             external_key=external_key,
             request_digest=request_digest,
             request_digest_version=request_digest_version,
+            caller_intent_json=caller_intent_json,
+            caller_intent_digest=caller_intent_digest,
+            caller_intent_digest_version=caller_intent_digest_version,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -1807,6 +1822,9 @@ class RunManager:
         external_key: str | None = None,
         request_digest: str | None = None,
         request_digest_version: str | None = None,
+        caller_intent_json: dict[str, Any] | None = None,
+        caller_intent_digest: str | None = None,
+        caller_intent_digest_version: str | None = None,
     ) -> RunAdmission:
         """Atomically check for inflight runs and create a new one.
 
@@ -1856,6 +1874,9 @@ class RunManager:
             external_key=external_key if operation_kind == ThreadOperationKind.run else None,
             request_digest=request_digest if operation_kind == ThreadOperationKind.run else None,
             request_digest_version=request_digest_version if operation_kind == ThreadOperationKind.run else None,
+            caller_intent_json=caller_intent_json if operation_kind == ThreadOperationKind.run else None,
+            caller_intent_digest=caller_intent_digest if operation_kind == ThreadOperationKind.run else None,
+            caller_intent_digest_version=caller_intent_digest_version if operation_kind == ThreadOperationKind.run else None,
         )
 
         async with self._lock:
@@ -1866,7 +1887,8 @@ class RunManager:
             if local_keyed is not None:
                 if local_keyed.user_id != user_id:
                     raise IdempotencyConflictError("Idempotency key is not visible to this principal")
-                outcome = AdmissionOutcome.known_same if local_keyed.request_digest == request_digest and local_keyed.request_digest_version == request_digest_version else AdmissionOutcome.key_conflict
+                same_intent = local_keyed.caller_intent_json == caller_intent_json and local_keyed.caller_intent_digest == caller_intent_digest and local_keyed.caller_intent_digest_version == caller_intent_digest_version
+                outcome = AdmissionOutcome.known_same if same_intent else AdmissionOutcome.key_conflict
                 return RunAdmission(record=local_keyed, outcome=outcome)
 
             # 1) Local inflight check (same-worker guard; cross-worker is the
@@ -1906,6 +1928,9 @@ class RunManager:
                                 external_key=external_key,
                                 request_digest=request_digest,
                                 request_digest_version=request_digest_version,
+                                caller_intent_json=caller_intent_json,
+                                caller_intent_digest=caller_intent_digest,
+                                caller_intent_digest_version=caller_intent_digest_version,
                                 multitask_strategy=multitask_strategy,
                                 assistant_id=assistant_id,
                                 user_id=user_id,

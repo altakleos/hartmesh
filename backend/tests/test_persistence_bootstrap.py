@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0013_invocation_lifecycle"
+HEAD = "0014_canonical_caller_intent"
 BASELINE = "0001_baseline"
 
 

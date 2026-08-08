@@ -50,6 +50,9 @@ class RunRow(Base):
     external_key: Mapped[str | None] = mapped_column(String(320), nullable=True)
     request_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     request_digest_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    caller_intent_json: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    caller_intent_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    caller_intent_digest_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     # Convenience fields (for listing pages without querying RunEventStore)
     message_count: Mapped[int] = mapped_column(default=0)
@@ -113,6 +116,26 @@ class RunRow(Base):
         CheckConstraint(
             "request_digest_version IS NULL OR request_digest_version = 'sha256-canonical-json-v1'",
             name="ck_runs_request_digest_version_format",
+        ),
+        CheckConstraint(
+            "(caller_intent_json IS NULL AND caller_intent_digest IS NULL AND caller_intent_digest_version IS NULL) OR (caller_intent_json IS NOT NULL AND caller_intent_digest IS NOT NULL AND caller_intent_digest_version IS NOT NULL)",
+            name="ck_runs_caller_intent_set",
+        ),
+        CheckConstraint(
+            "operation_kind = 'run' OR (caller_intent_json IS NULL AND caller_intent_digest IS NULL AND caller_intent_digest_version IS NULL)",
+            name="ck_runs_caller_intent_run_only",
+        ),
+        CheckConstraint(
+            "caller_intent_digest IS NULL OR (length(caller_intent_digest) = 64 AND lower(caller_intent_digest) = caller_intent_digest "
+            "AND length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace("
+            "replace(replace(replace(replace(replace(replace(caller_intent_digest, '0', ''), '1', ''), '2', ''), '3', ''), "
+            "'4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), 'b', ''), 'c', ''), 'd', ''), "
+            "'e', ''), 'f', '')) = 0)",
+            name="ck_runs_caller_intent_digest_format",
+        ),
+        CheckConstraint(
+            "caller_intent_digest_version IS NULL OR caller_intent_digest_version = 'caller-intent-canonical-json-v1'",
+            name="ck_runs_caller_intent_digest_version_format",
         ),
         Index("ix_runs_thread_status", "thread_id", "status"),
         Index("ix_runs_lease", "lease_expires_at"),
