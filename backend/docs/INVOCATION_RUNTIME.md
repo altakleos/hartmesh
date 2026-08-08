@@ -7,6 +7,31 @@ one worker attachment belong to the runtime. Checkpoint and artifact reservation
 auxiliary thread operations, not accepted invocations. Each invocation is one normal
 `RunRow(operation_kind="run")`; there is no separate invocation row or table.
 
+## Concern-to-evidence closure matrix
+
+This matrix is the release closure record for the current one-replica durable invocation
+contract. “Implemented” means the invariant has executable repository evidence. A deployment
+qualification is named separately where storage or infrastructure behavior cannot be proven by
+an ordinary unit test.
+
+| Concern | Implemented invariant | Implementation | Named evidence | Deployment evidence | Status |
+|---|---|---|---|---|---|
+| Application Module and portable Adapters | One application-layer invocation Module owns ensure/observe/control; the in-process and HTTP Adapters implement one host-independent Protocol. | `backend/app/runtime/invocation.py`; `backend/app/runtime/api.py`; `backend/packages/runtime-api/deerflow_runtime_api/__init__.py` | `test_runtime_transport_conformance` | Strict HTTP/in-process conformance | Implemented |
+| All durable launch sources | HTTP create/stream/wait, Scheduled Tasks, native channels, and embedded services enter the same durable admission boundary. | `backend/app/gateway/services.py`; `backend/app/scheduler/service.py`; `backend/app/channels/manager.py`; `backend/app/runtime/api.py` | `test_gateway_create_stream_wait_routes_share_durable_admission`; `test_scheduled_occurrence_enters_runtime_with_typed_execution_facts`; `test_authenticated_channel_launch_enters_runtime_with_typed_source_facts`; `test_ensure_builds_a_host_trusted_service_launch_intent` | Offline launch-source characterization | Implemented |
+| Canonical keyed replay | Atomic external-key arbitration compares caller intent, retains accepted effective execution, and attaches only one worker. | `backend/app/runtime/idempotency.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_http_replay_conflicts_when_original_execution_field_is_removed` | PostgreSQL equal/unequal race qualification | Implemented; PostgreSQL locking is a gated qualification |
+| Split identity and sealed Origin | Effective subject, optional acting service, and trusted source evidence are non-interchangeable and caller-forgery resistant. | `backend/packages/extension-api/deerflow_extension_api/authorization.py`; `backend/app/gateway/services.py`; `backend/app/runtime/authorization.py` | `test_channel_human_cannot_be_promoted_by_internal_transport` | Source-specific launch tests | Implemented |
+| Trusted contributor context | One immutable trusted context carries validated persistable evidence, runtime-only values, and stable handles without secret persistence. | `backend/packages/extension-api/deerflow_extension_api/contributors.py`; `backend/packages/harness/deerflow/extensions/contributors.py`; `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/mcp/tools.py` | `test_worker_carries_one_trusted_context_without_parallel_attributes_path` | Store/event/response redaction tests | Implemented |
+| Restrictive authorization and constraints | Authority failures fail closed; v2 constraints bind accepted material and can only narrow the exactly enforced subagent ceiling. | `backend/app/runtime/authorization.py`; `backend/app/runtime/constraints.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/subagents/executor.py` | `test_v2_host_rejects_projection_for_different_bound_material`; `test_worker_enforces_zero_ceiling_before_any_subagent_dispatch` | Required-capability health/readiness tests | Implemented |
+| Pinned agent and extension material | Accepted agent material and extension generation remain pinned; drift fails before graph/model work. | `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py` | `test_restart_drift_fails_before_graph_construction_or_model_work` | Process-reconstruction tests | Implemented |
+| Transactional lifecycle evidence | Every normal-run state change increments one state version and commits its safe lifecycle event atomically. | `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/packages/harness/deerflow/runtime/runs/store/base.py`; `backend/packages/harness/deerflow/runtime/runs/store/memory.py` | `test_sql_row_and_lifecycle_event_commit_together` | PostgreSQL CAS/cursor qualification | Implemented; PostgreSQL atomicity is a gated qualification |
+| Polling observation and bounded summaries | Authorized observation reads a pruning-aware bounded page and its source-aware summaries from one database snapshot. | `backend/packages/harness/deerflow/runtime/runs/lifecycle_query.py`; `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/app/runtime/api.py` | `test_context_query_excludes_other_owners_and_auxiliary_rows`; `test_malformed_ahead_and_pruned_cursors_are_typed`; `test_sql_context_page_loads_summary_rows_only_for_bounded_page_ids`; `test_postgres_query_uses_one_repeatable_read_snapshot` | Repeatable-read PostgreSQL query qualification | Implemented; PostgreSQL snapshot isolation is a gated qualification |
+| Clarification continuation | A clarification ends the current invocation successfully; the answer is a distinct invocation on the same thread. | `backend/packages/harness/deerflow/agents/middlewares/clarification_middleware.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/app/channels/manager.py` | `test_clarification_completes_then_answer_starts_new_same_thread_invocation`; `test_native_channel_revalidates_owner_dedupes_and_continues_clarification` | Native-channel characterization | Implemented; same-invocation suspension is not claimed |
+| Graceful shutdown and process recovery | One deadline coordinator freezes admission, stops producers, drains runs, flushes memory, then closes dependencies; unsettled durable runs use orphan recovery. | `backend/app/gateway/shutdown.py`; `backend/packages/harness/deerflow/runtime/runs/manager.py` | `test_shutdown_orders_producers_runs_memory_and_dependencies`; `test_orphan_recovery_records_failed_with_stable_reason` | Process-loss simulations; live pod evidence is separate | Implemented for one replica |
+| PostgreSQL schema and arbitration | Real Alembic predecessor data upgrades through accepted/idempotency/lifecycle evidence and remains repository-readable after the promised downgrade/re-upgrade path. | `backend/packages/harness/deerflow/persistence/migrations/versions/0011_accepted_invocation.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0012_invocation_idempotency.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0013_invocation_lifecycle.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0014_canonical_caller_intent.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io` | `postgres_contract` with `DEERFLOW_TEST_POSTGRES_URL` | Qualified only when the mandatory PostgreSQL gate passes |
+| One-replica deployment truth | Production requires one Gateway, shared durable PostgreSQL, compatible readiness/shutdown timing, and digest-pinned Gateway plus enabled provisioner execution artifacts; process-local mode makes no durability claim. | `backend/app/runtime/deployment.py`; `deploy/helm/deer-flow/values.yaml`; `deploy/helm/deer-flow/templates/gateway-deployment.yaml`; `deploy/helm/deer-flow/templates/provisioner-deployment.yaml` | `test_production_mode_requires_pinned_runtime_images_and_one_replica`; `test_production_mode_rejects_process_local_storage` | Helm lint/render and storage-profile checks | Implemented; not a high-availability claim |
+| Live Kubernetes pod recovery | Only a complete artifact-bound opt-in real-pod run can qualify graceful/abrupt one-replica recovery. | `backend/packages/harness/deerflow/runtime/kubernetes_qualification.py`; `backend/tests/support/kubernetes_qualification.py`; `backend/app/runtime/deployment.py` | `test_real_one_replica_pod_recovery_contract` | `kubernetes_contract` evidence for the deployed image/chart/config/schema | Unqualified when the live gate is skipped or evidence does not match |
+| Legacy compatibility and native execution | Existing LangGraph/REST facades retain their responses and native lead-agent, skill, memory, subagent, sandbox, and thread behavior. | `backend/app/gateway/routers/runs.py`; `backend/app/gateway/routers/thread_runs.py`; `backend/packages/harness/deerflow/agents/lead_agent/agent.py`; `backend/packages/harness/deerflow/agents/memory`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/sandbox/middleware.py` | `test_gateway_mounts_runtime_routes_without_replacing_legacy_runs`; `test_full_chain_order`; `test_make_lead_agent_custom_skill_allowlist_does_not_activate_tool_policy`; `test_after_agent_queues_memory_under_runtime_user`; `test_aexecute_propagates_one_trusted_run_context_without_free_form_attributes`; `test_sandbox_middleware_state_matches_thread_state_sandbox_field` | Full offline compatibility suite | Implemented; synchronous client durability remains deferred |
+
 ## Trust and sealing
 
 Every source constructs an internal launch intent, but caller thread, assistant, agent,
@@ -327,6 +352,22 @@ observation. Opaque `next_cursor`, `minimum_available_cursor`, and
 pages advance to the fence without skipping a future match. Reads are at least
 once, so consumers deduplicate with stable event IDs/cursors.
 
+Polling `DurableInvocationPort.observe` is the supported durable evidence path.
+No event sink or broker is required for correctness: observation reads the authoritative run
+state and its transactional lifecycle journal directly. A push sink or event broker may be
+added only as a separately reviewed delivery mechanism and cannot become an undeclared
+correctness or release criterion.
+
+### Clarification is continuation, not suspension
+
+A clarification request completes its current invocation successfully with the structured
+request for more information as its result.
+The user's answer starts a new invocation on the same thread, so ordinary idempotency,
+acceptance, and lifecycle rules apply to that answer.
+`input_required` is not a v1 lifecycle state. If a future contract supports true suspension
+and resumption of the same invocation, it may add an explicit nonterminal event only through a
+separately reviewed, versioned lifecycle change.
+
 ## Authoritative lifecycle and failure recovery
 
 Normal admissions commit at `state_version=1` with `accepted`. Each successful start,
@@ -344,6 +385,10 @@ make retained keyed retries converge, but do not provide scheduler HA or a multi
 Gateway ownership design beyond the explicitly configured PostgreSQL lease and stream
 primitives. Live pod termination is qualified only by the separate opt-in
 `kubernetes_contract` suite; its default skip remains an unpassed release gate.
+
+Repository process-loss simulation is not Kubernetes pod-recovery qualification. The
+process-loss simulation, image construction, and Helm rendering are separate evidence; none
+becomes live pod evidence by implication or aggregation.
 
 The PostgreSQL migration qualification starts both from an empty schema and from
 the real main-line predecessor `0010_run_cancel_request` with representative
@@ -418,6 +463,14 @@ digest, and pass state into the administrator deployment report. Collection or
 skip never produces qualification. This is one-replica pod recovery evidence,
 not scheduler HA, failover, active-active execution, or zero-downtime rollout.
 
+The supported production topology has one Gateway replica and shared PostgreSQL for durable
+state. When configured, shared Redis provides the bounded transient stream bridge used for
+SSE reconnect; Redis is not the authoritative invocation or lifecycle store, and its delivery
+semantics do not replace polling observation.
+`process_local` survives neither process restart nor pod loss. An operator may report live
+recovery as qualified only when the bounded evidence matches the deployed image, chart,
+configuration, and schema identities. The default skip is an unpassed release gate.
+
 ## Pinned agent construction
 
 Acceptance resolves `ResolvedAgentMaterialV1` once. Its versioned projector covers agent
@@ -473,9 +526,17 @@ compatible facades over the durable Gateway path. The synchronous `DeerFlowClien
 documented non-durable local graph path; applications that need durable embedded parity use
 the supported asynchronous `deerflow-runtime-api` adapter instead.
 
-The following are deferred and are not implemented or promised by this contract: context
-export or retirement, group/dynamic outbound governance, scheduler HA, a general
-multi-replica Gateway ownership model, an artifact catalogue, a full profile registry, an
-event sink or broker, and durable embedded parity for synchronous `DeerFlowClient`. Exact
-token constraints are also deferred; v1 enforces only the exact total-subagent count ceiling
-described above.
+The following are deliberate non-goals, not latent requirements or defects:
+
+- multi-replica Gateway coordination;
+- scheduler high availability;
+- an event broker or push sink;
+- a general channel extension contract;
+- context export and retirement;
+- synchronous-client durability;
+- speculative budget, deadline, resource, or effect ceilings; and
+- a PodDisruptionBudget and topology spread before a real multi-replica design.
+
+Group/dynamic outbound governance, an artifact catalogue, and a full profile registry are
+likewise deferred. Exact token ceilings are not advertised; the current contract enforces only
+the exact total-subagent count ceiling described above.

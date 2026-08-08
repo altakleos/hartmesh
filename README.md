@@ -1192,6 +1192,11 @@ pages expose opaque `next_cursor`, `minimum_available_cursor`, and
 `read_fence_cursor` values; reads are at least once, so consumers deduplicate by
 stable event ID/cursor.
 
+Polling observe is the supported durable evidence path; an event sink or broker is not
+required for correctness. Clarification completes the current invocation successfully with a
+request for more information, and the user's answer starts a new invocation on the same
+thread. The current lifecycle has no `input_required` state or same-invocation suspension.
+
 The transport returns `201` for a created invocation, `202` for a newly
 requested cancellation, `200` for known/observed/already-finished outcomes,
 `403` for an explicit visible-resource denial, `404` for unknown or invisible
@@ -1226,10 +1231,12 @@ fenced again by the worker, and keyed replay reuses that evidence without consul
 health or the provider again. The separate v1 contract remains a positive-only
 subagent-ceiling compatibility path.
 
-This surface does not promise context export/retirement, dynamic outbound
-governance, scheduler HA, a general multi-replica Gateway ownership model, an
-artifact catalogue, a full profile registry, an event broker, or durable parity
-for the synchronous `DeerFlowClient` path.
+This surface does not promise context export/retirement, dynamic outbound governance,
+scheduler high availability, multi-replica Gateway coordination, an event broker or push
+sink, a general channel extension contract, synchronous-client durability, speculative
+budget/deadline/resource/effect ceilings, an artifact catalogue, or a full profile registry.
+The one-replica chart intentionally has no PodDisruptionBudget or topology spread until a real
+multi-replica ownership design exists.
 
 ## Embedded Python Client
 

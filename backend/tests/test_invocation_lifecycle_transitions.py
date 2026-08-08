@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.runtime import CancelOutcome, RunManager, RunStatus
 from deerflow.runtime.runs.manager import ORPHAN_RECOVERY_STOP_REASON, RunRecord
 from deerflow.runtime.runs.store.base import (
@@ -15,6 +18,7 @@ from deerflow.runtime.runs.store.base import (
     LifecycleType,
 )
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.runs.worker import RunContext, run_agent
 
 
 async def _manager_and_run(
@@ -33,6 +37,90 @@ def _assert_latest_agrees(row: dict, events: list[dict]) -> None:
     latest = events[-1]
     assert latest["state_version"] == row["state_version"]
     assert latest["status"] == row["status"]
+
+
+def _bridge() -> SimpleNamespace:
+    return SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+
+@pytest.mark.anyio
+async def test_clarification_completes_then_answer_starts_new_same_thread_invocation() -> None:
+    """Clarification is a successful turn boundary, not a suspended run state."""
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    clarification = await manager.create("thread-clarification")
+
+    class ClarifyingAgent:
+        async def astream(self, *_args, **_kwargs):
+            request = SimpleNamespace(
+                tool_call={
+                    "name": "ask_clarification",
+                    "id": "clarification-1",
+                    "args": {
+                        "question": "Which environment?",
+                        "clarification_type": "missing_info",
+                    },
+                },
+                runtime=SimpleNamespace(context={}),
+            )
+            command = ClarificationMiddleware().wrap_tool_call(
+                request,
+                lambda _request: pytest.fail("clarification must not call the tool handler"),
+            )
+            assert command.goto == "__end__"
+            yield {"messages": command.update["messages"]}
+
+    await run_agent(
+        _bridge(),
+        manager,
+        clarification,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda *, config: ClarifyingAgent(),
+        graph_input={"messages": [{"role": "user", "content": "Deploy it"}]},
+        config={},
+    )
+
+    answer = await manager.create("thread-clarification")
+
+    class AnswerAgent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    await run_agent(
+        _bridge(),
+        manager,
+        answer,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda *, config: AnswerAgent(),
+        graph_input={"messages": [{"role": "user", "content": "Production"}]},
+        config={},
+    )
+
+    first_row = await store.get(clarification.run_id)
+    second_row = await store.get(answer.run_id)
+    first_events = await store.list_lifecycle_events(run_id=clarification.run_id)
+    second_events = await store.list_lifecycle_events(run_id=answer.run_id)
+
+    assert clarification.run_id != answer.run_id
+    assert first_row is not None and second_row is not None
+    assert first_row["thread_id"] == second_row["thread_id"] == "thread-clarification"
+    assert first_row["status"] == second_row["status"] == RunStatus.success
+    assert [event["lifecycle_type"] for event in first_events] == [
+        LifecycleType.accepted,
+        LifecycleType.started,
+        LifecycleType.succeeded,
+    ]
+    assert [event["lifecycle_type"] for event in second_events] == [
+        LifecycleType.accepted,
+        LifecycleType.started,
+        LifecycleType.succeeded,
+    ]
+    assert all(event["lifecycle_type"] != "input_required" for event in first_events + second_events)
 
 
 @pytest.mark.anyio

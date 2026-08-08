@@ -143,7 +143,7 @@ def test_create_app_fails_closed_when_a_required_extension_cannot_load(monkeypat
     from app.gateway.app import create_app
 
     def _raise_required(plugins):
-        raise extensions_module.ExtensionLoadError("required extension acme_policy:install failed to install")
+        raise extensions_module.ExtensionLoadError("required extension example_policy:install failed to install")
 
     monkeypatch.setattr(extensions_module, "load_extensions", _raise_required)
 

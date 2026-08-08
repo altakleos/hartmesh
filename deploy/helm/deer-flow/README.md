@@ -280,6 +280,12 @@ legacy three-field records remain readable. It is empty by default, so the
 report says `unqualified`; Helm never invents evidence. Neither configuration
 accepts credentials or arbitrary metadata.
 
+For `durable_one_replica_pod_recovery`, only an artifact-bound passing live result may be
+copied into `deployment.qualificationEvidence`. Its artifact digest must match the deployed
+image/chart qualification identity. The Gateway then reports that bounded evidence through
+the authenticated administrative deployment report; a collected test, default skip,
+process-loss simulation, image build, or Helm render leaves the deployment unqualified.
+
 #### Opt-in real-pod recovery qualification
 
 `backend/tests/kubernetes/test_durable_invocation_pod_recovery.py` qualifies the
