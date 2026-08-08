@@ -10,7 +10,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
-from deerflow_extension_api import ConstraintProjectionV1, InvocationIdentityV1
+from deerflow_extension_api import ConstraintProjectionV1, ConstraintProjectionV2, InvocationIdentityV1
 
 from app.runtime.idempotency import CanonicalCallerIntent
 from deerflow.runtime import CancelOutcome, DisconnectMode, RunRecord
@@ -228,20 +228,39 @@ class InvocationConstraintOutcome(StrEnum):
     indeterminate = "indeterminate"
 
 
-def _constraint_projection_evidence(projection: ConstraintProjectionV1) -> dict[str, Any]:
+def _constraint_projection_evidence(projection: ConstraintProjectionV1 | ConstraintProjectionV2) -> dict[str, Any]:
     from deerflow.runtime.accepted_invocation import canonical_digest
 
-    normalized = {
-        "version": 1,
-        "request_digest": projection.request_digest,
-        "agent_revision_digest": projection.agent_revision_digest,
-        "projection_revision": projection.projection_revision,
-        "issued_at": projection.issued_at.isoformat(),
-        "valid_until": projection.valid_until.isoformat(),
-        "evidence_id": projection.evidence_id,
-        "evidence_digest": projection.evidence_digest,
-        "max_total_subagents": projection.max_total_subagents,
-    }
+    if isinstance(projection, ConstraintProjectionV2):
+        normalized = {
+            "version": 2,
+            "request_digest": projection.request_digest,
+            "trusted_context_digest": projection.trusted_context_digest,
+            "thread_id": projection.thread_id,
+            "agent_revision_digest": projection.agent_revision_digest,
+            "profile_revision_digest": projection.profile_revision_digest,
+            "extension_manifest_digest": projection.extension_manifest_digest,
+            "extension_generation": projection.extension_generation,
+            "projection_revision": projection.projection_revision,
+            "issued_at": projection.issued_at.isoformat(),
+            "valid_until": projection.valid_until.isoformat(),
+            "evidence_id": projection.evidence_id,
+            "evidence_digest": projection.evidence_digest,
+            "mandatory_obligations": projection.mandatory_obligations,
+            "max_total_subagents": projection.max_total_subagents,
+        }
+    else:
+        normalized = {
+            "version": 1,
+            "request_digest": projection.request_digest,
+            "agent_revision_digest": projection.agent_revision_digest,
+            "projection_revision": projection.projection_revision,
+            "issued_at": projection.issued_at.isoformat(),
+            "valid_until": projection.valid_until.isoformat(),
+            "evidence_id": projection.evidence_id,
+            "evidence_digest": projection.evidence_digest,
+            "max_total_subagents": projection.max_total_subagents,
+        }
     normalized["projection_digest"] = canonical_digest(normalized)
     return {"version": 1, "constraints": normalized}
 
@@ -262,7 +281,7 @@ class InternalConstraintDecision:
         return cls(InvocationConstraintOutcome.allowed)
 
     @classmethod
-    def projected(cls, projection: ConstraintProjectionV1) -> InternalConstraintDecision:
+    def projected(cls, projection: ConstraintProjectionV1 | ConstraintProjectionV2) -> InternalConstraintDecision:
         return cls(
             InvocationConstraintOutcome.allowed,
             evidence=_constraint_projection_evidence(projection),

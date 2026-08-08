@@ -19,6 +19,7 @@ from deerflow_extension_api import (
     ExtensionData,
     InvocationConstraintsProvider,
     InvocationConstraintsProviderFactory,
+    InvocationConstraintsProviderV2,
     McpInterceptor,
     McpInterceptorDescriptor,
     MiddlewareContributor,
@@ -82,7 +83,7 @@ class RegisteredRunContextContributorFactory:
 class RegisteredInvocationConstraintsProviderFactory:
     contribution_id: str
     capability_api_version: str
-    factory: Callable[[], InvocationConstraintsProvider]
+    factory: Callable[[], InvocationConstraintsProvider | InvocationConstraintsProviderV2]
     kind: Literal["invocation_constraints"]
     source: str
     package_name: str | None

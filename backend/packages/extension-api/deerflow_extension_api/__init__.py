@@ -19,14 +19,20 @@ from deerflow_extension_api.authorization import (
 )
 from deerflow_extension_api.constraints import (
     INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION,
+    INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2,
     INVOCATION_CONSTRAINTS_KIND,
     INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY,
+    INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2,
+    INVOCATION_CONSTRAINTS_V2_SUPPORTED_OBLIGATIONS,
     ConstraintIndeterminate,
     ConstraintProjectionRequestV1,
+    ConstraintProjectionRequestV2,
     ConstraintProjectionV1,
+    ConstraintProjectionV2,
     ConstraintRejected,
     InvocationConstraintsProvider,
     InvocationConstraintsProviderFactory,
+    InvocationConstraintsProviderV2,
 )
 from deerflow_extension_api.contracts import (
     ExtensionInstall,
@@ -92,15 +98,18 @@ from deerflow_extension_api.state import ExtensionData
 #: Contract version. Pre-1.0 minors may break and only patches promise to be
 #: additive. From 1.0 on, bump the major on any breaking change; see the spec's
 #: evolution rules for what counts as additive.
-API_VERSION = "0.8.0"
+API_VERSION = "0.9.0"
 
 __all__ = [
     "API_VERSION",
     "AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION",
     "AUTHORIZATION_PROVIDER_KIND",
     "INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION",
+    "INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2",
     "INVOCATION_CONSTRAINTS_KIND",
     "INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY",
+    "INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2",
+    "INVOCATION_CONSTRAINTS_V2_SUPPORTED_OBLIGATIONS",
     "MCP_INTERCEPTOR_CAPABILITY_API_VERSION",
     "MCP_INTERCEPTOR_KIND",
     "EXTENSION_TASK_STORE_KEY",
@@ -117,7 +126,9 @@ __all__ = [
     "CapabilityHealthStatus",
     "ConstraintIndeterminate",
     "ConstraintProjectionRequestV1",
+    "ConstraintProjectionRequestV2",
     "ConstraintProjectionV1",
+    "ConstraintProjectionV2",
     "ConstraintRejected",
     "ExtensionData",
     "ExtensionInstall",
@@ -126,6 +137,7 @@ __all__ = [
     "HostPolicySnapshot",
     "InvocationConstraintsProvider",
     "InvocationConstraintsProviderFactory",
+    "InvocationConstraintsProviderV2",
     "InvocationIdentityV1",
     "MiddlewareContributor",
     "MiddlewarePlacement",

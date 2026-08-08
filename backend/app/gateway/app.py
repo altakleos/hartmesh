@@ -679,7 +679,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         loaded_extensions,
         required_capabilities=required_capabilities,
     )
-    extension_diagnostics.extend(Diagnostic.warning("invocation_constraints.v1", message) for message in invocation_constraints_host.startup_diagnostics)
+    constraint_registration = loaded_extensions.invocation_constraints_provider_factory
+    constraint_diagnostic_id = f"invocation_constraints.v{constraint_registration.capability_api_version.split('.', 1)[0]}" if constraint_registration is not None else "invocation_constraints.v1"
+    extension_diagnostics.extend(Diagnostic.warning(constraint_diagnostic_id, message) for message in invocation_constraints_host.startup_diagnostics)
     from deerflow.extensions.mcp import McpInterceptorHost
 
     mcp_interceptor_host = McpInterceptorHost(

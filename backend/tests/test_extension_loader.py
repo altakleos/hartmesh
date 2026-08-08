@@ -265,7 +265,7 @@ def test_compatible_string_subclass_api_marker_can_load(monkeypatch):
     monkeypatch.setattr(
         demo_extensions.install_ok,
         "__deerflow_api__",
-        _HostileString("0.8.0"),
+        _HostileString("0.9.0"),
         raising=False,
     )
 
@@ -278,12 +278,12 @@ def test_compatible_string_subclass_api_marker_can_load(monkeypatch):
 
 def test_newer_minor_declared_api_is_refused():
     """Before 1.0, minors carry no compatibility promise: an extension written
-    against 0.9 may use contracts a 0.8 host does not implement, and the host
+    against 0.10 may use contracts a 0.9 host does not implement, and the host
     must refuse it with an actionable message."""
     spec = ExtensionSpec(use=f"{_FIXTURE}:install_newer_minor_api")
     loaded, diagnostics = load_extensions([spec])
     assert diagnostics[0].level == "error"
-    assert "0.9" in diagnostics[0].message
+    assert "0.10" in diagnostics[0].message
     assert "pip install" in diagnostics[0].message
     assert demo_extensions.INSTALLED == [], "a newer-minor extension must not run on an older host"
 

@@ -68,7 +68,14 @@ def test_contract_imports_without_the_harness() -> None:
             sys.executable,
             "-I",
             "-c",
-            (f"import sys; sys.path.insert(0, {str(package_root)!r}); from deerflow_extension_api import ConstraintProjectionV1, InvocationConstraintsProvider; assert 'deerflow' not in sys.modules"),
+            (
+                f"import sys; sys.path.insert(0, {str(package_root)!r}); "
+                "from deerflow_extension_api import ("
+                "ConstraintProjectionV1, ConstraintProjectionRequestV2, "
+                "ConstraintProjectionV2, InvocationConstraintsProvider, "
+                "InvocationConstraintsProviderV2); "
+                "assert 'deerflow' not in sys.modules"
+            ),
         ],
         check=False,
         capture_output=True,

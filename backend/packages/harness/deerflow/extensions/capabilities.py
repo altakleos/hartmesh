@@ -10,7 +10,13 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from deerflow_extension_api import API_VERSION, CapabilityHealthResult
+from deerflow_extension_api import (
+    API_VERSION,
+    INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2,
+    INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY,
+    INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2,
+    CapabilityHealthResult,
+)
 
 from deerflow.extensions.registry import LoadedExtensions
 
@@ -96,6 +102,12 @@ def capability_health_to_dict(
             for item in snapshots
         ],
     }
+
+
+def _constraint_capability_id(capability_api_version: str) -> str:
+    if capability_api_version == INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2:
+        return INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2
+    return INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY
 
 
 def _manifest_digest(payload: dict[str, object]) -> str:
@@ -214,7 +226,7 @@ def build_capability_manifest(
                 )
             )
     for registration in extensions.invocation_constraints_provider_factories:
-        capability_id = "invocation_constraints.v1"
+        capability_id = _constraint_capability_id(registration.capability_api_version)
         entries.append(
             _registration_manifest_entry(
                 registration,
@@ -255,14 +267,22 @@ def build_capability_manifest(
     for missing_id in sorted(required - registered_ids):
         capability_type, separator, contribution_id = missing_id.partition(":")
         if not separator:
-            capability_type = "invocation_constraints" if missing_id == "invocation_constraints.v1" else missing_id
+            capability_type = (
+                "invocation_constraints"
+                if missing_id
+                in {
+                    INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY,
+                    INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2,
+                }
+                else missing_id
+            )
             contribution_id = missing_id
         entries.append(
             CapabilityManifestEntry(
                 contribution_id=contribution_id,
                 capability_id=missing_id,
                 capability_type=capability_type,
-                capability_api_version="1.0",
+                capability_api_version=(INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2 if missing_id == INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2 else "1.0"),
                 package_name=None,
                 package_version=None,
                 operator_required=True,
@@ -324,7 +344,7 @@ class CapabilityHealthMonitor:
         ):
             self._probes[f"{registration.kind}:{registration.contribution_id}"] = registration.health_probe
         for registration in extensions.invocation_constraints_provider_factories:
-            self._probes["invocation_constraints.v1"] = registration.health_probe
+            self._probes[_constraint_capability_id(registration.capability_api_version)] = registration.health_probe
         for registration in extensions.mcp_interceptor_descriptors:
             self._probes[f"mcp_interceptor:{registration.contribution_id}"] = registration.health_probe
         self._cache: dict[str, CapabilityHealthSnapshot] = {}
