@@ -7,11 +7,14 @@ from typing import Any
 
 from deerflow_extension_api import (
     AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION,
+    INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2,
+    INVOCATION_CONSTRAINTS_KIND,
     MCP_INTERCEPTOR_CAPABILITY_API_VERSION,
     MCP_INTERCEPTOR_KIND,
     AuthorizationProviderFactory,
     AuthzDecision,
     ExtensionRegistry,
+    InvocationConstraintsProviderFactory,
     McpInterceptorDescriptor,
     PreparedMcpCallV1,
     extension,
@@ -147,6 +150,23 @@ def install_mcp_and_authorization(registry: ExtensionRegistry, config: Mapping[s
 def install_mcp_then_raise(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     install_mcp_interceptor(registry, config)
     raise ValueError("boom-mcp")
+
+
+class _ConstraintsProviderV2:
+    async def project(self, request):
+        raise AssertionError("the loader fixture must not project constraints")
+
+
+def install_constraints_v2(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    del config
+    registry.invocation_constraints(
+        InvocationConstraintsProviderFactory(
+            contribution_id="fixture.constraints-v2",
+            capability_api_version=INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2,
+            factory=_ConstraintsProviderV2,
+            kind=INVOCATION_CONSTRAINTS_KIND,
+        )
+    )
 
 
 NOT_CALLABLE = "i am not a function"

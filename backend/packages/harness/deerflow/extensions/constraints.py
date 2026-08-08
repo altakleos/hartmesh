@@ -63,7 +63,12 @@ class InvocationConstraintsHost:
             raise ValueError("invocation constraints timeout_seconds must be positive")
         self._clock = clock or (lambda: datetime.now(UTC))
         diagnostics: list[str] = []
-        if registration is None:
+        if extensions.invocation_constraints_provider_conflict:
+            if required_constraints:
+                capability_id = next(iter(required_constraints))
+                raise ConstraintStartupError(f"required capability {capability_id} has duplicate provider registrations")
+            diagnostics.append("duplicate_registration")
+        elif registration is None:
             if required_constraints:
                 capability_id = next(iter(required_constraints))
                 raise ConstraintStartupError(f"required capability {capability_id} is not registered")

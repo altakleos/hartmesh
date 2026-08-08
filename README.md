@@ -879,6 +879,12 @@ the API-writable `extensions_config.json`. In Docker deployments, install the pl
 Gateway image rather than only in the host environment. See `config.example.yaml` for
 configuration.
 
+Startup-only `required_capabilities` is routed once by the Gateway to its owning
+contributor, invocation-constraints, or MCP host. Both `invocation_constraints.v1` and
+`invocation_constraints.v2` are owned solely by the constraints host; unknown, duplicate,
+missing, malformed, or version-incompatible requirements fail closed instead of being
+accepted or rejected by an unrelated extension host.
+
 The Gateway seals authoritative plugin provenance into one immutable generation and
 manifest digest at startup. New durable invocations retain that generation/digest for their
 entire run; changing plugins requires a restart and never switches in-flight work. Optional

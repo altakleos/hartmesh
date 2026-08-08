@@ -486,6 +486,16 @@ operator-only, restart-required configuration and accepts
 `mcp_interceptor:<id>`, plus one singular constraints contract version:
 `invocation_constraints.v1` or `invocation_constraints.v2`; it must never be exposed
 through API-writable `extensions_config.json`.
+Gateway classifies that operator list exactly once during `create_app()` using the public
+descriptor-kind constants and the exported v1/v2 constraints capability-ID constants.
+`ContributorHost` receives only Origin/Run Context requirements,
+`InvocationConstraintsHost` receives both supported constraints versions, and
+`McpInterceptorHost` receives only MCP requirements. Unknown or duplicate IDs fail before
+host construction. A second singular constraints registration leaves a host-owned ambiguity
+marker even when loader rollback removes the second entry, so a required constraints
+capability cannot start against an accidentally surviving first provider. Adding a future
+constraints version must export its versioned ID and extend the one host-owned routing table
+plus the constraints host; no unrelated host gets a version-specific pass-through exception.
 
 After both contributor phases, the Gateway creates one immutable
 `TrustedRunContextV1`. It contains the accepted split identity, final Origin (including

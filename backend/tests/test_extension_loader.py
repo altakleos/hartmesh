@@ -113,6 +113,24 @@ def test_rollback_does_not_remove_a_different_specs_registrations_sharing_the_sa
     assert contributor.tag == "shared:first"
 
 
+def test_duplicate_constraints_registration_remains_ambiguous_after_rollback():
+    from deerflow.extensions.constraints import InvocationConstraintsHost
+
+    specs = [
+        ExtensionSpec(use=f"{_FIXTURE}:install_constraints_v2"),
+        ExtensionSpec(use=f"{_FIXTURE}:install_constraints_v2"),
+    ]
+
+    loaded, diagnostics = load_extensions(specs)
+
+    assert len(loaded.invocation_constraints_provider_factories) == 1
+    assert loaded.invocation_constraints_provider_conflict is True
+    assert [item.code for item in diagnostics] == ["install_failed"]
+    optional_host = InvocationConstraintsHost(loaded)
+    assert optional_host.initialized_capability_ids == frozenset()
+    assert optional_host.startup_diagnostics == ("duplicate_registration",)
+
+
 def test_required_extension_failure_aborts_startup():
     spec = ExtensionSpec(use=f"{_FIXTURE}:install_partial_then_raise", required=True)
     with pytest.raises(ExtensionLoadError):

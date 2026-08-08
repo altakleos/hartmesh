@@ -9,6 +9,7 @@ import logging
 from collections.abc import Collection
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -17,12 +18,96 @@ from deerflow_extension_api import (
     INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2,
     INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY,
     INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2,
+    MCP_INTERCEPTOR_KIND,
+    ORIGIN_CONTRIBUTOR_KIND,
+    RUN_CONTEXT_CONTRIBUTOR_KIND,
     CapabilityHealthResult,
 )
 
 from deerflow.extensions.registry import LoadedExtensions
 
 logger = logging.getLogger(__name__)
+
+RequiredCapabilityOwner = Literal["contributors", "constraints", "mcp"]
+_MAX_REQUIRED_CAPABILITY_BYTES = 160
+
+# This is the canonical ownership classification used by Gateway composition.
+# Exact versioned IDs come from the public contract; dynamic contribution IDs
+# are routed by the public descriptor kind. A new constraints version becomes
+# routable by extending this host-owned set from the public version constants,
+# without teaching unrelated contributor or MCP hosts about that version.
+_INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITIES = frozenset(
+    {
+        INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY,
+        INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2,
+    }
+)
+REQUIRED_CAPABILITY_ID_OWNERS = MappingProxyType(
+    {capability_id: "constraints" for capability_id in _INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITIES},
+)
+REQUIRED_CAPABILITY_KIND_OWNERS = MappingProxyType(
+    {
+        ORIGIN_CONTRIBUTOR_KIND: "contributors",
+        RUN_CONTEXT_CONTRIBUTOR_KIND: "contributors",
+        MCP_INTERCEPTOR_KIND: "mcp",
+    }
+)
+
+
+class RequiredCapabilityRoutingError(RuntimeError):
+    """Operator-required capabilities cannot be routed to one owning host."""
+
+
+@dataclass(frozen=True)
+class RequiredCapabilityRoutes:
+    """One deterministic partition of startup-only required capabilities."""
+
+    contributors: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    mcp: tuple[str, ...] = ()
+
+
+def _safe_capability_label(value: object) -> str:
+    if not isinstance(value, str):
+        return f"<{type(value).__name__}>"
+    encoded = value.encode("utf-8")
+    if len(encoded) > _MAX_REQUIRED_CAPABILITY_BYTES or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return "<invalid>"
+    return repr(value)
+
+
+def route_required_capabilities(
+    required_capabilities: Collection[str],
+) -> RequiredCapabilityRoutes:
+    """Validate and route every required capability to exactly one host."""
+
+    required = tuple(required_capabilities)
+    if any(not isinstance(capability_id, str) for capability_id in required):
+        invalid = next(capability_id for capability_id in required if not isinstance(capability_id, str))
+        raise RequiredCapabilityRoutingError(f"unsupported required capability {_safe_capability_label(invalid)}")
+    if len(required) != len(set(required)):
+        raise RequiredCapabilityRoutingError("required_capabilities contains a duplicate capability ID")
+    routed: dict[RequiredCapabilityOwner, list[str]] = {
+        "contributors": [],
+        "constraints": [],
+        "mcp": [],
+    }
+    for capability_id in required:
+        owner = REQUIRED_CAPABILITY_ID_OWNERS.get(capability_id)
+        if owner is None and isinstance(capability_id, str):
+            kind, separator, contribution_id = capability_id.partition(":")
+            if separator == ":" and contribution_id:
+                owner = REQUIRED_CAPABILITY_KIND_OWNERS.get(kind)
+        invalid = len(capability_id.encode("utf-8")) > _MAX_REQUIRED_CAPABILITY_BYTES
+        invalid = invalid or any(ord(character) < 32 or ord(character) == 127 for character in capability_id)
+        if owner is None or invalid:
+            raise RequiredCapabilityRoutingError(f"unsupported required capability {_safe_capability_label(capability_id)}")
+        routed[owner].append(capability_id)
+    return RequiredCapabilityRoutes(
+        contributors=tuple(routed["contributors"]),
+        constraints=tuple(routed["constraints"]),
+        mcp=tuple(routed["mcp"]),
+    )
 
 
 @dataclass(frozen=True)
@@ -575,7 +660,12 @@ __all__ = [
     "CapabilityHealthSnapshot",
     "CapabilityPluginManifestEntry",
     "CapabilityReadinessSnapshot",
+    "REQUIRED_CAPABILITY_ID_OWNERS",
+    "REQUIRED_CAPABILITY_KIND_OWNERS",
+    "RequiredCapabilityRoutes",
+    "RequiredCapabilityRoutingError",
     "build_capability_manifest",
     "capability_health_to_dict",
     "capability_manifest_to_dict",
+    "route_required_capabilities",
 ]

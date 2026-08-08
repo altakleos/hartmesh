@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from deerflow_extension_api import (
+    ORIGIN_CONTRIBUTOR_KIND,
+    RUN_CONTEXT_CONTRIBUTOR_KIND,
     OriginContributionRequestV1,
     OriginContributionV1,
     OriginContributor,
@@ -27,15 +29,7 @@ logger = logging.getLogger(__name__)
 _TIMEOUT_SECONDS = 2.0
 _MAX_AGGREGATE_REFERENCES = 32
 _MAX_AGGREGATE_CANONICAL_BYTES = 8192
-_SUPPORTED_REQUIRED_KINDS = frozenset({"origin_contributor", "run_context_contributor"})
-_PASSTHROUGH_REQUIRED_CAPABILITIES = frozenset({"invocation_constraints.v1"})
-
-
-def _is_passthrough_required_capability(capability_id: str) -> bool:
-    if capability_id in _PASSTHROUGH_REQUIRED_CAPABILITIES:
-        return True
-    kind, separator, contribution_id = capability_id.partition(":")
-    return separator == ":" and kind == "mcp_interceptor" and bool(contribution_id)
+_SUPPORTED_REQUIRED_KINDS = frozenset({ORIGIN_CONTRIBUTOR_KIND, RUN_CONTEXT_CONTRIBUTOR_KIND})
 
 
 class RequiredCapabilityError(RuntimeError):
@@ -158,13 +152,10 @@ class ContributorHost:
         if len(required) != len(set(required)):
             raise RequiredCapabilityError("required_capabilities contains a duplicate capability ID")
         for capability_id in required:
-            if _is_passthrough_required_capability(capability_id):
-                continue
             kind, separator, contribution_id = capability_id.partition(":")
             if separator != ":" or kind not in _SUPPORTED_REQUIRED_KINDS or not contribution_id:
                 raise RequiredCapabilityError(f"unsupported required capability {capability_id!r}")
-        required_set = frozenset(required)
-        contributor_required = frozenset(capability_id for capability_id in required_set if not _is_passthrough_required_capability(capability_id))
+        contributor_required = frozenset(required)
         available = {
             *(f"origin_contributor:{item.contribution_id}" for item in extensions.origin_contributor_factories),
             *(f"run_context_contributor:{item.contribution_id}" for item in extensions.run_context_contributor_factories),

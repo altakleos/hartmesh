@@ -139,6 +139,7 @@ class LoadedExtensions:
     origin_contributor_factories: tuple[RegisteredOriginContributorFactory, ...] = ()
     run_context_contributor_factories: tuple[RegisteredRunContextContributorFactory, ...] = ()
     invocation_constraints_provider_factories: tuple[RegisteredInvocationConstraintsProviderFactory, ...] = ()
+    invocation_constraints_provider_conflict: bool = False
     mcp_interceptor_descriptors: tuple[RegisteredMcpInterceptorDescriptor, ...] = ()
     mcp_interceptor_conflicts: frozenset[str] = frozenset()
 
@@ -172,6 +173,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._origin_contributors: list[RegisteredOriginContributorFactory] = []
         self._run_context_contributors: list[RegisteredRunContextContributorFactory] = []
         self._invocation_constraints_providers: list[RegisteredInvocationConstraintsProviderFactory] = []
+        self._invocation_constraints_provider_conflict = False
         self._mcp_interceptors: list[RegisteredMcpInterceptorDescriptor] = []
         self._mcp_interceptor_conflicts: set[str] = set()
         self._current_source: str | None = None
@@ -285,6 +287,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             raise TypeError("invocation_constraints requires InvocationConstraintsProviderFactory")
         if self._invocation_constraints_providers:
             existing = self._invocation_constraints_providers[0]
+            self._invocation_constraints_provider_conflict = True
             raise DuplicateInvocationConstraintsProviderFactoryError(f"invocation constraints provider factory already registered by {existing.source} ({existing.contribution_id}); duplicate {contribution.contribution_id} is not allowed")
         self._invocation_constraints_providers.append(
             RegisteredInvocationConstraintsProviderFactory(
@@ -379,6 +382,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             origin_contributor_factories=tuple(self._origin_contributors),
             run_context_contributor_factories=tuple(self._run_context_contributors),
             invocation_constraints_provider_factories=tuple(self._invocation_constraints_providers),
+            invocation_constraints_provider_conflict=self._invocation_constraints_provider_conflict,
             mcp_interceptor_descriptors=tuple(self._mcp_interceptors),
             mcp_interceptor_conflicts=frozenset(self._mcp_interceptor_conflicts),
             has_middleware_contributors=bool(self._middlewares),
