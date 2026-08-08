@@ -17,6 +17,7 @@ from app.gateway.routers import runtime_api
 from app.runtime.deployment import (
     DeploymentProfile,
     DeploymentProvenance,
+    DeploymentQualification,
     GatewayDeploymentReporter,
     PersistenceTier,
     describe_persistence,
@@ -167,6 +168,50 @@ def test_admin_deployment_report_is_versioned_truthful_and_redacted() -> None:
 
     with pytest.raises(ValueError, match="credential"):
         DeploymentProvenance(image_reference="registry.example/user:secret@private/image:latest")
+
+
+def test_deployment_qualification_reads_bounded_trusted_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DEER_FLOW_QUALIFICATION_EVIDENCE",
+        '[{"qualificationId":"durable-contract-2026-08","artifactDigest":"sha256:' + ("c" * 64) + '","completedAt":"2026-08-08T12:00:00Z"}]',
+    )
+
+    qualification = DeploymentQualification.from_environment()
+
+    assert qualification.to_dict() == {
+        "version": 1,
+        "status": "qualified",
+        "evidence": [
+            {
+                "qualification_id": "durable-contract-2026-08",
+                "artifact_digest": "sha256:" + ("c" * 64),
+                "completed_at": "2026-08-08T12:00:00Z",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "completed_at",
+    [
+        "2026-W32-6T12:00:00Z",
+        "2026-08-08 12:00:00+00:00",
+        "2026-08-08T12:00:00",
+    ],
+)
+def test_deployment_qualification_rejects_non_rfc3339_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+    completed_at: str,
+) -> None:
+    monkeypatch.setenv(
+        "DEER_FLOW_QUALIFICATION_EVIDENCE",
+        '[{"qualificationId":"durable-contract-2026-08","artifactDigest":"sha256:' + ("c" * 64) + '","completedAt":"' + completed_at + '"}]',
+    )
+
+    with pytest.raises(ValueError, match="qualification evidence values are invalid"):
+        DeploymentQualification.from_environment()
 
 
 def test_deployment_report_requires_an_authenticated_administrator() -> None:

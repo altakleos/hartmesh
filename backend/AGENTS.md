@@ -541,6 +541,21 @@ operation context and expose only a bounded indeterminate failure with that ID. 
 middleware and optional capability failures remain diagnostic/fail-open and do not make the
 Gateway unready.
 
+The Helm integration keeps those runtime facts truthful. Chart defaults are
+`local_evaluation` plus runtime `local_development`, one Gateway replica, and no
+qualification evidence. Opt-in `durable_one_replica` validation requires exact
+Gateway and enabled-provisioner OCI digests, declared/shared PostgreSQL
+persistence, runtime `durable_production`, and termination/probe settings that
+cover the application's bounded readiness and shutdown work. Gateway
+ServiceAccounts have no chart-created RBAC and no API-token automount by
+default; structured extra environment/volume inputs carry only Secret or
+ConfigMap references. Bounded source revision and completed qualification
+evidence enter the administrator deployment report through trusted environment
+fields, never portable capabilities. The chart deliberately omits PDB,
+topology-spread, leader-election, and zero-downtime claims until multi-replica
+ownership exists. Render validation is pinned by
+`tests/test_helm_durable_deployment_contract.py`.
+
 The constraints provider is an authoritative restrictive projection, not a second binary
 permission provider. Gateway calls it after enabled invocation-start authorization allows
 and before durable admission, directly outside observational `IsolatedMiddleware`, with a

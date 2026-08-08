@@ -734,6 +734,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.state.capability_health_monitor = capability_health_monitor
     from app.runtime.deployment import (
         DeploymentProvenance,
+        DeploymentQualification,
         GatewayDeploymentReporter,
     )
 
@@ -742,6 +743,11 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     except ValueError:
         logger.warning("Ignoring invalid bounded deployment provenance identifiers")
         deployment_provenance = DeploymentProvenance()
+    try:
+        deployment_qualification = DeploymentQualification.from_environment()
+    except ValueError:
+        logger.warning("Ignoring invalid bounded deployment qualification evidence")
+        deployment_qualification = DeploymentQualification()
     app.state.deployment_reporter = GatewayDeploymentReporter(
         profile=construction_deployment.profile,
         database_backend=construction_database_backend,
@@ -754,6 +760,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             None,
         ),
         provenance=deployment_provenance,
+        qualification=deployment_qualification,
     )
     from app.runtime.readiness import RuntimeReadinessCoordinator
 

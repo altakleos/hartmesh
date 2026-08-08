@@ -50,11 +50,15 @@ def test_gateway_template_renders_distinct_readiness_and_liveness_paths() -> Non
     assert _probe_path(rendered, "livenessProbe") == "/health"
 
 
-def test_gateway_chart_declares_durable_profile_and_image_provenance() -> None:
+def test_gateway_chart_declares_local_default_and_validated_durable_profile() -> None:
     values = _HELM_VALUES.read_text(encoding="utf-8")
     template = _GATEWAY_DEPLOYMENT.read_text(encoding="utf-8")
+    helpers = (_GATEWAY_DEPLOYMENT.parent / "_helpers.tpl").read_text(encoding="utf-8")
 
-    assert "profile: durable_production" in values
+    assert "mode: local_evaluation" in values
+    assert "profile: local_development" in values
+    assert 'eq $mode "durable_one_replica"' in helpers
+    assert "config deployment.profile=durable_production" in helpers
     assert "name: DEER_FLOW_IMAGE_REFERENCE" in template
     assert 'include "deer-flow.gatewayImage"' in template
 

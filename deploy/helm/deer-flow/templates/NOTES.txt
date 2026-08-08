@@ -2,11 +2,20 @@ DeerFlow has been deployed.
 
   namespace: {{ include "deer-flow.namespace" . }}
 
-{{- if not .Values.image.registry }}
+{{- if and (not .Values.image.registry) (not .Values.gateway.image.repository) }}
 
-  ⚠️  WARNING: `image.registry` is empty. The gateway/frontend/provisioner
-  images won't resolve. Set `image.registry` in your values and build+push the
-  three images (see the chart README's "Build & push images" section).
+  ⚠️  WARNING: no registry-prefixed Gateway repository is configured. Ensure
+  the local cluster can resolve the default image, or set per-workload
+  image.repository values (see the chart README).
+{{- end }}
+
+  Deployment mode: {{ .Values.deployment.mode }}
+{{- if eq .Values.deployment.mode "local_evaluation" }}
+  ⚠️  This is an explicitly unqualified local evaluation, not a production
+  durability claim. See the chart README before enabling durable_one_replica.
+{{- else }}
+  ✓ durable_one_replica render validation passed. This pins deployment inputs;
+  it is not live Kubernetes recovery qualification or high availability.
 {{- end }}
 
 Get the status:
@@ -30,7 +39,7 @@ for HTTPS.
 
 Provisioner / sandbox notes:
 
-  • The provisioner ServiceAccount has a namespaced Role (get, list, watch,
+  • The selected provisioner ServiceAccount has a namespaced Role (get, list, watch,
     create, delete on Pods + Services incl. pods/log, in this namespace) and a
     narrow ClusterRole (namespace get + create, cluster-wide). These verbs
     apply to *all* Pods in the namespace, not just sandbox Pods - scoping to
@@ -83,8 +92,9 @@ Database ({{ if .Values.postgresql.enabled }}bundled postgres{{ else }}external 
     `postgres-password`. Both persist across upgrades.
   • Schema is bootstrapped automatically on gateway startup (alembic
     create_all + stamp head). No manual migration step needed.
-  • To run real HA, disable this (`postgresql.enabled: false`) and point at a
-    managed DB via `postgresql.external`.
+  • For a resilient database, disable this (`postgresql.enabled: false`) and
+    point at a managed DB via `postgresql.external`. That does not make the
+    one-replica Gateway highly available.
 {{- else }}
   • The gateway reads DATABASE_URL from Secret
     `{{ include "deer-flow.databaseUrlSecret" . }}` (key `database-url`).
@@ -99,8 +109,8 @@ Redis stream bridge ({{ if .Values.redis.enabled }}bundled redis{{ else if (incl
     `{{ include "deer-flow.redisFullname" . }}:6379`.
   • DEER_FLOW_STREAM_BRIDGE_REDIS_URL is in Secret
     `{{ include "deer-flow.redisUrlSecret" . }}` (key `redis-url`).
-  • Per-run SSE events are stored in Redis Streams so a client connected to any
-    gateway pod receives live events; reconnect resumes from Last-Event-ID.
+  • Per-run SSE events are stored in Redis Streams so reconnect resumes from
+    Last-Event-ID.
   • To use a managed Redis, disable this (`redis.enabled: false`) and point at it
     via `redis.external`.
 {{- else if (include "deer-flow.redisConfigured" .) }}
@@ -108,21 +118,20 @@ Redis stream bridge ({{ if .Values.redis.enabled }}bundled redis{{ else if (incl
     `{{ include "deer-flow.redisUrlSecret" . }}` (key `redis-url`). Ensure that
     Secret exists and contains your managed-Redis URL.
 {{- else }}
-  • No redis configured — the gateway falls back to the in-process memory stream
-    bridge. This is single-pod only: cross-pod SSE delivery and reconnect will
-    not work with `gateway.replicas > 1`.
+  • No redis configured — the gateway falls back to the process-local memory
+    stream bridge, which does not survive restart.
 {{- end }}
 
-{{- if or .Values.secrets .Values.existingSecret }}
+{{- if or .Values.secrets .Values.existingSecret .Values.gateway.extraEnvFrom }}
 
-Provider/channel keys are in Secret `{{ include "deer-flow.providerSecret" . }}`
-and injected into the gateway via envFrom. Reference them from config.yaml as
-$VAR.
+Provider/channel keys are injected into the gateway through referenced envFrom
+sources. Reference them from config.yaml as $VAR.
 {{- else }}
 
   ⚠️  No provider secrets configured. Add at least one model under `config`
     (e.g. an OpenAI model with `api_key: $OPENAI_API_KEY`) and supply the key
-    under `secrets` in your values, or the agent will have no LLM to call.
+    through `existingSecret` or `gateway.extraEnvFrom`, or the agent will have
+    no LLM to call.
 {{- end }}
 
 Agent tools: the chart enables the sandbox tools (ls, read_file, glob, grep,

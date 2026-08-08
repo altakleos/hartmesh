@@ -1,3 +1,4 @@
+{{- include "deer-flow.validate" . -}}
 {{- $appConfig := (.Values.config | fromYaml) -}}
 {{- $deploymentConfig := (index $appConfig "deployment") | default dict -}}
 {{- $shutdownConfig := (index $deploymentConfig "shutdown") | default dict -}}
@@ -29,13 +30,21 @@ spec:
       labels:
         {{- include "deer-flow.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: gateway
+        {{- with .Values.gateway.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         # Roll pods when the mounted ConfigMaps change (subPath mounts don't
         # get live updates, so without this a config-only upgrade is ignored).
         checksum/config: {{ include "deer-flow.configChecksum" . }}
         checksum/extensions: {{ include "deer-flow.extensionsChecksum" . }}
+        {{- with .Values.gateway.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "deer-flow.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       # Defaults to every configured application shutdown phase plus preStop
       # and scheduling headroom. An explicit override remains operator-owned.
       terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default $derivedTermination }}
@@ -90,6 +99,18 @@ spec:
               value: /tmp
             - name: DEER_FLOW_IMAGE_REFERENCE
               value: {{ include "deer-flow.gatewayImage" . | quote }}
+            {{- if .Values.gateway.image.digest }}
+            - name: DEER_FLOW_IMAGE_DIGEST
+              value: {{ .Values.gateway.image.digest | quote }}
+            {{- end }}
+            {{- if .Values.deployment.provenance.sourceRevision }}
+            - name: DEER_FLOW_SOURCE_REVISION
+              value: {{ .Values.deployment.provenance.sourceRevision | quote }}
+            {{- end }}
+            {{- if .Values.deployment.qualificationEvidence }}
+            - name: DEER_FLOW_QUALIFICATION_EVIDENCE
+              value: {{ .Values.deployment.qualificationEvidence | toJson | quote }}
+            {{- end }}
             - name: DEER_FLOW_PROJECT_ROOT
               value: /app
             - name: DEER_FLOW_HOME
@@ -140,10 +161,15 @@ spec:
               value: localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner
             - name: no_proxy
               value: localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner
-          {{- if or .Values.secrets .Values.existingSecret }}
+          {{- if or .Values.secrets .Values.existingSecret .Values.gateway.extraEnvFrom }}
           envFrom:
+            {{- if or .Values.secrets .Values.existingSecret }}
             - secretRef:
                 name: {{ include "deer-flow.providerSecret" . }}
+            {{- end }}
+            {{- with .Values.gateway.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           ports:
             - containerPort: 8001
@@ -195,6 +221,9 @@ spec:
               mountPath: /app/backend/.deer-flow
               subPath: deer-flow
             {{- end }}
+            {{- with .Values.gateway.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -216,4 +245,7 @@ spec:
         - name: home
           persistentVolumeClaim:
             claimName: {{ include "deer-flow.homePVC" . }}
+        {{- end }}
+        {{- with .Values.gateway.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}

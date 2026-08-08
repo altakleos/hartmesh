@@ -5,8 +5,9 @@ LangGraph runtime), **frontend** (Next.js), **nginx** (internal reverse proxy
 preserving the compose routing), and the **provisioner** (K8s-native sandbox
 that spawns code-execution Pods on demand).
 
-This chart translates the production `docker/docker-compose.yaml` into native
-Kubernetes resources. No existing repo files are modified.
+The default values are an explicitly unqualified local evaluation profile. The
+validated production mode is still exactly one Gateway replica; it does not
+claim high availability, rolling zero downtime, or live pod-loss qualification.
 
 ## Prerequisites
 
@@ -38,7 +39,7 @@ matches the release tag without the leading `v` (tag `v0.1.0` → `--version
 > keeps it distinct from the `deer-flow-{backend,frontend,provisioner}` image
 > packages).
 
-Point the chart at the published images:
+For local evaluation, the legacy shared tag values remain supported:
 
 ```yaml
 image:
@@ -59,6 +60,48 @@ pull secret (step 1) and reference it via `image.pullSecrets`.
 > `appVersion`; always set `image.tag` to the release that matches your chart
 > `--version` unless you have a reason to pin differently.
 
+For the validated one-replica profile, use immutable per-workload references.
+The Gateway and enabled provisioner are execution artifacts and therefore both
+require digests; tags remain documentation only and are not appended:
+
+```yaml
+deployment:
+  mode: durable_one_replica
+  persistenceTier: shared_durable
+
+gateway:
+  image:
+    repository: ghcr.io/yourorg/deer-flow-backend
+    tag: "2.1.0"
+    digest: sha256:<64-lowercase-hex>
+
+provisioner:
+  image:
+    repository: ghcr.io/yourorg/deer-flow-provisioner
+    tag: "2.1.0"
+    digest: sha256:<64-lowercase-hex>
+
+# Production validation accepts only references to separately managed
+# credentials; inline passwords and connection URLs are rejected.
+postgresql:
+  existingSecret: deer-flow-postgres
+redis:
+  existingSecret: deer-flow-redis
+
+config: |
+  # Keep the complete chart config; the relevant production declarations are:
+  deployment:
+    profile: durable_production
+  database:
+    backend: postgres
+    postgres_url: $DATABASE_URL
+```
+
+`frontend.image`, `nginx.image`, `postgresql.image`, and `redis.image` accept
+the same optional `digest` form. They are not part of the current invocation
+qualification boundary, but pinning them is recommended for a reproducible
+full deployment.
+
 ## 1. Build & push images (custom builds only)
 
 Skip this section if you're using the published chart above. To build the
@@ -68,8 +111,7 @@ images yourself from the existing Dockerfiles:
 REGISTRY=ghcr.io/yourorg
 TAG=latest
 
-# backend - build with the `postgres` extra so multi-replica deploys can use
-# shared Postgres (matches the published image)
+# backend - build with the `postgres` extra used by the durable profile
 docker build -t $REGISTRY/deer-flow-backend:$TAG --build-arg UV_EXTRAS=postgres -f backend/Dockerfile .
 # frontend
 docker build -t $REGISTRY/deer-flow-frontend:$TAG -f frontend/Dockerfile .
@@ -81,9 +123,8 @@ docker push $REGISTRY/deer-flow-frontend:$TAG
 docker push $REGISTRY/deer-flow-provisioner:$TAG
 ```
 
-These names match the chart's `gatewayImage` / `frontendImage` /
-`provisionerImage` defaults, so only `image.registry` and `image.tag` need to
-point at them.
+These names match the legacy image defaults. New values files should set each
+workload's `image.repository`; keep the legacy block only while migrating.
 
 If your registry needs auth, create a pull secret:
 
@@ -114,13 +155,13 @@ ingress:
     enabled: true
     secretName: deer-flow-tls
 
-secrets:
-  OPENAI_API_KEY: sk-...
-  # add channel tokens, search keys, etc. as needed
+# Reference a separately managed Secret; do not put provider credentials in
+# ordinary values files. It may contain OPENAI_API_KEY and other provider vars.
+existingSecret: deer-flow-provider
 ```
 
 Provide your model config under `config` (keep secrets as `$VAR` references —
-they resolve from the `secrets` map):
+they resolve from the selected Secret):
 
 ```yaml
 config: |
@@ -175,10 +216,10 @@ config: |
 ```
 
 `$DATABASE_URL` is injected from the postgres Secret (see below). The
-`checkpointer:` section is required for multi-replica operation — the LangGraph
-Store (cross-thread memory + thread list) reads it and does not fall back to
-`database:`. `stream_bridge.type: redis` is the default and routes live SSE
-events through the bundled redis StatefulSet (or `redis.external`).
+`checkpointer:` section keeps LangGraph checkpoints and Store data on the same
+restart-durable backend; the Store does not fall back to `database:`.
+`stream_bridge.type: redis` supplies bounded reconnect replay through the
+bundled Redis StatefulSet (or `redis.external`).
 Because `config:` is a single override blob, a partial `config:` replaces the
 chart default entirely - keep the `tools:`/`tool_groups:` block (or the agent
 will have no tools) and the `sandbox:`/`database:`/`checkpointer:`/`stream_bridge:`
@@ -206,10 +247,13 @@ The Gateway pod uses `GET /ready` for readiness and `GET /health` for liveness.
 Readiness includes operator-required authoritative capability health, lifecycle-cursor
 and retained event-edge integrity, database availability, and the configured deployment
 durability promise, but its unauthenticated body
-is deliberately only `{"status":"ready"}` or `{"status":"not_ready"}`. The chart selects
-`deployment.profile: durable_production`, uses PostgreSQL shared state, and stamps the
-Gateway image reference for bounded provenance. Safe provenance, persistence tier,
-qualification state, and safe admission-readiness reason codes are available only to an authenticated administrator
+is deliberately only `{"status":"ready"}` or `{"status":"not_ready"}`. Defaults use
+`deployment.mode: local_evaluation` and `deployment.profile: local_development`,
+so tag-based images remain convenient without implying production qualification.
+The validated mode requires one replica, pinned Gateway/provisioner images,
+`shared_durable`/PostgreSQL storage, and the runtime's
+`durable_production` profile. Safe provenance, persistence tier, qualification
+state, and safe admission-readiness reason codes are available only to an authenticated administrator
 at `GET /api/runtime/v1/deployment`; portable runtime support remains the strict
 `GET /api/runtime/v1/capabilities` record. Plugin registrations and their manifest
 generation are startup-only; deploy a restart to adopt changes, while in-flight invocations
@@ -221,7 +265,30 @@ Kubernetes supplies bounded headroom rather than aborting an evaluation first. R
 fails on its first unsafe result; liveness uses an independent failure threshold of three.
 Override these through `config.deployment.readiness` and `gateway.readinessProbe` only while
 preserving `readinessProbe.timeoutSeconds > overall_timeout_seconds >
-capability_probe_timeout_seconds`.
+capability_probe_timeout_seconds`. Render validation also requires the probe
+period to cover its timeout and any explicit termination grace to cover the
+application shutdown budget, preStop delay, and scheduling headroom.
+
+### Deployment identity and qualification
+
+`deployment.provenance.sourceRevision` and a pinned Gateway digest are injected
+through bounded trusted environment fields and appear only in the administrator
+deployment report. `deployment.qualificationEvidence` accepts completed safe
+identifiers, artifact SHA-256 digests, and RFC3339 completion times. It is empty
+by default, so the report says `unqualified`; Helm never invents evidence.
+Neither configuration accepts credentials or arbitrary metadata.
+
+### ServiceAccount, metadata, and referenced configuration
+
+`serviceAccount.create` creates a Gateway account with no RBAC and with API-token
+automount disabled. Set `create: false` and `name` to select an existing account.
+The provisioner has an independent `provisioner.serviceAccount` selector; its
+existing Role/RoleBinding remain limited to sandbox lifecycle operations.
+
+Gateway pod labels/annotations are bounded and chart-owned selector/checksum
+keys are reserved. `gateway.extraEnvFrom`, `gateway.extraVolumes`, and
+`gateway.extraVolumeMounts` accept structured Secret/ConfigMap references. Put
+only object names and mount metadata in values—never secret contents.
 
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 
@@ -239,38 +306,31 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   (key `database-url`) and injected as `DATABASE_URL`; `config.yaml` references
   it as `$DATABASE_URL` in `database.postgres_url`. Schema is bootstrapped
   automatically on gateway startup (alembic `create_all` + `stamp head`).
-  For real HA, disable the bundled instance and point at a managed DB:
+  The local-evaluation profile can generate its own Secret. The validated
+  production profile requires a separately managed Secret, whether PostgreSQL
+  is bundled or external. To use a managed database:
   ```yaml
   postgresql:
     enabled: false
     external:
-      host: mydb.example.com   # or set databaseUrl / existingSecret
-      port: 5432
-      database: deerflow
-      username: deerflow
-      password: changeme
+      existingSecret: deer-flow-managed-postgres # key: database-url
   ```
 - **Graceful shutdown & memory drain.** The Gateway owns one ordered deadline: freeze admission; stop channels and scheduler; interrupt/drain local runs; flush memory; close dependencies. Application phase budgets live in `config -> deployment.shutdown`, while `memory.shutdown_flush_timeout_seconds` owns the memory phase. By default the chart computes `terminationGracePeriodSeconds` from their sum plus `gateway.preStopSleepSeconds` (default 5s) and `gateway.shutdownSchedulingHeadroomSeconds` (default 3s). Set `gateway.terminationGracePeriodSeconds` only for an explicit override, and never below that derived requirement. A timed-out run remains subject to durable orphan recovery after restart. This documents the supported single-replica sequence; it is not live-pod termination qualification.
-- **Gateway replicas.** Postgres + the Redis stream bridge together make the
-  gateway's *persisted* state (checkpointer + run/thread metadata) and *live
-  stream* path cross-pod-safe. The default is still 1 replica: **do not raise
-  `gateway.replicas` past 1 yet.** Run control — `create_or_reject` dedup,
-  `cancel`, and orphan reconciliation — is still worker-local (in-process
-  `asyncio.Lock` + in-memory `record.task`), tracked by [issue
-  #3948](https://github.com/bytedance/deer-flow/issues/3948). With >1 replica a
-  double-submit can create two runs on one thread (checkpoint corruption), a
-  cancel can land on a non-owner pod (409), and a crashed pod's runs stay
-  `pending`/`running` forever. Stay on 1 replica until that work lands.
+- **Gateway replicas.** The supported local and production topology is one
+  Gateway replica. `durable_one_replica` rejects any other count. The chart does
+  not install a PodDisruptionBudget, topology spread, leader election, or a
+  rolling-zero-downtime policy because those controls would imply coordination
+  the runtime does not yet provide. They remain deferred until a real
+  multi-replica ownership and scheduler design exists.
 - **Redis stream bridge.** A bundled single-instance redis StatefulSet
   (`redis.enabled: true`, `redis:7-alpine`) runs in the namespace and the
   gateway connects via the in-cluster Service. Per-run SSE events are stored in
-  Redis Streams (PR #3191) so a client connected to any gateway pod receives
-  live events and reconnect resumes from `Last-Event-ID`. The URL is
-  auto-generated into a Secret (key `redis-url`) and injected as
+  Redis Streams so reconnect resumes from `Last-Event-ID`. The URL is
+  auto-generated into a Secret for local evaluation (key `redis-url`) and injected as
   `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`; `config.yaml` sets `stream_bridge.type:
-  redis` by default. No-auth by default (ClusterIP isolation, matching compose);
-  set `redis.auth.password` to enable AUTH. For a managed Redis, disable the
-  bundled instance and point at it via `redis.external`.
+  redis` by default. Production validation rejects inline passwords and URLs;
+  set `redis.existingSecret` for bundled Redis or
+  `redis.external.existingSecret` for managed Redis (key `redis-url`).
 - **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`
   (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC
@@ -281,6 +341,22 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   (namespace get/create). It uses in-cluster service-account creds — no
   kubeconfig mount. The unused update/patch/pods-exec/events verbs were dropped
   (audited against `docker/provisioner/app.py`).
+
+## Upgrading existing values
+
+Legacy `image.registry`, `image.tag`, and the three image-name keys continue to
+render tag references. Existing raw `config:` overrides remain valid, but an
+override that changes `database.backend` must also set the matching
+`deployment.persistenceTier`; the chart will not render a contradictory storage
+claim. The new `deployment.mode` defaults to `local_evaluation`; adopting
+production validation is deliberate: migrate to per-workload
+repositories/digests and externally managed credential Secrets, set
+`persistenceTier: shared_durable`, and set the embedded runtime config profile
+to `durable_production`. Helm then rejects invalid digests, process-local
+storage, multiple Gateway replicas, inline credentials, and unsafe
+probe/shutdown timing before an install or upgrade. This validation is
+deployment reproducibility, not evidence that live Kubernetes
+termination/recovery has been qualified.
 - **Skills.** Disabled by default (emptyDir at `/app/skills`). Populate via
   `skills.existingClaim` or `skills.configMap`, or bake skills into a custom
   gateway image.
