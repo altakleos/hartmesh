@@ -243,7 +243,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 33
+  config_version: 36
   log_level: info
 
   models: []
@@ -270,6 +270,11 @@ config: |
     postgres_url: $DATABASE_URL
     pool_recycle: 300
     command_timeout: 30
+
+  # Fail closed if this production chart is ever paired with process-local
+  # authoritative invocation state.
+  deployment:
+    profile: durable_production
 
   # The LangGraph Store (cross-thread memory + thread list) reads this legacy
   # `checkpointer:` section — it does NOT fall back to `database:` the way the

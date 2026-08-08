@@ -204,6 +204,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         startup_config = get_app_config()
         configure_logging(startup_config)
         ensure_browser_runtime_available(startup_config)
+        from app.runtime.deployment import validate_deployment_profile
+
+        validate_deployment_profile(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
     except Exception as e:
@@ -629,13 +632,18 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         configured_plugins = construction_config.plugins
         required_capabilities = construction_config.required_capabilities
         construction_authorization = construction_config.authorization
+        construction_deployment = construction_config.deployment
+        construction_database_backend = construction_config.database.backend
     except FileNotFoundError:
         logger.debug("config.yaml not found while constructing Gateway app; loading no extensions for this app instance")
         configured_plugins = []
         required_capabilities = []
         from deerflow.config.authorization_config import AuthorizationConfig
+        from deerflow.config.deployment_config import DeploymentConfig
 
         construction_authorization = AuthorizationConfig()
+        construction_deployment = DeploymentConfig()
+        construction_database_backend = "memory"
 
     try:
         loaded_extensions, extension_diagnostics = load_extensions(configured_plugins)
@@ -731,6 +739,24 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.state.mcp_interceptor_host = mcp_interceptor_host
     app.state.capability_manifest = capability_manifest
     app.state.capability_health_monitor = capability_health_monitor
+    from app.runtime.deployment import (
+        DeploymentProvenance,
+        GatewayDeploymentReporter,
+    )
+
+    try:
+        deployment_provenance = DeploymentProvenance.from_environment()
+    except ValueError:
+        logger.warning("Ignoring invalid bounded deployment provenance identifiers")
+        deployment_provenance = DeploymentProvenance()
+    app.state.deployment_reporter = GatewayDeploymentReporter(
+        profile=construction_deployment.profile,
+        database_backend=construction_database_backend,
+        atomic_lifecycle=False,
+        manifest=capability_manifest,
+        health_monitor=capability_health_monitor,
+        provenance=deployment_provenance,
+    )
 
     # Include routers
     # Models API is mounted at /api/models
@@ -844,7 +870,16 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                     exc_info=True,
                 )
         readiness = await app.state.capability_health_monitor.readiness(
-            lifecycle_ready=lifecycle_ready,
+            lifecycle_ready=(
+                lifecycle_ready
+                and bool(
+                    getattr(
+                        app.state.deployment_reporter,
+                        "persistence_ready",
+                        False,
+                    )
+                )
+            ),
         )
         ready = readiness.status == "ready"
         return JSONResponse(

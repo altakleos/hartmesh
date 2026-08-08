@@ -18,12 +18,14 @@ from deerflow_extension_api import (
     InvocationConstraintsProviderFactory,
     OriginContributorFactory,
 )
+from deerflow_runtime_api import RuntimeCapabilities, record_from_dict
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.auth.models import User
 from app.gateway.routers import runtime_api
+from app.runtime.deployment import GatewayDeploymentReporter
 from deerflow.extensions.capabilities import (
     CapabilityHealthMonitor,
     CapabilityHealthSnapshot,
@@ -348,7 +350,7 @@ async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
     assert readiness.json() == {"status": "not_ready"}
 
 
-def test_admin_capabilities_separates_immutable_manifest_from_mutable_health() -> None:
+def test_admin_deployment_report_separates_immutable_manifest_from_mutable_health() -> None:
     manifest = build_capability_manifest(ExtensionRegistry().build(generation=14))
     checked_at = datetime(2026, 8, 7, tzinfo=UTC)
 
@@ -379,14 +381,26 @@ def test_admin_capabilities_separates_immutable_manifest_from_mutable_health() -
 
     app = make_authed_test_app(user_factory=admin)
     app.include_router(runtime_api.router)
-    app.state.capability_manifest = manifest
-    app.state.capability_health_monitor = ChangingMonitor()
+    app.dependency_overrides[runtime_api.get_runtime_api] = lambda: type(
+        "CapabilitiesAdapter",
+        (),
+        {"capabilities": staticmethod(RuntimeCapabilities)},
+    )()
+    app.state.deployment_reporter = GatewayDeploymentReporter(
+        profile="local_development",
+        database_backend="sqlite",
+        atomic_lifecycle=True,
+        manifest=manifest,
+        health_monitor=ChangingMonitor(),
+    )
 
     with TestClient(app) as client:
-        first = client.get("/api/runtime/v1/capabilities").json()
-        second = client.get("/api/runtime/v1/capabilities").json()
+        portable = client.get("/api/runtime/v1/capabilities").json()
+        first = client.get("/api/runtime/v1/deployment").json()
+        second = client.get("/api/runtime/v1/deployment").json()
 
-    assert first["capability_manifest"] == second["capability_manifest"]
-    assert first["capability_manifest"]["manifest_digest"] == manifest.digest
+    assert record_from_dict(portable) == RuntimeCapabilities()
+    assert first["extension_manifest"] == second["extension_manifest"]
+    assert first["extension_manifest"]["manifest_digest"] == manifest.digest
     assert first["capability_health"]["snapshots"][0]["status"] == "healthy"
     assert second["capability_health"]["snapshots"][0]["status"] == "unhealthy"

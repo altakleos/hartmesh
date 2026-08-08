@@ -35,6 +35,13 @@ values, lifecycle types, lifecycle/status pairs, and state versions are
 validated against the complete v1 state machine; policy reasons and internal
 host types are never serialized.
 
+`RuntimeCapabilities` is the same exact strict record over every Adapter. Extension
+manifest/health, build provenance, persistence tier, and qualification evidence are
+deployment facts and therefore never appear in this package. Gateway exposes those
+separately through an authenticated administrative Interface. Unexpected host Adapter
+exceptions may return only an `indeterminate` failure with a bounded correlation ID;
+raw exception text and deployment internals remain outside the portable wire contract.
+
 The ensure request deliberately has no property bags. It accepts a service-
 supplied external key, thread, optional agent hint, strict graph or resume input,
 and `InvocationOptionsV1`. It cannot carry scope, principal, Origin, accepted

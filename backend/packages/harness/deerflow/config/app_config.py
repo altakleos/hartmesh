@@ -18,6 +18,7 @@ from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.dedupe_storage_config import DedupeStorageConfig
+from deerflow.config.deployment_config import DeploymentConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
@@ -282,6 +283,13 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "database",
             field_doc="Unified database backend for run/feedback metadata (memory, sqlite, or postgres).",
+        ),
+    )
+    deployment: DeploymentConfig = Field(
+        default_factory=DeploymentConfig,
+        description=format_field_description(
+            "deployment",
+            field_doc="Gateway deployment durability profile and startup validation.",
         ),
     )
     run_events: RunEventsConfig = Field(

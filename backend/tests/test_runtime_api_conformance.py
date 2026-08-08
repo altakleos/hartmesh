@@ -25,6 +25,7 @@ from support.runtime_api_conformance import assert_runtime_adapter_conformance
 from app.gateway.auth.models import User
 from app.gateway.routers import runtime_api
 from app.runtime.api import InProcessInvocationRuntime
+from app.runtime.deployment import GatewayDeploymentReporter
 from app.runtime.invocation import (
     InternalCancelReceipt,
     InternalLaunchReceipt,
@@ -32,6 +33,8 @@ from app.runtime.invocation import (
     InvocationAuthorizationOutcome,
     NotFoundOrInvisible,
 )
+from deerflow.extensions.capabilities import build_capability_manifest
+from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 from deerflow.runtime.runs.lifecycle_query import (
     CursorAhead,
@@ -41,6 +44,11 @@ from deerflow.runtime.runs.lifecycle_query import (
 )
 from deerflow.runtime.runs.manager import ConflictError, IdempotencyConflictError
 from deerflow.runtime.runs.store.base import CancellationRequestOutcome
+
+
+class _HealthyCapabilityMonitor:
+    async def health(self):
+        return ()
 
 
 def _record(*, status: RunStatus = RunStatus.pending, state_version: int = 1) -> RunRecord:
@@ -102,6 +110,17 @@ class _HttpAdapter(DurableInvocationPort):
         app = make_authed_test_app(user_factory=_admin_user)
         app.include_router(runtime_api.router)
         app.dependency_overrides[runtime_api.get_runtime_api] = lambda: delegate
+        manifest = build_capability_manifest(ExtensionRegistry().build(generation=9))
+        monitor = _HealthyCapabilityMonitor()
+        app.state.capability_manifest = manifest
+        app.state.capability_health_monitor = monitor
+        app.state.deployment_reporter = GatewayDeploymentReporter(
+            profile="durable_production",
+            database_backend="postgres",
+            atomic_lifecycle=True,
+            manifest=manifest,
+            health_monitor=monitor,
+        )
         self._client = TestClient(app)
         self._client.__enter__()
 

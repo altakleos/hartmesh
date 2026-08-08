@@ -8,6 +8,7 @@ and HTTP adapters. Construction snapshots every caller-owned JSON container;
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
@@ -20,6 +21,7 @@ type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 type ImmutableJsonValue = JsonScalar | tuple[ImmutableJsonValue, ...] | Mapping[str, ImmutableJsonValue]
 
 _RUN_STATUSES = frozenset({"pending", "running", "success", "error", "timeout", "interrupted"})
+_CORRELATION_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
 
 
 class EnsureDisposition(StrEnum):
@@ -517,10 +519,16 @@ class RuntimeFailure(_Record):
             cursor_field = "read_fence_cursor"
         if cursor_field is not None:
             expected_fields.add(cursor_field)
-        if set(detail) != expected_fields:
+        actual_fields = set(detail)
+        if self.code is FailureCode.indeterminate and "correlation_id" in actual_fields:
+            expected_fields.add("correlation_id")
+        if actual_fields != expected_fields:
             raise ValueError("runtime failure has invalid detail fields")
         if cursor_field is not None:
             _nonempty(detail[cursor_field], cursor_field)
+        correlation_id = detail.get("correlation_id")
+        if correlation_id is not None and (not isinstance(correlation_id, str) or _CORRELATION_ID_RE.fullmatch(correlation_id) is None):
+            raise ValueError("correlation_id must be 32 lowercase hexadecimal characters")
         object.__setattr__(self, "detail", detail)
 
 

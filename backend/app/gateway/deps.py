@@ -412,6 +412,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
         await app.state.run_store.initialize_lifecycle()
+        deployment_reporter = getattr(app.state, "deployment_reporter", None)
+        if deployment_reporter is not None:
+            app.state.deployment_reporter = deployment_reporter.with_runtime_store(
+                profile=config.deployment.profile,
+                database_backend=config.database.backend,
+                atomic_lifecycle=bool(getattr(app.state.run_store, "durable_lifecycle", False)),
+            )
 
         from deerflow.persistence.thread_meta import make_thread_store
 

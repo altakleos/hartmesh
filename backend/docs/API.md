@@ -769,7 +769,8 @@ container, while each `to_dict()` call returns a new mutable JSON wire copy.
 
 | Route | Contract |
 |---|---|
-| `GET /capabilities` | Administrator-only `runtime.capabilities`; reports ensure, invocation/context observation, cancel control, unsupported context export/retirement, the immutable capability manifest, and separately labelled mutable capability health. |
+| `GET /capabilities` | Administrator-only strict `runtime.capabilities`; reports only portable ensure, invocation/context observation, cancel control, and unsupported context export/retirement. |
+| `GET /deployment` | Administrator-only `deerflow.deployment/v1` report with extension manifest/health, bounded image/source provenance when supplied, persistence facts, and qualification evidence or explicit `unqualified` status. This is not part of `DurableInvocationPort`. |
 | `POST /invocations/ensure` | Exact `invocation.ensure` body. `external_key` is required; the server derives its scope from the authenticated principal or service. |
 | `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. |
 | `GET /contexts/{thread_id}/invocations` | Access-filtered normal-run snapshots and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. |
@@ -874,13 +875,26 @@ and CSRF middleware rejection—uses only this envelope:
 }
 ```
 
-Only cursor-gap/ahead responses may add their allowlisted cursor detail. The
-transport never returns policy objects, exception text, private Origin data,
-secrets, or a free-form property bag. The administrator-only capabilities
-response adds the host-owned immutable capability manifest and its digest plus
-separately labelled mutable capability health snapshots; live health never
-changes the manifest digest or an invocation's accepted generation. There is no
-context export, context retirement, event broker, or additional control in v1.
+Cursor-gap/ahead responses may add their allowlisted cursor detail. An unexpected
+Adapter failure may add only a bounded correlation identifier; the matching
+internal log contains that identifier and safe operation context, never a public
+exception message. The transport never returns policy objects, exception text,
+private Origin data, secrets, or a free-form property bag.
+
+Portable capabilities are transport-identical: HTTP emits the exact strict record
+that the in-process Adapter returns. Deployment facts never appear in that record.
+The separate `GET /deployment` report exposes the host-owned immutable capability
+manifest/digest, separately labelled mutable health, optional bounded build/image
+identifiers, and persistence/qualification truth. `process_local` survives neither
+restart nor pod loss; `node_durable` survives process restart on its node; and
+`shared_durable` uses the configured shared PostgreSQL store. `atomic_lifecycle` is
+reported independently because an in-memory store can be atomic without being
+restart-durable. `deployment.profile: durable_production` refuses process-local
+state at startup and readiness; `local_development` permits it without claiming
+durability. Qualification remains `unqualified` unless completed evidence is
+explicitly supplied. Live health never changes the manifest digest or an
+invocation's accepted generation. There is no context export, context retirement,
+event broker, or additional control in v1.
 
 ---
 

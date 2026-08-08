@@ -9,6 +9,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GATEWAY_DEPLOYMENT = _REPO_ROOT / "deploy" / "helm" / "deer-flow" / "templates" / "gateway-deployment.yaml"
+_HELM_VALUES = _REPO_ROOT / "deploy" / "helm" / "deer-flow" / "values.yaml"
 
 
 def _probe_path(template: str, probe_name: str) -> str:
@@ -45,3 +46,12 @@ def test_gateway_template_renders_distinct_readiness_and_liveness_paths() -> Non
 
     assert _probe_path(rendered, "readinessProbe") == "/ready"
     assert _probe_path(rendered, "livenessProbe") == "/health"
+
+
+def test_gateway_chart_declares_durable_profile_and_image_provenance() -> None:
+    values = _HELM_VALUES.read_text(encoding="utf-8")
+    template = _GATEWAY_DEPLOYMENT.read_text(encoding="utf-8")
+
+    assert "profile: durable_production" in values
+    assert "name: DEER_FLOW_IMAGE_REFERENCE" in template
+    assert 'include "deer-flow.gatewayImage"' in template

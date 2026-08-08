@@ -77,6 +77,8 @@ spec:
             # (1777). --no-sync means no install/cache writes in practice.
             - name: UV_CACHE_DIR
               value: /tmp
+            - name: DEER_FLOW_IMAGE_REFERENCE
+              value: {{ include "deer-flow.gatewayImage" . | quote }}
             - name: DEER_FLOW_PROJECT_ROOT
               value: /app
             - name: DEER_FLOW_HOME
