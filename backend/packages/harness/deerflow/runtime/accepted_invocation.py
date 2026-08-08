@@ -10,7 +10,13 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
-from deerflow_extension_api import InvocationIdentityV1, TrustedRunContextV1
+from deerflow_extension_api import (
+    InvocationIdentityV1,
+    TrustedRunContextV1,
+    canonicalize_agent_identifier,
+    validate_model_profile_identifier,
+    validate_thread_identifier,
+)
 
 _DIGEST_VERSION = 1
 _AGENT_REVISION_VERSION = 1
@@ -169,6 +175,24 @@ class ResolvedAgentMaterialV1:
     user_id: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        canonical_agent_id = canonicalize_agent_identifier(
+            self.agent_id,
+            field_name="resolved agent material id",
+        )
+        object.__setattr__(self, "agent_id", canonical_agent_id)
+        if self.agent_config is not None and "name" in self.agent_config:
+            config_agent_id = canonicalize_agent_identifier(
+                self.agent_config["name"],
+                field_name="resolved agent material config name",
+            )
+            if config_agent_id != canonical_agent_id:
+                raise ValueError("resolved agent material config name must match agent_id")
+        profile_name = self.model_profile.get("name")
+        if profile_name is not None:
+            validate_model_profile_identifier(
+                profile_name,
+                field_name="resolved model profile identifier",
+            )
         object.__setattr__(self, "agent_config", None if self.agent_config is None else _frozen_json_mapping(self.agent_config))
         object.__setattr__(self, "model_profile", _frozen_json_mapping(self.model_profile))
         object.__setattr__(self, "runtime_defaults", _frozen_json_mapping(self.runtime_defaults))
@@ -279,6 +303,7 @@ class AcceptedInvocation:
         contributor_execution_digest: str,
         trusted_context: TrustedRunContextV1 | None = None,
     ) -> AcceptedInvocation:
+        thread_id = validate_thread_identifier(thread_id)
         if extension_manifest_digest is not None and (len(extension_manifest_digest) != 64 or any(character not in "0123456789abcdef" for character in extension_manifest_digest)):
             raise ValueError("extension_manifest_digest must be a lowercase SHA-256 digest")
         if trusted_context is not None:

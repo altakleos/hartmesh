@@ -55,6 +55,31 @@ def test_name_is_stored_lowercase_and_excluded_from_document(store):
     assert store.get("mixed", user_id="u1").name == "mixed"
 
 
+@pytest.mark.parametrize("name", ["1bot", "a" * 65, "a" * 128])
+def test_full_agent_identifier_domain_round_trips_through_sql(store, name):
+    store.create(name, {"name": name}, "s", user_id="u1")
+
+    assert store.get(name, user_id="u1").name == name
+
+
+@pytest.mark.parametrize("name", ["-agent", "agent_name", "a" * 129, "agént"])
+def test_sql_store_rejects_agent_ids_outside_the_canonical_domain(store, name):
+    with pytest.raises(ValueError, match="agent name"):
+        store.create(name, {"name": name}, "s", user_id="u1")
+
+
+def test_sql_store_rejects_invalid_profile_identity_before_persistence(store):
+    with pytest.raises(ValueError, match="128 UTF-8 bytes"):
+        store.create(
+            "agent",
+            {"name": "agent", "model": "m" * 129},
+            "s",
+            user_id="u1",
+        )
+
+    assert not store.exists("agent", user_id="u1")
+
+
 def test_get_missing_raises_file_not_found(store):
     # The historical contract routers/tools rely on for a 404 / "does not exist".
     with pytest.raises(FileNotFoundError):

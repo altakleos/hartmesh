@@ -117,6 +117,9 @@ max_recursion_limit: 1000
 #                                      # (optional; omit → hits billed at miss price)
 
 models:
+  # `name` is the stable policy/profile identity: case-sensitive, no ASCII
+  # controls, and at most 128 UTF-8 bytes. Rename an overlong legacy name and
+  # update every agent/request reference; Hartmesh never truncates or aliases it.
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8

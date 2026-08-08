@@ -10,15 +10,15 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_extension_api_090_is_exactly_pinned_by_host_packages():
+def test_extension_api_0100_is_exactly_pinned_by_host_packages():
     backend_root = Path(__file__).parents[1]
     extension_project = tomllib.loads((backend_root / "packages/extension-api/pyproject.toml").read_text())
     harness_project = tomllib.loads((backend_root / "packages/harness/pyproject.toml").read_text())
     application_project = tomllib.loads((backend_root / "pyproject.toml").read_text())
 
-    assert extension_project["project"]["version"] == "0.9.0"
-    assert "deerflow-extension-api==0.9.0" in harness_project["project"]["dependencies"]
-    assert "deerflow-extension-api==0.9.0" in application_project["project"]["dependencies"]
+    assert extension_project["project"]["version"] == "0.10.0"
+    assert "deerflow-extension-api==0.10.0" in harness_project["project"]["dependencies"]
+    assert "deerflow-extension-api==0.10.0" in application_project["project"]["dependencies"]
 
 
 def test_extension_authorization_contracts_are_legacy_import_identities():

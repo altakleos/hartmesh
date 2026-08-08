@@ -496,10 +496,10 @@ def test_runtime_api_is_a_standard_library_only_workspace_dependency() -> None:
     project = tomllib.loads((backend / "pyproject.toml").read_text())
     package = tomllib.loads((backend / "packages/runtime-api/pyproject.toml").read_text())
 
-    assert package["project"]["version"] == "0.1.0"
+    assert package["project"]["version"] == "0.2.0"
     assert package["project"]["dependencies"] == []
     assert "packages/runtime-api" in project["tool"]["uv"]["workspace"]["members"]
-    assert "deerflow-runtime-api==0.1.0" in project["project"]["dependencies"]
+    assert "deerflow-runtime-api==0.2.0" in project["project"]["dependencies"]
 
     result = subprocess.run(
         [

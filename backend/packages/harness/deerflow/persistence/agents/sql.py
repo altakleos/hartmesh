@@ -25,7 +25,7 @@ from sqlalchemy import Engine, create_engine, delete, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from deerflow.config.agents_config import AgentConfig
+from deerflow.config.agents_config import AgentConfig, validate_agent_name
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents.base import (
     AgentDeleteOutcome,
@@ -33,6 +33,7 @@ from deerflow.persistence.agents.base import (
     AgentSnapshot,
     AgentStore,
     parse_agent_config,
+    validate_agent_config_identity,
 )
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.runtime.user_context import get_effective_user_id
@@ -85,8 +86,9 @@ def _get_sessionmaker(url: str) -> sessionmaker[Session]:
     return sessionmaker(engine, expire_on_commit=False)
 
 
-def _config_document(config: dict) -> dict:
+def _config_document(config: dict, name: str) -> dict:
     """Strip the natural key from the stored document (``name`` is its own column)."""
+    validate_agent_config_identity(config, name)
     return {k: v for k, v in config.items() if k != "name"}
 
 
@@ -95,6 +97,7 @@ class SqlAgentStore(AgentStore):
         self._Session = _get_sessionmaker(url)
 
     def _row(self, session: Session, name: str, user_id: str) -> AgentRow | None:
+        name = validate_agent_name(name)
         stmt = select(AgentRow).where(AgentRow.user_id == user_id, AgentRow.name == name.lower())
         return session.execute(stmt).scalar_one_or_none()
 
@@ -144,13 +147,14 @@ class SqlAgentStore(AgentStore):
         return [(r.user_id, parse_agent_config(r.config or {}, r.name)) for r in rows]
 
     def create(self, name: str, config: dict, soul: str, *, user_id: str | None = None) -> None:
+        name = validate_agent_name(name)
         effective_user = user_id or get_effective_user_id()
         now = datetime.now(UTC)
         row = AgentRow(
             id=uuid.uuid4().hex,
             user_id=effective_user,
             name=name.lower(),
-            config=_config_document(config),
+            config=_config_document(config, name),
             soul=soul or "",
             created_at=now,
             updated_at=now,
@@ -164,6 +168,7 @@ class SqlAgentStore(AgentStore):
             raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
 
     def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
+        name = validate_agent_name(name)
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
             row = self._row(session, name, effective_user)
@@ -181,7 +186,7 @@ class SqlAgentStore(AgentStore):
                 id=uuid.uuid4().hex,
                 user_id=effective_user,
                 name=name.lower(),
-                config=_config_document(config or {}),
+                config=_config_document(config or {}, name),
                 soul=soul or "",
             )
             session.add(row)
@@ -198,11 +203,12 @@ class SqlAgentStore(AgentStore):
     @staticmethod
     def _apply_update(row: AgentRow, config: dict | None, soul: str | None) -> None:
         if config is not None:
-            row.config = _config_document(config)
+            row.config = _config_document(config, row.name)
         if soul is not None:
             row.soul = soul
 
     def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
+        name = validate_agent_name(name)
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
             result = session.execute(delete(AgentRow).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()))

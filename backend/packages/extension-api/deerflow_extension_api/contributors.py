@@ -17,6 +17,11 @@ from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
 from deerflow_extension_api.health import CapabilityHealthProbe
+from deerflow_extension_api.identifiers import (
+    canonicalize_agent_identifier,
+    validate_model_profile_identifier,
+    validate_thread_identifier,
+)
 from deerflow_extension_api.identity import InvocationIdentityV1
 
 ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION = "1.0"
@@ -37,7 +42,7 @@ _MAX_TRUSTED_CONTEXT_BYTES = 32768
 _DIGEST = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 
 
-def _validate_identifier(value: object, *, field_name: str) -> str:
+def _validate_contributor_identifier(value: object, *, field_name: str) -> str:
     if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a 1-64 character ASCII identifier")
     return value
@@ -66,7 +71,7 @@ class SafeContextReferenceV1:
     purpose: ReferencePurpose
 
     def __post_init__(self) -> None:
-        _validate_identifier(self.key, field_name="reference key")
+        _validate_contributor_identifier(self.key, field_name="reference key")
         if self.storage_class not in ("persistable", "runtime_only"):
             raise ValueError("storage_class must be 'persistable' or 'runtime_only'")
         if self.purpose not in ("execution", "correlation", "secret_handle"):
@@ -107,7 +112,7 @@ def _reference_from_json(value: object) -> SafeContextReferenceV1:
 
 
 def _validate_contribution(namespace: str, references: tuple[SafeContextReferenceV1, ...]) -> None:
-    _validate_identifier(namespace, field_name="contribution namespace")
+    _validate_contributor_identifier(namespace, field_name="contribution namespace")
     if len(references) > _MAX_REFERENCES:
         raise ValueError("a contributor may return at most 32 references")
     seen: set[str] = set()
@@ -220,7 +225,7 @@ class NamespacedContextReferenceV1:
     def __post_init__(self) -> None:
         if not isinstance(self.capability_id, str) or not self.capability_id or len(self.capability_id.encode("utf-8")) > 160:
             raise ValueError("capability_id must be a non-empty string of at most 160 UTF-8 bytes")
-        _validate_identifier(self.namespace, field_name="reference namespace")
+        _validate_contributor_identifier(self.namespace, field_name="reference namespace")
         if not isinstance(self.reference, SafeContextReferenceV1):
             raise TypeError("reference must be SafeContextReferenceV1")
 
@@ -252,7 +257,11 @@ class ResolvedAgentRevisionReferenceV1:
     digest: str
 
     def __post_init__(self) -> None:
-        _validate_identifier(self.agent_id, field_name="resolved agent id")
+        object.__setattr__(
+            self,
+            "agent_id",
+            canonicalize_agent_identifier(self.agent_id, field_name="resolved agent id"),
+        )
         if _DIGEST.fullmatch(self.digest) is None:
             raise ValueError("resolved agent digest must be a lowercase SHA-256 digest")
 
@@ -263,8 +272,7 @@ class ResolvedProfileRevisionReferenceV1:
     digest: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.profile_id, str) or not self.profile_id or len(self.profile_id.encode("utf-8")) > 128 or any(ord(character) < 32 or ord(character) == 127 for character in self.profile_id):
-            raise ValueError("resolved profile id must be a bounded non-empty string")
+        validate_model_profile_identifier(self.profile_id, field_name="resolved model profile identifier")
         if _DIGEST.fullmatch(self.digest) is None:
             raise ValueError("resolved profile digest must be a lowercase SHA-256 digest")
 
@@ -302,12 +310,12 @@ class TrustedRunContextV1:
             raise TypeError("trusted run context identity must be InvocationIdentityV1")
         if not isinstance(self.origin, SealedOriginV1):
             raise TypeError("trusted run context origin must be SealedOriginV1")
+        validate_thread_identifier(self.thread_id, field_name="thread_id")
         for field_name, value, limit in (
-            ("thread_id", self.thread_id, 128),
             ("external_key_reference", self.external_key_reference, 384),
             ("run_id", self.run_id, 128),
         ):
-            if value is None and field_name != "thread_id":
+            if value is None:
                 continue
             if not isinstance(value, str) or not value or len(value.encode("utf-8")) > limit or any(ord(character) < 32 or ord(character) == 127 for character in value):
                 raise ValueError(f"{field_name} must be a bounded non-empty string")
@@ -559,6 +567,9 @@ class RunContextContributionRequestV1:
     agent_revision: ResolvedAgentRevisionReferenceV1
     external_key_reference: str | None = None
 
+    def __post_init__(self) -> None:
+        validate_thread_identifier(self.thread_id, field_name="thread_id")
+
 
 @dataclass(frozen=True)
 class RunContextContributionV1:
@@ -591,7 +602,7 @@ class OriginContributorFactory:
     health_probe: CapabilityHealthProbe | None = None
 
     def __post_init__(self) -> None:
-        _validate_identifier(self.contribution_id, field_name="origin contributor contribution_id")
+        _validate_contributor_identifier(self.contribution_id, field_name="origin contributor contribution_id")
         if self.capability_api_version != ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION:
             raise ValueError(f"unsupported origin contributor capability API version {self.capability_api_version!r}; expected {ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION!r}")
         if self.kind != ORIGIN_CONTRIBUTOR_KIND:
@@ -611,7 +622,7 @@ class RunContextContributorFactory:
     health_probe: CapabilityHealthProbe | None = None
 
     def __post_init__(self) -> None:
-        _validate_identifier(self.contribution_id, field_name="run-context contributor contribution_id")
+        _validate_contributor_identifier(self.contribution_id, field_name="run-context contributor contribution_id")
         if self.capability_api_version != RUN_CONTEXT_CONTRIBUTOR_CAPABILITY_API_VERSION:
             raise ValueError(f"unsupported run-context contributor capability API version {self.capability_api_version!r}; expected {RUN_CONTEXT_CONTRIBUTOR_CAPABILITY_API_VERSION!r}")
         if self.kind != RUN_CONTEXT_CONTRIBUTOR_KIND:

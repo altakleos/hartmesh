@@ -605,6 +605,19 @@ class TestAgentsAPI:
         response = agent_client.post("/api/agents", json=payload)
         assert response.status_code == 422
 
+    @pytest.mark.parametrize("name", ["1bot", "a" * 65, "a" * 128])
+    def test_create_agent_accepts_full_persisted_identifier_domain(self, agent_client, name):
+        response = agent_client.post("/api/agents", json={"name": name, "soul": "test"})
+
+        assert response.status_code == 201
+        assert response.json()["name"] == name
+
+    @pytest.mark.parametrize("name", ["-agent", "agent_name", "a" * 129, "agént"])
+    def test_create_agent_rejects_ids_outside_persisted_domain(self, agent_client, name):
+        response = agent_client.post("/api/agents", json={"name": name, "soul": "test"})
+
+        assert response.status_code == 422
+
     def test_create_duplicate_agent_409(self, agent_client):
         payload = {"name": "my-agent", "soul": "test"}
         agent_client.post("/api/agents", json=payload)

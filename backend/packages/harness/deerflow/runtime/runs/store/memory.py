@@ -12,6 +12,11 @@ from datetime import UTC, datetime, timedelta
 from functools import wraps
 from typing import Any
 
+from deerflow_extension_api import (
+    validate_model_profile_identifier,
+    validate_thread_identifier,
+)
+
 from deerflow.runtime.runs.lifecycle_query import (
     CursorAhead,
     LifecyclePage,
@@ -322,6 +327,9 @@ class MemoryRunStore(RunStore):
         caller_intent_digest=None,
         caller_intent_digest_version=None,
     ):
+        thread_id = validate_thread_identifier(thread_id)
+        if model_name is not None:
+            model_name = validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
         now = datetime.now(UTC).isoformat()
         existing = self._runs.get(run_id)
         lifecycle_row = operation_kind == "run" and status is not None
@@ -499,6 +507,8 @@ class MemoryRunStore(RunStore):
         return result.applied
 
     async def update_model_name(self, run_id, model_name):
+        if model_name is not None:
+            model_name = validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
         if run_id in self._runs:
             self._runs[run_id]["model_name"] = model_name
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
@@ -810,6 +820,9 @@ class MemoryRunStore(RunStore):
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
 
+        thread_id = validate_thread_identifier(thread_id)
+        if model_name is not None:
+            model_name = validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
         now = datetime.now(UTC).isoformat()
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
 

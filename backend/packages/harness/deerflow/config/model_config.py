@@ -1,4 +1,5 @@
-from pydantic import BaseModel, ConfigDict, Field
+from deerflow_extension_api import validate_model_profile_identifier
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ModelConfig(BaseModel):
@@ -13,6 +14,15 @@ class ModelConfig(BaseModel):
     )
     model: str = Field(..., description="Model name")
     model_config = ConfigDict(extra="allow")
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        try:
+            return validate_model_profile_identifier(value)
+        except ValueError as exc:
+            raise ValueError(f"{exc}. Rename models[].name and update every agent model and request model_name reference; Hartmesh performs no truncation or implicit alias migration") from exc
+
     use_responses_api: bool | None = Field(
         default=None,
         description="Whether to route OpenAI ChatOpenAI calls through the /v1/responses API",

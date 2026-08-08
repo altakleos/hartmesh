@@ -16,12 +16,17 @@ from deerflow_extension_api.contributors import (
     TrustedRunContextV1,
 )
 from deerflow_extension_api.health import CapabilityHealthProbe
+from deerflow_extension_api.identifiers import (
+    validate_mcp_server_identifier,
+    validate_mcp_tool_identifier,
+    validate_thread_identifier,
+)
 
 MCP_INTERCEPTOR_CAPABILITY_API_VERSION = "1.0"
 MCP_INTERCEPTOR_KIND = "mcp_interceptor"
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$", re.ASCII)
+_CONTRIBUTION_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$", re.ASCII)
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$", re.ASCII)
 _MAX_HEADERS = 16
 _MAX_HEADER_VALUE_BYTES = 1024
@@ -29,9 +34,15 @@ _MAX_EVIDENCE_REFERENCES = 32
 _MAX_CANONICAL_RESULT_BYTES = 8192
 
 
-def _validate_identifier(value: object, *, field_name: str) -> str:
-    if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
+def _validate_contribution_identifier(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str) or _CONTRIBUTION_IDENTIFIER.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a 1-128 character ASCII identifier")
+    return value
+
+
+def _validate_run_reference(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 128 or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("run_id must be a non-empty string limited to 128 UTF-8 bytes without control characters")
     return value
 
 
@@ -61,14 +72,14 @@ class McpCallProjectionV1:
             raise TypeError("principal must be PrincipalProjectionV1")
         if not isinstance(self.origin, SealedOriginV1):
             raise TypeError("origin must be SealedOriginV1")
-        _validate_identifier(self.thread_id, field_name="thread_id")
-        _validate_identifier(self.run_id, field_name="run_id")
+        validate_thread_identifier(self.thread_id, field_name="thread_id")
+        _validate_run_reference(self.run_id)
         if not isinstance(self.agent_revision, ResolvedAgentRevisionReferenceV1):
             raise TypeError("agent_revision must be ResolvedAgentRevisionReferenceV1")
         if type(self.extension_generation) is not int or self.extension_generation < 0:
             raise ValueError("extension_generation must be a non-negative integer")
-        _validate_identifier(self.server_name, field_name="server_name")
-        _validate_identifier(self.tool_name, field_name="tool_name")
+        validate_mcp_server_identifier(self.server_name)
+        validate_mcp_tool_identifier(self.tool_name)
         _validate_digest(self.arguments_digest, field_name="arguments_digest")
         if self.trusted_context is not None:
             if not isinstance(self.trusted_context, TrustedRunContextV1):
@@ -184,7 +195,7 @@ class McpInterceptorDescriptor:
     health_probe: CapabilityHealthProbe | None = None
 
     def __post_init__(self) -> None:
-        _validate_identifier(self.contribution_id, field_name="MCP interceptor contribution_id")
+        _validate_contribution_identifier(self.contribution_id, field_name="MCP interceptor contribution_id")
         if self.capability_api_version != MCP_INTERCEPTOR_CAPABILITY_API_VERSION:
             raise ValueError(f"unsupported MCP interceptor capability API version {self.capability_api_version!r}; expected {MCP_INTERCEPTOR_CAPABILITY_API_VERSION!r}")
         if self.kind != MCP_INTERCEPTOR_KIND:

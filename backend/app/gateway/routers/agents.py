@@ -2,13 +2,13 @@
 
 import asyncio
 import logging
-import re
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
+from deerflow.config.agents_config import AGENT_NAME_PATTERN as AGENT_NAME_PATTERN
 from deerflow.config.agents_config import (
     AgentConfig,
     AgentModelSettings,
@@ -16,6 +16,7 @@ from deerflow.config.agents_config import (
     load_agent_config,
     load_agent_soul,
     preserve_non_managed_fields,
+    validate_agent_name,
 )
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
@@ -24,8 +25,6 @@ from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
-
-AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 ReasoningEffort = Literal["low", "medium", "high"]
 
@@ -58,7 +57,7 @@ class AgentsListResponse(BaseModel):
 class AgentCreateRequest(BaseModel):
     """Request body for creating a custom agent."""
 
-    name: str = Field(..., description="Agent name (must match ^[A-Za-z0-9-]+$, stored as lowercase)")
+    name: str = Field(..., description="Agent name (1-128 ASCII letters, digits, or hyphens; alphanumeric first; stored as lowercase)")
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -91,11 +90,13 @@ def _validate_agent_name(name: str) -> None:
     Raises:
         HTTPException: 422 if the name is invalid.
     """
-    if not AGENT_NAME_PATTERN.match(name):
+    try:
+        validate_agent_name(name)
+    except ValueError as exc:
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid agent name '{name}'. Must match ^[A-Za-z0-9-]+$ (letters, digits, and hyphens only).",
-        )
+            detail=str(exc),
+        ) from exc
 
 
 def _normalize_agent_name(name: str) -> str:

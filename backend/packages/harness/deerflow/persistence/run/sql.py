@@ -12,6 +12,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from deerflow_extension_api import (
+    validate_model_profile_identifier,
+    validate_thread_identifier,
+)
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -440,15 +444,10 @@ class RunRepository(RunStore):
 
     @staticmethod
     def _normalize_model_name(model_name: str | None) -> str | None:
-        """Normalize model_name for storage: strip whitespace, truncate to 128 chars."""
+        """Validate a model-profile identity without changing it for storage."""
         if model_name is None:
             return None
-        if not isinstance(model_name, str):
-            model_name = str(model_name)
-        normalized = model_name.strip()
-        if len(normalized) > 128:
-            normalized = normalized[:128]
-        return normalized
+        return validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
 
     @staticmethod
     def _safe_json(obj: Any) -> Any:
@@ -535,6 +534,7 @@ class RunRepository(RunStore):
         commit from turning the retry into a primary-key failure.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.put")
+        thread_id = validate_thread_identifier(thread_id)
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
@@ -1261,6 +1261,7 @@ class RunRepository(RunStore):
         """
         from deerflow.runtime.runs.manager import ConflictError
 
+        thread_id = validate_thread_identifier(thread_id)
         resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now

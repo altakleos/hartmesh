@@ -96,6 +96,16 @@ backward compatibility. Disable it only when every resulting tool name remains
 unique across the enabled servers. Stdio tools continue to use DeerFlow's
 persistent per-thread session pool regardless of this setting.
 
+Server configuration keys are case-sensitive non-control UTF-8 strings limited
+to 128 bytes. Callable MCP tool names and tool-override keys are case-sensitive
+ASCII `[A-Za-z0-9_-]{1,128}`. If a server key contains spaces, Unicode, or any
+other character outside the callable-tool grammar, set `tool_name_prefix` to
+`false`; configuration preflight rejects the default prefix mode with this
+action instead of allowing discovery to drop the resulting tools later. Names
+are never truncated, hashed, or treated as plugin contribution identifiers. A
+prefix-enabled server key is limited to 126 ASCII characters so the separator
+and at least one tool-name character still fit the 128-character callable bound.
+
 ## Server Timeouts (Stdio MCP Servers)
 
 Two independent timeouts bound stdio MCP servers. `session_init_timeout` covers

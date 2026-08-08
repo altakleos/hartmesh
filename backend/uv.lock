@@ -912,7 +912,7 @@ dev = [
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.9.0"
+version = "0.10.0"
 source = { editable = "packages/extension-api" }
 
 [[package]]
@@ -1051,7 +1051,7 @@ provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf
 
 [[package]]
 name = "deerflow-runtime-api"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/runtime-api" }
 
 [[package]]

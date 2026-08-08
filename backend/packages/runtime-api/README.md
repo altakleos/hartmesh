@@ -1,7 +1,7 @@
 # deerflow-runtime-api
 
 `deerflow-runtime-api` is DeerFlow's host-independent durable invocation
-contract. Version `0.1.0` exposes strict frozen records under
+contract. Version `0.2.0` exposes strict frozen records under
 `api_version="deerflow.runtime/v1"` and depends only on the Python standard
 library. It never imports the Gateway application, harness, FastAPI, SQLAlchemy,
 or extension API. `DurableInvocationPort` is the complete portable Protocol:
@@ -59,6 +59,13 @@ supplied external key, thread, optional agent hint, strict graph or resume input
 and `InvocationOptionsV1`. It cannot carry scope, principal, Origin, accepted
 digests, revision, raw config/context/metadata, callbacks, delivery settings, or
 credentials.
+
+Portable requests enforce the same execution identities as the host. `thread_id` preserves
+exact case and matches `[A-Za-z0-9_-]{1,64}`. `agent_hint` accepts
+`[A-Za-z0-9][A-Za-z0-9-]{0,127}` and returns the existing lowercase canonical agent
+identity; `lead_agent` is the reserved built-in identity. `model_name` is a case-sensitive, non-empty model-profile identity with no ASCII
+controls and at most 128 UTF-8 bytes. These are policy identities rather than display
+labels; none is truncated, hashed, or routed through a plugin identifier grammar.
 
 Idempotent equality is the canonical caller intent expressed by that complete strict record,
 not the host's accepted effective execution projection. Object-key order is insignificant and

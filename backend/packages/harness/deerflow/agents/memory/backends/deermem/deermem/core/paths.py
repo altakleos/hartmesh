@@ -30,7 +30,7 @@ _UNSAFE_USER_ID_CHAR_RE = re.compile(r"[^A-Za-z0-9_\-]")
 _SAFE_USER_ID_DIGEST_HEX_LEN = 16
 
 # agent_name validation (inlined; was deer-flow's AGENT_NAME_PATTERN).
-AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,127}$", re.ASCII)
 # Internal bucket used when callers omit ``agent_name``.  The underscores keep
 # it outside the public custom-agent namespace accepted by AGENT_NAME_PATTERN.
 DEFAULT_AGENT_BUCKET = "__default__"
@@ -57,7 +57,7 @@ def validate_agent_name(name: str) -> None:
     """Validate that the agent name is safe to use in filesystem paths."""
     if not name:
         raise ValueError("Agent name must be a non-empty string.")
-    if name != DEFAULT_AGENT_BUCKET and not AGENT_NAME_PATTERN.match(name):
+    if name != DEFAULT_AGENT_BUCKET and AGENT_NAME_PATTERN.fullmatch(name) is None:
         raise ValueError(f"Invalid agent name {name!r}: names must match {AGENT_NAME_PATTERN.pattern}")
 
 

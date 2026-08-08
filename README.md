@@ -448,6 +448,12 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`.
 MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
+MCP server keys are case-sensitive non-control UTF-8 strings up to 128 bytes. Callable
+tool names are case-sensitive ASCII `[A-Za-z0-9_-]{1,128}`. A server key containing
+spaces, Unicode, or other characters outside that tool grammar must set
+`tool_name_prefix: false`; configuration is rejected early instead of dropping its tools
+later. Prefix-enabled server keys are limited to 126 ASCII characters so the separator
+and a non-empty tool name fit the 128-character callable bound.
 Settings > Tools updates one MCP server at a time: an invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
 Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport` field for SSE/HTTP servers.
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written.
@@ -563,6 +569,7 @@ channels:
 Notes:
 - `assistant_id: lead_agent` calls the default LangGraph assistant directly.
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
+- Legacy channel-session values with surrounding whitespace, uppercase letters, or underscores are adapted to the lowercase hyphenated identity with an operator warning. Update the session to the logged canonical value; new configuration should use the canonical agent grammar directly.
 - IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
 
@@ -938,7 +945,8 @@ The Web UI reports completed task time once per run. This is total wall-clock ti
 
 In the Web UI, the latest completed user turn can also be edited and rerun from the message toolbar. DeerFlow restores the conversation checkpoint before that user message, submits the edited text as a new user message, and hides the superseded turn once the replay is in progress or succeeds. This is a conversation-state replay only: files, memory updates, and external tool side effects are not undone.
 
-Web UI chat links percent-encode custom thread identifiers before placing them in route segments, so reserved URL characters such as `#` and `?` do not change which conversation is opened.
+Thread identifiers preserve case and use only 1–64 ASCII letters, digits, underscores,
+or hyphens. The Web UI percent-encodes them before placing them in route segments.
 
 ```
 # Paths inside the sandbox container
