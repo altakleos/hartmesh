@@ -20,7 +20,7 @@ spec:
         app.kubernetes.io/component: provisioner
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
-      serviceAccountName: {{ include "deer-flow.fullname" . }}-provisioner
+      serviceAccountName: {{ include "deer-flow.provisionerServiceAccountName" . }}
       securityContext:
         # Non-root: provisioner image has no USER directive. uid/gid 1000.
         # No fsGroup — it mounts no PVCs (it references PVC names for the

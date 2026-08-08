@@ -48,6 +48,16 @@ internal; the published nginx port is the entire external surface, and the Gatew
 address; `backend/tests/test_compose_default_bind_host.py` pins this for every service
 in both compose files.
 
+The Helm chart's supported topology is also exactly one Gateway replica. Its
+default `local_evaluation` mode is deliberately unqualified; the opt-in
+`durable_one_replica` render contract requires pinned Gateway/provisioner OCI
+digests, PostgreSQL/shared-durable runtime configuration, and safe probe plus
+shutdown timing. It supports existing ServiceAccounts and referenced
+Secret/ConfigMap mounts without creating broader Gateway RBAC. Do not add a
+PodDisruptionBudget, topology spread, leader election, or rolling-zero-downtime
+claim until the runtime owns a real multi-replica design. Semantic render
+coverage lives in `backend/tests/test_helm_durable_deployment_contract.py`.
+
 ## Repository Map
 
 ```

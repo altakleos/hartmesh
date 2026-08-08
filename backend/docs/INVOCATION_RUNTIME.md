@@ -300,6 +300,10 @@ The report also carries the latest safe admission-readiness status, reason codes
 and correlation identifier. Raw provider/database exception text remains internal.
 Unexpected Adapter exceptions become bounded indeterminate failures with a
 correlation ID matching a safe internal diagnostic; exception text is never public.
+The deployment process may supply bounded image/source provenance and completed
+qualification evidence through trusted environment fields. Invalid evidence
+degrades to explicit `unqualified`; neither those deployment facts nor their
+configuration enter the portable runtime Interface.
 
 Lifecycle observations return authoritative events plus bounded
 `InvocationSummaryV1` records joined from accepted normal `RunRow` rows. A

@@ -305,6 +305,20 @@ Runs that cannot settle inside the deadline retain the existing durable orphan-
 recovery semantics. This is graceful-shutdown behavior, not live pod-termination
 qualification or multi-replica coordination.
 
+The Helm chart defaults to an explicitly unqualified `local_evaluation` mode
+with one Gateway replica. Its validated `durable_one_replica` mode requires
+immutable Gateway/provisioner image digests, PostgreSQL-backed
+`shared_durable` invocation state, runtime `deployment.profile:
+durable_production`, and probe/termination timing that covers the configured
+application deadline. It supports existing ServiceAccounts, bounded pod
+metadata, and structured Secret/ConfigMap references without copying secret
+values into ConfigMaps. Safe image/source provenance and optional completed
+qualification identifiers appear only in the administrator deployment report;
+the portable capabilities record remains unchanged. The chart intentionally
+adds no PodDisruptionBudget, topology spread, leader election, or zero-downtime
+claim until the runtime has a real multi-replica design. See the
+[Helm deployment guide](deploy/helm/deer-flow/README.md).
+
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.

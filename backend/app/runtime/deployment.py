@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Callable
@@ -24,6 +25,10 @@ _SHA256_RE = re.compile(r"(?:sha256:)?[0-9a-f]{64}\Z")
 _REVISION_RE = re.compile(r"[0-9a-f]{7,64}\Z")
 _SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
 _IMAGE_REFERENCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}\Z")
+_RFC3339_RE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z"
+)
 
 
 class DeploymentProfile(StrEnum):
@@ -225,6 +230,46 @@ class DeploymentQualification:
                 )
             ),
         )
+
+    @classmethod
+    def from_environment(cls) -> DeploymentQualification:
+        """Read bounded deployer-supplied completed qualification evidence."""
+
+        raw = os.getenv("DEER_FLOW_QUALIFICATION_EVIDENCE")
+        if raw is None:
+            return cls()
+        if not raw or len(raw.encode("utf-8")) > 16 * 1024:
+            raise ValueError("qualification evidence must be bounded JSON")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("qualification evidence must be valid JSON") from exc
+        if not isinstance(payload, list) or len(payload) > 16:
+            raise ValueError("qualification evidence must be a list of at most 16 items")
+        evidence: list[QualificationEvidence] = []
+        expected_fields = {
+            "qualificationId",
+            "artifactDigest",
+            "completedAt",
+        }
+        for item in payload:
+            if not isinstance(item, dict) or set(item) != expected_fields:
+                raise ValueError("qualification evidence fields are invalid")
+            try:
+                completed_at_raw = item["completedAt"]
+                if not isinstance(completed_at_raw, str) or _RFC3339_RE.fullmatch(completed_at_raw) is None:
+                    raise ValueError("completedAt must be RFC3339")
+                completed_at = datetime.fromisoformat(completed_at_raw.replace("Z", "+00:00"))
+                evidence.append(
+                    QualificationEvidence(
+                        qualification_id=item["qualificationId"],
+                        artifact_digest=item["artifactDigest"],
+                        completed_at=completed_at,
+                    )
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError("qualification evidence values are invalid") from exc
+        return cls(evidence=tuple(evidence))
 
     def to_dict(self) -> dict[str, object]:
         return {

@@ -6,10 +6,11 @@
 # -- Target namespace (also used as the K8s sandbox namespace for provisioner-spawned Pods).
 namespace: deer-flow
 
-# -- Image registry & tag for the three DeerFlow images you build+push.
-#    Required: set `registry` to your registry (e.g. ghcr.io/yourorg).
+# -- Legacy shared image settings. Existing values files using registry/tag and
+#    the three image-name keys remain supported. New deployments should use the
+#    per-workload repository/tag/digest values below.
 image:
-  registry: ""              # REQUIRED, e.g. ghcr.io/yourorg
+  registry: ""
   tag: "latest"
   pullPolicy: IfNotPresent
   # -- Existing image pull secrets, e.g. [{ name: regcred }]
@@ -23,14 +24,46 @@ image:
   frontendImage: deer-flow-frontend
   provisionerImage: deer-flow-provisioner
 
+# -- Helm-side deployment declaration. local_evaluation keeps tag-based images
+#    and explicit unqualified state convenient. durable_one_replica enables
+#    fail-closed render validation for image pinning, storage, config profile,
+#    replica count, and shutdown/probe relationships.
+deployment:
+  mode: local_evaluation       # local_evaluation | durable_one_replica
+  persistenceTier: shared_durable  # process_local | node_durable | shared_durable
+  provenance:
+    # -- Optional lowercase source commit/revision (7-64 hex characters).
+    sourceRevision: ""
+  # -- Completed, externally produced evidence only. An empty list is reported
+  #    as explicitly unqualified; this chart never manufactures qualification.
+  qualificationEvidence: []
+  # - qualificationId: durable-contract-2026-08
+  #   artifactDigest: sha256:<64 lowercase hex characters>
+  #   completedAt: "2026-08-08T12:00:00Z"
+
+# -- Gateway ServiceAccount. The default account has no chart-created RBAC and
+#    does not mount an API token. Set create=false/name to select an existing
+#    least-privilege account.
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
 # -- Gateway (backend) deployment.
 gateway:
+  image:
+    # -- Full repository without a tag. Empty preserves legacy
+    #    image.registry + image.gatewayImage composition.
+    repository: ""
+    tag: ""
+    # -- Optional immutable OCI digest. When set, tag is not rendered.
+    digest: ""
   # The chart probes /ready for traffic readiness and keeps /health for
   # process liveness. Required authoritative capability health participates
   # only in readiness; manifest/plugin changes require a pod restart.
-  replicas: 1               # Safe default. Postgres + the Redis stream bridge are
-                            # wired, but multi-replica needs issue #3948's run-control
-                            # work (cancel/dedup/reconcile) — see README "Gateway replicas".
+  replicas: 1               # The only supported chart topology for this phase.
+                            # durable_one_replica rejects any other value.
   # Optional explicit override. null derives the grace period from all
   # deployment.shutdown phase budgets + memory flush + preStop + headroom.
   terminationGracePeriodSeconds: null
@@ -50,6 +83,18 @@ gateway:
     periodSeconds: 20
     timeoutSeconds: 2
     failureThreshold: 3
+  # -- Bounded pod metadata (maximum 32 entries each; label values <=63 bytes,
+  #    annotation values <=2048 bytes). Chart-owned selector/checksum keys are
+  #    reserved and cannot be overridden.
+  podLabels: {}
+  podAnnotations: {}
+  # -- Structured references only. Use secretRef/configMapRef; do not copy raw
+  #    secret values into this file.
+  extraEnvFrom: []
+  # -- Additional Secret or ConfigMap Volume records and matching read-only
+  #    VolumeMount records. Mounts apply only to the Gateway container.
+  extraVolumes: []
+  extraVolumeMounts: []
   resources:
     requests:
       cpu: 200m
@@ -61,6 +106,10 @@ gateway:
 # -- Frontend (Next.js) deployment.
 frontend:
   replicas: 1
+  image:
+    repository: ""
+    tag: ""
+    digest: ""
   resources:
     requests:
       cpu: 100m
@@ -75,6 +124,7 @@ nginx:
   image:
     repository: nginx
     tag: alpine
+    digest: ""
   resources:
     requests:
       cpu: 50m
@@ -95,6 +145,14 @@ nginx:
 #    this namespace via a ServiceAccount + RBAC.
 provisioner:
   enabled: true
+  image:
+    repository: ""
+    tag: ""
+    digest: ""
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
   resources:
     requests:
       cpu: 50m
@@ -130,11 +188,13 @@ postgresql:
   image:
     repository: postgres
     tag: "16"
+    digest: ""
   auth:
     database: deerflow
     username: deerflow
     # -- Password auto-generated (32 chars, persisted across upgrades) when
-    #    empty. Ignored if existingSecret is set.
+    #    empty. Ignored if existingSecret is set. Local evaluation only;
+    #    durable_one_replica rejects inline passwords.
     password: ""
   # -- Use an existing Secret (key `database-url`, plus `postgres-password`
   #    in bundled mode) instead of generating one. Skips Secret creation.
@@ -156,16 +216,15 @@ postgresql:
   #    `databaseUrl` (chart wraps it into a Secret for you) or an
   #    `existingSecret` you manage (key `database-url`).
   external:
-    # -- Full DSN, e.g. postgresql://user:pass@host:5432/deerflow. Chart
-    #    writes it into the Secret so it never touches the gateway env directly.
+    # -- Local-evaluation convenience DSN. durable_one_replica rejects inline
+    #    URLs and requires external.existingSecret instead.
     databaseUrl: ""
     # -- Secret you manage (key `database-url`). Use this with External Secrets
     #    / Vault / Sealed Secrets so the DSN never appears in values files.
     existingSecret: ""
 
 # -- Redis stream bridge. The gateway stores per-run SSE events in Redis Streams
-#    so live run events reach a client connected to any gateway pod (cross-pod
-#    SSE delivery + reconnect replay, PR #3191). Bundled mode (default) deploys
+#    for bounded reconnect replay. Bundled mode (default) deploys
 #    a single-instance redis StatefulSet; set `enabled: false` to use an external
 #    managed Redis. The gateway reads DEER_FLOW_STREAM_BRIDGE_REDIS_URL from the
 #    resolved Secret; config.yaml's stream_bridge.type is `redis` by default.
@@ -175,10 +234,12 @@ redis:
   image:
     repository: redis
     tag: "7-alpine"
+    digest: ""
   auth:
     # -- Empty (default) = no auth, matching the compose deployment (ClusterIP
     #    isolation only). Set a password to enable AUTH; the DSN becomes
     #    redis://:<password>@host:6379/0. Ignored if existingSecret is set.
+    #    Local evaluation only; durable_one_replica rejects inline passwords.
     password: ""
   # -- Use an existing Secret (key `redis-url`, plus `redis-password` if auth)
   #    instead of generating one. Skips Secret creation.
@@ -200,8 +261,8 @@ redis:
   #    `redisUrl` (chart wraps it into a Secret for you) or an `existingSecret`
   #    you manage (key `redis-url`).
   external:
-    # -- Full URL, e.g. redis://:pass@myredis.example:6379/0. Chart writes it
-    #    into the Secret so it never touches the gateway env directly.
+    # -- Local-evaluation convenience URL. durable_one_replica rejects inline
+    #    URLs and requires external.existingSecret instead.
     redisUrl: ""
     # -- Secret you manage (key `redis-url`). Use with External Secrets / Vault
     #    / Sealed Secrets so the URL never appears in values files.
@@ -225,13 +286,9 @@ skills:
   existingClaim: ""
   configMap: ""
 
-# -- Provider/channel/search secrets injected as env vars into the gateway.
-#    Reference them from config.yaml as $VAR. Example:
-#      secrets:
-#        OPENAI_API_KEY: "sk-..."
-#        FEISHU_APP_ID: "cli_xxx"
-#        FEISHU_APP_SECRET: "xxx"
-#        GITHUB_TOKEN: "ghp_xxx"
+# -- Local-evaluation convenience for provider/channel/search secrets injected
+#    as environment variables. Production values should leave this empty and
+#    use existingSecret or gateway.extraEnvFrom references instead.
 secrets: {}
 # -- Use an existing Secret instead of creating one from `secrets` above.
 existingSecret: ""
@@ -278,10 +335,11 @@ config: |
     pool_recycle: 300
     command_timeout: 30
 
-  # Fail closed if this production chart is ever paired with process-local
-  # authoritative invocation state.
+  # The default chart is an explicitly unqualified local evaluation. Switch
+  # both this profile and deployment.mode when adopting the validated durable
+  # one-replica profile.
   deployment:
-    profile: durable_production
+    profile: local_development
     readiness:
       capability_cache_seconds: 10.0
       admission_health_max_age_seconds: 10.0
@@ -298,15 +356,14 @@ config: |
 
   # The LangGraph Store (cross-thread memory + thread list) reads this legacy
   # `checkpointer:` section — it does NOT fall back to `database:` the way the
-  # checkpointer does. Point it at the same postgres so the Store is shared
-  # across gateway pods (required for multi-replica operation).
+  # checkpointer does. Point it at the same postgres so durable checkpoints and
+  # the Store survive a Gateway restart.
   checkpointer:
     type: postgres
     connection_string: $DATABASE_URL
 
   # Stream bridge: `redis` (default) stores per-run SSE events in Redis Streams
-  # so live run events reach a client on any gateway pod (cross-pod SSE delivery
-  # + reconnect replay, PR #3191). The URL is read from the
+  # for reconnect replay. The URL is read from the
   # DEER_FLOW_STREAM_BRIDGE_REDIS_URL env var injected from the redis Secret.
   # Set `type: memory` (and disable the redis chart) for single-pod-only mode.
   stream_bridge:
