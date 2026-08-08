@@ -58,14 +58,10 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Upper bound (seconds) each lifespan shutdown hook is allowed to run.
-# Bounds worker exit time so uvicorn's reload supervisor does not keep
-# firing signals into a worker that is stuck waiting for shutdown cleanup.
+# Compatibility name for tests/extensions that imported the former per-hook
+# timeout. It now supplies only the default channel phase budget; the
+# coordinator owns all actual deadline accounting.
 _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
-
-# The retrieval index is derived state, so shutdown only waits briefly for its
-# startup rebuild. The canonical memory flush keeps its full configured budget.
-_RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS = 1.0
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
@@ -357,119 +353,99 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to initialize MCP task service")
 
-        yield
+        from app.channels.service import stop_channel_service
+        from app.gateway.shutdown import GracefulShutdownCoordinator, ShutdownBudgets
+        from deerflow.community.browser_automation import get_browser_session_manager
 
-        try:
-            await auth.close_oidc_service()
-        except Exception:
-            logger.exception("Failed to close OIDC service")
+        shutdown_config = getattr(getattr(startup_config, "deployment", None), "shutdown", None)
 
-        # Stop channel service on shutdown (bounded to prevent worker hang)
-        try:
-            from app.channels.service import stop_channel_service
+        def shutdown_budget(name: str, default: float) -> float:
+            value = getattr(shutdown_config, name, default)
+            return float(value) if isinstance(value, (int, float)) else default
 
-            await asyncio.wait_for(
-                stop_channel_service(),
-                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning(
-                "Channel service shutdown exceeded %.1fs; proceeding with worker exit.",
-                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            logger.exception("Failed to stop channel service")
-
-        if getattr(app.state, "scheduled_task_service", None) is not None:
+        memory_enabled = bool(getattr(startup_config.memory, "enabled", False))
+        memory_manager = None
+        if memory_enabled:
             try:
-                await app.state.scheduled_task_service.stop()
-            except Exception:
-                logger.exception("Failed to stop scheduled task service")
-
-        if getattr(app.state, "mcp_task_service", None) is not None:
-            try:
-                await app.state.mcp_task_service.stop()
-            except Exception:
-                logger.exception("Failed to stop MCP task service")
-
-        try:
-            from deerflow.community.browser_automation import get_browser_session_manager
-
-            closed = await asyncio.wait_for(
-                get_browser_session_manager().close_all_sessions(),
-                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-            if closed:
-                logger.info("Closed %d browser session(s)", closed)
-        except TimeoutError:
-            logger.warning(
-                "Browser session shutdown exceeded %.1fs; proceeding with worker exit.",
-                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            logger.exception("Failed to close browser sessions")
-
-        # Drain the memory backend's pending-update buffer before the worker
-        # exits (best-effort, bounded). IM channels and the scheduler are
-        # already stopped above, so no new IM/scheduler updates arrive during
-        # the drain; the LangGraph runtime / in-flight HTTP requests can still
-        # complete memory enqueues in a narrow window, but anything added after
-        # the drain copies the buffer only resets the debounce Timer
-        # (best-effort, same as today).
-        #
-        # No host-level pending/processing guard: ``shutdown_flush``
-        # short-circuits on a truly idle buffer (returns True immediately), so
-        # calling it unconditionally is cheap and keeps the in-flight-worker
-        # race entirely inside the backend (where the buffer lives) -- the host
-        # cannot "forget" that case the way a ``pending_count > 0``-only guard
-        # would (review #6 on the original PR).
-        #
-        # K8s caveat: ``shutdown_flush_timeout_seconds`` must fit inside the
-        # pod's ``terminationGracePeriodSeconds`` (channel stop + browser
-        # session close + the brief retrieval-warm wait + this drain + buffer),
-        # set on the gateway Helm deployment -- or K8s SIGKILLs the drain
-        # mid-flight and the loss this is fixing is silently re-introduced.
-        # The retrieval index is derived from canonical memory files, so its
-        # wait is independently capped and never consumes the flush budget.
-        retrieval_warm_finished = True
-        if retrieval_warm_task is not None and not retrieval_warm_task.done():
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(retrieval_warm_task),
-                    timeout=min(
-                        _RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS,
-                        startup_config.memory.shutdown_flush_timeout_seconds,
-                    ),
-                )
-            except TimeoutError:
-                retrieval_warm_finished = False
-                logger.warning("Memory retrieval index rebuild is still running; leaving its connection open during shutdown")
-
-        manager = None
-        try:
-            app_cfg = get_app_config()
-            if app_cfg.memory.enabled:
                 from deerflow.agents.memory import get_memory_manager
 
-                manager = await asyncio.to_thread(get_memory_manager)
-                flush_timeout = app_cfg.memory.shutdown_flush_timeout_seconds
-                completed = await asyncio.to_thread(manager.shutdown_flush, flush_timeout)
-                if completed:
-                    logger.info("Memory queue flush completed within %.1fs", flush_timeout)
-                else:
-                    logger.warning(
-                        "Memory queue flush did not finish within %.1fs; remaining updates may be lost",
-                        flush_timeout,
-                    )
-        except Exception:
-            logger.exception("Failed to flush memory queue on shutdown")
+                memory_manager = await asyncio.to_thread(get_memory_manager)
+            except Exception:
+                logger.exception("Memory manager unavailable for graceful shutdown")
+
+        async def begin_admission_drain() -> bool:
+            readiness = getattr(app.state, "runtime_readiness", None)
+            if readiness is None:
+                return False
+            return await readiness.begin_draining()
+
+        async def stop_scheduler() -> None:
+            services = (
+                getattr(app.state, "scheduled_task_service", None),
+                getattr(app.state, "mcp_task_service", None),
+            )
+            stops = [service.stop() for service in services if service is not None]
+            if not stops:
+                return
+            results = await asyncio.gather(*stops, return_exceptions=True)
+            failures = [result for result in results if isinstance(result, BaseException)]
+            if failures:
+                raise RuntimeError("producer shutdown failed") from failures[0]
+
+        async def drain_runs(timeout: float) -> bool:
+            manager = getattr(app.state, "run_manager", None)
+            if manager is None:
+                return True
+            result = await manager.shutdown(timeout=timeout)
+            return result is not False
+
+        async def stop_retrieval() -> bool:
+            if retrieval_warm_task is None or retrieval_warm_task.done():
+                return True
+            retrieval_warm_task.cancel()
+            await asyncio.gather(retrieval_warm_task, return_exceptions=True)
+            # asyncio cancellation cannot stop the sync warm_retrieval call
+            # already running in the executor. Keep its manager open rather
+            # than closing a connection the thread may still be using.
+            return False
+
+        async def close_browser() -> None:
+            await get_browser_session_manager().close_all_sessions()
+
+        async def close_runtime() -> None:
+            close = getattr(app.state, "close_runtime_dependencies", None)
+            if close is not None:
+                await close()
+
+        coordinator = GracefulShutdownCoordinator(
+            budgets=ShutdownBudgets(
+                admission_seconds=shutdown_budget("admission_seconds", 2.0),
+                channel_seconds=shutdown_budget("channel_seconds", _SHUTDOWN_HOOK_TIMEOUT_SECONDS),
+                scheduler_seconds=shutdown_budget("scheduler_seconds", 3.0),
+                run_seconds=shutdown_budget("run_seconds", 8.0),
+                memory_seconds=float(getattr(startup_config.memory, "shutdown_flush_timeout_seconds", 30.0)),
+                dependencies_seconds=shutdown_budget("dependencies_seconds", 5.0),
+            ),
+            begin_admission_drain=begin_admission_drain,
+            stop_channels=stop_channel_service,
+            stop_scheduler=stop_scheduler,
+            drain_runs=drain_runs,
+            flush_memory=(memory_manager.shutdown_flush if memory_manager is not None else lambda _timeout: not memory_enabled),
+            close_memory=(getattr(memory_manager, "close", lambda: None) if memory_manager is not None else lambda: None),
+            close_browser=close_browser,
+            close_oidc=auth.close_oidc_service,
+            stop_retrieval=stop_retrieval,
+            close_runtime=close_runtime,
+        )
+        app.state.shutdown_coordinator = coordinator
+        try:
+            yield
         finally:
-            close = getattr(manager, "close", None)
-            if callable(close) and retrieval_warm_finished:
-                try:
-                    await asyncio.to_thread(close)
-                except Exception:
-                    logger.exception("Failed to close memory backend on shutdown")
+            report = await coordinator.shutdown()
+            if report.memory_flushed:
+                logger.info("Memory queue flush completed during Gateway graceful shutdown")
+            else:
+                logger.warning("Memory queue flush did not finish during Gateway graceful shutdown")
 
     logger.info("Shutting down API Gateway")
 

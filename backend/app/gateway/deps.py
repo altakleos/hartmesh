@@ -500,6 +500,39 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()
 
+        runtime_close_task: asyncio.Task[None] | None = None
+
+        async def close_runtime_dependencies() -> None:
+            """Close stream/checkpoint/store/database resources once."""
+
+            nonlocal runtime_close_task
+            if runtime_close_task is None:
+                # Transfer callbacks out of the surrounding AsyncExitStack
+                # before awaiting them. If the coordinator deadline cancels
+                # this task, the context manager cannot retry them unboundedly.
+                closing_stack = stack.pop_all()
+
+                async def close_owned_resources() -> None:
+                    try:
+                        await _flush_recovered_stream_cleanups(
+                            app.state.stream_bridge,
+                            recovered_stream_cleanup_tasks,
+                            timeout=1.0,
+                        )
+                    finally:
+                        try:
+                            await closing_stack.aclose()
+                        finally:
+                            await close_engine()
+
+                runtime_close_task = asyncio.create_task(
+                    close_owned_resources(),
+                    name="gateway-runtime-dependencies-close",
+                )
+            await runtime_close_task
+
+        app.state.close_runtime_dependencies = close_runtime_dependencies
+
         try:
             yield
         finally:
@@ -510,22 +543,15 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             # raises PoolClosed (issue #3373).
             run_manager = getattr(app.state, "run_manager", None)
             if run_manager is not None:
-                shutdown_deadline = asyncio.get_running_loop().time() + _RUN_DRAIN_TIMEOUT_SECONDS
-                try:
+                coordinator = getattr(app.state, "shutdown_coordinator", None)
+                if coordinator is not None:
+                    # Production lifespan owns the complete ordered sequence.
+                    await coordinator.shutdown()
+                else:
+                    # Direct context-manager users (mostly focused tests) do
+                    # not construct the application coordinator.
                     await _drain_inflight_runs(run_manager)
-                finally:
-                    await _flush_recovered_stream_cleanups(
-                        app.state.stream_bridge,
-                        recovered_stream_cleanup_tasks,
-                        timeout=min(
-                            1.0,
-                            max(
-                                0.0,
-                                shutdown_deadline - asyncio.get_running_loop().time(),
-                            ),
-                        ),
-                    )
-            await close_engine()
+                    await close_runtime_dependencies()
 
 
 # ---------------------------------------------------------------------------

@@ -340,6 +340,33 @@ make retained keyed retries converge, but do not provide scheduler HA or a multi
 Gateway ownership design beyond the explicitly configured PostgreSQL lease and stream
 primitives. Kubernetes pod-termination qualification remains a deployment release gate.
 
+## Graceful Gateway shutdown
+
+`app.gateway.shutdown.GracefulShutdownCoordinator` is the sole production owner
+of shutdown ordering and deadline accounting. It atomically closes the admission
+permit seam, stops channel and scheduler producers, requests interruption and
+bounded drain of locally active runs, flushes memory only after admission and run
+writers are quiescent, then closes retrieval, memory, browser, OIDC, stream, and
+database resources. Concurrent or repeated shutdown calls share one result and do
+not emit duplicate terminal transitions.
+
+`deployment.shutdown` supplies the admission, channel, scheduler, run, and final
+dependency sub-budgets. The memory phase uses
+`memory.shutdown_flush_timeout_seconds`; their sum is the absolute application
+deadline. A timed-out subsystem records only a stable code, error class, phase,
+and correlation ID while later phases continue within the remaining deadline. If
+admission or run quiescence cannot be proven, the coordinator deliberately skips
+memory flush/close rather than racing a late writer. Active locally owned runs are
+requested to interrupt; any run still unsettled is left to the existing durable
+orphan recovery on restart. Normal acceptance holds the admission permit through
+worker attachment, so graceful shutdown cannot enter between those operations;
+process loss after committed acceptance but before attachment remains an
+`orphan_recovered` case. Pending/running local tasks receive `interrupt`, a real
+terminal commit that wins the race is preserved, and already-terminal rows are
+untouched. These guarantees cover the supported one-replica
+topology and repository process-loss simulations only, not live Kubernetes pod
+termination qualification.
+
 ## Pinned agent construction
 
 Acceptance resolves `ResolvedAgentMaterialV1` once. Its versioned projector covers agent

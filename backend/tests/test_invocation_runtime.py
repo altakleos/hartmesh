@@ -197,6 +197,35 @@ async def test_unready_deployment_blocks_new_invocation_before_normalization() -
 
 
 @pytest.mark.anyio
+async def test_atomic_admission_permit_covers_normalization_through_attachment() -> None:
+    events: list[str] = []
+
+    class PermitFence:
+        @asynccontextmanager
+        async def admission_permit(self):
+            events.append("permit-enter")
+            try:
+                yield True
+            finally:
+                events.append("permit-exit")
+
+        async def ready_for_admission(self) -> bool:
+            raise AssertionError("atomic permit must replace the racy boolean check")
+
+    runtime = InvocationRuntime(
+        normalizer=_Normalizer(events),
+        runs=_Runs(events),
+        admission_fence=PermitFence(),
+    )
+
+    result = await runtime.launch(InternalLaunchIntent(thread_id="thread-1"))
+
+    assert result.created is True
+    assert events[:4] == ["permit-enter", "prepare", "admit", "permit-exit"]
+    await result.record.task
+
+
+@pytest.mark.anyio
 async def test_gateway_runtime_builder_installs_application_admission_fence() -> None:
     from app.gateway.services import (
         build_channel_invocation_runtime,

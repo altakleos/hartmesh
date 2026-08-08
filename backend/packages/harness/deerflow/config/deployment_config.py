@@ -29,6 +29,16 @@ class ReadinessConfig(BaseModel):
         return self
 
 
+class GracefulShutdownConfig(BaseModel):
+    """Startup-only phase budgets for the single Gateway shutdown sequence."""
+
+    admission_seconds: float = Field(default=2.0, gt=0, le=60)
+    channel_seconds: float = Field(default=5.0, gt=0, le=60)
+    scheduler_seconds: float = Field(default=3.0, gt=0, le=60)
+    run_seconds: float = Field(default=8.0, gt=0, le=120)
+    dependencies_seconds: float = Field(default=5.0, gt=0, le=60)
+
+
 class DeploymentConfig(BaseModel):
     """Select local convenience or a fail-closed durable production profile."""
 
@@ -40,6 +50,10 @@ class DeploymentConfig(BaseModel):
         default_factory=ReadinessConfig,
         description=("Startup-only health cache, admission freshness, and bounded probe timing settings."),
     )
+    shutdown: GracefulShutdownConfig = Field(
+        default_factory=GracefulShutdownConfig,
+        description=("Startup-only bounded phase budgets for graceful Gateway shutdown."),
+    )
 
 
-__all__ = ["DeploymentConfig", "ReadinessConfig"]
+__all__ = ["DeploymentConfig", "GracefulShutdownConfig", "ReadinessConfig"]

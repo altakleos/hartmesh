@@ -20,7 +20,12 @@ from fastapi import FastAPI
 
 
 @asynccontextmanager
-async def _noop_langgraph_runtime(_app, _startup_config):
+async def _noop_langgraph_runtime(app, _startup_config):
+    class Readiness:
+        async def begin_draining(self) -> bool:
+            return True
+
+    app.state.runtime_readiness = Readiness()
     yield
 
 
@@ -354,7 +359,6 @@ async def _run_shutdown_with_blocked_retrieval_warm() -> tuple[float, MagicMock]
         patch("app.gateway.app.get_app_config", return_value=startup_config),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
         patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
-        patch("app.gateway.app._RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS", 0.01),
         patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
         patch("app.channels.service.stop_channel_service", AsyncMock()),

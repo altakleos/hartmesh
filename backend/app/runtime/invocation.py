@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine, Mapping
-from contextlib import AbstractAsyncContextManager, AbstractContextManager
+from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import MappingProxyType
@@ -458,6 +458,8 @@ class InvocationAdmissionFence(Protocol):
 
     async def ready_for_admission(self) -> bool: ...
 
+    def admission_permit(self) -> AbstractAsyncContextManager[bool]: ...
+
 
 class _DisabledInvocationAuthorization:
     async def authorize_start(self, _launch: PreparedLaunch) -> InternalAuthorizationDecision:
@@ -539,6 +541,88 @@ class InvocationRuntime:
             return None
         return decision.outcome
 
+    @asynccontextmanager
+    async def _admission_permit(self):
+        fence = self._admission_fence
+        if fence is None:
+            yield True
+            return
+        permit = getattr(fence, "admission_permit", None)
+        if callable(permit):
+            async with permit() as allowed:
+                yield allowed
+            return
+        # Compatibility for host test doubles and older embedded adapters.
+        yield await fence.ready_for_admission()
+
+    async def _launch_absent(
+        self,
+        intent: InternalLaunchIntent,
+        identity: InternalAdmissionIdentity | None,
+        validate_replay,
+    ) -> InternalLaunchReceipt | NotFoundOrInvisible | InvocationAuthorizationOutcome:
+        launch = await self._normalizer.normalize(intent)
+        start_decision = await self._authorization.authorize_start(launch)
+        if rejection := self._rejection(start_decision):
+            return rejection
+        if start_decision.evidence is not None and launch.accepted_invocation is not None:
+            launch = replace(
+                launch,
+                accepted_invocation=_merge_decision_evidence(
+                    launch.accepted_invocation,
+                    start_decision.evidence,
+                ),
+            )
+        constraint_decision = await self._constraints.project(launch)
+        if constraint_decision.outcome is InvocationConstraintOutcome.denied:
+            return InvocationAuthorizationOutcome.denied
+        if constraint_decision.outcome is InvocationConstraintOutcome.indeterminate:
+            return InvocationAuthorizationOutcome.indeterminate
+        if constraint_decision.evidence is not None and launch.accepted_invocation is not None:
+            launch = replace(
+                launch,
+                accepted_invocation=_merge_decision_evidence(
+                    launch.accepted_invocation,
+                    constraint_decision.evidence,
+                ),
+            )
+        async with self._runs.admission_scope(launch.thread_id):
+            await self._runs.prepare_admission(launch)
+            admitted = await self._runs.admit(launch)
+            if isinstance(admitted, DurableAdmission):
+                record = admitted.record
+                if admitted.outcome is not AdmissionOutcome.created:
+                    visible = await self._runs.observe(
+                        record.run_id,
+                        launch.principal,
+                    )
+                    if visible is None:
+                        return NotFoundOrInvisible.not_found_or_invisible
+                    observation = await self._authorization.authorize_observe(
+                        visible,
+                        launch.principal,
+                    )
+                    if rejection := self._rejection(observation):
+                        return rejection
+                    if identity is not None and callable(validate_replay):
+                        await validate_replay(intent, identity, record)
+                    return InternalLaunchReceipt(record=visible, created=False)
+            else:
+                record = admitted
+            worker = launch.worker(record)
+            try:
+                record.task = self._task_factory(worker)
+            except Exception as exc:
+                close = getattr(worker, "close", None)
+                if callable(close):
+                    close()
+                await self._runs.fail_start(
+                    record,
+                    f"Failed to attach run worker: {exc}",
+                )
+                raise
+        return InternalLaunchReceipt(record=record, created=True)
+
     async def launch(
         self,
         intent: InternalLaunchIntent,
@@ -563,77 +647,10 @@ class InvocationRuntime:
                             await validate_replay(intent, identity, existing)
                         return InternalLaunchReceipt(record=existing, created=False)
 
-            if self._admission_fence is not None and not await self._admission_fence.ready_for_admission():
-                return InvocationAuthorizationOutcome.indeterminate
-
-            launch = await self._normalizer.normalize(intent)
-            start_decision = await self._authorization.authorize_start(launch)
-            if rejection := self._rejection(start_decision):
-                return rejection
-            if start_decision.evidence is not None and launch.accepted_invocation is not None:
-                launch = replace(
-                    launch,
-                    accepted_invocation=_merge_decision_evidence(
-                        launch.accepted_invocation,
-                        start_decision.evidence,
-                    ),
-                )
-            constraint_decision = await self._constraints.project(launch)
-            if constraint_decision.outcome is InvocationConstraintOutcome.denied:
-                return InvocationAuthorizationOutcome.denied
-            if constraint_decision.outcome is InvocationConstraintOutcome.indeterminate:
-                return InvocationAuthorizationOutcome.indeterminate
-            if constraint_decision.evidence is not None and launch.accepted_invocation is not None:
-                launch = replace(
-                    launch,
-                    accepted_invocation=_merge_decision_evidence(
-                        launch.accepted_invocation,
-                        constraint_decision.evidence,
-                    ),
-                )
-            async with self._runs.admission_scope(launch.thread_id):
-                await self._runs.prepare_admission(launch)
-                admitted = await self._runs.admit(launch)
-                if isinstance(admitted, DurableAdmission):
-                    record = admitted.record
-                    if admitted.outcome is not AdmissionOutcome.created:
-                        visible = await self._runs.observe(
-                            record.run_id,
-                            launch.principal,
-                        )
-                        if visible is None:
-                            return NotFoundOrInvisible.not_found_or_invisible
-                        observation = await self._authorization.authorize_observe(
-                            visible,
-                            launch.principal,
-                        )
-                        if rejection := self._rejection(observation):
-                            return rejection
-                        # A concurrent creator may have bound server-resolved
-                        # facts (notably a generated stateless thread) that made
-                        # the provisional digest differ. Re-project against the
-                        # winning row before deciding replay versus conflict.
-                        if identity is not None and callable(validate_replay):
-                            await validate_replay(intent, identity, record)
-                        return InternalLaunchReceipt(record=visible, created=False)
-                else:
-                    # Compatibility for host adapters predating keyed ensure.
-                    record = admitted
-                # Keep attachment adjacent to durable admission: no await may
-                # separate a successful admit from installing its worker task.
-                worker = launch.worker(record)
-                try:
-                    record.task = self._task_factory(worker)
-                except Exception as exc:
-                    close = getattr(worker, "close", None)
-                    if callable(close):
-                        close()
-                    await self._runs.fail_start(
-                        record,
-                        f"Failed to attach run worker: {exc}",
-                    )
-                    raise
-        return InternalLaunchReceipt(record=record, created=True)
+            async with self._admission_permit() as permitted:
+                if not permitted:
+                    return InvocationAuthorizationOutcome.indeterminate
+                return await self._launch_absent(intent, identity, validate_replay)
 
     async def observe_run(
         self,
