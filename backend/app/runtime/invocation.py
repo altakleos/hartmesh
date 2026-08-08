@@ -361,6 +361,7 @@ class InternalContextLifecycleQuery:
     cursor: str | None = None
     limit: int = 100
     include_snapshot: bool = True
+    source_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -671,7 +672,7 @@ class InvocationRuntime:
         if authoritative_snapshot is None:
             return NotFoundOrInvisible.not_found_or_invisible
         if not query.include_snapshot:
-            page = replace(page, snapshots=())
+            page = replace(page, snapshots=(), summaries=())
         return InternalLifecycleObservation(
             record=record,
             page=page,
@@ -697,6 +698,7 @@ class InvocationRuntime:
                 cursor=query.cursor,
                 limit=query.limit,
                 include_snapshot=query.include_snapshot,
+                source_kind=query.source_kind,
             )
         )
         return InternalLifecycleObservation(record=None, page=page)

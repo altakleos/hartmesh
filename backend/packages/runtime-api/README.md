@@ -15,6 +15,8 @@ object.
   admission;
 - `InvocationQuery` and `ContextInvocationsQuery` /
   `InvocationObservation` for access-filtered lifecycle pages;
+- `InvocationSummaryV1` and `InvocationCorrelationReferenceV1` for bounded,
+  source-aware accepted evidence joined to those pages;
 - `CancelInvocationRequest` / `InvocationControlReceipt` for version-fenced
   cancellation;
 - `RuntimeCapabilities` for supported operations; and
@@ -34,6 +36,16 @@ Observation snapshots and lifecycle events have fixed field sets. Status
 values, lifecycle types, lifecycle/status pairs, and state versions are
 validated against the complete v1 state machine; policy reasons and internal
 host types are never serialized.
+
+An observation may include immutable `InvocationSummaryV1` records for normal
+runs represented by that bounded event page. A summary contains current
+status/version, sealed `source_kind`, bounded safe Origin correlation
+references, revision/generation identity, and only digest evidence from
+acceptance. It never contains input, private policy reasons, credentials,
+secret handles, or arbitrary Origin data. Context queries may filter by the
+strict source kinds `http`, `scheduled_task`, `native_channel`, and `service`.
+Historical rows that predate sealed Origin remain readable through events and
+snapshots but cannot manufacture a summary.
 
 `RuntimeCapabilities` is the same exact strict record over every Adapter. Extension
 manifest/health, build provenance, persistence tier, and qualification evidence are
@@ -70,7 +82,13 @@ independently.
 Lifecycle cursor tokens are opaque. Callers persist `next_cursor`, handle
 `cursor_gap` by resuming at `minimum_available_cursor`, reject `cursor_ahead`,
 and may safely repeat a page by deduplicating stable event IDs/cursors. Reads are
-at least once.
+at least once. Page limits are 1–500. Event payloads are limited to 4 KiB,
+individual summaries to 16 KiB, and the complete portable observation to
+12 MiB of canonical JSON. Context summary/snapshot rows are loaded only for
+distinct run IDs in the returned event page, so observation work is bounded by
+the requested page rather than total thread history. Events, cursor metadata,
+and joined summaries come from one database snapshot; filtered empty pages
+still advance to the captured global fence.
 
 Gateway's authenticated `/api/runtime/v1` routes consume the same Protocol and
 records. The transport-neutral conformance suite runs against both the embedded

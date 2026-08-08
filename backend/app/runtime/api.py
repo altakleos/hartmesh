@@ -16,10 +16,12 @@ from deerflow_runtime_api import (
     FailureCode,
     GraphInputV1,
     InvocationControlReceipt,
+    InvocationCorrelationReferenceV1,
     InvocationEnsureReceipt,
     InvocationEnsureRequest,
     InvocationObservation,
     InvocationQuery,
+    InvocationSummaryV1,
     RuntimeCapabilities,
     RuntimeFailure,
 )
@@ -174,6 +176,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                         cursor=request.cursor,
                         limit=request.limit,
                         include_snapshot=request.include_snapshot,
+                        source_kind=request.source_kind,
                     )
                 )
                 thread_id = request.thread_id
@@ -214,40 +217,69 @@ class InvocationRuntimeAPI(DurableInvocationPort):
             thread_id = str(authoritative_snapshot["thread_id"])
         elif record is not None:
             thread_id = record.thread_id
-        snapshots = tuple(
-            {
-                "run_id": str(row["run_id"]),
-                "thread_id": str(row["thread_id"]),
-                "status": _status_value(row["status"]),
-                "state_version": int(row["state_version"]),
-            }
-            for row in result.page.snapshots
-        )
-        events = tuple(
-            {
-                "event_id": str(event["event_id"]),
-                "cursor": encode_lifecycle_cursor(int(event["cursor"])),
-                "run_id": str(event["run_id"]),
-                "thread_id": str(event["thread_id"]),
-                "lifecycle_type": _status_value(event["lifecycle_type"]),
-                "state_version": int(event["state_version"]),
-                "status": _status_value(event["status"]),
-                "created_at": str(event["created_at"]),
-                "payload": dict(event["payload"]),
-            }
-            for event in result.page.events
-        )
-        return InvocationObservation(
-            run_id=(str(authoritative_snapshot["run_id"]) if authoritative_snapshot is not None else (record.run_id if record is not None else None)),
-            thread_id=thread_id or "",
-            status=(_status_value(authoritative_snapshot["status"]) if authoritative_snapshot is not None else (_status_value(record.status) if record is not None else None)),
-            state_version=(int(authoritative_snapshot["state_version"]) if authoritative_snapshot is not None else (record.state_version if record is not None else None)),
-            snapshots=snapshots,
-            events=events,
-            next_cursor=result.page.next_cursor,
-            minimum_available_cursor=result.page.minimum_available_cursor,
-            read_fence_cursor=result.page.read_fence_cursor,
-        )
+        try:
+            snapshots = tuple(
+                {
+                    "run_id": str(row["run_id"]),
+                    "thread_id": str(row["thread_id"]),
+                    "status": _status_value(row["status"]),
+                    "state_version": int(row["state_version"]),
+                }
+                for row in result.page.snapshots
+            )
+            summaries = tuple(
+                InvocationSummaryV1(
+                    run_id=str(summary["run_id"]),
+                    thread_id=str(summary["thread_id"]),
+                    status=_status_value(summary["status"]),
+                    state_version=int(summary["state_version"]),
+                    source_kind=str(summary["source_kind"]),
+                    correlation_references=tuple(
+                        InvocationCorrelationReferenceV1(
+                            namespace=str(reference["namespace"]),
+                            key=str(reference["key"]),
+                            value=reference["value"],
+                        )
+                        for reference in summary["correlation_references"]
+                    ),
+                    agent_revision_digest=summary.get("agent_revision_digest"),
+                    extension_generation=summary.get("extension_generation"),
+                    extension_manifest_digest=summary.get("extension_manifest_digest"),
+                    caller_intent_digest=summary.get("caller_intent_digest"),
+                    accepted_context_digest=summary.get("accepted_context_digest"),
+                    authorization_evidence_digests=tuple(summary.get("authorization_evidence_digests") or ()),
+                    constraint_evidence_digest=summary.get("constraint_evidence_digest"),
+                )
+                for summary in result.page.summaries
+            )
+            events = tuple(
+                {
+                    "event_id": str(event["event_id"]),
+                    "cursor": encode_lifecycle_cursor(int(event["cursor"])),
+                    "run_id": str(event["run_id"]),
+                    "thread_id": str(event["thread_id"]),
+                    "lifecycle_type": _status_value(event["lifecycle_type"]),
+                    "state_version": int(event["state_version"]),
+                    "status": _status_value(event["status"]),
+                    "created_at": str(event["created_at"]),
+                    "payload": dict(event["payload"]),
+                }
+                for event in result.page.events
+            )
+            return InvocationObservation(
+                run_id=(str(authoritative_snapshot["run_id"]) if authoritative_snapshot is not None else (record.run_id if record is not None else None)),
+                thread_id=thread_id or "",
+                status=(_status_value(authoritative_snapshot["status"]) if authoritative_snapshot is not None else (_status_value(record.status) if record is not None else None)),
+                state_version=(int(authoritative_snapshot["state_version"]) if authoritative_snapshot is not None else (record.state_version if record is not None else None)),
+                snapshots=snapshots,
+                events=events,
+                next_cursor=result.page.next_cursor,
+                minimum_available_cursor=result.page.minimum_available_cursor,
+                read_fence_cursor=result.page.read_fence_cursor,
+                summaries=summaries,
+            )
+        except (KeyError, TypeError, ValueError):
+            return unexpected_adapter_failure("observe", exc_info=False)
 
     async def control(
         self,

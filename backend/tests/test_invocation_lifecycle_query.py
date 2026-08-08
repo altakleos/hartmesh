@@ -108,7 +108,10 @@ async def test_filtered_empty_page_advances_to_global_read_fence() -> None:
     )
 
     assert page.events == ()
-    assert [row["run_id"] for row in page.snapshots] == ["owner-run"]
+    # Context observations materialize state only for run IDs in the bounded
+    # event page; an empty filtered page must not reload thread history.
+    assert page.snapshots == ()
+    assert page.summaries == ()
     assert decode_lifecycle_cursor(page.next_cursor) == 4
     assert page.next_cursor == page.read_fence_cursor
 
@@ -248,7 +251,17 @@ async def test_postgres_query_uses_one_repeatable_read_snapshot() -> None:
     run_id = f"query-repeatable-{unique}"
     thread_id = f"query-repeatable-thread-{unique}"
     try:
-        await writer.put(run_id, thread_id=thread_id, user_id=None)
+        await writer.put(
+            run_id,
+            thread_id=thread_id,
+            user_id=None,
+            origin_json={
+                "version": 1,
+                "source_kind": "http",
+                "references": {},
+                "contributor_references": [],
+            },
+        )
         page_task = asyncio.create_task(reader.query_lifecycle(LifecycleQuery(run_id=run_id)))
         await snapshot_read.wait()
         transition = await writer.transition_run_atomic(
@@ -262,6 +275,7 @@ async def test_postgres_query_uses_one_repeatable_read_snapshot() -> None:
         page = await page_task
 
         assert [(row["status"], row["state_version"]) for row in page.snapshots] == [("pending", 1)]
+        assert [(summary["status"], summary["state_version"]) for summary in page.summaries] == [("pending", 1)]
         assert [event["lifecycle_type"] for event in page.events] == [LifecycleType.accepted]
         assert decode_lifecycle_cursor(page.read_fence_cursor) == page.events[-1]["cursor"]
     finally:
