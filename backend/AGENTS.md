@@ -1300,6 +1300,21 @@ This invokes `alembic revision --autogenerate` against the live ORM models. Revi
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch decision + locking
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps)
 
+`tests/test_postgres_invocation_migrations.py` is the real-PostgreSQL qualification
+for the durable invocation tail. It applies the full chain to an empty isolated
+schema and upgrades representative normal/auxiliary rows from
+`0010_run_cancel_request` through each of 0011–0014, then exercises repository
+replay, cancellation, lifecycle ordering, orphan takeover, and summary reads. It
+also proves the structurally supported downgrade to 0010 and re-upgrade. That
+downgrade is data-destructive for invocation-only columns and lifecycle rows: the
+base `runs` rows survive, but accepted evidence, external keys, caller intent,
+state versions, and lifecycle history cannot be represented and are not restored
+by re-upgrade. Take a database backup before any rollback. The CI
+`postgres_contract` step runs every PostgreSQL arbitration/migration case with
+`DEERFLOW_TEST_POSTGRES_URL`, fails on any marked skip, and records the server
+version plus Alembic head; a local skip remains an unpassed qualification, never
+PostgreSQL evidence.
+
 ### Checkpoint Channel Modes (`full` / `delta`)
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.

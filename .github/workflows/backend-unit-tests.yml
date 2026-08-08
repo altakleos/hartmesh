@@ -90,6 +90,14 @@ jobs:
         working-directory: backend
         run: uv sync --group dev --extra postgres
 
+      - name: Qualify PostgreSQL invocation persistence
+        working-directory: backend
+        env:
+          DEERFLOW_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
+        # Keep this visible marker gate even though the full suite below repeats
+        # it: this step records PostgreSQL/Alembic identity and isolates failures.
+        run: PYTHONPATH=. uv run pytest -m postgres_contract -v -s
+
       - name: Run unit tests of backend
         working-directory: backend
         env:

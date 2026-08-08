@@ -107,9 +107,13 @@ Gateway API. Config schema and resolution order are documented in
 
 The durable invocation qualification boundary is
 `backend/tests/test_durable_invocation_qualification.py` plus
-`backend/tests/test_durable_invocation_process_failures.py`. PostgreSQL-marked
-session-arbitration tests are release gates when `DEERFLOW_TEST_POSTGRES_URL` is absent;
-offline tests simulate process loss but do not claim Kubernetes pod-loss,
+`backend/tests/test_durable_invocation_process_failures.py`, with real-database
+migration and runtime persistence evidence in
+`backend/tests/test_postgres_invocation_migrations.py`. The CI
+`postgres_contract` marker includes that migration path and the independent-session
+arbitration tests; any marked skip fails when `DEERFLOW_TEST_POSTGRES_URL` is
+configured, while an absent local URL leaves an explicit unpassed release gate.
+Offline tests simulate process loss but do not claim Kubernetes pod-loss,
 scheduler-HA, or general multi-replica Gateway qualification.
 
 Skill quality review note:
