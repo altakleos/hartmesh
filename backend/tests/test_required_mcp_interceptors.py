@@ -149,13 +149,16 @@ async def test_required_load_failure_rolls_back_and_fails_readiness() -> None:
 
 
 def test_empty_required_mcp_contribution_id_is_rejected() -> None:
-    from deerflow.extensions.contributors import ContributorHost, RequiredCapabilityError
+    from deerflow.extensions.capabilities import (
+        RequiredCapabilityRoutingError,
+        route_required_capabilities,
+    )
 
-    with pytest.raises(RequiredCapabilityError, match="unsupported required capability"):
-        ContributorHost(
-            _registered_extensions(),
-            required_capabilities=("mcp_interceptor:",),
-        )
+    with pytest.raises(
+        RequiredCapabilityRoutingError,
+        match="unsupported required capability",
+    ):
+        route_required_capabilities(("mcp_interceptor:",))
 
 
 @pytest.mark.asyncio

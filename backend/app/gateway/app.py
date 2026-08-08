@@ -630,12 +630,15 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     except Exception:
         logger.exception("Extension loading failed; continuing with no extensions")
         loaded_extensions, extension_diagnostics = EMPTY_EXTENSIONS, []
+    from deerflow.extensions.capabilities import route_required_capabilities
     from deerflow.extensions.contributors import ContributorHost
     from deerflow.extensions.loader import Diagnostic
 
+    required_capability_routes = route_required_capabilities(required_capabilities)
+
     contributor_host = ContributorHost(
         loaded_extensions,
-        required_capabilities=required_capabilities,
+        required_capabilities=required_capability_routes.contributors,
     )
     extension_diagnostics.extend(
         Diagnostic(
@@ -653,16 +656,26 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     invocation_constraints_host = InvocationConstraintsHost(
         loaded_extensions,
-        required_capabilities=required_capabilities,
+        required_capabilities=required_capability_routes.constraints,
     )
+    from deerflow_extension_api import (
+        INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2,
+        INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY,
+        INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2,
+    )
+
     constraint_registration = loaded_extensions.invocation_constraints_provider_factory
-    constraint_diagnostic_id = f"invocation_constraints.v{constraint_registration.capability_api_version.split('.', 1)[0]}" if constraint_registration is not None else "invocation_constraints.v1"
+    constraint_diagnostic_id = (
+        INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2
+        if constraint_registration is not None and constraint_registration.capability_api_version == INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2
+        else INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY
+    )
     extension_diagnostics.extend(Diagnostic.warning(constraint_diagnostic_id, message) for message in invocation_constraints_host.startup_diagnostics)
     from deerflow.extensions.mcp import McpInterceptorHost
 
     mcp_interceptor_host = McpInterceptorHost(
         loaded_extensions,
-        required_capabilities=required_capabilities,
+        required_capabilities=required_capability_routes.mcp,
     )
     extension_diagnostics.extend(Diagnostic.warning(item.capability_id, item.diagnostic_code) for item in mcp_interceptor_host.startup_diagnostics)
     # One application-owned resolver supplies a coherent provider instance to
@@ -693,7 +706,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             construction_authorization.invocation_operations.cancel_enabled,
         )
     )
-    mcp_authorization_required = any(capability_id.startswith("mcp_interceptor:") for capability_id in required_capabilities)
+    mcp_authorization_required = bool(required_capability_routes.mcp)
     authorization_snapshot = authorization_provider_resolver.snapshot()
     initialized_capability_ids = set(contributor_host.initialized_capability_ids)
     initialized_capability_ids.update(invocation_constraints_host.initialized_capability_ids)

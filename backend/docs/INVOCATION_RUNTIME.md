@@ -187,6 +187,13 @@ timeout, exception, malformed output, or uncertainty is indeterminate. Either ou
 before row creation and graph/model/tool work. Optional provider absence preserves existing
 behavior. Operators make v2 startup-required only with
 `required_capabilities: [invocation_constraints.v2]` in `config.yaml`.
+Gateway partitions the complete required-capability list once during application
+construction. Both `invocation_constraints.v1` and `invocation_constraints.v2` are routed
+only to `InvocationConstraintsHost`; contributor and MCP hosts receive only their own
+publicly classified IDs. Unknown/duplicate requirements, duplicate singular registrations,
+and a provider whose declared version cannot satisfy the selected requirement fail closed
+before admission. This keeps a future constraints version from depending on an unrelated
+host's hard-coded pass-through list.
 For that required path, a genuinely absent invocation also requires a fresh healthy snapshot
 for the exact v2 capability before projection; missing, stale, unknown, or unhealthy health
 is indeterminate. Matching keyed replay remains pinned to accepted evidence and bypasses both

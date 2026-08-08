@@ -152,6 +152,18 @@ redacted diagnostics. Operators can make a contribution mandatory in startup-onl
 startup, and required invocation-time failure closes that invocation as indeterminate.
 This setting is intentionally absent from API-writable `extensions_config.json`.
 
+At Gateway composition, the operator list is validated and partitioned once by capability
+owner. The public `ORIGIN_CONTRIBUTOR_KIND`, `RUN_CONTEXT_CONTRIBUTOR_KIND`, and
+`MCP_INTERCEPTOR_KIND` constants route contribution-scoped IDs. The host-owned routing table
+uses the public `INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY` and
+`INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2` constants for the exact IDs owned by the
+singular constraints host. Each host validates only its subset. Unknown or duplicate IDs
+fail before host construction; duplicate singular constraints registrations remain
+ambiguous after positional loader rollback and fail closed when constraints are required.
+Future constraints versions add a public version constant and extend the one host-owned
+routing table plus the constraints host, without adding pass-through exceptions to
+contributor or MCP hosts.
+
 ## Invocation constraints contribution
 
 A trusted plugin may register the process's single

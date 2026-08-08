@@ -2593,6 +2593,10 @@ authorization:
 # capability that is missing, failed, stale, or unhealthy makes the unauthenticated
 # `GET /ready` return only `{"status":"not_ready"}`; `GET /health` remains liveness.
 required_capabilities: []
+# Gateway validates and routes this list once: origin/run-context IDs go to the
+# contributor host, invocation_constraints.v1/v2 go to the constraints host,
+# and MCP IDs go to the MCP host. Unknown/duplicate IDs and ambiguous singular
+# constraints providers fail closed.
 # Example required MCP credential/evidence preparation boundary:
 # required_capabilities:
 #   - mcp_interceptor:example.credential_broker

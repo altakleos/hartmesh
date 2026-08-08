@@ -264,3 +264,328 @@ def test_create_app_wires_required_mcp_host_health_and_shared_authorization(
     assert app.state.mcp_interceptor_host.required_capability_ids == frozenset({"mcp_interceptor:fixture.mcp"})
     assert "mcp_interceptor:fixture.mcp" in {item.capability_id for item in app.state.capability_manifest.capabilities}
     assert app.state.authorization_provider_resolver.snapshot().provider is not None
+
+
+class _NoopContributor:
+    async def contribute(self, request):
+        return None
+
+
+class _ConstraintsProvider:
+    async def project(self, request):
+        raise AssertionError("startup must not project invocation constraints")
+
+
+async def _healthy_capability():
+    from deerflow_extension_api import CapabilityHealthResult
+
+    return CapabilityHealthResult(status="healthy")
+
+
+async def _unhealthy_capability():
+    from deerflow_extension_api import CapabilityHealthResult
+
+    return CapabilityHealthResult(
+        status="unhealthy",
+        diagnostic_code="dependency_unavailable",
+    )
+
+
+def _constraints_extensions(
+    *,
+    api_version="2.0",
+    factory=_ConstraintsProvider,
+    health_probe=None,
+    duplicate=False,
+):
+    from deerflow_extension_api import (
+        INVOCATION_CONSTRAINTS_KIND,
+        InvocationConstraintsProviderFactory,
+    )
+
+    from deerflow.extensions.registry import (
+        DuplicateInvocationConstraintsProviderFactoryError,
+    )
+
+    registry = ExtensionRegistry()
+    descriptor = InvocationConstraintsProviderFactory(
+        contribution_id="fixture.constraints",
+        capability_api_version=api_version,
+        factory=factory,
+        kind=INVOCATION_CONSTRAINTS_KIND,
+        health_probe=health_probe,
+    )
+    with registry.attributed_to("fixture:constraints"):
+        registry.invocation_constraints(descriptor)
+    if duplicate:
+        with registry.attributed_to("fixture:constraints-duplicate"):
+            with pytest.raises(DuplicateInvocationConstraintsProviderFactoryError):
+                registry.invocation_constraints(descriptor)
+    return registry.build(generation=7)
+
+
+def _create_gateway(monkeypatch, stub_app_config, loaded, required_capabilities):
+    import app.gateway.app as app_module
+    import deerflow.extensions as extensions_module
+
+    monkeypatch.setattr(
+        extensions_module,
+        "load_extensions",
+        lambda plugins: (loaded, []),
+    )
+    config = stub_app_config.model_copy(update={"required_capabilities": list(required_capabilities)})
+    monkeypatch.setattr(app_module, "get_app_config", lambda: config)
+    return app_module.create_app()
+
+
+@pytest.mark.asyncio
+async def test_create_app_routes_required_invocation_contributors_to_their_owner(
+    monkeypatch,
+    stub_app_config,
+):
+    from deerflow_extension_api import (
+        ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION,
+        ORIGIN_CONTRIBUTOR_KIND,
+        RUN_CONTEXT_CONTRIBUTOR_CAPABILITY_API_VERSION,
+        RUN_CONTEXT_CONTRIBUTOR_KIND,
+        OriginContributorFactory,
+        RunContextContributorFactory,
+    )
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("fixture:contributors"):
+        registry.origin_contributor(
+            OriginContributorFactory(
+                contribution_id="fixture.origin",
+                capability_api_version=ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION,
+                factory=_NoopContributor,
+                kind=ORIGIN_CONTRIBUTOR_KIND,
+                health_probe=_healthy_capability,
+            )
+        )
+        registry.run_context_contributor(
+            RunContextContributorFactory(
+                contribution_id="fixture.context",
+                capability_api_version=RUN_CONTEXT_CONTRIBUTOR_CAPABILITY_API_VERSION,
+                factory=_NoopContributor,
+                kind=RUN_CONTEXT_CONTRIBUTOR_KIND,
+                health_probe=_healthy_capability,
+            )
+        )
+    required = (
+        "origin_contributor:fixture.origin",
+        "run_context_contributor:fixture.context",
+    )
+
+    app = _create_gateway(
+        monkeypatch,
+        stub_app_config,
+        registry.build(generation=7),
+        required,
+    )
+    readiness = await app.state.capability_health_monitor.readiness()
+
+    assert app.state.contributor_host.initialized_capability_ids == frozenset(required)
+    assert readiness.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_create_app_routes_required_v2_constraints_to_its_owning_host(
+    monkeypatch,
+    stub_app_config,
+):
+    from deerflow_extension_api import INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2
+
+    app = _create_gateway(
+        monkeypatch,
+        stub_app_config,
+        _constraints_extensions(health_probe=_healthy_capability),
+        [INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2],
+    )
+    readiness = await app.state.capability_health_monitor.readiness()
+
+    host = app.state.invocation_constraints_host
+    assert host.required_capability_id == INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2
+    assert host.initialized_capability_ids == frozenset({INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2})
+    assert readiness.status == "ready"
+    assert [(item.capability_id, item.status) for item in readiness.health] == [
+        (INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2, "healthy"),
+    ]
+
+
+def test_create_app_fails_when_required_v2_constraints_provider_is_missing(
+    monkeypatch,
+    stub_app_config,
+):
+    from deerflow_extension_api import INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2
+
+    from deerflow.extensions.constraints import ConstraintStartupError
+
+    with pytest.raises(
+        ConstraintStartupError,
+        match="required capability invocation_constraints.v2 is not registered",
+    ):
+        _create_gateway(
+            monkeypatch,
+            stub_app_config,
+            ExtensionRegistry().build(generation=7),
+            [INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2],
+        )
+
+
+def test_create_app_fails_closed_for_malformed_required_v2_constraints_provider(
+    monkeypatch,
+    stub_app_config,
+):
+    from deerflow_extension_api import INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2
+
+    from deerflow.extensions.constraints import ConstraintStartupError
+
+    with pytest.raises(ConstraintStartupError) as captured:
+        _create_gateway(
+            monkeypatch,
+            stub_app_config,
+            _constraints_extensions(factory=object),
+            [INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2],
+        )
+
+    assert str(captured.value).endswith("failed to initialize: TypeError")
+
+
+@pytest.mark.asyncio
+async def test_create_app_reports_unhealthy_required_v2_constraints_fail_closed(
+    monkeypatch,
+    stub_app_config,
+):
+    from deerflow_extension_api import INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2
+
+    app = _create_gateway(
+        monkeypatch,
+        stub_app_config,
+        _constraints_extensions(health_probe=_unhealthy_capability),
+        [INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2],
+    )
+    readiness = await app.state.capability_health_monitor.readiness()
+
+    assert readiness.status == "not_ready"
+    assert [(item.capability_id, item.status, item.diagnostic_code) for item in readiness.health] == [
+        (
+            INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2,
+            "unhealthy",
+            "dependency_unavailable",
+        )
+    ]
+
+
+def test_create_app_fails_when_required_constraints_provider_is_ambiguous(
+    monkeypatch,
+    stub_app_config,
+):
+    from deerflow_extension_api import INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2
+
+    from deerflow.extensions.constraints import ConstraintStartupError
+
+    with pytest.raises(
+        ConstraintStartupError,
+        match=("required capability invocation_constraints.v2 has duplicate provider registrations"),
+    ):
+        _create_gateway(
+            monkeypatch,
+            stub_app_config,
+            _constraints_extensions(duplicate=True),
+            [INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2],
+        )
+
+
+@pytest.mark.parametrize(
+    ("required_capability", "expected_error"),
+    [
+        ("invocation_constraints.v1", None),
+        (
+            "invocation_constraints.v2",
+            "required capability invocation_constraints.v2 is not registered; found invocation_constraints.v1",
+        ),
+    ],
+    ids=("v1-compatible", "v1-cannot-satisfy-v2"),
+)
+def test_create_app_routes_each_required_constraints_version_without_cross_host_rejection(
+    monkeypatch,
+    stub_app_config,
+    required_capability,
+    expected_error,
+):
+    from deerflow.extensions.constraints import ConstraintStartupError
+
+    if expected_error:
+        with pytest.raises(ConstraintStartupError, match=expected_error):
+            _create_gateway(
+                monkeypatch,
+                stub_app_config,
+                _constraints_extensions(api_version="1.0"),
+                [required_capability],
+            )
+    else:
+        app = _create_gateway(
+            monkeypatch,
+            stub_app_config,
+            _constraints_extensions(api_version="1.0"),
+            [required_capability],
+        )
+        assert app.state.invocation_constraints_host.required_capability_id == (required_capability)
+
+
+def test_required_capability_ownership_classification_covers_public_contracts() -> None:
+    import deerflow_extension_api.constraints as constraints_contract
+    from deerflow_extension_api import (
+        MCP_INTERCEPTOR_KIND,
+        ORIGIN_CONTRIBUTOR_KIND,
+        RUN_CONTEXT_CONTRIBUTOR_KIND,
+    )
+
+    from deerflow.extensions.capabilities import (
+        REQUIRED_CAPABILITY_ID_OWNERS,
+        REQUIRED_CAPABILITY_KIND_OWNERS,
+        route_required_capabilities,
+    )
+
+    constraint_ids = {getattr(constraints_contract, name) for name in constraints_contract.__all__ if name.startswith("INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY") and isinstance(getattr(constraints_contract, name), str)}
+    assert set(REQUIRED_CAPABILITY_ID_OWNERS) == constraint_ids
+    assert dict(REQUIRED_CAPABILITY_KIND_OWNERS) == {
+        ORIGIN_CONTRIBUTOR_KIND: "contributors",
+        RUN_CONTEXT_CONTRIBUTOR_KIND: "contributors",
+        MCP_INTERCEPTOR_KIND: "mcp",
+    }
+
+    routes = route_required_capabilities(
+        [
+            "origin_contributor:fixture.origin",
+            "run_context_contributor:fixture.context",
+            *sorted(constraint_ids),
+            "mcp_interceptor:fixture.mcp",
+        ]
+    )
+    assert routes.contributors == (
+        "origin_contributor:fixture.origin",
+        "run_context_contributor:fixture.context",
+    )
+    assert routes.constraints == tuple(sorted(constraint_ids))
+    assert routes.mcp == ("mcp_interceptor:fixture.mcp",)
+
+
+def test_create_app_rejects_unknown_required_capability_with_bounded_diagnostic(
+    monkeypatch,
+    stub_app_config,
+):
+    from deerflow.extensions.capabilities import RequiredCapabilityRoutingError
+
+    unknown = "future_authority:" + ("x" * 500)
+    with pytest.raises(RequiredCapabilityRoutingError) as captured:
+        _create_gateway(
+            monkeypatch,
+            stub_app_config,
+            ExtensionRegistry().build(generation=7),
+            [unknown],
+        )
+
+    assert str(captured.value) == "unsupported required capability <invalid>"
+    assert unknown not in str(captured.value)

@@ -12,6 +12,7 @@ from functools import partial
 from typing import Any
 
 from deerflow_extension_api import (
+    MCP_INTERCEPTOR_KIND,
     McpCallIndeterminateV1,
     McpCallProjectionV1,
     McpCallRejectedV1,
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 MCP_INVOCATION_FACTS_CONTEXT_KEY = "__deerflow_mcp_invocation_facts"
 MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY = "__deerflow_mcp_preparation_audit_sink"
-_CAPABILITY_PREFIX = "mcp_interceptor:"
+_CAPABILITY_PREFIX = f"{MCP_INTERCEPTOR_KIND}:"
 _DEFAULT_TIMEOUT_SECONDS = 2.0
 
 
