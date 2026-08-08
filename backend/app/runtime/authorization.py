@@ -257,6 +257,7 @@ class ProviderInvocationAuthorization:
                 "revision": accepted.agent_revision.to_json(),
                 "safe_source_evidence": dict(accepted.origin.references),
             },
+            trusted_context=accepted.trusted_context,
         )
         return await self._authorize(request, persist_evidence=True)
 
@@ -270,6 +271,7 @@ class ProviderInvocationAuthorization:
         if self._settings.observe_enabled is not True:
             return InternalAuthorizationDecision.allowed()
         target = f"run:{record.run_id}" if target_kind == "run" else f"context:{record.thread_id}"
+        accepted = record.accepted_invocation if isinstance(record.accepted_invocation, AcceptedInvocation) else None
         return await self._authorize(
             AuthzRequest(
                 principal=_invocation_principal(principal),
@@ -277,6 +279,7 @@ class ProviderInvocationAuthorization:
                 action="observe",
                 target=target,
                 context=_accepted_record_context(record),
+                trusted_context=None if accepted is None else accepted.trusted_context,
             )
         )
 
@@ -315,6 +318,7 @@ class ProviderInvocationAuthorization:
     ) -> InternalAuthorizationDecision:
         if self._settings.cancel_enabled is not True:
             return InternalAuthorizationDecision.allowed()
+        accepted = record.accepted_invocation if isinstance(record.accepted_invocation, AcceptedInvocation) else None
         return await self._authorize(
             AuthzRequest(
                 principal=_invocation_principal(principal),
@@ -322,6 +326,7 @@ class ProviderInvocationAuthorization:
                 action="cancel",
                 target=f"run:{record.run_id}",
                 context=_accepted_record_context(record),
+                trusted_context=None if accepted is None else accepted.trusted_context,
             )
         )
 

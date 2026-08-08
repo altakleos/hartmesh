@@ -9,6 +9,7 @@ middleware stack is position-sensitive.
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, packages_distributions, version
@@ -54,6 +55,10 @@ class Diagnostic:
     level: DiagnosticLevel
     source: str
     message: str
+    code: str | None = None
+    error_class: str | None = None
+    correlation_id: str | None = None
+    contribution_id: str | None = None
 
     @classmethod
     def error(cls, source: str, message: str) -> Diagnostic:
@@ -70,6 +75,28 @@ class Diagnostic:
     @classmethod
     def debug(cls, source: str, message: str) -> Diagnostic:
         return cls("debug", source, message)
+
+    @classmethod
+    def failure(
+        cls,
+        source: str,
+        *,
+        code: str,
+        error: BaseException,
+        message: str | None = None,
+    ) -> Diagnostic:
+        """Build a bounded failure diagnostic without retaining provider text."""
+
+        error_name = type(error).__name__
+        safe_error_name = "".join(character if character.isascii() and (character.isalnum() or character == "_") else "_" for character in error_name)
+        return cls(
+            "error",
+            source,
+            message or code,
+            code=code,
+            error_class=(safe_error_name or "Exception")[:128],
+            correlation_id=uuid.uuid4().hex,
+        )
 
 
 class ExtensionLoadError(RuntimeError):
@@ -149,15 +176,31 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
     diagnostics: list[Diagnostic] = []
     loaded_sources: list[str] = []
 
+    def record_failure(
+        spec: ExtensionSpec,
+        *,
+        code: str,
+        error: BaseException,
+        message: str | None = None,
+    ) -> Diagnostic:
+        diagnostic = Diagnostic.failure(spec.use, code=code, error=error, message=message)
+        diagnostics.append(diagnostic)
+        logger.error(
+            "Extension load failure source=%s diagnostic_code=%s error_class=%s correlation_id=%s",
+            diagnostic.source,
+            diagnostic.code,
+            diagnostic.error_class,
+            diagnostic.correlation_id,
+        )
+        return diagnostic
+
     for spec in specs:
         try:
             install = resolve_variable(spec.use)
         except Exception as exc:
-            message = f"could not resolve extension entry point: {exc}"
-            diagnostics.append(Diagnostic.error(spec.use, message))
-            logger.error("Extension %s: %s", spec.use, message)
+            record_failure(spec, code="entry_point_resolution_failed", error=exc)
             if spec.required:
-                raise ExtensionLoadError(f"required extension {spec.use} failed to load") from exc
+                raise ExtensionLoadError(f"required extension {spec.use} failed to load") from None
             continue
 
         if not callable(install):
@@ -171,11 +214,14 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
         try:
             declared = getattr(install, "__deerflow_api__", None)
         except Exception as exc:
-            message = f"could not inspect extension-api version marker: {type(exc).__name__}"
-            diagnostics.append(Diagnostic.error(spec.use, message))
-            logger.error("Extension %s: %s", spec.use, message)
+            record_failure(
+                spec,
+                code="api_marker_inspection_failed",
+                error=exc,
+                message="could not inspect extension-api version marker",
+            )
             if spec.required:
-                raise ExtensionLoadError(f"required extension {spec.use} could not inspect api marker") from exc
+                raise ExtensionLoadError(f"required extension {spec.use} could not inspect api marker") from None
             continue
         if declared is not None and _parse_version(declared) is None:
             message = f"extension declares invalid extension-api version marker of type {type(declared).__name__}; expected a dotted numeric string such as '0.1'"
@@ -213,11 +259,9 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
                 install(registry, _frozen_config(spec.config))
         except Exception as exc:
             registry.rollback_to(mark)
-            message = f"install() failed: {exc}"
-            diagnostics.append(Diagnostic.error(spec.use, message))
-            logger.exception("Extension %s: install() failed", spec.use)
+            record_failure(spec, code="install_failed", error=exc)
             if spec.required:
-                raise ExtensionLoadError(f"required extension {spec.use} failed to install") from exc
+                raise ExtensionLoadError(f"required extension {spec.use} failed to install") from None
             continue
 
         registry.record_loaded_plugin(

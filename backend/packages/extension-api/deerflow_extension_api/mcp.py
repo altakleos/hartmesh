@@ -13,6 +13,7 @@ from deerflow_extension_api.contributors import (
     ResolvedAgentRevisionReferenceV1,
     SafeContextReferenceV1,
     SealedOriginV1,
+    TrustedRunContextV1,
 )
 from deerflow_extension_api.health import CapabilityHealthProbe
 
@@ -53,6 +54,7 @@ class McpCallProjectionV1:
     server_name: str
     tool_name: str
     arguments_digest: str
+    trusted_context: TrustedRunContextV1 | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.principal, PrincipalProjectionV1):
@@ -68,6 +70,18 @@ class McpCallProjectionV1:
         _validate_identifier(self.server_name, field_name="server_name")
         _validate_identifier(self.tool_name, field_name="tool_name")
         _validate_digest(self.arguments_digest, field_name="arguments_digest")
+        if self.trusted_context is not None:
+            if not isinstance(self.trusted_context, TrustedRunContextV1):
+                raise TypeError("trusted_context must be TrustedRunContextV1 or None")
+            if (
+                self.trusted_context.identity != self.principal.identity
+                or self.trusted_context.origin != self.origin
+                or self.trusted_context.thread_id != self.thread_id
+                or self.trusted_context.run_id != self.run_id
+                or self.trusted_context.agent_revision != self.agent_revision
+                or self.trusted_context.extension_generation != self.extension_generation
+            ):
+                raise ValueError("MCP projection facts must match the trusted run context")
 
 
 @dataclass(frozen=True)

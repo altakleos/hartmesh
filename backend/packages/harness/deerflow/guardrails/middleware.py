@@ -23,6 +23,7 @@ from deerflow.guardrails.provider import (
 from deerflow.runtime.accepted_invocation import (
     INVOCATION_IDENTITY_CONTEXT_KEY,
     INVOCATION_ORIGIN_CONTEXT_KEY,
+    TRUSTED_RUN_CONTEXT_KEY,
 )
 from deerflow.runtime.events.catalog import MIDDLEWARE_GUARDRAIL_TAG
 
@@ -52,6 +53,13 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         return context if isinstance(context, dict) else {}
 
     def _build_request(self, request: ToolCallRequest, context: dict) -> GuardrailRequest:
+        trusted_context = context.get(TRUSTED_RUN_CONTEXT_KEY)
+        if trusted_context is not None:
+            from deerflow_extension_api import TrustedRunContextV1
+
+            if not isinstance(trusted_context, TrustedRunContextV1):
+                raise TypeError("accepted trusted run context must be TrustedRunContextV1")
+        authorization_attributes = trusted_context.authorization_attributes if trusted_context is not None else normalize_authz_attributes(context.get("authz_attributes"))
         return GuardrailRequest(
             tool_name=str(request.tool_call.get("name", "")),
             tool_input=request.tool_call.get("args", {}),
@@ -67,9 +75,10 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             tool_call_id=request.tool_call.get("id"),
             channel_user_id=context.get("channel_user_id"),
             is_internal=context.get("is_internal") is True,
-            authz_attributes=normalize_authz_attributes(context.get("authz_attributes")),
+            authz_attributes=authorization_attributes,
             identity=context.get(INVOCATION_IDENTITY_CONTEXT_KEY),
             origin=context.get(INVOCATION_ORIGIN_CONTEXT_KEY),
+            trusted_context=trusted_context,
         )
 
     def _build_denied_message(self, request: ToolCallRequest, decision: GuardrailDecision) -> ToolMessage:

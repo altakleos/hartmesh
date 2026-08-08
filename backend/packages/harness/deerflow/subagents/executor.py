@@ -15,7 +15,7 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from deerflow_extension_api import ConstraintProjectionV1, InvocationIdentityV1, SealedOriginV1
+from deerflow_extension_api import ConstraintProjectionV1, InvocationIdentityV1, SealedOriginV1, TrustedRunContextV1
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.callbacks.base import BaseCallbackManager
@@ -33,6 +33,7 @@ from deerflow.models import create_chat_model
 from deerflow.runtime.accepted_invocation import (
     INVOCATION_IDENTITY_CONTEXT_KEY,
     INVOCATION_ORIGIN_CONTEXT_KEY,
+    TRUSTED_RUN_CONTEXT_KEY,
 )
 from deerflow.runtime.constraints import InvocationSubagentReservation
 from deerflow.runtime.user_context import DEFAULT_USER_ID
@@ -460,6 +461,7 @@ class SubagentExecutor:
         authz_attributes: Mapping[str, Any] | None = None,
         invocation_identity: InvocationIdentityV1 | None = None,
         invocation_origin: SealedOriginV1 | None = None,
+        trusted_run_context: TrustedRunContextV1 | None = None,
         deerflow_trace_id: str | None = None,
         extensions: Any | None = None,
         authorization_provider: AuthorizationProvider | None = None,
@@ -508,6 +510,9 @@ class SubagentExecutor:
                 from the accepted parent invocation.
             mcp_preparation_audit_sink: Thread-safe bridge to the parent run's
                 MCP preparation journal.
+            trusted_run_context: Host-sealed invocation facts inherited as one
+                immutable record. When present it is authoritative over the
+                legacy identity, Origin, attributes, and extension arguments.
         """
         self.config = config
         self.app_config = app_config
@@ -534,16 +539,41 @@ class SubagentExecutor:
         # chats share one thread across senders, so delegated bash commands
         # must export the dispatching turn's id, not none at all.
         self.channel_user_id = channel_user_id
+        if trusted_run_context is not None and not isinstance(trusted_run_context, TrustedRunContextV1):
+            raise TypeError("trusted_run_context must be TrustedRunContextV1 or None")
+        if trusted_run_context is not None:
+            subject = trusted_run_context.identity.effective_subject
+            if run_id is not None and trusted_run_context.run_id is not None and run_id != trusted_run_context.run_id:
+                raise ValueError("trusted run context does not match parent run")
+            if thread_id is not None and thread_id != trusted_run_context.thread_id:
+                raise ValueError("trusted run context does not match parent thread")
+            self.thread_id = trusted_run_context.thread_id
+            self.run_id = trusted_run_context.run_id or run_id
+            self.user_id = subject.subject_id
+            self.user_role = subject.role
+            self.oauth_provider = subject.oauth_provider
+            self.oauth_id = subject.oauth_id
+            invocation_identity = trusted_run_context.identity
+            invocation_origin = trusted_run_context.origin
+            is_internal = subject.kind == "service"
+            authz_attributes = trusted_run_context.authorization_attributes
+            if accepted_extension_generation is not None and accepted_extension_generation != trusted_run_context.extension_generation:
+                raise ValueError("trusted run context does not match extension generation")
+            if accepted_extension_manifest_digest is not None and accepted_extension_manifest_digest != trusted_run_context.extension_manifest_digest:
+                raise ValueError("trusted run context does not match extension manifest")
+            accepted_extension_generation = trusted_run_context.extension_generation
+            accepted_extension_manifest_digest = trusted_run_context.extension_manifest_digest
         if invocation_identity is not None and not isinstance(invocation_identity, InvocationIdentityV1):
             raise TypeError("invocation_identity must be InvocationIdentityV1 or None")
         if invocation_origin is not None and not isinstance(invocation_origin, SealedOriginV1):
             raise TypeError("invocation_origin must be SealedOriginV1 or None")
         self.invocation_identity = invocation_identity
         self.invocation_origin = invocation_origin
+        self.trusted_run_context = trusted_run_context
         # Retain the compatibility boolean without allowing transport-derived
         # legacy state to promote a represented human.
         self.is_internal = invocation_identity.effective_subject.kind == "service" if invocation_identity is not None else is_internal
-        self.authz_attributes = normalize_authz_attributes(authz_attributes)
+        self.authz_attributes = trusted_run_context.authorization_attributes if trusted_run_context is not None else normalize_authz_attributes(authz_attributes)
         self.deerflow_trace_id = deerflow_trace_id
         # Parent run's extension snapshot. Binding it here (rather than reading
         # the singleton at execution time) is what keeps one run on a single
@@ -742,10 +772,13 @@ class SubagentExecutor:
             "oauth_id": self.oauth_id,
             "channel_user_id": self.channel_user_id,
             "is_internal": self.is_internal,
-            "authz_attributes": self.authz_attributes,
             INVOCATION_IDENTITY_CONTEXT_KEY: self.invocation_identity,
             INVOCATION_ORIGIN_CONTEXT_KEY: self.invocation_origin,
         }
+        if self.trusted_run_context is not None:
+            authz_context[TRUSTED_RUN_CONTEXT_KEY] = self.trusted_run_context
+        else:
+            authz_context["authz_attributes"] = self.authz_attributes
         authorization_candidates = [*self._base_tools]
         if skill_setup.describe_skill_tool is not None:
             authorization_candidates.append(skill_setup.describe_skill_tool)
@@ -948,7 +981,10 @@ class SubagentExecutor:
             # Authorization identity: is_internal written unconditionally
             # (including False); attributes copied again on write-back.
             context["is_internal"] = self.is_internal
-            context["authz_attributes"] = dict(self.authz_attributes)
+            if self.trusted_run_context is not None:
+                context[TRUSTED_RUN_CONTEXT_KEY] = self.trusted_run_context
+            else:
+                context["authz_attributes"] = dict(self.authz_attributes)
             if self.invocation_identity is not None:
                 context[INVOCATION_IDENTITY_CONTEXT_KEY] = self.invocation_identity
             if self.invocation_origin is not None:

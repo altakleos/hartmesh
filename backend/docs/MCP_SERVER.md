@@ -193,8 +193,9 @@ the exact provider identity and `AuthzRequest` already allowed by the operation-
 allow is followed by compatibility credential hooks, fresh health verification, and
 deterministic, two-second-bounded `prepare_call(...)` calls for every required contribution.
 Trusted preparation is the final fence after compatibility header changes and immediately
-before the network handler. The projection contains sealed
-principal/Origin, thread/run/agent/generation references, MCP server/tool names, and only a
+before the network handler. The projection contains the same immutable trusted run context
+used by invocation authorization and subagents, including the final contributor-enriched
+Origin, plus thread/run/agent/generation references, MCP server/tool names, and only a
 canonical arguments digest. A prepared result may add bounded transient headers and safe
 evidence references; the plugin never receives or invokes the network handler.
 

@@ -456,6 +456,84 @@ def test_task_tool_forwards_sealed_identity_and_origin_to_executor(monkeypatch):
     assert captured["executor_kwargs"]["is_internal"] is False
 
 
+def test_task_tool_forwards_trusted_run_context_as_the_only_context_seam(monkeypatch):
+    from deerflow_extension_api import (
+        EffectiveSubjectV1,
+        InvocationIdentityV1,
+        NamespacedContextReferenceV1,
+        ResolvedAgentRevisionReferenceV1,
+        ResolvedProfileRevisionReferenceV1,
+        SafeContextReferenceV1,
+        SealedOriginV1,
+        TrustedRunContextV1,
+    )
+
+    from deerflow.runtime.accepted_invocation import TRUSTED_RUN_CONTEXT_KEY
+
+    runtime_reference = NamespacedContextReferenceV1(
+        capability_id="run_context_contributor:routing",
+        namespace="routing",
+        reference=SafeContextReferenceV1(
+            key="target",
+            value="runtime-route",
+            storage_class="runtime_only",
+            purpose="execution",
+        ),
+    )
+    trusted = TrustedRunContextV1(
+        identity=InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="human", subject_id="owner-1", role="member")),
+        origin=SealedOriginV1(source_kind="http", digest="a" * 64),
+        thread_id="thread-1",
+        external_key_reference="raw:request-1",
+        agent_revision=ResolvedAgentRevisionReferenceV1(agent_id="lead_agent", digest="b" * 64),
+        profile_revision=ResolvedProfileRevisionReferenceV1(profile_id="default", digest="c" * 64),
+        extension_generation=8,
+        extension_manifest_digest="d" * 64,
+        runtime_only_references=(runtime_reference,),
+        run_id="run-1",
+    )
+    runtime = _make_runtime()
+    runtime.context[TRUSTED_RUN_CONTEXT_KEY] = trusted
+    runtime.context["authz_attributes"] = {"forged": True}
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(
+        runtime=runtime,
+        description="test",
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-trusted-context",
+    )
+
+    assert captured["executor_kwargs"]["trusted_run_context"] is trusted
+    assert "authz_attributes" not in captured["executor_kwargs"]
+    assert "invocation_identity" not in captured["executor_kwargs"]
+    assert "invocation_origin" not in captured["executor_kwargs"]
+    assert "user_id" not in captured["executor_kwargs"]
+    assert "thread_id" not in captured["executor_kwargs"]
+    assert "run_id" not in captured["executor_kwargs"]
+    assert "is_internal" not in captured["executor_kwargs"]
+
+
 def test_task_tool_forwards_is_internal_true_to_executor(monkeypatch):
     """is_internal=True must propagate to SubagentExecutor."""
     runtime = _make_runtime()

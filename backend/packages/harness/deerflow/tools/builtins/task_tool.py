@@ -6,7 +6,7 @@ import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
-from deerflow_extension_api import ConstraintProjectionV1, InvocationIdentityV1, SealedOriginV1
+from deerflow_extension_api import ConstraintProjectionV1, InvocationIdentityV1, SealedOriginV1, TrustedRunContextV1
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
 from langchain_core.messages import ToolMessage
@@ -20,6 +20,7 @@ from deerflow.extensions import resolve_run_extensions
 from deerflow.runtime.accepted_invocation import (
     INVOCATION_IDENTITY_CONTEXT_KEY,
     INVOCATION_ORIGIN_CONTEXT_KEY,
+    TRUSTED_RUN_CONTEXT_KEY,
 )
 from deerflow.runtime.constraints import (
     INVOCATION_CONSTRAINTS_CONTEXT_KEY,
@@ -370,16 +371,20 @@ async def task_tool(
     # The accepted records are installed by the worker after it scrubs caller
     # context.  They remain distinct: identity describes subject authority and
     # delegation, while Origin describes the trusted source/transport.
-    invocation_identity = parent_context.get(INVOCATION_IDENTITY_CONTEXT_KEY)
-    if not isinstance(invocation_identity, InvocationIdentityV1):
-        invocation_identity = None
-    invocation_origin = parent_context.get(INVOCATION_ORIGIN_CONTEXT_KEY)
-    if not isinstance(invocation_origin, SealedOriginV1):
-        invocation_origin = None
-    # Legacy consumers still receive is_internal, but an accepted identity is
-    # authoritative and a human represented by an internal service stays human.
-    is_internal = invocation_identity.effective_subject.kind == "service" if invocation_identity is not None else parent_context.get("is_internal") is True
-    authz_attributes = normalize_authz_attributes(parent_context.get("authz_attributes"))
+    trusted_run_context = parent_context.get(TRUSTED_RUN_CONTEXT_KEY)
+    if not isinstance(trusted_run_context, TrustedRunContextV1):
+        trusted_run_context = None
+    if trusted_run_context is None:
+        invocation_identity = parent_context.get(INVOCATION_IDENTITY_CONTEXT_KEY)
+        if not isinstance(invocation_identity, InvocationIdentityV1):
+            invocation_identity = None
+        invocation_origin = parent_context.get(INVOCATION_ORIGIN_CONTEXT_KEY)
+        if not isinstance(invocation_origin, SealedOriginV1):
+            invocation_origin = None
+        # Legacy consumers still receive is_internal, but an accepted identity is
+        # authoritative and a human represented by an internal service stays human.
+        is_internal = invocation_identity.effective_subject.kind == "service" if invocation_identity is not None else parent_context.get("is_internal") is True
+        authz_attributes = normalize_authz_attributes(parent_context.get("authz_attributes"))
     # The run's immutable extension snapshot, published by the run worker. Stays
     # None outside that path (embedded client, standalone LangGraph Server), where
     # the executor keeps its process-singleton fallback.
@@ -437,20 +442,25 @@ async def task_tool(
         "parent_model": parent_model,
         "sandbox_state": sandbox_state,
         "thread_data": thread_data,
-        "thread_id": thread_id,
         "trace_id": trace_id,
-        "user_id": user_id,
-        "user_role": user_role,
-        "oauth_provider": oauth_provider,
-        "oauth_id": oauth_id,
-        "run_id": run_id,
         "channel_user_id": channel_user_id,
-        "is_internal": is_internal,
-        "authz_attributes": authz_attributes,
-        "invocation_identity": invocation_identity,
-        "invocation_origin": invocation_origin,
         "deerflow_trace_id": deerflow_trace_id,
     }
+    if trusted_run_context is not None:
+        executor_kwargs["trusted_run_context"] = trusted_run_context
+    else:
+        executor_kwargs.update(
+            thread_id=thread_id,
+            user_id=user_id,
+            user_role=user_role,
+            oauth_provider=oauth_provider,
+            oauth_id=oauth_id,
+            run_id=run_id,
+            is_internal=is_internal,
+            authz_attributes=authz_attributes,
+            invocation_identity=invocation_identity,
+            invocation_origin=invocation_origin,
+        )
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
     if run_extensions is not None:

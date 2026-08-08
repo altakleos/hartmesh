@@ -4,7 +4,7 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
-Version 0.7.0 owns the authorization contracts `Principal`, `AuthzRequest`,
+Version 0.8.0 owns the authorization contracts `Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthzReason`, and `AuthorizationProvider`. Existing host code may keep
 using `deerflow.authz.provider`; those names are compatibility re-exports of the same
 objects. It also owns the versioned Origin and run-context contributor contracts described
@@ -112,6 +112,31 @@ must be stable string identifiers and contribute the identifier, never secret ma
 Runtime-only values are redacted from persistence while their safe execution aggregate is
 included in the accepted-context digest.
 
+The host combines both contributor phases into one immutable `TrustedRunContextV1` after
+validation. It carries the effective subject/acting service, final `SealedOriginV1`, bound
+thread and external-key reference, agent/profile revisions, extension generation/manifest,
+and three finite namespaced products: persistable references, runtime-only execution
+references, and stable secret handles. Per-result limits also apply to the aggregate across
+all contributors: 32 fully qualified keys and 8 KiB canonical reference data. Duplicate
+fully qualified keys fail deterministically.
+
+`storage_class` is a request to the host, not plugin authority. The v1 host policy accepts
+bounded persistable evidence, stable handle identifiers, and runtime-only execution values;
+runtime-only correlation has no consumer and fails closed. The trusted-context digest uses
+the persisted-safe projection plus the retained runtime-only digest/count, so it remains
+stable when a process reconstructs accepted evidence without ephemeral values. Its separate
+execution digest excludes contributor correlation; the evidence digest still binds those
+audit references.
+
+Only approved persistable references and persistable secret-handle identifiers are stored;
+runtime-only values are replaced by their aggregate digest/count. The live record is passed
+unchanged to invocation authorization, constraints, lead execution, MCP preparation, and
+delegated subagents. `authorization_attributes` is only a read-only, namespaced compatibility
+view derived from execution references, not a second producer-owned context channel. A
+secret handle is an identifier, not authority or a credential: authorization must allow the
+operation before a narrow consumer resolves it, and resolved values must never be returned
+through this contract.
+
 Each call has a host-owned two-second timeout. Optional failures are omitted with bounded,
 redacted diagnostics. Operators can make a contribution mandatory in startup-only
 `config.yaml` with `required_capabilities: [origin_contributor:<id>]` or
@@ -149,9 +174,10 @@ budgets remain post-response guards and are not advertised as exact constraints.
 
 Trusted operator plugins may register multiple `McpInterceptorDescriptor` values with
 `registry.mcp_interceptor(...)`. Each factory returns an async `McpInterceptor` whose
-`prepare_call(McpCallProjectionV1)` method receives only the sealed principal and Origin,
-bound thread/run, pinned agent revision and extension generation, MCP server/tool names,
-and a canonical arguments digest. It never receives or owns the network handler.
+`prepare_call(McpCallProjectionV1)` method receives the same trusted run context and final
+contributor-enriched Origin used by authorization, plus the bound thread/run, pinned agent
+revision and extension generation, MCP server/tool names, and a canonical arguments digest.
+It never receives or owns the network handler.
 
 The strict result union is `PreparedMcpCallV1`, `McpCallRejectedV1`, or
 `McpCallIndeterminateV1`. A prepared result may add at most 16 bounded transient headers

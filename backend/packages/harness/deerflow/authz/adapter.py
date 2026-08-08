@@ -23,7 +23,10 @@ from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest
 from deerflow.authz.runtime import AuthorizedToolCallReceipt
 from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason, GuardrailRequest
-from deerflow.runtime.accepted_invocation import INVOCATION_IDENTITY_CONTEXT_KEY
+from deerflow.runtime.accepted_invocation import (
+    INVOCATION_IDENTITY_CONTEXT_KEY,
+    TRUSTED_RUN_CONTEXT_KEY,
+)
 
 
 class GuardrailAuthorizationAdapter:
@@ -85,6 +88,7 @@ class GuardrailAuthorizationAdapter:
                 "is_internal": gr.is_internal,
                 "authz_attributes": gr.authz_attributes,
                 INVOCATION_IDENTITY_CONTEXT_KEY: gr.identity,
+                TRUSTED_RUN_CONTEXT_KEY: gr.trusted_context,
             },
             default_role=self._default_role,
         )
@@ -103,6 +107,7 @@ class GuardrailAuthorizationAdapter:
                 "timestamp": gr.timestamp,
                 "origin": gr.origin,
             },
+            trusted_context=gr.trusted_context,
         )
 
     @staticmethod

@@ -3270,6 +3270,73 @@ class TestSubagentGuardrailAttribution:
         assert context["is_internal"] is False
 
     @pytest.mark.anyio
+    async def test_aexecute_propagates_one_trusted_run_context_without_free_form_attributes(
+        self,
+        classes,
+        monkeypatch,
+    ):
+        from deerflow_extension_api import (
+            EffectiveSubjectV1,
+            InvocationIdentityV1,
+            NamespacedContextReferenceV1,
+            ResolvedAgentRevisionReferenceV1,
+            ResolvedProfileRevisionReferenceV1,
+            SafeContextReferenceV1,
+            SealedOriginV1,
+            TrustedRunContextV1,
+        )
+
+        from deerflow.runtime.accepted_invocation import TRUSTED_RUN_CONTEXT_KEY
+
+        runtime_reference = NamespacedContextReferenceV1(
+            capability_id="run_context_contributor:routing",
+            namespace="routing",
+            reference=SafeContextReferenceV1(
+                key="target",
+                value="runtime-route",
+                storage_class="runtime_only",
+                purpose="execution",
+            ),
+        )
+        trusted = TrustedRunContextV1(
+            identity=InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="human", subject_id="owner-1", role="member")),
+            origin=SealedOriginV1(source_kind="http", digest="a" * 64),
+            thread_id="thread-1",
+            external_key_reference="raw:request-1",
+            agent_revision=ResolvedAgentRevisionReferenceV1(agent_id="lead_agent", digest="b" * 64),
+            profile_revision=ResolvedProfileRevisionReferenceV1(profile_id="default", digest="c" * 64),
+            extension_generation=8,
+            extension_manifest_digest="d" * 64,
+            runtime_only_references=(runtime_reference,),
+            run_id="run-1",
+        )
+        executor = classes["SubagentExecutor"](
+            config=classes["SubagentConfig"](
+                name="general-purpose",
+                description="Trusted context propagation test agent",
+                system_prompt="Test trusted context propagation.",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            parent_model="test-model",
+            trusted_run_context=trusted,
+            authz_attributes={"forged": True},
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context[TRUSTED_RUN_CONTEXT_KEY] is trusted
+        assert "authz_attributes" not in context
+        assert executor.authz_attributes == {"routing.target": "runtime-route"}
+        assert context["accepted_extension_generation"] == 8
+
+    @pytest.mark.anyio
     async def test_aexecute_propagates_accepted_constraints_and_generation(
         self,
         classes,
