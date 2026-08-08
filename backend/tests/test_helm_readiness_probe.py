@@ -75,3 +75,45 @@ def test_gateway_probe_timeouts_bound_internal_readiness_work() -> None:
     assert ".Values.gateway.readinessProbe.timeoutSeconds" in template
     assert ".Values.gateway.readinessProbe.failureThreshold" in template
     assert ".Values.gateway.livenessProbe.failureThreshold" in template
+
+
+def test_gateway_termination_budget_is_derived_from_all_shutdown_phases() -> None:
+    helm = shutil.which("helm")
+    values = yaml.safe_load(_HELM_VALUES.read_text(encoding="utf-8"))
+    rendered_config = yaml.safe_load(values["config"])
+    shutdown = rendered_config["deployment"]["shutdown"]
+    application_budget = sum(shutdown.values()) + rendered_config["memory"].get("shutdown_flush_timeout_seconds", 30.0)
+    pre_stop = values["gateway"]["preStopSleepSeconds"]
+    headroom = values["gateway"]["shutdownSchedulingHeadroomSeconds"]
+
+    if helm is None:
+        template = _GATEWAY_DEPLOYMENT.read_text(encoding="utf-8")
+        assert "$shutdownTotal := addf" in template
+        assert "$derivedTermination := int" in template
+        assert ".Values.gateway.preStopSleepSeconds" in template
+        assert ".Values.gateway.shutdownSchedulingHeadroomSeconds" in template
+        assert "default $derivedTermination" in template
+        return
+
+    result = subprocess.run(
+        [
+            helm,
+            "template",
+            "deer-flow",
+            str(_GATEWAY_DEPLOYMENT.parents[1]),
+            "--namespace",
+            "deer-flow",
+            "--set",
+            "image.registry=example.invalid/deer-flow",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    gateway = next(document for document in result.stdout.split("---") if "kind: Deployment" in document and "app.kubernetes.io/component: gateway" in document)
+    rendered = yaml.safe_load(gateway)
+    termination = rendered["spec"]["template"]["spec"]["terminationGracePeriodSeconds"]
+
+    assert termination >= application_budget + pre_stop + headroom
+    assert termination > application_budget + pre_stop

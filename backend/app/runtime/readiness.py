@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
@@ -89,6 +90,9 @@ class RuntimeReadinessCoordinator:
         self._overall_timeout_seconds = overall_timeout_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
         self._last_snapshot: RuntimeReadinessSnapshot | None = None
+        self._admission_condition = asyncio.Condition()
+        self._draining = False
+        self._active_admissions = 0
 
     @property
     def last_snapshot(self) -> RuntimeReadinessSnapshot | None:
@@ -182,6 +186,14 @@ class RuntimeReadinessCoordinator:
         )
 
     async def readiness(self) -> RuntimeReadinessSnapshot:
+        if self._draining:
+            snapshot = RuntimeReadinessSnapshot(
+                status="not_ready",
+                reason_codes=("shutdown_draining",),
+                checked_at=self._now(),
+            )
+            self._last_snapshot = snapshot
+            return snapshot
         try:
             async with asyncio.timeout(self._overall_timeout_seconds):
                 snapshot = await self._evaluate()
@@ -212,6 +224,32 @@ class RuntimeReadinessCoordinator:
         """Return only whether a genuinely new invocation may be admitted."""
 
         return (await self.readiness()).status == "ready"
+
+    @asynccontextmanager
+    async def admission_permit(self) -> AsyncIterator[bool]:
+        """Fence a new admission atomically against graceful shutdown."""
+
+        async with self._admission_condition:
+            rejected = self._draining
+            if not rejected:
+                self._active_admissions += 1
+        if rejected:
+            yield False
+            return
+        try:
+            yield await self.ready_for_admission()
+        finally:
+            async with self._admission_condition:
+                self._active_admissions -= 1
+                self._admission_condition.notify_all()
+
+    async def begin_draining(self) -> bool:
+        """Reject new permits and wait until every admitted launch leaves its seam."""
+
+        async with self._admission_condition:
+            self._draining = True
+            await self._admission_condition.wait_for(lambda: self._active_admissions == 0)
+        return True
 
 
 __all__ = [

@@ -2595,7 +2595,7 @@ class RunManager:
                 timeout,
             )
 
-    async def shutdown(self, *, timeout: float = 5.0) -> None:
+    async def shutdown(self, *, timeout: float = 5.0) -> bool:
         """Cancel and bounded-await all in-flight runs on process shutdown.
 
         Signals active runs first so their cancellation/cleanup can overlap a
@@ -2613,6 +2613,11 @@ class RunManager:
         stack), the resulting ``psycopg_pool.PoolClosed`` is not catchable by the
         worker and surfaces as an unhandled exception during ``asyncio.run()``
         shutdown (bytedance/deer-flow issue #3373).
+
+        Returns ``True`` only when every local run task settled and each
+        required interrupted transition was persisted within the deadline.
+        The Gateway uses this proof to decide whether a final memory flush can
+        race a late run writer.
 
         Draining in-flight runs *before* the checkpointer is closed lets each
         run that settles within ``timeout`` flush its final checkpoint while
@@ -2642,7 +2647,7 @@ class RunManager:
 
         if not inflight:
             await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
-            return
+            return True
 
         tasks = [record.task for record in inflight]
         _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
@@ -2659,17 +2664,22 @@ class RunManager:
                     # is not reported as "never retrieved", and keep its status.
                     task.exception()  # type: ignore[union-attr]  # done & not cancelled
                     continue
-                if record.status in (RunStatus.pending, RunStatus.running):
-                    record.status = RunStatus.interrupted
-                    record.updated_at = _now_iso()
+                if record.status not in (RunStatus.pending, RunStatus.running):
+                    # Cancellation raced a real terminal commit. Preserve it
+                    # and never emit a second shutdown terminal transition.
+                    continue
+                record.status = RunStatus.interrupted
+                record.updated_at = _now_iso()
                 to_persist.append(record)
 
         # Bound the trailing status persistence within the remaining budget so a
         # slow store (``_call_store_with_retry`` can back off under DB pressure)
         # cannot push shutdown past ``timeout``.
+        persistence_complete = True
         if to_persist:
             remaining = deadline - loop.time()
             if remaining <= 0:
+                persistence_complete = False
                 logger.warning("Run drain budget exhausted before persisting %d interrupted run(s) on shutdown", len(to_persist))
             else:
                 try:
@@ -2678,6 +2688,7 @@ class RunManager:
                         timeout=remaining,
                     )
                 except TimeoutError:
+                    persistence_complete = False
                     logger.warning("Run drain status persistence exceeded the %.1fs budget; %d record(s) may not be persisted", timeout, len(to_persist))
                 else:
                     # ``_persist_status`` is best-effort: it catches and logs its
@@ -2686,14 +2697,17 @@ class RunManager:
                     # run_id) instead of being silently swallowed by the gather.
                     for record, result in zip(to_persist, results):
                         if isinstance(result, Exception):
+                            persistence_complete = False
                             logger.warning("Unexpected error persisting interrupted status for run %s during shutdown: %r", record.run_id, result)
                         elif result is False:
+                            persistence_complete = False
                             logger.warning("Could not persist interrupted status for run %s during shutdown", record.run_id)
 
         if pending:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
         logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
         await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
+        return not pending and persistence_complete
 
 
 class CancelOutcome(StrEnum):

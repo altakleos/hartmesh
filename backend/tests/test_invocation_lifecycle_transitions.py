@@ -282,3 +282,7 @@ async def test_shutdown_interruption_is_not_misclassified_as_user_cancellation()
     assert events[-1]["lifecycle_type"] == LifecycleType.interrupted
     assert LifecycleType.cancelled not in [event["lifecycle_type"] for event in events]
     _assert_latest_agrees(row, events)
+
+    await manager.shutdown(timeout=1.0)
+    repeated = await store.list_lifecycle_events(run_id=record.run_id)
+    assert repeated == events

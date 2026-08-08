@@ -167,6 +167,7 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
             yield object()
         finally:
             events.append("checkpointer_closed")
+            raise RuntimeError("simulated close failure")
 
     @asynccontextmanager
     async def fake_stream_bridge(_config):
@@ -180,7 +181,7 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
         return None
 
     async def fake_close_engine():
-        return None
+        events.append("engine_closed")
 
     async def spy_shutdown(self, *, timeout):  # noqa: ANN001
         events.append("runs_drained")
@@ -198,12 +199,23 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     app = FastAPI()
     startup_config = SimpleNamespace(database=SimpleNamespace(backend="memory", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)), run_events=None)
 
-    async with langgraph_runtime(app, startup_config):
-        pass
+    class Coordinator:
+        async def shutdown(self):
+            events.append("coordinator_shutdown")
+            await app.state.run_manager.shutdown(timeout=1.0)
+            await app.state.close_runtime_dependencies()
 
+    with pytest.raises(RuntimeError, match="simulated close failure"):
+        async with langgraph_runtime(app, startup_config):
+            app.state.shutdown_coordinator = Coordinator()
+
+    assert "coordinator_shutdown" in events
     assert "runs_drained" in events, "langgraph_runtime never drained in-flight runs on shutdown"
     assert "checkpointer_closed" in events
+    assert "engine_closed" in events
+    assert events.index("coordinator_shutdown") < events.index("runs_drained")
     assert events.index("runs_drained") < events.index("checkpointer_closed"), f"runs must be drained before the checkpointer pool is closed; got order {events}"
+    assert events.index("checkpointer_closed") < events.index("engine_closed")
 
 
 @pytest.mark.asyncio

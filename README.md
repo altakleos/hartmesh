@@ -295,6 +295,16 @@ process-local invocation state at startup and readiness. The default
 `local_development` profile keeps memory storage convenient but does not claim
 restart or pod-loss durability.
 
+Gateway shutdown is one bounded sequence in the supported single-replica
+topology: admission freezes, channels and the scheduler stop producing work,
+active local runs are interrupted/drained, memory flushes after the last run can
+write it, and process dependencies close last. Configure phase budgets under
+`deployment.shutdown`; the Helm chart derives its termination grace period from
+those budgets, the memory flush budget, preStop delay, and scheduling headroom.
+Runs that cannot settle inside the deadline retain the existing durable orphan-
+recovery semantics. This is graceful-shutdown behavior, not live pod-termination
+qualification or multi-replica coordination.
+
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
