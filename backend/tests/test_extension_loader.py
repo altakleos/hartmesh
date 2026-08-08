@@ -82,8 +82,12 @@ def test_install_failure_rolls_back_partial_registration():
         ExtensionSpec(use=f"{_FIXTURE}:install_ok"),
     ]
     loaded, diagnostics = load_extensions(specs)
-    assert diagnostics[0].level == "error"
-    assert "boom" in diagnostics[0].message
+    diagnostic = diagnostics[0]
+    assert diagnostic.level == "error"
+    assert diagnostic.code == "install_failed"
+    assert diagnostic.error_class == "ValueError"
+    assert len(diagnostic.correlation_id or "") == 32
+    assert "boom" not in repr(diagnostic)
     sources = {source for source, _ in loaded.middleware_contributors}
     assert sources == {f"{_FIXTURE}:install_ok"}
     assert len(loaded.middleware_contributors) == 1, "rollback must clear every partial registration"
@@ -101,7 +105,8 @@ def test_rollback_does_not_remove_a_different_specs_registrations_sharing_the_sa
     ]
     loaded, diagnostics = load_extensions(specs)
     assert [d.level for d in diagnostics] == ["error"]
-    assert "boom-shared" in diagnostics[0].message
+    assert diagnostics[0].code == "install_failed"
+    assert "boom-shared" not in repr(diagnostics[0])
     assert len(loaded.middleware_contributors) == 1
     source, contributor = loaded.middleware_contributors[0]
     assert source == f"{_FIXTURE}:install_shared_use"
@@ -260,7 +265,7 @@ def test_compatible_string_subclass_api_marker_can_load(monkeypatch):
     monkeypatch.setattr(
         demo_extensions.install_ok,
         "__deerflow_api__",
-        _HostileString("0.7.0"),
+        _HostileString("0.8.0"),
         raising=False,
     )
 
@@ -273,12 +278,12 @@ def test_compatible_string_subclass_api_marker_can_load(monkeypatch):
 
 def test_newer_minor_declared_api_is_refused():
     """Before 1.0, minors carry no compatibility promise: an extension written
-    against 0.8 may use contracts a 0.7 host does not implement, and the host
+    against 0.9 may use contracts a 0.8 host does not implement, and the host
     must refuse it with an actionable message."""
     spec = ExtensionSpec(use=f"{_FIXTURE}:install_newer_minor_api")
     loaded, diagnostics = load_extensions([spec])
     assert diagnostics[0].level == "error"
-    assert "0.8" in diagnostics[0].message
+    assert "0.9" in diagnostics[0].message
     assert "pip install" in diagnostics[0].message
     assert demo_extensions.INSTALLED == [], "a newer-minor extension must not run on an older host"
 

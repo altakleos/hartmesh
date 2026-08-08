@@ -254,7 +254,7 @@ def test_positional_rollback_removes_partial_contributor_registration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_required_runtime_failure_is_indeterminate_and_optional_failure_is_omitted() -> None:
+async def test_required_runtime_failure_is_indeterminate_and_optional_failure_is_omitted(caplog) -> None:
     class _Broken:
         async def contribute(self, _request):
             raise RuntimeError("credential-like-value-must-not-leak")
@@ -279,8 +279,14 @@ async def test_required_runtime_failure_is_indeterminate_and_optional_failure_is
         registry.build(),
         required_capabilities=("origin_contributor:broken",),
     )
-    with pytest.raises(ContributorIndeterminateError, match="origin_contributor:broken"):
-        await required.contribute_origin(OriginContributionRequestV1(source_kind="http"))
+    with caplog.at_level("ERROR", logger="deerflow.extensions.contributors"):
+        with pytest.raises(ContributorIndeterminateError, match="origin_contributor:broken"):
+            await required.contribute_origin(OriginContributionRequestV1(source_kind="http"))
+    assert "diagnostic_code=contribution_failed" in caplog.text
+    assert "contribution_id=broken" in caplog.text
+    assert "error_class=RuntimeError" in caplog.text
+    assert "correlation_id=" in caplog.text
+    assert "credential-like-value-must-not-leak" not in caplog.text
 
 
 @pytest.mark.asyncio

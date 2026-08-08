@@ -13,7 +13,7 @@ from typing import Any
 from deerflow_extension_api import InvocationIdentityV1
 
 from deerflow.authz.provider import Principal
-from deerflow.runtime.accepted_invocation import INVOCATION_IDENTITY_CONTEXT_KEY
+from deerflow.runtime.accepted_invocation import INVOCATION_IDENTITY_CONTEXT_KEY, TRUSTED_RUN_CONTEXT_KEY
 
 
 def normalize_authz_attributes(raw: Any) -> dict[str, Any]:
@@ -54,7 +54,13 @@ def build_principal_from_context(
     if resolved_role is None or resolved_role == "":
         resolved_role = default_role
 
-    identity = context.get(INVOCATION_IDENTITY_CONTEXT_KEY)
+    trusted_context = context.get(TRUSTED_RUN_CONTEXT_KEY)
+    if trusted_context is not None:
+        from deerflow_extension_api import TrustedRunContextV1
+
+        if not isinstance(trusted_context, TrustedRunContextV1):
+            raise TypeError("accepted trusted run context must be TrustedRunContextV1")
+    identity = trusted_context.identity if trusted_context is not None else context.get(INVOCATION_IDENTITY_CONTEXT_KEY)
     if identity is not None and not isinstance(identity, InvocationIdentityV1):
         raise TypeError("accepted invocation identity must be InvocationIdentityV1")
     if identity is not None:

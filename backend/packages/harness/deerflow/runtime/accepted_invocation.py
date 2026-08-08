@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
-from deerflow_extension_api import InvocationIdentityV1
+from deerflow_extension_api import InvocationIdentityV1, TrustedRunContextV1
 
 _DIGEST_VERSION = 1
 _AGENT_REVISION_VERSION = 1
@@ -20,6 +20,7 @@ _DECISION_EVIDENCE_V1 = {"version": 1, "decisions": []}
 # the worker installs them only from the accepted record after its fences pass.
 INVOCATION_IDENTITY_CONTEXT_KEY = "__deerflow_invocation_identity"
 INVOCATION_ORIGIN_CONTEXT_KEY = "__deerflow_invocation_origin"
+TRUSTED_RUN_CONTEXT_KEY = "__deerflow_trusted_run_context"
 
 
 def _canonical_value(value: Any) -> Any:
@@ -239,6 +240,7 @@ class AcceptedInvocation:
     accepted_context_digest: str
     runtime_identity_digest: str
     contributor_execution_digest: str
+    trusted_context: TrustedRunContextV1 | None = field(default=None, repr=False)
     decision_evidence: Mapping[str, Any] = field(default_factory=lambda: copy.deepcopy(_DECISION_EVIDENCE_V1))
 
     def __post_init__(self) -> None:
@@ -246,6 +248,8 @@ class AcceptedInvocation:
         object.__setattr__(self, "execution_options", _frozen_json_mapping(self.execution_options))
         object.__setattr__(self, "normalized_input", _deep_freeze(_canonical_value(self.normalized_input)))
         object.__setattr__(self, "decision_evidence", _frozen_json_mapping(self.decision_evidence))
+        if self.trusted_context is not None and not isinstance(self.trusted_context, TrustedRunContextV1):
+            raise TypeError("trusted_context must be TrustedRunContextV1 or None")
 
     @property
     def extension_manifest_digest(self) -> str | None:
@@ -273,9 +277,21 @@ class AcceptedInvocation:
         extension_generation: int,
         extension_manifest_digest: str | None = None,
         contributor_execution_digest: str,
+        trusted_context: TrustedRunContextV1 | None = None,
     ) -> AcceptedInvocation:
         if extension_manifest_digest is not None and (len(extension_manifest_digest) != 64 or any(character not in "0123456789abcdef" for character in extension_manifest_digest)):
             raise ValueError("extension_manifest_digest must be a lowercase SHA-256 digest")
+        if trusted_context is not None:
+            if principal.identity != trusted_context.identity:
+                raise ValueError("trusted context identity must match the accepted principal")
+            if origin.source_kind != trusted_context.origin.source_kind:
+                raise ValueError("trusted context Origin must match the accepted source")
+            if thread_id != trusted_context.thread_id:
+                raise ValueError("trusted context thread must match the accepted thread")
+            if agent_revision.agent_id != trusted_context.agent_revision.agent_id or agent_revision.digest != trusted_context.agent_revision.digest:
+                raise ValueError("trusted context agent revision must match the accepted revision")
+            if extension_generation != trusted_context.extension_generation or extension_manifest_digest != trusted_context.extension_manifest_digest:
+                raise ValueError("trusted context extension generation must match accepted evidence")
         principal_digest = canonical_digest({"version": _DIGEST_VERSION, "principal": principal.to_json()})
         base_origin_digest = canonical_digest({"version": _DIGEST_VERSION, "origin": origin.base_json()})
         accepted_context_digest = canonical_digest(
@@ -283,6 +299,7 @@ class AcceptedInvocation:
                 "version": _DIGEST_VERSION,
                 "context": context_references,
                 "contributor_execution_digest": contributor_execution_digest,
+                "trusted_context_execution_digest": None if trusted_context is None else trusted_context.execution_digest,
             }
         )
         runtime_identity_digest = canonical_digest(
@@ -320,10 +337,14 @@ class AcceptedInvocation:
             accepted_context_digest=accepted_context_digest,
             runtime_identity_digest=runtime_identity_digest,
             contributor_execution_digest=contributor_execution_digest,
+            trusted_context=trusted_context,
             decision_evidence=decision_evidence,
         )
 
     def to_persisted(self) -> dict[str, Any]:
+        decision_evidence = _deep_thaw(self.decision_evidence)
+        if self.trusted_context is not None:
+            decision_evidence["trusted_run_context"] = self.trusted_context.to_persisted_json()
         return {
             "origin_json": self.origin.to_json(),
             "principal_projection_json": self.principal.to_json(),
@@ -333,7 +354,7 @@ class AcceptedInvocation:
             "agent_revision_json": self.agent_revision.to_json(),
             "agent_revision_digest": self.agent_revision.digest,
             "extension_generation": self.extension_generation,
-            "decision_evidence_json": _deep_thaw(self.decision_evidence),
+            "decision_evidence_json": decision_evidence,
         }
 
     @classmethod
@@ -371,6 +392,9 @@ class AcceptedInvocation:
             storage_source=str(revision_json.get("storage_source") or "unknown"),
             storage_version=str(revision_json.get("storage_version") or "unknown"),
         )
+        decision_evidence = row.get("decision_evidence_json") or copy.deepcopy(_DECISION_EVIDENCE_V1)
+        trusted_json = decision_evidence.get("trusted_run_context") if isinstance(decision_evidence, Mapping) else None
+        trusted_context = TrustedRunContextV1.from_persisted_json(trusted_json) if isinstance(trusted_json, Mapping) else None
         return cls(
             principal=principal,
             origin=origin,
@@ -385,7 +409,8 @@ class AcceptedInvocation:
             accepted_context_digest=str(row.get("accepted_context_digest") or ""),
             runtime_identity_digest="",
             contributor_execution_digest="",
-            decision_evidence=row.get("decision_evidence_json") or copy.deepcopy(_DECISION_EVIDENCE_V1),
+            trusted_context=trusted_context,
+            decision_evidence=decision_evidence,
         )
 
 
@@ -397,5 +422,6 @@ __all__ = [
     "PrincipalProjection",
     "ResolvedAgentMaterialV1",
     "ResolvedAgentRevision",
+    "TRUSTED_RUN_CONTEXT_KEY",
     "canonical_digest",
 ]

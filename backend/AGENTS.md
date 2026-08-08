@@ -453,7 +453,8 @@ cannot load; optional plugins fail open with attributed diagnostics.
 The public package is `packages/extension-api/` and must never import `deerflow`. It owns
 the host-independent authorization contracts (`Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthorizationProvider`), invocation contributor contracts, and the
-restrictive invocation-constraints, required MCP call-preparation, split invocation identity, and health-probe contracts as of extension API 0.7.0; the old
+restrictive invocation-constraints, required MCP call-preparation, split invocation identity,
+trusted run-context, and health-probe contracts as of extension API 0.8.0; the old
 `deerflow.authz.provider` path is a compatibility re-export with object identity. Its
 registry exposes typed middleware, authorization-provider, `OriginContributor`,
 `RunContextContributor`, singular `InvocationConstraintsProvider`, and multi-contributor
@@ -470,16 +471,39 @@ Origin contributors receive only source kind, authenticated subject reference, a
 host-selected safe source references; run-context contributors receive the immutable
 principal projection, sealed Origin, bound thread, resolved agent revision, and optional
 external-key reference. Results are namespaced and limited to 32 scalar/list references,
-64-character ASCII keys, 1 KiB strings, and 8 KiB canonical output. Runtime-only values are
-never persisted; execution values and stable secret-handle IDs affect the aggregate digest,
-while correlation values do not. Calls run concurrently with a two-second timeout and are
-composed in contribution-ID order. Optional failures are omitted with redacted diagnostics;
+64-character ASCII keys, 1 KiB strings, and 8 KiB canonical output. Those count and byte
+limits also apply across the combined Origin and run-context result, and fully qualified keys
+must be unique. Runtime-only values are never persisted; approved persistable references and
+persistable stable secret-handle IDs enter accepted evidence, while ephemeral values remain
+only in the accepting process. Contributor storage labels are requests: the host admits only
+bounded persistable evidence, stable handle identifiers, and runtime-only execution values;
+runtime-only correlation has no consumer and is rejected. Calls run concurrently with a two-second timeout and are
+composed in contribution-ID order. Optional failures are omitted with diagnostics containing
+only a stable code, exception class, contribution ID, and correlation ID;
 required failures make the invocation indeterminate. Top-level `required_capabilities` is
 operator-only, restart-required configuration and accepts
 `origin_contributor:<id>` / `run_context_contributor:<id>`,
 `mcp_interceptor:<id>`, plus the singular
 `invocation_constraints.v1`; it must never be exposed through API-writable
 `extensions_config.json`.
+
+After both contributor phases, the Gateway creates one immutable
+`TrustedRunContextV1`. It contains the accepted split identity, final Origin (including
+contributor references), thread/external-key binding, agent/profile revisions, extension
+generation/manifest digest, approved persistable references, runtime-only execution
+references, and stable secret handles. The accepted-context digest binds that record in the
+same admission transaction through its execution-only projection, while a separate persisted
+evidence digest binds audit-only correlation without changing execution identity. The worker installs it under the reserved
+`__deerflow_trusted_run_context` key only after its fences; lead policy, constraints, MCP,
+and delegated subagents consume that exact record. The old free-form `authz_attributes`
+path is absent for accepted runs; compatibility policy gets a read-only namespaced view
+derived from the trusted record. Persisted rows retain only approved persistable values,
+persistable handle identifiers, and the runtime-only aggregate digest/count. If a restarted
+process cannot recover required ephemeral values, it terminalizes the run with
+`trusted_context_unavailable` before graph construction instead of guessing or rerunning
+contributors. Secret values are resolved, after authorization, only inside the operation
+that needs them; they never enter run kwargs, checkpoints, lifecycle events, public
+responses, manifests, or generic diagnostics.
 
 Authoritative contribution descriptors may expose a defaulted optional async health
 probe. The Capability Host publishes one startup-only manifest containing only

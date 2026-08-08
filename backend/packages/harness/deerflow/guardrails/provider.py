@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from deerflow_extension_api import InvocationIdentityV1, SealedOriginV1
+from deerflow_extension_api import InvocationIdentityV1, SealedOriginV1, TrustedRunContextV1
 
 
 @dataclass
@@ -32,9 +32,10 @@ class GuardrailRequest:
     # providers that don't read them.
     channel_user_id: str | None = None
     is_internal: bool = False
-    authz_attributes: dict[str, Any] = field(default_factory=dict)
+    authz_attributes: Mapping[str, Any] = field(default_factory=dict)
     identity: InvocationIdentityV1 | None = None
     origin: SealedOriginV1 | None = None
+    trusted_context: TrustedRunContextV1 | None = None
 
 
 @dataclass

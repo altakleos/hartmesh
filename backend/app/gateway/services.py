@@ -20,12 +20,15 @@ from deerflow_extension_api import (
     ActingServiceV1,
     EffectiveSubjectV1,
     InvocationIdentityV1,
+    NamespacedContextReferenceV1,
     OriginContributionRequestV1,
     PrincipalProjectionV1,
     ResolvedAgentRevisionReferenceV1,
+    ResolvedProfileRevisionReferenceV1,
     RunContextContributionRequestV1,
     SafeContextReferenceV1,
     SealedOriginV1,
+    TrustedRunContextV1,
 )
 from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage
@@ -102,6 +105,7 @@ from deerflow.runtime import (
 from deerflow.runtime.accepted_invocation import (
     INVOCATION_IDENTITY_CONTEXT_KEY,
     INVOCATION_ORIGIN_CONTEXT_KEY,
+    TRUSTED_RUN_CONTEXT_KEY,
     AcceptedInvocation,
     InvocationOrigin,
     PrincipalProjection,
@@ -471,6 +475,7 @@ _SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
         "langgraph_auth_user_id",
         INVOCATION_IDENTITY_CONTEXT_KEY,
         INVOCATION_ORIGIN_CONTEXT_KEY,
+        TRUSTED_RUN_CONTEXT_KEY,
     }
 )
 
@@ -1255,7 +1260,36 @@ def _contribution_json(composed: Any) -> tuple[dict[str, Any], ...]:
             "storage_class": item.reference.storage_class,
             "purpose": item.reference.purpose,
         }
-        for item in composed.persistable
+        for item in (
+            *composed.persistable,
+            *(handle for handle in getattr(composed, "secret_handles", ()) if handle.reference.storage_class == "persistable"),
+        )
+    )
+
+
+def _trusted_contribution_references(
+    composed: Any,
+    *,
+    capability_kind: str,
+) -> tuple[
+    tuple[NamespacedContextReferenceV1, ...],
+    tuple[NamespacedContextReferenceV1, ...],
+    tuple[NamespacedContextReferenceV1, ...],
+]:
+    def convert(items: Any) -> tuple[NamespacedContextReferenceV1, ...]:
+        return tuple(
+            NamespacedContextReferenceV1(
+                capability_id=f"{capability_kind}:{item.contribution_id}",
+                namespace=item.namespace,
+                reference=item.reference,
+            )
+            for item in items
+        )
+
+    return (
+        convert(composed.persistable),
+        convert(getattr(composed, "runtime_only", ())),
+        convert(getattr(composed, "secret_handles", ())),
     )
 
 
@@ -1610,6 +1644,8 @@ async def _seal_accepted_invocation(
     if contributor_host is None:
         origin_contributions = SimpleNamespace(
             persistable=(),
+            runtime_only=(),
+            secret_handles=(),
             execution_digest=empty_contributor_digest,
             diagnostics=(),
         )
@@ -1624,10 +1660,17 @@ async def _seal_accepted_invocation(
         )
     for diagnostic in origin_contributions.diagnostics:
         logger.warning(
-            "Optional invocation capability %s omitted (%s)",
+            "Optional invocation contributor omitted capability_id=%s contribution_id=%s diagnostic_code=%s error_class=%s correlation_id=%s",
             diagnostic.capability_id,
-            diagnostic.message,
+            diagnostic.contribution_id,
+            diagnostic.diagnostic_code,
+            diagnostic.error_class,
+            diagnostic.correlation_id,
         )
+    origin_persistable, origin_runtime_only, origin_secret_handles = _trusted_contribution_references(
+        origin_contributions,
+        capability_kind="origin_contributor",
+    )
     origin = InvocationOrigin(
         source_kind=intent.source_kind.value,
         references=base_references,
@@ -1653,14 +1696,39 @@ async def _seal_accepted_invocation(
         is_internal=principal.is_internal,
         identity=principal.identity,
     )
+    public_origin_references = _origin_request_references(base_references)
+    origin_contributor_references = (
+        *origin_persistable,
+        *origin_runtime_only,
+        *origin_secret_handles,
+    )
+    final_origin_digest = canonical_digest(
+        {
+            "version": 1,
+            "source_kind": origin.source_kind,
+            "references": [
+                {
+                    "key": reference.key,
+                    "value": reference.value,
+                    "storage_class": reference.storage_class,
+                    "purpose": reference.purpose,
+                }
+                for reference in public_origin_references
+            ],
+            "contributor_references": [reference.to_json() for reference in origin_contributor_references],
+        }
+    )
     public_origin = SealedOriginV1(
         source_kind=origin.source_kind,
-        references=_origin_request_references(base_references),
-        digest=canonical_digest({"version": 1, "origin": origin.base_json()}),
+        references=public_origin_references,
+        digest=final_origin_digest,
+        contributor_references=origin_contributor_references,
     )
     if contributor_host is None:
         context_contributions = SimpleNamespace(
             persistable=(),
+            runtime_only=(),
+            secret_handles=(),
             execution_digest=empty_contributor_digest,
             diagnostics=(),
         )
@@ -1679,10 +1747,17 @@ async def _seal_accepted_invocation(
         )
     for diagnostic in context_contributions.diagnostics:
         logger.warning(
-            "Optional invocation capability %s omitted (%s)",
+            "Optional invocation contributor omitted capability_id=%s contribution_id=%s diagnostic_code=%s error_class=%s correlation_id=%s",
             diagnostic.capability_id,
-            diagnostic.message,
+            diagnostic.contribution_id,
+            diagnostic.diagnostic_code,
+            diagnostic.error_class,
+            diagnostic.correlation_id,
         )
+    context_persistable, context_runtime_only, context_secret_handles = _trusted_contribution_references(
+        context_contributions,
+        capability_kind="run_context_contributor",
+    )
 
     contributor_execution_digest = canonical_digest(
         {
@@ -1706,6 +1781,30 @@ async def _seal_accepted_invocation(
     extension_generation = int(getattr(extensions, "generation", 0))
     capability_manifest = getattr(app_state, "capability_manifest", None)
     extension_manifest_digest = getattr(capability_manifest, "digest", None)
+    if principal.identity is None:  # pragma: no cover - new acceptance contract
+        raise RuntimeError("accepted principal is missing split identity")
+    model_profile = revision.material.model_profile
+    profile_id = str(model_profile.get("name") or "default")
+    external_key_reference = normalize_external_key(intent.external_key) if intent.external_key is not None else None
+    trusted_context = TrustedRunContextV1(
+        identity=principal.identity,
+        origin=public_origin,
+        thread_id=intent.thread_id,
+        external_key_reference=external_key_reference,
+        agent_revision=ResolvedAgentRevisionReferenceV1(
+            agent_id=revision.agent_id,
+            digest=revision.digest,
+        ),
+        profile_revision=ResolvedProfileRevisionReferenceV1(
+            profile_id=profile_id,
+            digest=canonical_digest({"version": 1, "model_profile": model_profile}),
+        ),
+        extension_generation=extension_generation,
+        extension_manifest_digest=extension_manifest_digest,
+        persistable_references=(*origin_persistable, *context_persistable),
+        runtime_only_references=(*origin_runtime_only, *context_runtime_only),
+        secret_handles=(*origin_secret_handles, *context_secret_handles),
+    )
     accepted = AcceptedInvocation.seal(
         principal=principal,
         origin=origin,
@@ -1723,6 +1822,7 @@ async def _seal_accepted_invocation(
         extension_generation=extension_generation,
         extension_manifest_digest=extension_manifest_digest,
         contributor_execution_digest=contributor_execution_digest,
+        trusted_context=trusted_context,
     )
     # These objects are server-owned and installed after all caller context is
     # scrubbed. The worker and delegated subagents inherit the same accepted

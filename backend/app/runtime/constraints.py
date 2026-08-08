@@ -62,19 +62,24 @@ class ProviderInvocationConstraints:
                     request_digest=request_digest,
                     agent_revision_digest=accepted.agent_revision.digest,
                     identity=accepted.principal.identity,
-                    origin=SealedOriginV1(
-                        source_kind=accepted.origin.source_kind,
-                        references=tuple(
-                            SafeContextReferenceV1(
-                                key=key,
-                                value=value,
-                                storage_class="persistable",
-                                purpose="correlation",
-                            )
-                            for key, value in sorted(accepted.origin.references.items())
-                        ),
-                        digest=accepted.base_origin_digest,
+                    origin=(
+                        accepted.trusted_context.origin
+                        if accepted.trusted_context is not None
+                        else SealedOriginV1(
+                            source_kind=accepted.origin.source_kind,
+                            references=tuple(
+                                SafeContextReferenceV1(
+                                    key=key,
+                                    value=value,
+                                    storage_class="persistable",
+                                    purpose="correlation",
+                                )
+                                for key, value in sorted(accepted.origin.references.items())
+                            ),
+                            digest=accepted.base_origin_digest,
+                        )
                     ),
+                    trusted_context=accepted.trusted_context,
                 ),
                 host_max_total_subagents=_host_subagent_ceiling(accepted),
                 runtime_enforceable=True,

@@ -85,6 +85,42 @@ def test_create_app_exposes_one_canonical_live_diagnostics_list(monkeypatch):
     ]
 
 
+def test_create_app_retains_structured_redacted_contributor_startup_diagnostic(monkeypatch):
+    from deerflow_extension_api import (
+        ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION,
+        ORIGIN_CONTRIBUTOR_KIND,
+        OriginContributorFactory,
+    )
+
+    import deerflow.extensions as extensions_module
+
+    def broken_factory():
+        raise RuntimeError("credential=resolved-secret-value")
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("demo:install"):
+        registry.origin_contributor(
+            OriginContributorFactory(
+                contribution_id="demo-origin",
+                capability_api_version=ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION,
+                factory=broken_factory,
+                kind=ORIGIN_CONTRIBUTOR_KIND,
+            )
+        )
+    loaded = registry.build()
+    monkeypatch.setattr(extensions_module, "load_extensions", lambda plugins: (loaded, []))
+
+    from app.gateway.app import create_app
+
+    app = create_app()
+    diagnostic = next(item for item in app.state.extension_diagnostics if item.source == "origin_contributor:demo-origin")
+    assert diagnostic.contribution_id == "demo-origin"
+    assert diagnostic.code == "initialization_failed"
+    assert diagnostic.error_class == "RuntimeError"
+    assert len(diagnostic.correlation_id or "") == 32
+    assert "resolved-secret-value" not in repr(diagnostic)
+
+
 def test_create_app_fails_open_when_extension_loading_raises_unexpectedly(monkeypatch):
     import deerflow.extensions as extensions_module
 

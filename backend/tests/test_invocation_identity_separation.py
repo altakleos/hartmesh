@@ -11,8 +11,11 @@ from deerflow_extension_api import (
     EffectiveSubjectV1,
     InvocationIdentityV1,
     Principal,
+    ResolvedAgentRevisionReferenceV1,
+    ResolvedProfileRevisionReferenceV1,
     SafeContextReferenceV1,
     SealedOriginV1,
+    TrustedRunContextV1,
 )
 
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
@@ -485,6 +488,28 @@ async def test_start_observe_and_cancel_share_effective_subject_and_actor() -> N
         effective_subject=EffectiveSubjectV1(kind="human", subject_id="owner-1", role="member"),
         acting_service=ActingServiceV1(service_id="channel:telegram"),
     )
+    agent_revision = ResolvedAgentRevision(
+        agent_id="lead_agent",
+        digest="a" * 64,
+        storage_source="builtin",
+        storage_version="1",
+    )
+    trusted_context = TrustedRunContextV1(
+        identity=identity,
+        origin=SealedOriginV1(source_kind="native_channel", digest="c" * 64),
+        thread_id="thread-1",
+        external_key_reference=None,
+        agent_revision=ResolvedAgentRevisionReferenceV1(
+            agent_id=agent_revision.agent_id,
+            digest=agent_revision.digest,
+        ),
+        profile_revision=ResolvedProfileRevisionReferenceV1(
+            profile_id="default",
+            digest="d" * 64,
+        ),
+        extension_generation=1,
+        extension_manifest_digest=None,
+    )
     accepted = AcceptedInvocation.seal(
         principal=PrincipalProjection(identity=identity, channel_user_id="telegram-user"),
         origin=InvocationOrigin(
@@ -493,16 +518,12 @@ async def test_start_observe_and_cancel_share_effective_subject_and_actor() -> N
         ),
         thread_id="thread-1",
         context_references={},
-        agent_revision=ResolvedAgentRevision(
-            agent_id="lead_agent",
-            digest="a" * 64,
-            storage_source="builtin",
-            storage_version="1",
-        ),
+        agent_revision=agent_revision,
         normalized_input={"messages": []},
         execution_options={},
         extension_generation=1,
         contributor_execution_digest="b" * 64,
+        trusted_context=trusted_context,
     )
 
     class Provider:
@@ -566,6 +587,7 @@ async def test_start_observe_and_cancel_share_effective_subject_and_actor() -> N
     assert all(request.principal.identity is identity for request in provider.requests)
     assert all(request.principal.is_internal is False for request in provider.requests)
     assert all(request.principal.identity.acting_service.service_id == "channel:telegram" for request in provider.requests)
+    assert all(request.trusted_context is trusted_context for request in provider.requests)
 
 
 def test_accepted_identity_overrides_legacy_internal_runtime_flag() -> None:
@@ -633,6 +655,28 @@ async def test_constraint_projection_receives_identity_and_final_origin() -> Non
         effective_subject=EffectiveSubjectV1(kind="human", subject_id="owner-1", role="member"),
         acting_service=ActingServiceV1(service_id="scheduler"),
     )
+    agent_revision = ResolvedAgentRevision(
+        agent_id="lead_agent",
+        digest="a" * 64,
+        storage_source="builtin",
+        storage_version="1",
+    )
+    trusted_context = TrustedRunContextV1(
+        identity=identity,
+        origin=SealedOriginV1(source_kind="scheduled_task", digest="d" * 64),
+        thread_id="thread-1",
+        external_key_reference="raw:occurrence-1",
+        agent_revision=ResolvedAgentRevisionReferenceV1(
+            agent_id=agent_revision.agent_id,
+            digest=agent_revision.digest,
+        ),
+        profile_revision=ResolvedProfileRevisionReferenceV1(
+            profile_id="default",
+            digest="e" * 64,
+        ),
+        extension_generation=1,
+        extension_manifest_digest=None,
+    )
     accepted = AcceptedInvocation.seal(
         principal=PrincipalProjection(identity=identity),
         origin=InvocationOrigin(
@@ -641,16 +685,12 @@ async def test_constraint_projection_receives_identity_and_final_origin() -> Non
         ),
         thread_id="thread-1",
         context_references={},
-        agent_revision=ResolvedAgentRevision(
-            agent_id="lead_agent",
-            digest="a" * 64,
-            storage_source="builtin",
-            storage_version="1",
-        ),
+        agent_revision=agent_revision,
         normalized_input={"messages": []},
         execution_options={},
         extension_generation=1,
         contributor_execution_digest="b" * 64,
+        trusted_context=trusted_context,
     )
 
     class Host:
@@ -683,7 +723,8 @@ async def test_constraint_projection_receives_identity_and_final_origin() -> Non
 
     assert host.request.identity is identity
     assert host.request.origin.source_kind == "scheduled_task"
-    assert host.request.origin.digest == accepted.base_origin_digest
+    assert host.request.origin is trusted_context.origin
+    assert host.request.trusted_context is trusted_context
 
 
 def test_mcp_facts_retain_effective_subject_actor_and_origin() -> None:

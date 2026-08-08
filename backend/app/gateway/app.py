@@ -661,7 +661,18 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         loaded_extensions,
         required_capabilities=required_capabilities,
     )
-    extension_diagnostics.extend(Diagnostic.warning(item.capability_id, item.message) for item in contributor_host.startup_diagnostics)
+    extension_diagnostics.extend(
+        Diagnostic(
+            level="warning",
+            source=item.capability_id,
+            message=item.error_class,
+            code=item.diagnostic_code,
+            error_class=item.error_class,
+            correlation_id=item.correlation_id,
+            contribution_id=item.contribution_id,
+        )
+        for item in contributor_host.startup_diagnostics
+    )
     from deerflow.extensions.constraints import InvocationConstraintsHost
 
     invocation_constraints_host = InvocationConstraintsHost(

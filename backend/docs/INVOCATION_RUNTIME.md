@@ -29,6 +29,16 @@ extension generation, and versioned principal, base-Origin, accepted-context,
 runtime-identity, and contributor-execution digests. Contributors cannot replace host-owned
 principal, thread, agent, source kind, or base-source fields.
 
+After contributor validation the Gateway also seals one `TrustedRunContextV1`: split
+identity, final Origin including contributor references, thread/external-key binding,
+agent/profile revisions, extension generation/manifest digest, approved persistable
+references, runtime-only execution references, and stable secret handles. Its digest is part
+of the committed evidence. A separate execution digest feeds accepted-context identity and
+excludes contributor correlation, so audit correlation is bound without changing execution
+semantics. The accepting worker binds the run ID
+and installs this exact immutable object at the lead execution seam; authorization,
+constraints, MCP, and subagents consume it rather than assembling parallel dictionaries.
+
 Identity has three non-interchangeable parts. `EffectiveSubjectV1` is the human or service
 whose authority the invocation exercises. `ActingServiceV1` is optional and identifies the
 authenticated/delegating service representing that subject. `InvocationOrigin` contains
@@ -51,13 +61,32 @@ of the harness and Gateway. Contributor factories are startup-only, loader-attri
 capabilities. Calls are concurrent, each has a two-second timeout, and successful results
 are composed in stable contribution-ID order.
 
-Results contain only bounded namespaced scalar/list references. Persistable safe Origin
-facts may enter `origin_json`; runtime-only values never do. Execution references and stable
-secret-handle identifiers affect the accepted-context digest, correlation references do
-not. Raw credentials, arbitrary objects, nested maps, and plugin exception text are never
-persisted or reflected in diagnostics. Optional failures are omitted; a configured required
+Results contain only bounded namespaced scalar/list references. The 32-reference and 8 KiB
+canonical limits apply both per contributor result and across the combined Origin/run-context
+products; fully qualified keys must be unique. Approved persistable references and
+persistable stable-handle identifiers enter accepted evidence. Runtime-only execution values
+stay only in the accepting process, while their digest/count remains bound to acceptance.
+Storage labels are contributor requests, not authority: the host applies this finite policy
+and rejects runtime-only correlation because it has no approved consumer.
+Correlation references are retained for audit but do not change execution identity. Raw
+credentials, arbitrary objects, nested maps, and plugin exception text are never persisted
+or reflected in diagnostics; a diagnostic contains only stable code, exception class,
+contribution ID, and correlation ID. Optional failures are omitted; a configured required
 capability fails startup when absent/broken and fails an invocation closed when it times out
 or returns invalid data.
+
+The worker reserves `__deerflow_trusted_run_context` for the host-owned record and removes
+caller values plus the old free-form `authz_attributes` map. Compatibility policy receives
+only a read-only namespaced view derived from accepted execution references. Stable secret
+handles are not credentials or authority; the already-authorized narrow MCP/operation
+boundary may resolve one transiently, and the resolved value never enters generic run kwargs,
+rows, checkpoints, lifecycle/rich events, public responses, or logs. A known-key replay
+reuses accepted evidence without rerunning contributors. Under the supported single-process
+recovery contract, a restart that loses required ephemeral values ends the retained run with
+`trusted_context_unavailable` before graph construction rather than reconstructing them.
+The trusted-context evidence and execution digests are calculated from persisted-safe
+projections plus the retained runtime-only digest/count, so both remain stable after
+reconstruction even though ephemeral values are absent.
 
 ## Persistence
 
@@ -68,6 +97,8 @@ material, credentials, and runtime-only contributor references are not serialize
 run additionally stores an internal request projection in its existing run kwargs so
 retries can be compared against accepted routing and contributor evidence without resolving
 today's mutable host state; this internal projector is not returned by the run API.
+The versioned `decision_evidence_json` also carries the safe persisted trusted-context
+projection; older rows without it remain readable through the conservative legacy path.
 Historical null rows remain readable. Auxiliary checkpoint/artifact operation rows carry
 none of these facts.
 
@@ -111,7 +142,7 @@ same provider snapshot used by route, resource, tool, model, skill, and agent as
 
 ## Restrictive invocation constraints
 
-`deerflow-extension-api` 0.7.0 defines one optional, singular
+`deerflow-extension-api` 0.8.0 defines one optional, singular
 `InvocationConstraintsProvider`. Gateway invokes it only for a genuinely absent invocation,
 after invocation-start authorization allows and before atomic acceptance. The request binds
 the canonical request digest and pinned agent-revision digest. The strict v1 projection may

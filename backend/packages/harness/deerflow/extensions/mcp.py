@@ -21,6 +21,7 @@ from deerflow_extension_api import (
     ResolvedAgentRevisionReferenceV1,
     SafeContextReferenceV1,
     SealedOriginV1,
+    TrustedRunContextV1,
 )
 
 from deerflow.authz.runtime import (
@@ -49,12 +50,15 @@ class McpInvocationFacts:
     run_id: str
     agent_revision: ResolvedAgentRevisionReferenceV1
     extension_generation: int
+    trusted_context: TrustedRunContextV1 | None = None
 
     @classmethod
     def from_accepted(cls, accepted: Any, *, run_id: str) -> McpInvocationFacts:
         principal = accepted.principal
         origin = accepted.origin
         revision = accepted.agent_revision
+        accepted_trusted_context = getattr(accepted, "trusted_context", None)
+        trusted_context = accepted_trusted_context.bind_run(run_id) if isinstance(accepted_trusted_context, TrustedRunContextV1) else None
         return cls(
             principal=PrincipalProjectionV1(
                 user_id=principal.user_id,
@@ -65,18 +69,22 @@ class McpInvocationFacts:
                 is_internal=principal.is_internal,
                 identity=principal.identity,
             ),
-            origin=SealedOriginV1(
-                source_kind=origin.source_kind,
-                references=tuple(
-                    SafeContextReferenceV1(
-                        key=key,
-                        value=value,
-                        storage_class="persistable",
-                        purpose="correlation",
-                    )
-                    for key, value in sorted(origin.references.items())
-                ),
-                digest=accepted.base_origin_digest,
+            origin=(
+                trusted_context.origin
+                if trusted_context is not None
+                else SealedOriginV1(
+                    source_kind=origin.source_kind,
+                    references=tuple(
+                        SafeContextReferenceV1(
+                            key=key,
+                            value=value,
+                            storage_class="persistable",
+                            purpose="correlation",
+                        )
+                        for key, value in sorted(origin.references.items())
+                    ),
+                    digest=accepted.base_origin_digest,
+                )
             ),
             thread_id=accepted.thread_id,
             run_id=run_id,
@@ -85,6 +93,7 @@ class McpInvocationFacts:
                 digest=revision.digest,
             ),
             extension_generation=accepted.extension_generation,
+            trusted_context=trusted_context,
         )
 
 
@@ -290,6 +299,7 @@ class McpInterceptorHost:
                 or principal.channel_user_id != facts.principal.channel_user_id
                 or principal.is_internal is not facts.principal.is_internal
                 or principal.identity != facts.principal.identity
+                or authz_request.trusted_context != facts.trusted_context
                 or authz_request.context.get("origin") != facts.origin
                 or authz_request.context.get("thread_id") != facts.thread_id
                 or authz_request.context.get("run_id") != facts.run_id
@@ -339,6 +349,7 @@ class McpInterceptorHost:
                         server_name=initial_server_name,
                         tool_name=initial_name,
                         arguments_digest=arguments_digest,
+                        trusted_context=facts.trusted_context,
                     )
                 except Exception:
                     raise McpCallPreparationError("preparation_indeterminate")

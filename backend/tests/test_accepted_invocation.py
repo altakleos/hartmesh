@@ -11,6 +11,7 @@ from deerflow_extension_api import (
     ActingServiceV1,
     EffectiveSubjectV1,
     InvocationIdentityV1,
+    SafeContextReferenceV1,
     SealedOriginV1,
 )
 
@@ -401,7 +402,20 @@ async def test_every_launch_source_is_sealed_with_host_selected_origin(
         async def contribute_origin(self, contributor_request):
             self.origin_requests.append(contributor_request)
             return SimpleNamespace(
-                persistable=(),
+                persistable=(
+                    SimpleNamespace(
+                        contribution_id="audit",
+                        namespace="audit",
+                        reference=SafeContextReferenceV1(
+                            key="tenant",
+                            value="tenant-1",
+                            storage_class="persistable",
+                            purpose="correlation",
+                        ),
+                    ),
+                ),
+                runtime_only=(),
+                secret_handles=(),
                 execution_digest=canonical_digest({"version": 1, "execution": []}),
                 diagnostics=(),
             )
@@ -410,6 +424,30 @@ async def test_every_launch_source_is_sealed_with_host_selected_origin(
             self.context_requests.append(contributor_request)
             return SimpleNamespace(
                 persistable=(),
+                runtime_only=(
+                    SimpleNamespace(
+                        contribution_id="routing",
+                        namespace="routing",
+                        reference=SafeContextReferenceV1(
+                            key="target",
+                            value="ephemeral-route",
+                            storage_class="runtime_only",
+                            purpose="execution",
+                        ),
+                    ),
+                ),
+                secret_handles=(
+                    SimpleNamespace(
+                        contribution_id="routing",
+                        namespace="routing",
+                        reference=SafeContextReferenceV1(
+                            key="credential",
+                            value="vault://tenant/api",
+                            storage_class="persistable",
+                            purpose="secret_handle",
+                        ),
+                    ),
+                ),
                 execution_digest=canonical_digest({"version": 1, "execution": []}),
                 diagnostics=(),
             )
@@ -453,6 +491,15 @@ async def test_every_launch_source_is_sealed_with_host_selected_origin(
     assert accepted.extension_generation == 9
     assert accepted.extension_manifest_digest == "f" * 64
     assert accepted.agent_revision.material is revision.material
+    assert accepted.trusted_context is not None
+    assert accepted.trusted_context.origin is contributor_spy.context_requests[0].origin
+    assert accepted.trusted_context.persistable_references[0].fully_qualified_key == "audit.tenant"
+    assert accepted.trusted_context.runtime_only_references[0].reference.value == "ephemeral-route"
+    assert accepted.trusted_context.secret_handles[0].reference.value == "vault://tenant/api"
+    accepted_wire = repr(accepted.to_persisted())
+    assert "tenant-1" in accepted_wire
+    assert "vault://tenant/api" in accepted_wire
+    assert "ephemeral-route" not in accepted_wire
     assert [item.source_kind for item in contributor_spy.origin_requests] == [expected["source_kind"]]
     assert [item.thread_id for item in contributor_spy.context_requests] == [intent.thread_id]
     assert contributor_spy.context_requests[0].agent_revision.digest == revision.digest

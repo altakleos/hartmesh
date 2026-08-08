@@ -129,6 +129,9 @@ REDACTED_CONTEXT_KEYS = frozenset(
         _SECRETS_BINDING_AUDIT_KEY,
         _SLASH_SKILL_ACTIVATION_RUN_KEY,
         SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY,
+        "__deerflow_trusted_run_context",
+        "__deerflow_invocation_origin",
+        "__deerflow_mcp_invocation_facts",
     }
 )
 

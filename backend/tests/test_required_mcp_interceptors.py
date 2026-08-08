@@ -247,9 +247,13 @@ def _invocation_runtime(provider, *, generation: int = 7, journal=None):
         ActingServiceV1,
         EffectiveSubjectV1,
         InvocationIdentityV1,
+        NamespacedContextReferenceV1,
         PrincipalProjectionV1,
         ResolvedAgentRevisionReferenceV1,
+        ResolvedProfileRevisionReferenceV1,
+        SafeContextReferenceV1,
         SealedOriginV1,
+        TrustedRunContextV1,
     )
 
     from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
@@ -260,6 +264,7 @@ def _invocation_runtime(provider, *, generation: int = 7, journal=None):
     from deerflow.runtime.accepted_invocation import (
         INVOCATION_IDENTITY_CONTEXT_KEY,
         INVOCATION_ORIGIN_CONTEXT_KEY,
+        TRUSTED_RUN_CONTEXT_KEY,
     )
 
     identity = InvocationIdentityV1(
@@ -270,7 +275,40 @@ def _invocation_runtime(provider, *, generation: int = 7, journal=None):
         ),
         acting_service=ActingServiceV1(service_id="embedded:test"),
     )
-    origin = SealedOriginV1(source_kind="service", digest="a" * 64)
+    contributor_reference = NamespacedContextReferenceV1(
+        capability_id="run_context_contributor:routing",
+        namespace="routing",
+        reference=SafeContextReferenceV1(
+            key="target",
+            value="ephemeral-route",
+            storage_class="runtime_only",
+            purpose="execution",
+        ),
+    )
+    origin = SealedOriginV1(
+        source_kind="service",
+        digest="a" * 64,
+        contributor_references=(contributor_reference,),
+    )
+    revision = ResolvedAgentRevisionReferenceV1(
+        agent_id="lead_agent",
+        digest="b" * 64,
+    )
+    trusted_context = TrustedRunContextV1(
+        identity=identity,
+        origin=origin,
+        thread_id="thread-1",
+        external_key_reference="raw:request-1",
+        agent_revision=revision,
+        profile_revision=ResolvedProfileRevisionReferenceV1(
+            profile_id="default",
+            digest="c" * 64,
+        ),
+        extension_generation=generation,
+        extension_manifest_digest="d" * 64,
+        runtime_only_references=(contributor_reference,),
+        run_id="run-1",
+    )
 
     context = {
         "user_id": "user-1",
@@ -279,17 +317,16 @@ def _invocation_runtime(provider, *, generation: int = 7, journal=None):
         "run_id": "run-1",
         INVOCATION_IDENTITY_CONTEXT_KEY: identity,
         INVOCATION_ORIGIN_CONTEXT_KEY: origin,
+        TRUSTED_RUN_CONTEXT_KEY: trusted_context,
         AUTHORIZATION_PROVIDER_CONTEXT_KEY: provider,
         MCP_INVOCATION_FACTS_CONTEXT_KEY: McpInvocationFacts(
             principal=PrincipalProjectionV1(identity=identity),
             origin=origin,
             thread_id="thread-1",
             run_id="run-1",
-            agent_revision=ResolvedAgentRevisionReferenceV1(
-                agent_id="lead_agent",
-                digest="b" * 64,
-            ),
+            agent_revision=revision,
             extension_generation=generation,
+            trusted_context=trusted_context,
         ),
     }
     if journal is not None:
@@ -340,6 +377,7 @@ async def _call_with_authorization(interceptor, request, handler, provider):
             "timestamp": "2026-08-07T00:00:00+00:00",
             "origin": facts.origin,
         },
+        trusted_context=facts.trusted_context,
     )
     with bind_guardrail_provider_receipt(AuthorizedToolCallReceipt(provider=provider, request=authz_request)):
         return await interceptor(request, handler)
@@ -798,10 +836,13 @@ async def test_required_preparations_compose_in_id_order_and_handler_runs_once()
     assert projections[0].arguments_digest == projections[1].arguments_digest
     assert projections[0].principal.user_id == "user-1"
     assert projections[0].origin.source_kind == "service"
+    assert projections[0].origin.contributor_references[0].fully_qualified_key == "routing.target"
     assert projections[0].thread_id == "thread-1"
     assert projections[0].run_id == "run-1"
     assert projections[0].agent_revision.agent_id == "lead_agent"
     assert projections[0].extension_generation == 7
+    assert projections[0].trusted_context is request.runtime.context["__deerflow_trusted_run_context"]
+    assert projections[0].trusted_context.runtime_only_references[0].reference.value == "ephemeral-route"
 
 
 @pytest.mark.asyncio

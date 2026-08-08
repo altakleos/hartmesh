@@ -825,6 +825,14 @@ same rule, whereas system schedules and embedded service calls use service subje
 inventing a human. The split identity is retained for start/observe/cancel decisions, MCP
 calls, and delegated subagents; caller-supplied internal or source flags are ignored.
 
+Trusted invocation contributors feed one bounded, immutable run context shared by the lead
+agent, authorization and constraint checks, MCP preparation, and delegated subagents.
+Approved persistable references and stable secret-handle identifiers are digest-bound to the
+accepted run; runtime-only execution values stay in the accepting process and never enter
+rows, checkpoints, lifecycle events, HTTP responses, or logs. A replay reuses the accepted
+evidence without calling contributors again, and a recovered run whose required ephemeral
+values are unavailable fails safely before graph execution.
+
 Advanced deployments can also extend the agent runtime itself by declaring zero-argument `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. DeerFlow loads the same configured class list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, and broken modules fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Per-context parameterization and separate lead-only/subagent-only middleware lists are not supported yet.
 
 For packaged and configurable middleware integrations, use the top-level `plugins:` list

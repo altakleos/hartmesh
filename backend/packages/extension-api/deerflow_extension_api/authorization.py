@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from deerflow_extension_api.health import CapabilityHealthProbe
 from deerflow_extension_api.identity import InvocationIdentityV1
+
+if TYPE_CHECKING:
+    from deerflow_extension_api.contributors import TrustedRunContextV1
 
 AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION = "1.0"
 AUTHORIZATION_PROVIDER_KIND = "authorization_provider"
@@ -72,6 +75,7 @@ class AuthzRequest:
     action: str
     target: str
     context: dict[str, Any] = field(default_factory=dict)
+    trusted_context: TrustedRunContextV1 | None = None
 
 
 @dataclass
