@@ -74,19 +74,39 @@ def scope_for_http(principal_kind: str, server_subject_id: str) -> str:
 
 def scope_for_channel(
     provider: str,
-    connection_id: str,
+    binding_reference: str,
     workspace_or_empty: str,
     chat_id: str,
+    *,
+    binding_kind: str = "connection",
 ) -> str:
-    return _scope(
-        "channel",
-        [
+    """Return a native-channel scope without changing legacy connection scopes."""
+
+    binding_kind = _require_external_string(binding_kind, field="binding kind")
+    if binding_kind == "connection":
+        # This tuple is deliberately unchanged: accepted connection-backed rows
+        # must remain replayable after verified route bindings are introduced.
+        parts = [
             "channel",
             _require_external_string(provider, field="provider"),
-            _require_external_string(connection_id, field="connection id"),
+            _require_external_string(binding_reference, field="connection id"),
             _require_external_string(workspace_or_empty, field="workspace", allow_empty=True),
             _require_external_string(chat_id, field="chat id"),
-        ],
+        ]
+    elif binding_kind == "webhook_route":
+        parts = [
+            "channel",
+            _require_external_string(provider, field="provider"),
+            "webhook_route",
+            _require_external_string(binding_reference, field="binding reference"),
+            _require_external_string(workspace_or_empty, field="workspace", allow_empty=True),
+            _require_external_string(chat_id, field="chat id"),
+        ]
+    else:
+        raise ValueError("unsupported native binding kind")
+    return _scope(
+        "channel",
+        parts,
     )
 
 

@@ -36,6 +36,10 @@ from app.runtime.invocation import (
     InvocationRuntime,
     PreparedLaunch,
 )
+from app.runtime.native_binding import (
+    InternalVerifiedNativeBinding,
+    InternalVerifiedNativeBindingKind,
+)
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.persistence.base import Base
 from deerflow.persistence.run.model import RunRow
@@ -659,6 +663,10 @@ async def test_internal_source_mappings_use_only_trusted_scope_facts(monkeypatch
                 channel_user_id="sender-1",
                 resolved_assistant_id="lead_agent",
                 resolved_agent_name=None,
+                verified_binding=InternalVerifiedNativeBinding(
+                    kind=InternalVerifiedNativeBindingKind.connection,
+                    reference="connection-1",
+                ),
             ),
         )
     )
@@ -1076,6 +1084,10 @@ async def test_channel_redelivery_bypasses_ttl_and_converges_in_sql_store(
         channel_user_id="sender-1",
         resolved_assistant_id="lead_agent",
         resolved_agent_name=None,
+        verified_binding=InternalVerifiedNativeBinding(
+            kind=InternalVerifiedNativeBindingKind.connection,
+            reference="connection-1",
+        ),
     )
 
     def intent(

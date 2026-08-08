@@ -17,7 +17,10 @@ unset, the route is not mounted at all (`/api/webhooks/github` responds
 anyway for local development or loopback testing — every delivery is
 then accepted unverified with a WARNING log line.
 
-After verification the payload is fanned out by :func:`fanout_event` into
+After verification the route passes an immutable request attestation to
+:func:`fanout_event`. The dispatcher combines it with the trusted installation,
+owner, canonical agent, and repository match to create a verified route binding;
+the raw payload cannot supply that binding. The payload is then fanned out into
 :class:`InboundMessage` instances on the channel bus, one per matching
 custom agent binding. The :class:`GitHubChannel` (registered alongside
 Feishu/Slack/etc.) takes care of posting the agent's reply back to GitHub.
@@ -34,7 +37,10 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from app.gateway.github.dispatcher import fanout_event
+from app.gateway.github.dispatcher import (
+    VerifiedGitHubWebhookRequest,
+    fanout_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +226,7 @@ async def receive_github_webhook(
     body = await request.body()
 
     secret = _get_webhook_secret()
+    verified_request: VerifiedGitHubWebhookRequest | None = None
     if secret is None:
         if not _unverified_webhooks_allowed():
             # Should be unreachable if startup-time is_route_enabled() was honored,
@@ -250,6 +257,10 @@ async def receive_github_webhook(
                 x_github_delivery,
             )
             raise HTTPException(status_code=401, detail="Invalid or missing X-Hub-Signature-256")
+        try:
+            verified_request = VerifiedGitHubWebhookRequest(x_github_delivery)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid X-GitHub-Delivery") from exc
 
     if not x_github_event:
         raise HTTPException(status_code=400, detail="Missing X-GitHub-Event header")
@@ -355,6 +366,7 @@ async def receive_github_webhook(
                     x_github_delivery,
                     payload,
                     operator_default_mention_login=operator_default_mention_login,
+                    verified_request=verified_request,
                 )
             except Exception as exc:  # noqa: BLE001 — re-raised as 503 below
                 logger.exception(

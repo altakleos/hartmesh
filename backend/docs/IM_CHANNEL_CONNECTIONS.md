@@ -434,6 +434,14 @@ Connection records live in SQL tables under `deerflow.persistence.channel_connec
 - `channel_credentials`: reserved for future provider-token flows, not used by the local/private binding flow.
 
 Incoming messages that resolve to a connection carry `connection_id`, `owner_user_id`, and `workspace_id`. `ChannelManager` uses `owner_user_id` as the DeerFlow run user id and preserves the raw platform user id as `channel_user_id`.
+After re-reading that connection by provider identity and matching its active owner,
+the host creates the `connection` source binding used by durable idempotency and
+sealed Origin evidence. The ordinary path performs that read in `ChannelManager`;
+Buzz performs the same repository lookup in its signed relay adapter before its
+channel-specific manager policy. A claimed connection or binding on the message is
+not sufficient. Signed webhook channels such as GitHub do not create a synthetic
+connection row: they use a separate authenticated route binding and keep their
+thread mapping in the ordinary channel store.
 
 Runtime provider credentials are deployment-level bot secrets, not user-owned
 connection credentials. They can come from `channels.*` in `config.yaml` or

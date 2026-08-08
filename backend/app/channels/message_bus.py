@@ -11,6 +11,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from app.runtime.native_binding import InternalVerifiedNativeBinding
+
 logger = logging.getLogger(__name__)
 
 PENDING_CLARIFICATION_METADATA_KEY = "pending_clarification"
@@ -53,6 +55,8 @@ class InboundMessage:
         owner_user_id: DeerFlow user id that owns the channel connection.
             Platform user ids stay in ``user_id``.
         workspace_id: Optional external workspace/guild/team id.
+        verified_source_binding: Host-owned source binding. Provider payloads
+            and arbitrary metadata cannot populate this field.
         files: Optional list of file attachments (platform-specific dicts).
         metadata: Arbitrary extra data from the channel.
         created_at: Unix timestamp when the message was created.
@@ -68,6 +72,7 @@ class InboundMessage:
     connection_id: str | None = None
     owner_user_id: str | None = None
     workspace_id: str | None = None
+    verified_source_binding: InternalVerifiedNativeBinding | None = None
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)

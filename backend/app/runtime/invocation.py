@@ -13,6 +13,7 @@ from typing import Any, Literal, Protocol
 from deerflow_extension_api import ConstraintProjectionV1, ConstraintProjectionV2, InvocationIdentityV1
 
 from app.runtime.idempotency import CanonicalCallerIntent
+from app.runtime.native_binding import InternalVerifiedNativeBinding
 from deerflow.runtime import CancelOutcome, DisconnectMode, RunRecord
 from deerflow.runtime.accepted_invocation import AcceptedInvocation
 from deerflow.runtime.runs.lifecycle_query import LifecyclePage, LifecycleQuery
@@ -71,6 +72,7 @@ class InternalNativeChannelFacts:
     channel_user_id: str
     resolved_assistant_id: str
     resolved_agent_name: str | None
+    verified_binding: InternalVerifiedNativeBinding | None = None
 
 
 @dataclass(frozen=True)
