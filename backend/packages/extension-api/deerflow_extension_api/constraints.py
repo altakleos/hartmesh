@@ -17,6 +17,7 @@ from deerflow_extension_api.contributors import (
     TrustedRunContextV1,
 )
 from deerflow_extension_api.health import CapabilityHealthProbe
+from deerflow_extension_api.identifiers import validate_thread_identifier
 from deerflow_extension_api.identity import InvocationIdentityV1
 
 INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION = "1.0"
@@ -44,7 +45,7 @@ def _validate_digest(value: object, *, field_name: str) -> str:
     return value
 
 
-def _validate_identifier(value: object, *, field_name: str) -> str:
+def _validate_policy_identifier(value: object, *, field_name: str) -> str:
     if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a 1-128 character ASCII identifier")
     return value
@@ -93,14 +94,14 @@ class ConstraintProjectionV1:
     def __post_init__(self) -> None:
         _validate_digest(self.request_digest, field_name="request_digest")
         _validate_digest(self.agent_revision_digest, field_name="agent_revision_digest")
-        _validate_identifier(self.projection_revision, field_name="projection_revision")
+        _validate_policy_identifier(self.projection_revision, field_name="projection_revision")
         issued_at = _validate_aware(self.issued_at, field_name="issued_at")
         valid_until = _validate_aware(self.valid_until, field_name="valid_until")
         if valid_until <= issued_at:
             raise ValueError("valid_until must be later than issued_at")
         if valid_until - issued_at > _MAX_VALIDITY:
             raise ValueError("constraint projections may be valid for at most 15 minutes")
-        _validate_identifier(self.evidence_id, field_name="evidence_id")
+        _validate_policy_identifier(self.evidence_id, field_name="evidence_id")
         _validate_digest(self.evidence_digest, field_name="evidence_digest")
         limit = self.max_total_subagents
         if limit is not None and (type(limit) is not int or limit <= 0 or limit > _MAX_SUBAGENTS):
@@ -148,7 +149,7 @@ class ConstraintProjectionRequestV2:
         ).encode("utf-8")
         if len(canonical_references) > 8192:
             raise ValueError("canonical policy lookup references are limited to 8 KiB")
-        _validate_identifier(self.thread_id, field_name="thread_id")
+        validate_thread_identifier(self.thread_id, field_name="thread_id")
         if self.external_key_reference is not None:
             if not isinstance(self.external_key_reference, str) or not self.external_key_reference or len(self.external_key_reference.encode("utf-8")) > 384:
                 raise ValueError("external_key_reference must be a bounded non-empty string or None")
@@ -187,20 +188,20 @@ class ConstraintProjectionV2:
     def __post_init__(self) -> None:
         _validate_digest(self.request_digest, field_name="request_digest")
         _validate_digest(self.trusted_context_digest, field_name="trusted_context_digest")
-        _validate_identifier(self.thread_id, field_name="thread_id")
+        validate_thread_identifier(self.thread_id, field_name="thread_id")
         _validate_digest(self.agent_revision_digest, field_name="agent_revision_digest")
         _validate_digest(self.profile_revision_digest, field_name="profile_revision_digest")
         _validate_digest(self.extension_manifest_digest, field_name="extension_manifest_digest")
         if type(self.extension_generation) is not int or self.extension_generation < 0:
             raise ValueError("extension_generation must be a non-negative integer")
-        _validate_identifier(self.projection_revision, field_name="projection_revision")
+        _validate_policy_identifier(self.projection_revision, field_name="projection_revision")
         issued_at = _validate_aware(self.issued_at, field_name="issued_at")
         valid_until = _validate_aware(self.valid_until, field_name="valid_until")
         if valid_until <= issued_at:
             raise ValueError("valid_until must be later than issued_at")
         if valid_until - issued_at > _MAX_VALIDITY:
             raise ValueError("constraint projections may be valid for at most 15 minutes")
-        _validate_identifier(self.evidence_id, field_name="evidence_id")
+        _validate_policy_identifier(self.evidence_id, field_name="evidence_id")
         _validate_digest(self.evidence_digest, field_name="evidence_digest")
         obligations = tuple(self.mandatory_obligations)
         if len(obligations) > 16:
@@ -208,7 +209,7 @@ class ConstraintProjectionV2:
         if len(obligations) != len(set(obligations)):
             raise ValueError("mandatory_obligations must not contain duplicates")
         for obligation in obligations:
-            _validate_identifier(obligation, field_name="mandatory obligation")
+            _validate_policy_identifier(obligation, field_name="mandatory obligation")
         object.__setattr__(self, "mandatory_obligations", tuple(sorted(obligations)))
         limit = self.max_total_subagents
         if limit is not None and (type(limit) is not int or not 0 <= limit <= _MAX_SUBAGENTS):
@@ -254,7 +255,7 @@ class InvocationConstraintsProviderFactory:
     health_probe: CapabilityHealthProbe | None = None
 
     def __post_init__(self) -> None:
-        _validate_identifier(self.contribution_id, field_name="constraint contribution_id")
+        _validate_policy_identifier(self.contribution_id, field_name="constraint contribution_id")
         if self.capability_api_version not in _SUPPORTED_CAPABILITY_API_VERSIONS:
             raise ValueError(f"unsupported invocation-constraints capability API version {self.capability_api_version!r}; expected one of {sorted(_SUPPORTED_CAPABILITY_API_VERSIONS)!r}")
         if self.kind != INVOCATION_CONSTRAINTS_KIND:

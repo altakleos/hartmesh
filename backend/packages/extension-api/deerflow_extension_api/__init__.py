@@ -67,6 +67,20 @@ from deerflow_extension_api.health import (
     CapabilityHealthResult,
     CapabilityHealthStatus,
 )
+from deerflow_extension_api.identifiers import (
+    AGENT_IDENTIFIER_PATTERN,
+    MCP_SERVER_IDENTIFIER_MAX_BYTES,
+    MCP_TOOL_IDENTIFIER_PATTERN,
+    MODEL_PROFILE_IDENTIFIER_MAX_BYTES,
+    RESERVED_AGENT_IDENTIFIERS,
+    THREAD_IDENTIFIER_PATTERN,
+    canonicalize_agent_identifier,
+    validate_agent_identifier,
+    validate_mcp_server_identifier,
+    validate_mcp_tool_identifier,
+    validate_model_profile_identifier,
+    validate_thread_identifier,
+)
 from deerflow_extension_api.identity import (
     ActingServiceV1,
     EffectiveSubjectV1,
@@ -98,10 +112,16 @@ from deerflow_extension_api.state import ExtensionData
 #: Contract version. Pre-1.0 minors may break and only patches promise to be
 #: additive. From 1.0 on, bump the major on any breaking change; see the spec's
 #: evolution rules for what counts as additive.
-API_VERSION = "0.9.0"
+API_VERSION = "0.10.0"
 
 __all__ = [
     "API_VERSION",
+    "AGENT_IDENTIFIER_PATTERN",
+    "MCP_SERVER_IDENTIFIER_MAX_BYTES",
+    "MCP_TOOL_IDENTIFIER_PATTERN",
+    "MODEL_PROFILE_IDENTIFIER_MAX_BYTES",
+    "RESERVED_AGENT_IDENTIFIERS",
+    "THREAD_IDENTIFIER_PATTERN",
     "AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION",
     "AUTHORIZATION_PROVIDER_KIND",
     "INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION",
@@ -171,4 +191,10 @@ __all__ = [
     "TrustedRunContextV1",
     "extension",
     "task_store_from_runtime",
+    "canonicalize_agent_identifier",
+    "validate_agent_identifier",
+    "validate_mcp_server_identifier",
+    "validate_mcp_tool_identifier",
+    "validate_model_profile_identifier",
+    "validate_thread_identifier",
 ]

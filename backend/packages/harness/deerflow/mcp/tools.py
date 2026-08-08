@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from deerflow_extension_api import MCP_TOOL_IDENTIFIER_PATTERN, validate_mcp_tool_identifier
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
@@ -38,7 +39,18 @@ logger = logging.getLogger(__name__)
 # framework prompt structure. Canonicalizing at the load boundary constrains
 # both bound and deferred names to the same safe identifier charset, mirroring
 # the load-time validation skill names get (skills/storage/skill_storage.py).
-_VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+_VALID_MCP_TOOL_NAME = re.compile(rf"^{MCP_TOOL_IDENTIFIER_PATTERN}$", re.ASCII)
+
+
+def is_valid_mcp_tool_name(value: object) -> bool:
+    """Return whether *value* is safe and host-bindable as an MCP tool name."""
+
+    try:
+        validate_mcp_tool_identifier(value)
+    except ValueError:
+        return False
+    return True
+
 
 # Subdirectory under the thread's workspace used as the temp dir for stdio MCP
 # subprocesses. Pinning the process temp dir here (alongside its cwd) makes
@@ -776,7 +788,7 @@ async def get_mcp_tools() -> list[BaseTool]:
             server_cfg = extensions_config.mcp_servers.get(source_name)
             tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
             for tool in server_tools:
-                if not _VALID_MCP_TOOL_NAME.fullmatch(tool.name or ""):
+                if not is_valid_mcp_tool_name(tool.name or ""):
                     logger.warning(
                         "Dropping MCP tool from server '%s' with invalid name %r: tool names must match %s. A name outside this charset cannot be bound as a function tool and could forge prompt structure when listed as a deferred tool.",
                         source_name,

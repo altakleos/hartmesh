@@ -9,6 +9,10 @@ import threading
 from pathlib import Path
 from typing import Any, Literal
 
+from deerflow_extension_api import (
+    validate_mcp_server_identifier,
+    validate_mcp_tool_identifier,
+)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.runtime_paths import existing_project_file
@@ -131,6 +135,16 @@ class McpServerConfig(BaseModel):
         """
         return normalize_mcp_transport_alias(data)
 
+    @field_validator("tools")
+    @classmethod
+    def _validate_tool_override_names(
+        cls,
+        value: dict[str, McpToolOverride],
+    ) -> dict[str, McpToolOverride]:
+        for tool_name in value:
+            validate_mcp_tool_identifier(tool_name, field_name="MCP tool override identifier")
+        return value
+
 
 def resolve_effective_mcp_routing(server_config: McpServerConfig | None, original_tool_name: str) -> dict[str, Any]:
     """Merge server-level routing with per-tool overrides for one MCP tool."""
@@ -167,6 +181,24 @@ class ExtensionsConfig(BaseModel):
         description="Map of skill name to state configuration",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _validate_mcp_server_names(
+        cls,
+        value: dict[str, McpServerConfig],
+    ) -> dict[str, McpServerConfig]:
+        for server_name, server in value.items():
+            validate_mcp_server_identifier(server_name)
+            if server.tool_name_prefix:
+                try:
+                    validate_mcp_tool_identifier(
+                        f"{server_name}_x",
+                        field_name="prefixed MCP callable name",
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"MCP server {server_name!r} cannot prefix callable tool names. Rename the server to an ASCII tool identifier or set tool_name_prefix=false") from exc
+        return value
 
     def to_file_dict(self) -> dict[str, Any]:
         """Serialize in the public extensions_config.json shape."""

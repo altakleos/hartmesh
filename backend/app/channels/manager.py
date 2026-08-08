@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
-import re
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
@@ -46,7 +45,7 @@ from app.runtime import (
     InternalSourceKind,
     InvocationRuntime,
 )
-from deerflow.config.agents_config import load_agent_config
+from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
 from deerflow.runtime import ConflictError as RuntimeConflictError
@@ -62,7 +61,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_LANGGRAPH_URL = "http://localhost:8001/api"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
-CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 # Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
 # This is independent of subagent depth: a `task()` dispatch runs the whole
@@ -336,13 +334,20 @@ def _merge_dicts(*layers: Any) -> dict[str, Any]:
 
 
 def _normalize_custom_agent_name(raw_value: str) -> str:
-    """Normalize legacy channel assistant IDs into valid custom agent names."""
+    """Adapt legacy channel assistant IDs into canonical custom-agent names."""
     normalized = raw_value.strip().lower().replace("_", "-")
     if not normalized:
         raise InvalidChannelSessionConfigError("Channel session assistant_id is empty. Use 'lead_agent' or a valid custom agent name.")
-    if not CUSTOM_AGENT_NAME_PATTERN.fullmatch(normalized):
-        raise InvalidChannelSessionConfigError(f"Invalid channel session assistant_id {raw_value!r}. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.")
-    return normalized
+    try:
+        canonical = validate_agent_name(normalized)
+    except ValueError as exc:
+        raise InvalidChannelSessionConfigError(f"Invalid channel session assistant_id {raw_value!r}. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.") from exc
+    if raw_value != canonical:
+        logger.warning(
+            "Legacy channel assistant_id was canonicalized to %r; update the channel session to this explicit custom-agent identity",
+            canonical,
+        )
+    return canonical
 
 
 def _extract_response_text(result: dict | list) -> str:

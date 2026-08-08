@@ -29,6 +29,7 @@ from deerflow_extension_api import (
     SafeContextReferenceV1,
     SealedOriginV1,
     TrustedRunContextV1,
+    validate_model_profile_identifier,
 )
 from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage
@@ -2025,9 +2026,11 @@ class _GatewayLaunchNormalizer:
 
         body_context = intent.context or {}
         model_name = body_context.get("model_name")
-        # Coerce non-string model_name values to str before truncation.
-        if model_name is not None and not isinstance(model_name, str):
-            model_name = str(model_name)
+        if model_name is not None:
+            try:
+                model_name = validate_model_profile_identifier(model_name, field_name="context.model_name profile identifier")
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
         # Validate model against the allowlist when a model_name is provided.
         if model_name and get_app_config().get_model_config(model_name) is None:
             raise HTTPException(

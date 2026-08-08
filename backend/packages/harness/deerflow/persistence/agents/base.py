@@ -30,7 +30,7 @@ from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from deerflow.config.agents_config import AgentConfig
+from deerflow.config.agents_config import AgentConfig, validate_agent_name
 
 
 def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
@@ -46,6 +46,16 @@ def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
     known_fields = set(AgentConfig.model_fields.keys())
     data = {k: v for k, v in data.items() if k in known_fields}
     return AgentConfig(**data)
+
+
+def validate_agent_config_identity(data: dict[str, Any], name: str) -> None:
+    """Validate natural-key and model-profile identities before persistence."""
+
+    canonical_name = validate_agent_name(name)
+    supplied_name = data.get("name", canonical_name)
+    if validate_agent_name(supplied_name) != canonical_name:
+        raise ValueError("agent config name must identify the persisted agent row or directory")
+    AgentConfig(name=canonical_name, model=data.get("model"))
 
 
 # Delete outcome, mirroring the agents router's result:

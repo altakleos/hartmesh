@@ -7,6 +7,27 @@ one worker attachment belong to the runtime. Checkpoint and artifact reservation
 auxiliary thread operations, not accepted invocations. Each invocation is one normal
 `RunRow(operation_kind="run")`; there is no separate invocation row or table.
 
+## Identifier domains
+
+Admission validates policy-visible identities before sealing. Agent input matches
+`[A-Za-z0-9][A-Za-z0-9-]{0,127}`; the existing case-insensitive agent store makes
+lowercase the explicit canonical agent identity returned by host and portable records.
+`lead_agent` remains the reserved built-in runtime identity and cannot be created as a
+custom agent.
+Thread IDs preserve exact case and match `[A-Za-z0-9_-]{1,64}` everywhere, including
+constraints and MCP projections. Model-profile IDs preserve exact case/Unicode, reject
+ASCII controls, and are limited to 128 UTF-8 bytes in configuration, accepted evidence,
+portable options, and run persistence. Existing over-bound profile names require an
+operator rename of `models[].name` and every agent/request reference before startup;
+Hartmesh does not truncate or create a hidden alias.
+
+MCP server configuration keys preserve exact case/Unicode under their own non-control
+128-byte bound. MCP callable tool names preserve exact case and match
+`[A-Za-z0-9_-]{1,128}`. A server key outside the callable-tool grammar must explicitly
+disable `tool_name_prefix`; a prefix-enabled key is limited to 126 characters so the
+separator and a non-empty tool name fit the callable bound. Server keys and tool names are
+not contributor or agent IDs.
+
 ## Concern-to-evidence closure matrix
 
 This matrix is the release closure record for the current one-replica durable invocation
@@ -167,7 +188,7 @@ same provider snapshot used by route, resource, tool, model, skill, and agent as
 
 ## Restrictive invocation constraints
 
-`deerflow-extension-api` 0.9.0 defines one optional, singular constraints provider with
+`deerflow-extension-api` 0.10.0 defines one optional, singular constraints provider with
 separate v1 and v2 contracts. Gateway invokes it only for a genuinely absent invocation,
 after invocation-start authorization allows and before atomic acceptance. V2 receives only
 the sealed split identity and final Origin, bounded namespaced correlation lookup references,
@@ -280,7 +301,7 @@ retained row is deleted.
 
 ## Embedded runtime API and lifecycle observation
 
-`deerflow-runtime-api==0.1.0` owns the strict, standard-library-only
+`deerflow-runtime-api==0.2.0` owns the strict, standard-library-only
 `deerflow.runtime/v1` records and the `DurableInvocationPort` Protocol. The
 Protocol is the complete transport-neutral seam: `ensure`, invocation/context
 `observe`, fenced `control`, and `capabilities`; it exposes no application,

@@ -26,6 +26,8 @@ _INVOCATION_SOURCE_KINDS = frozenset({"http", "scheduled_task", "native_channel"
 _CORRELATION_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _PUBLIC_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,191}\Z", re.ASCII)
+_AGENT_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}\Z", re.ASCII)
+_THREAD_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
 _MAX_CORRELATION_VALUE_BYTES = 1024
 _MAX_CORRELATION_REFERENCES = 64
 _MAX_INVOCATION_SUMMARY_BYTES = 16 * 1024
@@ -99,6 +101,32 @@ def _optional_nonempty(value: Any, name: str) -> str | None:
     if value is None:
         return None
     return _nonempty(value, name)
+
+
+def _optional_agent_identifier(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    if value == "lead_agent":
+        return value
+    if not isinstance(value, str) or _AGENT_IDENTIFIER_RE.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a 1-128 character ASCII agent identifier with an alphanumeric first character and only letters, digits, or hyphens, or the reserved built-in 'lead_agent'")
+    return value.lower()
+
+
+def _optional_model_profile_identifier(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 128:
+        raise ValueError(f"{name} model profile identifier must be a non-empty string limited to 128 UTF-8 bytes")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{name} model profile identifier must not contain ASCII control characters")
+    return value
+
+
+def _thread_identifier(value: Any, name: str = "thread_id") -> str:
+    if not isinstance(value, str) or _THREAD_IDENTIFIER_RE.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a 1-64 character ASCII thread identifier containing only letters, digits, underscores, or hyphens")
+    return value
 
 
 def _run_status(value: Any) -> str:
@@ -228,7 +256,7 @@ class InvocationOptionsV1(_Record):
     kind: Literal["invocation.options"] = field(default=KIND, init=False)
 
     def __post_init__(self) -> None:
-        _optional_nonempty(self.model_name, "model_name")
+        _optional_model_profile_identifier(self.model_name, "model_name")
         if self.thinking_enabled is not None and type(self.thinking_enabled) is not bool:
             raise TypeError("thinking_enabled must be a boolean or null")
         if self.multitask_strategy not in {"reject", "rollback", "interrupt"}:
@@ -262,8 +290,12 @@ class InvocationEnsureRequest(_Record):
 
     def __post_init__(self) -> None:
         _nonempty(self.external_key, "external_key")
-        _nonempty(self.thread_id, "thread_id")
-        _optional_nonempty(self.agent_hint, "agent_hint")
+        _thread_identifier(self.thread_id)
+        object.__setattr__(
+            self,
+            "agent_hint",
+            _optional_agent_identifier(self.agent_hint, "agent_hint"),
+        )
         if not isinstance(self.input, (GraphInputV1, ResumeInputV1)):
             raise TypeError("input must be GraphInputV1 or ResumeInputV1")
         if not isinstance(self.options, InvocationOptionsV1):
@@ -294,7 +326,7 @@ class InvocationEnsureReceipt(_Record):
         visible = self.disposition in {EnsureDisposition.created, EnsureDisposition.known}
         if visible:
             _nonempty(self.run_id, "run_id")
-            _nonempty(self.thread_id, "thread_id")
+            _thread_identifier(self.thread_id)
             _run_status(self.status)
             _state_version(self.state_version)
         elif any(value is not None for value in (self.run_id, self.thread_id, self.status, self.state_version)):
@@ -344,7 +376,7 @@ class ContextInvocationsQuery(_Record):
     kind: Literal["context.invocations.query"] = field(default=KIND, init=False)
 
     def __post_init__(self) -> None:
-        _nonempty(self.thread_id, "thread_id")
+        _thread_identifier(self.thread_id)
         _optional_nonempty(self.cursor, "cursor")
         if type(self.limit) is not int or not 1 <= self.limit <= MAX_OBSERVATION_PAGE_SIZE:
             raise ValueError(f"limit must be between 1 and {MAX_OBSERVATION_PAGE_SIZE}")
@@ -425,7 +457,7 @@ class InvocationSummaryV1(_Record):
 
     def __post_init__(self) -> None:
         _nonempty(self.run_id, "run_id")
-        _nonempty(self.thread_id, "thread_id")
+        _thread_identifier(self.thread_id)
         _run_status(self.status)
         _state_version(self.state_version)
         _source_kind(self.source_kind)
@@ -508,8 +540,9 @@ def _fixed_public_rows(
 
 
 def _validate_lifecycle_event(row: Mapping[str, ImmutableJsonValue]) -> None:
-    for name in ("event_id", "cursor", "run_id", "thread_id", "created_at"):
+    for name in ("event_id", "cursor", "run_id", "created_at"):
         _nonempty(row[name], name)
+    _thread_identifier(row["thread_id"])
     lifecycle_type = row["lifecycle_type"]
     status = row["status"]
     allowed_statuses = _LIFECYCLE_STATUSES_BY_TYPE.get(lifecycle_type) if isinstance(lifecycle_type, str) else None
@@ -531,7 +564,7 @@ def _validate_lifecycle_event(row: Mapping[str, ImmutableJsonValue]) -> None:
 
 def _validate_snapshot(row: Mapping[str, ImmutableJsonValue]) -> None:
     _nonempty(row["run_id"], "run_id")
-    _nonempty(row["thread_id"], "thread_id")
+    _thread_identifier(row["thread_id"])
     _run_status(row["status"])
     _state_version(row["state_version"])
 
@@ -561,7 +594,7 @@ class InvocationObservation(_Record):
     kind: Literal["invocation.observation"] = field(default=KIND, init=False)
 
     def __post_init__(self) -> None:
-        _nonempty(self.thread_id, "thread_id")
+        _thread_identifier(self.thread_id)
         if self.run_id is not None:
             _nonempty(self.run_id, "run_id")
             _run_status(self.status)
@@ -667,7 +700,7 @@ class InvocationControlReceipt(_Record):
                 raise ValueError("hidden control receipts cannot carry invocation fields")
         else:
             _nonempty(self.run_id, "run_id")
-            _nonempty(self.thread_id, "thread_id")
+            _thread_identifier(self.thread_id)
             _run_status(self.status)
             _state_version(self.state_version)
 

@@ -4,11 +4,34 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
-Version 0.9.0 owns the authorization contracts `Principal`, `AuthzRequest`,
+Version 0.10.0 owns the authorization contracts `Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthzReason`, and `AuthorizationProvider`. Existing host code may keep
 using `deerflow.authz.provider`; those names are compatibility re-exports of the same
 objects. It also owns the versioned Origin and run-context contributor contracts described
 below.
+
+## Identifier domains
+
+The public contracts use named field domains rather than the plugin contribution-ID
+grammar:
+
+- agent input matches `[A-Za-z0-9][A-Za-z0-9-]{0,127}` and has one documented
+  lowercase canonical identity for compatibility with case-insensitive agent storage;
+  `lead_agent` remains the reserved built-in runtime identity and is not a creatable
+  custom-agent name;
+- thread IDs preserve exact case and match `[A-Za-z0-9_-]{1,64}`;
+- model-profile IDs preserve exact case and Unicode, contain no ASCII controls, and are
+  limited to 128 UTF-8 bytes;
+- MCP server IDs preserve exact case and Unicode under the same non-control 128-byte
+  bound, while MCP tool IDs preserve exact case and match
+  `[A-Za-z0-9_-]{1,128}`.
+
+The validators never truncate or hash these identities. A profile that exceeds the bound
+must be explicitly renamed in `models[].name` and in every agent/request reference. MCP
+server keys that are not valid tool-name components remain supported only with
+`tool_name_prefix=false`; otherwise startup rejects the configuration with that action.
+Prefix-enabled server keys are additionally limited to 126 characters so the separator
+and a non-empty tool name fit the host's 128-character callable bound.
 
 ## Invocation identity
 

@@ -111,6 +111,51 @@ def test_agent_config_projector_classifies_every_factory_field() -> None:
     assert_app_config_projection_complete()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_id", ["1bot", "a" * 65, "a" * 128])
+async def test_full_agent_identifier_domain_seals_into_trusted_context(
+    monkeypatch,
+    agent_id: str,
+) -> None:
+    from app.gateway import services
+
+    material = replace(
+        _material(),
+        agent_id=agent_id,
+        agent_config={"name": agent_id, "skills": ["code-review"]},
+    )
+    revision = ResolvedAgentRevision.from_material(material)
+    monkeypatch.setattr(services, "resolve_agent_revision", lambda *_args, **_kwargs: revision)
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=SimpleNamespace(id="u1", system_role="member")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                extensions=SimpleNamespace(generation=1),
+                capability_manifest=SimpleNamespace(digest="f" * 64),
+                contributor_host=None,
+            )
+        ),
+    )
+    intent = InternalLaunchIntent(
+        thread_id="_thread",
+        assistant_id=agent_id,
+        input={"messages": []},
+    )
+
+    accepted = await services._seal_accepted_invocation(
+        request=request,
+        intent=intent,
+        config={"context": {}},
+        graph_input={"messages": []},
+        owner_user_id="u1",
+        run_ctx=SimpleNamespace(app_config=object()),
+    )
+
+    assert accepted.agent_revision.agent_id == agent_id
+    assert accepted.trusted_context is not None
+    assert accepted.trusted_context.agent_revision.agent_id == agent_id
+
+
 def _accepted(material: ResolvedAgentMaterialV1) -> AcceptedInvocation:
     return AcceptedInvocation.seal(
         principal=PrincipalProjection(user_id="u1"),

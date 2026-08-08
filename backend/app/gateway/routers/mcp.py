@@ -6,8 +6,12 @@ import re
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
+from deerflow_extension_api import (
+    validate_mcp_server_identifier,
+    validate_mcp_tool_identifier,
+)
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.gateway.deps import require_admin_user
 from deerflow.config.extensions_config import (
@@ -392,6 +396,16 @@ class McpServerConfigResponse(BaseModel):
         """Keep API parsing aligned with the runtime MCP config model."""
         return normalize_mcp_transport_alias(data)
 
+    @field_validator("tools")
+    @classmethod
+    def _validate_tool_override_names(
+        cls,
+        value: dict[str, McpToolOverride],
+    ) -> dict[str, McpToolOverride]:
+        for tool_name in value:
+            validate_mcp_tool_identifier(tool_name, field_name="MCP tool override identifier")
+        return value
+
 
 class McpConfigResponse(BaseModel):
     """Response model for MCP configuration."""
@@ -410,6 +424,24 @@ class McpConfigUpdateRequest(BaseModel):
         description="Map of MCP server name to configuration",
     )
 
+    @field_validator("mcp_servers")
+    @classmethod
+    def _validate_server_names(
+        cls,
+        value: dict[str, McpServerConfigResponse],
+    ) -> dict[str, McpServerConfigResponse]:
+        for server_name, server in value.items():
+            validate_mcp_server_identifier(server_name)
+            if server.tool_name_prefix:
+                try:
+                    validate_mcp_tool_identifier(
+                        f"{server_name}_x",
+                        field_name="prefixed MCP callable name",
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"MCP server {server_name!r} cannot prefix callable tool names. Rename the server to an ASCII tool identifier or set tool_name_prefix=false") from exc
+        return value
+
 
 class McpServerStateUpdateRequest(BaseModel):
     """Request model for enabling or disabling one MCP server."""
@@ -420,6 +452,11 @@ class McpServerStateUpdateRequest(BaseModel):
         description="Name of the MCP server to update",
     )
     enabled: bool = Field(..., description="Whether the MCP server is enabled")
+
+    @field_validator("server_name")
+    @classmethod
+    def _validate_server_name(cls, value: str) -> str:
+        return validate_mcp_server_identifier(value)
 
 
 class McpCacheResetResponse(BaseModel):

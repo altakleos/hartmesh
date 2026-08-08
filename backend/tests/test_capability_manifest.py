@@ -58,7 +58,7 @@ def test_empty_manifest_is_deterministic_and_bound_to_extension_generation() -> 
 
     assert first == second
     assert first.extension_generation == 7
-    assert first.extension_api_version == "0.9.0"
+    assert first.extension_api_version == "0.10.0"
     assert first.digest == second.digest
     assert first.digest != next_generation.digest
     assert len(first.digest) == 64

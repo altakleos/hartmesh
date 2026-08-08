@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 from typing import Annotated
 
+from deerflow_extension_api.identifiers import (
+    THREAD_IDENTIFIER_PATTERN,
+    validate_thread_identifier,
+)
 from pydantic import AfterValidator, StringConstraints
 
-THREAD_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
-_THREAD_ID_RE = re.compile(THREAD_ID_PATTERN)
+THREAD_ID_PATTERN = rf"^{THREAD_IDENTIFIER_PATTERN}$"
 
 
 def validate_thread_id(thread_id: str) -> str:
@@ -18,9 +20,10 @@ def validate_thread_id(thread_id: str) -> str:
     Thread IDs are caller-defined opaque identifiers, not necessarily UUIDs,
     but they must be safe for every persistence and filesystem backend.
     """
-    if not isinstance(thread_id, str) or _THREAD_ID_RE.fullmatch(thread_id) is None:
-        raise ValueError("Invalid thread_id: expected 1-64 ASCII letters, digits, hyphens, or underscores")
-    return thread_id
+    try:
+        return validate_thread_identifier(thread_id, field_name="thread_id")
+    except ValueError as exc:
+        raise ValueError("Invalid thread_id: expected 1-64 ASCII letters, digits, hyphens, or underscores") from exc
 
 
 def resolve_thread_id(thread_id: str | None) -> str:

@@ -12,6 +12,11 @@ import re
 from pathlib import Path
 from typing import Literal
 
+from deerflow_extension_api.identifiers import (
+    AGENT_IDENTIFIER_PATTERN,
+    canonicalize_agent_identifier,
+    validate_model_profile_identifier,
+)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.paths import get_paths
@@ -20,7 +25,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 logger = logging.getLogger(__name__)
 
 SOUL_FILENAME = "SOUL.md"
-AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+AGENT_NAME_PATTERN = re.compile(rf"{AGENT_IDENTIFIER_PATTERN}\Z", re.ASCII)
 MAX_AGENT_OUTPUT_TOKENS = 200_000
 
 
@@ -149,11 +154,10 @@ def validate_agent_name(name: str | None) -> str | None:
     """Validate a custom agent name before using it in filesystem paths."""
     if name is None:
         return None
-    if not isinstance(name, str):
-        raise ValueError("Invalid agent name. Expected a string or None.")
-    if not AGENT_NAME_PATTERN.fullmatch(name):
-        raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
-    return name
+    try:
+        return canonicalize_agent_identifier(name, field_name="agent name")
+    except ValueError as exc:
+        raise ValueError(f"Invalid agent name {name!r}. Must match pattern: {AGENT_NAME_PATTERN.pattern}") from exc
 
 
 class AgentModelSettings(BaseModel):
@@ -214,6 +218,18 @@ class AgentConfig(BaseModel):
     # webhook events from the gateway dispatcher. None means "no GitHub
     # integration", which is the case for every existing agent.
     github: GitHubAgentConfig | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return canonicalize_agent_identifier(value, field_name="agent name")
+
+    @field_validator("model")
+    @classmethod
+    def _validate_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_model_profile_identifier(value, field_name="agent model profile identifier")
 
 
 # Fields explicitly managed by agent-update surfaces. Anything else declared

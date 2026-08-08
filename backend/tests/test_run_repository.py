@@ -522,7 +522,7 @@ class TestRunRepository:
 
     @pytest.mark.anyio
     async def test_model_name_persistence(self, tmp_path):
-        """RunRepository should persist, normalize, and truncate model_name correctly via SQL."""
+        """RunRepository persists an exact validated model-profile identity."""
         from deerflow.persistence.engine import get_session_factory, init_engine
 
         url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
@@ -534,14 +534,16 @@ class TestRunRepository:
         assert row is not None
         assert row["model_name"] == "gpt-4o"
 
-        long_name = "a" * 200
-        await repo.put("run-2", thread_id="thread-1", model_name=long_name, status="success")
+        exact_name = " Profile V2 "
+        await repo.put("run-2", thread_id="thread-1", model_name=exact_name, status="success")
         row2 = await repo.get("run-2")
-        assert row2["model_name"] == "a" * 128
+        assert row2["model_name"] == exact_name
 
-        await repo.put("run-3", thread_id="thread-1", model_name=123, status="success")
-        row3 = await repo.get("run-3")
-        assert row3["model_name"] == "123"
+        with pytest.raises(ValueError, match="128 UTF-8 bytes"):
+            await repo.put("run-3", thread_id="thread-1", model_name="a" * 129, status="success")
+
+        with pytest.raises(ValueError, match="profile identifier"):
+            await repo.put("run-3", thread_id="thread-1", model_name=123, status="success")
 
         await repo.put("run-4", thread_id="thread-1", model_name=None, status="pending")
         row4 = await repo.get("run-4")
@@ -679,14 +681,14 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_update_model_name_normalizes_value(self, tmp_path):
-        """RunRepository.update_model_name should normalize and truncate model_name."""
+    async def test_update_model_name_rejects_overlong_value_without_truncation(self, tmp_path):
+        """RunRepository.update_model_name never aliases an overlong identity."""
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1")
-        long_name = "a" * 200
-        await repo.update_model_name("r1", long_name)
+        with pytest.raises(ValueError, match="128 UTF-8 bytes"):
+            await repo.update_model_name("r1", "a" * 129)
         row = await repo.get("r1")
-        assert row["model_name"] == "a" * 128
+        assert row["model_name"] is None
         await _cleanup()
 
     @pytest.mark.anyio
