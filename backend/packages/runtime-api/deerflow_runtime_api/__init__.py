@@ -7,6 +7,7 @@ and HTTP adapters. Construction snapshots every caller-owned JSON container;
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Mapping
@@ -21,7 +22,16 @@ type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 type ImmutableJsonValue = JsonScalar | tuple[ImmutableJsonValue, ...] | Mapping[str, ImmutableJsonValue]
 
 _RUN_STATUSES = frozenset({"pending", "running", "success", "error", "timeout", "interrupted"})
+_INVOCATION_SOURCE_KINDS = frozenset({"http", "scheduled_task", "native_channel", "service"})
 _CORRELATION_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_PUBLIC_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,191}\Z", re.ASCII)
+_MAX_CORRELATION_VALUE_BYTES = 1024
+_MAX_CORRELATION_REFERENCES = 64
+_MAX_INVOCATION_SUMMARY_BYTES = 16 * 1024
+MAX_OBSERVATION_PAGE_SIZE = 500
+MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES = 4 * 1024
+MAX_OBSERVATION_PAYLOAD_BYTES = 12 * 1024 * 1024
 
 
 class EnsureDisposition(StrEnum):
@@ -95,6 +105,35 @@ def _run_status(value: Any) -> str:
     if not isinstance(value, str) or value not in _RUN_STATUSES:
         raise ValueError("unsupported run status")
     return value
+
+
+def _source_kind(value: Any) -> str:
+    if not isinstance(value, str) or value not in _INVOCATION_SOURCE_KINDS:
+        raise ValueError("unsupported invocation source kind")
+    return value
+
+
+def _optional_digest(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a lowercase SHA-256 digest or null")
+    return value
+
+
+def _correlation_value(value: Any) -> ImmutableJsonValue:
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, str):
+        if len(value.encode("utf-8")) > _MAX_CORRELATION_VALUE_BYTES:
+            raise ValueError("correlation reference strings are limited to 1 KiB UTF-8")
+        return value
+    if isinstance(value, (list, tuple)):
+        frozen = tuple(_correlation_value(item) for item in value)
+        if any(isinstance(item, tuple) for item in frozen):
+            raise TypeError("correlation reference values cannot contain nested lists")
+        return frozen
+    raise TypeError("correlation references accept only strings, integers, booleans, null, or lists of those values")
 
 
 def _state_version(value: Any, *, nullable: bool = False) -> int | None:
@@ -281,31 +320,148 @@ class InvocationQuery(_Record):
     def __post_init__(self) -> None:
         _nonempty(self.run_id, "run_id")
         _optional_nonempty(self.cursor, "cursor")
-        if type(self.limit) is not int or not 1 <= self.limit <= 1000:
-            raise ValueError("limit must be between 1 and 1000")
+        if type(self.limit) is not int or not 1 <= self.limit <= MAX_OBSERVATION_PAGE_SIZE:
+            raise ValueError(f"limit must be between 1 and {MAX_OBSERVATION_PAGE_SIZE}")
         if type(self.include_snapshot) is not bool:
             raise TypeError("include_snapshot must be a boolean")
 
 
 @dataclass(frozen=True)
 class ContextInvocationsQuery(_Record):
-    """Access-filtered lifecycle page query for one visible thread/context."""
+    """Access-filtered lifecycle page query for one visible thread/context.
+
+    ``source_kind`` is a server-side filter over sealed accepted Origin facts;
+    it never accepts caller-defined source metadata.
+    """
 
     KIND: ClassVar[str] = "context.invocations.query"
     thread_id: str
     cursor: str | None = None
     limit: int = 100
     include_snapshot: bool = True
+    source_kind: Literal["http", "scheduled_task", "native_channel", "service"] | None = None
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["context.invocations.query"] = field(default=KIND, init=False)
 
     def __post_init__(self) -> None:
         _nonempty(self.thread_id, "thread_id")
         _optional_nonempty(self.cursor, "cursor")
-        if type(self.limit) is not int or not 1 <= self.limit <= 1000:
-            raise ValueError("limit must be between 1 and 1000")
+        if type(self.limit) is not int or not 1 <= self.limit <= MAX_OBSERVATION_PAGE_SIZE:
+            raise ValueError(f"limit must be between 1 and {MAX_OBSERVATION_PAGE_SIZE}")
         if type(self.include_snapshot) is not bool:
             raise TypeError("include_snapshot must be a boolean")
+        if self.source_kind is not None:
+            _source_kind(self.source_kind)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> Self:
+        """Parse current queries and legacy v1 payloads without a source filter."""
+
+        if not isinstance(payload, Mapping):
+            raise TypeError("runtime API record must be an object")
+        expected = {item.name for item in fields(cls)}
+        unknown = set(payload) - expected
+        missing = expected - set(payload)
+        if unknown:
+            raise ValueError(f"unknown fields for {cls.KIND}: {', '.join(sorted(unknown))}")
+        required_missing = missing - {"source_kind"}
+        if required_missing:
+            raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(required_missing))}")
+        if payload["api_version"] != API_VERSION:
+            raise ValueError("unsupported runtime API version")
+        if payload["kind"] != cls.KIND:
+            raise ValueError("unexpected runtime API record kind")
+        values = dict(payload)
+        values.pop("api_version")
+        values.pop("kind")
+        values.setdefault("source_kind", None)
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class InvocationCorrelationReferenceV1(_Record):
+    """One bounded, safe Origin correlation value in a stable namespace."""
+
+    KIND: ClassVar[str] = "invocation.correlation-reference.v1"
+    namespace: str
+    key: str
+    value: ImmutableJsonValue
+    api_version: str = field(default=API_VERSION, init=False)
+    kind: Literal["invocation.correlation-reference.v1"] = field(default=KIND, init=False)
+
+    def __post_init__(self) -> None:
+        for name in ("namespace", "key"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or _PUBLIC_IDENTIFIER_RE.fullmatch(value) is None:
+                raise ValueError(f"{name} must be a bounded ASCII identifier")
+        object.__setattr__(self, "value", _correlation_value(self.value))
+
+
+@dataclass(frozen=True)
+class InvocationSummaryV1(_Record):
+    """Safe accepted evidence and current state for one visible invocation.
+
+    The summary is joined from its authoritative normal ``RunRow`` under the
+    lifecycle page's read snapshot. It contains no model input, credentials,
+    private policy reasons, or unbounded Origin data.
+    """
+
+    KIND: ClassVar[str] = "invocation.summary.v1"
+    run_id: str
+    thread_id: str
+    status: str
+    state_version: int
+    source_kind: Literal["http", "scheduled_task", "native_channel", "service"]
+    correlation_references: tuple[InvocationCorrelationReferenceV1, ...] = ()
+    agent_revision_digest: str | None = None
+    extension_generation: int | None = None
+    extension_manifest_digest: str | None = None
+    caller_intent_digest: str | None = None
+    accepted_context_digest: str | None = None
+    authorization_evidence_digests: tuple[str, ...] = ()
+    constraint_evidence_digest: str | None = None
+    api_version: str = field(default=API_VERSION, init=False)
+    kind: Literal["invocation.summary.v1"] = field(default=KIND, init=False)
+
+    def __post_init__(self) -> None:
+        _nonempty(self.run_id, "run_id")
+        _nonempty(self.thread_id, "thread_id")
+        _run_status(self.status)
+        _state_version(self.state_version)
+        _source_kind(self.source_kind)
+        references = tuple(self.correlation_references)
+        if len(references) > _MAX_CORRELATION_REFERENCES:
+            raise ValueError("an invocation summary may contain at most 64 correlation references")
+        if not all(isinstance(reference, InvocationCorrelationReferenceV1) for reference in references):
+            raise TypeError("correlation_references must contain InvocationCorrelationReferenceV1 values")
+        if len({(reference.namespace, reference.key) for reference in references}) != len(references):
+            raise ValueError("invocation summary correlation keys must be unique after namespacing")
+        object.__setattr__(self, "correlation_references", references)
+        _optional_digest(self.agent_revision_digest, "agent_revision_digest")
+        if self.extension_generation is not None and (type(self.extension_generation) is not int or self.extension_generation < 0):
+            raise ValueError("extension_generation must be a non-negative integer or null")
+        for name in (
+            "extension_manifest_digest",
+            "caller_intent_digest",
+            "accepted_context_digest",
+            "constraint_evidence_digest",
+        ):
+            _optional_digest(getattr(self, name), name)
+        authorization_digests = tuple(self.authorization_evidence_digests)
+        for digest in authorization_digests:
+            _optional_digest(digest, "authorization_evidence_digest")
+        object.__setattr__(self, "authorization_evidence_digests", authorization_digests)
+        encoded = json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
+        if len(encoded) > _MAX_INVOCATION_SUMMARY_BYTES:
+            raise ValueError("an invocation summary is limited to 16 KiB canonical JSON")
+
+    @classmethod
+    def _from_wire(cls, values: dict[str, Any]) -> Self:
+        references = values.get("correlation_references")
+        if not isinstance(references, (list, tuple)):
+            raise TypeError("correlation_references must be a list")
+        values["correlation_references"] = tuple(InvocationCorrelationReferenceV1.from_dict(reference) for reference in references)
+        return cls(**values)
 
 
 _SNAPSHOT_FIELDS = {"run_id", "thread_id", "status", "state_version"}
@@ -365,6 +521,12 @@ def _validate_lifecycle_event(row: Mapping[str, ImmutableJsonValue]) -> None:
     state_version = _state_version(row["state_version"])
     if state_version == 0:
         raise ValueError("lifecycle event state_version must be positive")
+    payload = row["payload"]
+    if not isinstance(payload, Mapping):
+        raise TypeError("lifecycle event payload must be an object")
+    encoded = json.dumps(_wire(payload), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
+    if len(encoded) > MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES:
+        raise ValueError("lifecycle event payload is limited to 4 KiB canonical JSON")
 
 
 def _validate_snapshot(row: Mapping[str, ImmutableJsonValue]) -> None:
@@ -376,11 +538,12 @@ def _validate_snapshot(row: Mapping[str, ImmutableJsonValue]) -> None:
 
 @dataclass(frozen=True)
 class InvocationObservation(_Record):
-    """An authoritative snapshot plus one at-least-once lifecycle page.
+    """One access-filtered, bounded, at-least-once lifecycle page.
 
     Event IDs/cursors make repeated pages harmless. ``next_cursor`` advances
     within ``read_fence_cursor`` and ``minimum_available_cursor`` identifies
-    the retention boundary after pruning.
+    the retention boundary after pruning. ``summaries`` joins safe accepted
+    evidence for only the normal runs materialized by this page.
     """
 
     KIND: ClassVar[str] = "invocation.observation"
@@ -393,6 +556,7 @@ class InvocationObservation(_Record):
     next_cursor: str
     minimum_available_cursor: str
     read_fence_cursor: str
+    summaries: tuple[InvocationSummaryV1, ...] = ()
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["invocation.observation"] = field(default=KIND, init=False)
 
@@ -415,6 +579,48 @@ class InvocationObservation(_Record):
         _nonempty(self.next_cursor, "next_cursor")
         _nonempty(self.minimum_available_cursor, "minimum_available_cursor")
         _nonempty(self.read_fence_cursor, "read_fence_cursor")
+        summaries = tuple(self.summaries)
+        if not all(isinstance(summary, InvocationSummaryV1) for summary in summaries):
+            raise TypeError("summaries must contain InvocationSummaryV1 values")
+        if any(summary.thread_id != self.thread_id for summary in summaries):
+            raise ValueError("observation summaries must belong to the observed thread")
+        if self.run_id is not None and any(summary.run_id != self.run_id for summary in summaries):
+            raise ValueError("singular observation summaries must belong to the observed run")
+        object.__setattr__(self, "summaries", summaries)
+        encoded = json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
+        if len(encoded) > MAX_OBSERVATION_PAYLOAD_BYTES:
+            raise ValueError("an invocation observation is limited to 12 MiB canonical JSON")
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> Self:
+        """Parse current observations and legacy v1 payloads without summaries."""
+
+        if not isinstance(payload, Mapping):
+            raise TypeError("runtime API record must be an object")
+        expected = {item.name for item in fields(cls)}
+        unknown = set(payload) - expected
+        missing = expected - set(payload)
+        if unknown:
+            raise ValueError(f"unknown fields for {cls.KIND}: {', '.join(sorted(unknown))}")
+        if missing - {"summaries"}:
+            raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(missing - {'summaries'}))}")
+        if payload["api_version"] != API_VERSION:
+            raise ValueError("unsupported runtime API version")
+        if payload["kind"] != cls.KIND:
+            raise ValueError("unexpected runtime API record kind")
+        values = dict(payload)
+        values.pop("api_version")
+        values.pop("kind")
+        values.setdefault("summaries", ())
+        return cls._from_wire(values)
+
+    @classmethod
+    def _from_wire(cls, values: dict[str, Any]) -> Self:
+        summaries = values.get("summaries")
+        if not isinstance(summaries, (list, tuple)):
+            raise TypeError("summaries must be a list")
+        values["summaries"] = tuple(InvocationSummaryV1.from_dict(summary) for summary in summaries)
+        return cls(**values)
 
 
 @dataclass(frozen=True)
@@ -582,6 +788,8 @@ _RECORDS: dict[str, type[_Record]] = {
         InvocationEnsureReceipt,
         InvocationQuery,
         ContextInvocationsQuery,
+        InvocationCorrelationReferenceV1,
+        InvocationSummaryV1,
         InvocationObservation,
         CancelInvocationRequest,
         InvocationControlReceipt,
@@ -601,6 +809,8 @@ def record_from_dict(
     | InvocationEnsureReceipt
     | InvocationQuery
     | ContextInvocationsQuery
+    | InvocationCorrelationReferenceV1
+    | InvocationSummaryV1
     | InvocationObservation
     | CancelInvocationRequest
     | InvocationControlReceipt
@@ -629,13 +839,18 @@ __all__ = [
     "FailureCode",
     "GraphInputV1",
     "InvocationControlReceipt",
+    "InvocationCorrelationReferenceV1",
     "InvocationEnsureReceipt",
     "InvocationEnsureRequest",
     "InvocationObservation",
     "InvocationOptionsV1",
     "InvocationQuery",
+    "InvocationSummaryV1",
     "ImmutableJsonValue",
     "JsonValue",
+    "MAX_OBSERVATION_PAGE_SIZE",
+    "MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES",
+    "MAX_OBSERVATION_PAYLOAD_BYTES",
     "ResumeInputV1",
     "RuntimeCapabilities",
     "RuntimeFailure",

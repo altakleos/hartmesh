@@ -299,13 +299,26 @@ process-local state; `local_development` remains an explicit convenience profile
 Unexpected Adapter exceptions become bounded indeterminate failures with a
 correlation ID matching a safe internal diagnostic; exception text is never public.
 
-Lifecycle observations return a fixed safe snapshot projection plus authoritative
-events, opaque `next_cursor`, the `minimum_available_cursor`, and a captured
-`read_fence_cursor`. Visibility and optional observe authorization run before
-the store query. PostgreSQL pages use one read-only repeatable-read snapshot and
-SQLite pages one explicit read transaction; filtered empty pages advance to the
-global fence without skipping a future match. Administrative pruning is explicit
-and monotonic, and stale/ahead cursor conditions are typed. Reads are at least
+Lifecycle observations return authoritative events plus bounded
+`InvocationSummaryV1` records joined from accepted normal `RunRow` rows. A
+summary is the single public representation of static source/evidence facts:
+current state/version, sealed source kind, bounded safe Origin correlation
+references, agent revision, extension generation/manifest, and caller-intent,
+accepted-context, authorization, and constraint evidence digests. Static facts
+are not copied into each event. Historical rows without a sealed Origin retain
+legacy event/snapshot readability but cannot prove a summary.
+
+Visibility and optional observe authorization run before the store query.
+Context observation can filter the strict source kinds `http`,
+`scheduled_task`, `native_channel`, and `service`; filtering never weakens owner
+scope. PostgreSQL pages use one read-only repeatable-read snapshot and SQLite
+pages one explicit read transaction for cursor metadata, events, and summaries.
+Only distinct run IDs present in the bounded event page are materialized, so a
+long thread cannot turn one page into an all-run scan. Limits are 1–500 events,
+4 KiB per lifecycle payload, 16 KiB per summary, and 12 MiB per portable
+observation. Opaque `next_cursor`, `minimum_available_cursor`, and
+`read_fence_cursor` retain the global pruning-aware semantics; filtered empty
+pages advance to the fence without skipping a future match. Reads are at least
 once, so consumers deduplicate with stable event IDs/cursors.
 
 ## Authoritative lifecycle and failure recovery

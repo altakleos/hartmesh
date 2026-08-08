@@ -773,7 +773,7 @@ container, while each `to_dict()` call returns a new mutable JSON wire copy.
 | `GET /deployment` | Administrator-only `deerflow.deployment/v1` report with extension manifest/health, bounded image/source provenance when supplied, persistence facts, and qualification evidence or explicit `unqualified` status. This is not part of `DurableInvocationPort`. |
 | `POST /invocations/ensure` | Exact `invocation.ensure` body. `external_key` is required; the server derives its scope from the authenticated principal or service. |
 | `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. |
-| `GET /contexts/{thread_id}/invocations` | Access-filtered normal-run snapshots and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. |
+| `GET /contexts/{thread_id}/invocations` | Access-filtered normal-run lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500; optional `source_kind` is `http|scheduled_task|native_channel|service`. |
 | `POST /invocations/{run_id}/control` | Exact `invocation.cancel` body with required `expected_state_version`; body and path run IDs must match. |
 
 Every request record includes `api_version="deerflow.runtime/v1"` and its exact
@@ -814,10 +814,11 @@ The exact ensure body is:
 `invocation.input.resume` with any finite JSON value. Multitask strategy is
 `reject|rollback|interrupt`; interrupt selectors are a string list, `"*"`, or
 null. Observation is represented by `invocation.query` (`run_id`) or
-`context.invocations.query` (`thread_id`) plus nullable cursor, limit, and
-`include_snapshot`. HTTP supplies the path identity and fixes
-`include_snapshot=true`; its only paging query parameters are `cursor` and
-`limit`. Control accepts exactly:
+`context.invocations.query` (`thread_id`) plus nullable cursor, limit,
+`include_snapshot`, and strict nullable `source_kind`. HTTP supplies the path
+identity and fixes `include_snapshot=true`; invocation paging accepts `cursor`
+and `limit`, while context paging additionally accepts `source_kind`. Control
+accepts exactly:
 
 ```json
 {
@@ -831,8 +832,14 @@ null. Observation is represented by `invocation.query` (`run_id`) or
 
 `action` is `interrupt|rollback`, and the path/body run IDs must match.
 Visible ensure/control receipts carry `run_id`, `thread_id`, `status`, and
-`state_version`. Observations carry fixed snapshots/events plus all three
-cursor values; auxiliary rows never enter either collection.
+`state_version`. Observations carry fixed snapshots/events, typed immutable
+`invocation.summary.v1` records, and all three cursor values; auxiliary rows
+never enter any collection. Each summary is joined from its accepted normal run
+and contains only run/thread/current state, source kind, bounded safe Origin
+correlation references, agent/extension identity, and acceptance evidence
+digests. It excludes model input, secrets, secret handles, private policy
+reasons, and unbounded context. A pre-Origin historical row remains readable
+but has no summary.
 
 Ensure uses the existing durable idempotency boundary. Its strict v1 record always carries the
 complete option record: null model/thinking/checkpoint/interrupt values mean omission, while
@@ -849,7 +856,11 @@ Observation pages contain `next_cursor`, `minimum_available_cursor`, and
 the captured read fence; a pruned cursor returns `410 cursor_gap` with
 `minimum_available_cursor`, while malformed and ahead cursors return `422`.
 Reads are at least once, so consumers should deduplicate stable event IDs and
-cursors.
+cursors. Cursor metadata, returned events, and their summaries share one SQL
+snapshot. Context pages fetch summaries only for distinct run IDs in the
+bounded event page, not every run in the thread. Limits are 500 events per page,
+4 KiB canonical JSON per lifecycle payload, 16 KiB per summary, and 12 MiB for
+the full portable observation.
 
 Lifecycle event types are exactly `accepted`, `started`,
 `cancellation_requested`, `cancelled`, `succeeded`, `failed`, `timed_out`, and

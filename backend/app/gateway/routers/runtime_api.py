@@ -90,11 +90,18 @@ def _runtime_failure_response(failure: RuntimeFailure) -> JSONResponse:
     )
 
 
-def _paging_values(request: Request) -> tuple[str | None, int] | JSONResponse:
+def _paging_values(
+    request: Request,
+    *,
+    allow_source_kind: bool = False,
+) -> tuple[str | None, int, str | None] | JSONResponse:
     items = list(request.query_params.multi_items())
-    if any(key not in {"cursor", "limit"} for key, _value in items):
+    allowed = {"cursor", "limit"}
+    if allow_source_kind:
+        allowed.add("source_kind")
+    if any(key not in allowed for key, _value in items):
         return runtime_error_response(422, FailureCode.invalid_request)
-    if sum(key == "cursor" for key, _value in items) > 1 or sum(key == "limit" for key, _value in items) > 1:
+    if any(sum(key == name for key, _value in items) > 1 for name in allowed):
         return runtime_error_response(422, FailureCode.invalid_request)
     cursor = request.query_params.get("cursor")
     if cursor == "":
@@ -106,7 +113,7 @@ def _paging_values(request: Request) -> tuple[str | None, int] | JSONResponse:
         return runtime_error_response(422, FailureCode.invalid_request)
     if str(limit) != raw_limit or not 1 <= limit <= 500:
         return runtime_error_response(422, FailureCode.invalid_request)
-    return cursor, limit
+    return cursor, limit, request.query_params.get("source_kind")
 
 
 @router.get("/capabilities")
@@ -197,7 +204,7 @@ async def observe_invocation(
     paging = _paging_values(request)
     if isinstance(paging, JSONResponse):
         return paging
-    cursor, limit = paging
+    cursor, limit, _source_kind = paging
     try:
         query = InvocationQuery(run_id=run_id, cursor=cursor, limit=limit)
     except (TypeError, ValueError):
@@ -218,15 +225,16 @@ async def observe_context_invocations(
 ) -> JSONResponse:
     if error := _permission_error(request, "runs", "read"):
         return error
-    paging = _paging_values(request)
+    paging = _paging_values(request, allow_source_kind=True)
     if isinstance(paging, JSONResponse):
         return paging
-    cursor, limit = paging
+    cursor, limit, source_kind = paging
     try:
         query = ContextInvocationsQuery(
             thread_id=thread_id,
             cursor=cursor,
             limit=limit,
+            source_kind=source_kind,
         )
     except (TypeError, ValueError):
         return runtime_error_response(422, FailureCode.invalid_request)

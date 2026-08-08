@@ -16,8 +16,10 @@ from deerflow.runtime.runs.lifecycle_query import (
     CursorAhead,
     LifecyclePage,
     LifecycleQuery,
+    build_invocation_summary,
     decode_lifecycle_cursor,
     encode_lifecycle_cursor,
+    invocation_source_kind,
     validate_cursor_window,
 )
 from deerflow.runtime.runs.store.base import (
@@ -99,27 +101,49 @@ class MemoryRunStore(RunStore):
             pruned_through=self._lifecycle_pruned_through,
             last_cursor=self._lifecycle_cursor,
         )
+        window: list[dict[str, Any]] = []
+        start_index = requested - self._lifecycle_pruned_through
+        for index in range(start_index, len(self._lifecycle_events)):
+            event = self._lifecycle_events[index]
+            if not (
+                requested < event["cursor"] <= self._lifecycle_cursor
+                and (query.run_id is None or event["run_id"] == query.run_id)
+                and (query.thread_id is None or event["thread_id"] == query.thread_id)
+                and (query.owner_scope is None or event["owner_scope"] == query.owner_scope)
+                and (query.source_kind is None or invocation_source_kind(self._runs.get(event["run_id"], {})) == query.source_kind)
+            ):
+                continue
+            window.append(copy.deepcopy(event))
+            if len(window) > query.limit:
+                break
+        has_more = len(window) > query.limit
+        events = window[: query.limit]
+        summaries: list[dict[str, Any]] = []
         snapshots: list[dict[str, Any]] = []
         if query.include_snapshot:
             if query.run_id is not None:
-                row = self._runs.get(query.run_id)
-                candidates = [row] if row is not None else []
+                summary_run_ids = (query.run_id,)
             else:
-                candidates = [self._runs[run_id] for run_id in self._runs_by_thread.get(query.thread_id or "", {}) if run_id in self._runs]
-            snapshots = [copy.deepcopy(row) for row in candidates if row.get("operation_kind", "run") == "run" and (query.owner_scope is None or lifecycle_owner_scope(row.get("user_id")) == query.owner_scope)]
-            snapshots.sort(key=lambda row: (row.get("created_at") or "", row["run_id"]))
-
-        matching = [
-            copy.deepcopy(event)
-            for event in self._lifecycle_events
-            if requested < event["cursor"] <= self._lifecycle_cursor
-            and (query.run_id is None or event["run_id"] == query.run_id)
-            and (query.thread_id is None or event["thread_id"] == query.thread_id)
-            and (query.owner_scope is None or event["owner_scope"] == query.owner_scope)
-        ]
-        window = matching[: query.limit + 1]
-        has_more = len(window) > query.limit
-        events = window[: query.limit]
+                summary_run_ids = tuple(dict.fromkeys(event["run_id"] for event in events))
+            for run_id in summary_run_ids:
+                row = self._runs.get(run_id)
+                if row is None or row.get("operation_kind", "run") != "run":
+                    continue
+                if query.owner_scope is not None and lifecycle_owner_scope(row.get("user_id")) != query.owner_scope:
+                    continue
+                if query.source_kind is not None and invocation_source_kind(row) != query.source_kind:
+                    continue
+                summary = build_invocation_summary(row)
+                if summary is not None:
+                    summaries.append(copy.deepcopy(summary))
+                snapshots.append(
+                    {
+                        "run_id": row["run_id"],
+                        "thread_id": row["thread_id"],
+                        "status": row["status"],
+                        "state_version": row["state_version"],
+                    }
+                )
         next_value = events[-1]["cursor"] if has_more else self._lifecycle_cursor
         return LifecyclePage(
             snapshots=tuple(snapshots),
@@ -127,6 +151,7 @@ class MemoryRunStore(RunStore):
             next_cursor=encode_lifecycle_cursor(next_value),
             minimum_available_cursor=encode_lifecycle_cursor(self._lifecycle_pruned_through),
             read_fence_cursor=encode_lifecycle_cursor(self._lifecycle_cursor),
+            summaries=tuple(summaries),
         )
 
     @_atomic_memory_mutation

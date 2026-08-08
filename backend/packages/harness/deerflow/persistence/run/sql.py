@@ -22,6 +22,7 @@ from deerflow.runtime.runs.lifecycle_query import (
     LifecycleOrderingCorruption,
     LifecyclePage,
     LifecycleQuery,
+    build_invocation_summary,
     decode_lifecycle_cursor,
     encode_lifecycle_cursor,
     validate_cursor_window,
@@ -174,25 +175,15 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             await self._begin_lifecycle_read(session)
 
-            snapshots: list[dict[str, Any]] = []
-            if query.include_snapshot:
-                snapshot_stmt = select(RunRow).where(RunRow.operation_kind == "run")
-                if query.run_id is not None:
-                    snapshot_stmt = snapshot_stmt.where(RunRow.run_id == query.run_id)
-                else:
-                    snapshot_stmt = snapshot_stmt.where(RunRow.thread_id == query.thread_id)
-                snapshot_stmt = snapshot_stmt.order_by(RunRow.created_at.asc(), RunRow.run_id.asc())
-                rows = (await session.execute(snapshot_stmt)).scalars().all()
-                snapshots = [self._row_to_dict(row) for row in rows if query.owner_scope is None or lifecycle_owner_scope(row.user_id) == query.owner_scope]
-
-            await self._after_lifecycle_snapshot()
-
             cursor_state = await session.get(RunLifecycleCursorStateRow, 1)
             if cursor_state is None:
                 event_count = await session.scalar(select(func.count()).select_from(RunLifecycleEventRow))
                 await session.rollback()
                 detail = "events exist without cursor metadata" if event_count else "cursor metadata is missing"
                 raise LifecycleOrderingCorruption(detail)
+            # The cursor metadata read is the first SELECT and therefore pins
+            # the repeatable-read/SQLite snapshot used by events and summaries.
+            await self._after_lifecycle_snapshot()
             requested = validate_cursor_window(
                 query.cursor,
                 pruned_through=cursor_state.pruned_through,
@@ -210,11 +201,47 @@ class RunRepository(RunStore):
                 event_stmt = event_stmt.where(RunLifecycleEventRow.thread_id == query.thread_id)
             if query.owner_scope is not None:
                 event_stmt = event_stmt.where(RunLifecycleEventRow.owner_scope == query.owner_scope)
+            if query.source_kind is not None:
+                event_stmt = event_stmt.join(
+                    RunRow,
+                    RunRow.run_id == RunLifecycleEventRow.run_id,
+                ).where(
+                    RunRow.operation_kind == "run",
+                    RunRow.origin_json["source_kind"].as_string() == query.source_kind,
+                )
             event_stmt = event_stmt.order_by(RunLifecycleEventRow.cursor.asc()).limit(query.limit + 1)
             rows = (await session.execute(event_stmt)).scalars().all()
             pruned_through = cursor_state.pruned_through
             has_more = len(rows) > query.limit
             events = [self._event_to_dict(row) for row in rows[: query.limit]]
+            snapshots: list[dict[str, Any]] = []
+            summaries: list[dict[str, Any]] = []
+            if query.include_snapshot:
+                if query.run_id is not None:
+                    summary_run_ids = (query.run_id,)
+                else:
+                    summary_run_ids = tuple(dict.fromkeys(event["run_id"] for event in events))
+                summary_rows = await self._load_lifecycle_summary_rows(
+                    session,
+                    run_ids=summary_run_ids,
+                )
+                by_id = {row.run_id: row for row in summary_rows}
+                for run_id in summary_run_ids:
+                    row = by_id.get(run_id)
+                    if row is None or (query.owner_scope is not None and lifecycle_owner_scope(row.user_id) != query.owner_scope):
+                        continue
+                    row_dict = self._row_to_dict(row)
+                    summary = build_invocation_summary(row_dict)
+                    if summary is not None:
+                        summaries.append(summary)
+                    snapshots.append(
+                        {
+                            "run_id": row.run_id,
+                            "thread_id": row.thread_id,
+                            "status": row.status,
+                            "state_version": row.state_version,
+                        }
+                    )
             await session.rollback()
 
         next_value = events[-1]["cursor"] if has_more else fence
@@ -224,7 +251,24 @@ class RunRepository(RunStore):
             next_cursor=encode_lifecycle_cursor(next_value),
             minimum_available_cursor=encode_lifecycle_cursor(pruned_through),
             read_fence_cursor=encode_lifecycle_cursor(fence),
+            summaries=tuple(summaries),
         )
+
+    async def _load_lifecycle_summary_rows(
+        self,
+        session: AsyncSession,
+        *,
+        run_ids: tuple[str, ...],
+    ) -> list[RunRow]:
+        """Load at most the distinct normal runs present in one event page."""
+
+        if not run_ids:
+            return []
+        stmt = select(RunRow).where(
+            RunRow.run_id.in_(run_ids),
+            RunRow.operation_kind == "run",
+        )
+        return list((await session.execute(stmt)).scalars().all())
 
     async def prune_lifecycle_through(self, cursor: str) -> str:
         requested = decode_lifecycle_cursor(cursor)

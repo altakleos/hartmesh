@@ -85,6 +85,8 @@ Invocation and context queries apply owner/admin visibility and optional current
 `invocation:observe` authorization before reading a snapshot or event. Unknown,
 auxiliary, and owner-invisible rows are indistinguishable. A context feed makes
 one authorization decision for the bound context and returns only normal runs.
+It may filter on the sealed source kind (`http`, `scheduled_task`,
+`native_channel`, or `service`) without exposing another owner's records.
 
 Opaque `deerflow.lifecycle.cursor/v1` tokens encode the last-seen global integer
 cursor. One page captures `read_fence_cursor=last_cursor`, reads matching events
@@ -95,8 +97,15 @@ therefore at least once and harmless through stable event IDs/cursors without
 skipping a later match.
 
 PostgreSQL begins a read-only `REPEATABLE READ` transaction before the first
-SELECT; SQLite uses one explicit read transaction. Snapshot, cursor metadata,
-and events consequently represent one database snapshot across process restarts.
+SELECT; SQLite uses one explicit read transaction. Cursor metadata, events,
+and joined `InvocationSummaryV1` rows consequently represent one database
+snapshot across process restarts. Summaries carry bounded accepted source and
+digest evidence once; lifecycle events do not duplicate those static facts.
+For context pages, the store fetches summary/snapshot rows only for distinct run
+IDs in the returned event page—not every run in the thread. The page limit is
+1–500, lifecycle payloads are limited to 4 KiB, summaries to 16 KiB, and the
+portable observation to 12 MiB canonical JSON. Historical rows without sealed
+Origin remain event/snapshot-readable and simply have no summary.
 A malformed/wrong-version token is invalid, a token above the fence is ahead,
 and a token below `pruned_through` reports a gap plus the minimum available
 cursor. Equality with the minimum resumes at the first retained event.

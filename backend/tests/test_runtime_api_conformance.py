@@ -70,6 +70,7 @@ def _empty_page() -> LifecyclePage:
     cursor = encode_lifecycle_cursor(0)
     return LifecyclePage(
         snapshots=(),
+        summaries=(),
         events=(),
         next_cursor=cursor,
         minimum_available_cursor=cursor,
@@ -156,6 +157,8 @@ class _HttpAdapter(DurableInvocationPort):
             path = f"/api/runtime/v1/invocations/{query.run_id}"
         else:
             path = f"/api/runtime/v1/contexts/{query.thread_id}/invocations"
+            if query.source_kind is not None:
+                params["source_kind"] = query.source_kind
         return self._decode(self._client.get(path, params=params))
 
     async def control(self, command):
@@ -205,7 +208,10 @@ async def test_runtime_transport_conformance(transport: str) -> None:
                 options=InvocationOptionsV1(),
             ),
             invocation_query=InvocationQuery(run_id="run-1"),
-            context_query=ContextInvocationsQuery(thread_id="thread-1"),
+            context_query=ContextInvocationsQuery(
+                thread_id="thread-1",
+                source_kind="service",
+            ),
             control=CancelInvocationRequest(
                 run_id="run-1",
                 expected_state_version=1,
