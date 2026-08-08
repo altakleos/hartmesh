@@ -3225,6 +3225,51 @@ class TestSubagentGuardrailAttribution:
         assert context.get("channel_user_id") == "ou_group_sender_1"
 
     @pytest.mark.anyio
+    async def test_aexecute_propagates_sealed_identity_and_origin(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        from deerflow_extension_api import ActingServiceV1, EffectiveSubjectV1, InvocationIdentityV1, SealedOriginV1
+
+        from deerflow.runtime.accepted_invocation import (
+            INVOCATION_IDENTITY_CONTEXT_KEY,
+            INVOCATION_ORIGIN_CONTEXT_KEY,
+        )
+
+        identity = InvocationIdentityV1(
+            effective_subject=EffectiveSubjectV1(kind="human", subject_id="channel-owner"),
+            acting_service=ActingServiceV1(service_id="channel:slack"),
+        )
+        origin = SealedOriginV1(source_kind="native_channel", digest="b" * 64)
+        executor = classes["SubagentExecutor"](
+            config=classes["SubagentConfig"](
+                name="general-purpose",
+                description="Identity propagation test agent",
+                system_prompt="Test identity propagation.",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            parent_model="test-model",
+            invocation_identity=identity,
+            invocation_origin=origin,
+            is_internal=True,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context[INVOCATION_IDENTITY_CONTEXT_KEY] is identity
+        assert context[INVOCATION_ORIGIN_CONTEXT_KEY] is origin
+        assert context["is_internal"] is False
+
+    @pytest.mark.anyio
     async def test_aexecute_propagates_accepted_constraints_and_generation(
         self,
         classes,

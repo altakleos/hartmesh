@@ -244,6 +244,9 @@ class _AuthorizationProvider:
 
 def _invocation_runtime(provider, *, generation: int = 7, journal=None):
     from deerflow_extension_api import (
+        ActingServiceV1,
+        EffectiveSubjectV1,
+        InvocationIdentityV1,
         PrincipalProjectionV1,
         ResolvedAgentRevisionReferenceV1,
         SealedOriginV1,
@@ -254,16 +257,32 @@ def _invocation_runtime(provider, *, generation: int = 7, journal=None):
         MCP_INVOCATION_FACTS_CONTEXT_KEY,
         McpInvocationFacts,
     )
+    from deerflow.runtime.accepted_invocation import (
+        INVOCATION_IDENTITY_CONTEXT_KEY,
+        INVOCATION_ORIGIN_CONTEXT_KEY,
+    )
+
+    identity = InvocationIdentityV1(
+        effective_subject=EffectiveSubjectV1(
+            kind="human",
+            subject_id="user-1",
+            role="member",
+        ),
+        acting_service=ActingServiceV1(service_id="embedded:test"),
+    )
+    origin = SealedOriginV1(source_kind="service", digest="a" * 64)
 
     context = {
         "user_id": "user-1",
         "user_role": "member",
         "thread_id": "thread-1",
         "run_id": "run-1",
+        INVOCATION_IDENTITY_CONTEXT_KEY: identity,
+        INVOCATION_ORIGIN_CONTEXT_KEY: origin,
         AUTHORIZATION_PROVIDER_CONTEXT_KEY: provider,
         MCP_INVOCATION_FACTS_CONTEXT_KEY: McpInvocationFacts(
-            principal=PrincipalProjectionV1(user_id="user-1", role="member"),
-            origin=SealedOriginV1(source_kind="service", digest="a" * 64),
+            principal=PrincipalProjectionV1(identity=identity),
+            origin=origin,
             thread_id="thread-1",
             run_id="run-1",
             agent_revision=ResolvedAgentRevisionReferenceV1(
@@ -306,6 +325,7 @@ async def _call_with_authorization(interceptor, request, handler, provider):
             oauth_id=facts.principal.oauth_id,
             channel_user_id=facts.principal.channel_user_id,
             is_internal=facts.principal.is_internal,
+            identity=facts.principal.identity,
         ),
         resource="tool",
         action="call",
@@ -318,6 +338,7 @@ async def _call_with_authorization(interceptor, request, handler, provider):
             "is_subagent": False,
             "agent_id": None,
             "timestamp": "2026-08-07T00:00:00+00:00",
+            "origin": facts.origin,
         },
     )
     with bind_guardrail_provider_receipt(AuthorizedToolCallReceipt(provider=provider, request=authz_request)):

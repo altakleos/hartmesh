@@ -17,6 +17,9 @@ from types import SimpleNamespace
 from typing import Any
 
 from deerflow_extension_api import (
+    ActingServiceV1,
+    EffectiveSubjectV1,
+    InvocationIdentityV1,
     OriginContributionRequestV1,
     PrincipalProjectionV1,
     ResolvedAgentRevisionReferenceV1,
@@ -96,6 +99,8 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.accepted_invocation import (
+    INVOCATION_IDENTITY_CONTEXT_KEY,
+    INVOCATION_ORIGIN_CONTEXT_KEY,
     AcceptedInvocation,
     InvocationOrigin,
     PrincipalProjection,
@@ -144,10 +149,11 @@ def _invocation_principal_from_projection(
         channel_user_id=principal.channel_user_id,
         is_internal=principal.is_internal,
         visibility_prevalidated=visibility_prevalidated,
+        identity=principal.identity,
     )
 
 
-def invocation_principal_from_request(
+async def invocation_principal_from_request(
     request: Request,
     *,
     user_id: str | None = None,
@@ -159,13 +165,56 @@ def invocation_principal_from_request(
     auth_source = getattr(getattr(request, "state", None), "auth_source", None)
     if resolved_user_id is None and auth_source == AUTH_SOURCE_AUTH_DISABLED:
         resolved_user_id = AUTH_DISABLED_USER_ID
+    user_id_value = str(resolved_user_id) if resolved_user_id is not None else None
+    role = getattr(user, "system_role", None)
+    identity = None
+    if role == INTERNAL_SYSTEM_ROLE:
+        owner_user_id = get_trusted_internal_owner_user_id(request)
+        if owner_user_id is not None:
+            owner = await resolve_trusted_internal_owner_for_attribution(
+                request,
+                owner_user_id,
+            )
+            if owner is None:
+                raise ValueError("trusted internal invocation owner could not be revalidated")
+            identity = InvocationIdentityV1(
+                effective_subject=EffectiveSubjectV1(
+                    kind="human",
+                    subject_id=owner_user_id,
+                    role=getattr(owner, "system_role", None),
+                    oauth_provider=getattr(owner, "oauth_provider", None),
+                    oauth_id=getattr(owner, "oauth_id", None),
+                ),
+                acting_service=ActingServiceV1(service_id="gateway-internal"),
+            )
+        else:
+            identity = InvocationIdentityV1(
+                effective_subject=EffectiveSubjectV1(
+                    kind="service",
+                    subject_id="gateway-internal",
+                    role="service",
+                )
+            )
+    if user_id_value is not None:
+        if identity is None:
+            subject_kind = "service" if role == "service" else "human"
+            identity = InvocationIdentityV1(
+                effective_subject=EffectiveSubjectV1(
+                    kind=subject_kind,
+                    subject_id=user_id_value,
+                    role=("service" if subject_kind == "service" else role),
+                    oauth_provider=getattr(user, "oauth_provider", None),
+                    oauth_id=getattr(user, "oauth_id", None),
+                )
+            )
     return InvocationPrincipal(
-        user_id=str(resolved_user_id) if resolved_user_id is not None else None,
-        role=getattr(user, "system_role", None),
+        user_id=user_id_value,
+        role=role,
         oauth_provider=getattr(user, "oauth_provider", None),
         oauth_id=getattr(user, "oauth_id", None),
-        is_internal=getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE,
+        is_internal=identity is not None and identity.effective_subject.kind == "service",
         visibility_prevalidated=visibility_prevalidated,
+        identity=identity,
     )
 
 
@@ -419,6 +468,8 @@ _SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
         "channel_user_id",
         "langgraph_auth_user",
         "langgraph_auth_user_id",
+        INVOCATION_IDENTITY_CONTEXT_KEY,
+        INVOCATION_ORIGIN_CONTEXT_KEY,
     }
 )
 
@@ -1445,25 +1496,86 @@ async def _principal_projection_for_intent(
     internal = request_role == INTERNAL_SYSTEM_ROLE
     if owner_user_id is not None and internal:
         owner = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
+        if owner is None:
+            raise ValueError("trusted internal launch owner could not be revalidated")
+        if intent.source_kind is InternalSourceKind.native_channel:
+            facts = intent.native_channel
+            if facts is None or not facts.provider:
+                raise ValueError("native channel identity requires a trusted provider")
+            acting_service = ActingServiceV1(service_id=f"channel:{facts.provider}")
+        elif intent.source_kind is InternalSourceKind.scheduled_task:
+            acting_service = ActingServiceV1(service_id="scheduler")
+        else:
+            acting_service = ActingServiceV1(service_id="gateway-internal")
+        identity = InvocationIdentityV1(
+            effective_subject=EffectiveSubjectV1(
+                kind="human",
+                subject_id=owner_user_id,
+                role=getattr(owner, "system_role", None),
+                oauth_provider=getattr(owner, "oauth_provider", None),
+                oauth_id=getattr(owner, "oauth_id", None),
+            ),
+            acting_service=acting_service,
+        )
         return PrincipalProjection(
             user_id=owner_user_id,
             role=getattr(owner, "system_role", None),
             oauth_provider=getattr(owner, "oauth_provider", None),
             oauth_id=getattr(owner, "oauth_id", None),
             channel_user_id=(intent.context or {}).get("channel_user_id"),
-            is_internal=True,
+            is_internal=False,
+            identity=identity,
         )
     request_user_id = getattr(request_user, "id", None)
     auth_source = getattr(getattr(request, "state", None), "auth_source", None)
     if request_user_id is None and auth_source == AUTH_SOURCE_AUTH_DISABLED:
         request_user_id = AUTH_DISABLED_USER_ID
+    if internal:
+        if intent.source_kind is InternalSourceKind.scheduled_task and intent.scheduled_system_owned:
+            identity = InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="service", subject_id="scheduler", role="service"))
+        elif intent.source_kind is InternalSourceKind.scheduled_task:
+            raise ValueError("scheduled task launch requires a persisted owner or explicit system ownership")
+        elif intent.source_kind is InternalSourceKind.http:
+            # An authenticated internal HTTP caller is a service subject only
+            # when it is not representing a human. Owner-attributed requests
+            # take the branch above and must revalidate that human first.
+            identity = InvocationIdentityV1(
+                effective_subject=EffectiveSubjectV1(
+                    kind="service",
+                    subject_id="gateway-internal",
+                    role="service",
+                )
+            )
+        else:
+            raise ValueError("internal launch without a represented owner requires an explicit service subject")
+    elif intent.source_kind is InternalSourceKind.service:
+        service_id = intent.trusted_service_id
+        if not service_id:
+            raise ValueError("service launch requires an authenticated service subject")
+        if request_role != "service" or request_user_id is None or str(request_user_id) != service_id:
+            raise ValueError("service launch requires one matching authenticated service identity")
+        identity = InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="service", subject_id=service_id, role="service"))
+    else:
+        if request_user_id is None:
+            raise ValueError("invocation requires an authenticated effective subject")
+        subject_kind = "service" if request_role == "service" else "human"
+        identity = InvocationIdentityV1(
+            effective_subject=EffectiveSubjectV1(
+                kind=subject_kind,
+                subject_id=str(request_user_id),
+                role=("service" if subject_kind == "service" else request_role),
+                oauth_provider=getattr(request_user, "oauth_provider", None),
+                oauth_id=getattr(request_user, "oauth_id", None),
+            )
+        )
     return PrincipalProjection(
         user_id=None if internal else (str(request_user_id) if request_user_id is not None else None),
         role=None if internal else request_role,
         oauth_provider=None if internal else getattr(request_user, "oauth_provider", None),
         oauth_id=None if internal else getattr(request_user, "oauth_id", None),
         channel_user_id=(intent.context or {}).get("channel_user_id") if internal else None,
-        is_internal=internal or auth_source == AUTH_SOURCE_INTERNAL,
+        is_internal=identity.effective_subject.kind == "service",
+        identity=identity,
     )
 
 
@@ -1485,18 +1597,10 @@ async def _seal_accepted_invocation(
     run_ctx: RunContext,
 ) -> AcceptedInvocation:
     runtime_context = config.get("context") if isinstance(config.get("context"), dict) else {}
-    request_user = getattr(getattr(request, "state", None), "user", None)
-    request_user_id = getattr(request_user, "id", None)
-    request_user_role = getattr(request_user, "system_role", None)
-    is_internal_principal = request_user_role == INTERNAL_SYSTEM_ROLE
-    principal_user_id = owner_user_id or (None if is_internal_principal else (str(request_user_id) if request_user_id is not None else None))
-    principal = PrincipalProjection(
-        user_id=principal_user_id,
-        role=runtime_context.get("user_role") if owner_user_id else (None if is_internal_principal else request_user_role),
-        oauth_provider=runtime_context.get("oauth_provider") if owner_user_id else getattr(request_user, "oauth_provider", None),
-        oauth_id=runtime_context.get("oauth_id") if owner_user_id else getattr(request_user, "oauth_id", None),
-        channel_user_id=runtime_context.get("channel_user_id"),
-        is_internal=bool(runtime_context.get("is_internal", False)),
+    principal = await _principal_projection_for_intent(
+        request,
+        intent,
+        owner_user_id=owner_user_id,
     )
     base_references = _base_origin_references(intent)
     app_state = getattr(getattr(request, "app", None), "state", None)
@@ -1514,6 +1618,7 @@ async def _seal_accepted_invocation(
                 source_kind=intent.source_kind.value,
                 authenticated_subject_reference=principal.user_id,
                 source_references=_origin_request_references(base_references),
+                identity=principal.identity,
             )
         )
     for diagnostic in origin_contributions.diagnostics:
@@ -1545,6 +1650,7 @@ async def _seal_accepted_invocation(
         oauth_id=principal.oauth_id,
         channel_user_id=principal.channel_user_id,
         is_internal=principal.is_internal,
+        identity=principal.identity,
     )
     public_origin = SealedOriginV1(
         source_kind=origin.source_kind,

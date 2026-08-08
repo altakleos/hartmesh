@@ -9,6 +9,8 @@ from deerflow_extension_api import (
     ConstraintProjectionRequestV1,
     ConstraintProjectionV1,
     ConstraintRejected,
+    SafeContextReferenceV1,
+    SealedOriginV1,
 )
 
 from app.runtime.invocation import (
@@ -59,6 +61,20 @@ class ProviderInvocationConstraints:
                 ConstraintProjectionRequestV1(
                     request_digest=request_digest,
                     agent_revision_digest=accepted.agent_revision.digest,
+                    identity=accepted.principal.identity,
+                    origin=SealedOriginV1(
+                        source_kind=accepted.origin.source_kind,
+                        references=tuple(
+                            SafeContextReferenceV1(
+                                key=key,
+                                value=value,
+                                storage_class="persistable",
+                                purpose="correlation",
+                            )
+                            for key, value in sorted(accepted.origin.references.items())
+                        ),
+                        digest=accepted.base_origin_digest,
+                    ),
                 ),
                 host_max_total_subagents=_host_subagent_ceiling(accepted),
                 runtime_enforceable=True,

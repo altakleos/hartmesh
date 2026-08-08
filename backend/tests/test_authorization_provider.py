@@ -146,7 +146,7 @@ class TestDataclasses:
         assert p.role == "admin"
         assert p.oauth_provider == "github"
         assert p.oauth_id == "gh-123"
-        assert p.is_internal is True
+        assert p.is_internal is False
 
     def test_authz_request(self):
         p = Principal(user_id="u1", role="user")
@@ -301,14 +301,14 @@ class TestGuardrailAuthorizationAdapter:
         assert authz_req.principal.oauth_provider == "github"
         assert authz_req.principal.oauth_id == "gh-42"
         assert authz_req.principal.channel_user_id == "channel-42"
-        assert authz_req.principal.is_internal is True
+        assert authz_req.principal.is_internal is False
         assert authz_req.principal.attributes == {"department": "engineering"}
         assert authz_req.resource == "tool"
         assert authz_req.action == "call"
         assert authz_req.target == "write_file"
 
-    def test_evaluate_maps_is_internal_true(self):
-        """is_internal=True on GuardrailRequest maps to Principal.is_internal=True."""
+    def test_evaluate_does_not_promote_legacy_human_internal_flag(self):
+        """A legacy internal flag cannot promote a user effective subject."""
         captured: list[AuthzRequest] = []
 
         class _CapturingProvider:
@@ -327,6 +327,26 @@ class TestGuardrailAuthorizationAdapter:
         adapter = GuardrailAuthorizationAdapter(_CapturingProvider())
         gr_req = _make_guardrail_request(user_role="user", is_internal=True)
         adapter.evaluate(gr_req)
+        assert captured[0].principal.is_internal is False
+
+    def test_evaluate_preserves_legacy_service_internal_flag(self):
+        captured: list[AuthzRequest] = []
+
+        class _CapturingProvider:
+            name = "capturing"
+
+            def authorize(self, request: AuthzRequest) -> AuthzDecision:
+                captured.append(request)
+                return AuthzDecision(allow=True)
+
+            async def aauthorize(self, request: AuthzRequest) -> AuthzDecision:
+                return self.authorize(request)
+
+            def filter_resources(self, principal: Principal, resource_type: str, candidates: list[str]) -> list[str]:
+                return list(candidates)
+
+        adapter = GuardrailAuthorizationAdapter(_CapturingProvider())
+        adapter.evaluate(_make_guardrail_request(user_id="scheduler", user_role="service", is_internal=True))
         assert captured[0].principal.is_internal is True
 
     def test_evaluate_maps_is_internal_false(self):

@@ -212,3 +212,41 @@ def test_runtime_api_version_matches_the_installed_contract_package():
     from importlib.metadata import version
 
     assert API_VERSION == version("deerflow-extension-api")
+
+
+def test_invocation_identity_contract_is_frozen_bounded_and_round_trips() -> None:
+    from deerflow_extension_api import ActingServiceV1, EffectiveSubjectV1, InvocationIdentityV1
+
+    attributes = {"tenant": {"id": "north"}, "groups": ["readers"]}
+    identity = InvocationIdentityV1(
+        effective_subject=EffectiveSubjectV1(
+            kind="human",
+            subject_id="human-1",
+            attributes=attributes,
+        ),
+        acting_service=ActingServiceV1(service_id="channel:telegram"),
+    )
+    attributes["tenant"]["id"] = "forged"
+    attributes["groups"].append("admins")
+
+    assert dataclasses.is_dataclass(identity)
+    assert identity.__dataclass_params__.frozen
+    assert identity.effective_subject.attributes["tenant"]["id"] == "north"
+    assert identity.effective_subject.attributes["groups"] == ("readers",)
+    import json
+
+    assert json.loads(json.dumps(identity.to_json()))["effective_subject"]["subject_id"] == "human-1"
+    assert InvocationIdentityV1.from_json(identity.to_json()) == identity
+
+    with pytest.raises(ValueError, match="version 1"):
+        InvocationIdentityV1.from_json({**identity.to_json(), "version": 2})
+    with pytest.raises(ValueError, match="unknown or missing"):
+        InvocationIdentityV1.from_json({**identity.to_json(), "caller_internal": True})
+    with pytest.raises(ValueError, match="8 KiB"):
+        InvocationIdentityV1(
+            effective_subject=EffectiveSubjectV1(
+                kind="human",
+                subject_id="human-1",
+                attributes={"oversized": "x" * 9000},
+            )
+        )

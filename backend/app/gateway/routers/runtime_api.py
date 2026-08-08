@@ -38,7 +38,7 @@ router = APIRouter(prefix="/api/runtime/v1", tags=["runtime"])
 async def get_runtime_api(request: Request) -> InvocationRuntimeAPI:
     """Bind the transport to the current authenticated Gateway principal."""
 
-    principal = invocation_principal_from_request(
+    principal = await invocation_principal_from_request(
         request,
         user_id=await get_current_user(request),
     )

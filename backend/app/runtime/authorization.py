@@ -67,6 +67,7 @@ def _projection_principal(projection: PrincipalProjection) -> Principal:
         oauth_id=projection.oauth_id,
         channel_user_id=projection.channel_user_id,
         is_internal=projection.is_internal,
+        identity=projection.identity,
     )
 
 
@@ -78,6 +79,7 @@ def _invocation_principal(principal: InvocationPrincipal) -> Principal:
         oauth_id=principal.oauth_id,
         channel_user_id=principal.channel_user_id,
         is_internal=principal.is_internal,
+        identity=principal.identity,
     )
 
 

@@ -37,6 +37,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
+from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 from fastapi import HTTPException, Request
 
 from deerflow.authz.principal import build_principal_from_context
@@ -155,6 +156,8 @@ async def resolve_route_permissions(
     *,
     is_internal: bool,
     resolver: AuthorizationProviderResolver | None = None,
+    identity: InvocationIdentityV1 | None = None,
+    request: Request | None = None,
 ) -> list[str]:
     """Return the route permissions granted to an authenticated user.
 
@@ -177,6 +180,37 @@ async def resolve_route_permissions(
         logger.warning("Failed to resolve authorization provider for Gateway routes", exc_info=True)
         return [] if config.fail_closed else list(_ALL_PERMISSIONS)
 
+    if identity is None and not is_internal:
+        user_role = getattr(user, "system_role", None)
+        subject_kind = "service" if user_role == "service" else "human"
+        identity = InvocationIdentityV1(
+            effective_subject=EffectiveSubjectV1(
+                kind=subject_kind,
+                subject_id=str(user.id),
+                role=("service" if subject_kind == "service" else user_role),
+                oauth_provider=getattr(user, "oauth_provider", None),
+                oauth_id=getattr(user, "oauth_id", None),
+            )
+        )
+    if identity is None and request is not None:
+        try:
+            from app.gateway.services import invocation_principal_from_request
+
+            identity = (
+                await invocation_principal_from_request(
+                    request,
+                    user_id=str(user.id),
+                )
+            ).identity
+        except Exception:
+            # An enabled provider must never make a decision using transport
+            # trust when the effective subject cannot be established.
+            logger.warning(
+                "Failed to resolve split identity for Gateway route authorization",
+                exc_info=True,
+            )
+            return []
+
     # Align with Phase 1B's tool path: internal callers (IM channel workers,
     # scheduler) have system_role="internal", which is not a real RBAC role.
     # Omit it so default_role applies, mirroring inject_authenticated_user_context
@@ -187,16 +221,19 @@ async def resolve_route_permissions(
     if user_role == INTERNAL_SYSTEM_ROLE:
         user_role = None
 
-    principal = build_principal_from_context(
-        {
-            "user_id": str(user.id),
-            "user_role": user_role,
-            "oauth_provider": getattr(user, "oauth_provider", None),
-            "oauth_id": getattr(user, "oauth_id", None),
-            "is_internal": is_internal,
-        },
-        default_role=config.default_role,
-    )
+    if identity is not None:
+        principal = Principal.from_identity(identity)
+    else:
+        principal = build_principal_from_context(
+            {
+                "user_id": str(user.id),
+                "user_role": user_role,
+                "oauth_provider": getattr(user, "oauth_provider", None),
+                "oauth_id": getattr(user, "oauth_id", None),
+                "is_internal": is_internal,
+            },
+            default_role=config.default_role,
+        )
 
     # Evaluate all permissions in parallel (W2).
     async def _evaluate(permission: str) -> str | None:
@@ -306,6 +343,7 @@ async def _authenticate(request: Request) -> AuthContext:
         user,
         is_internal=is_internal,
         resolver=getattr(request.app.state, "authorization_provider_resolver", None),
+        request=request,
     )
     return AuthContext(user=user, permissions=permissions)
 

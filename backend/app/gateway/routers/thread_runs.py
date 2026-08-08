@@ -305,7 +305,7 @@ async def _invocation_principal(
 ) -> InvocationPrincipal:
     if getattr(request, "_deerflow_test_bypass_auth", False) and not hasattr(request, "cookies"):
         return InvocationPrincipal(visibility_prevalidated=True)
-    return invocation_principal_from_request(
+    return await invocation_principal_from_request(
         request,
         user_id=await get_current_user(request),
         visibility_prevalidated=visibility_prevalidated,

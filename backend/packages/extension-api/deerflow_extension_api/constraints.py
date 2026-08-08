@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal, Protocol, runtime_checkable
 
+from deerflow_extension_api.contributors import SealedOriginV1
 from deerflow_extension_api.health import CapabilityHealthProbe
+from deerflow_extension_api.identity import InvocationIdentityV1
 
 INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION = "1.0"
 INVOCATION_CONSTRAINTS_KIND = "invocation_constraints"
@@ -44,10 +46,16 @@ class ConstraintProjectionRequestV1:
 
     request_digest: str
     agent_revision_digest: str
+    identity: InvocationIdentityV1 | None = None
+    origin: SealedOriginV1 | None = None
 
     def __post_init__(self) -> None:
         _validate_digest(self.request_digest, field_name="request_digest")
         _validate_digest(self.agent_revision_digest, field_name="agent_revision_digest")
+        if self.identity is not None and not isinstance(self.identity, InvocationIdentityV1):
+            raise TypeError("identity must be InvocationIdentityV1 or None")
+        if self.origin is not None and not isinstance(self.origin, SealedOriginV1):
+            raise TypeError("origin must be SealedOriginV1 or None")
 
 
 @dataclass(frozen=True)

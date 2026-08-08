@@ -20,6 +20,10 @@ from deerflow.guardrails.provider import (
     GuardrailRequest,
     bind_guardrail_provider_receipt,
 )
+from deerflow.runtime.accepted_invocation import (
+    INVOCATION_IDENTITY_CONTEXT_KEY,
+    INVOCATION_ORIGIN_CONTEXT_KEY,
+)
 from deerflow.runtime.events.catalog import MIDDLEWARE_GUARDRAIL_TAG
 
 logger = logging.getLogger(__name__)
@@ -64,6 +68,8 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             channel_user_id=context.get("channel_user_id"),
             is_internal=context.get("is_internal") is True,
             authz_attributes=normalize_authz_attributes(context.get("authz_attributes")),
+            identity=context.get(INVOCATION_IDENTITY_CONTEXT_KEY),
+            origin=context.get(INVOCATION_ORIGIN_CONTEXT_KEY),
         )
 
     def _build_denied_message(self, request: ToolCallRequest, decision: GuardrailDecision) -> ToolMessage:

@@ -4,11 +4,37 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
-Version 0.6.0 owns the authorization contracts `Principal`, `AuthzRequest`,
+Version 0.7.0 owns the authorization contracts `Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthzReason`, and `AuthorizationProvider`. Existing host code may keep
 using `deerflow.authz.provider`; those names are compatibility re-exports of the same
 objects. It also owns the versioned Origin and run-context contributor contracts described
 below.
+
+## Invocation identity
+
+`InvocationIdentityV1` separates the immutable `effective_subject` whose authority is
+being exercised from an optional `acting_service` that authenticated or delegated the
+request. A directly authenticated human has a human subject and no actor. A native-channel
+or user-owned Scheduled Task invocation keeps its human owner as the subject and records
+the channel provider service or scheduler as the actor. A system-owned schedule and an
+embedded service invocation use a service subject and invent no human. Provider, connection,
+workspace, chat, event, task, and transport evidence remain in the separately sealed
+`SealedOriginV1`; they never imply subject privilege.
+
+The host constructs identity and Origin after authentication and scrubs caller attempts to
+provide either. Gateway route checks, start/observe/cancel authorization, contributors, constraints, tool/MCP
+authorization, and delegated subagents receive the same split identity and final Origin.
+Attribute mappings are defensively frozen and the identity records are bounded, frozen,
+JSON-safe records with explicit v1 serialization.
+
+`Principal.is_internal` remains as a deprecated compatibility view. With a v1 identity it
+is true only when the effective subject is a service; an acting service never makes a human
+internal. For records/providers using the legacy fields, the host clears the flag for an
+attributed channel user or a non-service/non-internal role. Thus an older provider may see
+less privilege, never an end user promoted by transport trust. Existing accepted rows with
+the v1 legacy principal JSON remain readable under that conservative rule; new rows store
+principal projection version 2 with the nested v1 identity and a digest bound atomically to
+admission.
 
 Every authoritative factory descriptor also has an optional `health_probe`. Existing
 plugins may omit it; a successfully initialized capability without a probe is healthy.
@@ -66,9 +92,10 @@ Trusted plugins may register typed `OriginContributorFactory` and
 provenance, initializes each factory once at startup, invokes contributors concurrently,
 and composes valid results deterministically by stable `contribution_id`.
 
-Origin contributors receive only source kind, an authenticated internal subject reference,
+Origin contributors receive only source kind, the canonical invocation identity, an
+authenticated subject reference,
 and host-selected safe source references. Run-context contributors receive an immutable
-principal projection, sealed Origin, bound thread, resolved agent revision reference, and
+split principal projection, sealed Origin, bound thread, resolved agent revision reference, and
 an optional external-key reference. Neither contract receives Gateway objects, raw
 credentials, or caller request metadata.
 
@@ -95,8 +122,9 @@ This setting is intentionally absent from API-writable `extensions_config.json`.
 ## Invocation constraints contribution
 
 A trusted plugin may register the process's single
-`InvocationConstraintsProviderFactory`. Its async provider receives only the canonical
-request digest and pinned agent-revision digest. It returns the strict v1 union:
+`InvocationConstraintsProviderFactory`. Its async provider receives the canonical split
+identity and sealed Origin together with the canonical request digest and pinned
+agent-revision digest. It returns the strict v1 union:
 `ConstraintProjectionV1`, `ConstraintRejected`, or `ConstraintIndeterminate`. The sole v1
 control is an optional positive `max_total_subagents`; authorization remains the only
 binary permission authority.

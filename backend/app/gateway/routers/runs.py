@@ -121,7 +121,7 @@ async def _resolve_run(run_id: str, request: Request) -> RunRecord:
     """Fetch run by run_id with user ownership check. Raises 404 if not found."""
     result = await build_invocation_runtime(request).observe_run(
         run_id,
-        invocation_principal_from_request(
+        await invocation_principal_from_request(
             request,
             user_id=await get_current_user(request),
         ),

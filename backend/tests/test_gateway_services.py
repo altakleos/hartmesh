@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 
@@ -23,7 +23,12 @@ def _stub_app_config():
     reset_app_config()
 
 
-def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None):
+def _make_start_run_request(
+    run_manager,
+    *,
+    thread_store=None,
+    auth_source=AUTH_SOURCE_AUTH_DISABLED,
+):
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
@@ -1617,13 +1622,18 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
     assert "oauth_id" not in config["context"]
 
 
-async def _capture_start_run_graph_input(body, *, auth_source=None):
+async def _capture_start_run_graph_input(
+    body,
+    *,
+    auth_source=AUTH_SOURCE_AUTH_DISABLED,
+):
     from types import SimpleNamespace
     from unittest.mock import patch
 
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
+    from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
     from app.gateway.services import start_run
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
     from deerflow.runtime import RunManager
@@ -1641,7 +1651,10 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
     )
     request = SimpleNamespace(
         headers={},
-        state=SimpleNamespace(auth_source=auth_source),
+        state=SimpleNamespace(
+            auth_source=auth_source,
+            user=(SimpleNamespace(id="internal-test-service", system_role=INTERNAL_SYSTEM_ROLE) if auth_source == AUTH_SOURCE_INTERNAL else None),
+        ),
         app=SimpleNamespace(state=state),
     )
     captured: dict[str, object] = {}
@@ -1684,7 +1697,7 @@ def _make_start_run_persistence_context():
     )
     request = SimpleNamespace(
         headers={},
-        state=SimpleNamespace(),
+        state=SimpleNamespace(auth_source=AUTH_SOURCE_AUTH_DISABLED),
         app=SimpleNamespace(state=state),
     )
     return request, run_store, thread_store
@@ -1962,6 +1975,15 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
         with (
             patch("app.gateway.services.resolve_agent_factory", return_value=object()),
             patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+            patch(
+                "app.gateway.services.resolve_trusted_internal_owner_for_attribution",
+                return_value=SimpleNamespace(
+                    id="owner-1",
+                    system_role="user",
+                    oauth_provider=None,
+                    oauth_id=None,
+                ),
+            ),
         ):
             record = await start_run(body, "channel-thread", request)
             await record.task

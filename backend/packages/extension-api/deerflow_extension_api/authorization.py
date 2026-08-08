@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from deerflow_extension_api.health import CapabilityHealthProbe
+from deerflow_extension_api.identity import InvocationIdentityV1
 
 AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION = "1.0"
 AUTHORIZATION_PROVIDER_KIND = "authorization_provider"
 
 
-@dataclass
+@dataclass(frozen=True)
 class Principal:
-    """Actor resolved from trusted host identity context."""
+    """Compatibility authorization principal backed by split identity.
+
+    New hosts construct this record with :meth:`from_identity`. ``is_internal``
+    is retained only for older providers and means that the *effective subject*
+    is a service; an acting service never promotes a represented human.
+    """
 
     user_id: str | None = None
     role: str | None = None
@@ -22,7 +28,39 @@ class Principal:
     oauth_id: str | None = None
     channel_user_id: str | None = None
     is_internal: bool = False
-    attributes: dict[str, Any] = field(default_factory=dict)
+    attributes: Mapping[str, Any] = field(default_factory=dict)
+    identity: InvocationIdentityV1 | None = None
+
+    def __post_init__(self) -> None:
+        from deerflow_extension_api.identity import _freeze_attributes
+
+        identity = self.identity
+        if identity is not None:
+            if not isinstance(identity, InvocationIdentityV1):
+                raise TypeError("identity must be InvocationIdentityV1 or None")
+            subject = identity.effective_subject
+            object.__setattr__(self, "user_id", subject.subject_id)
+            object.__setattr__(self, "role", subject.role)
+            object.__setattr__(self, "oauth_provider", subject.oauth_provider)
+            object.__setattr__(self, "oauth_id", subject.oauth_id)
+            object.__setattr__(self, "is_internal", subject.kind == "service")
+            object.__setattr__(self, "attributes", subject.attributes)
+            return
+        object.__setattr__(self, "attributes", _freeze_attributes(self.attributes))
+        if self.is_internal and (self.channel_user_id is not None or self.role not in {"internal", "service"}):
+            object.__setattr__(self, "is_internal", False)
+
+    @classmethod
+    def from_identity(
+        cls,
+        identity: InvocationIdentityV1,
+        *,
+        channel_user_id: str | None = None,
+    ) -> Principal:
+        return cls(channel_user_id=channel_user_id, identity=identity)
+
+    def identity_json(self) -> dict[str, Any] | None:
+        return None if self.identity is None else self.identity.to_json()
 
 
 @dataclass

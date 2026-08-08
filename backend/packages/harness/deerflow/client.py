@@ -17,7 +17,6 @@ Usage:
 
 import asyncio
 import concurrent.futures
-import copy
 import logging
 import mimetypes
 import os
@@ -28,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from deerflow_extension_api.identity import thaw_identity_value
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -269,7 +269,7 @@ class DeerFlowClient:
                 principal.oauth_id,
                 principal.channel_user_id,
                 principal.is_internal,
-                copy.deepcopy(principal.attributes),
+                thaw_identity_value(principal.attributes),
             )
         key = (
             cfg.get("model_name"),

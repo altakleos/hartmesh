@@ -41,7 +41,7 @@ class TestPrincipalBuilderFields:
         assert p.oauth_provider == "github"
         assert p.oauth_id == "gh-123"
         assert p.channel_user_id == "ou_sender_1"
-        assert p.is_internal is True
+        assert p.is_internal is False
         assert p.attributes == {"department": "eng"}
 
     def test_partial_context(self):
@@ -80,7 +80,7 @@ class TestIsInternalStrictBool:
     @pytest.mark.parametrize(
         "value,expected",
         [
-            (True, True),
+            (True, False),
             (False, False),
             (1, False),
             ("true", False),
@@ -93,6 +93,13 @@ class TestIsInternalStrictBool:
     def test_is_internal_strict_bool(self, value, expected):
         p = build_principal_from_context({"is_internal": value}, default_role="user")
         assert p.is_internal is expected
+
+    def test_legacy_internal_flag_requires_service_role(self):
+        p = build_principal_from_context(
+            {"user_id": "scheduler", "user_role": "service", "is_internal": True},
+            default_role="user",
+        )
+        assert p.is_internal is True
 
 
 class TestAttributes:

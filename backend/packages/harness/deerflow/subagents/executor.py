@@ -15,7 +15,7 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from deerflow_extension_api import ConstraintProjectionV1
+from deerflow_extension_api import ConstraintProjectionV1, InvocationIdentityV1, SealedOriginV1
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.callbacks.base import BaseCallbackManager
@@ -30,6 +30,10 @@ from deerflow.authz.provider import AuthorizationProvider
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.runtime.accepted_invocation import (
+    INVOCATION_IDENTITY_CONTEXT_KEY,
+    INVOCATION_ORIGIN_CONTEXT_KEY,
+)
 from deerflow.runtime.constraints import InvocationSubagentReservation
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
@@ -454,6 +458,8 @@ class SubagentExecutor:
         channel_user_id: str | None = None,
         is_internal: bool = False,
         authz_attributes: Mapping[str, Any] | None = None,
+        invocation_identity: InvocationIdentityV1 | None = None,
+        invocation_origin: SealedOriginV1 | None = None,
         deerflow_trace_id: str | None = None,
         extensions: Any | None = None,
         authorization_provider: AuthorizationProvider | None = None,
@@ -528,10 +534,15 @@ class SubagentExecutor:
         # chats share one thread across senders, so delegated bash commands
         # must export the dispatching turn's id, not none at all.
         self.channel_user_id = channel_user_id
-        # Authorization identity propagated from the parent runtime context.
-        # is_internal is written unconditionally (including False) so the
-        # subagent's GuardrailMiddleware sees the same provenance as the lead.
-        self.is_internal = is_internal
+        if invocation_identity is not None and not isinstance(invocation_identity, InvocationIdentityV1):
+            raise TypeError("invocation_identity must be InvocationIdentityV1 or None")
+        if invocation_origin is not None and not isinstance(invocation_origin, SealedOriginV1):
+            raise TypeError("invocation_origin must be SealedOriginV1 or None")
+        self.invocation_identity = invocation_identity
+        self.invocation_origin = invocation_origin
+        # Retain the compatibility boolean without allowing transport-derived
+        # legacy state to promote a represented human.
+        self.is_internal = invocation_identity.effective_subject.kind == "service" if invocation_identity is not None else is_internal
         self.authz_attributes = normalize_authz_attributes(authz_attributes)
         self.deerflow_trace_id = deerflow_trace_id
         # Parent run's extension snapshot. Binding it here (rather than reading
@@ -732,6 +743,8 @@ class SubagentExecutor:
             "channel_user_id": self.channel_user_id,
             "is_internal": self.is_internal,
             "authz_attributes": self.authz_attributes,
+            INVOCATION_IDENTITY_CONTEXT_KEY: self.invocation_identity,
+            INVOCATION_ORIGIN_CONTEXT_KEY: self.invocation_origin,
         }
         authorization_candidates = [*self._base_tools]
         if skill_setup.describe_skill_tool is not None:
@@ -936,6 +949,10 @@ class SubagentExecutor:
             # (including False); attributes copied again on write-back.
             context["is_internal"] = self.is_internal
             context["authz_attributes"] = dict(self.authz_attributes)
+            if self.invocation_identity is not None:
+                context[INVOCATION_IDENTITY_CONTEXT_KEY] = self.invocation_identity
+            if self.invocation_origin is not None:
+                context[INVOCATION_ORIGIN_CONTEXT_KEY] = self.invocation_origin
             if self.deerflow_trace_id:
                 context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
             context["is_subagent"] = True

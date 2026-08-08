@@ -58,6 +58,11 @@ from deerflow_extension_api.health import (
     CapabilityHealthResult,
     CapabilityHealthStatus,
 )
+from deerflow_extension_api.identity import (
+    ActingServiceV1,
+    EffectiveSubjectV1,
+    InvocationIdentityV1,
+)
 from deerflow_extension_api.mcp import (
     MCP_INTERCEPTOR_CAPABILITY_API_VERSION,
     MCP_INTERCEPTOR_KIND,
@@ -84,7 +89,7 @@ from deerflow_extension_api.state import ExtensionData
 #: Contract version. Pre-1.0 minors may break and only patches promise to be
 #: additive. From 1.0 on, bump the major on any breaking change; see the spec's
 #: evolution rules for what counts as additive.
-API_VERSION = "0.6.0"
+API_VERSION = "0.7.0"
 
 __all__ = [
     "API_VERSION",
@@ -98,6 +103,7 @@ __all__ = [
     "EXTENSION_TASK_STORE_KEY",
     "AgentBuildContext",
     "AgentScope",
+    "ActingServiceV1",
     "AuthorizationProvider",
     "AuthorizationProviderFactory",
     "AuthzDecision",
@@ -113,9 +119,11 @@ __all__ = [
     "ExtensionData",
     "ExtensionInstall",
     "ExtensionRegistry",
+    "EffectiveSubjectV1",
     "HostPolicySnapshot",
     "InvocationConstraintsProvider",
     "InvocationConstraintsProviderFactory",
+    "InvocationIdentityV1",
     "MiddlewareContributor",
     "MiddlewarePlacement",
     "Placement",
