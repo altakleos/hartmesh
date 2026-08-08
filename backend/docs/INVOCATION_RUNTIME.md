@@ -344,6 +344,25 @@ make retained keyed retries converge, but do not provide scheduler HA or a multi
 Gateway ownership design beyond the explicitly configured PostgreSQL lease and stream
 primitives. Kubernetes pod-termination qualification remains a deployment release gate.
 
+The PostgreSQL migration qualification starts both from an empty schema and from
+the real main-line predecessor `0010_run_cancel_request` with representative
+normal and auxiliary rows. It applies 0011–0014 individually, verifies the
+accepted/idempotency/caller-intent columns, checks and partial indexes, validates
+the lifecycle singleton/journal/index contract, and then uses `RunRepository` for
+replay, cancellation, orphan recovery, lifecycle, and summary reads/writes. The
+same CI marker suite retains the independent-session equal/unequal admission,
+lifecycle CAS/cursor ordering, and repeatable-read query races. With
+`DEERFLOW_TEST_POSTGRES_URL` configured, any marked skip fails the session;
+SQLite remains a fast compatibility tier rather than PostgreSQL evidence.
+
+Alembic can structurally downgrade this feature tail to 0010 and re-upgrade it,
+but the older schema cannot represent accepted evidence, external retry keys,
+canonical caller intent, state versions, or lifecycle events. Downgrade therefore
+preserves the base `runs` rows while deliberately dropping those feature fields
+and journal rows; re-upgrade reads them conservatively as legacy version-zero
+rows and does not invent lost evidence. Operators must quiesce writers and back
+up PostgreSQL before rollback.
+
 ## Graceful Gateway shutdown
 
 `app.gateway.shutdown.GracefulShutdownCoordinator` is the sole production owner
