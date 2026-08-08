@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 36
+config_version: 37
 
 # ============================================================================
 # Logging
@@ -1999,6 +1999,21 @@ database:
 # process-local invocation state and also participates in /ready.
 deployment:
   profile: local_development
+  readiness:
+    # Successful required-capability health evidence may be cached for this
+    # long. It never outlives the admission freshness window below.
+    capability_cache_seconds: 10.0
+    # A genuinely new invocation requires a healthy observation no older than
+    # this window and from the current immutable extension generation.
+    admission_health_max_age_seconds: 10.0
+    # Required health older than this is stale for diagnostics/readiness too.
+    required_health_stale_seconds: 30.0
+    # One authoritative extension probe is bounded independently; all probes
+    # run concurrently inside the overall readiness/admission deadline.
+    capability_probe_timeout_seconds: 2.0
+    overall_timeout_seconds: 5.0
+    # Required authority fails closed on the first failed observation in v1.
+    required_failure_threshold: 1
 
 # ============================================================================
 # Run Events Configuration

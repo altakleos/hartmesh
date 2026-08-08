@@ -296,6 +296,8 @@ atomicity is independent from restart/pod-loss durability: memory is
 `process_local`, SQLite is `node_durable`, and PostgreSQL is `shared_durable`.
 The `durable_production` deployment profile fails startup/readiness with
 process-local state; `local_development` remains an explicit convenience profile.
+The report also carries the latest safe admission-readiness status, reason codes,
+and correlation identifier. Raw provider/database exception text remains internal.
 Unexpected Adapter exceptions become bounded indeterminate failures with a
 correlation ID matching a safe internal diagnostic; exception text is never public.
 
@@ -358,13 +360,25 @@ a mutable-state reread.
 
 The Capability Host publishes a restart-only immutable manifest, generation, and digest.
 New accepted invocations pin that generation/digest, while live health is a separate mutable
-snapshot and cannot change it. `GET /health` remains minimal liveness; `GET /ready` fails
-closed for missing, failed, stale, or unhealthy operator-required authorization,
+snapshot and cannot change it. Every successful health observation records its generation and
+timestamp. `GET /health` remains minimal process liveness during recoverable dependency
+outages; `GET /ready` fails closed for missing, failed, stale, unhealthy, or
+generation-mismatched operator-required authorization,
 contributors, invocation constraints, or required MCP preparation, and for corrupt lifecycle
 cursor ordering and an unsatisfied durable deployment profile. The administrator-only
 deployment report exposes the safe manifest, separately labelled health snapshots,
 persistence truth, optional artifact provenance, and qualification state; the portable
 runtime capabilities record deliberately does not.
+
+The same coordinator fences every genuinely absent HTTP, scheduled-task, native-channel, and
+embedded-service invocation before normalization and durable acceptance. It runs required
+health probes concurrently with bounded lifecycle integrity under the configured overall
+timeout. The authoritative `authorize`, `contribute`, or `project` call then remains the final
+proof and fails closed independently. Known keyed replay is resolved before this fence and
+reuses its accepted evidence without rerunning health or authority code. Defaults and bounds
+live under startup-only `deployment.readiness`: 10-second cache/admission health, 30-second
+diagnostic staleness, two-second per-probe timeout, five-second overall timeout, and a required
+failure threshold fixed to one.
 
 Required MCP interceptors run only after the coherent authorization provider allows. At the
 final network fence, the host verifies the pinned generation and fresh required health, then

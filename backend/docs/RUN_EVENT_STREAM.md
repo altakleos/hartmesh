@@ -67,6 +67,13 @@ singleton may be repaired only while no lifecycle event exists. Lifecycle
 events without that singleton are corrupt ordering state and fail Gateway
 initialization.
 
+Readiness never repairs state. In one database snapshot it performs exactly three bounded
+`LIMIT 2` reads: singleton rows, the first retained event cursors, and the last retained event
+cursors. A missing/duplicate singleton, invalid `0 <= pruned_through <= last_cursor`, retained
+range mismatch, or discontinuity at either retained sequence edge makes readiness and new
+admission fail closed. This deliberately validates maintained structural boundaries without
+scanning conversation or lifecycle history.
+
 The lifecycle payload never stores prompts, messages, reasoning, tool payloads,
 credentials, artifact contents, or the rich bodies below. Reasons are selected
 from host-owned safe codes; v1 evidence accepts only the cancellation `action`

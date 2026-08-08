@@ -80,6 +80,11 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class _ReadyAdmissionFence:
+    async def ready_for_admission(self) -> bool:
+        return True
+
+
 def make_authed_test_app(
     *,
     user_factory: Callable[[], User] | None = None,
@@ -108,6 +113,7 @@ def make_authed_test_app(
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)
     app.state.thread_store = repo
+    app.state.runtime_readiness = _ReadyAdmissionFence()
 
     return app
 

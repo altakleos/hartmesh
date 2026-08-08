@@ -70,7 +70,12 @@ class ProviderInvocationConstraints:
         self._host = host
         self._health = health
 
-    async def _required_capability_is_healthy(self, host: ConstraintsHost) -> bool:
+    async def _required_capability_is_healthy(
+        self,
+        host: ConstraintsHost,
+        *,
+        expected_generation: int,
+    ) -> bool:
         required_id = getattr(host, "required_capability_id", None)
         if required_id is None:
             return True
@@ -88,16 +93,19 @@ class ProviderInvocationConstraints:
             raise
         except Exception:
             return False
-        return len(snapshots) == 1 and getattr(snapshots[0], "capability_id", None) == required_id and getattr(snapshots[0], "status", None) == "healthy"
+        return len(snapshots) == 1 and getattr(snapshots[0], "capability_id", None) == required_id and getattr(snapshots[0], "status", None) == "healthy" and getattr(snapshots[0], "extension_generation", None) == expected_generation
 
     async def project(self, launch: PreparedLaunch) -> InternalConstraintDecision:
         host = self._host
         if host is None:
             return InternalConstraintDecision.absent()
-        if not await self._required_capability_is_healthy(host):
-            return InternalConstraintDecision.indeterminate()
         accepted = launch.accepted_invocation
         if not isinstance(accepted, AcceptedInvocation):
+            return InternalConstraintDecision.indeterminate()
+        if not await self._required_capability_is_healthy(
+            host,
+            expected_generation=accepted.extension_generation,
+        ):
             return InternalConstraintDecision.indeterminate()
         request_digest = launch.request_digest
         if not isinstance(request_digest, str):

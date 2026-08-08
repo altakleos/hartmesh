@@ -22,6 +22,7 @@ from app.runtime.deployment import (
     describe_persistence,
     validate_deployment_profile,
 )
+from app.runtime.readiness import RuntimeReadinessSnapshot
 from deerflow.extensions.capabilities import (
     CapabilityHealthSnapshot,
     build_capability_manifest,
@@ -58,6 +59,15 @@ class _HealthMonitor:
         )
 
 
+class _Readiness:
+    last_snapshot = RuntimeReadinessSnapshot(
+        status="not_ready",
+        reason_codes=("lifecycle_event_bounds_invalid",),
+        checked_at=datetime(2026, 8, 7, tzinfo=UTC),
+        correlation_id="a" * 32,
+    )
+
+
 def _reporter(*, backend: str, profile: DeploymentProfile):
     return GatewayDeploymentReporter(
         profile=profile,
@@ -65,6 +75,7 @@ def _reporter(*, backend: str, profile: DeploymentProfile):
         atomic_lifecycle=True,
         manifest=build_capability_manifest(ExtensionRegistry().build(generation=7)),
         health_monitor=_HealthMonitor(),
+        readiness_supplier=lambda: _Readiness.last_snapshot,
         provenance=DeploymentProvenance(
             image_reference="registry.example/hartmesh/gateway:2026.08",
             image_digest="sha256:" + ("a" * 64),
@@ -141,6 +152,13 @@ def test_admin_deployment_report_is_versioned_truthful_and_redacted() -> None:
         "version": 1,
         "status": "unqualified",
         "evidence": [],
+    }
+    assert payload["admission_readiness"] == {
+        "version": 1,
+        "status": "not_ready",
+        "reason_codes": ["lifecycle_event_bounds_invalid"],
+        "checked_at": "2026-08-07T00:00:00Z",
+        "correlation_id": "a" * 32,
     }
     assert payload["provenance"]["image_digest"] == "sha256:" + ("a" * 64)
     serialized = str(payload).lower()

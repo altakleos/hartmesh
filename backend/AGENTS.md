@@ -513,13 +513,24 @@ Neither plugin configuration nor loaded objects enter that projection. New accep
 invocations persist the generation and digest in existing safe acceptance evidence, and
 workers/subagents stay pinned to them for the run. There is no plugin hot reload.
 
-Live health is separate mutable state: probes run outside observational middleware with a
-two-second timeout, a ten-second cache, one in-flight call per contribution, and a
-thirty-second required-snapshot staleness fence. Required unhealthy/missing/failed
-capabilities and lifecycle-cursor corruption make unauthenticated `GET /ready` return the
-minimal 503 body; `GET /health` remains independent liveness. Admin-only
+Live health is separate mutable state: probes run outside observational middleware with
+startup-only timings from `deployment.readiness` (defaults: two-second per-probe timeout,
+ten-second cache/admission window, thirty-second diagnostic staleness fence, and five-second
+overall evaluation timeout), one in-flight call per contribution, and a fixed fail-closed
+required failure threshold of one. Each successful observation records its extension
+generation and timestamp. Required unhealthy/missing/failed/stale/generation-mismatched
+capabilities, an unsatisfied persistence profile, and lifecycle-cursor corruption make
+unauthenticated `GET /ready` return the minimal 503 body; `GET /health` remains independent
+process liveness. `InvocationRuntime` applies that same bounded coordinator after known-key
+lookup but before normalization for every genuinely new HTTP, channel, scheduler, or service
+admission. Actual contributor, constraints, authorization, and MCP calls remain the final
+authoritative fail-closed operation; accepted replay bypasses health and reuses sealed
+evidence. SQL lifecycle readiness uses only three `LIMIT 2` snapshot reads to validate the
+singleton, pruning range, retained event bounds, and both sequence edges—never a historical
+event scan. Admin-only
 `GET /api/runtime/v1/deployment` exposes the safe immutable manifest plus separately
-labelled current health, bounded provenance, persistence facts, and qualification state.
+labelled current health, last successful generation/timestamp, admission-readiness reason
+codes/correlation IDs, bounded provenance, persistence facts, and qualification state.
 The strict portable `GET /api/runtime/v1/capabilities` record contains only supported
 runtime operations and is identical to the in-process Adapter response. Memory reports
 `process_local`, SQLite `node_durable`, and PostgreSQL `shared_durable`; lifecycle atomicity

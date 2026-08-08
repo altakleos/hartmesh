@@ -32,6 +32,7 @@ from deerflow.runtime.runs.store.base import (
     CancellationRequestOutcome,
     CancellationRequestResult,
     LeaseRenewal,
+    LifecycleReadiness,
     LifecycleTransition,
     LifecycleTransitionResult,
     LifecycleType,
@@ -90,12 +91,46 @@ class RunRepository(RunStore):
     async def lifecycle_ready(self) -> bool:
         """Check ordering metadata without repairing or mutating it."""
 
+        return (await self.lifecycle_readiness()).ready
+
+    async def lifecycle_readiness(self) -> LifecycleReadiness:
+        """Validate cursor metadata and retained event edges with bounded reads."""
+
         async with self._sf() as session:
-            state = await session.get(RunLifecycleCursorStateRow, 1)
-            if state is not None:
-                return True
-            event_count = await session.scalar(select(func.count()).select_from(RunLifecycleEventRow))
-            return not bool(event_count)
+            await self._begin_lifecycle_read(session)
+            states = tuple((await session.execute(select(RunLifecycleCursorStateRow).order_by(RunLifecycleCursorStateRow.singleton_id).limit(2))).scalars().all())
+            if len(states) != 1 or states[0].singleton_id != 1:
+                return LifecycleReadiness(
+                    ready=False,
+                    reason_code="lifecycle_cursor_missing",
+                )
+            state = states[0]
+            if state.last_cursor < 0 or state.pruned_through < 0 or state.pruned_through > state.last_cursor:
+                return LifecycleReadiness(
+                    ready=False,
+                    reason_code="lifecycle_pruning_invalid",
+                )
+
+            first = tuple((await session.execute(select(RunLifecycleEventRow.cursor).order_by(RunLifecycleEventRow.cursor).limit(2))).scalars().all())
+            last = tuple((await session.execute(select(RunLifecycleEventRow.cursor).order_by(RunLifecycleEventRow.cursor.desc()).limit(2))).scalars().all())
+            if not first:
+                if state.pruned_through != state.last_cursor:
+                    return LifecycleReadiness(
+                        ready=False,
+                        reason_code="lifecycle_event_bounds_invalid",
+                    )
+                return LifecycleReadiness(ready=True)
+            if first[0] != state.pruned_through + 1 or last[0] != state.last_cursor:
+                return LifecycleReadiness(
+                    ready=False,
+                    reason_code="lifecycle_event_bounds_invalid",
+                )
+            if (len(first) == 2 and first[1] != first[0] + 1) or (len(last) == 2 and last[1] != last[0] - 1):
+                return LifecycleReadiness(
+                    ready=False,
+                    reason_code="lifecycle_event_sequence_invalid",
+                )
+            return LifecycleReadiness(ready=True)
 
     @staticmethod
     async def _begin_lifecycle_read(session: AsyncSession) -> None:

@@ -770,7 +770,7 @@ container, while each `to_dict()` call returns a new mutable JSON wire copy.
 | Route | Contract |
 |---|---|
 | `GET /capabilities` | Administrator-only strict `runtime.capabilities`; reports only portable ensure, invocation/context observation, cancel control, and unsupported context export/retirement. |
-| `GET /deployment` | Administrator-only `deerflow.deployment/v1` report with extension manifest/health, bounded image/source provenance when supplied, persistence facts, and qualification evidence or explicit `unqualified` status. This is not part of `DurableInvocationPort`. |
+| `GET /deployment` | Administrator-only `deerflow.deployment/v1` report with extension manifest/health, latest safe admission-readiness reason codes/correlation, bounded image/source provenance when supplied, persistence facts, and qualification evidence or explicit `unqualified` status. This is not part of `DurableInvocationPort`. |
 | `POST /invocations/ensure` | Exact `invocation.ensure` body. `external_key` is required; the server derives its scope from the authenticated principal or service. |
 | `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. |
 | `GET /contexts/{thread_id}/invocations` | Access-filtered normal-run lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500; optional `source_kind` is `http|scheduled_task|native_channel|service`. |
@@ -906,6 +906,14 @@ durability. Qualification remains `unqualified` unless completed evidence is
 explicitly supplied. Live health never changes the manifest digest or an
 invocation's accepted generation. There is no context export, context retirement,
 event broker, or additional control in v1.
+
+`GET /health` is independent process liveness. Unauthenticated `GET /ready` returns only
+`{"status":"ready"}` or `{"status":"not_ready"}` and uses the same bounded proof that fences
+genuinely new invocation admission: current-generation fresh health for every required
+authority capability, bounded lifecycle singleton/pruning/event-edge integrity, database
+availability, and the configured persistence profile. Accepted keyed replay is resolved
+before that fence and reuses its sealed evidence. Startup-only `deployment.readiness`
+configures the cache/admission/staleness windows and per-probe/overall deadlines.
 
 ---
 

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
+from app.runtime.readiness import RuntimeReadinessSnapshot
 from deerflow.extensions.capabilities import (
     CapabilityHealthMonitor,
     CapabilityHealthSnapshot,
@@ -241,6 +243,7 @@ class DeploymentReport:
     persistence: PersistenceReport
     extension_manifest: CapabilityManifest
     capability_health: tuple[CapabilityHealthSnapshot, ...]
+    admission_readiness: RuntimeReadinessSnapshot | None = None
     provenance: DeploymentProvenance = field(default_factory=DeploymentProvenance)
     qualification: DeploymentQualification = field(default_factory=DeploymentQualification)
     api_version: Literal["deerflow.deployment/v1"] = field(
@@ -264,6 +267,17 @@ class DeploymentReport:
             "profile": self.profile.value,
             "extension_manifest": capability_manifest_to_dict(self.extension_manifest),
             "capability_health": capability_health_to_dict(self.capability_health),
+            "admission_readiness": (
+                self.admission_readiness.to_dict()
+                if self.admission_readiness is not None
+                else {
+                    "version": 1,
+                    "status": "unknown",
+                    "reason_codes": ["not_evaluated"],
+                    "checked_at": None,
+                    "correlation_id": None,
+                }
+            ),
             "provenance": self.provenance.to_dict(),
             "persistence": self.persistence.to_dict(),
             "qualification": self.qualification.to_dict(),
@@ -291,6 +305,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         atomic_lifecycle: bool,
         manifest: CapabilityManifest,
         health_monitor: CapabilityHealthMonitor,
+        readiness_supplier: Callable[[], RuntimeReadinessSnapshot | None] | None = None,
         provenance: DeploymentProvenance | None = None,
         qualification: DeploymentQualification | None = None,
     ) -> None:
@@ -301,6 +316,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         )
         self._manifest = manifest
         self._health_monitor = health_monitor
+        self._readiness_supplier = readiness_supplier or (lambda: None)
         self._provenance = provenance or DeploymentProvenance()
         self._qualification = qualification or DeploymentQualification()
 
@@ -327,6 +343,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             atomic_lifecycle=atomic_lifecycle,
             manifest=self._manifest,
             health_monitor=self._health_monitor,
+            readiness_supplier=self._readiness_supplier,
             provenance=self._provenance,
             qualification=self._qualification,
         )
@@ -337,6 +354,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             persistence=self._persistence,
             extension_manifest=self._manifest,
             capability_health=tuple(await self._health_monitor.health()),
+            admission_readiness=self._readiness_supplier(),
             provenance=self._provenance,
             qualification=self._qualification,
         )

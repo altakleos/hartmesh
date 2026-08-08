@@ -15,6 +15,7 @@ from app.runtime.invocation import (
     InternalCancelReceipt,
     InternalCancelRequest,
     InternalLaunchIntent,
+    InvocationAuthorizationOutcome,
     InvocationPrincipal,
     InvocationRuntime,
     NotFoundOrInvisible,
@@ -166,6 +167,103 @@ class _Runs:
     async def cancel(self, request: InternalCancelRequest) -> CancelOutcome:
         self.cancellations.append(request)
         return self.cancel_outcome
+
+
+class _AdmissionFence:
+    def __init__(self, ready: bool) -> None:
+        self.ready = ready
+        self.calls = 0
+
+    async def ready_for_admission(self) -> bool:
+        self.calls += 1
+        return self.ready
+
+
+@pytest.mark.anyio
+async def test_unready_deployment_blocks_new_invocation_before_normalization() -> None:
+    events: list[str] = []
+    fence = _AdmissionFence(ready=False)
+    runtime = InvocationRuntime(
+        normalizer=_Normalizer(events),
+        runs=_Runs(events),
+        admission_fence=fence,
+    )
+
+    result = await runtime.launch(InternalLaunchIntent(thread_id="thread-1"))
+
+    assert result is InvocationAuthorizationOutcome.indeterminate
+    assert fence.calls == 1
+    assert events == []
+
+
+@pytest.mark.anyio
+async def test_gateway_runtime_builder_installs_application_admission_fence() -> None:
+    from app.gateway.services import (
+        build_channel_invocation_runtime,
+        build_invocation_runtime,
+        build_scheduled_invocation_runtime,
+        build_service_invocation_runtime,
+    )
+
+    fence = _AdmissionFence(ready=False)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(runtime_readiness=fence),
+        ),
+        state=SimpleNamespace(user=None),
+        headers={},
+        cookies={},
+    )
+
+    runtimes = (
+        build_invocation_runtime(request),
+        build_scheduled_invocation_runtime(request.app),
+        build_channel_invocation_runtime(request.app),
+        build_service_invocation_runtime(
+            request.app,
+            authenticated_service_id="service-1",
+        ),
+    )
+
+    for runtime in runtimes:
+        result = await runtime.launch(
+            InternalLaunchIntent(thread_id="thread-1"),
+        )
+
+        assert result is InvocationAuthorizationOutcome.indeterminate
+
+    assert fence.calls == 4
+
+
+def test_gateway_runtime_builders_require_application_admission_fence() -> None:
+    from app.gateway.services import (
+        build_channel_invocation_runtime,
+        build_invocation_runtime,
+        build_scheduled_invocation_runtime,
+        build_service_invocation_runtime,
+    )
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    request = SimpleNamespace(
+        app=app,
+        state=SimpleNamespace(user=None),
+        headers={},
+        cookies={},
+    )
+
+    builders = (
+        lambda: build_invocation_runtime(request),
+        lambda: build_scheduled_invocation_runtime(app),
+        lambda: build_channel_invocation_runtime(app),
+        lambda: build_service_invocation_runtime(
+            app,
+            authenticated_service_id="service-1",
+        ),
+    )
+
+    for build in builders:
+        with pytest.raises(AttributeError, match="runtime_readiness"):
+            build()
 
 
 @pytest.mark.anyio

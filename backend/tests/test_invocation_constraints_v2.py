@@ -566,16 +566,23 @@ async def test_application_adapter_projects_v2_from_only_host_sealed_facts() -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("health_status", "expected_outcome", "expected_host_calls"),
+    (
+        "health_status",
+        "generation_offset",
+        "expected_outcome",
+        "expected_host_calls",
+    ),
     [
-        ("healthy", "allowed", 1),
-        ("unhealthy", "indeterminate", 0),
-        ("unknown", "indeterminate", 0),
-        (None, "indeterminate", 0),
+        ("healthy", 0, "allowed", 1),
+        ("healthy", 1, "indeterminate", 0),
+        ("unhealthy", 0, "indeterminate", 0),
+        ("unknown", 0, "indeterminate", 0),
+        (None, 0, "indeterminate", 0),
     ],
 )
 async def test_required_v2_health_fences_projection(
     health_status: str | None,
+    generation_offset: int,
     expected_outcome: str,
     expected_host_calls: int,
 ) -> None:
@@ -601,6 +608,7 @@ async def test_required_v2_health_fences_projection(
                 SimpleNamespace(
                     capability_id=INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2,
                     status=health_status,
+                    extension_generation=(accepted.extension_generation + generation_offset),
                 ),
             )
 

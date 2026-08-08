@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Collection
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
+from uuid import uuid4
 
 from deerflow_extension_api import (
     API_VERSION,
@@ -19,6 +21,8 @@ from deerflow_extension_api import (
 )
 
 from deerflow.extensions.registry import LoadedExtensions
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,9 @@ class CapabilityHealthSnapshot:
     diagnostic_code: str
     checked_at: datetime
     expires_at: datetime
+    extension_generation: int = 0
+    last_healthy_at: datetime | None = None
+    correlation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +105,9 @@ def capability_health_to_dict(
                 "diagnostic_code": item.diagnostic_code,
                 "checked_at": _timestamp(item.checked_at),
                 "expires_at": _timestamp(item.expires_at),
+                "extension_generation": item.extension_generation,
+                "last_healthy_at": (_timestamp(item.last_healthy_at) if item.last_healthy_at is not None else None),
+                "correlation_id": item.correlation_id,
             }
             for item in snapshots
         ],
@@ -328,14 +338,16 @@ class CapabilityHealthMonitor:
         cache_seconds: float = 10.0,
         timeout_seconds: float = 2.0,
         stale_seconds: float = 30.0,
+        admission_max_age_seconds: float = 10.0,
     ) -> None:
-        if cache_seconds <= 0 or timeout_seconds <= 0 or stale_seconds <= 0:
+        if cache_seconds <= 0 or timeout_seconds <= 0 or stale_seconds <= 0 or admission_max_age_seconds <= 0:
             raise ValueError("capability health timing values must be positive")
         self._manifest = manifest
         self._clock = clock or (lambda: datetime.now(UTC))
         self._cache_ttl = timedelta(seconds=cache_seconds)
         self._timeout_seconds = timeout_seconds
         self._stale_after = timedelta(seconds=stale_seconds)
+        self._admission_max_age = timedelta(seconds=admission_max_age_seconds)
         self._probes: dict[str, Any] = {}
         for registration in (
             *extensions.authorization_provider_factories,
@@ -348,6 +360,7 @@ class CapabilityHealthMonitor:
         for registration in extensions.mcp_interceptor_descriptors:
             self._probes[f"mcp_interceptor:{registration.contribution_id}"] = registration.health_probe
         self._cache: dict[str, CapabilityHealthSnapshot] = {}
+        self._last_healthy: dict[str, datetime] = {}
         self._inflight: dict[str, asyncio.Task[CapabilityHealthSnapshot]] = {}
         self._lock = asyncio.Lock()
 
@@ -362,6 +375,7 @@ class CapabilityHealthMonitor:
         entry: CapabilityManifestEntry,
     ) -> CapabilityHealthSnapshot:
         now = self._now()
+        correlation_id: str | None = None
         if entry.initialization_status != "initialized":
             snapshot = CapabilityHealthSnapshot(
                 contribution_id=entry.contribution_id,
@@ -370,6 +384,7 @@ class CapabilityHealthMonitor:
                 diagnostic_code=entry.diagnostic_code,
                 checked_at=now,
                 expires_at=now + self._cache_ttl,
+                extension_generation=self._manifest.extension_generation,
             )
         else:
             probe = self._probes.get(entry.capability_id)
@@ -384,16 +399,35 @@ class CapabilityHealthMonitor:
                 except asyncio.CancelledError:
                     raise
                 except TimeoutError:
+                    correlation_id = uuid4().hex
+                    logger.warning(
+                        "Authoritative capability health probe timed out",
+                        extra={
+                            "capability_id": entry.capability_id,
+                            "correlation_id": correlation_id,
+                        },
+                    )
                     result = CapabilityHealthResult(
                         status="unhealthy",
                         diagnostic_code="probe_timeout",
                     )
                 except Exception:
+                    correlation_id = uuid4().hex
+                    logger.warning(
+                        "Authoritative capability health probe failed",
+                        exc_info=True,
+                        extra={
+                            "capability_id": entry.capability_id,
+                            "correlation_id": correlation_id,
+                        },
+                    )
                     result = CapabilityHealthResult(
                         status="unhealthy",
                         diagnostic_code="probe_failed",
                     )
             checked_at = self._now()
+            if result.status == "healthy":
+                self._last_healthy[entry.capability_id] = checked_at
             snapshot = CapabilityHealthSnapshot(
                 contribution_id=entry.contribution_id,
                 capability_id=entry.capability_id,
@@ -401,6 +435,9 @@ class CapabilityHealthMonitor:
                 diagnostic_code=result.diagnostic_code or ("healthy" if result.status == "healthy" else "reported_unhealthy"),
                 checked_at=checked_at,
                 expires_at=checked_at + self._cache_ttl,
+                extension_generation=self._manifest.extension_generation,
+                last_healthy_at=self._last_healthy.get(entry.capability_id),
+                correlation_id=correlation_id,
             )
         async with self._lock:
             self._cache[entry.capability_id] = snapshot
@@ -429,6 +466,8 @@ class CapabilityHealthMonitor:
                     diagnostic_code="refresh_in_progress",
                     checked_at=now,
                     expires_at=now,
+                    extension_generation=self._manifest.extension_generation,
+                    last_healthy_at=(cached.last_healthy_at if cached is not None else None),
                 )
             task = asyncio.create_task(self._run_probe(entry))
             self._inflight[entry.capability_id] = task
@@ -463,8 +502,43 @@ class CapabilityHealthMonitor:
                 diagnostic_code="snapshot_stale",
                 checked_at=snapshot.checked_at,
                 expires_at=snapshot.expires_at,
+                extension_generation=snapshot.extension_generation,
+                last_healthy_at=snapshot.last_healthy_at,
+                correlation_id=snapshot.correlation_id,
             )
         return tuple(snapshots)
+
+    async def admission_readiness(
+        self,
+        *,
+        expected_generation: int,
+    ) -> CapabilityReadinessSnapshot:
+        """Prove fresh health for every operator-required capability."""
+
+        required = {entry.capability_id for entry in self._manifest.capabilities if entry.operator_required}
+        snapshots = list(await self.health_for(required, refresh=True))
+        now = self._now()
+        ready = {item.capability_id for item in snapshots} == required
+        for index, snapshot in enumerate(snapshots):
+            if snapshot.extension_generation != expected_generation:
+                snapshot = replace(
+                    snapshot,
+                    status="unknown",
+                    diagnostic_code="generation_mismatch",
+                )
+            elif snapshot.status == "healthy" and (snapshot.last_healthy_at is None or now - snapshot.last_healthy_at > self._admission_max_age):
+                snapshot = replace(
+                    snapshot,
+                    status="unknown",
+                    diagnostic_code="snapshot_stale",
+                )
+            snapshots[index] = snapshot
+            if snapshot.status != "healthy":
+                ready = False
+        return CapabilityReadinessSnapshot(
+            status="ready" if ready else "not_ready",
+            health=tuple(snapshots),
+        )
 
     async def readiness(
         self,
@@ -480,13 +554,10 @@ class CapabilityHealthMonitor:
             if snapshot.capability_id not in required:
                 continue
             if now - snapshot.checked_at > self._stale_after:
-                snapshot = CapabilityHealthSnapshot(
-                    contribution_id=snapshot.contribution_id,
-                    capability_id=snapshot.capability_id,
+                snapshot = replace(
+                    snapshot,
                     status="unknown",
                     diagnostic_code="snapshot_stale",
-                    checked_at=snapshot.checked_at,
-                    expires_at=snapshot.expires_at,
                 )
                 snapshots[index] = snapshot
             if snapshot.status != "healthy":

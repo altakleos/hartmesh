@@ -336,7 +336,7 @@ class McpInterceptorHost:
                 if frozenset(required_by_id) != required:
                     raise McpCallPreparationError("required_interceptor_unavailable")
                 health = await health_monitor.health_for(required, refresh=True)
-                if {item.capability_id for item in health} != required or any(item.status != "healthy" for item in health):
+                if {item.capability_id for item in health} != required or any(item.status != "healthy" or item.extension_generation != generation for item in health):
                     raise McpCallPreparationError("required_interceptor_unhealthy")
                 try:
                     projection = McpCallProjectionV1(

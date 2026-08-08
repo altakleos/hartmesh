@@ -43,6 +43,16 @@ gateway:
   # shutdown begins (which runs the memory queue drain). 0 disables the hook.
   # Counts against terminationGracePeriodSeconds.
   preStopSleepSeconds: 5
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 6
+    failureThreshold: 1
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 20
+    timeoutSeconds: 2
+    failureThreshold: 3
   resources:
     requests:
       cpu: 200m
@@ -243,7 +253,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 36
+  config_version: 37
   log_level: info
 
   models: []
@@ -275,6 +285,13 @@ config: |
   # authoritative invocation state.
   deployment:
     profile: durable_production
+    readiness:
+      capability_cache_seconds: 10.0
+      admission_health_max_age_seconds: 10.0
+      required_health_stale_seconds: 30.0
+      capability_probe_timeout_seconds: 2.0
+      overall_timeout_seconds: 5.0
+      required_failure_threshold: 1
 
   # The LangGraph Store (cross-thread memory + thread list) reads this legacy
   # `checkpointer:` section — it does NOT fall back to `database:` the way the

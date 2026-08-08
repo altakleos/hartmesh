@@ -31,6 +31,11 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 _INPUT = {"messages": [{"role": "user", "content": "hello"}]}
 
 
+class _ReadyAdmissionFence:
+    async def ready_for_admission(self) -> bool:
+        return True
+
+
 @pytest.fixture
 def gateway_launch_harness():
     graph_store = InMemoryStore()
@@ -44,6 +49,7 @@ def gateway_launch_harness():
         ),
         app=SimpleNamespace(
             state=SimpleNamespace(
+                runtime_readiness=_ReadyAdmissionFence(),
                 stream_bridge=SimpleNamespace(),
                 run_manager=manager,
                 checkpointer=InMemorySaver(),
@@ -308,6 +314,7 @@ async def test_in_process_and_http_runtime_adapters_persist_the_same_caller_inte
         manager = RunManager(store=MemoryRunStore())
         app = SimpleNamespace(
             state=SimpleNamespace(
+                runtime_readiness=_ReadyAdmissionFence(),
                 stream_bridge=SimpleNamespace(),
                 run_manager=manager,
                 checkpointer=InMemorySaver(),

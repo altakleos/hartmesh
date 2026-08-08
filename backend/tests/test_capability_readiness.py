@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -20,12 +21,13 @@ from deerflow_extension_api import (
 )
 from deerflow_runtime_api import RuntimeCapabilities, record_from_dict
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, event, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.auth.models import User
 from app.gateway.routers import runtime_api
 from app.runtime.deployment import GatewayDeploymentReporter
+from deerflow.config.deployment_config import DeploymentConfig
 from deerflow.extensions.capabilities import (
     CapabilityHealthMonitor,
     CapabilityHealthSnapshot,
@@ -33,7 +35,10 @@ from deerflow.extensions.capabilities import (
 )
 from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.persistence.base import Base
-from deerflow.persistence.run.model import RunLifecycleCursorStateRow
+from deerflow.persistence.run.model import (
+    RunLifecycleCursorStateRow,
+    RunLifecycleEventRow,
+)
 from deerflow.persistence.run.sql import RunRepository
 
 
@@ -58,6 +63,30 @@ class _AuthorizationProvider:
 class _ConstraintsProvider:
     async def project(self, request):
         raise NotImplementedError
+
+
+def test_readiness_timing_configuration_is_explicit_and_fail_closed() -> None:
+    timing = DeploymentConfig().readiness
+
+    assert timing.capability_cache_seconds == 10.0
+    assert timing.admission_health_max_age_seconds == 10.0
+    assert timing.required_health_stale_seconds == 30.0
+    assert timing.capability_probe_timeout_seconds == 2.0
+    assert timing.overall_timeout_seconds == 5.0
+    assert timing.required_failure_threshold == 1
+
+    with pytest.raises(ValueError, match="overall_timeout_seconds"):
+        DeploymentConfig(
+            readiness={
+                "capability_probe_timeout_seconds": 3.0,
+                "overall_timeout_seconds": 2.0,
+            }
+        )
+
+    with pytest.raises(ValueError, match="required_failure_threshold"):
+        DeploymentConfig(
+            readiness={"required_failure_threshold": 2},
+        )
 
 
 @pytest.mark.asyncio
@@ -245,6 +274,121 @@ async def test_required_probe_timeout_and_stale_snapshot_are_not_ready() -> None
 
 
 @pytest.mark.asyncio
+async def test_admission_health_requires_fresh_success_from_current_generation() -> None:
+    now = [datetime(2026, 8, 7, tzinfo=UTC)]
+    healthy = [True]
+
+    async def probe() -> CapabilityHealthResult:
+        if healthy[0]:
+            return CapabilityHealthResult(status="healthy")
+        return CapabilityHealthResult(
+            status="unhealthy",
+            diagnostic_code="authority_unavailable",
+        )
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("fixture:install"):
+        registry.origin_contributor(
+            OriginContributorFactory(
+                contribution_id="policy_origin",
+                capability_api_version=ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION,
+                factory=_OriginContributor,
+                kind="origin_contributor",
+                health_probe=probe,
+            )
+        )
+    loaded = registry.build(generation=7)
+    manifest = build_capability_manifest(
+        loaded,
+        required_capabilities=("origin_contributor:policy_origin",),
+        initialized_capability_ids=("origin_contributor:policy_origin",),
+    )
+    monitor = CapabilityHealthMonitor(
+        manifest,
+        loaded,
+        clock=lambda: now[0],
+        cache_seconds=1,
+        admission_max_age_seconds=5,
+    )
+
+    first = await monitor.admission_readiness(expected_generation=7)
+    assert first.status == "ready"
+    assert first.health[0].extension_generation == 7
+    assert first.health[0].last_healthy_at == now[0]
+
+    generation_mismatch = await monitor.admission_readiness(
+        expected_generation=8,
+    )
+    assert generation_mismatch.status == "not_ready"
+    assert generation_mismatch.health[0].diagnostic_code == ("generation_mismatch")
+
+    healthy[0] = False
+    now[0] += timedelta(seconds=6)
+    unavailable = await monitor.admission_readiness(expected_generation=7)
+    assert unavailable.status == "not_ready"
+    assert unavailable.health[0].diagnostic_code == "authority_unavailable"
+    assert unavailable.health[0].last_healthy_at == datetime(
+        2026,
+        8,
+        7,
+        tzinfo=UTC,
+    )
+
+    healthy[0] = True
+    now[0] += timedelta(seconds=2)
+    recovered = await monitor.admission_readiness(expected_generation=7)
+    assert recovered.status == "ready"
+    assert recovered.health[0].last_healthy_at == now[0]
+
+
+@pytest.mark.asyncio
+async def test_authority_probe_exception_is_fail_closed_and_safely_correlated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def probe() -> CapabilityHealthResult:
+        raise RuntimeError("provider token=never-publish")
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("fixture:install"):
+        registry.origin_contributor(
+            OriginContributorFactory(
+                contribution_id="policy_origin",
+                capability_api_version=ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION,
+                factory=_OriginContributor,
+                kind="origin_contributor",
+                health_probe=probe,
+            )
+        )
+    loaded = registry.build(generation=9)
+    manifest = build_capability_manifest(
+        loaded,
+        required_capabilities=("origin_contributor:policy_origin",),
+        initialized_capability_ids=("origin_contributor:policy_origin",),
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="deerflow.extensions.capabilities",
+    ):
+        result = await CapabilityHealthMonitor(
+            manifest,
+            loaded,
+        ).admission_readiness(expected_generation=9)
+
+    assert result.status == "not_ready"
+    snapshot = result.health[0]
+    assert snapshot.diagnostic_code == "probe_failed"
+    assert snapshot.correlation_id is not None
+    public = {
+        "diagnostic_code": snapshot.diagnostic_code,
+        "correlation_id": snapshot.correlation_id,
+    }
+    assert "never-publish" not in str(public)
+    matching = [record for record in caplog.records if getattr(record, "correlation_id", None) == snapshot.correlation_id]
+    assert len(matching) == 1
+
+
+@pytest.mark.asyncio
 async def test_missing_required_initialization_is_unready_but_optional_failure_is_diagnostic_only() -> None:
     missing_extensions = ExtensionRegistry().build()
     missing = build_capability_manifest(
@@ -300,6 +444,15 @@ async def test_lifecycle_counter_corruption_is_reported_not_ready(tmp_path) -> N
     try:
         await store.initialize_lifecycle()
         assert await store.lifecycle_ready() is True
+        async with factory() as session:
+            await session.execute(delete(RunLifecycleCursorStateRow))
+            await session.commit()
+
+        missing = await store.lifecycle_readiness()
+        assert missing.ready is False
+        assert missing.reason_code == "lifecycle_cursor_missing"
+
+        await store.initialize_lifecycle()
         await store.put("run-1", thread_id="thread-1")
         async with factory() as session:
             await session.execute(delete(RunLifecycleCursorStateRow))
@@ -307,6 +460,111 @@ async def test_lifecycle_counter_corruption_is_reported_not_ready(tmp_path) -> N
 
         assert await store.lifecycle_ready() is False
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_readiness_rejects_invalid_pruning_and_event_bounds(
+    tmp_path,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'readiness-bounds.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    store = RunRepository(factory)
+    try:
+        await store.initialize_lifecycle()
+        await store.put("run-1", thread_id="thread-1")
+        assert (await store.lifecycle_readiness()).ready is True
+
+        async with factory() as session:
+            await session.execute(text("PRAGMA ignore_check_constraints = ON"))
+            await session.execute(
+                update(RunLifecycleCursorStateRow).values(
+                    pruned_through=2,
+                    last_cursor=1,
+                )
+            )
+            await session.commit()
+        invalid_pruning = await store.lifecycle_readiness()
+        assert invalid_pruning.ready is False
+        assert invalid_pruning.reason_code == "lifecycle_pruning_invalid"
+
+        async with factory() as session:
+            await session.execute(
+                update(RunLifecycleCursorStateRow).values(
+                    pruned_through=0,
+                    last_cursor=2,
+                )
+            )
+            await session.commit()
+        invalid_events = await store.lifecycle_readiness()
+        assert invalid_events.ready is False
+        assert invalid_events.reason_code == "lifecycle_event_bounds_invalid"
+
+        async with factory() as session:
+            await session.execute(
+                update(RunLifecycleCursorStateRow).values(
+                    pruned_through=0,
+                    last_cursor=1,
+                )
+            )
+            await session.commit()
+        await store.put("run-2", thread_id="thread-2")
+        async with factory() as session:
+            await session.execute(update(RunLifecycleEventRow).where(RunLifecycleEventRow.run_id == "run-2").values(cursor=3))
+            await session.execute(update(RunLifecycleCursorStateRow).values(last_cursor=3))
+            await session.commit()
+        invalid_sequence = await store.lifecycle_readiness()
+        assert invalid_sequence.ready is False
+        assert invalid_sequence.reason_code == "lifecycle_event_sequence_invalid"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_readiness_uses_only_bounded_edge_queries(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'readiness-query-bound.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    store = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
+    statements: list[str] = []
+
+    def record_statement(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        statements.append(statement)
+
+    try:
+        await store.initialize_lifecycle()
+        for index in range(6):
+            await store.put(
+                f"run-{index}",
+                thread_id=f"thread-{index}",
+            )
+        event.listen(
+            engine.sync_engine,
+            "before_cursor_execute",
+            record_statement,
+        )
+
+        assert (await store.lifecycle_readiness()).ready is True
+
+        selects = [statement.upper() for statement in statements if statement.lstrip().upper().startswith("SELECT")]
+        assert len(selects) == 3
+        assert all(" LIMIT " in statement for statement in selects)
+        assert all("COUNT(" not in statement for statement in selects)
+    finally:
+        event.remove(
+            engine.sync_engine,
+            "before_cursor_execute",
+            record_statement,
+        )
         await engine.dispose()
 
 
@@ -329,8 +587,19 @@ async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
     app = app_module.create_app()
 
     class CorruptLifecycle:
-        async def lifecycle_ready(self) -> bool:
-            return False
+        async def lifecycle_readiness(self):
+            from deerflow.runtime.runs.store.base import LifecycleReadiness
+
+            return LifecycleReadiness(
+                False,
+                "lifecycle_cursor_missing",
+            )
+
+    class HealthyLifecycle:
+        async def lifecycle_readiness(self):
+            from deerflow.runtime.runs.store.base import LifecycleReadiness
+
+            return LifecycleReadiness(True)
 
     app.state.run_store = CorruptLifecycle()
     transport = httpx.ASGITransport(app=app)
@@ -340,6 +609,8 @@ async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
     ) as client:
         liveness = await client.get("/health")
         readiness = await client.get("/ready")
+        app.state.run_store = HealthyLifecycle()
+        recovered = await client.get("/ready")
 
     assert liveness.status_code == 200
     assert liveness.json() == {
@@ -348,6 +619,8 @@ async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
     }
     assert readiness.status_code == 503
     assert readiness.json() == {"status": "not_ready"}
+    assert recovered.status_code == 200
+    assert recovered.json() == {"status": "ready"}
 
 
 def test_admin_deployment_report_separates_immutable_manifest_from_mutable_health() -> None:

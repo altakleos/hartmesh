@@ -67,6 +67,11 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
 
 
+class _ReadyAdmissionFence:
+    async def ready_for_admission(self) -> bool:
+        return True
+
+
 @pytest.fixture
 def runtime_app_config():
     set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
@@ -154,6 +159,7 @@ def _make_start_request(run_manager: RunManager):
         state=SimpleNamespace(auth_source=AUTH_SOURCE_AUTH_DISABLED),
         app=SimpleNamespace(
             state=SimpleNamespace(
+                runtime_readiness=_ReadyAdmissionFence(),
                 stream_bridge=SimpleNamespace(),
                 run_manager=run_manager,
                 checkpointer=InMemorySaver(),
