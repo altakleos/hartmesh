@@ -28,6 +28,10 @@ from deerflow.runtime.constraints import (
     SUBAGENT_RESERVATION_CONTEXT_KEY,
     InvocationSubagentReservation,
 )
+from deerflow.runtime.skill_projection import (
+    SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
+    SkillProjectionConsumerToken,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -396,6 +400,9 @@ async def task_tool(
     accepted_extension_generation = parent_context.get("accepted_extension_generation")
     accepted_extension_manifest_digest = parent_context.get("accepted_extension_manifest_digest")
     resolved_agent_material = parent_context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+    skill_projection_token = parent_context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
+    if not isinstance(skill_projection_token, SkillProjectionConsumerToken):
+        skill_projection_token = None
     from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
 
     if not isinstance(resolved_agent_material, ResolvedAgentMaterialV1):
@@ -487,6 +494,8 @@ async def task_tool(
         executor_kwargs["mcp_preparation_audit_sink"] = mcp_preparation_audit_sink
     if resolved_agent_material is not None:
         executor_kwargs["resolved_agent_material"] = resolved_agent_material
+    if skill_projection_token is not None:
+        executor_kwargs["skill_projection_token"] = skill_projection_token
     executor = SubagentExecutor(**executor_kwargs)
 
     # Start background execution (always async to prevent blocking)
@@ -498,7 +507,7 @@ async def task_tool(
             error=f"Invocation subagent limit ({subagent_reservation.limit}) reached",
         )
     if resolved_agent_material is not None:
-        executor.retain_resolved_agent_material()
+        executor.retain_resolved_agent_material(tool_call_id)
     task_id = executor.execute_async(prompt, task_id=tool_call_id)
 
     # Poll for task completion in backend (removes need for LLM to poll)

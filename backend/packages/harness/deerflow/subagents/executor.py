@@ -38,6 +38,11 @@ from deerflow.runtime.accepted_invocation import (
 )
 from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
 from deerflow.runtime.constraints import InvocationSubagentReservation
+from deerflow.runtime.skill_projection import (
+    SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
+    SkillProjectionConsumerToken,
+    get_skill_projection_coordinator,
+)
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -474,6 +479,7 @@ class SubagentExecutor:
         mcp_invocation_facts: Any | None = None,
         mcp_preparation_audit_sink: Any | None = None,
         resolved_agent_material: ResolvedAgentMaterialV1 | None = None,
+        skill_projection_token: SkillProjectionConsumerToken | None = None,
     ):
         """Initialize the executor.
 
@@ -601,6 +607,13 @@ class SubagentExecutor:
             raise TypeError("resolved_agent_material must be ResolvedAgentMaterialV1 or None")
         self.resolved_agent_material = resolved_agent_material
         self._owns_resolved_agent_material = False
+        if skill_projection_token is not None and not isinstance(
+            skill_projection_token,
+            SkillProjectionConsumerToken,
+        ):
+            raise TypeError("skill_projection_token must be SkillProjectionConsumerToken or None")
+        self.skill_projection_token = skill_projection_token
+        self._owns_skill_projection_token = False
 
         self._base_tools = _filter_tools(
             tools,
@@ -1045,6 +1058,8 @@ class SubagentExecutor:
                 context[MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY] = self.mcp_preparation_audit_sink
             if self.resolved_agent_material is not None:
                 context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = self.resolved_agent_material
+            if self.skill_projection_token is not None:
+                context[SKILL_PROJECTION_TOKEN_CONTEXT_KEY] = self.skill_projection_token
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -1187,21 +1202,44 @@ class SubagentExecutor:
 
         return result
 
-    def retain_resolved_agent_material(self) -> None:
-        """Give this background child an independent snapshot lease."""
+    def retain_resolved_agent_material(self, consumer_id: str) -> None:
+        """Give this background child independent byte and projection leases."""
+        previous_material = self.resolved_agent_material
+        acquired_material = False
         if self.resolved_agent_material is None:
-            return
-        if self._owns_resolved_agent_material:
-            return
-        self.resolved_agent_material = self.resolved_agent_material.retain_process_material()
-        self._owns_resolved_agent_material = True
+            pass
+        elif not self._owns_resolved_agent_material:
+            self.resolved_agent_material = self.resolved_agent_material.retain_process_material()
+            self._owns_resolved_agent_material = True
+            acquired_material = True
+        try:
+            if self.skill_projection_token is not None and not self._owns_skill_projection_token:
+                self.skill_projection_token = get_skill_projection_coordinator().retain(
+                    self.skill_projection_token,
+                    consumer_id=f"subagent:{consumer_id}",
+                )
+                self._owns_skill_projection_token = True
+        except BaseException:
+            if acquired_material:
+                retained_material = self.resolved_agent_material
+                self.resolved_agent_material = previous_material
+                self._owns_resolved_agent_material = False
+                if retained_material is not None:
+                    retained_material.release_process_material()
+            raise
 
     def _release_owned_resolved_agent_material(self) -> None:
-        if not self._owns_resolved_agent_material:
-            return
-        self._owns_resolved_agent_material = False
-        if self.resolved_agent_material is not None:
-            self.resolved_agent_material.release_process_material()
+        try:
+            if self._owns_skill_projection_token:
+                self._owns_skill_projection_token = False
+                from deerflow.sandbox.sandbox_provider import release_accepted_skill_consumer
+
+                release_accepted_skill_consumer(self.skill_projection_token)
+        finally:
+            if self._owns_resolved_agent_material:
+                self._owns_resolved_agent_material = False
+                if self.resolved_agent_material is not None:
+                    self.resolved_agent_material.release_process_material()
 
     async def _aexecute_with_material_lease(
         self,
@@ -1211,7 +1249,7 @@ class SubagentExecutor:
         try:
             return await self._aexecute(task, result_holder)
         finally:
-            self._release_owned_resolved_agent_material()
+            await asyncio.to_thread(self._release_owned_resolved_agent_material)
 
     def _execute_in_isolated_loop(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute the subagent on the persistent isolated event loop.
@@ -1351,8 +1389,19 @@ class SubagentExecutor:
                     )
                     execution_future.cancel()
             except Exception as e:
-                self._release_owned_resolved_agent_material()
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
+                try:
+                    self._release_owned_resolved_agent_material()
+                except Exception:
+                    # Projection/material cleanup is independently best-effort
+                    # here. It must never strand the already-rejected task in
+                    # RUNNING or replace the authoritative submission error.
+                    logger.warning(
+                        "[trace=%s] Subagent %s material cleanup failed after async execution rejection",
+                        self.trace_id,
+                        self.config.name,
+                        exc_info=True,
+                    )
                 with _background_tasks_lock:
                     task_result = _background_tasks[task_id]
                 task_result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
@@ -1360,7 +1409,33 @@ class SubagentExecutor:
         try:
             _scheduler_pool.submit(run_task)
         except Exception:
-            self._release_owned_resolved_agent_material()
+            with _background_tasks_lock:
+                if _background_tasks.get(task_id) is result:
+                    _background_tasks.pop(task_id, None)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._release_owned_resolved_agent_material()
+            else:
+                cleanup_task = loop.create_task(
+                    asyncio.to_thread(
+                        self._release_owned_resolved_agent_material,
+                    )
+                )
+
+                def log_cleanup_failure(completed: asyncio.Task[None]) -> None:
+                    try:
+                        completed.result()
+                    except asyncio.CancelledError:
+                        logger.warning(
+                            "Subagent material cleanup was cancelled after scheduler rejection",
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Subagent material cleanup failed after scheduler rejection",
+                        )
+
+                cleanup_task.add_done_callback(log_cleanup_failure)
             raise
         return task_id
 

@@ -501,6 +501,10 @@ sandbox:
 ```
 
 `allow_host_bash` is intentionally `false` by default. DeerFlow's local sandbox is a host-side convenience mode, not a secure shell isolation boundary. If you need `bash`, prefer `AioSandboxProvider`. Only set `allow_host_bash: true` for fully trusted single-user local workflows.
+Local supports only an explicitly empty skill set for durable accepted runs. Its subprocesses
+share the Gateway identity, so a virtual read-only mapping cannot prove nonempty accepted bytes
+immutable. Nonempty durable skill admission therefore fails closed; use AIO for that production
+path.
 
 When `LocalSandboxProvider` runs under `make up`, it runs inside the `deer-flow-gateway` container. In that mode, `sandbox.mounts[].host_path` is resolved from the gateway container's filesystem, not from your Docker host. If you need a local-sandbox custom mount in production Docker, bind the host directory into the gateway service first, then use the in-container path in `config.yaml`:
 

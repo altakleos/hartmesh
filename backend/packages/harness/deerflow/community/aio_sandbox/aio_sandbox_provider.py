@@ -43,7 +43,13 @@ from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATIO
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import (
+    AcceptedSkillMaterialCapability,
+    AcceptedSkillSandboxBindingError,
+    AcceptedSkillSandboxBindingV1,
+    SandboxProvider,
+    reject_writable_accepted_skill_aliases,
+)
 
 from .aio_sandbox import AioSandbox
 from .backend import SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
@@ -788,23 +794,54 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     # ── Mount helpers ────────────────────────────────────────────────────
 
-    def _get_extra_mounts(self, thread_id: str | None, *, user_id: str | None = None) -> list[tuple[str, str, bool]]:
+    def _get_extra_mounts(
+        self,
+        thread_id: str | None,
+        *,
+        user_id: str | None = None,
+        accepted_skills_only: bool = False,
+    ) -> list[tuple[str, str, bool]]:
         """Collect all extra mounts for a sandbox (thread-specific + skills)."""
         mounts: list[tuple[str, str, bool]] = []
 
         if thread_id:
             mounts.extend(self._get_thread_mounts(thread_id, user_id=user_id))
+            if accepted_skills_only:
+                paths = get_paths()
+                effective_user_id = self._effective_acquire_user_id(user_id)
+                active_view = paths.skill_snapshot_active_view_dir(
+                    effective_user_id,
+                    thread_id,
+                )
+                active_view.mkdir(parents=True, exist_ok=True)
+                try:
+                    skills_container_path = get_app_config().skills.container_path
+                except FileNotFoundError:
+                    from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+
+                    skills_container_path = DEFAULT_SKILLS_CONTAINER_PATH
+                mounts.append(
+                    (
+                        paths.host_skill_snapshot_active_view_dir(
+                            effective_user_id,
+                            thread_id,
+                        ),
+                        f"{skills_container_path}/.accepted",
+                        True,
+                    )
+                )
             logger.info(f"Adding thread mounts for thread {thread_id}: {mounts}")
 
-        skills_mounts = self._get_skills_mounts(user_id=user_id)
-        if skills_mounts:
-            mounts.extend(skills_mounts)
-            logger.info(f"Adding skills mounts: {skills_mounts}")
+        if not accepted_skills_only:
+            skills_mounts = self._get_skills_mounts(user_id=user_id)
+            if skills_mounts:
+                mounts.extend(skills_mounts)
+                logger.info(f"Adding skills mounts: {skills_mounts}")
 
-        user_skill_mounts = self._get_user_skill_mounts(user_id=user_id)
-        if user_skill_mounts:
-            mounts.extend(user_skill_mounts)
-            logger.info(f"Adding user skill mounts: {user_skill_mounts}")
+            user_skill_mounts = self._get_user_skill_mounts(user_id=user_id)
+            if user_skill_mounts:
+                mounts.extend(user_skill_mounts)
+                logger.info(f"Adding user skill mounts: {user_skill_mounts}")
 
         lark_cli_mounts = self._get_lark_cli_runtime_mounts(user_id=user_id)
         if lark_cli_mounts:
@@ -879,16 +916,6 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             AioSandboxProvider._ensure_skills_projection(effective_user_id)
             paths = get_paths()
             host_base_dir = str(paths.host_base_dir)
-
-            snapshot_root = paths.skill_snapshot_scope_dir(effective_user_id)
-            snapshot_root.mkdir(parents=True, exist_ok=True)
-            mounts.append(
-                (
-                    paths.host_skill_snapshot_scope_dir(effective_user_id),
-                    f"{container_path}/.accepted",
-                    True,
-                )
-            )
 
             # 1. Public skills: global, read-only — static, shared by all threads
             mounts.append(
@@ -1192,14 +1219,35 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.warning(f"Error closing sandbox {sandbox_id} after losing its lease: {e}")
 
     def _cleanup_idle_sandboxes(self, idle_timeout: float) -> None:
+        from deerflow.runtime.skill_projection import (
+            get_skill_projection_coordinator,
+        )
+
         current_time = time.time()
         active_to_destroy = []
+        coordinator = get_skill_projection_coordinator()
+
+        def projection_is_owned(sandbox_id: str) -> bool:
+            """Check while ``self._lock`` stabilizes the sandbox identity."""
+            identity = self._active_sandbox_identity.get(sandbox_id)
+            if identity is None:
+                identity = next(
+                    (key for key, mapped_id in self._thread_sandboxes.items() if mapped_id == sandbox_id),
+                    None,
+                )
+            return bool(
+                identity is not None
+                and coordinator.is_busy(
+                    user_id=identity[0],
+                    thread_id=identity[1],
+                )
+            )
 
         with self._lock:
             # Active sandboxes: tracked via _last_activity
             for sandbox_id, last_activity in self._last_activity.items():
                 idle_duration = current_time - last_activity
-                if idle_duration > idle_timeout:
+                if idle_duration > idle_timeout and not projection_is_owned(sandbox_id):
                     active_to_destroy.append(sandbox_id)
                     logger.info(f"Sandbox {sandbox_id} idle for {idle_duration:.1f}s, marking for destroy")
 
@@ -1213,6 +1261,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # untracks — in which a turn re-acquires the sandbox and then has its
         # container stopped underneath it.
         def still_idle(sandbox_id: str) -> bool:
+            if projection_is_owned(sandbox_id):
+                logger.info(
+                    "Sandbox %s has an invocation-owned skill projection; skipping idle destroy",
+                    sandbox_id,
+                )
+                return False
             last_activity = self._last_activity.get(sandbox_id)
             if last_activity is None:
                 # Already released or destroyed by another path — skip.
@@ -1814,6 +1868,72 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         else:
             return self._acquire_internal(thread_id, user_id=effective_user_id)
 
+    def acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
+        """Create a durable-run sandbox whose only skills mount is ``.accepted``."""
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        try:
+            skills_root = get_app_config().skills.container_path.rstrip("/")
+        except FileNotFoundError:
+            from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+
+            skills_root = DEFAULT_SKILLS_CONTAINER_PATH.rstrip("/")
+        configured_host_mounts: list[tuple[str, bool]] = []
+        for mount in self._config.get("mounts") or ():
+            container_path = getattr(mount, "container_path", None)
+            host_path = getattr(mount, "host_path", None)
+            read_only = bool(getattr(mount, "read_only", False))
+            if container_path is None and isinstance(mount, dict):
+                container_path = mount.get("container_path")
+                host_path = mount.get("host_path")
+                read_only = bool(mount.get("read_only", False))
+            if isinstance(container_path, str) and (container_path.rstrip("/") == skills_root or container_path.startswith(f"{skills_root}/")):
+                raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_isolation_conflict")
+            if isinstance(host_path, str):
+                configured_host_mounts.append((host_path, read_only))
+        paths = get_paths()
+        reject_writable_accepted_skill_aliases(
+            paths.host_skill_snapshot_active_view_dir(
+                effective_user_id,
+                thread_id,
+            ),
+            configured_host_mounts,
+        )
+        key = self._thread_key(thread_id, effective_user_id)
+        thread_lock = self._get_thread_lock(thread_id, effective_user_id)
+        with thread_lock:
+            with self._lock:
+                existing = self._thread_sandboxes.get(key)
+                accepted_ids = getattr(self, "_accepted_only_sandbox_ids", set())
+            if existing is not None:
+                if existing in accepted_ids:
+                    return existing
+                raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_isolation_conflict")
+            sandbox_id = f"{self._sandbox_id_for_thread(thread_id, effective_user_id)}-accepted"
+            created = self._create_sandbox(
+                thread_id,
+                sandbox_id,
+                user_id=effective_user_id,
+                accepted_skills_only=True,
+            )
+            with self._lock:
+                accepted_ids = getattr(self, "_accepted_only_sandbox_ids", None)
+                if accepted_ids is None:
+                    accepted_ids = self._accepted_only_sandbox_ids = set()
+                accepted_ids.add(created)
+            return created
+
+    def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
+        with self._lock:
+            return sandbox_id in getattr(self, "_accepted_only_sandbox_ids", set())
+
+    def accepted_skill_material_capability(
+        self,
+        sandbox_id: str,
+    ) -> AcceptedSkillMaterialCapability:
+        if self.has_accepted_skill_isolation(sandbox_id):
+            return AcceptedSkillMaterialCapability.IMMUTABLE_READ_ONLY
+        return AcceptedSkillMaterialCapability.EMPTY_ONLY
+
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment without blocking the event loop.
 
@@ -2011,7 +2131,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         finally:
             self._finish_local_teardown(sandbox_id)
 
-    def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
+    def _create_sandbox(
+        self,
+        thread_id: str | None,
+        sandbox_id: str,
+        *,
+        user_id: str | None = None,
+        accepted_skills_only: bool = False,
+    ) -> str:
         """Create a new sandbox via the backend.
 
         Args:
@@ -2025,7 +2152,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             RuntimeError: If sandbox creation or readiness check fails.
         """
         effective_user_id = self._effective_acquire_user_id(user_id)
-        extra_mounts = self._get_extra_mounts(thread_id, user_id=effective_user_id)
+        if accepted_skills_only:
+            extra_mounts = self._get_extra_mounts(
+                thread_id,
+                user_id=effective_user_id,
+                accepted_skills_only=True,
+            )
+        else:
+            extra_mounts = self._get_extra_mounts(thread_id, user_id=effective_user_id)
         provision_lark_cli_runtime = self._lark_integration_active(effective_user_id)
         provision_lark_cli_broker = self._lark_broker_active(effective_user_id)
 
@@ -2172,6 +2306,83 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         logger.info(f"Released sandbox {sandbox_id} to warm pool (container still running)")
 
+    def _identity_for_sandbox(self, sandbox_id: str) -> tuple[str, str] | None:
+        with self._lock:
+            identity = self._active_sandbox_identity.get(sandbox_id)
+            if identity is not None:
+                return identity
+            return next(
+                (key for key, mapped_id in self._thread_sandboxes.items() if mapped_id == sandbox_id),
+                None,
+            )
+
+    def bind_accepted_skill_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+    ) -> None:
+        if self._identity_for_sandbox(sandbox_id) != (user_id, thread_id):
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_sandbox_identity_mismatch")
+        from deerflow.runtime.skill_snapshot import bind_skill_snapshot_active_view
+
+        try:
+            bind_skill_snapshot_active_view(
+                user_id=user_id,
+                thread_id=thread_id,
+                snapshot_id=binding.snapshot_id,
+                run_id=binding.run_id,
+                generation=binding.generation,
+                evidence=binding.evidence,
+            )
+        except Exception as exc:
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_failed") from exc
+
+    def _clear_bound_accepted_skill_snapshot(self, sandbox_id: str) -> None:
+        identity = self._identity_for_sandbox(sandbox_id)
+        if identity is None:
+            return
+        user_id, thread_id = identity
+        from deerflow.runtime.skill_snapshot import force_clear_skill_snapshot_active_view
+
+        force_clear_skill_snapshot_active_view(user_id=user_id, thread_id=thread_id)
+
+    def clear_accepted_skill_snapshot(
+        self,
+        clear,
+    ) -> bool:
+        from deerflow.runtime.skill_projection import SkillProjectionClear
+        from deerflow.runtime.skill_snapshot import clear_skill_snapshot_active_view
+
+        if not isinstance(clear, SkillProjectionClear):
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_clear_fence_invalid")
+        return clear_skill_snapshot_active_view(
+            user_id=clear.user_id,
+            thread_id=clear.thread_id,
+            run_id=clear.run_id,
+            generation=clear.generation,
+        )
+
+    def ensure_accepted_skill_snapshot_absent(self, clear) -> bool:
+        from deerflow.runtime.skill_projection import SkillProjectionClear
+        from deerflow.runtime.skill_snapshot import prove_skill_snapshot_active_view_absent
+
+        if not isinstance(clear, SkillProjectionClear):
+            return False
+        if not self.has_accepted_skill_isolation(clear.sandbox_id):
+            return False
+        if self._identity_for_sandbox(clear.sandbox_id) != (
+            clear.user_id,
+            clear.thread_id,
+        ):
+            return False
+        return prove_skill_snapshot_active_view_absent(
+            user_id=clear.user_id,
+            thread_id=clear.thread_id,
+        )
+
     def destroy(self, sandbox_id: str) -> None:
         """Destroy a sandbox: stop the container and free all resources.
 
@@ -2186,6 +2397,19 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             sandbox_id: The ID of the sandbox to destroy.
         """
         self._destroy_tracked(sandbox_id, still_reapable=lambda: True)
+
+    def _assert_no_invocation_owned_skill_projections(self) -> None:
+        """Refuse provider teardown while accepted material still has an owner."""
+        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+        with self._lock:
+            identities = set(self._thread_sandboxes)
+            identities.update(identity for identity in self._active_sandbox_identity.values() if identity is not None)
+        coordinator = get_skill_projection_coordinator()
+        if any(coordinator.is_busy(user_id=user_id, thread_id=thread_id) for user_id, thread_id in identities):
+            raise AcceptedSkillSandboxBindingError(
+                "accepted_skill_snapshot_projection_in_use",
+            )
 
     def _destroy_tracked(self, sandbox_id: str, *, still_reapable: Callable[[], bool]) -> None:
         """``destroy()`` with a caller-supplied "is this still reapable" gate.
@@ -2212,6 +2436,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.warning("Refusing to destroy sandbox %s: owned by another instance", sandbox_id)
             return
 
+        try:
+            self._clear_bound_accepted_skill_snapshot(sandbox_id)
+        except Exception:
+            logger.error(
+                "Could not clear accepted skill snapshot for sandbox %s during destroy",
+                sandbox_id,
+                exc_info=True,
+            )
         sandbox, info, _ = self._remove_tracked_sandbox(sandbox_id)
 
         if sandbox is not None:
@@ -2239,8 +2471,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # lease stuck in `del:`.
             self._release_ownership(sandbox_id)
 
+    def reset(self) -> None:
+        """Destroy tracked sandboxes only after accepted owners have drained."""
+        self.shutdown()
+
     def shutdown(self) -> None:
         """Shutdown all sandboxes. Thread-safe and idempotent."""
+        self._assert_no_invocation_owned_skill_projections()
         with self._lock:
             if self._shutdown_called:
                 return

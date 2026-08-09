@@ -2344,6 +2344,53 @@ class TestCooperativeCancellation:
         assert result.result == "done: Task"
         assert result.error is None
 
+    def test_execute_async_terminalizes_when_submission_and_material_cleanup_fail(
+        self,
+        executor_module,
+        classes,
+        base_config,
+    ):
+        """Cleanup failure must not strand a rejected background task RUNNING."""
+        import concurrent.futures
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        def run_inline(fn, *args, **kwargs):
+            future = concurrent.futures.Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+        )
+
+        with (
+            patch.object(executor_module._scheduler_pool, "submit", side_effect=run_inline),
+            patch.object(
+                executor_module,
+                "_submit_to_isolated_loop_in_context",
+                side_effect=RuntimeError("isolated submission failed"),
+            ),
+            patch.object(
+                executor,
+                "_release_owned_resolved_agent_material",
+                side_effect=RuntimeError("material cleanup failed"),
+            ),
+        ):
+            task_id = executor.execute_async("Task")
+
+        result = executor_module._background_tasks.get(task_id)
+        assert result is not None
+        assert result.status.value == SubagentStatus.FAILED.value
+        assert result.error == "isolated submission failed"
+
     def test_execute_async_propagates_user_context_to_isolated_loop(self, executor_module, classes, base_config):
         """Regression: background subagent execution must keep request user context."""
         import concurrent.futures
@@ -3186,6 +3233,138 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
         assert context.get("is_subagent") is True
+
+    @pytest.mark.anyio
+    async def test_background_subagent_retains_and_propagates_projection_consumer(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """The child, not the completed lead, owns the final projection lease."""
+        from deerflow.runtime.skill_projection import (
+            SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
+            SkillProjectionCoordinator,
+        )
+
+        skill_projection_module = importlib.import_module("deerflow.runtime.skill_projection")
+        sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
+
+        coordinator = SkillProjectionCoordinator()
+        coordinator.claim_committed_run(
+            user_id="alice",
+            thread_id="thread-attrib-1",
+            run_id="run-42",
+            snapshot_id=None,
+        )
+        lead_token = coordinator.activate(
+            user_id="alice",
+            thread_id="thread-attrib-1",
+            sandbox_id="sandbox-42",
+            run_id="run-42",
+            snapshot_id=None,
+            consumer_id="run:run-42:lead",
+        )
+        provider_releases: list[str] = []
+
+        class ProjectionProvider:
+            def clear_accepted_skill_snapshot(self, clear):
+                assert clear.run_id == "run-42"
+                assert clear.generation == lead_token.generation
+                return True
+
+            def release(self, sandbox_id):
+                provider_releases.append(sandbox_id)
+
+        monkeypatch.setattr(
+            executor_module,
+            "get_skill_projection_coordinator",
+            lambda: coordinator,
+        )
+        monkeypatch.setattr(
+            skill_projection_module,
+            "get_skill_projection_coordinator",
+            lambda: coordinator,
+        )
+        monkeypatch.setattr(
+            sandbox_provider_module,
+            "get_sandbox_provider",
+            lambda: ProjectionProvider(),
+        )
+        executor = self._make_executor(
+            classes,
+            user_id="alice",
+            run_id="run-42",
+        )
+        executor.skill_projection_token = lead_token
+        executor.retain_resolved_agent_material("task-1")
+        child_token = executor.skill_projection_token
+        assert child_token.consumer_id == "subagent:task-1"
+        assert coordinator.release(lead_token) is None
+
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        result_holder = classes["SubagentResult"](
+            task_id="task-1",
+            trace_id="trace-child-1",
+            status=classes["SubagentStatus"].RUNNING,
+        )
+
+        await executor._aexecute_with_material_lease("do something", result_holder)
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context[SKILL_PROJECTION_TOKEN_CONTEXT_KEY] == child_token
+        assert not coordinator.is_busy(user_id="alice", thread_id="thread-attrib-1")
+        assert provider_releases == ["sandbox-42"]
+
+    def test_projection_retain_failure_rolls_back_byte_snapshot_lease(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """The two child leases are acquired transactionally."""
+
+        class RetainedMaterial:
+            def __init__(self) -> None:
+                self.release_calls = 0
+
+            def release_process_material(self) -> None:
+                self.release_calls += 1
+
+        retained = RetainedMaterial()
+
+        class ParentMaterial:
+            def retain_process_material(self):
+                return retained
+
+        class RejectProjectionRetain:
+            def retain(self, *_args, **_kwargs):
+                raise RuntimeError("projection retain failed")
+
+        executor = self._make_executor(
+            classes,
+            user_id="alice",
+            run_id="run-42",
+        )
+        parent = ParentMaterial()
+        executor.resolved_agent_material = parent
+        executor.skill_projection_token = object()
+        monkeypatch.setattr(
+            executor_module,
+            "get_skill_projection_coordinator",
+            lambda: RejectProjectionRetain(),
+        )
+
+        with pytest.raises(RuntimeError, match="projection retain failed"):
+            executor.retain_resolved_agent_material("task-rollback")
+
+        assert retained.release_calls == 1
+        assert executor.resolved_agent_material is parent
+        assert executor._owns_resolved_agent_material is False
+        assert executor._owns_skill_projection_token is False
 
     @pytest.mark.anyio
     async def test_aexecute_propagates_channel_user_id_to_subagent_context(

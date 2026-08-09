@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -74,6 +75,9 @@ class SkillSnapshotProjection:
 
 _leases_lock = threading.RLock()
 _lease_counts: dict[Path, int] = {}
+_active_views_lock = threading.RLock()
+_active_view_bindings: dict[Path, tuple[str, int, str | None]] = {}
+_SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,6 +420,180 @@ def _digest_published_snapshot(
     return _snapshot_digest(rebuilt), file_count, total_bytes
 
 
+def _capture_verified_projection(
+    root: Path,
+    evidence,
+    limits: SkillSnapshotLimits,
+) -> tuple[tuple[tuple[SkillSnapshotProjection, tuple[_CapturedFile, ...]], ...], str, int, int]:
+    """Stable-capture every accepted file and prove the immutable manifest."""
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    if not isinstance(evidence, SkillProjectionEvidence):
+        raise SkillSnapshotError("skill_snapshot_evidence_invalid")
+    if evidence.snapshot_id is None:
+        if root.exists():
+            raise SkillSnapshotError("skill_snapshot_evidence_invalid")
+        return (), "", 0, 0
+    try:
+        root_metadata = root.lstat()
+    except OSError as exc:
+        raise SkillSnapshotError("skill_snapshot_unavailable") from exc
+    if stat.S_ISLNK(root_metadata.st_mode):
+        raise SkillSnapshotError("skill_snapshot_symlink")
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise SkillSnapshotError("skill_snapshot_tree_invalid")
+
+    captured: list[tuple[SkillSnapshotProjection, tuple[_CapturedFile, ...]]] = []
+    rebuilt: list[SkillSnapshotProjection] = []
+    total_files = 0
+    total_bytes = 0
+    for projection in evidence.projections:
+        relative_path = _bounded_relative(Path(projection.relative_path), limits=limits)
+        current = root
+        for component in (projection.category, *Path(relative_path).parts):
+            current = current / component
+            try:
+                component_metadata = current.lstat()
+            except OSError as exc:
+                raise SkillSnapshotError("skill_snapshot_unavailable") from exc
+            if stat.S_ISLNK(component_metadata.st_mode):
+                raise SkillSnapshotError("skill_snapshot_symlink")
+        files = tuple(_walk_skill_files(current, limits=limits))
+        skill_bytes = sum(len(item.data) for item in files)
+        manifest = next(item.data for item in files if item.relative_path.as_posix() == SKILL_MD_FILE)
+        rebuilt_projection = SkillSnapshotProjection(
+            name=projection.name,
+            category=projection.category,
+            relative_path=relative_path,
+            manifest_digest=hashlib.sha256(manifest).hexdigest(),
+            content_digest=_skill_tree_digest(
+                projection.category,
+                relative_path,
+                list(files),
+            ),
+            file_count=len(files),
+            total_bytes=skill_bytes,
+        )
+        if rebuilt_projection != projection:
+            raise SkillSnapshotError("skill_snapshot_drift")
+        captured.append((projection, files))
+        rebuilt.append(rebuilt_projection)
+        total_files += len(files)
+        total_bytes += skill_bytes
+        if total_files > limits.max_total_files:
+            raise SkillSnapshotError("skill_snapshot_too_many_files")
+        if total_bytes > limits.max_total_bytes:
+            raise SkillSnapshotError("skill_snapshot_total_too_large")
+    digest = _snapshot_digest(rebuilt)
+    if digest != evidence.content_digest or digest != evidence.snapshot_id or total_files != evidence.file_count or total_bytes != evidence.total_bytes:
+        raise SkillSnapshotError("skill_snapshot_drift")
+    return tuple(captured), digest, total_files, total_bytes
+
+
+def load_skill_projection_evidence(
+    *,
+    user_id: str | None,
+    snapshot_id: str | None,
+    limits: SkillSnapshotLimits = DEFAULT_SKILL_SNAPSHOT_LIMITS,
+):
+    """Reconstruct and verify legacy process-local snapshot evidence."""
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    if snapshot_id is None:
+        return SkillProjectionEvidence.from_snapshot(None)
+    if _SNAPSHOT_ID_PATTERN.fullmatch(snapshot_id) is None:
+        raise SkillSnapshotError("skill_snapshot_id_invalid")
+    root = get_paths().skill_snapshot_scope_dir(user_id) / snapshot_id
+    try:
+        root_stat = root.lstat()
+    except OSError as exc:
+        raise SkillSnapshotError("skill_snapshot_unavailable") from exc
+    if stat.S_ISLNK(root_stat.st_mode):
+        raise SkillSnapshotError("skill_snapshot_symlink")
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise SkillSnapshotError("skill_snapshot_tree_invalid")
+
+    manifest_paths: list[Path] = []
+    all_files: set[str] = set()
+    stack = [root]
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = sorted(os.scandir(directory), key=lambda item: item.name)
+        except OSError as exc:
+            raise SkillSnapshotError("skill_snapshot_tree_unreadable") from exc
+        for entry in entries:
+            path = Path(entry.path)
+            relative = _bounded_relative(path.relative_to(root), limits=limits)
+            metadata = entry.stat(follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode):
+                raise SkillSnapshotError("skill_snapshot_symlink")
+            if stat.S_ISDIR(metadata.st_mode):
+                stack.append(path)
+            elif stat.S_ISREG(metadata.st_mode):
+                all_files.add(relative)
+                if entry.name == SKILL_MD_FILE:
+                    manifest_paths.append(path)
+            else:
+                raise SkillSnapshotError("skill_snapshot_special_file")
+            if len(all_files) > limits.max_total_files:
+                raise SkillSnapshotError("skill_snapshot_too_many_files")
+    if not manifest_paths:
+        raise SkillSnapshotError("skill_snapshot_manifest_missing")
+
+    projections: list[SkillSnapshotProjection] = []
+    captured_files: set[str] = set()
+    for manifest_path in sorted(manifest_paths):
+        relative_manifest = manifest_path.relative_to(root)
+        if len(relative_manifest.parts) < 3:
+            raise SkillSnapshotError("skill_snapshot_path_invalid")
+        category = relative_manifest.parts[0]
+        relative_path = Path(*relative_manifest.parts[1:-1])
+        parsed = parse_skill_file(
+            manifest_path,
+            SkillCategory(category),
+            relative_path=relative_path,
+        )
+        if parsed is None:
+            raise SkillSnapshotError("skill_snapshot_manifest_invalid")
+        files = _walk_skill_files(manifest_path.parent, limits=limits)
+        for item in files:
+            full_relative = (Path(category) / relative_path / item.relative_path).as_posix()
+            if full_relative in captured_files:
+                raise SkillSnapshotError("skill_snapshot_duplicate_path")
+            captured_files.add(full_relative)
+        skill_bytes = sum(len(item.data) for item in files)
+        manifest = next(item.data for item in files if item.relative_path.as_posix() == SKILL_MD_FILE)
+        projections.append(
+            SkillSnapshotProjection(
+                name=parsed.name,
+                category=category,
+                relative_path=relative_path.as_posix(),
+                manifest_digest=hashlib.sha256(manifest).hexdigest(),
+                content_digest=_skill_tree_digest(
+                    category,
+                    relative_path.as_posix(),
+                    files,
+                ),
+                file_count=len(files),
+                total_bytes=skill_bytes,
+            )
+        )
+    if captured_files != all_files:
+        raise SkillSnapshotError("skill_snapshot_unbound_file")
+    projections.sort(key=lambda item: (item.category, item.relative_path, item.name))
+    digest = _snapshot_digest(projections)
+    if digest != snapshot_id:
+        raise SkillSnapshotError("skill_snapshot_drift")
+    return SkillProjectionEvidence(
+        snapshot_id=snapshot_id,
+        content_digest=digest,
+        projections=tuple(projections),
+        file_count=sum(item.file_count for item in projections),
+        total_bytes=sum(item.total_bytes for item in projections),
+    )
+
+
 def snapshot_effective_skills(
     skills: tuple[Skill, ...],
     *,
@@ -562,27 +740,205 @@ def snapshot_effective_skills(
     )
 
 
+def bind_skill_snapshot_active_view(
+    *,
+    user_id: str | None,
+    thread_id: str,
+    snapshot_id: str | None,
+    run_id: str = "legacy",
+    generation: int = 0,
+    evidence: object | None = None,
+) -> Path:
+    """Expose exactly one accepted snapshot through a stable thread mount.
+
+    Local and container sandboxes reuse a stable mount across turns.  The
+    mounted directory therefore contains a copied, read-only projection of
+    only the currently accepted digest instead of the subject-wide snapshot
+    cache.  ``snapshot_id=None`` deliberately publishes an empty view.
+    """
+    if snapshot_id is not None and _SNAPSHOT_ID_PATTERN.fullmatch(snapshot_id) is None:
+        raise SkillSnapshotError("skill_snapshot_id_invalid")
+    paths = get_paths()
+    view = paths.skill_snapshot_active_view_dir(user_id, thread_id)
+    view.parent.mkdir(parents=True, exist_ok=True)
+    view.mkdir(parents=True, exist_ok=True)
+
+    stage: Path | None = None
+    if snapshot_id is not None:
+        source = paths.skill_snapshot_scope_dir(user_id) / snapshot_id
+        if not source.is_dir() or source.is_symlink():
+            raise SkillSnapshotError("skill_snapshot_unavailable")
+        if evidence is None:
+            evidence = load_skill_projection_evidence(
+                user_id=user_id,
+                snapshot_id=snapshot_id,
+            )
+        captured, _, _, _ = _capture_verified_projection(
+            source,
+            evidence,
+            DEFAULT_SKILL_SNAPSHOT_LIMITS,
+        )
+        stage = Path(tempfile.mkdtemp(prefix=".binding-", dir=view.parent))
+        try:
+            staged_snapshot = stage / snapshot_id
+            for projection, files in captured:
+                target = staged_snapshot / projection.category / Path(projection.relative_path)
+                for captured_file in files:
+                    _write_private_file(
+                        target / captured_file.relative_path,
+                        captured_file.data,
+                        executable=captured_file.executable,
+                    )
+            confirmed, _, _, _ = _capture_verified_projection(
+                source,
+                evidence,
+                DEFAULT_SKILL_SNAPSHOT_LIMITS,
+            )
+            if confirmed != captured:
+                raise SkillSnapshotError("skill_snapshot_changed")
+            staged, _, _, _ = _capture_verified_projection(
+                staged_snapshot,
+                evidence,
+                DEFAULT_SKILL_SNAPSHOT_LIMITS,
+            )
+            if staged != captured:
+                raise SkillSnapshotError("skill_snapshot_write_mismatch")
+        except Exception:
+            _remove_tree(stage)
+            raise
+    elif evidence is not None:
+        from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+        if not isinstance(evidence, SkillProjectionEvidence) or evidence.snapshot_id is not None:
+            raise SkillSnapshotError("skill_snapshot_evidence_invalid")
+
+    binding_identity = (run_id, generation, snapshot_id)
+    with _active_views_lock:
+        if view in _active_view_bindings:
+            current = _active_view_bindings[view]
+            if current == binding_identity:
+                if stage is not None:
+                    _remove_tree(stage)
+                return view
+            if generation <= current[1] or generation == 0:
+                if stage is not None:
+                    _remove_tree(stage)
+                raise SkillSnapshotError("skill_snapshot_binding_conflict")
+        for child in list(view.iterdir()):
+            _remove_tree(child)
+        if stage is not None and snapshot_id is not None:
+            staged_snapshot = stage / snapshot_id
+            # macOS refuses to rename a directory whose own mode is read-only,
+            # even when both parents are writable. Publication still happens
+            # within the same filesystem and the destination is made read-only
+            # immediately after the atomic rename.
+            destination = view / snapshot_id
+            try:
+                os.chmod(
+                    staged_snapshot,
+                    stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
+                )
+                os.replace(staged_snapshot, destination)
+                _make_read_only(destination)
+            except Exception:
+                _remove_tree(destination)
+                _remove_tree(stage)
+                raise
+            _remove_tree(stage)
+        _active_view_bindings[view] = binding_identity
+    return view
+
+
+def clear_skill_snapshot_active_view(
+    *,
+    user_id: str | None,
+    thread_id: str,
+    run_id: str,
+    generation: int,
+) -> bool:
+    """Compare-and-clear one exact invocation projection."""
+    view = get_paths().skill_snapshot_active_view_dir(user_id, thread_id)
+    with _active_views_lock:
+        current = _active_view_bindings.get(view)
+        if current is None or current[:2] != (run_id, generation):
+            return False
+        if view.exists():
+            for child in list(view.iterdir()):
+                _remove_tree(child)
+        _active_view_bindings.pop(view, None)
+        return True
+
+
+def prove_skill_snapshot_active_view_absent(
+    *,
+    user_id: str | None,
+    thread_id: str,
+) -> bool:
+    """Prove a failed pre-publication bind left no reachable accepted bytes."""
+    view = get_paths().skill_snapshot_active_view_dir(user_id, thread_id)
+    with _active_views_lock:
+        if view in _active_view_bindings:
+            return False
+        try:
+            if not view.exists():
+                return True
+            if view.is_symlink() or not view.is_dir():
+                return False
+            return next(view.iterdir(), None) is None
+        except OSError:
+            return False
+
+
+def force_clear_skill_snapshot_active_view(
+    *,
+    user_id: str | None,
+    thread_id: str,
+) -> None:
+    """Clear a destroyed/reset sandbox view regardless of invocation owner."""
+    view = get_paths().skill_snapshot_active_view_dir(user_id, thread_id)
+    with _active_views_lock:
+        if view.exists():
+            for child in list(view.iterdir()):
+                _remove_tree(child)
+        _active_view_bindings.pop(view, None)
+
+
 def cleanup_abandoned_skill_snapshots() -> int:
     """Remove process-local snapshots left by a prior Gateway process."""
     root = get_paths().skill_snapshots_dir
-    if not root.exists():
-        return 0
     removed = 0
-    with _leases_lock:
-        for scope in list(root.iterdir()):
-            if scope.is_symlink() or not scope.is_dir():
-                _remove_tree(scope)
-                removed += 1
-                continue
-            for snapshot in list(scope.iterdir()):
-                if snapshot in _lease_counts:
+    if root.exists():
+        with _leases_lock:
+            for scope in list(root.iterdir()):
+                if scope.is_symlink() or not scope.is_dir():
+                    _remove_tree(scope)
+                    removed += 1
                     continue
-                _remove_tree(snapshot)
-                removed += 1
-            try:
-                scope.rmdir()
-            except OSError:
-                pass
+                for snapshot in list(scope.iterdir()):
+                    if snapshot in _lease_counts:
+                        continue
+                    _remove_tree(snapshot)
+                    removed += 1
+                try:
+                    scope.rmdir()
+                except OSError:
+                    pass
+    active_views = get_paths().skill_snapshot_active_views_dir
+    if active_views.exists():
+        with _active_views_lock:
+            for scope in list(active_views.iterdir()):
+                if scope.is_symlink() or not scope.is_dir():
+                    _remove_tree(scope)
+                    removed += 1
+                    continue
+                for view in list(scope.iterdir()):
+                    _remove_tree(view)
+                    _active_view_bindings.pop(view, None)
+                    removed += 1
+                try:
+                    scope.rmdir()
+                except OSError:
+                    pass
     return removed
 
 
@@ -593,6 +949,11 @@ __all__ = [
     "SkillSnapshotError",
     "SkillSnapshotLimits",
     "SkillSnapshotProjection",
+    "bind_skill_snapshot_active_view",
+    "clear_skill_snapshot_active_view",
+    "force_clear_skill_snapshot_active_view",
+    "load_skill_projection_evidence",
+    "prove_skill_snapshot_active_view_absent",
     "cleanup_abandoned_skill_snapshots",
     "snapshot_effective_skills",
 ]

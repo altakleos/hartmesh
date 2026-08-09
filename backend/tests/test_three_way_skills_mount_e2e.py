@@ -372,6 +372,10 @@ class TestThreeWayMountEndToEnd:
         assert "/mnt/skills/legacy" in mount_entries
         assert "dst=/mnt/skills/legacy" in mount_entries["/mnt/skills/legacy"]
 
+        # Ordinary/legacy sandboxes never receive the process-local accepted
+        # view. Only accepted-only acquisition may expose that run-scoped path.
+        assert "/mnt/skills/.accepted" not in mount_entries
+
     # ── Path alignment ──────────────────────────────────────────────────
 
     def test_skill_container_paths_match_expected_mounts(self, skills_fs):

@@ -26,7 +26,12 @@ from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import (
+    accepted_skill_access_from_runtime,
+    bind_runtime_accepted_skill_projection,
+    bind_runtime_accepted_skill_projection_async,
+    get_sandbox_provider,
+)
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
@@ -156,6 +161,42 @@ def _is_skills_path(path: str) -> bool:
     """Check if a path is under the skills container path."""
     skills_prefix = _get_skills_container_path()
     return path == skills_prefix or path.startswith(f"{skills_prefix}/")
+
+
+_ACCEPTED_SKILL_ACCESS_DENIED = "Durable invocation may access only its accepted skill snapshot"
+
+
+def _validate_runtime_skill_path(runtime: object, path: str) -> None:
+    """Restrict durable runs to their exact immutable ``.accepted`` tree."""
+    accepted, snapshot_id = accepted_skill_access_from_runtime(runtime)
+    if not accepted or not _is_skills_path(path):
+        return
+    _reject_path_traversal(path)
+    accepted_root = f"{_get_skills_container_path()}/.accepted"
+    if path == accepted_root:
+        return
+    if snapshot_id is not None:
+        snapshot_root = f"{accepted_root}/{snapshot_id}"
+        if path == snapshot_root or path.startswith(f"{snapshot_root}/"):
+            return
+    raise PermissionError(_ACCEPTED_SKILL_ACCESS_DENIED)
+
+
+def _validate_runtime_skill_command(runtime: object, command: str) -> None:
+    """Apply the accepted-tree restriction before local or remote shell IO."""
+    accepted, _snapshot_id = accepted_skill_access_from_runtime(runtime)
+    if not accepted:
+        return
+    skills_root = _get_skills_container_path()
+    if skills_root in command and _DOTDOT_PATH_SEGMENT_PATTERN.search(command):
+        raise PermissionError(_ACCEPTED_SKILL_ACCESS_DENIED)
+    url_spans = _non_file_url_spans(command)
+    for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
+        if _is_in_spans(match.start(), url_spans):
+            continue
+        path = match.group()
+        if _is_skills_path(path):
+            _validate_runtime_skill_path(runtime, path)
 
 
 def _extract_skill_name_from_skills_path(path: str) -> str | None:
@@ -1408,8 +1449,20 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
-            sandbox = get_sandbox_provider().get(sandbox_id)
+            provider = get_sandbox_provider()
+            sandbox = provider.get(sandbox_id)
             if sandbox is not None:
+                accepted_skills_only, _snapshot_id = accepted_skill_access_from_runtime(runtime)
+                if accepted_skills_only and not provider.has_accepted_skill_isolation(sandbox_id):
+                    provider.release(sandbox_id)
+                    sandbox = None
+            if sandbox is not None:
+                bind_runtime_accepted_skill_projection(
+                    provider,
+                    runtime,
+                    sandbox_id=sandbox_id,
+                    user_id=resolve_runtime_user_id(runtime),
+                )
                 if runtime.context is not None:
                     runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
                 return sandbox
@@ -1423,7 +1476,19 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
+    user_id = resolve_runtime_user_id(runtime)
+    accepted_skills_only, _snapshot_id = accepted_skill_access_from_runtime(runtime)
+    sandbox_id = provider.acquire_accepted_skills(thread_id, user_id=user_id) if accepted_skills_only else provider.acquire(thread_id, user_id=user_id)
+    try:
+        bind_runtime_accepted_skill_projection(
+            provider,
+            runtime,
+            sandbox_id=sandbox_id,
+            user_id=user_id,
+        )
+    except Exception:
+        provider.release(sandbox_id)
+        raise
 
     # Update runtime state - this persists across tool calls
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
@@ -1457,8 +1522,20 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
-            sandbox = get_sandbox_provider().get(sandbox_id)
+            provider = get_sandbox_provider()
+            sandbox = provider.get(sandbox_id)
             if sandbox is not None:
+                accepted_skills_only, _snapshot_id = accepted_skill_access_from_runtime(runtime)
+                if accepted_skills_only and not provider.has_accepted_skill_isolation(sandbox_id):
+                    await asyncio.to_thread(provider.release, sandbox_id)
+                    sandbox = None
+            if sandbox is not None:
+                await bind_runtime_accepted_skill_projection_async(
+                    provider,
+                    runtime,
+                    sandbox_id=sandbox_id,
+                    user_id=resolve_runtime_user_id(runtime),
+                )
                 if runtime.context is not None:
                     runtime.context["sandbox_id"] = sandbox_id
                 return sandbox
@@ -1470,7 +1547,19 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+    user_id = resolve_runtime_user_id(runtime)
+    accepted_skills_only, _snapshot_id = accepted_skill_access_from_runtime(runtime)
+    sandbox_id = await provider.acquire_accepted_skills_async(thread_id, user_id=user_id) if accepted_skills_only else await provider.acquire_async(thread_id, user_id=user_id)
+    try:
+        await bind_runtime_accepted_skill_projection_async(
+            provider,
+            runtime,
+            sandbox_id=sandbox_id,
+            user_id=user_id,
+        )
+    except Exception:
+        await asyncio.to_thread(provider.release, sandbox_id)
+        raise
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
@@ -1787,6 +1876,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         command: The bash command to execute. Always use absolute paths for files and directories.
     """
     try:
+        _validate_runtime_skill_command(runtime, command)
         sandbox = ensure_sandbox_initialized(runtime)
         # Request-scoped secrets resolved for the active skill (#3861), plus a
         # short-lived GitHub App installation token threaded through by the
@@ -1861,7 +1951,9 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         description: Explain why you are listing this directory in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the directory to list.
     """
+    requested_path = path
     try:
+        _validate_runtime_skill_path(runtime, path)
         user_id = resolve_runtime_user_id(runtime)
         # Block access to disabled skill directories
         if _is_disabled_skill_path(path, user_id=user_id):
@@ -1869,7 +1961,6 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         thread_data = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
@@ -1939,7 +2030,9 @@ def glob_tool(
         include_dirs: Whether matching directories should also be returned. Default is False.
         max_results: Maximum number of paths to return. Default is 200.
     """
+    requested_path = path
     try:
+        _validate_runtime_skill_path(runtime, path)
         user_id = resolve_runtime_user_id(runtime)
         # Block access to disabled skill directories
         if _is_disabled_skill_path(path, user_id=user_id):
@@ -1947,7 +2040,6 @@ def glob_tool(
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         effective_max_results = _resolve_max_results(
             "glob",
             max_results,
@@ -2023,7 +2115,9 @@ def grep_tool(
         case_sensitive: Whether matching is case-sensitive. Default is False.
         max_results: Maximum number of matching lines to return. Default is 100.
     """
+    requested_path = path
     try:
+        _validate_runtime_skill_path(runtime, path)
         user_id = resolve_runtime_user_id(runtime)
         # Block access to disabled skill directories
         if _is_disabled_skill_path(path, user_id=user_id):
@@ -2031,7 +2125,6 @@ def grep_tool(
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         effective_max_results = _resolve_max_results(
             "grep",
             max_results,
@@ -2114,16 +2207,15 @@ def read_current_file_content(runtime: Runtime | None, path: str) -> str:
     ``FileNotFoundError`` when the file does not exist; other sandbox errors
     propagate to the caller.
     """
+    _validate_runtime_skill_path(runtime, path)
     sandbox = ensure_sandbox_initialized(runtime)
     ensure_thread_directories_exist(runtime)
     if is_local_sandbox(runtime):
         thread_data = get_thread_data(runtime)
         validate_local_tool_path(path, thread_data, read_only=True)
-        if _is_skills_path(path):
-            path = _resolve_skills_path(path)
-        elif _is_acp_workspace_path(path):
+        if _is_acp_workspace_path(path):
             path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-        elif not _is_custom_mount_path(path):
+        elif not _is_skills_path(path) and not _is_custom_mount_path(path):
             path = _resolve_and_validate_user_data_path(path, thread_data)
         # Custom mount paths are resolved by LocalSandbox._resolve_path()
     return sandbox.read_file(path)
@@ -2145,7 +2237,9 @@ def read_file_tool(
         start_line: Optional starting line number (1-indexed, inclusive). Omit to start at the first line.
         end_line: Optional ending line number (1-indexed, inclusive). Omit to read through the last line.
     """
+    requested_path = path
     try:
+        _validate_runtime_skill_path(runtime, path)
         # Block access to disabled skill files
         if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
@@ -2158,7 +2252,6 @@ def read_file_tool(
         if end_line is not None and effective_start > end_line:
             return "(start_line > end_line — no lines in range)"
 
-        requested_path = path
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         use_line_range = start_line is not None or end_line is not None
@@ -2166,11 +2259,9 @@ def read_file_tool(
             if is_local_sandbox(runtime):
                 thread_data = get_thread_data(runtime)
                 validate_local_tool_path(path, thread_data, read_only=True)
-                if _is_skills_path(path):
-                    path = _resolve_skills_path(path)
-                elif _is_acp_workspace_path(path):
+                if _is_acp_workspace_path(path):
                     path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-                elif not _is_custom_mount_path(path):
+                elif not _is_skills_path(path) and not _is_custom_mount_path(path):
                     path = _resolve_and_validate_user_data_path(path, thread_data)
                 # Custom mount paths are resolved by LocalSandbox._resolve_path()
             content = sandbox.read_file(path, start_line=start_line, end_line=end_line)

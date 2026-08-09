@@ -3,9 +3,14 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import (
+    AcceptedSkillSandboxBindingError,
+    AcceptedSkillSandboxBindingV1,
+    SandboxProvider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +282,13 @@ class LocalSandboxProvider(SandboxProvider):
         return (user_id, thread_id)
 
     @staticmethod
-    def _build_thread_path_mappings(thread_id: str, *, user_id: str | None = None, skill_projection=None) -> list[PathMapping]:
+    def _build_thread_path_mappings(
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+        skill_projection=None,
+        accepted_skills_only: bool = False,
+    ) -> list[PathMapping]:
         """Build per-thread path mappings for /mnt/user-data, /mnt/acp-workspace,
         and /mnt/skills/custom.
 
@@ -331,18 +342,23 @@ class LocalSandboxProvider(SandboxProvider):
         try:
             config = get_app_config()
             skills_container_path = config.skills.container_path
-            projection = skill_projection if skill_projection is not None else LocalSandboxProvider._ensure_skills_projection(effective_user_id)
-            snapshot_root = paths.skill_snapshot_scope_dir(effective_user_id)
-            snapshot_root.mkdir(parents=True, exist_ok=True)
-
-            mappings.append(
-                PathMapping(
-                    container_path=f"{skills_container_path}/.accepted",
-                    local_path=str(snapshot_root),
-                    read_only=True,
+            projection = None
+            if not accepted_skills_only:
+                projection = skill_projection if skill_projection is not None else LocalSandboxProvider._ensure_skills_projection(effective_user_id)
+            if accepted_skills_only:
+                snapshot_root = paths.skill_snapshot_active_view_dir(
+                    effective_user_id,
+                    thread_id,
                 )
-            )
-            if projection is not None:
+                snapshot_root.mkdir(parents=True, exist_ok=True)
+                mappings.append(
+                    PathMapping(
+                        container_path=f"{skills_container_path}/.accepted",
+                        local_path=str(snapshot_root),
+                        read_only=True,
+                    )
+                )
+            elif projection is not None:
                 mappings.extend(
                     [
                         PathMapping(
@@ -366,6 +382,79 @@ class LocalSandboxProvider(SandboxProvider):
             logger.warning("Could not setup per-thread skills projection mounts: %s", exc, exc_info=True)
 
         return mappings
+
+    @staticmethod
+    def _has_only_accepted_skill_mapping(sandbox: LocalSandbox) -> bool:
+        try:
+            from deerflow.config import get_app_config
+
+            skills_root = get_app_config().skills.container_path.rstrip("/")
+        except Exception:
+            skills_root = DEFAULT_SKILLS_CONTAINER_PATH
+        skill_mappings = [mapping.container_path.rstrip("/") for mapping in sandbox.path_mappings if mapping.container_path == skills_root or mapping.container_path.startswith(f"{skills_root}/")]
+        return bool(skill_mappings) and all(path == f"{skills_root}/.accepted" for path in skill_mappings)
+
+    def _acquire_thread(self, thread_id: str, *, user_id: str, accepted_skills_only: bool) -> str:
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        key = self._thread_key(thread_id, effective_user_id)
+        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+        coordinator = get_skill_projection_coordinator()
+
+        with self._lock:
+            cached = self._thread_sandboxes.get(key)
+            if cached is not None and self._has_only_accepted_skill_mapping(cached) == accepted_skills_only:
+                self._thread_sandboxes.move_to_end(key)
+                return cached.id
+            if cached is not None:
+                if coordinator.is_busy(
+                    user_id=effective_user_id,
+                    thread_id=thread_id,
+                ):
+                    raise AcceptedSkillSandboxBindingError(
+                        "accepted_skill_snapshot_isolation_conflict",
+                    )
+                self._thread_sandboxes.pop(key, None)
+
+        skill_projection = None if accepted_skills_only else self._ensure_skills_projection(effective_user_id)
+        new_mappings = [mapping for mapping in self._path_mappings if not accepted_skills_only or not self._mapping_targets_skills(mapping)]
+        if not accepted_skills_only:
+            self._append_public_skill_mapping(new_mappings, skill_projection)
+        new_mappings += self._build_thread_path_mappings(
+            thread_id,
+            user_id=effective_user_id,
+            skill_projection=skill_projection,
+            accepted_skills_only=accepted_skills_only,
+        )
+        with self._lock:
+            cached = self._thread_sandboxes.get(key)
+            if cached is None or self._has_only_accepted_skill_mapping(cached) != accepted_skills_only:
+                if cached is not None and coordinator.is_busy(
+                    user_id=effective_user_id,
+                    thread_id=thread_id,
+                ):
+                    raise AcceptedSkillSandboxBindingError(
+                        "accepted_skill_snapshot_isolation_conflict",
+                    )
+                cached = LocalSandbox(
+                    self._sandbox_id_for_thread(thread_id, effective_user_id),
+                    path_mappings=new_mappings,
+                )
+                self._thread_sandboxes[key] = cached
+                self._evict_until_within_cap_locked()
+            else:
+                self._thread_sandboxes.move_to_end(key)
+            return cached.id
+
+    @staticmethod
+    def _mapping_targets_skills(mapping: PathMapping) -> bool:
+        try:
+            from deerflow.config import get_app_config
+
+            skills_root = get_app_config().skills.container_path.rstrip("/")
+        except Exception:
+            skills_root = DEFAULT_SKILLS_CONTAINER_PATH
+        return mapping.container_path == skills_root or mapping.container_path.startswith(f"{skills_root}/")
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Return a sandbox id scoped to *thread_id* (or the generic singleton).
@@ -392,55 +481,60 @@ class LocalSandboxProvider(SandboxProvider):
                     _singleton = self._generic_sandbox
                 return self._generic_sandbox.id
 
-        effective_user_id = self._effective_acquire_user_id(user_id)
-        # Runs on every acquire, including cache hits, to self-heal drift —
-        # cheap (~3-4 ms metadata walk) when the manifest is fresh. If another
-        # worker mutated this user's skills since the last check, this
-        # triggers a full rebuild (~400 ms measured locally) under the
-        # cross-process projection lock, serializing concurrent acquires and
-        # mutations for that user. Acceptable for an editing-frequency event.
-        skill_projection = self._ensure_skills_projection(effective_user_id)
-        key = self._thread_key(thread_id, effective_user_id)
-
-        # Fast path under lock.
-        with self._lock:
-            cached = self._thread_sandboxes.get(key)
-            if cached is not None:
-                # Mark as most-recently used so frequently-touched threads
-                # survive eviction.
-                self._thread_sandboxes.move_to_end(key)
-        if cached is not None:
-            return cached.id
-
-        # ``_build_thread_path_mappings`` touches the filesystem
-        # (``ensure_thread_dirs``); release the lock during I/O.
-        new_mappings = list(self._path_mappings)
-        self._append_public_skill_mapping(new_mappings, skill_projection)
-        new_mappings += self._build_thread_path_mappings(
+        return self._acquire_thread(
             thread_id,
-            user_id=effective_user_id,
-            skill_projection=skill_projection,
+            user_id=self._effective_acquire_user_id(user_id),
+            accepted_skills_only=False,
         )
 
-        with self._lock:
-            # Re-check after the lock-free I/O: another caller may have
-            # populated the cache while we were computing mappings.
-            cached = self._thread_sandboxes.get(key)
-            if cached is None:
-                cached = LocalSandbox(self._sandbox_id_for_thread(thread_id, effective_user_id), path_mappings=new_mappings)
-                self._thread_sandboxes[key] = cached
-                self._evict_until_within_cap_locked()
-            else:
-                self._thread_sandboxes.move_to_end(key)
-            return cached.id
+    def acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
+        return self._acquire_thread(
+            thread_id,
+            user_id=user_id,
+            accepted_skills_only=True,
+        )
+
+    def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
+        sandbox = self.get(sandbox_id)
+        return isinstance(sandbox, LocalSandbox) and self._has_only_accepted_skill_mapping(sandbox)
 
     def _evict_until_within_cap_locked(self) -> None:
         """LRU-evict cached thread sandboxes once the cap is exceeded.
 
+        Invocation-owned entries are not cache-idle: a lead or background
+        consumer can still resolve the accepted skill projection through the
+        cached sandbox after the graph that created it has returned.  If all
+        candidates are owned, the cache cap becomes a temporary soft limit;
+        exact consumer release makes a later acquire eligible to evict them.
+
         Caller MUST hold ``self._lock``.
         """
         while len(self._thread_sandboxes) > self._max_cached_threads:
-            evicted_key, _ = self._thread_sandboxes.popitem(last=False)
+            from deerflow.runtime.skill_projection import (
+                get_skill_projection_coordinator,
+            )
+
+            coordinator = get_skill_projection_coordinator()
+            evicted_key = next(
+                (key for key in self._thread_sandboxes if not coordinator.is_busy(user_id=key[0], thread_id=key[1])),
+                None,
+            )
+            if evicted_key is None:
+                logger.info(
+                    "Deferring LocalSandbox LRU eviction because every cached thread owns an accepted skill projection (cap=%d, cached=%d)",
+                    self._max_cached_threads,
+                    len(self._thread_sandboxes),
+                )
+                break
+            self._thread_sandboxes.pop(evicted_key)
+            from deerflow.runtime.skill_snapshot import (
+                force_clear_skill_snapshot_active_view,
+            )
+
+            force_clear_skill_snapshot_active_view(
+                user_id=evicted_key[0],
+                thread_id=evicted_key[1],
+            )
             logger.info(
                 "Evicting LocalSandbox cache entry for user/thread %s/%s (cap=%d)",
                 evicted_key[0],
@@ -478,9 +572,83 @@ class LocalSandboxProvider(SandboxProvider):
         # ``acquire`` and explicit ``reset()`` / ``shutdown()`` are the only
         # paths that drop cached entries.
         #
-        # Note: This method is intentionally not called by SandboxMiddleware
-        # to allow sandbox reuse across multiple turns in a thread.
-        pass
+        # Projection cleanup is owned by the invocation-fenced consumer
+        # coordinator. A background child may still be using this cached
+        # sandbox after the lead graph releases it.
+        del sandbox_id
+
+    def clear_accepted_skill_snapshot(
+        self,
+        clear,
+    ) -> bool:
+        from deerflow.runtime.skill_projection import SkillProjectionClear
+        from deerflow.runtime.skill_snapshot import clear_skill_snapshot_active_view
+
+        if not isinstance(clear, SkillProjectionClear):
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_clear_fence_invalid")
+        return clear_skill_snapshot_active_view(
+            user_id=clear.user_id,
+            thread_id=clear.thread_id,
+            run_id=clear.run_id,
+            generation=clear.generation,
+        )
+
+    def ensure_accepted_skill_snapshot_absent(self, clear) -> bool:
+        from deerflow.runtime.skill_projection import SkillProjectionClear
+        from deerflow.runtime.skill_snapshot import prove_skill_snapshot_active_view_absent
+
+        if not isinstance(clear, SkillProjectionClear):
+            return False
+        if not self.has_accepted_skill_isolation(clear.sandbox_id):
+            return False
+        if self._key_from_sandbox_id(clear.sandbox_id) != (
+            clear.user_id,
+            clear.thread_id,
+        ):
+            return False
+        return prove_skill_snapshot_active_view_absent(
+            user_id=clear.user_id,
+            thread_id=clear.thread_id,
+        )
+
+    def bind_accepted_skill_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+    ) -> None:
+        key = self._key_from_sandbox_id(sandbox_id)
+        if key != (user_id, thread_id):
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_sandbox_identity_mismatch")
+        from deerflow.runtime.skill_snapshot import bind_skill_snapshot_active_view
+
+        try:
+            bind_skill_snapshot_active_view(
+                user_id=user_id,
+                thread_id=thread_id,
+                snapshot_id=binding.snapshot_id,
+                run_id=binding.run_id,
+                generation=binding.generation,
+                evidence=binding.evidence,
+            )
+        except Exception as exc:
+            if isinstance(exc, AcceptedSkillSandboxBindingError):
+                raise
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_failed") from exc
+
+    def _assert_no_invocation_owned_skill_projections(self) -> None:
+        """Refuse cache teardown while accepted material still has an owner."""
+        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+        with self._lock:
+            identities = tuple(self._thread_sandboxes)
+        coordinator = get_skill_projection_coordinator()
+        if any(coordinator.is_busy(user_id=user_id, thread_id=thread_id) for user_id, thread_id in identities):
+            raise AcceptedSkillSandboxBindingError(
+                "accepted_skill_snapshot_projection_in_use",
+            )
 
     def reset(self) -> None:
         """Drop all cached LocalSandbox instances.
@@ -490,11 +658,17 @@ class LocalSandboxProvider(SandboxProvider):
         module-level ``_singleton`` alias so older callers/tests that reach
         # into it see a fresh state.
         """
+        self._assert_no_invocation_owned_skill_projections()
         global _singleton
         with self._lock:
+            identities = list(self._thread_sandboxes)
             self._generic_sandbox = None
             self._thread_sandboxes.clear()
             _singleton = None
+        from deerflow.runtime.skill_snapshot import force_clear_skill_snapshot_active_view
+
+        for user_id, thread_id in identities:
+            force_clear_skill_snapshot_active_view(user_id=user_id, thread_id=thread_id)
 
     def shutdown(self) -> None:
         # LocalSandboxProvider has no extra resources beyond the cached

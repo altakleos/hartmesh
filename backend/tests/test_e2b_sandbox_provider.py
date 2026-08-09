@@ -25,6 +25,10 @@ from deerflow.community.e2b_sandbox.capacity import (
 from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+from deerflow.sandbox.sandbox_provider import (
+    AcceptedSkillSandboxBindingError,
+    AcceptedSkillSandboxBindingV1,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fakes for the e2b SDK
@@ -361,6 +365,44 @@ def test_apply_mounts_uploads_only_enabled_skill_projection(monkeypatch, tmp_pat
     assert "/mnt/skills/integrations/lark-cli/disabled-integration/SKILL.md" not in uploaded_paths
 
 
+def test_accepted_mount_application_never_reads_or_uploads_live_skills(monkeypatch):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    provider = _make_provider()
+    provider._config["mounts"] = []
+    monkeypatch.setattr(
+        provider,
+        "_skill_projection_mounts",
+        lambda _user_id: (_ for _ in ()).throw(AssertionError("live skills must not be captured")),
+    )
+    client = FakeClient()
+
+    provider._apply_mounts(
+        client,
+        user_id="owner-accepted",
+        accepted_skills_only=True,
+    )
+
+    assert client.files.write_calls == []
+
+
+def test_accepted_sandbox_creation_persists_its_isolation_profile(monkeypatch) -> None:
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+
+    provider._create_sandbox(
+        "thread-accepted-profile",
+        user_id="owner-accepted-profile",
+        accepted_skills_only=True,
+    )
+
+    assert fake_cls.create_calls[0]["metadata"]["deer_flow_skill_profile"] == "accepted_v1"
+
+
 def test_skill_projection_mounts_swallows_projection_failure(monkeypatch):
     """``_skill_projection_mounts`` must not raise — a projection failure used
     to propagate out of ``_apply_mounts`` before the configured-mounts loop
@@ -378,6 +420,636 @@ def test_skill_projection_mounts_swallows_projection_failure(monkeypatch):
     provider = _make_provider()
 
     assert provider._skill_projection_mounts("user-1") == []
+
+
+def test_accepted_snapshot_binding_uploads_only_the_selected_digest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    paths = Paths(base_dir=tmp_path / "state")
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+    from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    selected_source = tmp_path / "selected-source"
+    sibling_source = tmp_path / "sibling-source"
+    _write_skill(selected_source, "selected-skill")
+    _write_skill(sibling_source, "sibling-skill")
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.runtime.skill_snapshot.get_paths", lambda: paths)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    provider = _make_provider()
+    client = FakeClient()
+    provider._sandboxes["fake-sb-1"] = SimpleNamespace(client=client)
+    provider._thread_sandboxes[("user-1", "thread-1")] = "fake-sb-1"
+    selected_skill = parse_skill_file(
+        selected_source / "selected-skill" / "SKILL.md",
+        SkillCategory.CUSTOM,
+        relative_path=Path("selected-skill"),
+    )
+    sibling_skill = parse_skill_file(
+        sibling_source / "sibling-skill" / "SKILL.md",
+        SkillCategory.CUSTOM,
+        relative_path=Path("sibling-skill"),
+    )
+    assert selected_skill is not None and sibling_skill is not None
+    selected = snapshot_effective_skills((selected_skill,), user_id="user-1")
+    sibling = snapshot_effective_skills((sibling_skill,), user_id="user-1")
+    assert selected is not None and sibling is not None
+    selected_id = selected.snapshot_id
+    sibling_id = sibling.snapshot_id
+    binding = AcceptedSkillSandboxBindingV1(
+        snapshot_id=selected_id,
+        run_id="run-selected",
+        generation=1,
+        evidence=SkillProjectionEvidence.from_snapshot(selected),
+    )
+
+    provider.bind_accepted_skill_snapshot(
+        "fake-sb-1",
+        thread_id="thread-1",
+        user_id="user-1",
+        binding=binding,
+    )
+
+    uploaded = {path for path, _ in client.files.write_calls}
+    assert any(path.endswith(f"/{selected_id}/custom/selected-skill/SKILL.md") for path in uploaded)
+    assert all(sibling_id not in path for path in uploaded)
+    assert any("mv /mnt/skills/.accepted-stage-" in call for call in client.commands.calls)
+    assert any("find /mnt/skills/.accepted-stage-" in call and "-type d -exec chmod 500" in call and "stat -c '%a' /mnt/skills/.accepted-stage-" in call for call in client.commands.calls)
+
+    commands_before_equal_rebind = len(client.commands.calls)
+    writes_before_equal_rebind = len(client.files.write_calls)
+    provider.bind_accepted_skill_snapshot(
+        "fake-sb-1",
+        thread_id="thread-1",
+        user_id="user-1",
+        binding=binding,
+    )
+    assert len(client.commands.calls) == commands_before_equal_rebind
+    assert len(client.files.write_calls) == writes_before_equal_rebind
+
+    # Release removes this process-local binding before the same warm VM can
+    # serve another invocation; simulate that lifecycle edge without driving
+    # the provider's unrelated output-sync machinery in this projection test.
+    provider._accepted_skill_bindings.pop("fake-sb-1")
+    writes_before_empty = len(client.files.write_calls)
+    provider.bind_accepted_skill_snapshot(
+        "fake-sb-1",
+        thread_id="thread-1",
+        user_id="user-1",
+        binding=AcceptedSkillSandboxBindingV1(snapshot_id=None),
+    )
+    assert len(client.files.write_calls) == writes_before_empty
+    selected.release()
+    sibling.release()
+
+
+def test_accepted_snapshot_upload_failure_clears_and_retries(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    paths = Paths(base_dir=tmp_path / "state")
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+    from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    source = tmp_path / "selected-source"
+    _write_skill(source, "selected-skill")
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.runtime.skill_snapshot.get_paths", lambda: paths)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    provider = _make_provider()
+    client = FakeClient()
+    provider._sandboxes["fake-sb-1"] = SimpleNamespace(client=client)
+    provider._thread_sandboxes[("user-1", "thread-1")] = "fake-sb-1"
+    skill = parse_skill_file(
+        source / "selected-skill" / "SKILL.md",
+        SkillCategory.CUSTOM,
+        relative_path=Path("selected-skill"),
+    )
+    assert skill is not None
+    snapshot = snapshot_effective_skills((skill,), user_id="user-1")
+    assert snapshot is not None
+    snapshot_id = snapshot.snapshot_id
+    original_write = client.files.write
+    attempts = 0
+
+    def flaky_write(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("partial upload")
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(client.files, "write", flaky_write)
+    binding = AcceptedSkillSandboxBindingV1(
+        snapshot_id=snapshot_id,
+        run_id="run-selected",
+        generation=1,
+        evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+    )
+
+    with pytest.raises(
+        AcceptedSkillSandboxBindingError,
+        match="accepted_skill_snapshot_projection_failed",
+    ):
+        provider.bind_accepted_skill_snapshot(
+            "fake-sb-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            binding=binding,
+        )
+
+    assert "fake-sb-1" not in getattr(
+        provider,
+        "_accepted_skill_bindings",
+        {},
+    )
+    assert sum("find /mnt/skills/.accepted -mindepth 1 -delete" in call for call in client.commands.calls) == 1
+
+    provider.bind_accepted_skill_snapshot(
+        "fake-sb-1",
+        thread_id="thread-1",
+        user_id="user-1",
+        binding=binding,
+    )
+    assert attempts == 2
+    assert provider._accepted_skill_bindings == {
+        "fake-sb-1": ("run-selected", 1, snapshot_id),
+    }
+    snapshot.release()
+
+
+@pytest.mark.parametrize("failure", ["chmod", "readback"])
+def test_accepted_snapshot_remote_verification_fails_closed(
+    monkeypatch,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+    from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    paths = Paths(base_dir=tmp_path / "state")
+    source = tmp_path / "verified-source"
+    _write_skill(source, "verified-skill")
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.runtime.skill_snapshot.get_paths", lambda: paths)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    skill = parse_skill_file(
+        source / "verified-skill" / "SKILL.md",
+        SkillCategory.CUSTOM,
+        relative_path=Path("verified-skill"),
+    )
+    assert skill is not None
+    snapshot = snapshot_effective_skills((skill,), user_id="user-1")
+    assert snapshot is not None
+    commands = FakeCommandsAPI(
+        [
+            SimpleNamespace(stdout="", stderr="", exit_code=0),
+            SimpleNamespace(stdout="", stderr="chmod failed", exit_code=1),
+            SimpleNamespace(stdout="", stderr="", exit_code=0),
+        ]
+        if failure == "chmod"
+        else None
+    )
+    client = FakeClient(commands=commands)
+    if failure == "readback":
+        original_read = client.files.read
+
+        def mismatched_read(path: str, *, format: str | None = None):
+            value = original_read(path, format=format)
+            return b"mutated remote bytes" if format == "bytes" else value
+
+        monkeypatch.setattr(client.files, "read", mismatched_read)
+    provider = _make_provider()
+    sandbox = SimpleNamespace(client=client)
+    provider._sandboxes["fake-sb-1"] = sandbox
+    provider._thread_sandboxes[("user-1", "thread-1")] = "fake-sb-1"
+
+    with pytest.raises(
+        AcceptedSkillSandboxBindingError,
+        match="accepted_skill_snapshot_projection_failed",
+    ):
+        provider.bind_accepted_skill_snapshot(
+            "fake-sb-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            binding=AcceptedSkillSandboxBindingV1(
+                snapshot_id=snapshot.snapshot_id,
+                run_id="run-verified",
+                generation=1,
+                evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+            ),
+        )
+
+    assert "fake-sb-1" not in getattr(provider, "_accepted_skill_bindings", {})
+    assert any("find /mnt/skills/.accepted -mindepth 1 -delete" in call for call in client.commands.calls)
+    snapshot.release()
+
+
+@pytest.mark.parametrize("cleanup_succeeds", [True, False])
+def test_failed_accepted_snapshot_publish_removes_transient_bytes_or_poisons(
+    monkeypatch,
+    tmp_path: Path,
+    cleanup_succeeds: bool,
+) -> None:
+    """A failure after the old tree moves cannot leave a reusable mixed view."""
+    import hashlib
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+    from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    paths = Paths(base_dir=tmp_path / "state")
+    source = tmp_path / "publish-failure-source"
+    _write_skill(source, "publish-failure-skill")
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.runtime.skill_snapshot.get_paths", lambda: paths)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    skill = parse_skill_file(
+        source / "publish-failure-skill" / "SKILL.md",
+        SkillCategory.CUSTOM,
+        relative_path=Path("publish-failure-skill"),
+    )
+    assert skill is not None
+    snapshot = snapshot_effective_skills((skill,), user_id="user-1")
+    assert snapshot is not None
+    binding = AcceptedSkillSandboxBindingV1(
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-publish-failure",
+        generation=7,
+        evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+    )
+    suffix = hashlib.sha256(f"{binding.run_id}:{binding.generation}".encode()).hexdigest()[:24]
+    destination = "/mnt/skills/.accepted"
+    stage = f"/mnt/skills/.accepted-stage-{suffix}"
+    previous = f"/mnt/skills/.accepted-old-{suffix}"
+    files = FakeFilesAPI({f"{destination}/old-snapshot/custom/old/SKILL.md": b"old accepted"})
+
+    def fail_publish_after_old_move(command: str):
+        assert f"mv {destination} {previous}" in command
+        for path, content in list(files.store.items()):
+            if path.startswith(f"{destination}/"):
+                files.store[f"{previous}/{path.removeprefix(f'{destination}/')}"] = content
+                files.store.pop(path)
+        return SimpleNamespace(stdout="", stderr="publish failed", exit_code=1)
+
+    def cleanup_exact_paths(command: str):
+        for prefix in (destination, stage, previous):
+            if prefix in command:
+                for path in list(files.store):
+                    if path == prefix or path.startswith(f"{prefix}/"):
+                        files.store.pop(path)
+        return SimpleNamespace(
+            stdout="",
+            stderr="" if cleanup_succeeds else "cleanup failed",
+            exit_code=0 if cleanup_succeeds else 1,
+        )
+
+    commands = FakeCommandsAPI(
+        [
+            SimpleNamespace(stdout="", stderr="", exit_code=0),
+            SimpleNamespace(stdout="", stderr="", exit_code=0),
+            SimpleNamespace(stdout="", stderr="", exit_code=0),
+            fail_publish_after_old_move,
+            cleanup_exact_paths,
+        ]
+    )
+    client = FakeClient(commands=commands, files=files)
+    provider = _make_provider()
+    sandbox = SimpleNamespace(
+        id="fake-sb-1",
+        client=client,
+        _client=client,
+        close=MagicMock(),
+    )
+    provider._sandboxes["fake-sb-1"] = sandbox
+    provider._thread_sandboxes[("user-1", "thread-1")] = "fake-sb-1"
+
+    with pytest.raises(
+        AcceptedSkillSandboxBindingError,
+        match="accepted_skill_snapshot_projection_failed",
+    ):
+        provider.bind_accepted_skill_snapshot(
+            "fake-sb-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            binding=binding,
+        )
+
+    cleanup_command = commands.calls[-1]
+    assert destination in cleanup_command
+    assert stage in cleanup_command
+    assert previous in cleanup_command
+    if cleanup_succeeds:
+        assert not any(path == prefix or path.startswith(f"{prefix}/") for prefix in (destination, stage, previous) for path in files.store)
+        assert not client.killed
+        assert "fake-sb-1" in provider._sandboxes
+    else:
+        assert client.killed
+        assert "fake-sb-1" not in provider._sandboxes
+        assert ("user-1", "thread-1") not in provider._thread_sandboxes
+    snapshot.release()
+
+
+def test_concurrent_different_accepted_bindings_serialize_and_conflict(
+    monkeypatch,
+) -> None:
+    provider = _make_provider()
+    provider._sandboxes["fake-sb-1"] = SimpleNamespace(client=FakeClient())
+    provider._thread_sandboxes[("user-1", "thread-1")] = "fake-sb-1"
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_attempting = threading.Event()
+    projected: list[str | None] = []
+
+    def project(_sandbox_id, *, user_id, binding):
+        del user_id
+        projected.append(binding.snapshot_id)
+        first_entered.set()
+        assert release_first.wait(timeout=2)
+
+    monkeypatch.setattr(provider, "_project_accepted_skill_snapshot", project)
+    outcomes: list[str] = []
+
+    def bind(snapshot_id: str, *, second: bool = False) -> None:
+        if second:
+            second_attempting.set()
+        try:
+            provider.bind_accepted_skill_snapshot(
+                "fake-sb-1",
+                thread_id="thread-1",
+                user_id="user-1",
+                binding=AcceptedSkillSandboxBindingV1(snapshot_id=snapshot_id),
+            )
+        except AcceptedSkillSandboxBindingError as exc:
+            outcomes.append(exc.code)
+        else:
+            outcomes.append("bound")
+
+    first = threading.Thread(target=bind, args=("a" * 64,))
+    second = threading.Thread(
+        target=bind,
+        args=("b" * 64,),
+        kwargs={"second": True},
+    )
+    first.start()
+    assert first_entered.wait(timeout=2)
+    second.start()
+    assert second_attempting.wait(timeout=2)
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert projected == ["a" * 64]
+    assert sorted(outcomes) == [
+        "accepted_skill_snapshot_binding_conflict",
+        "bound",
+    ]
+
+
+def test_unclearable_partial_projection_poisons_remote_sandbox(
+    monkeypatch,
+) -> None:
+    provider = _make_provider()
+    sandbox = SimpleNamespace(client=FakeClient())
+    provider._sandboxes["fake-sb-1"] = sandbox
+    provider._thread_sandboxes[("user-1", "thread-1")] = "fake-sb-1"
+    killed: list[object] = []
+
+    def fail_projection(*_args, **_kwargs) -> None:
+        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_failed")
+
+    def fail_clear(*_args) -> None:
+        raise RuntimeError("clear failed")
+
+    monkeypatch.setattr(
+        provider,
+        "_project_accepted_skill_snapshot",
+        fail_projection,
+    )
+    monkeypatch.setattr(
+        provider,
+        "_clear_remote_accepted_skill_snapshot",
+        fail_clear,
+    )
+    monkeypatch.setattr(provider, "_kill_and_close", killed.append)
+
+    with pytest.raises(
+        AcceptedSkillSandboxBindingError,
+        match="accepted_skill_snapshot_projection_failed",
+    ):
+        provider.bind_accepted_skill_snapshot(
+            "fake-sb-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            binding=AcceptedSkillSandboxBindingV1(snapshot_id="d" * 64),
+        )
+
+    assert killed == [sandbox]
+    assert "fake-sb-1" not in provider._sandboxes
+    assert ("user-1", "thread-1") not in provider._thread_sandboxes
+
+
+def test_failed_remote_clear_quarantines_accepted_profile_as_success(
+    monkeypatch,
+) -> None:
+    from deerflow.runtime.skill_projection import SkillProjectionClear
+
+    provider = _make_provider()
+    sandbox = SimpleNamespace(id="fake-sb-clear", client=FakeClient())
+    provider._sandboxes["fake-sb-clear"] = sandbox
+    provider._thread_sandboxes[("user-clear", "thread-clear")] = "fake-sb-clear"
+    provider._accepted_skill_bindings = {
+        "fake-sb-clear": ("run-clear", 7, "a" * 64),
+    }
+    quarantined: list[object] = []
+
+    def fail_clear(*_args) -> None:
+        raise RuntimeError("remote clear failed")
+
+    monkeypatch.setattr(provider, "_clear_remote_accepted_skill_snapshot", fail_clear)
+    monkeypatch.setattr(provider, "_kill_and_close", quarantined.append)
+
+    assert provider.clear_accepted_skill_snapshot(
+        SkillProjectionClear(
+            user_id="user-clear",
+            thread_id="thread-clear",
+            sandbox_id="fake-sb-clear",
+            run_id="run-clear",
+            generation=7,
+            snapshot_id="a" * 64,
+        )
+    )
+    assert quarantined == [sandbox]
+    assert "fake-sb-clear" not in provider._sandboxes
+    assert "fake-sb-clear" not in provider._accepted_skill_bindings
+    assert ("user-clear", "thread-clear") not in provider._thread_sandboxes
+
+
+def test_dead_accepted_profile_sandbox_finalizes_from_fenced_local_binding() -> None:
+    from deerflow.runtime.skill_projection import SkillProjectionClear
+
+    provider = _make_provider()
+    provider._thread_sandboxes[("user-dead", "thread-dead")] = "fake-sb-dead"
+    provider._accepted_skill_bindings = {
+        "fake-sb-dead": ("run-dead", 8, "b" * 64),
+    }
+
+    assert provider.clear_accepted_skill_snapshot(
+        SkillProjectionClear(
+            user_id="user-dead",
+            thread_id="thread-dead",
+            sandbox_id="fake-sb-dead",
+            run_id="run-dead",
+            generation=8,
+            snapshot_id="b" * 64,
+        )
+    )
+    assert provider._accepted_skill_bindings == {}
+    assert ("user-dead", "thread-dead") not in provider._thread_sandboxes
+
+
+def test_failed_prepublication_remote_clear_quarantines_exact_profile(
+    monkeypatch,
+) -> None:
+    from deerflow.runtime.skill_projection import SkillProjectionClear
+
+    provider = _make_provider()
+    sandbox = SimpleNamespace(id="fake-sb-unpublished", client=FakeClient())
+    provider._sandboxes["fake-sb-unpublished"] = sandbox
+    provider._thread_sandboxes[("user-unpublished", "thread-unpublished")] = "fake-sb-unpublished"
+    provider._accepted_only_sandbox_ids = {"fake-sb-unpublished"}
+    quarantined: list[object] = []
+    monkeypatch.setattr(
+        provider,
+        "_clear_remote_accepted_skill_snapshot",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("remote clear failed")),
+    )
+    monkeypatch.setattr(provider, "_kill_and_close", quarantined.append)
+    clear = SkillProjectionClear(
+        user_id="user-unpublished",
+        thread_id="thread-unpublished",
+        sandbox_id="fake-sb-unpublished",
+        run_id="run-unpublished",
+        generation=9,
+        snapshot_id=None,
+    )
+
+    assert provider.clear_accepted_skill_snapshot(clear) is False
+    assert provider.ensure_accepted_skill_snapshot_absent(clear)
+    assert quarantined == [sandbox]
+    assert provider._accepted_skill_quarantines == {}
+
+
+def test_missing_prepublication_client_uses_persisted_profile_quarantine() -> None:
+    from deerflow.runtime.skill_projection import SkillProjectionClear
+
+    provider = _make_provider()
+    provider._thread_sandboxes[("user-missing", "thread-missing")] = "fake-sb-missing"
+    provider._accepted_only_sandbox_ids = {"fake-sb-missing"}
+    clear = SkillProjectionClear(
+        user_id="user-missing",
+        thread_id="thread-missing",
+        sandbox_id="fake-sb-missing",
+        run_id="run-missing",
+        generation=10,
+        snapshot_id=None,
+    )
+
+    assert provider.clear_accepted_skill_snapshot(clear) is False
+    assert provider.ensure_accepted_skill_snapshot_absent(clear)
+    assert provider._accepted_skill_quarantines == {}
+    assert ("user-missing", "thread-missing") not in provider._thread_sandboxes
+
+
+def test_recreated_accepted_sandbox_cannot_inherit_stale_quarantine(
+    monkeypatch,
+) -> None:
+    from deerflow.runtime.skill_projection import SkillProjectionClear
+
+    provider = _make_provider()
+    sandbox_id = "fake-sb-recreated"
+    old = SimpleNamespace(id=sandbox_id, client=FakeClient())
+    provider._sandboxes[sandbox_id] = old
+    provider._thread_sandboxes[("user-recreated", "thread-recreated")] = sandbox_id
+    provider._accepted_only_sandbox_ids = {sandbox_id}
+    killed: list[object] = []
+    monkeypatch.setattr(provider, "_kill_and_close", killed.append)
+    assert provider._poison_accepted_skill_sandbox(sandbox_id)
+    assert sandbox_id in provider._accepted_skill_quarantines
+
+    new = SimpleNamespace(id=sandbox_id, client=FakeClient())
+
+    def recreate(thread_id, *, user_id, accepted_skills_only):
+        assert accepted_skills_only
+        provider._sandboxes[sandbox_id] = new
+        provider._thread_sandboxes[(user_id, thread_id)] = sandbox_id
+        return sandbox_id
+
+    monkeypatch.setattr(provider, "_create_sandbox", recreate)
+    assert (
+        provider.acquire_accepted_skills(
+            "thread-recreated",
+            user_id="user-recreated",
+        )
+        == sandbox_id
+    )
+    assert sandbox_id not in provider._accepted_skill_quarantines
+
+    clear_attempts: list[object] = []
+
+    def fail_new_clear(client, *args, **kwargs):
+        del args, kwargs
+        clear_attempts.append(client)
+        raise RuntimeError("new incarnation contains partial bytes")
+
+    monkeypatch.setattr(
+        provider,
+        "_clear_remote_accepted_skill_snapshot",
+        fail_new_clear,
+    )
+    clear = SkillProjectionClear(
+        user_id="user-recreated",
+        thread_id="thread-recreated",
+        sandbox_id=sandbox_id,
+        run_id="run-recreated",
+        generation=11,
+        snapshot_id=None,
+    )
+
+    assert provider.ensure_accepted_skill_snapshot_absent(clear)
+    assert clear_attempts == [new.client]
+    assert killed == [old, new]
 
 
 def test_apply_mounts_keeps_configured_mounts_when_projection_fails(monkeypatch, tmp_path):
@@ -871,6 +1543,20 @@ def test_discover_remote_sandbox_accepts_legacy_list(monkeypatch):
     assert sid == "sb-legacy"
 
 
+def test_discover_remote_sandbox_never_adopts_accepted_profile_as_legacy(
+    monkeypatch,
+) -> None:
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    accepted = _info("sb-accepted", "u1", "t1")
+    accepted.metadata["deer_flow_skill_profile"] = "accepted_v1"
+    fake_cls.list_return = [accepted]
+
+    assert p._discover_remote_sandbox("t1", user_id="u1") is None
+    assert fake_cls.connect_calls == []
+    assert ("u1", "t1") not in p._thread_sandboxes
+
+
 def test_discover_remote_sandbox_skips_dead_candidate(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
@@ -1050,6 +1736,21 @@ def test_reconcile_adopts_canonical_after_restart_loses_local_state(monkeypatch)
     assert stats.adopted == 1
     assert p._thread_sandboxes[("u1", "t1")] == "sb-existing"
     assert "sb-existing" in p._owned_sandbox_ids
+
+
+def test_reconcile_quarantines_accepted_profile_after_restart(monkeypatch) -> None:
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    accepted = _info("sb-accepted-existing", "u1", "t1")
+    accepted.metadata["deer_flow_skill_profile"] = "accepted_v1"
+    fake_cls.list_return = [accepted]
+
+    stats = p._reconcile_remote_sandboxes(now=100.0)
+
+    assert stats.adopted == 0
+    assert stats.deferred == 1
+    assert ("u1", "t1") not in p._thread_sandboxes
+    assert fake_cls.connect_calls == []
 
 
 def test_reconcile_bootstrap_failure_clears_inflight_after_peer_take(monkeypatch):
@@ -1476,12 +2177,14 @@ def test_release_healthy_sandbox_parks_in_warm_pool(monkeypatch, tmp_path):
     sb = _make_sandbox(client, sandbox_id="sb-warm-1")
     p._sandboxes["sb-warm-1"] = sb
     p._thread_sandboxes[("u1", "t1")] = "sb-warm-1"
+    p._accepted_skill_bindings = {"sb-warm-1": "a" * 64}
 
     p.release("sb-warm-1")
 
     assert "sb-warm-1" in p._warm_pool
     seed_in_pool, _ts = p._warm_pool["sb-warm-1"]
     assert seed_in_pool == p._stable_seed("t1", "u1")
+    assert "sb-warm-1" not in p._accepted_skill_bindings
     assert client.killed is False
     assert client.timeouts_set
 
@@ -1564,6 +2267,53 @@ def test_shutdown_only_kills_sandboxes_owned_by_current_instance(monkeypatch):
     assert owned_client.killed is True
     assert peer_client.killed is False
     assert peer_client.closed is True
+
+
+@pytest.mark.parametrize("teardown", ["reset", "shutdown"])
+def test_teardown_refuses_to_kill_an_invocation_owned_projection(
+    monkeypatch,
+    teardown,
+):
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    p = _make_provider()
+    _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="sb-projection-owned")
+    sandbox = _make_sandbox(client, sandbox_id="sb-projection-owned")
+    identity = ("shutdown-owner", "shutdown-thread")
+    p._sandboxes = {"sb-projection-owned": sandbox}
+    p._thread_sandboxes = {identity: "sb-projection-owned"}
+    p._owned_sandbox_ids = {"sb-projection-owned"}
+    coordinator = get_skill_projection_coordinator()
+    reservation = coordinator.reserve_admission(
+        user_id=identity[0],
+        thread_id=identity[1],
+        reservation_id="e2b-shutdown-reservation",
+        snapshot_id=None,
+    )
+    coordinator.promote_admission(reservation, run_id="e2b-shutdown-run")
+
+    try:
+        with pytest.raises(
+            AcceptedSkillSandboxBindingError,
+            match="accepted_skill_snapshot_projection_in_use",
+        ):
+            getattr(p, teardown)()
+
+        assert p._shutdown_called is False
+        assert p._sandboxes == {"sb-projection-owned": sandbox}
+        assert client.killed is False
+        assert client.closed is False
+    finally:
+        assert coordinator.release_unactivated_run(
+            user_id=identity[0],
+            thread_id=identity[1],
+            run_id="e2b-shutdown-run",
+        )
+
+    getattr(p, teardown)()
+    assert client.killed is True
+    assert client.closed is True
 
 
 def _setup_paths(monkeypatch, tmp_path):

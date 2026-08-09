@@ -1,10 +1,342 @@
 import asyncio
+import re
 import threading
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
 from deerflow.sandbox.sandbox import Sandbox
+
+_SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+class AcceptedSkillSandboxBindingError(RuntimeError):
+    """Fail-closed error for an unavailable accepted-skill projection."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class AcceptedSkillMaterialCapability(Enum):
+    """Strongest accepted-skill material boundary a sandbox can prove."""
+
+    EMPTY_ONLY = "empty_only"
+    IMMUTABLE_READ_ONLY = "immutable_read_only"
+
+
+def reject_writable_accepted_skill_aliases(
+    accepted_root: str | Path,
+    mounts: list[tuple[str, bool]],
+) -> None:
+    """Reject writable host mounts that overlap accepted material.
+
+    Container-path isolation alone is insufficient: the same host directory
+    can be mounted again at an unrelated virtual path. Either ancestor or
+    descendant overlap gives that alias write access to accepted bytes.
+    """
+    try:
+        accepted = Path(accepted_root).resolve()
+        for host_path, read_only in mounts:
+            if read_only:
+                continue
+            mounted = Path(host_path).resolve()
+            if mounted == accepted or mounted in accepted.parents or accepted in mounted.parents:
+                raise AcceptedSkillSandboxBindingError(
+                    "accepted_skill_snapshot_writable_alias",
+                )
+    except AcceptedSkillSandboxBindingError:
+        raise
+    except OSError as exc:
+        raise AcceptedSkillSandboxBindingError(
+            "accepted_skill_snapshot_writable_alias",
+        ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedSkillSandboxBindingV1:
+    """Exact accepted skill snapshot visible to one sandboxed invocation.
+
+    ``snapshot_id=None`` is an explicit accepted empty skill set.  A missing
+    binding object, by contrast, is the legacy execution path with no durable
+    accepted-material contract.
+    """
+
+    snapshot_id: str | None
+    run_id: str = "legacy"
+    generation: int = 0
+    evidence: object | None = None
+
+    def __post_init__(self) -> None:
+        if self.snapshot_id is not None and _SNAPSHOT_ID_PATTERN.fullmatch(self.snapshot_id) is None:
+            raise ValueError("accepted skill snapshot_id must be a lowercase SHA-256 digest")
+        if not isinstance(self.run_id, str) or not self.run_id:
+            raise ValueError("accepted skill run_id must be non-empty")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("accepted skill generation must be a non-negative integer")
+
+    @classmethod
+    def from_consumer_token(cls, token) -> "AcceptedSkillSandboxBindingV1":
+        from deerflow.runtime.skill_projection import SkillProjectionConsumerToken
+
+        if not isinstance(token, SkillProjectionConsumerToken):
+            raise TypeError("accepted skill projection token is invalid")
+        return cls(
+            snapshot_id=token.snapshot_id,
+            run_id=token.run_id,
+            generation=token.generation,
+            evidence=token.evidence,
+        )
+
+
+def accepted_skill_binding_from_runtime(runtime: object) -> AcceptedSkillSandboxBindingV1 | None:
+    """Return the coordinator-issued binding, never caller dictionaries."""
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        return None
+    from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY
+
+    token = context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
+    if token is None:
+        return None
+    return AcceptedSkillSandboxBindingV1.from_consumer_token(token)
+
+
+def accepted_skill_snapshot_id_from_runtime(runtime: object) -> str | None | object:
+    """Return accepted snapshot ID, explicit ``None``, or ``_NO_BINDING``."""
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        return _NO_BINDING
+    from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+    from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+
+    material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+    if not isinstance(material, ResolvedAgentMaterialV1):
+        return _NO_BINDING
+    snapshot = material.skill_snapshot
+    return None if snapshot is None else snapshot.snapshot_id
+
+
+def accepted_skill_access_from_runtime(runtime: object) -> tuple[bool, str | None]:
+    """Return whether durable accepted material is present and its snapshot ID.
+
+    The boolean distinguishes an accepted empty skill set from legacy execution,
+    for which no immutable skill-access contract exists.
+    """
+    snapshot_id = accepted_skill_snapshot_id_from_runtime(runtime)
+    if snapshot_id is _NO_BINDING:
+        return False, None
+    return True, snapshot_id
+
+
+_NO_BINDING = object()
+
+
+def require_runtime_accepted_skill_isolation(
+    provider: "SandboxProvider",
+    runtime: object,
+    *,
+    sandbox_id: str,
+) -> None:
+    """Fail before binding unless accepted acquisition proves live-path isolation."""
+    accepted, _snapshot_id = accepted_skill_access_from_runtime(runtime)
+    if accepted and not provider.has_accepted_skill_isolation(sandbox_id):
+        raise AcceptedSkillSandboxBindingError(
+            "accepted_skill_snapshot_isolation_unverified",
+        )
+    if accepted and _snapshot_id is not None:
+        capability = provider.accepted_skill_material_capability(sandbox_id)
+        if capability is not AcceptedSkillMaterialCapability.IMMUTABLE_READ_ONLY:
+            raise AcceptedSkillSandboxBindingError(
+                "accepted_skill_snapshot_immutability_unsupported",
+            )
+
+
+def ensure_accepted_skill_binding(
+    runtime: object,
+    *,
+    sandbox_id: str,
+    user_id: str,
+) -> tuple[AcceptedSkillSandboxBindingV1 | None, object | None, bool]:
+    """Activate the lead/child projection token before provider binding."""
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        return None, None, False
+    snapshot_id = accepted_skill_snapshot_id_from_runtime(runtime)
+    if snapshot_id is _NO_BINDING:
+        return None, None, False
+    thread_id = context.get("thread_id")
+    run_id = context.get("run_id")
+    if not isinstance(thread_id, str) or not isinstance(run_id, str):
+        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_runtime_identity_missing")
+    from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+    from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+    from deerflow.runtime.skill_projection import (
+        SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
+        SkillProjectionConsumerToken,
+        SkillProjectionEvidence,
+        get_skill_projection_coordinator,
+    )
+
+    material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+    if not isinstance(material, ResolvedAgentMaterialV1):
+        return None, None, False
+
+    coordinator = get_skill_projection_coordinator()
+    existing = context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
+    if isinstance(existing, SkillProjectionConsumerToken):
+        if existing.user_id != user_id or existing.thread_id != thread_id or existing.run_id != run_id or existing.sandbox_id != sandbox_id or existing.snapshot_id != snapshot_id:
+            context.pop(SKILL_PROJECTION_TOKEN_CONTEXT_KEY, None)
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_binding_conflict")
+        if coordinator.owns(existing):
+            return AcceptedSkillSandboxBindingV1.from_consumer_token(existing), existing, False
+        context.pop(SKILL_PROJECTION_TOKEN_CONTEXT_KEY, None)
+
+    evidence = SkillProjectionEvidence.from_snapshot(material.skill_snapshot)
+    try:
+        coordinator.claim_committed_run(
+            user_id=user_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            snapshot_id=snapshot_id,
+            evidence=evidence,
+        )
+        token = coordinator.activate(
+            user_id=user_id,
+            thread_id=thread_id,
+            sandbox_id=sandbox_id,
+            run_id=run_id,
+            snapshot_id=snapshot_id,
+            consumer_id=f"run:{run_id}:lead",
+        )
+    except Exception as exc:
+        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_binding_conflict") from exc
+    context[SKILL_PROJECTION_TOKEN_CONTEXT_KEY] = token
+    return AcceptedSkillSandboxBindingV1.from_consumer_token(token), token, True
+
+
+def invalidate_runtime_skill_projection_token(runtime: object, token: object) -> bool:
+    """Remove only the failed binding token retained by this runtime context."""
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        return False
+    from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY
+
+    if context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY) != token:
+        return False
+    context.pop(SKILL_PROJECTION_TOKEN_CONTEXT_KEY, None)
+    return True
+
+
+def release_accepted_skill_consumer(token: object) -> bool:
+    """Release one consumer, retaining ownership through provider cleanup."""
+    from deerflow.runtime.skill_projection import (
+        SkillProjectionConsumerToken,
+        get_skill_projection_coordinator,
+    )
+
+    if not isinstance(token, SkillProjectionConsumerToken):
+        return False
+    coordinator = get_skill_projection_coordinator()
+    clear = coordinator.release(token)
+    if clear is None:
+        return False
+    provider = get_sandbox_provider()
+    cleared = provider.clear_accepted_skill_snapshot(clear)
+    if not cleared:
+        cleared = provider.ensure_accepted_skill_snapshot_absent(clear)
+    if not cleared:
+        return False
+    try:
+        provider.release(clear.sandbox_id)
+    finally:
+        # A successful compare-and-clear is the material-isolation boundary.
+        # Resource parking/teardown may fail, but it cannot make the removed
+        # accepted bytes reachable again, so stale ownership must not strand
+        # the thread indefinitely.
+        finalized = coordinator.finalize_release(clear)
+    return finalized
+
+
+def bind_runtime_accepted_skill_projection(
+    provider: "SandboxProvider",
+    runtime: object,
+    *,
+    sandbox_id: str,
+    user_id: str,
+) -> bool:
+    """Idempotently bind accepted material for middleware and cached tools."""
+    require_runtime_accepted_skill_isolation(
+        provider,
+        runtime,
+        sandbox_id=sandbox_id,
+    )
+    binding, token, _created = ensure_accepted_skill_binding(
+        runtime,
+        sandbox_id=sandbox_id,
+        user_id=user_id,
+    )
+    if binding is None:
+        return False
+    context = getattr(runtime, "context", None)
+    thread_id = context.get("thread_id") if isinstance(context, dict) else None
+    if not isinstance(thread_id, str):
+        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_runtime_identity_missing")
+    try:
+        provider.bind_accepted_skill_snapshot(
+            sandbox_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            binding=binding,
+        )
+    except Exception:
+        invalidate_runtime_skill_projection_token(runtime, token)
+        if token is not None:
+            release_accepted_skill_consumer(token)
+        raise
+    return True
+
+
+async def bind_runtime_accepted_skill_projection_async(
+    provider: "SandboxProvider",
+    runtime: object,
+    *,
+    sandbox_id: str,
+    user_id: str,
+) -> bool:
+    """Async counterpart that keeps provider I/O off the event loop."""
+    require_runtime_accepted_skill_isolation(
+        provider,
+        runtime,
+        sandbox_id=sandbox_id,
+    )
+    binding, token, _created = ensure_accepted_skill_binding(
+        runtime,
+        sandbox_id=sandbox_id,
+        user_id=user_id,
+    )
+    if binding is None:
+        return False
+    context = getattr(runtime, "context", None)
+    thread_id = context.get("thread_id") if isinstance(context, dict) else None
+    if not isinstance(thread_id, str):
+        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_runtime_identity_missing")
+    try:
+        await provider.bind_accepted_skill_snapshot_async(
+            sandbox_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            binding=binding,
+        )
+    except Exception:
+        invalidate_runtime_skill_projection_token(runtime, token)
+        if token is not None:
+            await asyncio.to_thread(release_accepted_skill_consumer, token)
+        raise
+    return True
 
 
 class SandboxProvider(ABC):
@@ -31,6 +363,97 @@ class SandboxProvider(ABC):
         of stalling the event loop.
         """
         return await asyncio.to_thread(self.acquire, thread_id, user_id=user_id)
+
+    def acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
+        """Acquire a sandbox created without mutable live skill projections."""
+        del thread_id, user_id
+        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_unsupported")
+
+    async def acquire_accepted_skills_async(self, thread_id: str, *, user_id: str) -> str:
+        return await asyncio.to_thread(
+            self.acquire_accepted_skills,
+            thread_id,
+            user_id=user_id,
+        )
+
+    def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
+        """Return whether ``sandbox_id`` was created without live skill paths."""
+        del sandbox_id
+        return False
+
+    def accepted_skill_material_capability(
+        self,
+        sandbox_id: str,
+    ) -> AcceptedSkillMaterialCapability:
+        """Return the immutable access profile available to accepted material.
+
+        The conservative default permits only the explicit empty accepted set.
+        Providers that advertise immutable read-only material must prove projected
+        files immutable to commands run inside that sandbox.
+        """
+        del sandbox_id
+        return AcceptedSkillMaterialCapability.EMPTY_ONLY
+
+    def bind_accepted_skill_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+    ) -> None:
+        """Expose exactly one accepted snapshot, or fail before execution.
+
+        Custom providers retain their legacy behavior until an accepted
+        invocation supplies this binding.  They must implement the same exact
+        projection contract before durable skill material can execute.
+        """
+        del sandbox_id, thread_id, user_id, binding
+        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_unsupported")
+
+    async def bind_accepted_skill_snapshot_async(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+    ) -> None:
+        await asyncio.to_thread(
+            self.bind_accepted_skill_snapshot,
+            sandbox_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            binding=binding,
+        )
+
+    def clear_accepted_skill_snapshot(
+        self,
+        clear,
+    ) -> bool:
+        """Compare-and-clear only an exact last-consumer ownership proof."""
+        del clear
+        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_unsupported")
+
+    def ensure_accepted_skill_snapshot_absent(self, clear) -> bool:
+        """Prove an exact failed/unpublished projection cannot be reached.
+
+        This is intentionally separate from compare-and-clear: providers may
+        use it only when no exact binding receipt exists. Custom providers fail
+        closed until they can prove an empty namespace or quarantine/destroy
+        the exact accepted-only sandbox.
+        """
+        del clear
+        return False
+
+    async def clear_accepted_skill_snapshot_async(
+        self,
+        clear,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self.clear_accepted_skill_snapshot,
+            clear,
+        )
 
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:
@@ -66,14 +489,26 @@ _default_sandbox_provider: SandboxProvider | None = None
 # hand a caller `None` or a torn instance. Every access to the global below takes
 # this lock, including the read+return in `get_sandbox_provider()`.
 #
-# The lock guards only the reference swap. Provider callbacks (`__init__`,
-# `reset()`, `shutdown()`) and the dynamic import in `resolve_class()` run
-# *outside* the lock: they are plugin-supplied (`config.sandbox.use` resolves to
-# an arbitrary class) and may be slow or, worse, re-enter these lifecycle
-# functions. Holding a non-reentrant `threading.Lock` across them would
-# self-deadlock such a provider and would block every concurrent `get()` during a
-# slow teardown. Keeping callbacks off the lock avoids both.
+# Provider callbacks (`__init__`, `reset()`, `shutdown()`) and the dynamic import
+# in `resolve_class()` run *outside* the lock: they are plugin-supplied and may be
+# slow or re-enter lifecycle functions. During reset/shutdown, a condition-backed
+# transition prevents another thread from installing a replacement until the
+# callback succeeds or refuses teardown. Waiters release the non-reentrant lock;
+# callback-thread re-entry observes the transitioning provider without deadlock.
 _provider_lock = threading.Lock()
+_provider_condition = threading.Condition(_provider_lock)
+_provider_teardown: SandboxProvider | None = None
+_provider_teardown_owner: int | None = None
+
+
+def _wait_for_provider_teardown_locked() -> SandboxProvider | None:
+    """Wait for another thread's teardown; return self-owned transition."""
+    current_thread = threading.get_ident()
+    while _provider_teardown is not None:
+        if _provider_teardown_owner == current_thread:
+            return _provider_teardown
+        _provider_condition.wait()
+    return None
 
 
 def get_sandbox_provider(**kwargs) -> SandboxProvider:
@@ -88,7 +523,10 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
     global _default_sandbox_provider
     # Fast path: a single locked read so a concurrent reset/shutdown can't null
     # the global between the check and the return.
-    with _provider_lock:
+    with _provider_condition:
+        reentrant_provider = _wait_for_provider_teardown_locked()
+        if reentrant_provider is not None:
+            return reentrant_provider
         if _default_sandbox_provider is not None:
             return _default_sandbox_provider
 
@@ -99,13 +537,17 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
     cls = resolve_class(config.sandbox.use, SandboxProvider)
     provider = cls(**kwargs)
 
-    with _provider_lock:
-        if _default_sandbox_provider is None:
+    with _provider_condition:
+        reentrant_provider = _wait_for_provider_teardown_locked()
+        if reentrant_provider is not None:
+            winner = reentrant_provider
+        elif _default_sandbox_provider is None:
             _default_sandbox_provider = provider
             return provider
-        # We lost the install race: another thread got there first. `winner` is
-        # read under the same lock, so it is always a live instance, never None.
-        winner = _default_sandbox_provider
+        else:
+            # We lost the install race: another thread got there first.
+            # ``winner`` is read under the same lock, so it is live.
+            winner = _default_sandbox_provider
 
     # Discard the instance we just built (outside the lock). For providers with
     # side-effectful constructors (e.g. AioSandboxProvider starts an idle-checker
@@ -129,17 +571,44 @@ def reset_sandbox_provider() -> None:
 
     A provider override can release active sandboxes during reset.
     Otherwise, active sandboxes become orphaned.
-    Do not reuse the detached provider after reset.
+    Concurrent callers wait until reset either completes or restores a provider
+    that refused teardown.
     Use `shutdown_sandbox_provider()` for proper cleanup.
     """
-    global _default_sandbox_provider
+    global _default_sandbox_provider, _provider_teardown, _provider_teardown_owner
     # Detach the reference under the lock, then run the provider's `reset()`
     # callback outside it (see the `_provider_lock` note).
-    with _provider_lock:
+    with _provider_condition:
+        if _wait_for_provider_teardown_locked() is not None:
+            return
         provider = _default_sandbox_provider
         _default_sandbox_provider = None
+        if provider is not None:
+            _provider_teardown = provider
+            _provider_teardown_owner = threading.get_ident()
     if provider is not None:
-        provider.reset()
+        try:
+            provider.reset()
+        except AcceptedSkillSandboxBindingError as exc:
+            with _provider_condition:
+                if exc.code == "accepted_skill_snapshot_projection_in_use":
+                    if _default_sandbox_provider is None:
+                        _default_sandbox_provider = provider
+                _provider_teardown = None
+                _provider_teardown_owner = None
+                _provider_condition.notify_all()
+            raise
+        except BaseException:
+            with _provider_condition:
+                _provider_teardown = None
+                _provider_teardown_owner = None
+                _provider_condition.notify_all()
+            raise
+        else:
+            with _provider_condition:
+                _provider_teardown = None
+                _provider_teardown_owner = None
+                _provider_condition.notify_all()
 
 
 def shutdown_sandbox_provider() -> None:
@@ -149,14 +618,45 @@ def shutdown_sandbox_provider() -> None:
     before clearing the singleton. Call this when the application
     is shutting down or when you need to completely reset the sandbox system.
     """
-    global _default_sandbox_provider
+    global _default_sandbox_provider, _provider_teardown, _provider_teardown_owner
     # Detach the reference under the lock, then run the (potentially slow)
     # `shutdown()` callback outside it (see the `_provider_lock` note).
-    with _provider_lock:
+    with _provider_condition:
+        if _wait_for_provider_teardown_locked() is not None:
+            return
         provider = _default_sandbox_provider
         _default_sandbox_provider = None
+        if provider is not None:
+            _provider_teardown = provider
+            _provider_teardown_owner = threading.get_ident()
     if provider is not None and hasattr(provider, "shutdown"):
-        provider.shutdown()
+        try:
+            provider.shutdown()
+        except AcceptedSkillSandboxBindingError as exc:
+            with _provider_condition:
+                if exc.code == "accepted_skill_snapshot_projection_in_use":
+                    if _default_sandbox_provider is None:
+                        _default_sandbox_provider = provider
+                _provider_teardown = None
+                _provider_teardown_owner = None
+                _provider_condition.notify_all()
+            raise
+        except BaseException:
+            with _provider_condition:
+                _provider_teardown = None
+                _provider_teardown_owner = None
+                _provider_condition.notify_all()
+            raise
+        else:
+            with _provider_condition:
+                _provider_teardown = None
+                _provider_teardown_owner = None
+                _provider_condition.notify_all()
+    elif provider is not None:
+        with _provider_condition:
+            _provider_teardown = None
+            _provider_teardown_owner = None
+            _provider_condition.notify_all()
 
 
 def set_sandbox_provider(provider: SandboxProvider) -> None:
@@ -171,5 +671,7 @@ def set_sandbox_provider(provider: SandboxProvider) -> None:
         provider: The SandboxProvider instance to use.
     """
     global _default_sandbox_provider
-    with _provider_lock:
+    with _provider_condition:
+        if _wait_for_provider_teardown_locked() is not None:
+            raise RuntimeError("sandbox provider cannot be replaced during its teardown callback")
         _default_sandbox_provider = provider
