@@ -18,7 +18,11 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
 
-from deerflow.runtime.runs.lifecycle_query import LifecyclePage, LifecycleQuery
+from deerflow.runtime.runs.lifecycle_query import (
+    LifecyclePage,
+    LifecycleQuery,
+    LifecycleVisibilityScope,
+)
 
 _LIFECYCLE_EVIDENCE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 _LIFECYCLE_SAFE_REASONS = {
@@ -272,6 +276,15 @@ class RunStore(abc.ABC):
 
     async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage:
         """Read one authorized lifecycle page from one consistent snapshot."""
+
+        raise NotImplementedError
+
+    async def context_visible_in_scope(
+        self,
+        thread_id: str,
+        scope: LifecycleVisibilityScope,
+    ) -> bool:
+        """Return whether one exact context has a row inside a finite scope."""
 
         raise NotImplementedError
 

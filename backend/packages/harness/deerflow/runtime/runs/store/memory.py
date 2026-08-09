@@ -21,6 +21,7 @@ from deerflow.runtime.runs.lifecycle_query import (
     CursorAhead,
     LifecyclePage,
     LifecycleQuery,
+    LifecycleVisibilityScope,
     build_invocation_summary,
     decode_lifecycle_cursor,
     encode_lifecycle_cursor,
@@ -116,6 +117,14 @@ class MemoryRunStore(RunStore):
                 and (query.thread_id is None or event["thread_id"] == query.thread_id)
                 and (query.owner_scope is None or event["owner_scope"] == query.owner_scope)
                 and (query.source_kind is None or invocation_source_kind(self._runs.get(event["run_id"], {})) == query.source_kind)
+                and (
+                    query.visibility_scope is None
+                    or query.visibility_scope.permits(
+                        run_id=event["run_id"],
+                        owner_id=self._runs.get(event["run_id"], {}).get("user_id"),
+                        source_kind=invocation_source_kind(self._runs.get(event["run_id"], {})),
+                    )
+                )
             ):
                 continue
             window.append(copy.deepcopy(event))
@@ -158,6 +167,25 @@ class MemoryRunStore(RunStore):
             read_fence_cursor=encode_lifecycle_cursor(self._lifecycle_cursor),
             summaries=tuple(summaries),
         )
+
+    async def context_visible_in_scope(
+        self,
+        thread_id: str,
+        scope: LifecycleVisibilityScope,
+    ) -> bool:
+        if scope.thread_id != thread_id:
+            raise ValueError("lifecycle visibility scope is bound to another context")
+        for run_id in self._runs_by_thread.get(thread_id, {}):
+            row = self._runs.get(run_id)
+            if row is None or row.get("operation_kind", "run") != "run":
+                continue
+            if scope.permits(
+                run_id=run_id,
+                owner_id=row.get("user_id"),
+                source_kind=invocation_source_kind(row),
+            ):
+                return True
+        return False
 
     @_atomic_memory_mutation
     async def prune_lifecycle_through(self, cursor: str) -> str:

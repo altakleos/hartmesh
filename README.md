@@ -1207,8 +1207,13 @@ requires an `external_key`, while DeerFlow derives its scope from the
 authenticated user/service; equal retries compare the complete canonical caller
 intent, return the retained run, and never attach a second worker. Adding,
 removing, or changing an execution option conflicts; accepted server defaults
-and pinned facts are retained separately and reused. Invocation/context reads
-apply owner/admin visibility. Context feeds can filter the sealed source kind
+and pinned facts are retained separately and reused. Invocation/context reads apply owner/admin
+visibility by default. Operators can give a specifically authenticated integration service a
+bounded `run_ids`, `thread_ids`, `owner_ids`, or `source_kinds` search grant under
+`authorization.service_observation_grants`; this requires enabled observe authorization, never
+grants cancellation, and is re-evaluated on every poll. The grant only selects rows eligible
+for lookup—the current `AuthorizationProvider` must still allow `invocation:observe`, so an
+ordinary service remains owner-scoped and revocation takes effect on the next request. Context feeds can filter the sealed source kind
 (`http`, `scheduled_task`, `native_channel`, or `service`) and return bounded
 immutable summaries with safe source correlation, current state,
 revision/generation identity, and accepted evidence digests. Summaries and

@@ -759,6 +759,15 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.state.mcp_interceptor_host = mcp_interceptor_host
     app.state.capability_manifest = capability_manifest
     app.state.capability_health_monitor = capability_health_monitor
+    from app.runtime.visibility import ConfiguredServiceObservationGrantResolver
+
+    app.state.service_observation_visibility_resolver = (
+        ConfiguredServiceObservationGrantResolver(
+            lambda: get_app_config().authorization.service_observation_grants,
+        )
+        if construction_authorization.invocation_operations.observe_enabled
+        else None
+    )
     from app.runtime.deployment import (
         DeploymentProvenance,
         DeploymentQualification,

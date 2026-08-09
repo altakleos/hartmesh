@@ -36,7 +36,10 @@ def _config_signature(config: AuthorizationConfig) -> str:
     # Gateway application. They must not participate in the legacy provider's
     # hot-reload signature or manufacture a second provider generation.
     return json.dumps(
-        config.model_dump(mode="json", exclude={"invocation_operations"}),
+        config.model_dump(
+            mode="json",
+            exclude={"invocation_operations", "service_observation_grants"},
+        ),
         sort_keys=True,
         separators=(",", ":"),
     )

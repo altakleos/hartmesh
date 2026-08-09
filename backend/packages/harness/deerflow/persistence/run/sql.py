@@ -26,6 +26,7 @@ from deerflow.runtime.runs.lifecycle_query import (
     LifecycleOrderingCorruption,
     LifecyclePage,
     LifecycleQuery,
+    LifecycleVisibilityScope,
     build_invocation_summary,
     decode_lifecycle_cursor,
     encode_lifecycle_cursor,
@@ -240,6 +241,7 @@ class RunRepository(RunStore):
                 event_stmt = event_stmt.where(RunLifecycleEventRow.thread_id == query.thread_id)
             if query.owner_scope is not None:
                 event_stmt = event_stmt.where(RunLifecycleEventRow.owner_scope == query.owner_scope)
+            joined_run = False
             if query.source_kind is not None:
                 event_stmt = event_stmt.join(
                     RunRow,
@@ -248,6 +250,23 @@ class RunRepository(RunStore):
                     RunRow.operation_kind == "run",
                     RunRow.origin_json["source_kind"].as_string() == query.source_kind,
                 )
+                joined_run = True
+            if query.visibility_scope is not None and not query.visibility_scope.allow_context:
+                scope = query.visibility_scope
+                visibility = []
+                if scope.run_ids:
+                    visibility.append(RunLifecycleEventRow.run_id.in_(scope.run_ids))
+                if scope.owner_ids:
+                    visibility.append(RunLifecycleEventRow.owner_scope.in_(tuple(lifecycle_owner_scope(owner_id) for owner_id in scope.owner_ids)))
+                if scope.source_kinds:
+                    if not joined_run:
+                        event_stmt = event_stmt.join(
+                            RunRow,
+                            RunRow.run_id == RunLifecycleEventRow.run_id,
+                        ).where(RunRow.operation_kind == "run")
+                        joined_run = True
+                    visibility.append(RunRow.origin_json["source_kind"].as_string().in_(scope.source_kinds))
+                event_stmt = event_stmt.where(or_(*visibility))
             event_stmt = event_stmt.order_by(RunLifecycleEventRow.cursor.asc()).limit(query.limit + 1)
             rows = (await session.execute(event_stmt)).scalars().all()
             pruned_through = cursor_state.pruned_through
@@ -292,6 +311,29 @@ class RunRepository(RunStore):
             read_fence_cursor=encode_lifecycle_cursor(fence),
             summaries=tuple(summaries),
         )
+
+    async def context_visible_in_scope(
+        self,
+        thread_id: str,
+        scope: LifecycleVisibilityScope,
+    ) -> bool:
+        if scope.thread_id != thread_id:
+            raise ValueError("lifecycle visibility scope is bound to another context")
+        stmt = select(RunRow.run_id).where(
+            RunRow.thread_id == thread_id,
+            RunRow.operation_kind == "run",
+        )
+        if not scope.allow_context:
+            visibility = []
+            if scope.run_ids:
+                visibility.append(RunRow.run_id.in_(scope.run_ids))
+            if scope.owner_ids:
+                visibility.append(RunRow.user_id.in_(scope.owner_ids))
+            if scope.source_kinds:
+                visibility.append(RunRow.origin_json["source_kind"].as_string().in_(scope.source_kinds))
+            stmt = stmt.where(or_(*visibility))
+        async with self._sf() as session:
+            return (await session.execute(stmt.limit(1))).first() is not None
 
     async def _load_lifecycle_summary_rows(
         self,

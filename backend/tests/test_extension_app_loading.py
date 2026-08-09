@@ -266,6 +266,54 @@ def test_create_app_wires_required_mcp_host_health_and_shared_authorization(
     assert app.state.authorization_provider_resolver.snapshot().provider is not None
 
 
+@pytest.mark.anyio
+async def test_create_app_wires_operator_service_observation_grants(
+    monkeypatch,
+    stub_app_config,
+):
+    from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
+
+    import app.gateway.app as app_module
+    from app.runtime.invocation import InvocationPrincipal
+    from deerflow.config.authorization_config import AuthorizationConfig
+
+    config = stub_app_config.model_copy(
+        update={
+            "plugins": [
+                ExtensionSpec(
+                    use=("extension_test_fixtures.demo_extensions:install_mcp_and_authorization"),
+                    required=True,
+                )
+            ],
+            "authorization": AuthorizationConfig(
+                enabled=True,
+                invocation_operations={"observe_enabled": True},
+                service_observation_grants=[
+                    {"service_id": "service-1", "thread_ids": ["thread-a"]},
+                ],
+            ),
+        }
+    )
+    monkeypatch.setattr(app_module, "get_app_config", lambda: config)
+
+    app = app_module.create_app()
+    grant = await app.state.service_observation_visibility_resolver.resolve(
+        InvocationPrincipal(
+            identity=InvocationIdentityV1(
+                effective_subject=EffectiveSubjectV1(
+                    kind="service",
+                    subject_id="service-1",
+                    role="service",
+                )
+            )
+        )
+    )
+
+    assert grant.service_id == "service-1"
+    assert grant.thread_ids == ("thread-a",)
+    assert app.state.invocation_authorization_config.observe_enabled is True
+
+
 class _NoopContributor:
     async def contribute(self, request):
         return None
