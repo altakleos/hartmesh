@@ -1,10 +1,8 @@
-"""Configuration for inbound webhook dedupe storage.
+"""Backward-compatible configuration for keyed inbound receipt storage.
 
-Controls where the ChannelManager's inbound dedupe state lives. See issue #4120
-(cross-pod webhook dedupe). The default ``auto`` reuses the Postgres application
-database whenever database.backend='postgres', otherwise an in-process memory
-store. ``memory`` is per-pod and not shared across replicas; ``postgres`` shares
-state across pods.
+The field name predates leased receipts and remains wire-compatible. ``auto``
+uses PostgreSQL for durable receipt rows when the application database is
+PostgreSQL; ``memory`` retains explicitly best-effort local delivery.
 """
 
 from __future__ import annotations
@@ -23,19 +21,18 @@ class DedupeStorageBackend(StrEnum):
 
 
 class DedupeStorageConfig(BaseModel):
-    """Where inbound webhook dedupe state lives."""
+    """Where keyed native-ingress receipt state lives."""
 
     backend: DedupeStorageBackend = Field(
         default=DedupeStorageBackend.AUTO,
         description=format_field_description(
             "dedupe_storage",
             field_doc=(
-                "Storage backend for inbound webhook dedupe state. "
-                "'auto' uses the Postgres application database whenever database.backend='postgres', "
-                "otherwise an in-process memory store (single-pod). "
-                "'memory' forces the in-process store (per-pod; not shared across replicas). "
-                "'postgres' shares dedupe state across pods via the application database. "
-                "See issue #4120."
+                "Storage backend for keyed native-ingress receipts. "
+                "'auto' uses the PostgreSQL application database when available; "
+                "otherwise delivery remains explicitly best_effort. "
+                "'memory' forces best_effort process-local delivery. "
+                "'postgres' selects leased durable receipt storage."
             ),
         ),
     )

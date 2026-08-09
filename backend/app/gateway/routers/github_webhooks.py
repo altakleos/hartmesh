@@ -20,9 +20,10 @@ then accepted unverified with a WARNING log line.
 After verification the route passes an immutable request attestation to
 :func:`fanout_event`. The dispatcher combines it with the trusted installation,
 owner, canonical agent, and repository match to create a verified route binding;
-the raw payload cannot supply that binding. The payload is then fanned out into
-:class:`InboundMessage` instances on the channel bus, one per matching
-custom agent binding. The :class:`GitHubChannel` (registered alongside
+the raw payload cannot supply that binding. In PostgreSQL mode the resulting
+bounded messages are atomically retained as leased receipts before the route
+acknowledges; the channel bus carries only receipt wake-ups. The
+:class:`GitHubChannel` (registered alongside
 Feishu/Slack/etc.) takes care of posting the agent's reply back to GitHub.
 """
 
@@ -360,6 +361,7 @@ async def receive_github_webhook(
             # ``is_route_enabled`` check still covers fail-closed
             # *configuration* errors.
             try:
+                verified_sink = getattr(service, "accept_verified_inbound_batch", None)
                 dispatch_result = await fanout_event(
                     service.bus,
                     x_github_event,
@@ -367,16 +369,18 @@ async def receive_github_webhook(
                     payload,
                     operator_default_mention_login=operator_default_mention_login,
                     verified_request=verified_request,
+                    inbound_sink=(verified_sink if verified_request is not None and callable(verified_sink) else None),
                 )
             except Exception as exc:  # noqa: BLE001 — re-raised as 503 below
+                delivery_correlation = hashlib.sha256((x_github_delivery or "missing").encode("utf-8")).hexdigest()[:16]
                 logger.exception(
-                    "github_webhook: fanout failed (delivery=%s event=%s) — returning 503 (recoverable via manual/API redelivery)",
-                    x_github_delivery,
+                    "github_webhook: fanout failed (delivery_correlation=%s event=%s) — returning 503 (recoverable via manual/API redelivery)",
+                    delivery_correlation,
                     x_github_event,
                 )
                 raise HTTPException(
                     status_code=503,
-                    detail=f"fan-out failed for delivery {x_github_delivery!r}: {exc!r}",
+                    detail="fan-out failed: verified inbound receipt storage is unavailable",
                 ) from exc
     else:
         logger.info(

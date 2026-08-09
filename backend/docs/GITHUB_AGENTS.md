@@ -1,18 +1,18 @@
 # GitHub Event-Driven Agents
 
-GitHub is a **webhook-push** channel: there is no long-polling worker. Every GitHub App / repository delivery lands at `POST /api/webhooks/github`, where it is HMAC-verified, fan-out'd to one `InboundMessage` per matching custom-agent binding, and shipped to the rest of DeerFlow through the same `ChannelManager` that handles Feishu/Slack/Telegram. For the high-level orientation, see [AGENTS.md](../AGENTS.md) → "GitHub event-driven agents".
+GitHub is a **webhook-push** channel: there is no long-polling worker. Every GitHub App / repository delivery lands at `POST /api/webhooks/github`, where it is HMAC-verified, resolved against trusted agent bindings, and fan-out'd into bounded leased receipt rows. The handler acknowledges only after every matching row commits. Receipt IDs then wake the same `ChannelManager` that handles Feishu/Slack/Telegram. For the high-level orientation, see [AGENTS.md](../AGENTS.md) → "GitHub event-driven agents".
 
 This document covers the **architecture** of that pipeline:
 
 - Per-agent bindings (`config.yaml` → `github:` block)
-- Webhook → fan-out → `InboundMessage` dispatch
+- Webhook → atomic receipt fan-out → leased dispatch
 - HMAC/registry-derived verified route bindings for durable replay
 - Mention-handle precedence for `require_mention` triggers
 - `preferred_thread_id = UUID5(repo, number, agent_name)` thread determinism
 - GH token lifecycle (`GITHUB_APP_ID` + `PRIVATE_KEY` → `run_context["github_token"]` → sandbox `GH_TOKEN`/`GITHUB_TOKEN`)
 - `ConflictError` (HTTP 409) thread-create race recovery
 - Why **outbound is log-only** (agents post via `gh` from their sandbox)
-- Follow-up buffering while busy (issue #4121): buffer → watch → drain, and the single-process scope limit
+- Durable FIFO deferral while busy, with process-local buffering retained only for best-effort mode
 
 ## Overview
 
@@ -59,9 +59,20 @@ Historical accepted Origins without these optional references remain readable;
 connection-backed rows also replay through their original Origin digest because
 the new binding reference repeats their already-authenticated `connection_id`.
 
+With PostgreSQL and `dedupe_storage.backend: auto|postgres`, the signed route is
+durable at acknowledgment: one receipt is keyed by provider, verified binding
+kind/reference, and provider delivery ID. Each row contains only the bounded
+normalized launch facts needed for replay. It excludes the HMAC secret, GitHub
+token, raw payload, transient attachment bytes, and credentials. SQLite/memory or
+explicit `backend: memory` is reported as `best_effort`, not durable ingress.
+
 ## Webhook → Fan-out → Dispatch
 
-The webhook handler stays cheap — no LangGraph calls — so GitHub's 10-second delivery timeout is never at risk. Verification, fan-out, and the bus publish are all in-process and bounded.
+The webhook handler performs no LangGraph work. It verifies, resolves all trusted
+fan-out targets, and atomically stores their receipt rows before returning `200`.
+A receipt-store failure returns `503`; because GitHub does not automatically retry
+every failed delivery, operators may still need delivery redelivery, but Hartmesh
+never acknowledges a delivery whose only copy is the in-memory bus.
 
 ```mermaid
 sequenceDiagram
@@ -71,7 +82,8 @@ sequenceDiagram
     participant Disp as fanout_event()<br/>(github/dispatcher.py)
     participant Reg as build_github_agent_registry
     participant Trg as event_should_fire
-    participant Bus as MessageBus
+    participant Store as InboundReceiptStore
+    participant Bus as MessageBus wake-up
     participant Mgr as ChannelManager
     participant Gateway as Gateway thread API
     participant Runtime as InvocationRuntime
@@ -91,20 +103,26 @@ sequenceDiagram
             opt fire
                 Disp->>Disp: build_prompt() + resolve_thread_id()<br/>UUID5(repo, number, agent)
                 Disp->>Disp: verify payload installation;<br/>derive webhook_route binding
-                Disp->>Bus: publish_inbound(InboundMessage(<br/>channel=github, connection_id=None,<br/>verified_source_binding=route,<br/>chat_id=repo, topic_id="{number}:{agent}",<br/>owner_user_id=match.user_id,<br/>metadata.agent_name=agent,<br/>metadata.preferred_thread_id=...,<br/>metadata.github={...}))
+                Disp->>Disp: build bounded immutable receipt envelope
             end
         end
     end
+    Disp->>Store: receive_batch(all fired envelopes)
+    Store-->>Disp: committed receipt identities
+    Disp->>Bus: publish receipt-id wake-ups
     Disp-->>Router: summary {matched, fired, skipped}
     Router-->>GH: 200 OK
 
-    Note over Bus,Gateway: Bus consumer side
-    Bus->>Mgr: msg = get_inbound()
+    Note over Bus,Gateway: Recovery/consumer side
+    Bus->>Mgr: receipt wake-up
+    Mgr->>Store: atomically claim with lease + fencing token
+    Store-->>Mgr: immutable replay envelope
     Mgr->>Client: client.threads.create(thread_id=preferred_thread_id)
     Client->>Gateway: threads.create (with owner headers)
     Gateway-->>Client: thread_id (or 409)
     Mgr->>Runtime: launch(InternalLaunchIntent)<br/>verified route binding + stable delivery key
     Runtime-->>Mgr: created or known retained run
+    Mgr->>Store: bind run_id, then complete (fenced)
     Note over Mgr: Manager returns immediately.<br/>Agent posts to GitHub via gh CLI.
 ```
 
@@ -243,9 +261,14 @@ The recovery is **narrow**: only `langgraph_sdk.errors.ConflictError` (HTTP 409)
 
 The follow-up `threads.get(preferred_thread_id)` is itself verified before caching — if it also rejects, the store underneath is in an inconsistent state and the failure surfaces.
 
-## Follow-up Buffering While Busy (#4121)
+## Busy Follow-ups and Receipt Recovery
 
-A **different** conflict from the one above: not two deliveries racing to *create* a thread, but a new comment arriving while a *run* is already active on an existing thread. `runs.create()` raises `ConflictError` for that too, and until this fix the manager only logged it and replied with `THREAD_BUSY_MESSAGE` — invisible to the commenter, since `GitHubChannel.send()` is log-only (see below). The comment looked silently ignored.
+A **different** conflict from the one above is a new comment arriving while a run
+is active on the same thread. In durable signed-GitHub mode the claimed receipt is
+returned to `deferred` with a bounded next-attempt time. It stays in PostgreSQL,
+and only the oldest unfinished receipt for that thread is eligible for a claim.
+Watcher completion is an early wake-up only; bounded recovery polling is the
+process-loss-safe source of progress.
 
 ```mermaid
 sequenceDiagram
@@ -254,22 +277,22 @@ sequenceDiagram
     participant C2 as Comment 2 (while busy)
     participant Mgr as ChannelManager
     participant Client as langgraph_sdk client
-    participant SB as StreamBridge
+    participant Store as InboundReceiptStore
 
-    C1->>Mgr: InboundMessage
+    C1->>Store: receipt K1 committed and claimed
+    Store->>Mgr: immutable delivery K1
     Mgr->>Runtime: launch(K1) [fire_and_forget]
     Runtime-->>Mgr: {run_id: run-1, status: pending}
     Mgr->>SB: subscribe(run-1) (background watcher)
 
-    C2->>Mgr: InboundMessage (same thread_id)
+    C2->>Store: receipt K2 committed (same thread_id)
+    Store->>Mgr: immutable delivery K2
     Mgr->>Runtime: launch(K2)
     Runtime-->>Mgr: thread-busy ConflictError
-    Mgr->>Mgr: _buffer_followup(thread_id, source snapshot)<br/>(deduped by delivery_id, capped at 20)
-    Mgr-->>C2: THREAD_BUSY_MESSAGE (log-only on GitHub)
+    Mgr->>Store: defer K2 with same immutable evidence<br/>and bounded next-attempt time
 
-    Note over SB: run-1 completes
-    SB-->>Mgr: END_SENTINEL
-    Mgr->>Mgr: _drain_followups_for_thread()<br/>(pop exactly one, oldest first)
+    Note over Store: run-1 completes; watcher or recovery wakes K2
+    Store->>Mgr: claim K2 with a new fencing token
     Mgr->>Runtime: launch(K2)<br/>(C2's binding, Origin, sender, and external key)
     Runtime-->>Mgr: {run_id: run-2, status: pending}
     Mgr->>SB: subscribe(run-2) (watch again — one delivery per chained run)
@@ -277,15 +300,13 @@ sequenceDiagram
 
 Key properties:
 
-- **Identity snapshot**: the buffer defensively freezes the delivery's stable provider ID, verified route binding, sender, owner, chat/topic/workspace route, resolved agent/assistant, and finite launch input/config/context. Raw provider payloads, attachment bytes, and transient credentials are not retained. The completed run is only a completion carrier; none of its authority, Origin, sender, or external key is used for the next invocation.
-- **Dedupe and replay**: buffering keys on the stable provider message identity. That identity is also the delivery's external invocation key inside the verified binding scope. A redelivery already in the buffer is a no-op; a repeated drain after admission receives the known run and does not attach another worker. A same-key/different-caller-intent result is a bounded integrity error and is not retried forever.
-- **Cap**: 20 entries per thread. Overflow drops the *oldest* buffered entry (not the newest) with a WARNING log — recent activity is a more useful signal than the stalest queued comment once a thread is deep enough in the backlog to hit the cap. No reaction/acknowledgment is sent on drop; see the reactions note below.
-- **One source per run**: a drain launches exactly one FIFO entry as one chained invocation on the existing DeerFlow thread. It never coalesces independently attributed deliveries. The new run is watched, and its completion drains the next entry.
-- **Drain-conflict edge case**: if another invocation (for example, a manual Web turn) wins the same thread, the popped immutable entry is restored at the FIFO head. When the local runtime identifies the active run, the watcher retries after that run completes; failures never trigger a tight retry loop.
+- **Identity snapshot**: each receipt freezes the stable provider ID, verified route binding, sender, owner, chat/topic/workspace route, agent selection, text, and finite policy metadata. Raw provider payloads, attachment bytes, secrets, and credentials are rejected. A previous run never supplies a later delivery's authority, Origin, sender, or key.
+- **Dedupe and replay**: receipt acquisition is unique on verified source identity plus provider delivery ID. If a claimant crashes after invocation acceptance but before binding, replay uses the same external key and receives the known equal run; no second graph starts. Different normalized payload under the same receipt identity is an integrity failure.
+- **Lease fencing**: every claim increments a fencing token. An expired claim may be reclaimed, and the stale claimant cannot bind, defer, or complete it.
+- **FIFO and bounds**: claims select bounded pages and only the earliest unfinished receipt for each thread. Busy work receives exponential bounded retry, a finite attempt cap, and a terminal `dead_letter` outcome rather than a tight loop. Completed receipts have bounded retention cleanup.
+- **One source per run**: one receipt launches one invocation on the existing DeerFlow thread. Independent deliveries are never coalesced.
 - **Reactions are out of scope.** GitHub's reaction API (`eyes`/`confused` acknowledgment) has no existing integration in this codebase; buffered comments receive no per-comment acknowledgment.
-- **Config**: gated behind `ChannelRunPolicy.buffer_followups_on_busy` (default `False`); GitHub's own registration in `app/gateway/github/run_policy.py` opts in, since it is exactly the fire_and_forget + log-only-send channel this was designed for. Any other channel that adopts `fire_and_forget=True` in the future keeps the old silent-drop-with-log behavior unless it opts in too.
-- **Plumbing**: the watcher subscribes to the Gateway's `StreamBridge` singleton (`app.state.stream_bridge`), which `ChannelManager` previously had no way to reach — every other consumer gets it via `get_stream_bridge(request)`, which needs an HTTP `Request` the bus-consumer loop doesn't have. It is threaded as a zero-arg closure from `app.py`'s lifespan (`get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None)`) through `start_channel_service()` → `ChannelService.__init__` → `ChannelManager.__init__`, mirroring the existing `launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs)` closure already used for `ScheduledTaskService` in the same lifespan function.
-- **Single-process scope (known limitation)**: the buffer and watcher tasks live in one `ChannelManager` instance's memory. Process loss before admission loses buffered entries; this queue does not claim durable pre-admission delivery. The supported one-Gateway-replica topology prevents cross-worker routing but does not change that process-loss boundary.
+- **Best-effort compatibility**: local/non-PostgreSQL dispatch may still use `ChannelManager._followup_buffers`, capped at 20 and process-local. It is reported as `best_effort`; no deployment claim treats that buffer or `MessageBus` as durable.
 
 ## Outbound is Log-only
 

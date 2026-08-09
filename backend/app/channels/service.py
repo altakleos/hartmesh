@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from app.channels.base import Channel
@@ -89,6 +89,18 @@ def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
     return ChannelConnectionRepository(session_factory)
 
 
+def _uses_postgres_receipts(app_config: AppConfig | None) -> bool:
+    if app_config is None:
+        return False
+    database = getattr(app_config, "database", None)
+    if getattr(database, "backend", None) != "postgres":
+        return False
+    dedupe = getattr(app_config, "dedupe_storage", None)
+    backend = getattr(dedupe, "backend", "auto")
+    raw_backend = backend.value if hasattr(backend, "value") else str(backend)
+    return raw_backend != "memory"
+
+
 class ChannelService:
     """Manages the lifecycle of all configured IM channels.
 
@@ -130,6 +142,23 @@ class ChannelService:
             get_stream_bridge=get_stream_bridge,
             invocation_runtime=invocation_runtime,
         )
+        self.inbound_receipt_processor = None
+        if _uses_postgres_receipts(app_config):
+            from app.channels.inbound_receipts import (
+                InboundReceiptProcessor,
+                SqlInboundReceiptStore,
+            )
+            from deerflow.persistence.engine import get_session_factory
+
+            session_factory = get_session_factory()
+            if session_factory is None:
+                raise RuntimeError("PostgreSQL inbound receipt storage is unavailable")
+            self.inbound_receipt_processor = InboundReceiptProcessor(
+                store=SqlInboundReceiptStore(session_factory),
+                publish_wakeup=self.bus.publish_receipt_wakeup,
+                process_message=self.manager.process_inbound_receipt_message,
+            )
+            self.manager.set_inbound_receipt_processor(self.inbound_receipt_processor)
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
         self._running = False
@@ -180,6 +209,8 @@ class ChannelService:
             return
 
         await self.manager.start()
+        if self.inbound_receipt_processor is not None:
+            await self.inbound_receipt_processor.start()
         self._running = True
 
         ready_status = await self.ensure_ready_channels(attempts=2)
@@ -259,9 +290,34 @@ class ChannelService:
                 logger.exception("Error stopping channel")
         self._channels.clear()
 
+        if self.inbound_receipt_processor is not None:
+            await self.inbound_receipt_processor.stop()
         await self.manager.stop()
         self._running = False
         logger.info("ChannelService stopped")
+
+    @property
+    def github_ingress_durability(self) -> str:
+        """Return the truthful signed-GitHub receipt support level."""
+
+        if self.inbound_receipt_processor is not None and self.inbound_receipt_processor.durable:
+            return "durable"
+        return "best_effort"
+
+    async def accept_verified_inbound_batch(
+        self,
+        messages: Sequence[Any],
+    ) -> None:
+        """Persist a verified fan-out before acknowledgment, or label it local-only."""
+
+        batch = tuple(messages)
+        if not batch:
+            return
+        if self.inbound_receipt_processor is not None:
+            await self.inbound_receipt_processor.receive_batch(batch)
+            return
+        for message in batch:
+            await self.bus.publish_inbound(message)
 
     def _load_channel_config(self, name: str) -> dict[str, Any] | None:
         """Load the latest config for a specific channel from disk.

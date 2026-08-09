@@ -259,6 +259,16 @@ at `GET /api/runtime/v1/deployment`; portable runtime support remains the strict
 generation are startup-only; deploy a restart to adopt changes, while in-flight invocations
 stay pinned to the generation they accepted.
 
+Signed GitHub ingress also participates in that deployment truth. The default
+`config.dedupe_storage.backend: auto` selects PostgreSQL leased receipt storage when
+the chart's database backend is PostgreSQL; an explicit `postgres` is equivalent.
+`memory` retains local best-effort behavior and is rejected by the
+`durable_production` chart contract. The authenticated deployment report exposes a
+versioned `native_ingress` map with `durable` or `best_effort` per enabled source.
+Durable means the webhook commits every bounded fan-out receipt before acknowledgment;
+it does not mean that the process-local `MessageBus` is durable, and it does not claim
+multi-replica channel ownership.
+
 The default internal health probe timeout is 2 seconds and the complete readiness evaluation
 is capped at 5 seconds. The chart's Gateway readiness probe uses `timeoutSeconds: 6`, so
 Kubernetes supplies bounded headroom rather than aborting an evaluation first. Readiness

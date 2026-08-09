@@ -345,7 +345,7 @@ class AppConfig(BaseModel):
         default_factory=DedupeStorageConfig,
         description=format_field_description(
             "dedupe_storage",
-            field_doc="Inbound webhook dedupe storage backend (memory / postgres / auto) for cross-pod redelivery dedup. See issue #4120.",
+            field_doc=("Backward-compatible selector for keyed native-ingress receipt storage (memory / postgres / auto). Memory is best_effort; PostgreSQL enables leased replay before acknowledgment."),
         ),
     )
 

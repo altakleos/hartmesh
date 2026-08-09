@@ -1,10 +1,11 @@
-"""Inbound webhook dedupe store.
+"""Legacy best-effort inbound webhook dedupe store.
 
 The manager-level inbound dedupe (``ChannelManager._inbound_dedupe_key``) guards an
 agent run / final answer against provider redeliveries. The default store is an
 in-process ``OrderedDict`` (backward compatible, single-pod). A shared store (e.g.
-Postgres) can be injected for multi-pod deployments so a redelivery landing on a
-different pod is still dropped as a duplicate. See issue #4120.
+Postgres) can be injected for compatibility. Signed GitHub deliveries in a
+durable profile bypass this boolean interface and use the leased, replayable
+receipt Module in :mod:`app.channels.inbound_receipts`.
 """
 
 from __future__ import annotations

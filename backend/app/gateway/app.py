@@ -617,6 +617,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # _resolve_trace_enabled_for_app_construction() — create_app() runs at
     # import time, and lifespan still performs strict config loading before
     # serving.
+    construction_config = None
     try:
         construction_config = get_app_config()
         configured_plugins = construction_config.plugins
@@ -772,6 +773,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         DeploymentProvenance,
         DeploymentQualification,
         GatewayDeploymentReporter,
+        describe_native_ingress,
     )
 
     try:
@@ -797,6 +799,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         ),
         provenance=deployment_provenance,
         qualification=deployment_qualification,
+        native_ingress=describe_native_ingress(construction_config),
     )
     from app.runtime.readiness import RuntimeReadinessCoordinator
 

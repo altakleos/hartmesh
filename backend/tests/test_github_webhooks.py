@@ -587,11 +587,51 @@ def test_dispatch_failure_returns_503_not_200(client: TestClient, monkeypatch: p
     assert response.status_code == 503
     detail = response.json()["detail"]
     assert "fan-out failed" in detail
-    assert DELIVERY_ID in detail
-    assert "transient registry hiccup" in detail
-    # Operator-visible log: stack trace + delivery id so the redelivery
-    # page entry can be correlated.
+    assert DELIVERY_ID not in detail
+    assert "transient registry hiccup" not in detail
+    # Operator-visible diagnostics use a bounded correlation digest rather
+    # than reflecting the caller-controlled delivery header.
     assert any("fanout failed" in rec.message for rec in caplog.records)
+    assert any("delivery_correlation=" in rec.message for rec in caplog.records)
+
+
+def test_signed_webhook_does_not_ack_until_atomic_receipt_batch_commits(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_channel_service,
+) -> None:
+    persisted_batches: list[tuple[object, ...]] = []
+
+    async def fail_receipts(messages) -> None:
+        persisted_batches.append(tuple(messages))
+        raise RuntimeError("database unavailable")
+
+    _stub_channel_service.accept_verified_inbound_batch = fail_receipts
+
+    async def fake_fanout(*_args, **kwargs) -> dict:
+        await kwargs["inbound_sink"]((object(), object()))
+        return {
+            "matched_agents": ["a", "b"],
+            "fired_agents": ["a", "b"],
+            "skipped": [],
+        }
+
+    monkeypatch.setattr(github_webhooks, "fanout_event", fake_fanout)
+    body = json.dumps({"zen": "ok"}).encode()
+
+    response = client.post(
+        "/api/webhooks/github",
+        content=body,
+        headers={
+            "X-GitHub-Event": "ping",
+            "X-GitHub-Delivery": DELIVERY_ID,
+            "X-Hub-Signature-256": _signature(body),
+        },
+    )
+
+    assert response.status_code == 503
+    assert len(persisted_batches) == 1
+    assert len(persisted_batches[0]) == 2
 
 
 def test_dispatch_failure_503_lets_github_redeliver_successfully(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

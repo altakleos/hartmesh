@@ -477,6 +477,17 @@ def test_production_mode_rejects_process_local_storage(
     assert "durable_one_replica requires shared_durable persistence" in result.stderr
 
 
+def test_production_mode_rejects_process_local_inbound_receipts(
+    tmp_path: Path,
+) -> None:
+    values = _production_values()
+    _set_config_value(values, ("dedupe_storage", "backend"), "memory")
+
+    result = _render(tmp_path, values, expect_success=False)
+
+    assert "requires PostgreSQL inbound receipt storage" in result.stderr
+
+
 @pytest.mark.parametrize(
     ("mutator", "message"),
     [

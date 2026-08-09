@@ -19,7 +19,9 @@ from app.runtime.deployment import (
     DeploymentProvenance,
     DeploymentQualification,
     GatewayDeploymentReporter,
+    IngressDeliveryGuarantee,
     PersistenceTier,
+    describe_native_ingress,
     describe_persistence,
     validate_deployment_profile,
 )
@@ -294,3 +296,32 @@ def test_local_development_profile_explicitly_allows_process_local_storage() -> 
     )
 
     validate_deployment_profile(config)
+
+
+def test_native_ingress_report_distinguishes_durable_and_best_effort() -> None:
+    def config(*, database: str, receipt_backend: str):
+        return SimpleNamespace(
+            database=SimpleNamespace(backend=database),
+            dedupe_storage=SimpleNamespace(backend=receipt_backend),
+            model_extra={"channels": {"github": {"enabled": True}}},
+        )
+
+    local = describe_native_ingress(config(database="sqlite", receipt_backend="memory"))
+    durable = describe_native_ingress(config(database="postgres", receipt_backend="auto"))
+
+    assert local.sources == (("github", IngressDeliveryGuarantee.best_effort),)
+    assert durable.sources == (("github", IngressDeliveryGuarantee.durable),)
+    assert local.to_dict()["sources"] == {"github": "best_effort"}
+    assert durable.to_dict()["sources"] == {"github": "durable"}
+
+
+def test_durable_profile_rejects_enabled_source_without_postgres_receipts() -> None:
+    config = SimpleNamespace(
+        deployment=SimpleNamespace(profile="durable_production"),
+        database=SimpleNamespace(backend="sqlite"),
+        dedupe_storage=SimpleNamespace(backend="memory"),
+        model_extra={"channels": {"github": {"enabled": True}}},
+    )
+
+    with pytest.raises(ValueError, match="PostgreSQL inbound receipt storage"):
+        validate_deployment_profile(config)

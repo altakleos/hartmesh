@@ -233,6 +233,11 @@ imagePullSecrets:
 {{- $memoryConfig := (index $appConfig "memory") | default dict -}}
 {{- $databaseConfig := (index $appConfig "database") | default dict -}}
 {{- $databaseBackend := ((index $databaseConfig "backend") | default "memory") -}}
+{{- $receiptConfig := (index $appConfig "dedupe_storage") | default dict -}}
+{{- $receiptBackend := ((index $receiptConfig "backend") | default "auto") -}}
+{{- if not (has $receiptBackend (list "auto" "memory" "postgres")) -}}
+{{- fail "config dedupe_storage.backend must be auto, memory, or postgres" -}}
+{{- end -}}
 {{- $tierByBackend := dict "memory" "process_local" "sqlite" "node_durable" "postgres" "shared_durable" -}}
 {{- if not (hasKey $tierByBackend $databaseBackend) -}}
 {{- fail "config database.backend must be memory, sqlite, or postgres" -}}
@@ -476,6 +481,9 @@ imagePullSecrets:
   {{- end -}}
   {{- if ne $databaseBackend "postgres" -}}
   {{- fail "durable_one_replica requires config database.backend=postgres" -}}
+  {{- end -}}
+  {{- if eq $receiptBackend "memory" -}}
+  {{- fail "durable_one_replica requires PostgreSQL inbound receipt storage; dedupe_storage.backend cannot be memory" -}}
   {{- end -}}
   {{- $postgresConfigured := or .Values.postgresql.enabled .Values.postgresql.external.databaseUrl .Values.postgresql.external.existingSecret .Values.postgresql.existingSecret -}}
   {{- if not $postgresConfigured -}}{{- fail "durable_one_replica requires a configured PostgreSQL database" -}}{{- end -}}

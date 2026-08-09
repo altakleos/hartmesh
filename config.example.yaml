@@ -1947,19 +1947,15 @@ database:
 # Where the ChannelManager records inbound webhook dedupe state.
 #
 # backend: auto     -- (default) Postgres whenever database.backend=postgres,
-#                       including multi-replica K8s where each pod runs a single
-#                       worker but shares one DB. Otherwise an in-process memory
-#                       store (single-DB, single-pod).
-#                       NOTE: multi-replica deployments must use a Postgres DB;
-#                       if database.backend is sqlite/memory, 'auto' falls back to
-#                       the per-pod memory store and cross-pod dedupe is disabled.
-# backend: memory   -- In-process store only. Per-pod: a webhook redelivered to
-#                       a DIFFERENT replica is NOT deduped. Not recommended for
-#                       multi-worker deployments (logs a startup WARNING).
-# backend: postgres -- Share dedupe state across pods via the application DB.
-#                       REQUIRED for any multi-replica deployment. If
-#                       database.backend is not 'postgres', a WARNING is logged and
-#                       the store falls back to the in-process memory store.
+#                       and stores bounded leased inbound receipts before a signed
+#                       GitHub webhook is acknowledged. Otherwise delivery is
+#                       explicitly best_effort and the administrative deployment
+#                       report says so.
+# backend: memory   -- Process-local best-effort ingress only. An acknowledged
+#                       delivery can be lost with the Gateway process.
+# backend: postgres -- Store leased receipts in the application PostgreSQL DB.
+#                       Required for an enabled durable native source in the
+#                       durable_production profile.
 #
 # dedupe_storage:
 #   backend: auto

@@ -337,6 +337,12 @@ config: |
     pool_recycle: 300
     command_timeout: 30
 
+  # Keyed native ingress uses the application PostgreSQL database for leased
+  # receipt rows. In local non-PostgreSQL configurations, auto degrades
+  # explicitly to best_effort delivery and the deployment report says so.
+  dedupe_storage:
+    backend: auto
+
   # The default chart is an explicitly unqualified local evaluation. Switch
   # both this profile and deployment.mode when adopting the validated durable
   # one-replica profile.

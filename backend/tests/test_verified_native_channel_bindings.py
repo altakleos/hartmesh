@@ -12,13 +12,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+import sqlalchemy as sa
 import yaml
 from fastapi import FastAPI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.inbound_receipts import InboundReceiptProcessor, SqlInboundReceiptStore
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, MessageBus
 from app.channels.store import ChannelStore
@@ -38,6 +41,8 @@ from app.runtime import (
 from app.runtime.idempotency import scope_for_channel
 from deerflow.config.agents_config import GitHubAgentConfig
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+from deerflow.persistence.base import Base
+from deerflow.persistence.inbound_receipt.model import InboundReceiptRow
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime.accepted_invocation import (
     InvocationOrigin,
@@ -462,8 +467,9 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
     bus = MessageBus()
 
     class _ChannelService:
-        def __init__(self) -> None:
+        def __init__(self, receipt_processor) -> None:
             self.bus = bus
+            self._receipt_processor = receipt_processor
 
         def is_channel_enabled(self, name: str) -> bool:
             return name == "github"
@@ -474,13 +480,10 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
         def get_channel(self, _name: str):
             return None
 
-    import app.channels.service as service_module
+        async def accept_verified_inbound_batch(self, messages) -> None:
+            await self._receipt_processor.receive_batch(messages)
 
-    monkeypatch.setattr(
-        service_module,
-        "get_channel_service",
-        lambda: _ChannelService(),
-    )
+    import app.channels.service as service_module
 
     async def owner_user(*_args, **_kwargs):
         return SimpleNamespace(
@@ -531,6 +534,19 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
         get_stream_bridge=lambda: None,
     )
     manager._client = client
+    receipt_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'receipts.db'}")
+    async with receipt_engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all, tables=[InboundReceiptRow.__table__])
+    receipt_sessions = async_sessionmaker(receipt_engine, expire_on_commit=False)
+    receipt_processor = InboundReceiptProcessor(
+        store=SqlInboundReceiptStore(receipt_sessions),
+        publish_wakeup=bus.publish_receipt_wakeup,
+        process_message=manager.process_inbound_receipt_message,
+        lease_owner="gateway-test",
+    )
+    manager.set_inbound_receipt_processor(receipt_processor)
+    service = _ChannelService(receipt_processor)
+    monkeypatch.setattr(service_module, "get_channel_service", lambda: service)
     body = json.dumps(_github_payload()).encode()
     headers = {
         "X-GitHub-Event": "pull_request",
@@ -554,22 +570,42 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
                 transport=httpx.ASGITransport(app=app),
                 base_url="http://test",
             ) as http:
-                for _ in range(2):
-                    response = await http.post(
-                        "/api/webhooks/github",
-                        content=body,
-                        headers=headers,
-                    )
-                    assert response.status_code == 200
-                    await manager._handle_chat(await bus.get_inbound())
+                await manager.start()
+                await receipt_processor.start()
+                response = await http.post(
+                    "/api/webhooks/github",
+                    content=body,
+                    headers=headers,
+                )
+                assert response.status_code == 200
+                for _ in range(100):
+                    if recording_runtime.receipts:
+                        break
+                    await asyncio.sleep(0.01)
+                assert recording_runtime.receipts
+                first = recording_runtime.receipts[0]
+                assert first.record.task is not None
+                await first.record.task
+                for _ in range(100):
+                    async with receipt_sessions() as session:
+                        stored = await session.scalar(sa.select(InboundReceiptRow).where(InboundReceiptRow.provider_delivery_id == "delivery-1"))
+                    if stored is not None and stored.state == "completed":
+                        break
+                    await asyncio.sleep(0.01)
+                assert stored is not None
+                assert stored.state == "completed"
 
-            assert len(recording_runtime.receipts) == 2
-            first, replay = recording_runtime.receipts
+                redelivery = await http.post(
+                    "/api/webhooks/github",
+                    content=body,
+                    headers=headers,
+                )
+                assert redelivery.status_code == 200
+                await asyncio.sleep(0)
+
+            assert len(recording_runtime.receipts) == 1
             assert first.created is True
-            assert replay.created is False
-            assert replay.record.run_id == first.record.run_id
-            assert first.record.task is not None
-            await first.record.task
+            assert stored.run_id == first.record.run_id
             assert run_agent.await_count == 1
 
             accepted = first.record.accepted_invocation
@@ -592,6 +628,9 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
             assert client.threads.create.await_count == 1
 
     finally:
+        await receipt_processor.stop()
+        await manager.stop()
+        await receipt_engine.dispose()
         reset_app_config()
 
 

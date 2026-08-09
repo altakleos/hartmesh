@@ -39,6 +39,7 @@ an ordinary unit test.
 |---|---|---|---|---|---|
 | Application Module and portable Adapters | One application-layer invocation Module owns ensure/observe/control; the in-process and HTTP Adapters implement one host-independent Protocol. | `backend/app/runtime/invocation.py`; `backend/app/runtime/api.py`; `backend/packages/runtime-api/deerflow_runtime_api/__init__.py` | `test_runtime_transport_conformance` | Strict HTTP/in-process conformance | Implemented |
 | All durable launch sources | HTTP create/stream/wait, Scheduled Tasks, native channels, and embedded services enter the same durable admission boundary. | `backend/app/gateway/services.py`; `backend/app/scheduler/service.py`; `backend/app/channels/manager.py`; `backend/app/runtime/api.py` | `test_gateway_create_stream_wait_routes_share_durable_admission`; `test_scheduled_occurrence_enters_runtime_with_typed_execution_facts`; `test_authenticated_channel_launch_enters_runtime_with_typed_source_facts`; `test_ensure_builds_a_host_trusted_service_launch_intent` | Offline launch-source characterization | Implemented |
+| Keyed native ingress receipts | Signed GitHub acknowledges only after an atomic bounded receipt batch; leased/fenced recovery composes with stable-key invocation replay, and busy work stays durable FIFO. | `backend/app/channels/inbound_receipts.py`; `backend/app/channels/service.py`; `backend/app/gateway/github/dispatcher.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0015_inbound_receipts.py` | `test_received_payload_survives_process_loss_before_claim`; `test_response_loss_after_admission_replays_known_run_before_binding`; `test_signed_route_reaches_real_runtime_and_redelivery_replays` | PostgreSQL receipt concurrency/migration qualification | Implemented for signed GitHub with PostgreSQL; other/local paths report best-effort |
 | Canonical keyed replay | Atomic external-key arbitration compares caller intent, retains accepted effective execution, and attaches only one worker. | `backend/app/runtime/idempotency.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_http_replay_conflicts_when_original_execution_field_is_removed` | PostgreSQL equal/unequal race qualification | Implemented; PostgreSQL locking is a gated qualification |
 | Split identity and sealed Origin | Effective subject, optional acting service, and trusted source evidence are non-interchangeable and caller-forgery resistant. | `backend/packages/extension-api/deerflow_extension_api/authorization.py`; `backend/app/gateway/services.py`; `backend/app/runtime/authorization.py` | `test_channel_human_cannot_be_promoted_by_internal_transport` | Source-specific launch tests | Implemented |
 | Trusted contributor context | One immutable trusted context carries validated persistable evidence, runtime-only values, and stable handles without secret persistence. | `backend/packages/extension-api/deerflow_extension_api/contributors.py`; `backend/packages/harness/deerflow/extensions/contributors.py`; `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/mcp/tools.py` | `test_worker_carries_one_trusted_context_without_parallel_attributes_path` | Store/event/response redaction tests | Implemented |
@@ -49,7 +50,7 @@ an ordinary unit test.
 | Scoped service observation | An authenticated service is owner-scoped unless an operator grants a finite run/thread/owner/source search scope; the current coherent authorization provider still makes the final observe decision. | `backend/app/runtime/visibility.py`; `backend/app/runtime/invocation.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_ordinary_service_cannot_observe_another_owner_or_trigger_policy`; `test_current_authorization_denial_overrides_a_valid_visibility_grant`; `test_context_pagination_stays_inside_the_finite_owner_scope` | Memory and SQL bounded-query tests; no external service | Implemented |
 | Clarification continuation | A clarification ends the current invocation successfully; the answer is a distinct invocation on the same thread. | `backend/packages/harness/deerflow/agents/middlewares/clarification_middleware.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/app/channels/manager.py` | `test_clarification_completes_then_answer_starts_new_same_thread_invocation`; `test_native_channel_revalidates_owner_dedupes_and_continues_clarification` | Native-channel characterization | Implemented; same-invocation suspension is not claimed |
 | Graceful shutdown and process recovery | One deadline coordinator freezes admission, stops producers, drains runs, flushes memory, then closes dependencies; unsettled durable runs use orphan recovery. | `backend/app/gateway/shutdown.py`; `backend/packages/harness/deerflow/runtime/runs/manager.py` | `test_shutdown_orders_producers_runs_memory_and_dependencies`; `test_orphan_recovery_records_failed_with_stable_reason` | Process-loss simulations; live pod evidence is separate | Implemented for one replica |
-| PostgreSQL schema and arbitration | Real Alembic predecessor data upgrades through accepted/idempotency/lifecycle evidence and remains repository-readable after the promised downgrade/re-upgrade path. | `backend/packages/harness/deerflow/persistence/migrations/versions/0011_accepted_invocation.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0012_invocation_idempotency.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0013_invocation_lifecycle.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0014_canonical_caller_intent.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io` | `postgres_contract` with `DEERFLOW_TEST_POSTGRES_URL` | Qualified only when the mandatory PostgreSQL gate passes |
+| PostgreSQL schema and arbitration | Real Alembic predecessor data upgrades through accepted/idempotency/lifecycle/receipt evidence and remains repository-readable after the promised downgrade/re-upgrade path. | `backend/packages/harness/deerflow/persistence/migrations/versions/0011_accepted_invocation.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0012_invocation_idempotency.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0013_invocation_lifecycle.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0014_canonical_caller_intent.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0015_inbound_receipts.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io`; `test_postgres_inbound_receipt_acquisition_and_claim_are_atomic` | `postgres_contract` with `DEERFLOW_TEST_POSTGRES_URL` | Qualified only when the mandatory PostgreSQL gate passes |
 | One-replica deployment truth | Production requires one Gateway, shared durable PostgreSQL, compatible readiness/shutdown timing, and digest-pinned Gateway plus enabled provisioner execution artifacts; process-local mode makes no durability claim. | `backend/app/runtime/deployment.py`; `deploy/helm/deer-flow/values.yaml`; `deploy/helm/deer-flow/templates/gateway-deployment.yaml`; `deploy/helm/deer-flow/templates/provisioner-deployment.yaml` | `test_production_mode_requires_pinned_runtime_images_and_one_replica`; `test_production_mode_rejects_process_local_storage` | Helm lint/render and storage-profile checks | Implemented; not a high-availability claim |
 | Live Kubernetes pod recovery | Only a complete artifact-bound opt-in real-pod run can qualify graceful/abrupt one-replica recovery. | `backend/packages/harness/deerflow/runtime/kubernetes_qualification.py`; `backend/tests/support/kubernetes_qualification.py`; `backend/app/runtime/deployment.py` | `test_real_one_replica_pod_recovery_contract` | `kubernetes_contract` evidence for the deployed image/chart/config/schema | Unqualified when the live gate is skipped or evidence does not match |
 | Legacy compatibility and native execution | Existing LangGraph/REST facades retain their responses and native lead-agent, skill, memory, subagent, sandbox, and thread behavior. | `backend/app/gateway/routers/runs.py`; `backend/app/gateway/routers/thread_runs.py`; `backend/packages/harness/deerflow/agents/lead_agent/agent.py`; `backend/packages/harness/deerflow/agents/memory`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/sandbox/middleware.py` | `test_gateway_mounts_runtime_routes_without_replacing_legacy_runs`; `test_full_chain_order`; `test_make_lead_agent_custom_skill_allowlist_does_not_activate_tool_policy`; `test_after_agent_queues_memory_under_runtime_user`; `test_aexecute_propagates_one_trusted_run_context_without_free_form_attributes`; `test_sandbox_middleware_state_matches_thread_state_sandbox_field` | Full offline compatibility suite | Implemented; synchronous client durability remains deferred |
@@ -60,8 +61,8 @@ Every source constructs an internal launch intent, but caller thread, assistant,
 body context, headers, queries, and metadata remain hints. Before admission the host:
 
 1. authenticates the effective subject and optional acting service and, for channels,
-   authenticates the provider event, looks
-   up the connection, and revalidates its current owner;
+   authenticates the provider event, then either revalidates the current interactive
+   connection owner or resolves a signed webhook's trusted route binding;
 2. resolves the thread, agent, source facts, normalized input, and execution-significant
    options;
 3. creates a bounded base `InvocationOrigin` containing only independently authenticatable
@@ -100,6 +101,40 @@ identity, actor, Origin, and legacy internal flags. The same immutable identity 
 Origin flow to Gateway route and start/observe/cancel policy, contributors, constraints,
 tool/MCP policy and preparation, and lead/nested subagents. Their principal and Origin digests are accepted
 evidence persisted in the same admission transaction.
+
+## Keyed native ingress receipts
+
+Invocation admission is durable only after the runtime sees a launch, so a durable
+native ingress source also needs a pre-admission record. Signed GitHub supplies that
+record when the application uses PostgreSQL receipt storage. After HMAC verification
+and trusted registry resolution, the dispatcher builds every fan-out envelope and
+commits the whole batch before returning success. A row is uniquely identified by
+provider, verified binding kind/reference, and provider delivery ID. `MessageBus`
+carries only receipt-ID wake-ups; duplicate or lost wake-ups do not change the ledger.
+
+The receipt lifecycle is `received -> claimed -> admitted(run_id) -> completed`, with
+`deferred` for a bounded retry and `dead_letter` for exhausted or permanently invalid
+input. A claim has an owner, expiry, attempt counter, and monotonically increasing
+fencing token. Only that token may bind, defer, complete, or dead-letter. Recovery reads
+bounded due pages, reclaims expired claims, and admits only the earliest unfinished row
+for a thread. A crash after invocation acceptance but before receipt binding replays the
+same external key and binds the known-equal run; contributors, policy, graph, and model
+do not run a second time. Commands and rejections complete with a bounded outcome and no
+invented run ID.
+
+Persisted envelopes contain only the finite normalized text/type, owner/agent/thread
+route, verified binding, safe provider correlation, and supported stable attachment
+handles. The current signed GitHub path rejects transient attachments rather than
+persisting their bytes. Webhook secrets, access tokens, raw provider payloads, resolved
+credentials, and arbitrary metadata never enter the receipt. The administrator
+deployment report exposes `native_ingress.v1` per enabled source as `durable` or
+`best_effort`; portable runtime capabilities do not. SQLite/memory and explicitly
+memory-backed receipt configuration remain local convenience and cannot satisfy the
+durable production profile.
+
+`InboundReceiptProcessor` owns both recovery and in-flight claim tasks. Channel
+shutdown stops producers, cancels and awaits those tasks, and leaves an interrupted
+claim fenced until its lease expires; a later process reclaims it from PostgreSQL.
 
 ## Contributor data and redaction
 
@@ -449,9 +484,9 @@ becomes live pod evidence by implication or aggregation.
 
 The PostgreSQL migration qualification starts both from an empty schema and from
 the real main-line predecessor `0010_run_cancel_request` with representative
-normal and auxiliary rows. It applies 0011–0014 individually, verifies the
+normal and auxiliary rows. It applies 0011–0015 individually, verifies the
 accepted/idempotency/caller-intent columns, checks and partial indexes, validates
-the lifecycle singleton/journal/index contract, and then uses `RunRepository` for
+the lifecycle singleton/journal/index contract and inbound receipt arbitration, and then uses `RunRepository` for
 replay, cancellation, orphan recovery, lifecycle, and summary reads/writes. The
 same CI marker suite retains the independent-session equal/unequal admission,
 lifecycle CAS/cursor ordering, and repeatable-read query races. With
@@ -460,7 +495,7 @@ SQLite remains a fast compatibility tier rather than PostgreSQL evidence.
 
 Alembic can structurally downgrade this feature tail to 0010 and re-upgrade it,
 but the older schema cannot represent accepted evidence, external retry keys,
-canonical caller intent, state versions, or lifecycle events. Downgrade therefore
+canonical caller intent, state versions, lifecycle events, or inbound receipts. Downgrade therefore
 preserves the base `runs` rows while deliberately dropping those feature fields
 and journal rows; re-upgrade reads them conservatively as legacy version-zero
 rows and does not invent lost evidence. Operators must quiesce writers and back
