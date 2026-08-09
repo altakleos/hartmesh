@@ -34,8 +34,9 @@ deployment:
   provenance:
     # -- Optional lowercase source commit/revision (7-64 hex characters).
     sourceRevision: ""
-  # -- Completed, externally produced evidence only. An empty list is reported
-  #    as explicitly unqualified; this chart never manufactures qualification.
+  # -- Operator-declared references to completed external evidence. An empty list
+  #    reports unqualified/none_declared; a value reports operator_asserted until
+  #    the artifact is independently checked by the offline verifier.
   qualificationEvidence: []
   # - qualificationId: durable-contract-2026-08
   #   artifactDigest: sha256:<64 lowercase hex characters>

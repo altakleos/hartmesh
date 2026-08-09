@@ -149,9 +149,12 @@ def test_storage_and_qualification_claims_name_their_evidence_boundary() -> None
     assert "one Gateway replica" in guide
     assert "shared PostgreSQL" in guide
     assert "shared Redis" in guide
-    assert "default skip is an unpassed release gate" in guide
+    assert "default skip and an unverified declaration are both unpassed release gates" in guide
     assert "process-loss simulation, image construction, and Helm rendering are separate evidence" in guide
-    assert "only an artifact-bound passing live result" in helm_guide
+    assert '`trust="operator_asserted"`' in guide
+    assert "external_evidence_verified" in guide
+    assert "operator copies only an artifact-bound passing" in helm_guide
+    assert "external_evidence_verified" in helm_guide
 
 
 def test_durable_examples_and_fixtures_use_generic_provider_names() -> None:

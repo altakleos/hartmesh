@@ -287,14 +287,19 @@ deployment report. `deployment.qualificationEvidence` accepts completed safe
 identifiers, artifact SHA-256 digests, and RFC3339 completion times. Scoped
 evidence additionally requires a bounded `scope` and exact `status: passed`;
 legacy three-field records remain readable. It is empty by default, so the
-report says `unqualified`; Helm never invents evidence. Neither configuration
-accepts credentials or arbitrary metadata.
+report says `status: unqualified` and `trust: none_declared`; Helm never invents
+evidence. A configured reference retains v1 `status: qualified` for compatibility
+but explicitly reports `trust: operator_asserted`. It does not mean the Gateway
+fetched or verified the artifact. Neither configuration accepts credentials or
+arbitrary metadata.
 
-For `durable_one_replica_pod_recovery`, only an artifact-bound passing live result may be
-copied into `deployment.qualificationEvidence`. Its artifact digest must match the deployed
-image/chart qualification identity. The Gateway then reports that bounded evidence through
-the authenticated administrative deployment report; a collected test, default skip,
-process-loss simulation, image build, or Helm render leaves the deployment unqualified.
+For `durable_one_replica_pod_recovery`, the operator copies only an artifact-bound passing
+live result into `deployment.qualificationEvidence`. The Gateway reports that bounded
+assertion through the authenticated administrative deployment report. A release or
+deployment controller must separately verify the artifact digest and exact image/chart,
+configuration, Alembic head, qualification run/namespace, scope, and scenario set. A
+collected test, default skip, process-loss simulation, image build, Helm render, or declared
+reference alone is not externally verified qualification evidence.
 
 #### Opt-in real-pod recovery qualification
 
@@ -319,6 +324,36 @@ export DEERFLOW_TEST_KUBERNETES_EVIDENCE="$PWD/artifacts/kubernetes-qualificatio
 cd backend
 PYTHONPATH=. uv run pytest -m kubernetes_contract -v -s
 ```
+
+After the run, obtain the declared digest/reference from the administrator report and the
+artifact from the independently configured evidence path or artifact store. Supply expected
+subjects from the deployment controller, not from untrusted fields inside the artifact:
+
+```bash
+cd backend
+PYTHONPATH=. uv run python scripts/verify_qualification_evidence.py \
+  /operator/artifacts/kubernetes-qualification.json \
+  --declared-digest "sha256:<report-artifact-digest>" \
+  --qualification-id "pod-recovery-20260808" \
+  --image-digest "sha256:<deployed-image-digest>" \
+  --chart-version "<deployed-chart-version>" \
+  --chart-digest "sha256:<deployed-chart-digest>" \
+  --configuration-digest "sha256:<rendered-qualification-config-digest>" \
+  --migration-head "<expected-alembic-head>" \
+  --scope "durable_one_replica_pod_recovery" \
+  --namespace "hartmesh-qualification-20260808" \
+  --required-scenario accepted_before_client_response \
+  --required-scenario accepted_before_worker_start \
+  --required-scenario active_execution \
+  --required-scenario terminal_before_lifecycle_commit \
+  --required-scenario graceful_rollout_termination \
+  --required-scenario forced_kill_after_graceful_deadline
+```
+
+Success is one bounded JSON record with `status: verified` and
+`trust: external_evidence_verified`; every mismatch exits nonzero with a stable code. The
+verifier is offline and never follows report paths or URLs, reads kubeconfig, or emits pod
+logs. This digest/exact-subject check is not signature verification or remote attestation.
 
 An enabled run fails for missing CLIs or inputs, unreachable infrastructure,
 any skipped scenario, an unreached barrier, timeout, incomplete coverage, or an

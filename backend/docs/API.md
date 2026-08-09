@@ -770,7 +770,7 @@ container, while each `to_dict()` call returns a new mutable JSON wire copy.
 | Route | Contract |
 |---|---|
 | `GET /capabilities` | Administrator-only strict `runtime.capabilities`; reports only portable ensure, invocation/context observation, cancel control, and unsupported context export/retirement. |
-| `GET /deployment` | Administrator-only `deerflow.deployment/v1` report with extension manifest/health, latest safe admission-readiness reason codes/correlation, bounded image/source provenance when supplied, persistence facts, and qualification evidence or explicit `unqualified` status. This is not part of `DurableInvocationPort`. |
+| `GET /deployment` | Administrator-only `deerflow.deployment/v1` report with extension manifest/health, latest safe admission-readiness reason codes/correlation, bounded image/source provenance when supplied, persistence facts, and an operator-asserted qualification reference or explicit `unqualified` state. This is not part of `DurableInvocationPort` and is not remote attestation. |
 | `POST /invocations/ensure` | Exact `invocation.ensure` body. `external_key` is required; the server derives its scope from the authenticated principal or service. |
 | `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. |
 | `GET /contexts/{thread_id}/invocations` | Access-filtered normal-run lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500; optional `source_kind` is `http|scheduled_task|native_channel|service`. |
@@ -907,8 +907,10 @@ restart nor pod loss; `node_durable` survives process restart on its node; and
 reported independently because an in-memory store can be atomic without being
 restart-durable. `deployment.profile: durable_production` refuses process-local
 state at startup and readiness; `local_development` permits it without claiming
-durability. Qualification remains `unqualified` unless completed evidence is
-explicitly supplied. Live health never changes the manifest digest or an
+durability. Qualification remains `unqualified` with `trust="none_declared"` unless a
+reference is explicitly supplied. A supplied reference retains v1
+`status="qualified"` but is labelled `trust="operator_asserted"`; it is not independently
+verified by the Gateway. Live health never changes the manifest digest or an
 invocation's accepted generation. There is no context export, context retirement,
 event broker, or additional control in v1.
 
@@ -919,10 +921,14 @@ of exact ID, SHA-256 artifact digest, and RFC3339 completion-time records. New
 scoped records additionally carry a bounded scope and exact `passed` state;
 legacy three-field records remain readable as `legacy_unspecified`. The opt-in
 real-pod suite uses scope `durable_one_replica_pod_recovery` and supplies it only
-after all required scenarios pass. Collection or default skip cannot manufacture
-a qualified report. Invalid input is ignored with a safe server diagnostic. The
-Helm chart validates and supplies these fields from its non-secret deployment
-values; they never enter portable capabilities.
+after all required scenarios pass. Collection or default skip cannot manufacture a
+reference. Invalid input is ignored with a safe server diagnostic. The Helm chart validates
+and supplies these fields from its non-secret deployment values; they never enter portable
+capabilities. Exact verification is an offline operation: the operator supplies the artifact
+independently and runs `backend/scripts/verify_qualification_evidence.py` with the report
+digest plus expected qualification ID, image/chart/config/schema, namespace, scope, and
+required scenarios. Its only successful trust state is
+`external_evidence_verified`; it performs no network fetch.
 
 `GET /health` is independent process liveness. Unauthenticated `GET /ready` returns only
 `{"status":"ready"}` or `{"status":"not_ready"}` and uses the same bounded proof that fences

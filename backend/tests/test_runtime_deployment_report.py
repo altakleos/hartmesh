@@ -154,6 +154,7 @@ def test_admin_deployment_report_is_versioned_truthful_and_redacted() -> None:
     assert payload["qualification"] == {
         "version": 1,
         "status": "unqualified",
+        "trust": "none_declared",
         "evidence": [],
     }
     assert payload["admission_readiness"] == {
@@ -185,6 +186,7 @@ def test_deployment_qualification_reads_bounded_trusted_environment(
     assert qualification.to_dict() == {
         "version": 1,
         "status": "qualified",
+        "trust": "operator_asserted",
         "evidence": [
             {
                 "qualification_id": "durable-contract-2026-08",
@@ -208,6 +210,7 @@ def test_kubernetes_qualification_evidence_declares_bounded_scope_and_pass_state
     qualification = DeploymentQualification.from_environment().to_dict()
 
     assert qualification["status"] == "qualified"
+    assert qualification["trust"] == "operator_asserted"
     assert qualification["evidence"][0]["scope"] == "durable_one_replica_pod_recovery"
     assert qualification["evidence"][0]["status"] == "passed"
 

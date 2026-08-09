@@ -21,10 +21,17 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import ClassVar, Literal
+from typing import Literal
 
-from deerflow.runtime.kubernetes_qualification import QUALIFICATION_SCENARIOS
+from deerflow.qualification_evidence import (
+    KubernetesQualificationEvidence,
+    KubernetesQualificationFailureEvidence,
+    QualificationEvidenceExpectation,
+    ScenarioEvidence,
+    StoreContinuityEvidence,
+    qualification_evidence_digest,
+    verify_qualification_evidence,
+)
 
 _SAFE_CONTEXT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,252}\Z")
 _SAFE_NAMESPACE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?\Z")
@@ -166,402 +173,10 @@ def wait_until(
         sleeper(min(interval_seconds, remaining))
 
 
-def _bounded_safe(value: str, *, name: str, limit: int = 256) -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > limit:
-        raise ValueError(f"{name} must be a bounded non-empty string")
-    if any(ord(character) < 32 or ord(character) == 127 for character in value):
-        raise ValueError(f"{name} must not contain control characters")
-    return value
-
-
-@dataclass(frozen=True)
-class ScenarioEvidence:
-    """Bounded outcome for one required real-pod fault point."""
-
-    name: str
-    run_id: str
-    worker_attachments: int
-    graph_starts: int
-    model_starts: int
-    terminal_status: str
-    termination_mode: Literal["abrupt", "graceful", "forced_deadline"]
-    old_pod_termination_millis: int
-    barrier_reached: bool = True
-    status: Literal["passed"] = "passed"
-
-    def __post_init__(self) -> None:
-        if _SAFE_ID.fullmatch(self.name) is None:
-            raise ValueError("scenario name is invalid")
-        _bounded_safe(self.run_id, name="scenario run_id", limit=128)
-        counters = (
-            self.worker_attachments,
-            self.graph_starts,
-            self.model_starts,
-            self.old_pod_termination_millis,
-        )
-        if any(type(value) is not int for value in counters):
-            raise ValueError("scenario counters must be integers")
-        if self.worker_attachments < 0 or self.graph_starts < 0 or self.model_starts < 0:
-            raise ValueError("scenario start counters must be non-negative")
-        if self.termination_mode not in {"abrupt", "graceful", "forced_deadline"}:
-            raise ValueError("scenario termination mode is invalid")
-        if not 0 <= self.old_pod_termination_millis <= 300_000:
-            raise ValueError("scenario pod termination duration is invalid")
-        if not self.barrier_reached or self.status != "passed":
-            raise ValueError("completed scenario evidence must be passed")
-        expected_attachments = _expected_worker_attachments(self.name)
-        if self.worker_attachments != expected_attachments:
-            raise ValueError("scenario worker attachment evidence is inconsistent")
-        if not _execution_counts_are_valid(
-            self.name,
-            self.graph_starts,
-            self.model_starts,
-        ):
-            raise ValueError("scenario execution evidence is inconsistent")
-        if self.termination_mode != _expected_termination_mode(self.name):
-            raise ValueError("scenario termination evidence is inconsistent")
-        _bounded_safe(self.terminal_status, name="terminal status", limit=32)
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "name": self.name,
-            "status": self.status,
-            "barrier_reached": self.barrier_reached,
-            "run_id": self.run_id,
-            "terminal_status": self.terminal_status,
-            "termination_mode": self.termination_mode,
-            "old_pod_termination_millis": self.old_pod_termination_millis,
-            "worker_attachments": self.worker_attachments,
-            "graph_starts": self.graph_starts,
-            "model_starts": self.model_starts,
-        }
-
-    @classmethod
-    def from_dict(cls, value: object) -> ScenarioEvidence:
-        fields = {
-            "name",
-            "status",
-            "barrier_reached",
-            "run_id",
-            "terminal_status",
-            "termination_mode",
-            "old_pod_termination_millis",
-            "worker_attachments",
-            "graph_starts",
-            "model_starts",
-        }
-        if not isinstance(value, dict) or set(value) != fields:
-            raise ValueError("scenario evidence fields are invalid")
-        try:
-            return cls(
-                name=value["name"],
-                status=value["status"],
-                barrier_reached=value["barrier_reached"],
-                run_id=value["run_id"],
-                terminal_status=value["terminal_status"],
-                termination_mode=value["termination_mode"],
-                old_pod_termination_millis=value["old_pod_termination_millis"],
-                worker_attachments=value["worker_attachments"],
-                graph_starts=value["graph_starts"],
-                model_starts=value["model_starts"],
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError("scenario evidence values are invalid") from exc
-
-
-@dataclass(frozen=True)
-class StoreContinuityEvidence:
-    """Exact shared-store identity retained across every Gateway replacement."""
-
-    component: Literal["postgres", "redis"]
-    pod_uid: str
-    volume_uid: str
-    image_id: str
-    version: str
-
-    def __post_init__(self) -> None:
-        if self.component not in {"postgres", "redis"}:
-            raise ValueError("store component is invalid")
-        for field_name, limit in (
-            ("pod_uid", 128),
-            ("volume_uid", 128),
-            ("image_id", 576),
-            ("version", 256),
-        ):
-            _bounded_safe(getattr(self, field_name), name=field_name, limit=limit)
-
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "component": self.component,
-            "pod_uid": self.pod_uid,
-            "volume_uid": self.volume_uid,
-            "image_id": self.image_id,
-            "version": self.version,
-        }
-
-    @classmethod
-    def from_dict(cls, value: object) -> StoreContinuityEvidence:
-        fields = {"component", "pod_uid", "volume_uid", "image_id", "version"}
-        if not isinstance(value, dict) or set(value) != fields:
-            raise ValueError("store continuity evidence fields are invalid")
-        try:
-            return cls(**value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("store continuity evidence values are invalid") from exc
-
-
-@dataclass(frozen=True)
-class KubernetesQualificationEvidence:
-    """Machine-readable proof for one exact image/chart/configuration run."""
-
-    REQUIRED_SCENARIOS: ClassVar[tuple[str, ...]] = QUALIFICATION_SCENARIOS
-    API_VERSION: ClassVar[str] = "deerflow.kubernetes-qualification/v1"
-    SCOPE: ClassVar[str] = "durable_one_replica_pod_recovery"
-
-    qualification_id: str
-    image_reference: str
-    image_digest: str
-    chart_version: str
-    chart_digest: str
-    configuration_digest: str
-    migration_head: str
-    stores: tuple[StoreContinuityEvidence, ...]
-    kubernetes_server_version: str
-    cluster_context: str
-    cluster_driver: str | None
-    namespace: str
-    completed_at: datetime
-    scenarios: tuple[ScenarioEvidence, ...]
-
-    def __post_init__(self) -> None:
-        if _SAFE_ID.fullmatch(self.qualification_id) is None:
-            raise ValueError("qualification_id is invalid")
-        _bounded_safe(self.image_reference, name="image_reference", limit=576)
-        if _IMAGE_DIGEST.fullmatch(self.image_digest) is None:
-            raise ValueError("image_digest is invalid")
-        if not self.image_reference.endswith("@" + self.image_digest):
-            raise ValueError("image_reference must be pinned to image_digest")
-        for field_name in (
-            "chart_version",
-            "migration_head",
-            "kubernetes_server_version",
-            "cluster_context",
-        ):
-            _bounded_safe(getattr(self, field_name), name=field_name, limit=256)
-        for digest_name in ("chart_digest", "configuration_digest"):
-            if _IMAGE_DIGEST.fullmatch(getattr(self, digest_name)) is None:
-                raise ValueError(f"{digest_name} is invalid")
-        if self.cluster_driver is not None and _SAFE_ID.fullmatch(self.cluster_driver) is None:
-            raise ValueError("cluster_driver is invalid")
-        stores = tuple(self.stores)
-        if tuple(item.component for item in stores) != ("postgres", "redis"):
-            raise ValueError("store continuity evidence is incomplete or out of order")
-        if _SAFE_NAMESPACE.fullmatch(self.namespace) is None:
-            raise ValueError("namespace is invalid")
-        if not self.namespace.startswith("hartmesh-qualification-"):
-            raise ValueError("evidence namespace is not a qualification namespace")
-        if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
-            raise ValueError("completed_at must be timezone-aware")
-        scenarios = tuple(self.scenarios)
-        if tuple(item.name for item in scenarios) != self.REQUIRED_SCENARIOS:
-            raise ValueError("scenario coverage is incomplete or out of order")
-        object.__setattr__(self, "scenarios", scenarios)
-        object.__setattr__(self, "stores", stores)
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "api_version": self.API_VERSION,
-            "kind": "kubernetes.qualification.evidence",
-            "status": "passed",
-            "scope": self.SCOPE,
-            "qualification_id": self.qualification_id,
-            "artifact": {
-                "image_reference": self.image_reference,
-                "image_digest": self.image_digest,
-                "chart_version": self.chart_version,
-                "chart_digest": self.chart_digest,
-                "configuration_digest": self.configuration_digest,
-                "migration_head": self.migration_head,
-            },
-            "environment": {
-                "stores": [store.to_dict() for store in self.stores],
-                "kubernetes_server_version": self.kubernetes_server_version,
-                "cluster_context": self.cluster_context,
-                "cluster_driver": self.cluster_driver,
-                "namespace": self.namespace,
-            },
-            "completed_at": self.completed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
-            "scenarios": [scenario.to_dict() for scenario in self.scenarios],
-        }
-
-    @classmethod
-    def from_dict(cls, value: object) -> KubernetesQualificationEvidence:
-        fields = {
-            "api_version",
-            "kind",
-            "status",
-            "scope",
-            "qualification_id",
-            "artifact",
-            "environment",
-            "completed_at",
-            "scenarios",
-        }
-        if not isinstance(value, dict):
-            raise ValueError("evidence must be an object")
-        unknown = set(value) - fields
-        if unknown:
-            raise ValueError("unknown evidence fields")
-        if set(value) != fields:
-            raise ValueError("evidence fields are incomplete")
-        if value["api_version"] != cls.API_VERSION or value["kind"] != "kubernetes.qualification.evidence" or value["status"] != "passed" or value["scope"] != cls.SCOPE:
-            raise ValueError("evidence discriminator is invalid")
-        artifact = value["artifact"]
-        environment = value["environment"]
-        artifact_fields = {
-            "image_reference",
-            "image_digest",
-            "chart_version",
-            "chart_digest",
-            "configuration_digest",
-            "migration_head",
-        }
-        environment_fields = {
-            "stores",
-            "kubernetes_server_version",
-            "cluster_context",
-            "cluster_driver",
-            "namespace",
-        }
-        if not isinstance(artifact, dict) or set(artifact) != artifact_fields:
-            raise ValueError("artifact evidence fields are invalid")
-        if not isinstance(environment, dict) or set(environment) != environment_fields:
-            raise ValueError("environment evidence fields are invalid")
-        stores = environment["stores"]
-        if not isinstance(stores, list):
-            raise ValueError("store continuity evidence must be a list")
-        scenarios = value["scenarios"]
-        if not isinstance(scenarios, list):
-            raise ValueError("scenario evidence must be a list")
-        try:
-            completed_at = datetime.fromisoformat(value["completed_at"].replace("Z", "+00:00"))
-            return cls(
-                qualification_id=value["qualification_id"],
-                image_reference=artifact["image_reference"],
-                image_digest=artifact["image_digest"],
-                chart_version=artifact["chart_version"],
-                chart_digest=artifact["chart_digest"],
-                configuration_digest=artifact["configuration_digest"],
-                migration_head=artifact["migration_head"],
-                stores=tuple(StoreContinuityEvidence.from_dict(item) for item in stores),
-                kubernetes_server_version=environment["kubernetes_server_version"],
-                cluster_context=environment["cluster_context"],
-                cluster_driver=environment["cluster_driver"],
-                namespace=environment["namespace"],
-                completed_at=completed_at,
-                scenarios=tuple(ScenarioEvidence.from_dict(item) for item in scenarios),
-            )
-        except (AttributeError, TypeError, ValueError) as exc:
-            if isinstance(exc, ValueError) and "scenario coverage" in str(exc):
-                raise
-            raise ValueError("evidence values are invalid") from exc
-
-    def write(self, path: Path) -> None:
-        """Atomically write canonical bounded evidence."""
-
-        _write_bounded_evidence(path, self.to_dict())
-
-
-@dataclass(frozen=True)
-class KubernetesQualificationFailureEvidence:
-    """Safe non-passing artifact retained when a live scenario fails."""
-
-    qualification_id: str
-    image_digest: str
-    chart_version: str
-    chart_digest: str
-    configuration_digest: str
-    cluster_context: str
-    namespace: str
-    completed_at: datetime
-    completed_scenarios: tuple[str, ...]
-    failure_code: str
-
-    def __post_init__(self) -> None:
-        if _SAFE_ID.fullmatch(self.qualification_id) is None:
-            raise ValueError("qualification_id is invalid")
-        for digest in (
-            self.image_digest,
-            self.chart_digest,
-            self.configuration_digest,
-        ):
-            if _IMAGE_DIGEST.fullmatch(digest) is None:
-                raise ValueError("failure evidence digest is invalid")
-        _bounded_safe(self.chart_version, name="chart_version", limit=256)
-        _bounded_safe(self.cluster_context, name="cluster_context", limit=256)
-        if _SAFE_NAMESPACE.fullmatch(self.namespace) is None:
-            raise ValueError("namespace is invalid")
-        if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
-            raise ValueError("completed_at must be timezone-aware")
-        completed = tuple(self.completed_scenarios)
-        required = KubernetesQualificationEvidence.REQUIRED_SCENARIOS
-        if completed != required[: len(completed)]:
-            raise ValueError("completed scenarios must be an ordered required prefix")
-        if _SAFE_ID.fullmatch(self.failure_code) is None:
-            raise ValueError("failure_code is invalid")
-        object.__setattr__(self, "completed_scenarios", completed)
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "api_version": KubernetesQualificationEvidence.API_VERSION,
-            "kind": "kubernetes.qualification.evidence",
-            "status": "failed",
-            "scope": KubernetesQualificationEvidence.SCOPE,
-            "qualification_id": self.qualification_id,
-            "image_digest": self.image_digest,
-            "chart_version": self.chart_version,
-            "chart_digest": self.chart_digest,
-            "configuration_digest": self.configuration_digest,
-            "cluster_context": self.cluster_context,
-            "namespace": self.namespace,
-            "completed_at": self.completed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
-            "completed_scenarios": list(self.completed_scenarios),
-            "failure_code": self.failure_code,
-        }
-
-    def write(self, path: Path) -> None:
-        _write_bounded_evidence(path, self.to_dict())
-
-
-def _write_bounded_evidence(path: Path, value: Mapping[str, object]) -> None:
-    payload = (
-        json.dumps(
-            value,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-        + b"\n"
-    )
-    if len(payload) > 64 * 1024:
-        raise ValueError("qualification evidence exceeds 64 KiB")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        delete=False,
-    ) as temporary:
-        temporary.write(payload)
-        temporary.flush()
-        os.fsync(temporary.fileno())
-        temporary_path = Path(temporary.name)
-    os.replace(temporary_path, path)
-
-
 def evidence_sha256(path: Path) -> str:
     """Return the digest used by the bounded administrative evidence link."""
 
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    return qualification_evidence_digest(path.read_bytes())
 
 
 @dataclass(frozen=True)
@@ -1588,6 +1203,23 @@ class KubernetesQualificationRunner:
         )
         evidence.write(passing_path)
         evidence_digest = evidence_sha256(passing_path)
+        verification = verify_qualification_evidence(
+            passing_path.read_bytes(),
+            declared_digest=evidence_digest,
+            expected=QualificationEvidenceExpectation(
+                qualification_id=evidence.qualification_id,
+                image_digest=self.config.image_digest,
+                chart_version=self._chart_version(),
+                chart_digest=self._chart_digest(),
+                configuration_digest=_sha256_bytes(_canonical_json(values)),
+                migration_head=evidence.migration_head,
+                scope=evidence.SCOPE,
+                namespace=self.config.namespace,
+                required_scenarios=evidence.REQUIRED_SCENARIOS,
+            ),
+        )
+        if verification.artifact_digest != evidence_digest:
+            raise QualificationCommandError("offline qualification verification returned the wrong digest")
         completed_at = evidence.completed_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
         published = json.loads(json.dumps(values))
         published["deployment"]["qualificationEvidence"] = [
@@ -1619,9 +1251,14 @@ class KubernetesQualificationRunner:
             raise QualificationCommandError("qualified administrative deployment report was unavailable")
         qualification = report.get("qualification")
         entries = qualification.get("evidence") if isinstance(qualification, dict) else None
-        if not isinstance(entries, list) or not any(
-            isinstance(entry, dict) and entry.get("qualification_id") == evidence.qualification_id and entry.get("artifact_digest") == evidence_digest and entry.get("scope") == evidence.SCOPE and entry.get("status") == "passed"
-            for entry in entries
+        if (
+            not isinstance(qualification, dict)
+            or qualification.get("trust") != "operator_asserted"
+            or not isinstance(entries, list)
+            or not any(
+                isinstance(entry, dict) and entry.get("qualification_id") == evidence.qualification_id and entry.get("artifact_digest") == evidence_digest and entry.get("scope") == evidence.SCOPE and entry.get("status") == "passed"
+                for entry in entries
+            )
         ):
             raise QualificationCommandError("administrative report did not expose bounded passing qualification evidence")
         return passing_path

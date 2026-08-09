@@ -28,6 +28,10 @@ from support.kubernetes_qualification import (
 )
 
 from deerflow.config.app_config import AppConfig
+from deerflow.qualification_evidence import (
+    QualificationEvidenceExpectation,
+    verify_qualification_evidence,
+)
 
 
 def test_kubernetes_commands_pin_kubeconfig_context_and_namespace(tmp_path: Path) -> None:
@@ -148,6 +152,22 @@ def test_qualification_evidence_is_strict_complete_and_digestible(tmp_path: Path
     assert wire["status"] == "passed"
     assert wire["scope"] == "durable_one_replica_pod_recovery"
     assert evidence_sha256(evidence_path) == "sha256:" + __import__("hashlib").sha256(evidence_path.read_bytes()).hexdigest()
+    verified = verify_qualification_evidence(
+        evidence_path.read_bytes(),
+        declared_digest=evidence_sha256(evidence_path),
+        expected=QualificationEvidenceExpectation(
+            qualification_id=evidence.qualification_id,
+            image_digest=evidence.image_digest,
+            chart_version=evidence.chart_version,
+            chart_digest=evidence.chart_digest,
+            configuration_digest=evidence.configuration_digest,
+            migration_head=evidence.migration_head,
+            scope=evidence.SCOPE,
+            namespace=evidence.namespace,
+            required_scenarios=evidence.REQUIRED_SCENARIOS,
+        ),
+    )
+    assert verified.qualification_id == evidence.qualification_id
     with pytest.raises(ValueError, match="scenario coverage"):
         KubernetesQualificationEvidence.from_dict({**wire, "scenarios": wire["scenarios"][:-1]})
     with pytest.raises(ValueError, match="unknown evidence fields"):
