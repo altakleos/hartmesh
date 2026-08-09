@@ -408,3 +408,48 @@ def test_lru_promotes_recently_used_thread(isolated_paths, tmp_path):
     assert ("default", "a") in provider._thread_sandboxes
     assert ("default", "b") not in provider._thread_sandboxes
     assert {("default", "a"), ("default", "c"), ("default", "d")} == set(provider._thread_sandboxes.keys())
+
+
+def test_lru_pressure_does_not_evict_invocation_owned_projection(
+    isolated_paths,
+    tmp_path,
+):
+    """A background consumer keeps its cached sandbox until its exact release."""
+    from deerflow.runtime.skill_projection import SkillProjectionCoordinator
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    cfg = _build_config(skills_dir)
+    coordinator = SkillProjectionCoordinator()
+
+    with (
+        patch("deerflow.config.get_app_config", return_value=cfg),
+        patch(
+            "deerflow.runtime.skill_projection.get_skill_projection_coordinator",
+            return_value=coordinator,
+        ),
+    ):
+        provider = LocalSandboxProvider(max_cached_threads=1)
+        sandbox_id = provider.acquire("owned", user_id="default")
+        coordinator.claim_committed_run(
+            user_id="default",
+            thread_id="owned",
+            run_id="run-owned",
+            snapshot_id=None,
+        )
+        token = coordinator.activate(
+            user_id="default",
+            thread_id="owned",
+            sandbox_id=sandbox_id,
+            run_id="run-owned",
+            snapshot_id=None,
+            consumer_id="subagent:background",
+        )
+
+        provider.acquire("pressure", user_id="default")
+
+    assert ("default", "owned") in provider._thread_sandboxes
+    assert provider.get(sandbox_id) is not None
+    clear = coordinator.release(token)
+    assert clear is not None
+    assert coordinator.finalize_release(clear)

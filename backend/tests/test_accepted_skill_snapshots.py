@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import os
@@ -28,6 +29,8 @@ from deerflow.runtime.accepted_invocation import (
     AcceptedInvocation,
     InvocationOrigin,
     PrincipalProjection,
+    ResolvedAgentMaterialV1,
+    ResolvedAgentRevision,
     canonical_digest,
 )
 from deerflow.runtime.agent_revision import (
@@ -43,6 +46,7 @@ from deerflow.runtime.skill_snapshot import (
     cleanup_abandoned_skill_snapshots,
     snapshot_effective_skills,
 )
+from deerflow.sandbox import tools as sandbox_tools
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import Skill, SkillCategory
@@ -144,6 +148,121 @@ def _accepted(revision) -> AcceptedInvocation:
     )
 
 
+def _runtime_for_revision(revision) -> SimpleNamespace:
+    material = revision.material
+    assert material is not None
+    return SimpleNamespace(
+        state={},
+        context={
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "user_id": "user-1",
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
+        },
+        config={"configurable": {"thread_id": "thread-1"}},
+    )
+
+
+def test_accepted_execution_rejects_live_skill_reads_before_sandbox_io(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    skill_file = _write_skill(tmp_path, body="ACCEPTED")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    runtime = _runtime_for_revision(revision)
+    sandbox_calls = 0
+
+    def unexpected_sandbox(_runtime):
+        nonlocal sandbox_calls
+        sandbox_calls += 1
+        raise AssertionError("live skill denial must precede sandbox IO")
+
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", unexpected_sandbox)
+
+    result = sandbox_tools.read_file_tool.func(
+        runtime,
+        "read mutable instructions",
+        "/mnt/skills/custom/immutable-skill/SKILL.md",
+    )
+
+    assert result == "Error: Permission denied reading file: /mnt/skills/custom/immutable-skill/SKILL.md"
+    assert sandbox_calls == 0
+    revision.material.release_process_material()
+
+
+@pytest.mark.parametrize(
+    ("invoke", "expected"),
+    [
+        (
+            lambda runtime: sandbox_tools.ls_tool.func(runtime, "list mutable skills", "/mnt/skills"),
+            "Error: Permission denied: /mnt/skills",
+        ),
+        (
+            lambda runtime: sandbox_tools.glob_tool.func(runtime, "find mutable skills", "**/*", "/mnt/skills/custom"),
+            "Error: Permission denied: /mnt/skills/custom",
+        ),
+        (
+            lambda runtime: sandbox_tools.grep_tool.func(runtime, "search mutable skills", "secret", "/mnt/skills/public"),
+            "Error: Permission denied: /mnt/skills/public",
+        ),
+        (
+            lambda runtime: sandbox_tools.bash_tool.func(runtime, "execute mutable script", "bash /mnt/skills/custom/tool/run.sh"),
+            "Error: Durable invocation may access only its accepted skill snapshot",
+        ),
+        (
+            lambda runtime: sandbox_tools.bash_tool.func(
+                runtime,
+                "escape accepted tree",
+                "cd /mnt/skills/.accepted/" + "a" * 64 + "; cat ../../custom/tool/SKILL.md",
+            ),
+            "Error: Durable invocation may access only its accepted skill snapshot",
+        ),
+    ],
+)
+def test_accepted_execution_rejects_all_live_skill_tool_bypasses_before_io(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+    invoke,
+    expected: str,
+) -> None:
+    skill_file = _write_skill(tmp_path, body="ACCEPTED")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    runtime = _runtime_for_revision(revision)
+    sandbox_calls = 0
+
+    def unexpected_sandbox(_runtime):
+        nonlocal sandbox_calls
+        sandbox_calls += 1
+        raise AssertionError("accepted skill denial must precede sandbox IO")
+
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", unexpected_sandbox)
+
+    assert invoke(runtime) == expected
+    assert sandbox_calls == 0
+    revision.material.release_process_material()
+
+
+def test_accepted_execution_allows_only_its_exact_snapshot_path(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    skill_file = _write_skill(tmp_path, body="ACCEPTED")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    runtime = _runtime_for_revision(revision)
+    material = revision.material
+    assert material is not None and material.skill_snapshot is not None
+    snapshot_root = f"/mnt/skills/.accepted/{material.skill_snapshot.snapshot_id}"
+
+    sandbox_tools._validate_runtime_skill_path(runtime, "/mnt/skills/.accepted")
+    sandbox_tools._validate_runtime_skill_path(runtime, f"{snapshot_root}/custom/immutable-skill/SKILL.md")
+    with pytest.raises(PermissionError, match="only its accepted skill snapshot"):
+        sandbox_tools._validate_runtime_skill_path(runtime, f"/mnt/skills/.accepted/{'f' * 64}/custom/other/SKILL.md")
+    material.release_process_material()
+
+
 def test_same_process_live_edit_cannot_replace_accepted_slash_skill(
     monkeypatch,
     tmp_path: Path,
@@ -237,6 +356,393 @@ def test_supporting_files_and_sandbox_reads_use_the_accepted_snapshot(
     assert sandbox.read_file(container_path) == "ACCEPTED RESOURCE"
     assert ".accepted" in container_path
     material.release_process_material()
+
+
+def test_local_sandbox_exposes_only_the_bound_accepted_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    """A same-subject sibling snapshot must not be visible inside the run."""
+    import deerflow.config as config_module
+    from deerflow.config import paths as paths_module
+    from deerflow.runtime.skill_projection import SkillProjectionClear, SkillProjectionEvidence
+    from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+    from deerflow.sandbox.sandbox_provider import AcceptedSkillSandboxBindingV1
+
+    first_file = _write_skill(
+        tmp_path / "first",
+        body="FIRST ACCEPTED RESOURCE",
+        name="first-skill",
+    )
+    second_file = _write_skill(
+        tmp_path / "second",
+        body="SIBLING SECRET RESOURCE",
+        name="second-skill",
+    )
+    first = snapshot_effective_skills(
+        (_parsed_skill(first_file),),
+        user_id="user-1",
+    )
+    second = snapshot_effective_skills(
+        (_parsed_skill(second_file),),
+        user_id="user-1",
+    )
+    assert first is not None and second is not None
+
+    projection = SimpleNamespace(
+        public=tmp_path / "view" / "public",
+        custom=tmp_path / "view" / "custom",
+        legacy=tmp_path / "view" / "legacy",
+        integrations=tmp_path / "view" / "integrations",
+    )
+    for path in vars(projection).values():
+        path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(paths_module, "get_paths", lambda: snapshot_paths)
+    monkeypatch.setattr(
+        config_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            sandbox=SimpleNamespace(mounts=[]),
+        ),
+    )
+    monkeypatch.setattr(
+        LocalSandboxProvider,
+        "_ensure_skills_projection",
+        staticmethod(lambda *_args, **_kwargs: projection),
+    )
+
+    provider = LocalSandboxProvider()
+    sandbox_id = provider.acquire_accepted_skills("thread-1", user_id="user-1")
+    provider.bind_accepted_skill_snapshot(
+        sandbox_id,
+        thread_id="thread-1",
+        user_id="user-1",
+        binding=AcceptedSkillSandboxBindingV1(
+            snapshot_id=first.snapshot_id,
+            run_id="run-first",
+            generation=1,
+            evidence=SkillProjectionEvidence.from_snapshot(first),
+        ),
+    )
+    sandbox = provider.get(sandbox_id)
+    assert sandbox is not None
+
+    selected_path = f"/mnt/skills/.accepted/{first.snapshot_id}/custom/first-skill/SKILL.md"
+    sibling_path = f"/mnt/skills/.accepted/{second.snapshot_id}/custom/second-skill/SKILL.md"
+    assert "FIRST ACCEPTED RESOURCE" in sandbox.read_file(selected_path)
+    with pytest.raises(FileNotFoundError):
+        sandbox.read_file(sibling_path)
+
+    assert provider.clear_accepted_skill_snapshot(
+        SkillProjectionClear(
+            user_id="user-1",
+            thread_id="thread-1",
+            sandbox_id=sandbox_id,
+            run_id="run-first",
+            generation=1,
+            snapshot_id=first.snapshot_id,
+        )
+    )
+    provider.release(sandbox_id)
+    cached_id = provider.acquire_accepted_skills("thread-1", user_id="user-1")
+    assert cached_id == sandbox_id
+    provider.bind_accepted_skill_snapshot(
+        cached_id,
+        thread_id="thread-1",
+        user_id="user-1",
+        binding=AcceptedSkillSandboxBindingV1(
+            snapshot_id=None,
+            run_id="run-empty",
+            generation=2,
+            evidence=SkillProjectionEvidence.from_snapshot(None),
+        ),
+    )
+    with pytest.raises(FileNotFoundError):
+        sandbox.read_file(selected_path)
+
+    assert provider.clear_accepted_skill_snapshot(
+        SkillProjectionClear(
+            user_id="user-1",
+            thread_id="thread-1",
+            sandbox_id=sandbox_id,
+            run_id="run-empty",
+            generation=2,
+            snapshot_id=None,
+        )
+    )
+    provider.release(cached_id)
+    provider.bind_accepted_skill_snapshot(
+        provider.acquire("thread-1", user_id="user-1"),
+        thread_id="thread-1",
+        user_id="user-1",
+        binding=AcceptedSkillSandboxBindingV1(
+            snapshot_id=second.snapshot_id,
+            evidence=SkillProjectionEvidence.from_snapshot(second),
+        ),
+    )
+    assert "SIBLING SECRET RESOURCE" in sandbox.read_file(sibling_path)
+    with pytest.raises(FileNotFoundError):
+        sandbox.read_file(selected_path)
+
+    # Provider release alone is not an invocation-clear authority.
+    provider.release(sandbox_id)
+    first.release()
+    second.release()
+
+
+def test_failed_active_view_publication_leaves_no_partial_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    skill_file = _write_skill(tmp_path, body="never partially visible")
+    snapshot = snapshot_effective_skills(
+        (_parsed_skill(skill_file),),
+        user_id="user-1",
+    )
+    assert snapshot is not None
+
+    def fail_publish(*_args: object) -> None:
+        raise OSError("publish failed")
+
+    monkeypatch.setattr(
+        snapshot_module.os,
+        "replace",
+        fail_publish,
+    )
+
+    with pytest.raises(OSError, match="publish failed"):
+        snapshot_module.bind_skill_snapshot_active_view(
+            user_id="user-1",
+            thread_id="thread-1",
+            snapshot_id=snapshot.snapshot_id,
+            evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+        )
+
+    view = snapshot_paths.skill_snapshot_active_view_dir(
+        "user-1",
+        "thread-1",
+    )
+    assert list(view.iterdir()) == []
+    assert not any(child.name.startswith(".binding-") for child in view.parent.iterdir())
+    snapshot.release()
+
+
+def test_replacement_waits_until_prior_projection_cleanup_finishes(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    """Ownership remains busy until physical cleanup of the prior run ends."""
+    import threading
+
+    import deerflow.config as config_module
+    from deerflow.config import paths as paths_module
+    from deerflow.runtime.skill_projection import (
+        SkillProjectionBusyError,
+        SkillProjectionEvidence,
+        get_skill_projection_coordinator,
+    )
+    from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+    from deerflow.sandbox.sandbox_provider import (
+        AcceptedSkillSandboxBindingV1,
+        release_accepted_skill_consumer,
+        reset_sandbox_provider,
+        set_sandbox_provider,
+    )
+
+    first_file = _write_skill(tmp_path / "stale-a", body="STALE A", name="stale-a")
+    second_file = _write_skill(tmp_path / "current-b", body="CURRENT B", name="current-b")
+    first = snapshot_effective_skills((_parsed_skill(first_file),), user_id="fenced-user")
+    second = snapshot_effective_skills((_parsed_skill(second_file),), user_id="fenced-user")
+    assert first is not None and second is not None
+    projection = SimpleNamespace(
+        public=tmp_path / "view" / "public",
+        custom=tmp_path / "view" / "custom",
+        legacy=tmp_path / "view" / "legacy",
+        integrations=tmp_path / "view" / "integrations",
+    )
+    for path in vars(projection).values():
+        path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(paths_module, "get_paths", lambda: snapshot_paths)
+    monkeypatch.setattr(
+        config_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            sandbox=SimpleNamespace(mounts=[]),
+        ),
+    )
+    monkeypatch.setattr(
+        LocalSandboxProvider,
+        "_ensure_skills_projection",
+        staticmethod(lambda *_args, **_kwargs: projection),
+    )
+
+    provider = LocalSandboxProvider()
+    set_sandbox_provider(provider)
+    coordinator = get_skill_projection_coordinator()
+    sandbox_id = provider.acquire_accepted_skills(
+        "thread-fenced",
+        user_id="fenced-user",
+    )
+
+    def activate(run_id: str, snapshot) -> object:
+
+        coordinator.claim_committed_run(
+            user_id="fenced-user",
+            thread_id="thread-fenced",
+            run_id=run_id,
+            snapshot_id=snapshot.snapshot_id,
+            evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+        )
+        token = coordinator.activate(
+            user_id="fenced-user",
+            thread_id="thread-fenced",
+            sandbox_id=sandbox_id,
+            run_id=run_id,
+            snapshot_id=snapshot.snapshot_id,
+            consumer_id=f"run:{run_id}:lead",
+        )
+        provider.bind_accepted_skill_snapshot(
+            sandbox_id,
+            thread_id="thread-fenced",
+            user_id="fenced-user",
+            binding=AcceptedSkillSandboxBindingV1.from_consumer_token(token),
+        )
+        return token
+
+    token_a = activate("run-stale-a", first)
+    clear_started = threading.Event()
+    allow_clear = threading.Event()
+    original_clear = provider.clear_accepted_skill_snapshot
+    original_release = provider.release
+    provider_releases: list[str] = []
+
+    def delayed_clear(clear):
+        clear_started.set()
+        assert allow_clear.wait(timeout=5)
+        return original_clear(clear)
+
+    monkeypatch.setattr(provider, "clear_accepted_skill_snapshot", delayed_clear)
+    monkeypatch.setattr(provider, "release", provider_releases.append)
+    result: list[bool] = []
+    cleanup = threading.Thread(
+        target=lambda: result.append(release_accepted_skill_consumer(token_a)),
+    )
+    cleanup.start()
+    assert clear_started.wait(timeout=5)
+
+    with pytest.raises(
+        SkillProjectionBusyError,
+        match="skill_projection_thread_busy",
+    ):
+        activate("run-current-b", second)
+
+    allow_clear.set()
+    cleanup.join(timeout=5)
+    assert not cleanup.is_alive()
+    assert result == [True]
+    assert provider_releases == [sandbox_id]
+
+    token_b = activate("run-current-b", second)
+
+    sandbox = provider.get(sandbox_id)
+    assert sandbox is not None
+    current_path = f"/mnt/skills/.accepted/{second.snapshot_id}/custom/current-b/SKILL.md"
+    stale_path = f"/mnt/skills/.accepted/{first.snapshot_id}/custom/stale-a/SKILL.md"
+    assert "CURRENT B" in sandbox.read_file(current_path)
+    with pytest.raises(FileNotFoundError):
+        sandbox.read_file(stale_path)
+
+    monkeypatch.setattr(provider, "clear_accepted_skill_snapshot", original_clear)
+    monkeypatch.setattr(provider, "release", original_release)
+    assert release_accepted_skill_consumer(token_b)
+    reset_sandbox_provider()
+    first.release()
+    second.release()
+
+
+def test_active_view_rejects_symlink_inserted_into_accepted_source(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    skill_file = _write_skill(tmp_path / "source-symlink", body="accepted")
+    support = skill_file.parent / "references" / "guide.txt"
+    support.parent.mkdir()
+    support.write_text("accepted support", encoding="utf-8")
+    snapshot = snapshot_effective_skills((_parsed_skill(skill_file),), user_id="symlink-user")
+    assert snapshot is not None
+
+    projection = snapshot.projections[0]
+    copied_support = snapshot.root / projection.category / projection.relative_path / "references" / "guide.txt"
+    copied_support.parent.chmod(0o700)
+    copied_support.chmod(0o600)
+    copied_support.unlink()
+    outside = tmp_path / "outside-secret"
+    outside.write_text("must not be copied", encoding="utf-8")
+    copied_support.symlink_to(outside)
+
+    with pytest.raises(SkillSnapshotError, match="skill_snapshot_symlink"):
+        snapshot_module.bind_skill_snapshot_active_view(
+            user_id="symlink-user",
+            thread_id="thread-symlink",
+            snapshot_id=snapshot.snapshot_id,
+            run_id="run-symlink",
+            generation=1,
+            evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+        )
+    snapshot.release()
+
+
+def test_active_view_rejects_source_mutation_during_verified_copy(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    skill_file = _write_skill(tmp_path / "source-race", body="accepted")
+    support = skill_file.parent / "references" / "guide.txt"
+    support.parent.mkdir()
+    support.write_text("accepted support", encoding="utf-8")
+    snapshot = snapshot_effective_skills((_parsed_skill(skill_file),), user_id="race-user")
+    assert snapshot is not None
+    projection = snapshot.projections[0]
+    copied_support = snapshot.root / projection.category / projection.relative_path / "references" / "guide.txt"
+    original_write = snapshot_module._write_private_file
+    mutated = False
+
+    def mutate_after_first_write(*args, **kwargs):
+        nonlocal mutated
+        original_write(*args, **kwargs)
+        if not mutated:
+            mutated = True
+            copied_support.chmod(0o600)
+            copied_support.write_text("changed during copy", encoding="utf-8")
+
+    monkeypatch.setattr(snapshot_module, "_write_private_file", mutate_after_first_write)
+    with pytest.raises(SkillSnapshotError, match="skill_snapshot_(changed|drift)"):
+        snapshot_module.bind_skill_snapshot_active_view(
+            user_id="race-user",
+            thread_id="thread-race",
+            snapshot_id=snapshot.snapshot_id,
+            run_id="run-race",
+            generation=1,
+            evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+        )
+    view = snapshot_paths.skill_snapshot_active_view_dir("race-user", "thread-race")
+    assert list(view.iterdir()) == []
+    snapshot.release()
 
 
 def test_deleting_live_tree_cannot_remove_accepted_supporting_material(
@@ -531,10 +1037,17 @@ def test_startup_cleanup_removes_only_abandoned_snapshots(
     abandoned = snapshot_paths.skill_snapshot_scope_dir("user-2") / ("f" * 64)
     abandoned.mkdir(parents=True)
     (abandoned / "partial").write_text("stale", encoding="utf-8")
+    abandoned_view = snapshot_paths.skill_snapshot_active_view_dir(
+        "user-3",
+        "thread-stale",
+    )
+    abandoned_view.mkdir(parents=True)
+    (abandoned_view / "partial").write_text("stale", encoding="utf-8")
 
-    assert cleanup_abandoned_skill_snapshots() == 1
+    assert cleanup_abandoned_skill_snapshots() == 2
     assert active.root.is_dir()
     assert not abandoned.exists()
+    assert not abandoned_view.exists()
     active.release()
 
 
@@ -581,6 +1094,360 @@ async def test_terminal_worker_releases_snapshot_after_execution(
 
     assert record.status is RunStatus.success
     assert not snapshot_root.exists()
+
+
+@pytest.mark.asyncio
+async def test_replacement_worker_waits_for_old_projection_before_start() -> None:
+    material = ResolvedAgentMaterialV1(
+        agent_id="lead-agent",
+        storage_source="test",
+        storage_version="1",
+        agent_config=None,
+        soul="",
+        model_profile={},
+    )
+    revision = ResolvedAgentRevision.from_material(material)
+    accepted = _accepted(revision)
+    manager = RunManager()
+    old = await manager.create_or_reject(
+        "thread-1",
+        user_id="user-1",
+        accepted_invocation=accepted,
+    )
+    await manager.set_status(old.run_id, RunStatus.running)
+    replacement = await manager.create_or_reject(
+        "thread-1",
+        user_id="user-1",
+        accepted_invocation=accepted,
+        multitask_strategy="interrupt",
+    )
+    from deerflow.runtime.skill_projection import (
+        SkillProjectionEvidence,
+        get_skill_projection_coordinator,
+    )
+
+    coordinator = get_skill_projection_coordinator()
+    reservation = coordinator.reserve_admission(
+        user_id="user-1",
+        thread_id="thread-1",
+        reservation_id="old:worker-wait",
+        snapshot_id=None,
+        evidence=SkillProjectionEvidence.from_snapshot(None),
+    )
+    coordinator.promote_admission(reservation, run_id=old.run_id)
+    old_token = coordinator.activate(
+        user_id="user-1",
+        thread_id="thread-1",
+        sandbox_id="sandbox:worker-wait",
+        run_id=old.run_id,
+        snapshot_id=None,
+        consumer_id=f"run:{old.run_id}:lead",
+    )
+    factory_called = asyncio.Event()
+
+    class _Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    def factory(**_kwargs):
+        factory_called.set()
+        return _Agent()
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    worker = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            replacement,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=factory,
+            graph_input={},
+            config={"context": {"user_id": "user-1"}},
+        )
+    )
+    try:
+        await asyncio.sleep(0.1)
+        assert not factory_called.is_set()
+        assert replacement.status is RunStatus.pending
+
+        clear = coordinator.release(old_token)
+        assert clear is not None
+        assert coordinator.finalize_release(clear)
+        await asyncio.wait_for(worker, timeout=2)
+
+        assert factory_called.is_set()
+        assert replacement.status is RunStatus.success
+    finally:
+        if not worker.done():
+            worker.cancel()
+            await worker
+        clear = coordinator.release(old_token)
+        if clear is not None:
+            coordinator.finalize_release(clear)
+        coordinator.release_unactivated_run(
+            user_id="user-1",
+            thread_id="thread-1",
+            run_id=replacement.run_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_superseded_worker_cancels_projection_wait_without_claiming() -> None:
+    material = ResolvedAgentMaterialV1(
+        agent_id="lead-agent",
+        storage_source="test",
+        storage_version="1",
+        agent_config=None,
+        soul="",
+        model_profile={},
+    )
+    accepted = _accepted(ResolvedAgentRevision.from_material(material))
+    manager = RunManager()
+    old = await manager.create_or_reject(
+        "thread-1",
+        user_id="user-1",
+        accepted_invocation=accepted,
+    )
+    await manager.set_status(old.run_id, RunStatus.running)
+    waiting = await manager.create_or_reject(
+        "thread-1",
+        user_id="user-1",
+        accepted_invocation=accepted,
+        multitask_strategy="interrupt",
+    )
+    from deerflow.runtime.skill_projection import (
+        SkillProjectionEvidence,
+        get_skill_projection_coordinator,
+    )
+
+    coordinator = get_skill_projection_coordinator()
+    reservation = coordinator.reserve_admission(
+        user_id="user-1",
+        thread_id="thread-1",
+        reservation_id="old:superseded-worker",
+        snapshot_id=None,
+        evidence=SkillProjectionEvidence.from_snapshot(None),
+    )
+    coordinator.promote_admission(reservation, run_id=old.run_id)
+    old_token = coordinator.activate(
+        user_id="user-1",
+        thread_id="thread-1",
+        sandbox_id="sandbox:superseded-worker",
+        run_id=old.run_id,
+        snapshot_id=None,
+        consumer_id=f"run:{old.run_id}:lead",
+    )
+    factory_called = asyncio.Event()
+
+    def factory(**_kwargs):
+        factory_called.set()
+        raise AssertionError("superseded worker must not build a graph")
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    worker = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            waiting,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=factory,
+            graph_input={},
+            config={"context": {"user_id": "user-1"}},
+        )
+    )
+    waiting.task = worker
+    try:
+        await asyncio.sleep(0.1)
+        assert not factory_called.is_set()
+
+        later = await manager.create_or_reject(
+            "thread-1",
+            user_id="user-1",
+            accepted_invocation=accepted,
+            multitask_strategy="interrupt",
+        )
+        await asyncio.wait_for(worker, timeout=2)
+
+        assert waiting.status is RunStatus.interrupted
+        assert not factory_called.is_set()
+        assert (
+            coordinator.current_token(
+                user_id="user-1",
+                thread_id="thread-1",
+            )
+            == old_token
+        )
+        assert (
+            coordinator.token_for_consumer(
+                user_id="user-1",
+                thread_id="thread-1",
+                run_id=waiting.run_id,
+                consumer_id=f"run:{waiting.run_id}:lead",
+            )
+            is None
+        )
+        assert later.status is RunStatus.pending
+    finally:
+        if not worker.done():
+            worker.cancel()
+            await worker
+        clear = coordinator.release(old_token)
+        if clear is not None:
+            coordinator.finalize_release(clear)
+
+
+@pytest.mark.asyncio
+async def test_terminal_worker_clears_explicit_empty_view_before_later_binding(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    import deerflow.config as config_module
+    from deerflow.config import paths as paths_module
+    from deerflow.runtime import agent_revision as revision_module
+    from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+    from deerflow.sandbox.sandbox_provider import (
+        AcceptedSkillSandboxBindingV1,
+        reset_sandbox_provider,
+        set_sandbox_provider,
+    )
+
+    projection = SimpleNamespace(
+        public=tmp_path / "view" / "public",
+        custom=tmp_path / "view" / "custom",
+        legacy=tmp_path / "view" / "legacy",
+        integrations=tmp_path / "view" / "integrations",
+    )
+    for path in vars(projection).values():
+        path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(paths_module, "get_paths", lambda: snapshot_paths)
+    monkeypatch.setattr(
+        config_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            sandbox=SimpleNamespace(mounts=[]),
+        ),
+    )
+    monkeypatch.setattr(
+        LocalSandboxProvider,
+        "_ensure_skills_projection",
+        staticmethod(lambda *_args, **_kwargs: projection),
+    )
+    monkeypatch.setattr(
+        revision_module,
+        "_skills",
+        lambda _app_config, *, user_id: ((), ()),
+    )
+    monkeypatch.setattr(
+        revision_module,
+        "load_agent_soul",
+        lambda *_args, **_kwargs: "",
+    )
+    revision = resolve_agent_revision(
+        {"configurable": {}},
+        app_config=AppConfig(sandbox=SandboxConfig(use="test")),
+        user_id="user-1",
+    )
+    assert revision.material is not None
+    assert revision.material.skill_snapshot is None
+
+    provider = LocalSandboxProvider()
+    set_sandbox_provider(provider)
+    manager = RunManager()
+    record = await manager.create_or_reject(
+        "thread-worker",
+        user_id="user-1",
+        accepted_invocation=_accepted(revision),
+    )
+    from deerflow.runtime.skill_projection import (
+        SkillProjectionEvidence,
+        get_skill_projection_coordinator,
+    )
+
+    coordinator = get_skill_projection_coordinator()
+    coordinator.claim_committed_run(
+        user_id="user-1",
+        thread_id="thread-worker",
+        run_id=record.run_id,
+        snapshot_id=None,
+        evidence=SkillProjectionEvidence.from_snapshot(None),
+    )
+    sandbox_id = provider.acquire_accepted_skills(
+        "thread-worker",
+        user_id="user-1",
+    )
+    token = coordinator.activate(
+        user_id="user-1",
+        thread_id="thread-worker",
+        sandbox_id=sandbox_id,
+        run_id=record.run_id,
+        snapshot_id=None,
+        consumer_id=f"run:{record.run_id}:lead",
+    )
+    provider.bind_accepted_skill_snapshot(
+        sandbox_id,
+        thread_id="thread-worker",
+        user_id="user-1",
+        binding=AcceptedSkillSandboxBindingV1.from_consumer_token(token),
+    )
+
+    class _Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    try:
+        await run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=lambda **_kwargs: _Agent(),
+            graph_input={},
+            config={"context": {"user_id": "user-1"}},
+        )
+
+        later_file = _write_skill(
+            tmp_path / "later",
+            body="LATER ACCEPTED RESOURCE",
+            name="later-skill",
+        )
+        later = snapshot_effective_skills(
+            (_parsed_skill(later_file),),
+            user_id="user-1",
+        )
+        assert later is not None
+        provider.bind_accepted_skill_snapshot(
+            provider.acquire_accepted_skills(
+                "thread-worker",
+                user_id="user-1",
+            ),
+            thread_id="thread-worker",
+            user_id="user-1",
+            binding=AcceptedSkillSandboxBindingV1(
+                snapshot_id=later.snapshot_id,
+                evidence=SkillProjectionEvidence.from_snapshot(later),
+            ),
+        )
+        sandbox = provider.get(sandbox_id)
+        assert sandbox is not None
+        assert "LATER ACCEPTED RESOURCE" in sandbox.read_file(f"/mnt/skills/.accepted/{later.snapshot_id}/custom/later-skill/SKILL.md")
+        later.release()
+    finally:
+        reset_sandbox_provider()
 
 
 @pytest.mark.asyncio

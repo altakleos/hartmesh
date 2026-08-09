@@ -194,6 +194,9 @@ def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("DEER_FLOW_HOME", str(home))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-key-not-used")
     monkeypatch.setenv("OPENAI_API_BASE", "https://example.invalid")
+    empty_skills = tmp_path / "skills"
+    empty_skills.mkdir()
+    monkeypatch.setenv("DEER_FLOW_SKILLS_PATH", str(empty_skills))
 
     staged_config = tmp_path / "config.yaml"
     staged_config.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")

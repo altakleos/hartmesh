@@ -639,15 +639,39 @@ Gateway copies every non-symlink regular file in each effective skill package—
 content-addressed process-local tree before admission. It re-reads the source before atomic
 publication and rejects unreadable, changing, symlinked, special-file, escaping, duplicate, or
 over-limit material. Bounds are 64 skills, 256 files and 8 MiB per skill, 2,048 files and
-32 MiB per invocation, 2 MiB per file, and 512 UTF-8 bytes per relative path. Published files
-are read-only; accepted executable files retain only their read/execute bits.
+32 MiB per invocation, 2 MiB per file, and 512 UTF-8 bytes per relative path. Published host
+files are write-protected; accepted executable files retain only their read/execute bits. That
+host mode is evidence integrity, not an OS boundary against a same-identity sandbox process.
 
 The snapshot-backed `Skill` records are the only durable-run inputs to prompt/slash activation,
 deferred discovery, skill-derived allowed-tool/secret policy, lead and subagent construction,
-and sandbox paths under `/mnt/skills/.accepted/<snapshot-digest>/...`. A later install, edit,
-delete, enable, or disable changes only a later invocation and revision. Empty accepted skill
-sets also remain empty and never fall back to the live registry. The ledger stores only stable
-skill identities, digests, counts, and bounded metadata—never bodies or host paths.
+and sandbox paths under `/mnt/skills/.accepted/<snapshot-digest>/...`. Durable sandbox
+acquisition omits every mutable live skill mount or upload; legacy non-durable execution
+retains those live views. File, list, search, and shell paths are also restricted to the
+exact accepted subtree before sandbox I/O. Before the first model
+call, the sandbox provider binds exactly that accepted digest to a per-user, per-thread active
+view; sibling snapshots are not mounted. An accepted empty skill set binds an empty view and
+never falls back to the live registry. Docker/AIO mounts nonempty accepted material through an
+OS-enforced read-only boundary while retaining sandbox command execution. A writable configured
+host mount that overlaps that accepted host view is rejected even under an unrelated container
+path. Local, E2B, and custom providers remain explicitly empty-only until they prove an
+equivalent boundary; a nonempty snapshot on any of them fails before graph/model execution.
+Use AIO for the production path that executes nonempty durable accepted skills.
+
+Admission reserves one process-local projection owner inside the thread admission lock. Atomic
+creation promotes that owner to the committed run; equal known-key replay bypasses the busy
+check and unequal/new work remains thread-busy. The coordinator issues exact
+run/generation/consumer tokens. Lead and background subagent consumers hold independent tokens,
+and only the last exact release may begin provider cleanup. Ownership remains busy in a
+two-phase clearing state until the provider proves the old bytes cleared, never published, or
+quarantined and an exact CAS finalizes removal. Failed clears retry with the same proof; an
+unproven custom-provider failure remains busy and cannot recycle its sandbox. Stale or
+wrong-run cleanup cannot remove a later invocation's view. Once material clear succeeds, later resource-parking
+failure does not strand ownership because it cannot make the removed bytes reachable again.
+Local LRU and Docker/AIO idle cleanup skip invocation-owned sandboxes; explicit process shutdown
+may tear them down under the existing orphan-terminalization contract. A later install, edit,
+delete, enable, or disable changes only a later invocation and revision. The ledger stores only
+stable skill identities, digests, counts, and bounded metadata—never bodies or host paths.
 
 The accepting worker receives and uses that exact captured object; lead and subagents inherit
 its revision digest and extension generation for audit. After restart, the worker resolves

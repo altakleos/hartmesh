@@ -114,6 +114,51 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
+_SKILL_PROJECTION_CLAIM_POLL_SECONDS = 0.05
+_SKILL_PROJECTION_CLAIM_TIMEOUT_SECONDS = 5.0
+
+
+async def _await_accepted_skill_projection_claim(
+    *,
+    user_id: str,
+    thread_id: str,
+    run_id: str,
+    material: Any,
+    abort_event: asyncio.Event,
+) -> bool:
+    """Wait boundedly for an interrupted predecessor's exact projection release."""
+    from deerflow.runtime.skill_projection import (
+        SkillProjectionBusyError,
+        SkillProjectionEvidence,
+        get_skill_projection_coordinator,
+    )
+
+    snapshot = material.skill_snapshot
+    snapshot_id = None if snapshot is None else snapshot.snapshot_id
+    evidence = SkillProjectionEvidence.from_snapshot(snapshot)
+    coordinator = get_skill_projection_coordinator()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _SKILL_PROJECTION_CLAIM_TIMEOUT_SECONDS
+    while not abort_event.is_set():
+        if coordinator.try_claim_committed_run(
+            user_id=user_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            snapshot_id=snapshot_id,
+            evidence=evidence,
+        ):
+            return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise SkillProjectionBusyError()
+        try:
+            await asyncio.wait_for(
+                abort_event.wait(),
+                timeout=min(_SKILL_PROJECTION_CLAIM_POLL_SECONDS, remaining),
+            )
+        except TimeoutError:
+            pass
+    return False
 
 
 async def _persist_delivery_receipt(
@@ -729,6 +774,7 @@ async def run_agent(
     accepted_constraints = None
     accepted_for_cleanup = record.accepted_invocation
     pinned_material_for_cleanup = accepted_for_cleanup.agent_revision.material if accepted_for_cleanup is not None else None
+    skill_binding_user_id: str | None = None
 
     async def _finish_cancellation(
         action: str,
@@ -801,6 +847,16 @@ async def run_agent(
             run_id,
             abort_event=record.abort_event,
         )
+
+        if pinned_material_for_cleanup is not None:
+            skill_binding_user_id = record.user_id or get_effective_user_id()
+            await _await_accepted_skill_projection_claim(
+                user_id=skill_binding_user_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                material=pinned_material_for_cleanup,
+                abort_event=record.abort_event,
+            )
 
         start_outcome = await run_manager.try_start(run_id)
         if start_outcome is not RunStartOutcome.started:
@@ -912,6 +968,7 @@ async def run_agent(
             runtime_ctx["__run_journal"] = journal
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
+        skill_binding_user_id = resolve_runtime_user_id(runtime)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
 
         # Inject RunJournal as a LangChain callback handler.
@@ -1577,6 +1634,38 @@ async def run_agent(
         if record.finalizing:
             await run_manager.set_finalizing(run_id, False)
 
+        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+        projection_coordinator = get_skill_projection_coordinator()
+        projection_token = None
+        if skill_binding_user_id is not None:
+            projection_token = projection_coordinator.token_for_consumer(
+                user_id=skill_binding_user_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                consumer_id=f"run:{run_id}:lead",
+            )
+        if projection_token is not None:
+            from deerflow.sandbox.sandbox_provider import release_accepted_skill_consumer
+
+            try:
+                await asyncio.to_thread(
+                    release_accepted_skill_consumer,
+                    projection_token,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to release accepted skill projection consumer for run %s",
+                    run_id,
+                    exc_info=True,
+                )
+        elif skill_binding_user_id is not None:
+            projection_coordinator.release_unactivated_run(
+                user_id=skill_binding_user_id,
+                thread_id=thread_id,
+                run_id=run_id,
+            )
+
         if pinned_material_for_cleanup is not None:
             try:
                 await asyncio.to_thread(pinned_material_for_cleanup.release_process_material)
@@ -1586,7 +1675,6 @@ async def run_agent(
                     run_id,
                     exc_info=True,
                 )
-
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
 

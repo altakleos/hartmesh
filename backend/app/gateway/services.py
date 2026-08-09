@@ -11,6 +11,8 @@ import asyncio
 import json
 import logging
 import re
+import threading
+import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
@@ -135,14 +137,14 @@ from deerflow.runtime.runs.lifecycle_query import (
 )
 from deerflow.runtime.runs.manager import IdempotencyConflictError
 from deerflow.runtime.runs.naming import resolve_root_run_name
-from deerflow.runtime.runs.store.base import CancellationRequestOutcome
+from deerflow.runtime.runs.store.base import AdmissionOutcome, CancellationRequestOutcome
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
     redact_config_secrets,
     validate_run_metadata_secrets,
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
-from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.runtime.user_context import DEFAULT_USER_ID, reset_current_user, set_current_user
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -1645,6 +1647,116 @@ def _base_origin_digest(
     return canonical_digest({"version": 1, "origin": origin.base_json()})
 
 
+_PROCESS_MATERIAL_CLEANUP_TIMEOUT_SECONDS = 5.0
+
+
+async def _release_process_material_bounded(material: ResolvedAgentMaterialV1) -> None:
+    """Release process material off-loop without letting cancellation orphan it."""
+    cleanup = asyncio.create_task(asyncio.to_thread(material.release_process_material))
+    deadline = asyncio.get_running_loop().time() + _PROCESS_MATERIAL_CLEANUP_TIMEOUT_SECONDS
+    cancellation: asyncio.CancelledError | None = None
+    while not cleanup.done():
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            cleanup.add_done_callback(_consume_task_result)
+            logger.warning(
+                "Accepted agent material cleanup exceeded its bounded deadline error_class=TimeoutError",
+            )
+            break
+        try:
+            await asyncio.wait_for(asyncio.shield(cleanup), timeout=remaining)
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
+        except TimeoutError:
+            cleanup.add_done_callback(_consume_task_result)
+            logger.warning(
+                "Accepted agent material cleanup exceeded its bounded deadline error_class=TimeoutError",
+            )
+            break
+        except Exception as exc:
+            logger.warning(
+                "Accepted agent material cleanup failed error_class=%s",
+                type(exc).__name__,
+            )
+            break
+    if cancellation is not None:
+        raise cancellation
+
+
+class _RevisionResolutionOwnership:
+    """Transfer a resolver-produced process-material lease without a cancel gap."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._resolved: Any | None = None
+
+    def resolve(self, config: dict[str, Any], *, app_config: Any, user_id: str | None) -> Any:
+        revision = resolve_agent_revision(
+            config,
+            app_config=app_config,
+            user_id=user_id,
+        )
+        release_material: ResolvedAgentMaterialV1 | None = None
+        with self._lock:
+            if self._abandoned:
+                release_material = revision.material
+            else:
+                self._resolved = revision
+        if isinstance(release_material, ResolvedAgentMaterialV1):
+            try:
+                release_material.release_process_material()
+            except Exception as exc:  # pragma: no cover - defensive cleanup diagnostic
+                logger.warning(
+                    "Late accepted agent material cleanup failed error_class=%s",
+                    type(exc).__name__,
+                )
+        return revision
+
+    def abandon(self) -> ResolvedAgentMaterialV1 | None:
+        with self._lock:
+            self._abandoned = True
+            revision = self._resolved
+            self._resolved = None
+        material = getattr(revision, "material", None)
+        return material if isinstance(material, ResolvedAgentMaterialV1) else None
+
+    def take(self, revision: Any) -> Any:
+        with self._lock:
+            resolved = self._resolved
+            self._resolved = None
+        return resolved if resolved is not None else revision
+
+
+async def _resolve_agent_revision_cancellation_safe(
+    config: dict[str, Any],
+    *,
+    app_config: Any,
+    user_id: str | None,
+) -> Any:
+    ownership = _RevisionResolutionOwnership()
+    resolution = asyncio.create_task(
+        asyncio.to_thread(
+            ownership.resolve,
+            config,
+            app_config=app_config,
+            user_id=user_id,
+        )
+    )
+    try:
+        revision = await asyncio.shield(resolution)
+    except asyncio.CancelledError:
+        material = ownership.abandon()
+        resolution.add_done_callback(_consume_task_result)
+        if material is not None:
+            try:
+                await _release_process_material_bounded(material)
+            except asyncio.CancelledError:
+                pass
+        raise
+    return ownership.take(revision)
+
+
 async def _seal_accepted_invocation(
     *,
     request: Any,
@@ -1701,8 +1813,7 @@ async def _seal_accepted_invocation(
     )
 
     app_config = run_ctx.app_config or get_app_config()
-    revision = await asyncio.to_thread(
-        resolve_agent_revision,
+    revision = await _resolve_agent_revision_cancellation_safe(
         config,
         app_config=app_config,
         user_id=principal.user_id,
@@ -1761,18 +1872,25 @@ async def _seal_accepted_invocation(
             diagnostics=(),
         )
     else:
-        context_contributions = await contributor_host.contribute_run_context(
-            RunContextContributionRequestV1(
-                principal=public_principal,
-                origin=public_origin,
-                thread_id=intent.thread_id,
-                agent_revision=ResolvedAgentRevisionReferenceV1(
-                    agent_id=revision.agent_id,
-                    digest=revision.digest,
-                ),
-                external_key_reference=(normalize_external_key(intent.external_key) if intent.external_key is not None else None),
+        try:
+            context_contributions = await contributor_host.contribute_run_context(
+                RunContextContributionRequestV1(
+                    principal=public_principal,
+                    origin=public_origin,
+                    thread_id=intent.thread_id,
+                    agent_revision=ResolvedAgentRevisionReferenceV1(
+                        agent_id=revision.agent_id,
+                        digest=revision.digest,
+                    ),
+                    external_key_reference=(normalize_external_key(intent.external_key) if intent.external_key is not None else None),
+                )
             )
-        )
+        except BaseException:
+            try:
+                await _release_unattached_agent_material(config)
+            except asyncio.CancelledError:
+                pass
+            raise
     for diagnostic in context_contributions.diagnostics:
         logger.warning(
             "Optional invocation contributor omitted capability_id=%s contribution_id=%s diagnostic_code=%s error_class=%s correlation_id=%s",
@@ -1869,8 +1987,8 @@ async def _release_unattached_agent_material(config: dict[str, Any]) -> None:
     runtime_context = config.get("context")
     material = runtime_context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY) if isinstance(runtime_context, dict) else None
     if isinstance(material, ResolvedAgentMaterialV1):
-        await asyncio.to_thread(material.release_process_material)
         runtime_context.pop(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY, None)
+        await _release_process_material_bounded(material)
 
 
 class _GatewayLaunchNormalizer:
@@ -2310,6 +2428,42 @@ class _GatewayDurableRuns:
 
     def __init__(self, request: Request) -> None:
         self._request = request
+        self._projection_reservations: dict[int, object] = {}
+        self._projection_supersessions: dict[int, object] = {}
+
+    @staticmethod
+    async def _resolve_cancellation_safe(awaitable, *, resolution_seconds: float = 5.0):
+        """Bound resolution of an admission-store operation after cancellation.
+
+        SQL admission can commit in a worker thread after the awaiting task has
+        received cancellation. Shielding gives that operation a short, absolute
+        window to report database truth without letting shutdown wait forever.
+        """
+        task = asyncio.create_task(awaitable)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as cancellation:
+            if task.done():
+                return task.result()
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + resolution_seconds
+            while not task.done():
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    task.add_done_callback(_consume_task_result)
+                    raise cancellation
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.shield(task),
+                        timeout=remaining,
+                    )
+                except TimeoutError:
+                    task.add_done_callback(_consume_task_result)
+                    raise cancellation
+                except asyncio.CancelledError:
+                    if task.done():
+                        return task.result()
+            return task.result()
 
     @asynccontextmanager
     async def admission_scope(self, thread_id: str):
@@ -2317,11 +2471,71 @@ class _GatewayDurableRuns:
             yield
 
     async def prepare_admission(self, launch: PreparedLaunch) -> None:
-        await ensure_checkpoint_history_seeded(
-            self._request,
-            thread_id=launch.thread_id,
-            assistant_id=launch.assistant_id,
-        )
+        run_manager = get_run_manager(self._request)
+        launch_identity = id(launch)
+        if launch.external_scope is not None and launch.external_key is not None:
+            existing = await run_manager.get_by_external_identity(
+                launch.external_scope,
+                launch.external_key,
+                user_id=launch.user_id,
+            )
+            if existing is not None:
+                # The optimistic lookup raced a creator. Let the atomic store
+                # classify equal replay versus digest conflict; neither case
+                # is blocked by the creator's still-live projection.
+                return
+
+        accepted = launch.accepted_invocation
+        material = accepted.agent_revision.material if accepted is not None else None
+        if material is not None:
+            from deerflow.runtime.skill_projection import (
+                SkillProjectionBusyError,
+                SkillProjectionEvidence,
+                get_skill_projection_coordinator,
+            )
+
+            snapshot = material.skill_snapshot
+            try:
+                reservation = get_skill_projection_coordinator().reserve_admission(
+                    user_id=launch.user_id or DEFAULT_USER_ID,
+                    thread_id=launch.thread_id,
+                    reservation_id=f"admission:{uuid.uuid4().hex}",
+                    snapshot_id=None if snapshot is None else snapshot.snapshot_id,
+                    evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+                )
+            except SkillProjectionBusyError as exc:
+                coordinator = get_skill_projection_coordinator()
+                replacement = launch.multitask_strategy in ("interrupt", "rollback")
+                if not replacement:
+                    raise ConflictError(
+                        "Thread has an invocation-owned skill projection",
+                    ) from exc
+                try:
+                    supersession = coordinator.fence_committed_owner(
+                        user_id=launch.user_id or DEFAULT_USER_ID,
+                        thread_id=launch.thread_id,
+                    )
+                except SkillProjectionBusyError:
+                    raise ConflictError(
+                        "Thread has an invocation-owned skill projection",
+                    ) from exc
+                self._projection_supersessions[launch_identity] = supersession
+            else:
+                self._projection_reservations[launch_identity] = reservation
+        try:
+            await ensure_checkpoint_history_seeded(
+                self._request,
+                thread_id=launch.thread_id,
+                assistant_id=launch.assistant_id,
+            )
+        except (Exception, asyncio.CancelledError):
+            reservation = self._projection_reservations.pop(launch_identity, None)
+            self._projection_supersessions.pop(launch_identity, None)
+            if reservation is not None:
+                from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+                get_skill_projection_coordinator().abort_admission(reservation)
+            raise
 
     async def find_by_external_identity(
         self,
@@ -2335,41 +2549,138 @@ class _GatewayDurableRuns:
 
     async def admit(self, launch: PreparedLaunch) -> DurableAdmission | RunRecord:
         run_manager = get_run_manager(self._request)
+        launch_identity = id(launch)
+        reservation = self._projection_reservations.pop(launch_identity, None)
+        supersession = self._projection_supersessions.pop(launch_identity, None)
         if launch.external_scope is None:
-            return await run_manager.create_or_reject(
-                launch.thread_id,
-                launch.assistant_id,
-                on_disconnect=launch.on_disconnect,
-                metadata=thaw_host_value(launch.metadata),
-                kwargs=thaw_host_value(launch.kwargs),
-                multitask_strategy=launch.multitask_strategy,
-                model_name=launch.model_name,
-                user_id=launch.user_id,
-                accepted_invocation=launch.accepted_invocation,
-            )
+            try:
+                record = await self._resolve_cancellation_safe(
+                    run_manager.create_or_reject(
+                        launch.thread_id,
+                        launch.assistant_id,
+                        on_disconnect=launch.on_disconnect,
+                        metadata=thaw_host_value(launch.metadata),
+                        kwargs=thaw_host_value(launch.kwargs),
+                        multitask_strategy=launch.multitask_strategy,
+                        model_name=launch.model_name,
+                        user_id=launch.user_id,
+                        accepted_invocation=launch.accepted_invocation,
+                    )
+                )
+            except (Exception, asyncio.CancelledError):
+                if reservation is not None:
+                    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+                    get_skill_projection_coordinator().abort_admission(reservation)
+                raise
+            if reservation is not None:
+                from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+                get_skill_projection_coordinator().promote_admission(
+                    reservation,
+                    run_id=record.run_id,
+                )
+            elif supersession is not None:
+                from deerflow.runtime.skill_projection import (
+                    SkillProjectionEvidence,
+                    get_skill_projection_coordinator,
+                )
+
+                snapshot = launch.accepted_invocation.agent_revision.material.skill_snapshot
+                get_skill_projection_coordinator().promote_supersession(
+                    supersession,
+                    run_id=record.run_id,
+                    snapshot_id=None if snapshot is None else snapshot.snapshot_id,
+                    evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+                )
+            return record
         if launch.external_key is None or launch.request_digest is None or launch.request_digest_version is None or launch.caller_intent_json is None or launch.caller_intent_digest is None or launch.caller_intent_digest_version is None:
+            if reservation is not None:
+                from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+                get_skill_projection_coordinator().abort_admission(reservation)
             raise RuntimeError("keyed launch is missing canonical admission evidence")
-        admission = await run_manager.ensure_or_reject(
-            launch.thread_id,
-            launch.assistant_id,
-            on_disconnect=launch.on_disconnect,
-            metadata=thaw_host_value(launch.metadata),
-            kwargs=thaw_host_value(launch.kwargs),
-            multitask_strategy=launch.multitask_strategy,
-            model_name=launch.model_name,
-            user_id=launch.user_id,
-            accepted_invocation=launch.accepted_invocation,
-            external_scope=launch.external_scope,
-            external_key=launch.external_key,
-            request_digest=launch.request_digest,
-            request_digest_version=launch.request_digest_version,
-            caller_intent_json=thaw_host_value(launch.caller_intent_json),
-            caller_intent_digest=launch.caller_intent_digest,
-            caller_intent_digest_version=launch.caller_intent_digest_version,
-        )
+        try:
+            admission = await self._resolve_cancellation_safe(
+                run_manager.ensure_or_reject(
+                    launch.thread_id,
+                    launch.assistant_id,
+                    on_disconnect=launch.on_disconnect,
+                    metadata=thaw_host_value(launch.metadata),
+                    kwargs=thaw_host_value(launch.kwargs),
+                    multitask_strategy=launch.multitask_strategy,
+                    model_name=launch.model_name,
+                    user_id=launch.user_id,
+                    accepted_invocation=launch.accepted_invocation,
+                    external_scope=launch.external_scope,
+                    external_key=launch.external_key,
+                    request_digest=launch.request_digest,
+                    request_digest_version=launch.request_digest_version,
+                    caller_intent_json=thaw_host_value(launch.caller_intent_json),
+                    caller_intent_digest=launch.caller_intent_digest,
+                    caller_intent_digest_version=launch.caller_intent_digest_version,
+                )
+            )
+        except (Exception, asyncio.CancelledError) as admission_error:
+            try:
+                committed = await self._resolve_cancellation_safe(
+                    run_manager.get_by_external_identity(
+                        launch.external_scope,
+                        launch.external_key,
+                        user_id=launch.user_id,
+                    )
+                )
+            except (Exception, asyncio.CancelledError):
+                committed = None
+            if committed is None:
+                if reservation is not None:
+                    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+                    get_skill_projection_coordinator().abort_admission(reservation)
+                raise admission_error
+            same_intent = (
+                committed.caller_intent_json == thaw_host_value(launch.caller_intent_json) and committed.caller_intent_digest == launch.caller_intent_digest and committed.caller_intent_digest_version == launch.caller_intent_digest_version
+            )
+            outcome = AdmissionOutcome.known_same if same_intent else AdmissionOutcome.key_conflict
+            if reservation is not None:
+                from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+                get_skill_projection_coordinator().abort_admission(reservation)
+            return DurableAdmission(record=committed, outcome=outcome)
+        if reservation is not None:
+            from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+            coordinator = get_skill_projection_coordinator()
+            if admission.outcome is AdmissionOutcome.created:
+                coordinator.promote_admission(
+                    reservation,
+                    run_id=admission.record.run_id,
+                )
+            else:
+                coordinator.abort_admission(reservation)
+        elif supersession is not None and admission.outcome is AdmissionOutcome.created:
+            from deerflow.runtime.skill_projection import (
+                SkillProjectionEvidence,
+                get_skill_projection_coordinator,
+            )
+
+            snapshot = launch.accepted_invocation.agent_revision.material.skill_snapshot
+            get_skill_projection_coordinator().promote_supersession(
+                supersession,
+                run_id=admission.record.run_id,
+                snapshot_id=None if snapshot is None else snapshot.snapshot_id,
+                evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+            )
         return DurableAdmission(record=admission.record, outcome=admission.outcome)
 
     async def fail_start(self, record: RunRecord, error: str) -> None:
+        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+        get_skill_projection_coordinator().release_unactivated_run(
+            user_id=record.user_id or DEFAULT_USER_ID,
+            thread_id=record.thread_id,
+            run_id=record.run_id,
+        )
         await get_run_manager(self._request).fail_start_if_pending(
             record.run_id,
             error=error,

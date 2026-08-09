@@ -72,6 +72,9 @@ def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DEER_FLOW_HOME", str(home))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-key-not-used-because-llm-is-mocked")
     monkeypatch.setenv("OPENAI_API_BASE", "https://example.invalid")
+    empty_skills = tmp_path / "skills"
+    empty_skills.mkdir()
+    monkeypatch.setenv("DEER_FLOW_SKILLS_PATH", str(empty_skills))
 
     # Hermetic config: do not depend on whether the dev machine has a real
     # ``config.yaml`` at the repo root. CI's ``actions/checkout`` only ships
@@ -81,6 +84,13 @@ def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     staged_config = tmp_path / "config.yaml"
     staged_config.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(staged_config))
+
+    # This exercises setup_agent rather than durable skill projection. Keep the
+    # accepted skill set explicitly empty so LocalSandboxProvider's intentional
+    # empty-only durable capability does not depend on repository skill content.
+    staged_extensions_config = tmp_path / "extensions_config.json"
+    staged_extensions_config.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(staged_extensions_config))
 
     return home
 

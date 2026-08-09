@@ -700,7 +700,18 @@ class InvocationRuntime:
                     # the worker's finally block. The idempotent completion
                     # callback closes that narrow process-local lease gap.
                     def release_process_material(_completed_task) -> None:
-                        asyncio.create_task(asyncio.to_thread(material.release_process_material))
+                        def release_cancelled_before_start() -> None:
+                            from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+                            from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+                            get_skill_projection_coordinator().release_unactivated_run(
+                                user_id=record.user_id or DEFAULT_USER_ID,
+                                thread_id=record.thread_id,
+                                run_id=record.run_id,
+                            )
+                            material.release_process_material()
+
+                        asyncio.create_task(asyncio.to_thread(release_cancelled_before_start))
 
                     add_done_callback(release_process_material)
                 worker_owns_material = True

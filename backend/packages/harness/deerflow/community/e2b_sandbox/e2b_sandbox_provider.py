@@ -54,7 +54,11 @@ from deerflow.config import get_app_config
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import (
+    AcceptedSkillSandboxBindingError,
+    AcceptedSkillSandboxBindingV1,
+    SandboxProvider,
+)
 
 from ..aio_sandbox.ownership import (
     OwnershipBackendError,
@@ -99,6 +103,9 @@ MAX_E2B_TIMEOUT = 24 * 60 * 60
 META_KEY_USER = "deer_flow_user"
 META_KEY_THREAD = "deer_flow_thread"
 META_KEY_PROVIDER = "deer_flow_provider"
+META_KEY_SKILL_PROFILE = "deer_flow_skill_profile"
+META_VAL_SKILL_PROFILE_LEGACY = "legacy_v1"
+META_VAL_SKILL_PROFILE_ACCEPTED = "accepted_v1"
 META_KEY_GATEWAY = "deer_flow_gateway"
 META_KEY_CREATED_AT = "deer_flow_created_at"
 META_KEY_CAPACITY_LEDGER = "deer_flow_capacity_ledger"
@@ -137,6 +144,8 @@ class E2BSandboxProvider(SandboxProvider):
         self._sandboxes: dict[str, E2BSandbox] = {}
         # (user_id, thread_id) -> sandbox id for fast in-process lookup.
         self._thread_sandboxes: dict[tuple[str, str], str] = {}
+        # Remote projection currently installed in each active sandbox.
+        self._accepted_skill_bindings: dict[str, str | None] = {}
         # Per-(user,thread) lock to serialise acquire() and release() state
         # transitions without holding the provider-wide lock across remote IO.
         self._thread_locks: dict[tuple[str, str], threading.Lock] = {}
@@ -371,50 +380,333 @@ class E2BSandboxProvider(SandboxProvider):
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
             with self._get_thread_lock(thread_id, effective_user_id):
-                sandbox_id = self._acquire_internal(thread_id, user_id=effective_user_id)
-                self._sync_accepted_skill_snapshots(
-                    sandbox_id,
-                    user_id=effective_user_id,
-                )
-                return sandbox_id
-        sandbox_id = self._acquire_internal(thread_id, user_id=effective_user_id)
-        self._sync_accepted_skill_snapshots(
-            sandbox_id,
-            user_id=effective_user_id,
-        )
-        return sandbox_id
+                return self._acquire_internal(thread_id, user_id=effective_user_id)
+        return self._acquire_internal(thread_id, user_id=effective_user_id)
 
-    def _sync_accepted_skill_snapshots(
+    def acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
+        """Create a VM without uploading any mutable live skill projection."""
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        key = self._thread_key(thread_id, effective_user_id)
+        with self._get_thread_lock(thread_id, effective_user_id):
+            with self._lock:
+                existing = self._thread_sandboxes.get(key)
+                accepted_ids = getattr(self, "_accepted_only_sandbox_ids", set())
+            if existing is not None:
+                if existing in accepted_ids:
+                    return existing
+                raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_isolation_conflict")
+            created = self._create_sandbox(
+                thread_id,
+                user_id=effective_user_id,
+                accepted_skills_only=True,
+            )
+            with self._lock:
+                accepted_ids = getattr(self, "_accepted_only_sandbox_ids", None)
+                if accepted_ids is None:
+                    accepted_ids = self._accepted_only_sandbox_ids = set()
+                accepted_ids.add(created)
+                # E2B IDs may be deterministic and reused after a remote VM is
+                # recreated. Quarantine proves only the discarded incarnation;
+                # successful registration of a new accepted-only instance
+                # invalidates that proof before any bind/cleanup decision.
+                getattr(self, "_accepted_skill_quarantines", {}).pop(
+                    created,
+                    None,
+                )
+            return created
+
+    def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
+        with self._lock:
+            return sandbox_id in getattr(self, "_accepted_only_sandbox_ids", set())
+
+    def _project_accepted_skill_snapshot(
         self,
         sandbox_id: str,
         *,
         user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
     ) -> None:
-        """Make newly accepted process-local snapshots visible on cache hits."""
+        """Stage, verify, and atomically publish one accepted snapshot."""
         from deerflow.config.paths import get_paths
+        from deerflow.runtime.skill_projection import SkillProjectionEvidence
+        from deerflow.runtime.skill_snapshot import (
+            DEFAULT_SKILL_SNAPSHOT_LIMITS,
+            _capture_verified_projection,
+            load_skill_projection_evidence,
+        )
 
-        root = get_paths().skill_snapshot_scope_dir(user_id)
-        root.mkdir(parents=True, exist_ok=True)
+        snapshot_id = binding.snapshot_id
+        root = None
+        evidence = binding.evidence
+        if snapshot_id is not None:
+            root = get_paths().skill_snapshot_scope_dir(user_id) / snapshot_id
+            if not root.is_dir() or root.is_symlink():
+                raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_unavailable")
+            if not isinstance(evidence, SkillProjectionEvidence):
+                evidence = load_skill_projection_evidence(
+                    user_id=user_id,
+                    snapshot_id=snapshot_id,
+                )
+            captured, digest, file_count, total_bytes = _capture_verified_projection(
+                root,
+                evidence,
+                DEFAULT_SKILL_SNAPSHOT_LIMITS,
+            )
+            confirmed, confirmed_digest, confirmed_files, confirmed_bytes = _capture_verified_projection(
+                root,
+                evidence,
+                DEFAULT_SKILL_SNAPSHOT_LIMITS,
+            )
+            if confirmed != captured or confirmed_digest != digest or confirmed_files != file_count or confirmed_bytes != total_bytes:
+                raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_changed")
+        elif evidence is not None and not (isinstance(evidence, SkillProjectionEvidence) and evidence.snapshot_id is None):
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_evidence_invalid")
+        else:
+            captured = ()
         with self._lock:
             sandbox = self._sandboxes.get(sandbox_id)
         client = getattr(sandbox, "client", None)
         if client is None:
             raise RuntimeError("accepted skill snapshot sandbox is unavailable")
+        destination, stage, previous = self._accepted_skill_projection_paths(binding)
         try:
-            skills_container_path = get_app_config().skills.container_path
-        except FileNotFoundError:
-            from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-
-            skills_container_path = DEFAULT_SKILLS_CONTAINER_PATH
-        destination = f"{skills_container_path.rstrip('/')}/.accepted"
-        try:
-            client.commands.run(f"set -e; mkdir -p {shlex.quote(destination)}; chmod -R u+w {shlex.quote(destination)} 2>/dev/null || true; find {shlex.quote(destination)} -mindepth 1 -delete")
+            self._run_accepted_projection_command(
+                client,
+                f"set -e; rm -rf {shlex.quote(stage)} {shlex.quote(previous)}; mkdir -p {shlex.quote(stage)}; chmod 700 {shlex.quote(stage)}",
+            )
             make_dir = getattr(client.files, "make_dir", None)
             if callable(make_dir):
-                make_dir(destination)
-            self._upload_tree(client, root, destination, True)
+                make_dir(stage)
+            if root is not None and snapshot_id is not None:
+                selected_destination = f"{stage}/{snapshot_id}"
+                if callable(make_dir):
+                    make_dir(selected_destination)
+                for projection, files in captured:
+                    for captured_file in files:
+                        relative = (Path(projection.category) / projection.relative_path / captured_file.relative_path).as_posix()
+                        target = f"{selected_destination}/{relative}"
+                        if callable(make_dir):
+                            make_dir(target.rsplit("/", 1)[0])
+                        client.files.write(target, captured_file.data)
+                for projection, files in captured:
+                    for captured_file in files:
+                        relative = (Path(projection.category) / projection.relative_path / captured_file.relative_path).as_posix()
+                        target = f"{selected_destination}/{relative}"
+                        remote = client.files.read(target, format="bytes")
+                        if not isinstance(remote, bytes) or remote != captured_file.data:
+                            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_remote_readback_mismatch")
+                        expected_mode = "500" if captured_file.executable else "400"
+                        self._run_accepted_projection_command(
+                            client,
+                            f"set -e; chmod {expected_mode} {shlex.quote(target)}; test \"$(stat -c '%a' {shlex.quote(target)})\" = {expected_mode}",
+                        )
+            self._run_accepted_projection_command(
+                client,
+                f"set -e; find {shlex.quote(stage)} -type d -exec chmod 500 {{}} +; test \"$(stat -c '%a' {shlex.quote(stage)})\" = 500",
+            )
+            self._run_accepted_projection_command(
+                client,
+                f"set -e; if [ -e {shlex.quote(destination)} ]; then mv {shlex.quote(destination)} {shlex.quote(previous)}; fi; mv {shlex.quote(stage)} {shlex.quote(destination)}; rm -rf {shlex.quote(previous)}",
+            )
         except Exception as exc:
-            raise RuntimeError("accepted skill snapshot projection failed") from exc
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_failed") from exc
+
+    @staticmethod
+    def _run_accepted_projection_command(client, command: str) -> None:
+        result = client.commands.run(command)
+        if type(getattr(result, "exit_code", None)) is not int or result.exit_code != 0:
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_remote_command_failed")
+
+    def _identity_for_sandbox(self, sandbox_id: str) -> tuple[str, str] | None:
+        with self._lock:
+            return next(
+                (key for key, mapped_id in self._thread_sandboxes.items() if mapped_id == sandbox_id),
+                None,
+            )
+
+    def bind_accepted_skill_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+    ) -> None:
+        with self._get_thread_lock(thread_id, user_id):
+            if self._identity_for_sandbox(sandbox_id) != (user_id, thread_id):
+                raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_sandbox_identity_mismatch")
+            with self._lock:
+                bindings = getattr(self, "_accepted_skill_bindings", {})
+                if sandbox_id in bindings:
+                    if bindings[sandbox_id] == (
+                        binding.run_id,
+                        binding.generation,
+                        binding.snapshot_id,
+                    ):
+                        return
+                    current = bindings[sandbox_id]
+                    if binding.generation <= current[1] or binding.generation == 0:
+                        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_binding_conflict")
+            try:
+                self._project_accepted_skill_snapshot(
+                    sandbox_id,
+                    user_id=user_id,
+                    binding=binding,
+                )
+            except Exception:
+                with self._lock:
+                    getattr(self, "_accepted_skill_bindings", {}).pop(
+                        sandbox_id,
+                        None,
+                    )
+                    sandbox = self._sandboxes.get(sandbox_id)
+                if sandbox is None:
+                    self._poison_accepted_skill_sandbox(sandbox_id)
+                else:
+                    try:
+                        self._clear_remote_accepted_skill_snapshot(
+                            sandbox.client,
+                            binding=binding,
+                        )
+                    except Exception:
+                        self._poison_accepted_skill_sandbox(sandbox_id)
+                raise
+            with self._lock:
+                bindings = getattr(self, "_accepted_skill_bindings", None)
+                if bindings is None:
+                    bindings = self._accepted_skill_bindings = {}
+                bindings[sandbox_id] = (
+                    binding.run_id,
+                    binding.generation,
+                    binding.snapshot_id,
+                )
+
+    def _poison_accepted_skill_sandbox(self, sandbox_id: str) -> bool:
+        """Quarantine a remote accepted-profile sandbox from every reuse path."""
+        with self._lock:
+            sandbox = self._sandboxes.pop(sandbox_id, None)
+            getattr(self, "_accepted_skill_bindings", {}).pop(sandbox_id, None)
+            quarantines = getattr(self, "_accepted_skill_quarantines", None)
+            if quarantines is None:
+                quarantines = self._accepted_skill_quarantines = {}
+            identities = [key for key, mapped_id in self._thread_sandboxes.items() if mapped_id == sandbox_id]
+            if len(identities) == 1:
+                quarantines[sandbox_id] = identities[0]
+            for key, mapped_id in list(self._thread_sandboxes.items()):
+                if mapped_id == sandbox_id:
+                    self._thread_sandboxes.pop(key, None)
+        if sandbox is None:
+            return False
+        self._kill_and_close(sandbox)
+        # The persisted accepted-profile marker prevents restart discovery from
+        # adopting this VM as a legacy sandbox even when remote kill is delayed.
+        return True
+
+    def _consume_accepted_skill_quarantine(
+        self,
+        sandbox_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> bool:
+        """Consume one incarnation-scoped proof after cleanup claims it."""
+        with self._lock:
+            quarantines = getattr(self, "_accepted_skill_quarantines", {})
+            if quarantines.get(sandbox_id) != (user_id, thread_id):
+                return False
+            quarantines.pop(sandbox_id, None)
+            return True
+
+    def ensure_accepted_skill_snapshot_absent(self, clear) -> bool:
+        from deerflow.runtime.skill_projection import SkillProjectionClear
+
+        if not isinstance(clear, SkillProjectionClear):
+            return False
+        with self._get_thread_lock(clear.thread_id, clear.user_id):
+            with self._lock:
+                quarantined = clear.sandbox_id in getattr(self, "_accepted_skill_quarantines", {})
+            if quarantined:
+                return self._consume_accepted_skill_quarantine(
+                    clear.sandbox_id,
+                    user_id=clear.user_id,
+                    thread_id=clear.thread_id,
+                )
+            with self._lock:
+                if clear.sandbox_id not in getattr(
+                    self,
+                    "_accepted_only_sandbox_ids",
+                    set(),
+                ):
+                    return False
+                if self._thread_sandboxes.get((clear.user_id, clear.thread_id)) != clear.sandbox_id:
+                    return False
+                if clear.sandbox_id in getattr(
+                    self,
+                    "_accepted_skill_bindings",
+                    {},
+                ):
+                    return False
+                sandbox = self._sandboxes.get(clear.sandbox_id)
+            if sandbox is None:
+                self._poison_accepted_skill_sandbox(clear.sandbox_id)
+                return self._consume_accepted_skill_quarantine(
+                    clear.sandbox_id,
+                    user_id=clear.user_id,
+                    thread_id=clear.thread_id,
+                )
+            try:
+                self._clear_remote_accepted_skill_snapshot(sandbox.client)
+            except Exception:
+                self._poison_accepted_skill_sandbox(clear.sandbox_id)
+                return self._consume_accepted_skill_quarantine(
+                    clear.sandbox_id,
+                    user_id=clear.user_id,
+                    thread_id=clear.thread_id,
+                )
+            return True
+
+    def clear_accepted_skill_snapshot(
+        self,
+        clear,
+    ) -> bool:
+        from deerflow.runtime.skill_projection import SkillProjectionClear
+
+        if not isinstance(clear, SkillProjectionClear):
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_clear_fence_invalid")
+        with self._get_thread_lock(clear.thread_id, clear.user_id):
+            expected = (clear.run_id, clear.generation, clear.snapshot_id)
+            with self._lock:
+                sandbox_id = self._thread_sandboxes.get((clear.user_id, clear.thread_id))
+                sandbox = None if sandbox_id is None else self._sandboxes.get(sandbox_id)
+                bindings = getattr(self, "_accepted_skill_bindings", {})
+                if sandbox_id is None or sandbox is None:
+                    if bindings.get(clear.sandbox_id) != expected:
+                        return False
+                    bindings.pop(clear.sandbox_id, None)
+                    self._thread_sandboxes.pop((clear.user_id, clear.thread_id), None)
+                    return True
+            if sandbox_id != clear.sandbox_id:
+                return False
+            with self._lock:
+                if getattr(self, "_accepted_skill_bindings", {}).get(sandbox_id) != expected:
+                    return False
+            try:
+                self._clear_remote_accepted_skill_snapshot(sandbox.client)
+            except Exception as exc:
+                if self._poison_accepted_skill_sandbox(sandbox_id):
+                    self._consume_accepted_skill_quarantine(
+                        sandbox_id,
+                        user_id=clear.user_id,
+                        thread_id=clear.thread_id,
+                    )
+                    return True
+                raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_failed") from exc
+            with self._lock:
+                bindings = getattr(self, "_accepted_skill_bindings", {})
+                if bindings.get(sandbox_id) == expected:
+                    bindings.pop(sandbox_id, None)
+                    return True
+            return False
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)
@@ -587,7 +879,11 @@ class E2BSandboxProvider(SandboxProvider):
             (
                 (sandbox_id, metadata)
                 for entry in entries
-                if (sandbox_id := self._entry_id(entry)) and (metadata := self._entry_metadata(entry)).get(META_KEY_USER) == user_id and metadata.get(META_KEY_THREAD) == thread_id and self._metadata_matches_capacity_ledger(metadata)
+                if (sandbox_id := self._entry_id(entry))
+                and (metadata := self._entry_metadata(entry)).get(META_KEY_USER) == user_id
+                and metadata.get(META_KEY_THREAD) == thread_id
+                and metadata.get(META_KEY_SKILL_PROFILE) in (None, META_VAL_SKILL_PROFILE_LEGACY)
+                and self._metadata_matches_capacity_ledger(metadata)
             ),
             key=lambda item: (item[1].get(META_KEY_CREATED_AT, ""), item[0]),
         )
@@ -1027,7 +1323,13 @@ class E2BSandboxProvider(SandboxProvider):
         if self._reserved_slots > 0:
             self._reserved_slots -= 1
 
-    def _create_sandbox(self, thread_id: str | None, *, user_id: str) -> str:
+    def _create_sandbox(
+        self,
+        thread_id: str | None,
+        *,
+        user_id: str,
+        accepted_skills_only: bool = False,
+    ) -> str:
         """Allocate a fresh e2b sandbox and hydrate it with configured mounts.
 
         Capacity is enforced atomically via :meth:`_reserve_capacity`.
@@ -1039,6 +1341,7 @@ class E2BSandboxProvider(SandboxProvider):
             META_KEY_PROVIDER: META_VAL_PROVIDER,
             META_KEY_GATEWAY: self._owner_id,
             META_KEY_CREATED_AT: str(time.time()),
+            META_KEY_SKILL_PROFILE: (META_VAL_SKILL_PROFILE_ACCEPTED if accepted_skills_only else META_VAL_SKILL_PROFILE_LEGACY),
         }
         if self._deployment_capacity is not None:
             metadata[META_KEY_CAPACITY_LEDGER] = self._deployment_capacity.key
@@ -1134,7 +1437,11 @@ class E2BSandboxProvider(SandboxProvider):
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
         try:
-            self._apply_mounts(client, user_id=user_id)
+            self._apply_mounts(
+                client,
+                user_id=user_id,
+                accepted_skills_only=accepted_skills_only,
+            )
         except Exception as e:
             logger.warning("Failed to apply some mounts to e2b sandbox %s: %s", sandbox_id, e)
 
@@ -1423,7 +1730,16 @@ class E2BSandboxProvider(SandboxProvider):
             metadata = self._entry_metadata(entry)
             user_id = metadata.get(META_KEY_USER)
             thread_id = metadata.get(META_KEY_THREAD)
-            if isinstance(user_id, str) and user_id and isinstance(thread_id, str) and thread_id:
+            skill_profile = metadata.get(META_KEY_SKILL_PROFILE)
+            if skill_profile == META_VAL_SKILL_PROFILE_ACCEPTED:
+                with self._lock:
+                    locally_accepted = sandbox_id in getattr(self, "_accepted_only_sandbox_ids", set()) and sandbox_id in self._sandboxes
+                if not locally_accepted:
+                    # A process-lost accepted-only VM must never be relabelled
+                    # as a legacy/live sandbox. Quarantine it for the existing
+                    # bounded orphan cleanup instead of reconnecting it.
+                    orphans.append((sandbox_id, metadata))
+            elif skill_profile in (None, META_VAL_SKILL_PROFILE_LEGACY) and isinstance(user_id, str) and user_id and isinstance(thread_id, str) and thread_id:
                 groups.setdefault((user_id, thread_id), []).append((sandbox_id, metadata))
             else:
                 orphans.append((sandbox_id, metadata))
@@ -1787,9 +2103,15 @@ class E2BSandboxProvider(SandboxProvider):
             logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
             return []
 
-    def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> None:
+    def _apply_mounts(
+        self,
+        client: E2BClientSandbox,
+        *,
+        user_id: str | None = None,
+        accepted_skills_only: bool = False,
+    ) -> None:
         effective_user_id = user_id or get_effective_user_id()
-        projection_mounts = self._skill_projection_mounts(effective_user_id)
+        projection_mounts = [] if accepted_skills_only else self._skill_projection_mounts(effective_user_id)
         configured_mounts = self._config.get("mounts") or []
         skills_root = get_app_config().skills.container_path.rstrip("/")
 
@@ -2268,6 +2590,7 @@ class E2BSandboxProvider(SandboxProvider):
             sandbox = self._sandboxes.pop(sandbox_id, None)
             if sandbox is None:
                 return
+            getattr(self, "_accepted_skill_bindings", {}).pop(sandbox_id, None)
             self._begin_transition_locked()
             transition_slot_held = True
             removed_keys = [key for key, sid in self._thread_sandboxes.items() if sid == sandbox_id]
@@ -2290,6 +2613,19 @@ class E2BSandboxProvider(SandboxProvider):
                 self._kill_and_close(sandbox)
                 return
 
+            try:
+                self._clear_remote_accepted_skill_snapshot(client)
+            except Exception as error:
+                if _is_sandbox_gone_error(error):
+                    with sandbox._lock:
+                        sandbox._dead = True
+                logger.error(
+                    "Could not clear accepted skill snapshot for e2b sandbox %s; killing it instead of warming it",
+                    sandbox_id,
+                    exc_info=True,
+                )
+                self._kill_and_close(sandbox)
+                return
             sync_failed_due_to_dead_vm = False
             if seed is not None and removed_keys:
                 user_id_sync, thread_id_sync = removed_keys[0]
@@ -2366,6 +2702,44 @@ class E2BSandboxProvider(SandboxProvider):
         except Exception:
             pass
 
+    @staticmethod
+    def _accepted_skill_projection_paths(
+        binding: AcceptedSkillSandboxBindingV1 | None = None,
+    ) -> tuple[str, str | None, str | None]:
+        try:
+            skills_container_path = get_app_config().skills.container_path
+        except FileNotFoundError:
+            from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+
+            skills_container_path = DEFAULT_SKILLS_CONTAINER_PATH
+        base = skills_container_path.rstrip("/")
+        destination = f"{base}/.accepted"
+        if binding is None:
+            return destination, None, None
+        stage_suffix = hashlib.sha256(f"{binding.run_id}:{binding.generation}".encode()).hexdigest()[:24]
+        return (
+            destination,
+            f"{base}/.accepted-stage-{stage_suffix}",
+            f"{base}/.accepted-old-{stage_suffix}",
+        )
+
+    @classmethod
+    def _clear_remote_accepted_skill_snapshot(
+        cls,
+        client: E2BClientSandbox,
+        *,
+        binding: AcceptedSkillSandboxBindingV1 | None = None,
+    ) -> None:
+        destination, stage, previous = cls._accepted_skill_projection_paths(binding)
+        exact_paths = tuple(path for path in (destination, stage, previous) if path is not None)
+        make_writable = "; ".join(f"if [ -e {shlex.quote(path)} ]; then chmod -R u+w {shlex.quote(path)}; fi" for path in exact_paths)
+        remove_transient = ""
+        if stage is not None and previous is not None:
+            remove_transient = f"; rm -rf {shlex.quote(stage)} {shlex.quote(previous)}"
+        result = client.commands.run(f"set -e; {make_writable}; mkdir -p {shlex.quote(destination)}; find {shlex.quote(destination)} -mindepth 1 -delete{remove_transient}; chmod 700 {shlex.quote(destination)}")
+        if type(getattr(result, "exit_code", None)) is not int or result.exit_code != 0:
+            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_remote_command_failed")
+
     def _kill_client(
         self,
         client: E2BClientSandbox | None,
@@ -2389,7 +2763,20 @@ class E2BSandboxProvider(SandboxProvider):
         """Destroy tracked E2B VMs and make this detached provider unusable."""
         self.shutdown()
 
+    def _assert_no_invocation_owned_skill_projections(self) -> None:
+        """Refuse provider teardown while accepted material still has an owner."""
+        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+        with self._lock:
+            identities = tuple(self._thread_sandboxes)
+        coordinator = get_skill_projection_coordinator()
+        if any(coordinator.is_busy(user_id=user_id, thread_id=thread_id) for user_id, thread_id in identities):
+            raise AcceptedSkillSandboxBindingError(
+                "accepted_skill_snapshot_projection_in_use",
+            )
+
     def shutdown(self) -> None:
+        self._assert_no_invocation_owned_skill_projections()
         with self._lock:
             if self._shutdown_called:
                 return

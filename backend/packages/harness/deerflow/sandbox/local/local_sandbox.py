@@ -178,7 +178,11 @@ class LocalSandbox(Sandbox):
         except OSError:
             return False
 
-    def __init__(self, id: str, path_mappings: list[PathMapping] | None = None):
+    def __init__(
+        self,
+        id: str,
+        path_mappings: list[PathMapping] | None = None,
+    ):
         """
         Initialize local sandbox with optional path mappings.
 

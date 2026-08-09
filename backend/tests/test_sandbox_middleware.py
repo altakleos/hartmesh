@@ -12,9 +12,16 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import ThreadState
+from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
+from deerflow.sandbox.sandbox_provider import (
+    AcceptedSkillSandboxBindingError,
+    SandboxProvider,
+    reset_sandbox_provider,
+    set_sandbox_provider,
+)
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.tools import ls_tool
 
@@ -108,12 +115,89 @@ class _AsyncOnlyProvider(SandboxProvider):
         return None
 
 
+class _IncompleteAcceptedProvider(_AsyncOnlyProvider):
+    """Claims accepted hooks but omits the required isolation advertisement."""
+
+    async def acquire_accepted_skills_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+    ) -> str:
+        self.thread_ids.append(thread_id)
+        self.user_ids.append(user_id)
+        return "async-sandbox"
+
+    async def bind_accepted_skill_snapshot_async(self, *args, **kwargs) -> None:
+        del args, kwargs
+
+
+class _AcceptedNamespaceOnlyProvider(_IncompleteAcceptedProvider):
+    def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
+        return sandbox_id == "async-sandbox"
+
+
+class _CapabilityProbeMustNotRunProvider(_AcceptedNamespaceOnlyProvider):
+    def accepted_skill_material_capability(self, sandbox_id: str):
+        raise AssertionError(f"capability probe must not run for {sandbox_id}")
+
+
+class _PrepublicationFailureProvider(_AcceptedNamespaceOnlyProvider):
+    async def bind_accepted_skill_snapshot_async(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("bind failed before publication")
+
+    def clear_accepted_skill_snapshot(self, clear) -> bool:
+        del clear
+        return False
+
+    def ensure_accepted_skill_snapshot_absent(self, clear) -> bool:
+        del clear
+        return True
+
+
+class _UnprovenPrepublicationFailureProvider(_AcceptedNamespaceOnlyProvider):
+    async def bind_accepted_skill_snapshot_async(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("unproven bind failure")
+
+    def clear_accepted_skill_snapshot(self, clear) -> bool:
+        del clear
+        return False
+
+
 def test_sandbox_middleware_state_matches_thread_state_sandbox_field() -> None:
     """Middleware-local schema must not drift from ThreadState.sandbox."""
     middleware_hints = get_type_hints(SandboxMiddlewareState, include_extras=True)
     thread_hints = get_type_hints(ThreadState, include_extras=True)
 
     assert middleware_hints["sandbox"] == thread_hints["sandbox"]
+
+
+def test_material_capability_probe_is_skipped_for_legacy_and_accepted_empty_runs() -> None:
+    from deerflow.sandbox.sandbox_provider import (
+        require_runtime_accepted_skill_isolation,
+    )
+
+    provider = _CapabilityProbeMustNotRunProvider()
+    require_runtime_accepted_skill_isolation(
+        provider,
+        Runtime(context={}),
+        sandbox_id="async-sandbox",
+    )
+    material = ResolvedAgentMaterialV1(
+        agent_id="lead-agent",
+        storage_source="test",
+        storage_version="1",
+        agent_config=None,
+        soul="",
+        model_profile={},
+    )
+    require_runtime_accepted_skill_isolation(
+        provider,
+        Runtime(context={RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material}),
+        sandbox_id="async-sandbox",
+    )
 
 
 @pytest.mark.anyio
@@ -149,6 +233,231 @@ async def test_abefore_agent_uses_async_provider_acquire() -> None:
     assert result == {"sandbox": {"sandbox_id": "async-sandbox"}}
     assert provider.thread_ids == ["thread-2"]
     assert provider.user_ids == ["owner-2"]
+
+
+@pytest.mark.anyio
+async def test_accepted_empty_skill_set_fails_closed_for_unsupported_provider() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    material = ResolvedAgentMaterialV1(
+        agent_id="lead-agent",
+        storage_source="test",
+        storage_version="1",
+        agent_config=None,
+        soul="",
+        model_profile={},
+    )
+    runtime = Runtime(
+        context={
+            "thread_id": "thread-accepted",
+            "run_id": "run-accepted",
+            "user_id": "owner-accepted",
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
+        }
+    )
+    try:
+        with pytest.raises(
+            AcceptedSkillSandboxBindingError,
+            match="accepted_skill_snapshot_projection_unsupported",
+        ):
+            await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
+    finally:
+        reset_sandbox_provider()
+
+    # Durable accepted material selects the explicit accepted-only acquisition
+    # profile. Unsupported providers fail before creating a sandbox that might
+    # expose mutable live skill mounts.
+    assert provider.thread_ids == []
+    assert provider.released_ids == []
+
+
+@pytest.mark.anyio
+async def test_accepted_acquisition_requires_provider_isolation_advertisement() -> None:
+    provider = _IncompleteAcceptedProvider()
+    set_sandbox_provider(provider)
+    material = ResolvedAgentMaterialV1(
+        agent_id="lead-agent",
+        storage_source="test",
+        storage_version="1",
+        agent_config=None,
+        soul="",
+        model_profile={},
+    )
+    runtime = Runtime(
+        context={
+            "thread_id": "thread-incomplete",
+            "run_id": "run-incomplete",
+            "user_id": "owner-incomplete",
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
+        }
+    )
+    try:
+        with pytest.raises(
+            AcceptedSkillSandboxBindingError,
+            match="accepted_skill_snapshot_isolation_unverified",
+        ):
+            await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
+    finally:
+        reset_sandbox_provider()
+
+    assert provider.thread_ids == ["thread-incomplete"]
+    assert provider.released_ids == ["async-sandbox"]
+
+
+@pytest.mark.anyio
+async def test_bind_failure_before_publication_releases_after_absence_proof() -> None:
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    provider = _PrepublicationFailureProvider()
+    set_sandbox_provider(provider)
+    material = ResolvedAgentMaterialV1(
+        agent_id="lead-agent",
+        storage_source="test",
+        storage_version="1",
+        agent_config=None,
+        soul="",
+        model_profile={},
+    )
+    runtime = Runtime(
+        context={
+            "thread_id": "thread-prepublication-failure",
+            "run_id": "run-prepublication-failure",
+            "user_id": "owner-prepublication-failure",
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
+        }
+    )
+    coordinator = get_skill_projection_coordinator()
+    try:
+        with pytest.raises(RuntimeError, match="bind failed before publication"):
+            await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
+
+        assert provider.released_ids == ["async-sandbox"]
+        assert not coordinator.is_busy(
+            user_id="owner-prepublication-failure",
+            thread_id="thread-prepublication-failure",
+        )
+        assert coordinator.try_claim_committed_run(
+            user_id="owner-prepublication-failure",
+            thread_id="thread-prepublication-failure",
+            run_id="replacement-after-prepublication-failure",
+            snapshot_id=None,
+        )
+    finally:
+        coordinator.release_unactivated_run(
+            user_id="owner-prepublication-failure",
+            thread_id="thread-prepublication-failure",
+            run_id="replacement-after-prepublication-failure",
+        )
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+async def test_bind_failure_without_absence_proof_does_not_release_sandbox() -> None:
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    provider = _UnprovenPrepublicationFailureProvider()
+    set_sandbox_provider(provider)
+    material = ResolvedAgentMaterialV1(
+        agent_id="lead-agent",
+        storage_source="test",
+        storage_version="1",
+        agent_config=None,
+        soul="",
+        model_profile={},
+    )
+    runtime = Runtime(
+        context={
+            "thread_id": "thread-unproven-failure",
+            "run_id": "run-unproven-failure",
+            "user_id": "owner-unproven-failure",
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
+        }
+    )
+    coordinator = get_skill_projection_coordinator()
+    try:
+        with pytest.raises(RuntimeError, match="unproven bind failure"):
+            await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
+
+        assert provider.released_ids == []
+        assert coordinator.is_busy(
+            user_id="owner-unproven-failure",
+            thread_id="thread-unproven-failure",
+        )
+    finally:
+        token = coordinator.token_for_consumer(
+            user_id="owner-unproven-failure",
+            thread_id="thread-unproven-failure",
+            run_id="run-unproven-failure",
+            consumer_id="run:run-unproven-failure:lead",
+        )
+        if token is not None:
+            clear = coordinator.release(token)
+            if clear is not None:
+                coordinator.finalize_release(clear)
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+async def test_nonempty_accepted_material_requires_hard_read_only_provider(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from pathlib import Path
+
+    from deerflow.config.paths import Paths
+    from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    source = tmp_path / "source" / "immutable-skill"
+    source.mkdir(parents=True)
+    skill_file = source / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: immutable-skill\ndescription: immutable\n---\naccepted bytes\n",
+        encoding="utf-8",
+    )
+    skill = parse_skill_file(
+        skill_file,
+        SkillCategory.CUSTOM,
+        relative_path=Path("immutable-skill"),
+    )
+    assert skill is not None
+    paths = Paths(base_dir=tmp_path / "state")
+    monkeypatch.setattr("deerflow.runtime.skill_snapshot.get_paths", lambda: paths)
+    snapshot = snapshot_effective_skills((skill,), user_id="owner-read-only")
+    assert snapshot is not None
+    material = ResolvedAgentMaterialV1(
+        agent_id="lead-agent",
+        storage_source="test",
+        storage_version="1",
+        agent_config=None,
+        soul="",
+        model_profile={},
+        skill_snapshot=snapshot,
+        enabled_skill_objects=snapshot.skills,
+        all_skill_objects=snapshot.skills,
+    )
+    provider = _AcceptedNamespaceOnlyProvider()
+    set_sandbox_provider(provider)
+    runtime = Runtime(
+        context={
+            "thread_id": "thread-read-only",
+            "run_id": "run-read-only",
+            "user_id": "owner-read-only",
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
+        }
+    )
+    try:
+        with pytest.raises(
+            AcceptedSkillSandboxBindingError,
+            match="accepted_skill_snapshot_immutability_unsupported",
+        ):
+            await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
+    finally:
+        reset_sandbox_provider()
+        snapshot.release()
+
+    assert provider.released_ids == ["async-sandbox"]
 
 
 @pytest.mark.anyio

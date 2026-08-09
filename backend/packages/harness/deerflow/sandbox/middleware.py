@@ -15,6 +15,14 @@ from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
 from deerflow.sandbox.overwrite import unwrap_sandbox
+from deerflow.sandbox.sandbox_provider import (
+    _NO_BINDING,
+    accepted_skill_snapshot_id_from_runtime,
+    ensure_accepted_skill_binding,
+    invalidate_runtime_skill_projection_token,
+    release_accepted_skill_consumer,
+    require_runtime_accepted_skill_isolation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,15 +58,15 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         super().__init__()
         self._lazy_init = lazy_init
 
-    def _acquire_sandbox(self, thread_id: str, *, user_id: str) -> str:
+    def _acquire_sandbox(self, thread_id: str, *, user_id: str, accepted_skills_only: bool = False) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = provider.acquire(thread_id, user_id=user_id)
+        sandbox_id = provider.acquire_accepted_skills(thread_id, user_id=user_id) if accepted_skills_only else provider.acquire(thread_id, user_id=user_id)
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
-    async def _acquire_sandbox_async(self, thread_id: str, *, user_id: str) -> str:
+    async def _acquire_sandbox_async(self, thread_id: str, *, user_id: str, accepted_skills_only: bool = False) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+        sandbox_id = await provider.acquire_accepted_skills_async(thread_id, user_id=user_id) if accepted_skills_only else await provider.acquire_async(thread_id, user_id=user_id)
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
@@ -67,39 +75,139 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def before_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        # Skip acquisition if lazy_init is enabled
-        if self._lazy_init:
+        has_accepted_binding = accepted_skill_snapshot_id_from_runtime(runtime) is not _NO_BINDING
+        # Durable accepted material must be projected before the first model.
+        # Legacy runs keep lazy sandbox initialization.
+        if self._lazy_init and not has_accepted_binding:
             return super().before_agent(state, runtime)
 
-        # Eager initialization (original behavior)
-        if "sandbox" not in state or state["sandbox"] is None:
-            thread_id = (runtime.context or {}).get("thread_id")
-            if thread_id is None:
-                return super().before_agent(state, runtime)
-            sandbox_id = self._acquire_sandbox(thread_id, user_id=resolve_runtime_user_id(runtime))
+        thread_id = (runtime.context or {}).get("thread_id")
+        if thread_id is None:
+            return super().before_agent(state, runtime)
+        user_id = resolve_runtime_user_id(runtime)
+        sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
+        sandbox_id = None if sandbox_state is None else sandbox_state.get("sandbox_id")
+        if isinstance(sandbox_id, str) and not has_accepted_binding:
+            return super().before_agent(state, runtime)
+        provider = get_sandbox_provider()
+        if has_accepted_binding and isinstance(sandbox_id, str) and provider.get(sandbox_id) is not None and not provider.has_accepted_skill_isolation(sandbox_id):
+            provider.release(sandbox_id)
+            sandbox_id = None
+        acquired = not isinstance(sandbox_id, str) or provider.get(sandbox_id) is None
+        if acquired:
+            sandbox_id = self._acquire_sandbox(
+                thread_id,
+                user_id=user_id,
+                accepted_skills_only=has_accepted_binding,
+            )
+        if has_accepted_binding:
+            token = None
+            try:
+                require_runtime_accepted_skill_isolation(
+                    provider,
+                    runtime,
+                    sandbox_id=sandbox_id,
+                )
+                binding, token, _created_token = ensure_accepted_skill_binding(
+                    runtime,
+                    sandbox_id=sandbox_id,
+                    user_id=user_id,
+                )
+                assert binding is not None
+                provider.bind_accepted_skill_snapshot(
+                    sandbox_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    binding=binding,
+                )
+            except Exception:
+                released = False
+                invalidate_runtime_skill_projection_token(runtime, token)
+                if token is not None:
+                    try:
+                        released = release_accepted_skill_consumer(token)
+                    except Exception:
+                        logger.warning("Failed to clear a rejected accepted-skill projection", exc_info=True)
+                if acquired and token is None and not released:
+                    provider.release(sandbox_id)
+                raise
+        if acquired:
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return super().before_agent(state, runtime)
 
     @override
     async def abefore_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        # Skip acquisition if lazy_init is enabled
-        if self._lazy_init:
+        has_accepted_binding = accepted_skill_snapshot_id_from_runtime(runtime) is not _NO_BINDING
+        if self._lazy_init and not has_accepted_binding:
             return await super().abefore_agent(state, runtime)
 
-        # Eager initialization (original behavior), but use the async provider
-        # hook so blocking sandbox startup/polling runs outside the event loop.
-        if "sandbox" not in state or state["sandbox"] is None:
-            thread_id = (runtime.context or {}).get("thread_id")
-            if thread_id is None:
-                return await super().abefore_agent(state, runtime)
-            sandbox_id = await self._acquire_sandbox_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+        thread_id = (runtime.context or {}).get("thread_id")
+        if thread_id is None:
+            return await super().abefore_agent(state, runtime)
+        user_id = resolve_runtime_user_id(runtime)
+        sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
+        sandbox_id = None if sandbox_state is None else sandbox_state.get("sandbox_id")
+        if isinstance(sandbox_id, str) and not has_accepted_binding:
+            return await super().abefore_agent(state, runtime)
+        provider = get_sandbox_provider()
+        if has_accepted_binding and isinstance(sandbox_id, str) and provider.get(sandbox_id) is not None and not provider.has_accepted_skill_isolation(sandbox_id):
+            await self._release_sandbox_async(sandbox_id)
+            sandbox_id = None
+        acquired = not isinstance(sandbox_id, str) or provider.get(sandbox_id) is None
+        if acquired:
+            sandbox_id = await self._acquire_sandbox_async(
+                thread_id,
+                user_id=user_id,
+                accepted_skills_only=has_accepted_binding,
+            )
+        if has_accepted_binding:
+            token = None
+            try:
+                require_runtime_accepted_skill_isolation(
+                    provider,
+                    runtime,
+                    sandbox_id=sandbox_id,
+                )
+                binding, token, _created_token = ensure_accepted_skill_binding(
+                    runtime,
+                    sandbox_id=sandbox_id,
+                    user_id=user_id,
+                )
+                assert binding is not None
+                await provider.bind_accepted_skill_snapshot_async(
+                    sandbox_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    binding=binding,
+                )
+            except Exception:
+                released = False
+                invalidate_runtime_skill_projection_token(runtime, token)
+                if token is not None:
+                    try:
+                        released = await asyncio.to_thread(
+                            release_accepted_skill_consumer,
+                            token,
+                        )
+                    except Exception:
+                        logger.warning("Failed to clear a rejected accepted-skill projection", exc_info=True)
+                if acquired and token is None and not released:
+                    await self._release_sandbox_async(sandbox_id)
+                raise
+        if acquired:
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return await super().abefore_agent(state, runtime)
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY, SkillProjectionConsumerToken
+
+        token = (runtime.context or {}).get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
+        if isinstance(token, SkillProjectionConsumerToken):
+            release_accepted_skill_consumer(token)
+            return None
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
@@ -123,6 +231,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY, SkillProjectionConsumerToken
+
+        token = (runtime.context or {}).get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
+        if isinstance(token, SkillProjectionConsumerToken):
+            await asyncio.to_thread(release_accepted_skill_consumer, token)
+            return None
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]

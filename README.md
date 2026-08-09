@@ -777,7 +777,11 @@ effective skill package. Its prompts, slash activation, deferred reads, supporti
 Editing, deleting, enabling, or disabling a live skill affects later invocations, not a run
 that was already accepted. Snapshot bodies remain process-local and are removed after the
 worker terminates; the durable ledger stores only stable identities, digests, and bounded
-metadata. A worker lost with its process follows normal orphan terminalization rather than
+metadata. Docker/AIO mounts nonempty accepted material read-only while retaining sandbox
+commands. Local, E2B, and custom providers accept only an explicitly empty skill set and fail
+before model work when effective skills are present; use AIO for production durable runs that
+execute nonempty accepted skills. A
+worker lost with its process follows normal orphan terminalization rather than
 resuming from reconstructed historical skill bytes.
 
 A skill directory is a package boundary: once DeerFlow finds its `SKILL.md`, nested `SKILL.md` files under that package (for example evaluation fixtures) remain supporting data and are not registered as runtime skills. Namespace directories without their own `SKILL.md` can still group nested skills.
@@ -788,7 +792,7 @@ An enabled skill's `allowed-tools` policy applies only after that skill is expli
 
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
-Disabling a skill also removes it from the live sandbox filesystem view, so later work follows the updated enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Existing E2B sandboxes retain that live creation-time projection until they are recreated, but every acquire refreshes the reserved `.accepted` tree used by already-admitted durable runs. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
+Disabling a skill also removes it from the live sandbox filesystem view, so later work follows the updated enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Durable runs use an accepted-only acquisition profile that excludes mutable `/mnt/skills/{public,custom,legacy,integrations}` trees. Docker/AIO exposes the selected `/mnt/skills/.accepted` digest through an OS-enforced read-only mount and retains command execution. Local, E2B, and custom providers are empty-only until they can prove the same hard boundary; nonempty material fails closed before model execution. Legacy non-durable execution retains the live projections. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
 
 Managed integrations install shared read-only skill packs without mixing them
 into custom skills. The Lark/Feishu CLI integration is available under

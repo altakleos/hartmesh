@@ -131,9 +131,14 @@ Skill quality review note:
   tag-neutralized; full raw payloads stay in tool artifacts. See
   [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
   `skill-creator` ownership boundaries.
-- Durable invocations snapshot every effective skill package before admission. Lead and
-  subagent prompts, slash/deferred activation, allowed-tool metadata, and sandbox reads use
-  that same process-local immutable tree; live skill edits affect only later invocations.
+- Durable invocations snapshot every effective skill package before admission. Their
+  sandboxes use an accepted-only profile with no mutable live skill mounts; lead and
+  subagent prompts, slash/deferred activation, and allowed-tool metadata use that same
+  process-local immutable tree. Docker/AIO mounts nonempty accepted material read-only while
+  retaining sandbox command execution. Local, E2B, and custom providers are currently
+  empty-only and fail before model work when effective skills exist; use AIO for the
+  production path that executes nonempty accepted skills. Live skill views remain a
+  legacy/non-durable compatibility surface, and edits affect only later durable invocations.
   See the accepted-snapshot contract and bounds in [backend/AGENTS.md](backend/AGENTS.md).
 
 Scheduled-task note:

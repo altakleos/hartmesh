@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -154,6 +156,128 @@ async def test_full_agent_identifier_domain_seals_into_trusted_context(
     assert accepted.agent_revision.agent_id == agent_id
     assert accepted.trusted_context is not None
     assert accepted.trusted_context.agent_revision.agent_id == agent_id
+
+
+@pytest.mark.asyncio
+async def test_cancelled_revision_resolution_releases_late_process_material(
+    monkeypatch,
+) -> None:
+    from app.gateway import services
+
+    material = _material()
+    revision = ResolvedAgentRevision.from_material(material)
+    resolver_started = threading.Event()
+    resolver_continue = threading.Event()
+    material_released = threading.Event()
+    release_calls: list[ResolvedAgentMaterialV1] = []
+
+    def blocking_resolver(*_args, **_kwargs):
+        resolver_started.set()
+        assert resolver_continue.wait(timeout=2)
+        return revision
+
+    def release_process_material(self: ResolvedAgentMaterialV1) -> None:
+        release_calls.append(self)
+        material_released.set()
+
+    monkeypatch.setattr(services, "resolve_agent_revision", blocking_resolver)
+    monkeypatch.setattr(ResolvedAgentMaterialV1, "release_process_material", release_process_material)
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=SimpleNamespace(id="u1", system_role="member")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                extensions=SimpleNamespace(generation=1),
+                capability_manifest=SimpleNamespace(digest="f" * 64),
+                contributor_host=None,
+            )
+        ),
+    )
+    config = {"context": {}}
+    sealing = asyncio.create_task(
+        services._seal_accepted_invocation(
+            request=request,
+            intent=InternalLaunchIntent(thread_id="thread-1", input={"messages": []}),
+            config=config,
+            graph_input={"messages": []},
+            owner_user_id="u1",
+            run_ctx=SimpleNamespace(app_config=object()),
+        )
+    )
+    assert await asyncio.to_thread(resolver_started.wait, 1)
+
+    sealing.cancel()
+    resolver_continue.set()
+    with pytest.raises(asyncio.CancelledError):
+        await sealing
+
+    assert await asyncio.to_thread(material_released.wait, 1)
+    assert release_calls == [material]
+    assert RESOLVED_AGENT_MATERIAL_CONTEXT_KEY not in config["context"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_context_contribution_releases_published_material(
+    monkeypatch,
+) -> None:
+    from app.gateway import services
+
+    material = _material()
+    revision = ResolvedAgentRevision.from_material(material)
+    contribution_started = asyncio.Event()
+    material_released = threading.Event()
+    release_calls: list[ResolvedAgentMaterialV1] = []
+    empty_digest = canonical_digest({"version": 1, "execution": []})
+
+    class BlockingContributorHost:
+        async def contribute_origin(self, _request):
+            return SimpleNamespace(
+                persistable=(),
+                runtime_only=(),
+                secret_handles=(),
+                execution_digest=empty_digest,
+                diagnostics=(),
+            )
+
+        async def contribute_run_context(self, _request):
+            contribution_started.set()
+            await asyncio.Event().wait()
+
+    def release_process_material(self: ResolvedAgentMaterialV1) -> None:
+        release_calls.append(self)
+        material_released.set()
+
+    monkeypatch.setattr(services, "resolve_agent_revision", lambda *_args, **_kwargs: revision)
+    monkeypatch.setattr(ResolvedAgentMaterialV1, "release_process_material", release_process_material)
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=SimpleNamespace(id="u1", system_role="member")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                extensions=SimpleNamespace(generation=1),
+                capability_manifest=SimpleNamespace(digest="f" * 64),
+                contributor_host=BlockingContributorHost(),
+            )
+        ),
+    )
+    config = {"context": {}}
+    sealing = asyncio.create_task(
+        services._seal_accepted_invocation(
+            request=request,
+            intent=InternalLaunchIntent(thread_id="thread-1", input={"messages": []}),
+            config=config,
+            graph_input={"messages": []},
+            owner_user_id="u1",
+            run_ctx=SimpleNamespace(app_config=object()),
+        )
+    )
+    await asyncio.wait_for(contribution_started.wait(), timeout=1)
+
+    sealing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await sealing
+
+    assert await asyncio.to_thread(material_released.wait, 1)
+    assert release_calls == [material]
+    assert RESOLVED_AGENT_MATERIAL_CONTEXT_KEY not in config["context"]
 
 
 def _accepted(material: ResolvedAgentMaterialV1) -> AcceptedInvocation:

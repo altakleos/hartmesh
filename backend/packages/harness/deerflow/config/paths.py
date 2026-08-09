@@ -308,6 +308,39 @@ class Paths:
             self.skill_snapshot_scope_name(user_id),
         )
 
+    @property
+    def skill_snapshot_active_views_dir(self) -> Path:
+        """Stable per-thread mounts exposing only the currently bound snapshot."""
+        return self.base_dir / "runtime" / "skill-snapshot-active-views"
+
+    @staticmethod
+    def skill_snapshot_thread_scope_name(thread_id: str) -> str:
+        """Return an opaque bounded filesystem scope for a thread identity."""
+        digest = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:32]
+        return f"thread-{digest}"
+
+    def skill_snapshot_active_view_dir(
+        self,
+        user_id: str | None,
+        thread_id: str,
+    ) -> Path:
+        """Stable mount root containing at most one accepted snapshot digest."""
+        return self.skill_snapshot_active_views_dir / self.skill_snapshot_scope_name(user_id) / self.skill_snapshot_thread_scope_name(thread_id)
+
+    def host_skill_snapshot_active_view_dir(
+        self,
+        user_id: str | None,
+        thread_id: str,
+    ) -> str:
+        """Host-visible counterpart of :meth:`skill_snapshot_active_view_dir`."""
+        return _join_host_path(
+            self._host_base_dir_str(),
+            "runtime",
+            "skill-snapshot-active-views",
+            self.skill_snapshot_scope_name(user_id),
+            self.skill_snapshot_thread_scope_name(thread_id),
+        )
+
     def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for a thread's data.
