@@ -282,6 +282,32 @@ class Paths:
         """Enabled managed integration skills exposed to one user's sandboxes."""
         return self.user_skills_view_dir(user_id) / "integrations"
 
+    @property
+    def skill_snapshots_dir(self) -> Path:
+        """Process-local accepted skill snapshots, grouped by opaque subject scope."""
+        return self.base_dir / "runtime" / "skill-snapshots"
+
+    @staticmethod
+    def skill_snapshot_scope_name(user_id: str | None) -> str:
+        """Return a bounded opaque filesystem scope without exposing an identity."""
+        if user_id is None:
+            return "system"
+        digest = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:32]
+        return f"subject-{digest}"
+
+    def skill_snapshot_scope_dir(self, user_id: str | None) -> Path:
+        """Snapshot root mounted only for the invocation's effective subject."""
+        return self.skill_snapshots_dir / self.skill_snapshot_scope_name(user_id)
+
+    def host_skill_snapshot_scope_dir(self, user_id: str | None) -> str:
+        """Host-visible counterpart of :meth:`skill_snapshot_scope_dir`."""
+        return _join_host_path(
+            self._host_base_dir_str(),
+            "runtime",
+            "skill-snapshots",
+            self.skill_snapshot_scope_name(user_id),
+        )
+
     def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for a thread's data.

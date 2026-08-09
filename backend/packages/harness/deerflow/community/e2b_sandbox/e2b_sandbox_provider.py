@@ -371,8 +371,50 @@ class E2BSandboxProvider(SandboxProvider):
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
             with self._get_thread_lock(thread_id, effective_user_id):
-                return self._acquire_internal(thread_id, user_id=effective_user_id)
-        return self._acquire_internal(thread_id, user_id=effective_user_id)
+                sandbox_id = self._acquire_internal(thread_id, user_id=effective_user_id)
+                self._sync_accepted_skill_snapshots(
+                    sandbox_id,
+                    user_id=effective_user_id,
+                )
+                return sandbox_id
+        sandbox_id = self._acquire_internal(thread_id, user_id=effective_user_id)
+        self._sync_accepted_skill_snapshots(
+            sandbox_id,
+            user_id=effective_user_id,
+        )
+        return sandbox_id
+
+    def _sync_accepted_skill_snapshots(
+        self,
+        sandbox_id: str,
+        *,
+        user_id: str,
+    ) -> None:
+        """Make newly accepted process-local snapshots visible on cache hits."""
+        from deerflow.config.paths import get_paths
+
+        root = get_paths().skill_snapshot_scope_dir(user_id)
+        root.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            sandbox = self._sandboxes.get(sandbox_id)
+        client = getattr(sandbox, "client", None)
+        if client is None:
+            raise RuntimeError("accepted skill snapshot sandbox is unavailable")
+        try:
+            skills_container_path = get_app_config().skills.container_path
+        except FileNotFoundError:
+            from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+
+            skills_container_path = DEFAULT_SKILLS_CONTAINER_PATH
+        destination = f"{skills_container_path.rstrip('/')}/.accepted"
+        try:
+            client.commands.run(f"set -e; mkdir -p {shlex.quote(destination)}; chmod -R u+w {shlex.quote(destination)} 2>/dev/null || true; find {shlex.quote(destination)} -mindepth 1 -delete")
+            make_dir = getattr(client.files, "make_dir", None)
+            if callable(make_dir):
+                make_dir(destination)
+            self._upload_tree(client, root, destination, True)
+        except Exception as exc:
+            raise RuntimeError("accepted skill snapshot projection failed") from exc
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)

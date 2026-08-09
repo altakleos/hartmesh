@@ -880,6 +880,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             paths = get_paths()
             host_base_dir = str(paths.host_base_dir)
 
+            snapshot_root = paths.skill_snapshot_scope_dir(effective_user_id)
+            snapshot_root.mkdir(parents=True, exist_ok=True)
+            mounts.append(
+                (
+                    paths.host_skill_snapshot_scope_dir(effective_user_id),
+                    f"{container_path}/.accepted",
+                    True,
+                )
+            )
+
             # 1. Public skills: global, read-only — static, shared by all threads
             mounts.append(
                 (

@@ -47,7 +47,8 @@ _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
 # never values) so unchanged bindings are not re-recorded each call.
 # The shared slash-source context contract holds the latest slash activation,
 # ONLY the activated skill's canonical container path (never its declared
-# secrets — those are read from the live registry on each call, #3938). The
+# secrets — those are resolved from the accepted snapshot for durable runs and
+# from the live registry only for legacy embedded runs). The
 # injection set is recomputed every model call, but a slash-activated skill must
 # stay bound for the rest of the run — the model's tool loop issues many model
 # calls after the single activation call (#3861 semantics).
@@ -136,13 +137,46 @@ class SkillActivationMiddleware(AgentMiddleware):
             raise FileNotFoundError(resolved_file)
         return resolved_file.read_text(encoding="utf-8")
 
-    def _resolve_activation(self, text: str) -> _ActivationResolution | None:
+    @staticmethod
+    def _accepted_skills(
+        context: dict | None,
+    ) -> tuple[tuple[Skill, ...], str, Path | None] | None:
+        if not isinstance(context, dict):
+            return None
+        from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+        from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+
+        material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+        if not isinstance(material, ResolvedAgentMaterialV1):
+            return None
+        container_root = getattr(getattr(material.app_config, "skills", None), "container_path", None)
+        if not isinstance(container_root, str) or not container_root:
+            return None
+        return (
+            tuple(material.enabled_skill_objects),
+            container_root,
+            (material.skill_snapshot.root if material.skill_snapshot is not None else None),
+        )
+
+    def _resolve_activation(
+        self,
+        text: str,
+        *,
+        run_context: dict | None = None,
+    ) -> _ActivationResolution | None:
         reference = parse_slash_skill_reference(text)
         if reference is None:
             return None
 
-        storage = self._storage()
-        skills = storage.load_skills(enabled_only=False)
+        accepted = self._accepted_skills(run_context)
+        if accepted is None:
+            storage = self._storage()
+            skills = tuple(storage.load_skills(enabled_only=False))
+            container_root = storage.get_container_root()
+            skills_root = storage.get_skills_root_path()
+        else:
+            skills, container_root, skills_root = accepted
+            storage = None
         skill = next((candidate for candidate in skills if candidate.name == reference.name), None)
         if skill is None:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not installed.")
@@ -153,15 +187,21 @@ class SkillActivationMiddleware(AgentMiddleware):
 
         resolved = resolve_slash_skill(
             text,
-            skills,
+            list(skills),
             available_skills=self._available_skills,
-            container_base_path=storage.get_container_root(),
+            container_base_path=container_root,
         )
         if resolved is None:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be resolved.")
+        if skills_root is None:
+            return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be loaded safely.")
 
         try:
-            skill_content = self._read_skill_content(resolved.skill.skill_file, storage.get_skills_root_path(), storage=storage)
+            skill_content = self._read_skill_content(
+                resolved.skill.skill_file,
+                skills_root,
+                storage=storage,
+            )
         except (OSError, ValueError):
             logger.exception("Failed to read slash-activated skill %s", resolved.skill.name)
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be loaded safely. Please check the skill installation.")
@@ -284,7 +324,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return None
 
         content = get_original_user_content_text(target.content, target.additional_kwargs)
-        resolution = self._resolve_activation(content)
+        resolution = self._resolve_activation(content, run_context=run_context) if self._accepted_skills(run_context) is not None else self._resolve_activation(content)
         if resolution is None:
             return None
         return target_index, target, resolution, run_key
@@ -371,10 +411,11 @@ Follow this skill before choosing a general workflow. Load supporting resources 
           slash is a run-scoped commitment made by the user, and it dies with
           the run anyway;
         - skills the model loaded earlier in the thread (``ThreadState.skill_context``),
-          re-validated against the live registry on each call: enabled,
-          runtime-allowed for this agent, and not opted out via
-          ``secrets-autonomous: false``. Slash activation is exempt from the
-          opt-out — it is the explicit-ceremony path.
+          re-validated against the accepted registry on durable runs and the
+          live registry on legacy embedded runs: enabled, runtime-allowed for
+          this agent, and not opted out via ``secrets-autonomous: false``.
+          Slash activation is exempt from the opt-out — it is the
+          explicit-ceremony path.
 
         The set is recomputed and REPLACED each call, so a skill evicted from
         skill_context, or a caller that stops supplying a value, loses its
@@ -391,8 +432,9 @@ Follow this skill before choosing a general workflow. Load supporting resources 
 
         # The slash source records the canonical container path plus a
         # middleware-chain-local owner token — never declared secrets. Both
-        # consumers authenticate the source and resolve the live registry skill
-        # by path, so caller-mergeable context cannot forge an activation.
+        # consumers authenticate the source and resolve accepted/legacy
+        # registry metadata by path, so caller-mergeable context cannot forge
+        # an activation.
         if activation is not None:
             write_slash_skill_source_path(
                 context,
@@ -403,7 +445,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request_secrets = extract_request_secrets(context)
         sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
         if request_secrets:
-            registry = self._load_skill_registry_by_path()
+            registry = self._load_skill_registry_by_path(context)
             if registry is not None:
                 # Slash source: exempt from the ``secrets-autonomous`` opt-out
                 # (explicit ceremony), but still enabled + allowlist checked.
@@ -448,10 +490,12 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             )
         self._record_secret_binding(context, audit_state, hook=hook)
 
-    def _load_skill_registry_by_path(self) -> dict[str, Skill] | None:
-        """Load the live skill registry keyed by normalized container file path.
+    def _load_skill_registry_by_path(self, context: dict | None = None) -> dict[str, Skill] | None:
+        """Load accepted or legacy skill metadata by normalized container path.
 
-        Reloaded every call on purpose (not cached): load_skills re-reads the
+        Durable runs use the accepted immutable snapshot, including its
+        allowed-tool and secret metadata. Legacy embedded runs reload the live
+        registry every call: load_skills re-reads the
         enabled state from extensions_config so an operator disabling a skill
         revokes its secret binding on the very next model call. A cache keyed on
         file mtimes would miss enable/disable toggles (which do not touch
@@ -467,6 +511,10 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         a transient registry read failure mid-run drops the injection for that
         call rather than trusting stale caller-supplied data.
         """
+        accepted = self._accepted_skills(context)
+        if accepted is not None:
+            skills, container_root, _skills_root = accepted
+            return {posixpath.normpath(skill.get_container_file_path(container_root)): skill for skill in skills}
         try:
             storage = self._storage()
             skills = storage.load_skills(enabled_only=False)
@@ -477,8 +525,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         return {posixpath.normpath(skill.get_container_file_path(container_root)): skill for skill in skills}
 
     def _resolve_registry_skill(self, registry: dict[str, Skill], path: object, *, require_autonomous: bool) -> Skill | None:
-        """Resolve a container path to a live registry skill eligible for secret
-        binding, or ``None``.
+        """Resolve a container path to accepted/legacy skill metadata, or ``None``.
 
         Match strictly by normalized container file path — never by name. A
         by-name fallback would be a confused deputy: DeerFlow lets a custom skill
@@ -508,9 +555,9 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         """Map ``ThreadState.skill_context`` entries to declared-secret sources.
 
         Entries are references to skills the model actually loaded in this
-        thread. Each is re-validated against the live registry so a skill that
-        was disabled, uninstalled, opted out, or removed from the agent's
-        allowlist after being read stops binding immediately.
+        thread. Durable runs re-validate against their accepted snapshot;
+        legacy embedded runs use the live registry. In both cases an opted-out
+        or no-longer-allowlisted skill stops binding immediately.
         """
         state = getattr(request, "state", None) or {}
         try:

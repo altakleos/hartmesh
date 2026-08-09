@@ -564,76 +564,94 @@ class InvocationRuntime:
         validate_replay,
     ) -> InternalLaunchReceipt | NotFoundOrInvisible | InvocationAuthorizationOutcome:
         launch = await self._normalizer.normalize(intent)
-        start_decision = await self._authorization.authorize_start(launch)
-        if rejection := self._rejection(start_decision):
-            return rejection
-        if start_decision.evidence is not None and launch.accepted_invocation is not None:
-            launch = replace(
-                launch,
-                accepted_invocation=_merge_decision_evidence(
-                    launch.accepted_invocation,
-                    start_decision.evidence,
-                ),
-            )
-        constraint_decision = await self._constraints.project(launch)
-        if constraint_decision.outcome is InvocationConstraintOutcome.denied:
-            return InvocationAuthorizationOutcome.denied
-        if constraint_decision.outcome is InvocationConstraintOutcome.indeterminate:
-            return InvocationAuthorizationOutcome.indeterminate
-        if constraint_decision.evidence is not None and launch.accepted_invocation is not None:
-            launch = replace(
-                launch,
-                accepted_invocation=_merge_decision_evidence(
-                    launch.accepted_invocation,
-                    constraint_decision.evidence,
-                ),
-            )
-        async with self._runs.admission_scope(launch.thread_id):
-            await self._runs.prepare_admission(launch)
-            admitted = await self._runs.admit(launch)
-            if isinstance(admitted, DurableAdmission):
-                record = admitted.record
-                if admitted.outcome is not AdmissionOutcome.created:
-                    visible = await self._runs.observe(
-                        record.run_id,
-                        launch.principal,
-                    )
-                    if visible is None:
-                        return NotFoundOrInvisible.not_found_or_invisible
-                    observation = await self._authorization.authorize_observe(
-                        visible,
-                        launch.principal,
-                    )
-                    if rejection := self._rejection(observation):
-                        return rejection
-                    if identity is not None and callable(validate_replay):
-                        await validate_replay(intent, identity, record)
-                    return InternalLaunchReceipt(record=visible, created=False)
-            else:
-                record = admitted
-            # Real-pod qualification barriers are inert unless the dedicated
-            # test image is started with its explicit environment gate.
-            from deerflow.runtime.kubernetes_qualification import (
-                qualification_barrier,
-                qualification_counter,
-            )
-
-            await qualification_barrier("accepted_before_worker_start", record)
-            worker = launch.worker(record)
-            try:
-                record.task = self._task_factory(worker)
-            except Exception as exc:
-                close = getattr(worker, "close", None)
-                if callable(close):
-                    close()
-                await self._runs.fail_start(
-                    record,
-                    f"Failed to attach run worker: {exc}",
+        worker_owns_material = False
+        try:
+            start_decision = await self._authorization.authorize_start(launch)
+            if rejection := self._rejection(start_decision):
+                return rejection
+            if start_decision.evidence is not None and launch.accepted_invocation is not None:
+                launch = replace(
+                    launch,
+                    accepted_invocation=_merge_decision_evidence(
+                        launch.accepted_invocation,
+                        start_decision.evidence,
+                    ),
                 )
-                raise
-            await qualification_counter("worker_attachments", record)
-            await qualification_barrier("accepted_before_client_response", record)
-        return InternalLaunchReceipt(record=record, created=True)
+            constraint_decision = await self._constraints.project(launch)
+            if constraint_decision.outcome is InvocationConstraintOutcome.denied:
+                return InvocationAuthorizationOutcome.denied
+            if constraint_decision.outcome is InvocationConstraintOutcome.indeterminate:
+                return InvocationAuthorizationOutcome.indeterminate
+            if constraint_decision.evidence is not None and launch.accepted_invocation is not None:
+                launch = replace(
+                    launch,
+                    accepted_invocation=_merge_decision_evidence(
+                        launch.accepted_invocation,
+                        constraint_decision.evidence,
+                    ),
+                )
+            async with self._runs.admission_scope(launch.thread_id):
+                await self._runs.prepare_admission(launch)
+                admitted = await self._runs.admit(launch)
+                if isinstance(admitted, DurableAdmission):
+                    record = admitted.record
+                    if admitted.outcome is not AdmissionOutcome.created:
+                        visible = await self._runs.observe(
+                            record.run_id,
+                            launch.principal,
+                        )
+                        if visible is None:
+                            return NotFoundOrInvisible.not_found_or_invisible
+                        observation = await self._authorization.authorize_observe(
+                            visible,
+                            launch.principal,
+                        )
+                        if rejection := self._rejection(observation):
+                            return rejection
+                        if identity is not None and callable(validate_replay):
+                            await validate_replay(intent, identity, record)
+                        return InternalLaunchReceipt(record=visible, created=False)
+                else:
+                    record = admitted
+                # Real-pod qualification barriers are inert unless the dedicated
+                # test image is started with its explicit environment gate.
+                from deerflow.runtime.kubernetes_qualification import (
+                    qualification_barrier,
+                    qualification_counter,
+                )
+
+                await qualification_barrier("accepted_before_worker_start", record)
+                worker = launch.worker(record)
+                try:
+                    record.task = self._task_factory(worker)
+                except Exception as exc:
+                    close = getattr(worker, "close", None)
+                    if callable(close):
+                        close()
+                    await self._runs.fail_start(
+                        record,
+                        f"Failed to attach run worker: {exc}",
+                    )
+                    raise
+                material = launch.accepted_invocation.agent_revision.material if launch.accepted_invocation is not None else None
+                add_done_callback = getattr(record.task, "add_done_callback", None)
+                if material is not None and callable(add_done_callback):
+                    # A task cancelled before its coroutine runs never enters
+                    # the worker's finally block. The idempotent completion
+                    # callback closes that narrow process-local lease gap.
+                    def release_process_material(_completed_task) -> None:
+                        asyncio.create_task(asyncio.to_thread(material.release_process_material))
+
+                    add_done_callback(release_process_material)
+                worker_owns_material = True
+                await qualification_counter("worker_attachments", record)
+                await qualification_barrier("accepted_before_client_response", record)
+            return InternalLaunchReceipt(record=record, created=True)
+        finally:
+            if not worker_owns_material and launch.accepted_invocation is not None:
+                material = launch.accepted_invocation.agent_revision.material
+                if material is not None:
+                    await asyncio.to_thread(material.release_process_material)
 
     async def launch(
         self,

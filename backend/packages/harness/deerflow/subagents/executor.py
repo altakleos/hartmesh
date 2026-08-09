@@ -34,7 +34,9 @@ from deerflow.runtime.accepted_invocation import (
     INVOCATION_IDENTITY_CONTEXT_KEY,
     INVOCATION_ORIGIN_CONTEXT_KEY,
     TRUSTED_RUN_CONTEXT_KEY,
+    ResolvedAgentMaterialV1,
 )
+from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
 from deerflow.runtime.constraints import InvocationSubagentReservation
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
@@ -471,6 +473,7 @@ class SubagentExecutor:
         accepted_extension_manifest_digest: str | None = None,
         mcp_invocation_facts: Any | None = None,
         mcp_preparation_audit_sink: Any | None = None,
+        resolved_agent_material: ResolvedAgentMaterialV1 | None = None,
     ):
         """Initialize the executor.
 
@@ -513,6 +516,9 @@ class SubagentExecutor:
             trusted_run_context: Host-sealed invocation facts inherited as one
                 immutable record. When present it is authoritative over the
                 legacy identity, Origin, attributes, and extension arguments.
+            resolved_agent_material: Exact accepted graph-factory material.
+                Its snapshot-backed skills are shared with the lead agent and
+                remain process-local.
         """
         self.config = config
         self.app_config = app_config
@@ -588,6 +594,13 @@ class SubagentExecutor:
         self.accepted_extension_manifest_digest = accepted_extension_manifest_digest
         self.mcp_invocation_facts = mcp_invocation_facts
         self.mcp_preparation_audit_sink = mcp_preparation_audit_sink
+        if resolved_agent_material is not None and not isinstance(
+            resolved_agent_material,
+            ResolvedAgentMaterialV1,
+        ):
+            raise TypeError("resolved_agent_material must be ResolvedAgentMaterialV1 or None")
+        self.resolved_agent_material = resolved_agent_material
+        self._owns_resolved_agent_material = False
 
         self._base_tools = _filter_tools(
             tools,
@@ -701,21 +714,30 @@ class SubagentExecutor:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} skills=[] — skipping skill loading")
             return []
 
-        try:
-            from deerflow.skills.storage import get_or_new_user_skill_storage
-
-            storage_kwargs = {"app_config": self.app_config} if self.app_config is not None else {}
-            storage = await asyncio.to_thread(
-                get_or_new_user_skill_storage,
-                self.user_id or DEFAULT_USER_ID,
-                **storage_kwargs,
+        if self.resolved_agent_material is not None:
+            all_skills = list(self.resolved_agent_material.enabled_skill_objects)
+            logger.info(
+                "[trace=%s] Subagent %s loaded %d accepted snapshot skill(s)",
+                self.trace_id,
+                self.config.name,
+                len(all_skills),
             )
-            # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
-            all_skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
-            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
-        except Exception:
-            logger.exception(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}")
-            raise
+        else:
+            try:
+                from deerflow.skills.storage import get_or_new_user_skill_storage
+
+                storage_kwargs = {"app_config": self.app_config} if self.app_config is not None else {}
+                storage = await asyncio.to_thread(
+                    get_or_new_user_skill_storage,
+                    self.user_id or DEFAULT_USER_ID,
+                    **storage_kwargs,
+                )
+                # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
+                all_skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
+                logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
+            except Exception:
+                logger.exception(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}")
+                raise
 
         if not all_skills:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} no enabled skills found")
@@ -829,6 +851,7 @@ class SubagentExecutor:
                     self._available_skill_names,
                     app_config=resolved_app_config,
                     user_id=self.user_id or DEFAULT_USER_ID,
+                    resolved_skills=(tuple(skills) if self.resolved_agent_material is not None else None),
                 )
             if skills_section:
                 system_parts.append(skills_section)
@@ -906,6 +929,8 @@ class SubagentExecutor:
 
         collector: SubagentTokenCollector | None = None
         try:
+            if self.resolved_agent_material is not None:
+                await asyncio.to_thread(self.resolved_agent_material.verify_process_material)
             state, final_tools, deferred_setup = await self._build_initial_state(task)
             agent = self._create_agent(
                 final_tools,
@@ -1018,6 +1043,8 @@ class SubagentExecutor:
                 )
 
                 context[MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY] = self.mcp_preparation_audit_sink
+            if self.resolved_agent_material is not None:
+                context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = self.resolved_agent_material
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -1160,6 +1187,32 @@ class SubagentExecutor:
 
         return result
 
+    def retain_resolved_agent_material(self) -> None:
+        """Give this background child an independent snapshot lease."""
+        if self.resolved_agent_material is None:
+            return
+        if self._owns_resolved_agent_material:
+            return
+        self.resolved_agent_material = self.resolved_agent_material.retain_process_material()
+        self._owns_resolved_agent_material = True
+
+    def _release_owned_resolved_agent_material(self) -> None:
+        if not self._owns_resolved_agent_material:
+            return
+        self._owns_resolved_agent_material = False
+        if self.resolved_agent_material is not None:
+            self.resolved_agent_material.release_process_material()
+
+    async def _aexecute_with_material_lease(
+        self,
+        task: str,
+        result_holder: SubagentResult,
+    ) -> SubagentResult:
+        try:
+            return await self._aexecute(task, result_holder)
+        finally:
+            self._release_owned_resolved_agent_material()
+
     def _execute_in_isolated_loop(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute the subagent on the persistent isolated event loop.
 
@@ -1280,7 +1333,10 @@ class SubagentExecutor:
                 # background path does not create a temporary loop via execute().
                 execution_future = _submit_to_isolated_loop_in_context(
                     parent_context,
-                    lambda: self._aexecute(task, result_holder),
+                    lambda: self._aexecute_with_material_lease(
+                        task,
+                        result_holder,
+                    ),
                 )
                 try:
                     # Wait for execution with timeout
@@ -1295,12 +1351,17 @@ class SubagentExecutor:
                     )
                     execution_future.cancel()
             except Exception as e:
+                self._release_owned_resolved_agent_material()
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
                 with _background_tasks_lock:
                     task_result = _background_tasks[task_id]
                 task_result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
 
-        _scheduler_pool.submit(run_task)
+        try:
+            _scheduler_pool.submit(run_task)
+        except Exception:
+            self._release_owned_resolved_agent_material()
+            raise
         return task_id
 
 

@@ -212,7 +212,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
+    from deerflow.runtime.skill_snapshot import cleanup_abandoned_skill_snapshots
     from deerflow.skills.projection import ensure_public_skill_projection
+
+    try:
+        removed_skill_snapshots = await asyncio.to_thread(cleanup_abandoned_skill_snapshots)
+        if removed_skill_snapshots:
+            logger.info(
+                "Removed %d abandoned accepted skill snapshot(s)",
+                removed_skill_snapshots,
+            )
+    except Exception:
+        logger.warning(
+            "Accepted skill snapshot startup cleanup failed",
+            exc_info=True,
+        )
 
     public_projection_ready = await asyncio.to_thread(ensure_public_skill_projection, app_config=startup_config)
     if public_projection_ready:

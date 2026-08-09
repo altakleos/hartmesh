@@ -332,7 +332,16 @@ class LocalSandboxProvider(SandboxProvider):
             config = get_app_config()
             skills_container_path = config.skills.container_path
             projection = skill_projection if skill_projection is not None else LocalSandboxProvider._ensure_skills_projection(effective_user_id)
+            snapshot_root = paths.skill_snapshot_scope_dir(effective_user_id)
+            snapshot_root.mkdir(parents=True, exist_ok=True)
 
+            mappings.append(
+                PathMapping(
+                    container_path=f"{skills_container_path}/.accepted",
+                    local_path=str(snapshot_root),
+                    read_only=True,
+                )
+            )
             if projection is not None:
                 mappings.extend(
                     [

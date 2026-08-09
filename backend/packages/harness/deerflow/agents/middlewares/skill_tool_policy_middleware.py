@@ -100,19 +100,38 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             return _POLICY_SOURCE_SKILL_CONTEXT, tuple(paths)
         return _POLICY_SOURCE_PASSIVE, ()
 
-    def _active_skills_for_paths(self, paths: tuple[str, ...]) -> tuple[list[Skill], bool]:
+    def _active_skills_for_paths(
+        self,
+        paths: tuple[str, ...],
+        *,
+        request: ModelRequest | ToolCallRequest | None = None,
+    ) -> tuple[list[Skill], bool]:
         if not paths:
             return [], False
 
-        try:
-            storage = self._storage()
-            skills = storage.load_skills(enabled_only=False)
-            container_root = storage.get_container_root()
-        except Exception:
-            logger.exception("Failed to load active skills for allowed-tools policy")
-            # A real active reference exists but cannot be authorized. Signal a
-            # policy failure so callers retain only framework-safe tools.
-            return [], True
+        context = getattr(getattr(request, "runtime", None), "context", None)
+        accepted_skills = None
+        if isinstance(context, dict):
+            from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+            from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+
+            material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+            if isinstance(material, ResolvedAgentMaterialV1):
+                container_root = getattr(getattr(material.app_config, "skills", None), "container_path", None)
+                if isinstance(container_root, str) and container_root:
+                    accepted_skills = tuple(material.enabled_skill_objects)
+        if accepted_skills is None:
+            try:
+                storage = self._storage()
+                skills = storage.load_skills(enabled_only=False)
+                container_root = storage.get_container_root()
+            except Exception:
+                logger.exception("Failed to load active skills for allowed-tools policy")
+                # A real active reference exists but cannot be authorized. Signal a
+                # policy failure so callers retain only framework-safe tools.
+                return [], True
+        else:
+            skills = accepted_skills
 
         registry = {posixpath.normpath(skill.get_container_file_path(container_root)): skill for skill in skills}
         active: list[Skill] = []
@@ -137,8 +156,16 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             return [], True
         return active, False
 
-    def _allowed_names_for_paths(self, paths: tuple[str, ...]) -> set[str] | None:
-        active_skills, policy_failed = self._active_skills_for_paths(paths)
+    def _allowed_names_for_paths(
+        self,
+        paths: tuple[str, ...],
+        *,
+        request: ModelRequest | ToolCallRequest | None = None,
+    ) -> set[str] | None:
+        active_skills, policy_failed = self._active_skills_for_paths(
+            paths,
+            request=request,
+        )
         if policy_failed:
             return set(ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES)
         allowed = allowed_tool_names_for_skills(active_skills)
@@ -199,7 +226,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         decision = self._read_policy_decision(context, resolved_policy)
         if decision is not _MISSING_POLICY_DECISION:
             return decision
-        return self._allowed_names_for_paths(paths)
+        return self._allowed_names_for_paths(paths, request=request)
 
     def _filter_model_request(
         self,
@@ -210,7 +237,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelRequest:
         resolved_policy = self._active_policy(request) if policy is None else policy
         _, paths = resolved_policy
-        allowed = self._allowed_names_for_paths(paths) if refresh_decision else self._allowed_names(request, policy=resolved_policy)
+        allowed = self._allowed_names_for_paths(paths, request=request) if refresh_decision else self._allowed_names(request, policy=resolved_policy)
         if refresh_decision:
             self._store_policy_decision(request, resolved_policy, allowed)
         if allowed is None:
