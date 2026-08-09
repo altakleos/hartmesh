@@ -101,6 +101,44 @@ async def _wait_for(condition, *, timeout=5.0, interval=0.05):
     raise TimeoutError(f"Condition not met within {timeout}s")
 
 
+def _github_followup_message(
+    delivery_id: str,
+    *,
+    text: str = "queued comment",
+    user_id: str = "github-user",
+    owner_user_id: str = "agent-owner-1",
+    chat_id: str = "org/repo",
+) -> InboundMessage:
+    """Build the production-shaped, host-verified GitHub delivery used below."""
+
+    from app.runtime import build_verified_webhook_route_binding
+
+    binding = build_verified_webhook_route_binding(
+        provider="github",
+        installation_reference=1234,
+        owner_user_id=owner_user_id,
+        agent_id="reviewer",
+        repository_reference=chat_id,
+    )
+    return InboundMessage(
+        channel_name="github",
+        chat_id=chat_id,
+        workspace_id=chat_id,
+        user_id=user_id,
+        owner_user_id=owner_user_id,
+        text=text,
+        verified_source_binding=binding,
+        metadata={
+            "message_id": delivery_id,
+            "agent_name": "reviewer",
+            "github": {
+                "delivery_id": delivery_id,
+                "installation_id": 1234,
+            },
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # MessageBus tests
 # ---------------------------------------------------------------------------
@@ -4054,38 +4092,50 @@ class TestGithubFireAndForget:
 
 
 class TestGithubFollowupBuffer:
-    """Tests for issue #4121 Slice 2: buffer-and-drain of concurrent GitHub
-    comments that arrive while a run is already active on the thread.
+    """Process-local FIFO buffering for attributed native source deliveries."""
 
-    Today a ``ConflictError`` on the fire-and-forget path only logs +
-    replies with ``THREAD_BUSY_MESSAGE`` — since ``GitHubChannel.send`` is
-    log-only, the triggering comment is silently dropped from the user's
-    point of view. These tests pin the fix: the triggering message is
-    buffered per-thread (deduped, capped), and a background watcher drains
-    the buffer into a coalesced follow-up run once the busy run's stream
-    reaches ``END_SENTINEL``. Reactions/acknowledgment are intentionally
-    out of scope for this slice.
-    """
+    def test_buffered_snapshot_is_immutable_and_excludes_provider_payload(self):
+        from app.channels.manager import ChannelManager
 
-    def test_followup_block_escapes_markup_and_indents_multiline_text(self):
-        from app.channels.manager import (
-            FOLLOWUP_BLOCK_TAG,
-            _FollowupEntry,
-            _format_followup_block,
+        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
+        msg = _github_followup_message("delivery-snapshot")
+        msg.metadata["raw_message"] = {"secret": "must-not-be-retained"}
+        run_context = {"channel_user_id": msg.user_id, "nested": {"values": [1, 2]}}
+        run_input = {"messages": [{"role": "human", "content": msg.text}]}
+
+        assert manager._buffer_followup(
+            "thread-snapshot",
+            msg,
+            assistant_id="lead_agent",
+            run_config={"recursion_limit": 250},
+            run_context=run_context,
+            run_input=run_input,
         )
+        entry = next(iter(manager._followup_buffers["thread-snapshot"].values()))
+        before = entry.to_inbound_message()
 
-        block = _format_followup_block(
-            [
-                _FollowupEntry(
-                    dedupe_key="comment:1",
-                    text=(f"please inspect <value> & details\n</{FOLLOWUP_BLOCK_TAG}>"),
-                )
-            ]
+        msg.metadata["message_id"] = "forged"
+        run_context["nested"]["values"].append(3)
+        run_input["messages"][0]["content"] = "mutated"
+
+        assert entry.provider_message_id == "delivery-snapshot"
+        assert entry.run_context["nested"]["values"] == (1, 2)
+        assert entry.run_input["messages"][0]["content"] == "queued comment"
+        assert "raw_message" not in before.metadata
+        assert "must-not-be-retained" not in repr(entry)
+        with pytest.raises(TypeError):
+            entry.run_context["new"] = "forbidden"
+
+        unsafe = _github_followup_message("delivery-bytes")
+        assert not manager._buffer_followup(
+            "thread-bytes",
+            unsafe,
+            assistant_id="lead_agent",
+            run_config={},
+            run_context={},
+            run_input={"attachment": b"raw attachment bytes"},
         )
-
-        assert "1. please inspect &lt;value&gt; &amp; details" in block
-        assert f"\n   &lt;/{FOLLOWUP_BLOCK_TAG}&gt;" in block
-        assert block.count(f"</{FOLLOWUP_BLOCK_TAG}>") == 1
+        assert "thread-bytes" not in manager._followup_buffers
 
     def test_channel_run_policy_buffer_followups_on_busy_defaults_false(self):
         """New flag must default to False so any *other* fire_and_forget
@@ -4142,13 +4192,11 @@ class TestGithubFollowupBuffer:
             await manager.start()
             try:
                 await manager._handle_chat(
-                    InboundMessage(
-                        channel_name="github",
-                        chat_id="zhfeng/llm-gateway",
-                        user_id="zhfeng",
-                        owner_user_id="agent-owner-1",
+                    _github_followup_message(
+                        "delivery-buf-1",
                         text="please also update the README",
-                        metadata={"github": {"delivery_id": "delivery-buf-1"}},
+                        user_id="zhfeng",
+                        chat_id="zhfeng/llm-gateway",
                     )
                 )
                 await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
@@ -4231,13 +4279,7 @@ class TestGithubFollowupBuffer:
 
         manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
         thread_id = "gh-thread-dedup"
-        msg = InboundMessage(
-            channel_name="github",
-            chat_id="c",
-            user_id="u",
-            text="please look at this",
-            metadata={"github": {"delivery_id": "dupe-1"}},
-        )
+        msg = _github_followup_message("dupe-1", text="please look at this")
 
         manager._buffer_followup(thread_id, msg)
         manager._buffer_followup(thread_id, msg)  # redelivery of the same comment
@@ -4256,13 +4298,7 @@ class TestGithubFollowupBuffer:
 
         with caplog.at_level(logging.WARNING):
             for i in range(FOLLOWUP_BUFFER_MAX_PER_THREAD + 5):
-                msg = InboundMessage(
-                    channel_name="github",
-                    chat_id="c",
-                    user_id="u",
-                    text=f"comment {i}",
-                    metadata={"github": {"delivery_id": f"d{i}"}},
-                )
+                msg = _github_followup_message(f"d{i}", text=f"comment {i}")
                 manager._buffer_followup(thread_id, msg)
 
         buffer = manager._followup_buffers[thread_id]
@@ -4273,59 +4309,41 @@ class TestGithubFollowupBuffer:
         assert f"comment {FOLLOWUP_BUFFER_MAX_PER_THREAD + 4}" in kept_texts
         assert any("overflow" in r.message.lower() for r in caplog.records)
 
-    def test_drain_batches_at_most_ten_entries_per_cycle(self):
-        """A queue deeper than the drain batch size must only coalesce the
-        oldest N entries in one cycle, leaving the rest buffered — this is
-        what lets a >10 backlog chain into a second drain cycle instead of
-        growing one unbounded input block."""
-        from app.channels.manager import FOLLOWUP_DRAIN_BATCH_SIZE, ChannelManager
+    def test_drain_launches_exactly_one_fifo_delivery_per_cycle(self):
+        """Each source delivery owns one invocation and FIFO is preserved."""
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
-            carrier_msg = InboundMessage(
-                channel_name="github",
-                chat_id="zhfeng/llm-gateway",
-                user_id="zhfeng",
-                owner_user_id="agent-owner-1",
-                text="carrier",
-            )
-            thread_id = "gh-thread-batch"
-            for i in range(15):
-                entry_msg = InboundMessage(
-                    channel_name="github",
-                    chat_id="zhfeng/llm-gateway",
-                    user_id="zhfeng",
-                    owner_user_id="agent-owner-1",
-                    text=f"comment {i}",
-                    metadata={"github": {"delivery_id": f"d{i}"}},
-                )
+            thread_id = "gh-thread-fifo"
+            for i in range(3):
+                entry_msg = _github_followup_message(f"d{i}", text=f"comment {i}")
                 manager._buffer_followup(thread_id, entry_msg)
 
-            assert len(manager._followup_buffers[thread_id]) == 15
+            assert len(manager._followup_buffers[thread_id]) == 3
 
             mock_client = _make_mock_langgraph_client(thread_id=thread_id)
             mock_client.runs.create = AsyncMock(return_value={"run_id": "run-drain-1", "status": "pending"})
 
-            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+            await manager._drain_followups_for_thread(mock_client, thread_id)
 
             mock_client.runs.create.assert_called_once()
             drained_text = mock_client.runs.create.call_args[1]["input"]["messages"][0]["content"]
-            for i in range(FOLLOWUP_DRAIN_BATCH_SIZE):
-                assert f"comment {i}" in drained_text
-            for i in range(FOLLOWUP_DRAIN_BATCH_SIZE, 15):
-                assert f"comment {i}" not in drained_text
-
-            assert len(manager._followup_buffers[thread_id]) == 15 - FOLLOWUP_DRAIN_BATCH_SIZE
+            assert drained_text == "comment 0"
+            assert [entry.text for entry in manager._followup_buffers[thread_id].values()] == [
+                "comment 1",
+                "comment 2",
+            ]
 
         _run(go())
 
     def test_drain_conflict_requeues_entries_without_losing_them(self):
         """If the drain's own runs.create hits ConflictError (a real edge
         case — e.g. a manual/scheduled trigger raced onto the same thread),
-        the popped batch must be put back rather than lost, and the drain
+        the popped entry must be put back rather than lost, and the drain
         must not raise."""
         import httpx
         from langgraph_sdk.errors import ConflictError
@@ -4337,13 +4355,7 @@ class TestGithubFollowupBuffer:
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
-            carrier_msg = InboundMessage(
-                channel_name="github",
-                chat_id="zhfeng/llm-gateway",
-                user_id="zhfeng",
-                owner_user_id="agent-owner-1",
-                text="queued comment",
-            )
+            carrier_msg = _github_followup_message("delivery-conflict")
             thread_id = "gh-thread-9"
             manager._buffer_followup(thread_id, carrier_msg)
             assert len(manager._followup_buffers[thread_id]) == 1
@@ -4356,11 +4368,126 @@ class TestGithubFollowupBuffer:
             mock_client.runs.create = AsyncMock(side_effect=conflict)
 
             # Must not raise.
-            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+            await manager._drain_followups_for_thread(mock_client, thread_id)
 
             assert thread_id in manager._followup_buffers
             assert len(manager._followup_buffers[thread_id]) == 1
             mock_client.runs.create.assert_called_once()
+
+        _run(go())
+
+    def test_runtime_busy_requeues_same_entry_and_watches_winning_run(self):
+        """A manual run race preserves FIFO and retries after its exact run ends."""
+        from app.channels.manager import ChannelManager
+        from app.runtime import InternalLaunchReceipt
+        from deerflow.runtime import ConflictError as RuntimeConflictError
+        from deerflow.runtime import MemoryStreamBridge
+
+        class RacingRuntime:
+            def __init__(self):
+                self.intents = []
+
+            async def launch(self, intent):
+                self.intents.append(intent)
+                if len(self.intents) == 1:
+                    raise RuntimeConflictError(
+                        "thread busy",
+                        active_run_id="manual-web-run",
+                    )
+                return InternalLaunchReceipt(
+                    record=SimpleNamespace(
+                        run_id="buffered-run",
+                        thread_id=intent.thread_id,
+                    )
+                )
+
+        async def go():
+            bridge = MemoryStreamBridge()
+            runtime = RacingRuntime()
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                invocation_runtime=runtime,
+                get_stream_bridge=lambda: bridge,
+            )
+            client = MagicMock()
+            first = _github_followup_message("delivery-race-1", text="first")
+            second = _github_followup_message("delivery-race-2", text="second")
+            manager._buffer_followup("thread-race", first)
+            manager._buffer_followup("thread-race", second)
+            original_entry = next(iter(manager._followup_buffers["thread-race"].values()))
+
+            await manager._drain_followups_for_thread(client, "thread-race")
+
+            queued = list(manager._followup_buffers["thread-race"].values())
+            assert queued[0] is original_entry
+            assert [entry.provider_message_id for entry in queued] == [
+                "delivery-race-1",
+                "delivery-race-2",
+            ]
+            assert len(manager._followup_watcher_tasks) == 1
+
+            await bridge.publish_end("manual-web-run")
+            await _wait_for(lambda: len(runtime.intents) == 2)
+            assert [entry.provider_message_id for entry in manager._followup_buffers["thread-race"].values()] == ["delivery-race-2"]
+            assert runtime.intents[1].external_key == "delivery-race-1"
+            await manager.stop()
+
+        _run(go())
+
+    def test_idempotency_mismatch_is_consumed_once_without_retry_loop(self, caplog):
+        """Changed intent under one source key is a terminal integrity signal."""
+        from app.channels.manager import ChannelManager
+        from deerflow.runtime.runs.manager import IdempotencyConflictError
+
+        async def go():
+            runtime = SimpleNamespace(launch=AsyncMock(side_effect=IdempotencyConflictError("private detail")))
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                invocation_runtime=runtime,
+            )
+            manager._buffer_followup(
+                "thread-mismatch",
+                _github_followup_message(
+                    "delivery-mismatch",
+                    text="sensitive message body",
+                ),
+            )
+
+            with caplog.at_level(logging.ERROR):
+                await manager._drain_followups_for_thread(MagicMock(), "thread-mismatch")
+                await manager._drain_followups_for_thread(MagicMock(), "thread-mismatch")
+
+            assert runtime.launch.await_count == 1
+            assert "thread-mismatch" not in manager._followup_buffers
+            mismatch_records = [record for record in caplog.records if "idempotency mismatch" in record.message]
+            assert len(mismatch_records) == 1
+            assert "sensitive message body" not in mismatch_records[0].getMessage()
+            assert "private detail" not in mismatch_records[0].getMessage()
+
+        _run(go())
+
+    def test_manager_without_stream_bridge_keeps_buffer_without_watcher(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+            )
+            manager._buffer_followup(
+                "thread-no-watcher",
+                _github_followup_message("delivery-no-watcher"),
+            )
+
+            manager._maybe_spawn_followup_watcher(
+                "thread-no-watcher",
+                {"run_id": "active-run"},
+            )
+
+            assert manager._followup_watcher_tasks == set()
+            assert len(manager._followup_buffers["thread-no-watcher"]) == 1
 
         _run(go())
 
@@ -4375,31 +4502,21 @@ class TestGithubFollowupBuffer:
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
-            carrier_msg = InboundMessage(
-                channel_name="github",
-                chat_id="zhfeng/llm-gateway",
-                user_id="zhfeng",
-                owner_user_id="agent-owner-1",
-                text="queued comment",
-            )
+            carrier_msg = _github_followup_message("delivery-network-error")
             thread_id = "gh-thread-neterr"
             manager._buffer_followup(thread_id, carrier_msg)
 
             mock_client = MagicMock()
             mock_client.runs.create = AsyncMock(side_effect=RuntimeError("connection reset"))
 
-            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+            await manager._drain_followups_for_thread(mock_client, thread_id)
 
             assert len(manager._followup_buffers[thread_id]) == 1
 
         _run(go())
 
-    def test_drain_resolve_run_params_failure_requeues_entries_without_losing_them(self, monkeypatch):
-        """If a step BETWEEN the buffer pop and runs.create raises -- e.g.
-        _resolve_run_params blows up because the target agent config was
-        removed mid-run -- the already-popped batch must still end up back
-        in the buffer instead of vanishing, and the drain must not raise
-        (mirrors the existing runs.create requeue-on-failure guarantee)."""
+    def test_drain_uses_retained_routing_without_reresolving_agent(self, monkeypatch):
+        """Mutable routing state cannot replace the source delivery snapshot."""
         from app.channels.manager import ChannelManager
 
         async def go():
@@ -4407,15 +4524,16 @@ class TestGithubFollowupBuffer:
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
-            carrier_msg = InboundMessage(
-                channel_name="github",
-                chat_id="zhfeng/llm-gateway",
-                user_id="zhfeng",
-                owner_user_id="agent-owner-1",
-                text="queued comment",
-            )
+            carrier_msg = _github_followup_message("delivery-retained-routing")
             thread_id = "gh-thread-resolve-fail"
-            manager._buffer_followup(thread_id, carrier_msg)
+            manager._buffer_followup(
+                thread_id,
+                carrier_msg,
+                assistant_id="retained-assistant",
+                run_config={"recursion_limit": 77},
+                run_context={"channel_user_id": carrier_msg.user_id},
+                run_input={"messages": [{"role": "human", "content": carrier_msg.text}]},
+            )
             assert len(manager._followup_buffers[thread_id]) == 1
 
             def _boom(*args, **kwargs):
@@ -4424,14 +4542,15 @@ class TestGithubFollowupBuffer:
             monkeypatch.setattr(manager, "_resolve_run_params", _boom)
 
             mock_client = MagicMock()
-            mock_client.runs.create = AsyncMock(return_value={"run_id": "should-not-be-created", "status": "pending"})
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "created", "status": "pending"})
 
-            # Must not raise -- the failure must be swallowed and requeued.
-            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+            await manager._drain_followups_for_thread(mock_client, thread_id)
 
-            assert thread_id in manager._followup_buffers
-            assert len(manager._followup_buffers[thread_id]) == 1
-            mock_client.runs.create.assert_not_called()
+            mock_client.runs.create.assert_awaited_once()
+            call = mock_client.runs.create.call_args
+            assert call.args[1] == "retained-assistant"
+            assert call.kwargs["config"] == {"recursion_limit": 77}
+            assert thread_id not in manager._followup_buffers
 
         _run(go())
 
@@ -4439,7 +4558,7 @@ class TestGithubFollowupBuffer:
         """Same guarantee one step later: if _apply_channel_policy raises
         (e.g. channel-policy/credential resolution blows up instead of
         following its documented degrade-and-continue path), the popped
-        batch must still be requeued rather than lost."""
+        entry must still be requeued rather than lost."""
         from app.channels.manager import ChannelManager
 
         async def go():
@@ -4447,13 +4566,7 @@ class TestGithubFollowupBuffer:
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
-            carrier_msg = InboundMessage(
-                channel_name="github",
-                chat_id="zhfeng/llm-gateway",
-                user_id="zhfeng",
-                owner_user_id="agent-owner-1",
-                text="queued comment",
-            )
+            carrier_msg = _github_followup_message("delivery-policy-failure")
             thread_id = "gh-thread-apply-fail"
             manager._buffer_followup(thread_id, carrier_msg)
 
@@ -4465,7 +4578,7 @@ class TestGithubFollowupBuffer:
             mock_client = MagicMock()
             mock_client.runs.create = AsyncMock(return_value={"run_id": "should-not-be-created", "status": "pending"})
 
-            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+            await manager._drain_followups_for_thread(mock_client, thread_id)
 
             assert thread_id in manager._followup_buffers
             assert len(manager._followup_buffers[thread_id]) == 1
@@ -4474,16 +4587,16 @@ class TestGithubFollowupBuffer:
         _run(go())
 
     def test_run_watcher_drains_buffer_on_end_sentinel(self):
-        """End-to-end mechanism test: a busy-thread follow-up gets buffered,
+        """End-to-end mechanism test: a busy-thread delivery gets buffered,
         and once the ORIGINAL run's stream reaches END_SENTINEL, the watcher
-        drains the buffer into a new coalesced runs.create call. That
+        drains the exact delivery into a new runs.create call. That
         drained run is itself watched too, so an empty buffer at its own
         END_SENTINEL is a clean no-op (the chain terminates)."""
         import httpx
         from langgraph_sdk.errors import ConflictError
 
         import app.gateway.github.run_policy  # noqa: F401 — register policy
-        from app.channels.manager import FOLLOWUP_BLOCK_TAG, ChannelManager
+        from app.channels.manager import ChannelManager
         from deerflow.runtime import MemoryStreamBridge
 
         async def go():
@@ -4508,24 +4621,20 @@ class TestGithubFollowupBuffer:
 
             # First message: no active run yet -> succeeds, watcher spawned for run-1.
             await manager._handle_chat(
-                InboundMessage(
-                    channel_name="github",
-                    chat_id="zhfeng/llm-gateway",
-                    user_id="zhfeng",
-                    owner_user_id="agent-owner-1",
+                _github_followup_message(
+                    "d1",
                     text="first comment",
-                    metadata={"github": {"delivery_id": "d1"}},
+                    user_id="zhfeng",
+                    chat_id="zhfeng/llm-gateway",
                 )
             )
             # Second message: thread is busy -> ConflictError -> buffered.
             await manager._handle_chat(
-                InboundMessage(
-                    channel_name="github",
-                    chat_id="zhfeng/llm-gateway",
-                    user_id="zhfeng",
-                    owner_user_id="agent-owner-1",
+                _github_followup_message(
+                    "d2",
                     text="second comment while busy",
-                    metadata={"github": {"delivery_id": "d2"}},
+                    user_id="zhfeng",
+                    chat_id="zhfeng/llm-gateway",
                 )
             )
 
@@ -4537,9 +4646,8 @@ class TestGithubFollowupBuffer:
 
             drain_call = mock_client.runs.create.call_args_list[2]
             assert drain_call[0][0] == "gh-thread-watch"
-            coalesced_text = drain_call[1]["input"]["messages"][0]["content"]
-            assert "second comment while busy" in coalesced_text
-            assert f"<{FOLLOWUP_BLOCK_TAG}>" in coalesced_text
+            drained_text = drain_call[1]["input"]["messages"][0]["content"]
+            assert drained_text == "second comment while busy"
 
             await _wait_for(lambda: "gh-thread-watch" not in manager._followup_buffers)
 
@@ -4566,25 +4674,12 @@ class TestGithubFollowupBuffer:
             bridge = MemoryStreamBridge()
             manager = ChannelManager(bus=bus, store=store, get_stream_bridge=lambda: bridge)
 
-            carrier_msg = InboundMessage(
-                channel_name="github",
-                chat_id="zhfeng/llm-gateway",
-                user_id="zhfeng",
-                owner_user_id="agent-owner-1",
-                text="carrier",
-            )
             thread_id = "gh-thread-stop-watcher"
             # Something buffered, so a slipped-through drain would have a
-            # non-empty batch to (wrongly) fire a run for.
+            # non-empty entry to (wrongly) fire a run for.
             manager._buffer_followup(
                 thread_id,
-                InboundMessage(
-                    channel_name="github",
-                    chat_id="c",
-                    user_id="u",
-                    text="queued while busy",
-                    metadata={"github": {"delivery_id": "d-stop-1"}},
-                ),
+                _github_followup_message("d-stop-1", text="queued while busy"),
             )
 
             mock_client = _make_mock_langgraph_client(thread_id=thread_id)
@@ -4596,7 +4691,7 @@ class TestGithubFollowupBuffer:
             # Spawn a watcher for a run whose stream never ends -- it sits
             # suspended awaiting stream_bridge.subscribe(), exactly like a
             # real in-flight watcher for a long-running GitHub coding run.
-            manager._maybe_spawn_followup_watcher(thread_id, {"run_id": "run-being-watched"}, carrier_msg)
+            manager._maybe_spawn_followup_watcher(thread_id, {"run_id": "run-being-watched"})
             await asyncio.sleep(0.05)
 
             assert len(manager._followup_watcher_tasks) == 1
@@ -4631,23 +4726,10 @@ class TestGithubFollowupBuffer:
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
-            carrier_msg = InboundMessage(
-                channel_name="github",
-                chat_id="zhfeng/llm-gateway",
-                user_id="zhfeng",
-                owner_user_id="agent-owner-1",
-                text="carrier",
-            )
             thread_id = "gh-thread-post-stop-drain"
             manager._buffer_followup(
                 thread_id,
-                InboundMessage(
-                    channel_name="github",
-                    chat_id="c",
-                    user_id="u",
-                    text="queued",
-                    metadata={"github": {"delivery_id": "d-post-stop-1"}},
-                ),
+                _github_followup_message("d-post-stop-1", text="queued"),
             )
 
             await manager.start()
@@ -4657,7 +4739,7 @@ class TestGithubFollowupBuffer:
             mock_client = MagicMock()
             mock_client.runs.create = AsyncMock(return_value={"run_id": "should-not-fire", "status": "pending"})
 
-            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+            await manager._drain_followups_for_thread(mock_client, thread_id)
 
             mock_client.runs.create.assert_not_called()
             assert len(manager._followup_buffers[thread_id]) == 1

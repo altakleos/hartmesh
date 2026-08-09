@@ -1899,7 +1899,14 @@ class RunManager:
                 raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
 
             if multitask_strategy == "reject" and local_inflight:
-                raise ConflictError(f"Thread {thread_id} already has an active run")
+                active_run = next(
+                    (current for current in local_inflight if current.operation_kind == ThreadOperationKind.run),
+                    None,
+                )
+                raise ConflictError(
+                    f"Thread {thread_id} already has an active run",
+                    active_run_id=(active_run.run_id if active_run is not None else None),
+                )
 
             if multitask_strategy in ("interrupt", "rollback") and local_inflight:
                 logger.info(
@@ -2724,6 +2731,10 @@ class CancelOutcome(StrEnum):
 
 class ConflictError(Exception):
     """Raised when multitask_strategy=reject and thread has inflight runs."""
+
+    def __init__(self, message: str, *, active_run_id: str | None = None) -> None:
+        super().__init__(message)
+        self.active_run_id = active_run_id
 
 
 class IdempotencyConflictError(ConflictError):

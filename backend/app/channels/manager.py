@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import mimetypes
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from html import escape
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote
 
@@ -52,6 +53,7 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
 from deerflow.runtime import ConflictError as RuntimeConflictError
 from deerflow.runtime.goal import parse_goal_command
+from deerflow.runtime.runs.manager import IdempotencyConflictError
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -114,15 +116,10 @@ BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is tempora
 # mechanism, same TTL), not a channel-specific gap. True idempotency against
 # a late/manual redelivery would require persisting the dedupe key in
 # ``ChannelStore`` instead, which is not implemented here.
-# Follow-up buffering for busy fire_and_forget threads (issue #4121 Slice 2).
-# A ConflictError on a channel opted into ChannelRunPolicy.buffer_followups_on_busy
-# buffers the triggering message per-thread instead of only logging it; a
-# background watcher drains the buffer into a coalesced follow-up run once the
-# busy run's StreamBridge stream reaches END_SENTINEL. See _buffer_followup,
-# _drain_followups_for_thread, and _watch_run_and_drain_followups below.
+# Follow-up buffering for busy fire_and_forget threads. Each bounded immutable
+# source snapshot drains as its own invocation once the prior run ends.
 FOLLOWUP_BUFFER_MAX_PER_THREAD = 20
-FOLLOWUP_DRAIN_BATCH_SIZE = 10
-FOLLOWUP_BLOCK_TAG = "followups-while-busy"
+FOLLOWUP_ENTRY_MAX_BYTES = 64 * 1024
 # Only server-stable provider message ids: client-generated ids (client_msg_id,
 # client_id) are not guaranteed identical across a provider's own redelivery, so
 # keying dedupe on them would miss exactly the retries we want to absorb.
@@ -245,25 +242,133 @@ class _SerializedThreadRunState:
     waiters: int = 0
 
 
-@dataclass(slots=True)
-class _FollowupEntry:
-    """One inbound message's text, buffered because its thread was busy.
+def _freeze_followup_value(value: Any) -> Any:
+    """Snapshot the finite JSON value retained by the process-local buffer."""
 
-    Routing/policy identity (channel_name, metadata, owner headers) for the
-    eventual drained run comes from a separate ``carrier_msg`` — see
-    ``ChannelManager._drain_followups_for_thread`` — not from a per-entry
-    message, since every buffered entry for one thread_id shares that
-    identity already (thread_id is itself derived deterministically from
-    (repo, number, agent_name) for GitHub). Only the text needs to survive
-    per entry.
-    """
+    if isinstance(value, Mapping):
+        frozen: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("buffered follow-up mappings require string keys")
+            frozen[key] = _freeze_followup_value(item)
+        return MappingProxyType(frozen)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_followup_value(item) for item in value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise ValueError(f"buffered follow-up cannot retain {type(value).__name__}")
+
+
+def _thaw_followup_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_followup_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_followup_value(item) for item in value]
+    return value
+
+
+def _followup_policy_metadata(msg: InboundMessage, provider_message_id: str) -> dict[str, Any]:
+    """Keep only bounded server-selected metadata needed to relaunch policy."""
+
+    metadata: dict[str, Any] = {"message_id": provider_message_id}
+    source = msg.metadata if isinstance(msg.metadata, Mapping) else {}
+    channel_metadata = source.get(msg.channel_name)
+    if isinstance(channel_metadata, Mapping):
+        # GitHub's credentials provider needs only the trusted installation
+        # reference. Recursion is already captured in ``run_config``. New
+        # buffered channel policies must extend this finite projection rather
+        # than retaining arbitrary provider payloads.
+        selected = {key: channel_metadata[key] for key in ("installation_id",) if key in channel_metadata}
+        if selected:
+            metadata[msg.channel_name] = selected
+    return metadata
+
+
+@dataclass(frozen=True, slots=True)
+class _FollowupEntry:
+    """One bounded immutable source delivery waiting for its own invocation."""
 
     dedupe_key: str
+    provider_message_id: str
+    channel_name: str
+    chat_id: str
+    user_id: str
     text: str
+    thread_ts: str | None
+    topic_id: str | None
+    connection_id: str | None
+    owner_user_id: str | None
+    workspace_id: str | None
+    verified_source_binding: InternalVerifiedNativeBinding
+    policy_metadata: Mapping[str, Any]
+    assistant_id: str
+    run_config: Mapping[str, Any]
+    run_context: Mapping[str, Any]
+    run_input: Mapping[str, Any]
+    created_at: float
+
+    def __post_init__(self) -> None:
+        for name in ("policy_metadata", "run_config", "run_context", "run_input"):
+            value = getattr(self, name)
+            if not isinstance(value, Mapping):
+                raise ValueError(f"buffered follow-up {name} must be a mapping")
+            object.__setattr__(self, name, _freeze_followup_value(value))
+        projection = {
+            "dedupe_key": self.dedupe_key,
+            "provider_message_id": self.provider_message_id,
+            "channel_name": self.channel_name,
+            "chat_id": self.chat_id,
+            "user_id": self.user_id,
+            "text": self.text,
+            "thread_ts": self.thread_ts,
+            "topic_id": self.topic_id,
+            "connection_id": self.connection_id,
+            "owner_user_id": self.owner_user_id,
+            "workspace_id": self.workspace_id,
+            "verified_source_binding": {
+                "kind": self.verified_source_binding.kind.value,
+                "reference": self.verified_source_binding.reference,
+            },
+            "policy_metadata": _thaw_followup_value(self.policy_metadata),
+            "assistant_id": self.assistant_id,
+            "run_config": _thaw_followup_value(self.run_config),
+            "run_context": _thaw_followup_value(self.run_context),
+            "run_input": _thaw_followup_value(self.run_input),
+        }
+        encoded = json.dumps(
+            projection,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        if len(encoded) > FOLLOWUP_ENTRY_MAX_BYTES:
+            raise ValueError(f"buffered follow-up exceeds {FOLLOWUP_ENTRY_MAX_BYTES} UTF-8 bytes")
+
+    def to_inbound_message(self) -> InboundMessage:
+        """Return a fresh minimal carrier for this delivery's trusted facts."""
+
+        return InboundMessage(
+            channel_name=self.channel_name,
+            chat_id=self.chat_id,
+            user_id=self.user_id,
+            text=self.text,
+            thread_ts=self.thread_ts,
+            topic_id=self.topic_id,
+            connection_id=self.connection_id,
+            owner_user_id=self.owner_user_id,
+            workspace_id=self.workspace_id,
+            verified_source_binding=self.verified_source_binding,
+            files=[],
+            metadata=_thaw_followup_value(self.policy_metadata),
+            created_at=self.created_at,
+        )
 
 
 def _is_thread_busy_error(exc: BaseException | None) -> bool:
     if exc is None:
+        return False
+    if isinstance(exc, IdempotencyConflictError):
         return False
     if isinstance(exc, (ConflictError, RuntimeConflictError)):
         return True
@@ -301,26 +406,9 @@ def _followup_dedupe_key(msg: InboundMessage) -> str:
             if value:
                 return f"{key}:{value}"
 
-    # No stable provider id available: fall back to a per-message key so the
-    # entry is still buffered (just never deduped against a redelivery).
+    # _buffer_followup rejects this shape before calling us; retain a unique
+    # fallback only for defensive compatibility with direct private callers.
     return f"__no_id__:{id(msg)}:{msg.created_at}"
-
-
-def _format_followup_block(entries: list[_FollowupEntry]) -> str:
-    """Coalesce buffered follow-up entries into one templated input block."""
-    lines = [
-        f"<{FOLLOWUP_BLOCK_TAG}>",
-        "The following messages arrived on this thread while a previous run was still in progress. They were queued and are now delivered together as one turn:",
-        "",
-    ]
-    for idx, entry in enumerate(entries, start=1):
-        escaped_text = escape(entry.text, quote=False).replace(
-            "\n",
-            "\n   ",
-        )
-        lines.append(f"{idx}. {escaped_text}")
-    lines.append(f"</{FOLLOWUP_BLOCK_TAG}>")
-    return "\n".join(lines)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -1058,8 +1146,8 @@ class ChannelManager:
         # duplicate deliveries landing on different pods are collapsed.
         self._inbound_dedupe_store = inbound_dedupe_store if inbound_dedupe_store is not None else MemoryInboundDedupeStore()
         # Per-thread follow-up buffers for busy fire_and_forget channels that
-        # opted into ChannelRunPolicy.buffer_followups_on_busy (issue #4121
-        # Slice 2). Keyed by thread_id -> OrderedDict[dedupe_key -> entry],
+        # opted into ChannelRunPolicy.buffer_followups_on_busy. Keyed by
+        # thread_id -> OrderedDict[dedupe_key -> immutable source entry],
         # oldest-first, mirroring the dedupe store's shape but scoped
         # per-thread with a hard cap instead of a global TTL (see
         # _buffer_followup / _enforce_followup_cap).
@@ -1070,6 +1158,9 @@ class ChannelManager:
         # run after this manager has been shut down. Discarded via the same
         # task's done-callback (see _maybe_spawn_followup_watcher).
         self._followup_watcher_tasks: set[asyncio.Task] = set()
+        # One watcher per (thread, run) avoids duplicate drain attempts when
+        # several deliveries observe the same active run.
+        self._followup_watched_runs: set[tuple[str, str]] = set()
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -1141,8 +1232,8 @@ class ChannelManager:
 
         Dropping the oldest (rather than the newest, incoming) entry means a
         thread that is deep enough in the backlog to hit the cap still keeps
-        the most recent activity — a better signal for the eventual coalesced
-        turn than the stalest queued comment. No reaction/acknowledgment is
+        the most recent activity — a better signal for eventual chained work
+        than the stalest queued comment. No reaction/acknowledgment is
         sent on drop (out of scope for this slice); a WARNING is logged so
         operators can see it in gateway.log.
         """
@@ -1155,14 +1246,33 @@ class ChannelManager:
                 dropped_key,
             )
 
-    def _buffer_followup(self, thread_id: str, msg: InboundMessage) -> None:
+    def _buffer_followup(
+        self,
+        thread_id: str,
+        msg: InboundMessage,
+        *,
+        assistant_id: str | None = None,
+        run_config: Mapping[str, Any] | None = None,
+        run_context: Mapping[str, Any] | None = None,
+        run_input: Mapping[str, Any] | None = None,
+    ) -> bool:
         """Append *msg* to thread_id's follow-up buffer (ConflictError path).
 
         Dedupe mirrors ``_is_duplicate_inbound``'s OrderedDict idiom, scoped
         per-thread instead of global: a redelivered webhook for a comment
         already buffered (same dedupe key) is a no-op instead of a second
-        entry.
+        entry. The retained entry owns the delivery's source/routing facts;
+        no later carrier message may replace them.
         """
+        provider_message_id = self._stable_provider_message_id(msg)
+        binding = msg.verified_source_binding
+        if provider_message_id is None or binding is None:
+            logger.error(
+                "[Manager] cannot buffer follow-up without stable provider identity and verified binding: channel=%s thread_id=%s",
+                msg.channel_name,
+                thread_id,
+            )
+            return False
         key = _followup_dedupe_key(msg)
         buffer = self._followup_buffers.setdefault(thread_id, OrderedDict())
         if key in buffer:
@@ -1171,9 +1281,53 @@ class ChannelManager:
                 thread_id,
                 key,
             )
-            return
+            return True
 
-        buffer[key] = _FollowupEntry(dedupe_key=key, text=msg.text)
+        if assistant_id is None or run_config is None or run_context is None:
+            resolved_assistant_id, resolved_run_config, resolved_run_context = self._resolve_run_params(msg, thread_id)
+            assistant_id = assistant_id or resolved_assistant_id
+            run_config = run_config or resolved_run_config
+            run_context = run_context or resolved_run_context
+        if run_input is None:
+            run_input = {"messages": [_human_input_message(msg.text)]}
+
+        try:
+            entry = _FollowupEntry(
+                dedupe_key=key,
+                provider_message_id=provider_message_id,
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                user_id=msg.user_id,
+                text=msg.text,
+                thread_ts=msg.thread_ts,
+                topic_id=msg.topic_id,
+                connection_id=msg.connection_id,
+                owner_user_id=msg.owner_user_id,
+                workspace_id=msg.workspace_id,
+                verified_source_binding=binding,
+                policy_metadata=_followup_policy_metadata(
+                    msg,
+                    provider_message_id,
+                ),
+                assistant_id=assistant_id,
+                run_config=run_config,
+                run_context=run_context,
+                run_input=run_input,
+                created_at=msg.created_at,
+            )
+        except (TypeError, ValueError):
+            logger.error(
+                "[Manager] rejected unsafe buffered follow-up: channel=%s thread_id=%s dedupe_key=%s",
+                msg.channel_name,
+                thread_id,
+                key,
+                exc_info=True,
+            )
+            if not buffer:
+                self._followup_buffers.pop(thread_id, None)
+            return False
+
+        buffer[key] = entry
         self._enforce_followup_cap(thread_id, buffer)
         logger.info(
             "[Manager] buffered follow-up for busy thread_id=%s (dedupe_key=%s, buffered=%d)",
@@ -1181,24 +1335,21 @@ class ChannelManager:
             key,
             len(buffer),
         )
+        return True
 
-    def _pop_followup_batch(self, thread_id: str, *, limit: int) -> list[_FollowupEntry]:
-        """Pop up to *limit* buffered entries FIFO (oldest first)."""
+    def _pop_followup_entry(self, thread_id: str) -> _FollowupEntry | None:
+        """Pop exactly one buffered source delivery FIFO."""
         buffer = self._followup_buffers.get(thread_id)
         if not buffer:
-            return []
+            return None
 
-        batch: list[_FollowupEntry] = []
-        for _ in range(min(limit, len(buffer))):
-            _, entry = buffer.popitem(last=False)
-            batch.append(entry)
-
+        _, entry = buffer.popitem(last=False)
         if not buffer:
             self._followup_buffers.pop(thread_id, None)
-        return batch
+        return entry
 
     def _requeue_followups(self, thread_id: str, entries: list[_FollowupEntry]) -> None:
-        """Put a popped batch back at the front of the buffer (oldest-first).
+        """Put popped immutable entries back at the front, oldest first.
 
         Used when the drain's own ``runs.create`` call itself fails —
         including the ``ConflictError`` edge case where something this
@@ -1224,7 +1375,6 @@ class ChannelManager:
         self,
         thread_id: str,
         run_result: Any,
-        carrier_msg: InboundMessage,
     ) -> None:
         """Spawn a background watcher for a just-created run, if wired up.
 
@@ -1250,17 +1400,21 @@ class ChannelManager:
                 thread_id,
             )
             return
+        watch_key = (thread_id, run_id)
+        if watch_key in self._followup_watched_runs:
+            return
 
-        task = asyncio.create_task(self._watch_run_and_drain_followups(thread_id, run_id, carrier_msg))
+        self._followup_watched_runs.add(watch_key)
+        task = asyncio.create_task(self._watch_run_and_drain_followups(thread_id, run_id))
         self._followup_watcher_tasks.add(task)
         task.add_done_callback(self._followup_watcher_tasks.discard)
+        task.add_done_callback(lambda _task, key=watch_key: self._followup_watched_runs.discard(key))
         task.add_done_callback(self._log_task_error)
 
     async def _watch_run_and_drain_followups(
         self,
         thread_id: str,
         run_id: str,
-        carrier_msg: InboundMessage,
     ) -> None:
         """Watch *run_id* until it ends, then attempt to drain thread_id's buffer.
 
@@ -1295,36 +1449,29 @@ class ChannelManager:
             return
 
         client = self._get_client()
-        await self._drain_followups_for_thread(client, thread_id, carrier_msg)
+        await self._drain_followups_for_thread(client, thread_id)
 
     async def _drain_followups_for_thread(
         self,
         client,
         thread_id: str,
-        carrier_msg: InboundMessage,
     ) -> None:
-        """Coalesce up to one batch of buffered follow-ups into a fresh run.
+        """Launch the oldest buffered source delivery as one fresh run.
 
-        ``carrier_msg`` supplies routing/policy identity (channel_name,
-        metadata, owner headers) for the drained run — it is safe to reuse
-        across an entire drain chain because every buffered entry for one
-        thread_id shares that identity (thread_id itself is derived
-        deterministically from (repo, number, agent_name) for GitHub).
+        The popped entry, not the completed run that triggered this drain,
+        owns routing, authority, Origin, sender, and external-key identity.
+        Each successful launch is watched, so a deeper FIFO backlog chains
+        one source delivery per invocation.
 
-        A batch larger than ``FOLLOWUP_DRAIN_BATCH_SIZE`` is intentionally
-        NOT drained in one shot: only the oldest batch is popped here, and
-        the run created for it is itself watched (via
-        ``_maybe_spawn_followup_watcher``), so a deeper backlog chains into
-        another drain cycle once this run ends, rather than growing one
-        unbounded coalesced input block.
-
-        If anything from here through ``runs.create`` fails — resolving run
-        params, applying channel policy, or ``runs.create`` itself
+        If anything from here through ``runs.create`` fails — applying
+        channel policy or ``runs.create`` itself
         (including ``ConflictError`` from something this manager did not
-        create racing onto the same thread) — the popped batch is requeued
+        create racing onto the same thread) — the popped entry is requeued
         (not lost) and this coroutine returns without raising or looping:
         the next run this manager successfully creates and watches on this
-        thread will attempt the drain again.
+        thread will attempt the drain again. A same-key/different-intent
+        result is consumed as one bounded integrity diagnostic because it
+        can never succeed on retry.
 
         No-ops if the manager has already been ``stop()``-ped: a watcher
         task that slips past its own cancellation and reaches this point
@@ -1341,38 +1488,39 @@ class ChannelManager:
             )
             return
 
-        entries = self._pop_followup_batch(thread_id, limit=FOLLOWUP_DRAIN_BATCH_SIZE)
-        if not entries:
+        entry = self._pop_followup_entry(thread_id)
+        if entry is None:
             return
 
         logger.info(
-            "[Manager] draining %d buffered follow-up(s) for thread_id=%s",
-            len(entries),
+            "[Manager] draining one buffered follow-up for thread_id=%s dedupe_key=%s",
             thread_id,
+            entry.dedupe_key,
         )
+        entry_msg = entry.to_inbound_message()
         try:
             # Everything from here through runs.create is covered by the
-            # same except below: a pre-create failure (e.g. the target agent
-            # config was removed mid-run, or channel-policy/credential
-            # resolution raises) must requeue the popped batch exactly like
-            # a runs.create failure does — none of these steps get to
+            # same except below: a pre-create failure (for example,
+            # channel-policy/credential resolution) must requeue the entry
+            # like a runs.create failure — none of these steps get to
             # silently drop entries that were already popped off the buffer.
-            assistant_id, run_config, run_context = self._resolve_run_params(carrier_msg, thread_id)
-            await self._apply_channel_policy(carrier_msg, run_context)
+            assistant_id = entry.assistant_id
+            run_config = _thaw_followup_value(entry.run_config)
+            run_context = _thaw_followup_value(entry.run_context)
+            await self._apply_channel_policy(entry_msg, run_context)
 
-            human_message = _human_input_message(_format_followup_block(entries))
             run_kwargs: dict[str, Any] = {
-                "input": {"messages": [human_message]},
+                "input": _thaw_followup_value(entry.run_input),
                 "config": run_config,
                 "context": run_context,
                 "multitask_strategy": "reject",
             }
-            if owner_headers := _owner_headers(carrier_msg):
+            if owner_headers := _owner_headers(entry_msg):
                 run_kwargs["headers"] = owner_headers
 
             if self._invocation_runtime is not None:
                 record = await self._launch_with_invocation_runtime(
-                    msg=carrier_msg,
+                    msg=entry_msg,
                     thread_id=thread_id,
                     assistant_id=assistant_id,
                     run_input=run_kwargs["input"],
@@ -1382,23 +1530,40 @@ class ChannelManager:
                 result = {"run_id": record.run_id}
             else:
                 result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
+        except IdempotencyConflictError:
+            # The same provider identity produced different canonical caller
+            # intent. Retrying can never succeed and would create an unbounded
+            # watcher loop, so surface one bounded integrity diagnostic and
+            # consume this poisoned entry.
+            logger.error(
+                "[Manager] buffered follow-up idempotency mismatch: channel=%s thread_id=%s dedupe_key=%s",
+                entry.channel_name,
+                thread_id,
+                entry.dedupe_key,
+            )
+            return
         except Exception as exc:
             if _is_thread_busy_error(exc):
                 logger.warning(
-                    "[Manager] follow-up drain hit a busy thread_id=%s (a run this manager did not create is active); re-buffering %d entries",
+                    "[Manager] follow-up drain hit a busy thread_id=%s; re-buffering one entry",
                     thread_id,
-                    len(entries),
                 )
             else:
-                logger.exception(
-                    "[Manager] follow-up drain failed for thread_id=%s; re-buffering %d entries",
+                logger.error(
+                    "[Manager] follow-up drain failed for thread_id=%s; re-buffering one entry (error_type=%s)",
                     thread_id,
-                    len(entries),
+                    type(exc).__name__,
                 )
-            self._requeue_followups(thread_id, entries)
+            self._requeue_followups(thread_id, [entry])
+            active_run_id = getattr(exc, "active_run_id", None)
+            if _is_thread_busy_error(exc) and isinstance(active_run_id, str):
+                self._maybe_spawn_followup_watcher(
+                    thread_id,
+                    {"run_id": active_run_id},
+                )
             return
 
-        self._maybe_spawn_followup_watcher(thread_id, result, carrier_msg)
+        self._maybe_spawn_followup_watcher(thread_id, result)
 
     async def _publish_progress_update(self, msg: InboundMessage, thread_id: str, text: str) -> None:
         await self.bus.publish_outbound(
@@ -1685,6 +1850,7 @@ class ChannelManager:
             except Exception:
                 logger.exception("[Manager] follow-up watcher task raised during stop()")
         self._followup_watcher_tasks.clear()
+        self._followup_watched_runs.clear()
 
         logger.info("ChannelManager stopped")
 
@@ -2158,6 +2324,10 @@ class ChannelManager:
             storage_user_id = _channel_storage_user_id(msg)
 
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+        # Buffering must never retain policy-injected credentials. Keep the
+        # pre-policy execution context as the immutable retry basis; the drain
+        # invokes the policy again at the narrow launch boundary.
+        buffered_run_context = _thaw_followup_value(_freeze_followup_value(run_context))
 
         # Apply per-channel policy: credentials provider (e.g. GitHub
         # installation-token mint) and the non-interactive flag for
@@ -2179,6 +2349,7 @@ class ChannelManager:
             msg = await channel.receive_file(msg, thread_id, user_id=storage_user_id) if channel else msg
         if extra_context:
             run_context.update(extra_context)
+            buffered_run_context.update(extra_context)
 
         original_text = msg.text
         uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
@@ -2243,7 +2414,16 @@ class ChannelManager:
                 if _is_thread_busy_error(exc):
                     logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
                     if policy.buffer_followups_on_busy:
-                        self._buffer_followup(thread_id, msg)
+                        buffered = self._buffer_followup(
+                            thread_id,
+                            msg,
+                            assistant_id=assistant_id,
+                            run_config=run_config,
+                            run_context=buffered_run_context,
+                            run_input=run_kwargs["input"],
+                        )
+                        if not buffered:
+                            await self._release_inbound_dedupe_key(msg)
                     else:
                         # Swallowed like the generic handler would not be: release the
                         # key so the provider's redelivery can retry once the thread
@@ -2253,7 +2433,7 @@ class ChannelManager:
                     return
                 raise
             if policy.buffer_followups_on_busy:
-                self._maybe_spawn_followup_watcher(thread_id, result, msg)
+                self._maybe_spawn_followup_watcher(thread_id, result)
             return
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))

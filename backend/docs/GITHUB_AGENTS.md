@@ -73,7 +73,6 @@ sequenceDiagram
     participant Trg as event_should_fire
     participant Bus as MessageBus
     participant Mgr as ChannelManager
-    participant Client as langgraph_sdk client
     participant Gateway as Gateway thread API
     participant Runtime as InvocationRuntime
 
@@ -258,34 +257,35 @@ sequenceDiagram
     participant SB as StreamBridge
 
     C1->>Mgr: InboundMessage
-    Mgr->>Client: runs.create() [fire_and_forget]
-    Client-->>Mgr: {run_id: run-1, status: pending}
+    Mgr->>Runtime: launch(K1) [fire_and_forget]
+    Runtime-->>Mgr: {run_id: run-1, status: pending}
     Mgr->>SB: subscribe(run-1) (background watcher)
 
     C2->>Mgr: InboundMessage (same thread_id)
-    Mgr->>Client: runs.create()
-    Client-->>Mgr: 409 ConflictError
-    Mgr->>Mgr: _buffer_followup(thread_id, msg)<br/>(deduped by delivery_id, capped at 20)
+    Mgr->>Runtime: launch(K2)
+    Runtime-->>Mgr: thread-busy ConflictError
+    Mgr->>Mgr: _buffer_followup(thread_id, source snapshot)<br/>(deduped by delivery_id, capped at 20)
     Mgr-->>C2: THREAD_BUSY_MESSAGE (log-only on GitHub)
 
     Note over SB: run-1 completes
     SB-->>Mgr: END_SENTINEL
-    Mgr->>Mgr: _drain_followups_for_thread()<br/>(pop up to 10, oldest first)
-    Mgr->>Client: runs.create() with <followups-while-busy> input
-    Client-->>Mgr: {run_id: run-2, status: pending}
-    Mgr->>SB: subscribe(run-2) (watch again — chains if >10 queued)
+    Mgr->>Mgr: _drain_followups_for_thread()<br/>(pop exactly one, oldest first)
+    Mgr->>Runtime: launch(K2)<br/>(C2's binding, Origin, sender, and external key)
+    Runtime-->>Mgr: {run_id: run-2, status: pending}
+    Mgr->>SB: subscribe(run-2) (watch again — one delivery per chained run)
 ```
 
 Key properties:
 
-- **Dedupe**: buffering keys on the GitHub webhook delivery id (falling back to the generic provider-message-id metadata keys, mirroring `_inbound_dedupe_key`), so a redelivered webhook for a comment already buffered is a no-op rather than a duplicate entry.
+- **Identity snapshot**: the buffer defensively freezes the delivery's stable provider ID, verified route binding, sender, owner, chat/topic/workspace route, resolved agent/assistant, and finite launch input/config/context. Raw provider payloads, attachment bytes, and transient credentials are not retained. The completed run is only a completion carrier; none of its authority, Origin, sender, or external key is used for the next invocation.
+- **Dedupe and replay**: buffering keys on the stable provider message identity. That identity is also the delivery's external invocation key inside the verified binding scope. A redelivery already in the buffer is a no-op; a repeated drain after admission receives the known run and does not attach another worker. A same-key/different-caller-intent result is a bounded integrity error and is not retried forever.
 - **Cap**: 20 entries per thread. Overflow drops the *oldest* buffered entry (not the newest) with a WARNING log — recent activity is a more useful signal than the stalest queued comment once a thread is deep enough in the backlog to hit the cap. No reaction/acknowledgment is sent on drop; see the reactions note below.
-- **Batching**: a drain coalesces at most 10 entries into one `<followups-while-busy>` input block. A backlog deeper than 10 is not force-fit into a single turn — the drained run is itself watched, so its own completion triggers another drain cycle for the remainder.
-- **Drain-conflict edge case**: if the drain's own `runs.create()` also hits `ConflictError` — e.g. a manual Web UI turn or a scheduled run raced onto the same thread — the popped batch is requeued (not lost, not retried in a tight loop). It is picked up again the next time this manager successfully creates *and watches* a run on that thread, which is guaranteed to eventually happen once whatever is occupying the thread finishes and any subsequent trigger succeeds.
-- **Reactions are out of scope for this slice.** GitHub's reaction API (`eyes`/`confused` acknowledgment) has no existing integration in this codebase and needs its own design pass; buffered comments are coalesced silently, with no per-comment acknowledgment.
+- **One source per run**: a drain launches exactly one FIFO entry as one chained invocation on the existing DeerFlow thread. It never coalesces independently attributed deliveries. The new run is watched, and its completion drains the next entry.
+- **Drain-conflict edge case**: if another invocation (for example, a manual Web turn) wins the same thread, the popped immutable entry is restored at the FIFO head. When the local runtime identifies the active run, the watcher retries after that run completes; failures never trigger a tight retry loop.
+- **Reactions are out of scope.** GitHub's reaction API (`eyes`/`confused` acknowledgment) has no existing integration in this codebase; buffered comments receive no per-comment acknowledgment.
 - **Config**: gated behind `ChannelRunPolicy.buffer_followups_on_busy` (default `False`); GitHub's own registration in `app/gateway/github/run_policy.py` opts in, since it is exactly the fire_and_forget + log-only-send channel this was designed for. Any other channel that adopts `fire_and_forget=True` in the future keeps the old silent-drop-with-log behavior unless it opts in too.
 - **Plumbing**: the watcher subscribes to the Gateway's `StreamBridge` singleton (`app.state.stream_bridge`), which `ChannelManager` previously had no way to reach — every other consumer gets it via `get_stream_bridge(request)`, which needs an HTTP `Request` the bus-consumer loop doesn't have. It is threaded as a zero-arg closure from `app.py`'s lifespan (`get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None)`) through `start_channel_service()` → `ChannelService.__init__` → `ChannelManager.__init__`, mirroring the existing `launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs)` closure already used for `ScheduledTaskService` in the same lifespan function.
-- **Single-process scope (known limitation)**: the buffer and watcher tasks live in one `ChannelManager` instance's process memory. Under `GATEWAY_WORKERS>1` or a multi-pod deployment, a follow-up comment that a load balancer or webhook fan-out routes to a *different* worker than the one that created the busy run will not see that worker's buffer. This mirrors the cross-pod gap already documented for issue #4120 (IM leader election or a shared buffer store would close it) and is deliberately deferred — single-process/single-pod deployments, the safe default, are unaffected.
+- **Single-process scope (known limitation)**: the buffer and watcher tasks live in one `ChannelManager` instance's memory. Process loss before admission loses buffered entries; this queue does not claim durable pre-admission delivery. The supported one-Gateway-replica topology prevents cross-worker routing but does not change that process-loss boundary.
 
 ## Outbound is Log-only
 
