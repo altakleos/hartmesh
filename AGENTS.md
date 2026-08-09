@@ -131,6 +131,10 @@ Skill quality review note:
   tag-neutralized; full raw payloads stay in tool artifacts. See
   [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
   `skill-creator` ownership boundaries.
+- Durable invocations snapshot every effective skill package before admission. Lead and
+  subagent prompts, slash/deferred activation, allowed-tool metadata, and sandbox reads use
+  that same process-local immutable tree; live skill edits affect only later invocations.
+  See the accepted-snapshot contract and bounds in [backend/AGENTS.md](backend/AGENTS.md).
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.

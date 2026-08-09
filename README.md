@@ -767,6 +767,15 @@ A standard Agent Skill is a structured capability module — a Markdown file tha
 
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
 
+For a durable invocation, DeerFlow first captures one bounded, read-only snapshot of every
+effective skill package. Its prompts, slash activation, deferred reads, supporting scripts,
+`allowed-tools` metadata, sandboxes, and delegated subagents all use those accepted bytes.
+Editing, deleting, enabling, or disabling a live skill affects later invocations, not a run
+that was already accepted. Snapshot bodies remain process-local and are removed after the
+worker terminates; the durable ledger stores only stable identities, digests, and bounded
+metadata. A worker lost with its process follows normal orphan terminalization rather than
+resuming from reconstructed historical skill bytes.
+
 A skill directory is a package boundary: once DeerFlow finds its `SKILL.md`, nested `SKILL.md` files under that package (for example evaluation fixtures) remain supporting data and are not registered as runtime skills. Namespace directories without their own `SKILL.md` can still group nested skills.
 
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
@@ -775,7 +784,7 @@ An enabled skill's `allowed-tools` policy applies only after that skill is expli
 
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
-Disabling a skill also removes it from the sandbox filesystem view, so shell commands and structured file tools follow the same enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Existing E2B sandboxes retain their creation-time snapshot until they are recreated. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
+Disabling a skill also removes it from the live sandbox filesystem view, so later work follows the updated enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Existing E2B sandboxes retain that live creation-time projection until they are recreated, but every acquire refreshes the reserved `.accepted` tree used by already-admitted durable runs. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
 
 Managed integrations install shared read-only skill packs without mixing them
 into custom skills. The Lark/Feishu CLI integration is available under
@@ -962,6 +971,9 @@ or hyphens. The Web UI percent-encodes them before placing them in route segment
 
 /mnt/skills/integrations
 └── lark-cli/lark-doc/SKILL.md      ← managed, read-only
+
+/mnt/skills/.accepted/<digest>
+└── custom/your-custom-skill/...    ← immutable for one accepted revision
 ```
 
 #### Claude Code Integration

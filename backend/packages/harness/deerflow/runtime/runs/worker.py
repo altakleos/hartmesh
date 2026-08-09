@@ -727,6 +727,8 @@ async def run_agent(
     subagent_events: _SubagentEventBuffer | None = None
     started = False
     accepted_constraints = None
+    accepted_for_cleanup = record.accepted_invocation
+    pinned_material_for_cleanup = accepted_for_cleanup.agent_revision.material if accepted_for_cleanup is not None else None
 
     async def _finish_cancellation(
         action: str,
@@ -963,6 +965,28 @@ async def run_agent(
                     pinned_material = resolved.material
                 elif isinstance(resolved, ResolvedAgentMaterialV1):
                     pinned_material = resolved
+            if isinstance(pinned_material, ResolvedAgentMaterialV1):
+                pinned_material_for_cleanup = pinned_material
+                try:
+                    await asyncio.to_thread(pinned_material.verify_process_material)
+                except Exception:
+                    error = "Accepted skill snapshot no longer matches captured material"
+                    await run_manager.set_status_if_not_cancelled(
+                        run_id,
+                        RunStatus.error,
+                        error=error,
+                        stop_reason="agent_revision_drift",
+                        **terminal_status_kwargs,
+                    )
+                    await bridge.publish(
+                        run_id,
+                        "error",
+                        {
+                            "message": error,
+                            "name": "AgentRevisionDriftError",
+                        },
+                    )
+                    return
             actual_revision = ResolvedAgentRevision.from_material(pinned_material) if isinstance(pinned_material, ResolvedAgentMaterialV1) else None
             if actual_revision is None or actual_revision.digest != accepted.agent_revision.digest:
                 error = "Accepted agent revision no longer matches current resolved material"
@@ -1552,6 +1576,16 @@ async def run_agent(
                 logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
         if record.finalizing:
             await run_manager.set_finalizing(run_id, False)
+
+        if pinned_material_for_cleanup is not None:
+            try:
+                await asyncio.to_thread(pinned_material_for_cleanup.release_process_material)
+            except Exception:
+                logger.warning(
+                    "Failed to release accepted skill snapshot for run %s",
+                    run_id,
+                    exc_info=True,
+                )
 
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))

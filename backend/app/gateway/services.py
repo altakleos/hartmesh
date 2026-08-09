@@ -111,6 +111,7 @@ from deerflow.runtime.accepted_invocation import (
     AcceptedInvocation,
     InvocationOrigin,
     PrincipalProjection,
+    ResolvedAgentMaterialV1,
     canonical_digest,
 )
 from deerflow.runtime.agent_revision import (
@@ -1703,6 +1704,11 @@ async def _seal_accepted_invocation(
     )
     if revision.material is None:  # pragma: no cover - resolver contract
         raise RuntimeError("accepted agent revision is missing captured material")
+    # Publish the process-local lease into the already-scrubbed host context as
+    # soon as it exists. The normalizer releases it if a later contributor or
+    # sealing step fails before a PreparedLaunch can transfer ownership.
+    runtime_context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = revision.material
+    config["context"] = runtime_context
 
     public_principal = PrincipalProjectionV1(
         user_id=principal.user_id,
@@ -1851,6 +1857,15 @@ async def _seal_accepted_invocation(
         runtime_context["accepted_extension_manifest_digest"] = extension_manifest_digest
     config["context"] = runtime_context
     return accepted
+
+
+async def _release_unattached_agent_material(config: dict[str, Any]) -> None:
+    """Release a process-local snapshot lease that never reached a worker."""
+    runtime_context = config.get("context")
+    material = runtime_context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY) if isinstance(runtime_context, dict) else None
+    if isinstance(material, ResolvedAgentMaterialV1):
+        await asyncio.to_thread(material.release_process_material)
+        runtime_context.pop(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY, None)
 
 
 class _GatewayLaunchNormalizer:
@@ -2157,23 +2172,31 @@ class _GatewayLaunchNormalizer:
                 if resolved_agent_name is not None:
                     section["agent_name"] = resolved_agent_name
 
-        accepted_invocation = await _seal_accepted_invocation(
-            request=self._request,
-            intent=intent,
-            config=config,
-            graph_input=graph_input,
-            owner_user_id=owner_user_id,
-            run_ctx=run_ctx,
-        )
+        try:
+            accepted_invocation = await _seal_accepted_invocation(
+                request=self._request,
+                intent=intent,
+                config=config,
+                graph_input=graph_input,
+                owner_user_id=owner_user_id,
+                run_ctx=run_ctx,
+            )
+        except Exception:
+            await _release_unattached_agent_material(config)
+            raise
         # Start authorization receives a canonical digest for every launch,
         # including unkeyed calls. Only keyed admission persists the internal
         # projection and uses it for replay comparison.
-        effective_execution = _effective_execution_projection(
-            intent,
-            accepted=accepted_invocation,
-            graph_input=graph_input,
-            config=config,
-        )
+        try:
+            effective_execution = _effective_execution_projection(
+                intent,
+                accepted=accepted_invocation,
+                graph_input=graph_input,
+                config=config,
+            )
+        except Exception:
+            await _release_unattached_agent_material(config)
+            raise
         caller_intent = identity.caller_intent if identity is not None else None
 
         async def run_after_metadata(record: RunRecord) -> None:
@@ -2244,32 +2267,37 @@ class _GatewayLaunchNormalizer:
                 interrupt_after=thaw_host_value(intent.interrupt_after),
             )
 
-        return PreparedLaunch(
-            thread_id=intent.thread_id,
-            assistant_id=intent.assistant_id,
-            on_disconnect=disconnect,
-            metadata=metadata,
-            kwargs={
-                # The stored kwargs are echoed by the run API, so persist a
-                # secret-redacted config while retaining live secrets above.
-                "input": thaw_host_value(intent.input),
-                "config": redact_config_secrets(thaw_host_value(intent.config)),
-                **({_EFFECTIVE_EXECUTION_PROJECTION_KEY: effective_execution.to_persisted()} if identity is not None else {}),
-            },
-            multitask_strategy=intent.multitask_strategy,
-            model_name=model_name,
-            user_id=accepted_invocation.principal.user_id,
-            worker=run_after_metadata,
-            accepted_invocation=accepted_invocation,
-            external_scope=identity.external_scope if identity is not None else None,
-            external_key=identity.external_key if identity is not None else None,
-            request_digest=effective_execution.digest,
-            request_digest_version=effective_execution.digest_version,
-            caller_intent_json=caller_intent.to_persisted() if caller_intent is not None else None,
-            caller_intent_digest=caller_intent.digest if caller_intent is not None else None,
-            caller_intent_digest_version=caller_intent.digest_version if caller_intent is not None else None,
-            principal=_invocation_principal_from_projection(accepted_invocation.principal),
-        )
+        try:
+            prepared = PreparedLaunch(
+                thread_id=intent.thread_id,
+                assistant_id=intent.assistant_id,
+                on_disconnect=disconnect,
+                metadata=metadata,
+                kwargs={
+                    # The stored kwargs are echoed by the run API, so persist a
+                    # secret-redacted config while retaining live secrets above.
+                    "input": thaw_host_value(intent.input),
+                    "config": redact_config_secrets(thaw_host_value(intent.config)),
+                    **({_EFFECTIVE_EXECUTION_PROJECTION_KEY: effective_execution.to_persisted()} if identity is not None else {}),
+                },
+                multitask_strategy=intent.multitask_strategy,
+                model_name=model_name,
+                user_id=accepted_invocation.principal.user_id,
+                worker=run_after_metadata,
+                accepted_invocation=accepted_invocation,
+                external_scope=identity.external_scope if identity is not None else None,
+                external_key=identity.external_key if identity is not None else None,
+                request_digest=effective_execution.digest,
+                request_digest_version=effective_execution.digest_version,
+                caller_intent_json=caller_intent.to_persisted() if caller_intent is not None else None,
+                caller_intent_digest=caller_intent.digest if caller_intent is not None else None,
+                caller_intent_digest_version=caller_intent.digest_version if caller_intent is not None else None,
+                principal=_invocation_principal_from_projection(accepted_invocation.principal),
+            )
+        except Exception:
+            await _release_unattached_agent_material(config)
+            raise
+        return prepared
 
 
 class _GatewayDurableRuns:

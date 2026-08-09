@@ -22,6 +22,7 @@ from deerflow.runtime.accepted_invocation import (
     INVOCATION_ORIGIN_CONTEXT_KEY,
     TRUSTED_RUN_CONTEXT_KEY,
 )
+from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
 from deerflow.runtime.constraints import (
     INVOCATION_CONSTRAINTS_CONTEXT_KEY,
     SUBAGENT_RESERVATION_CONTEXT_KEY,
@@ -394,6 +395,11 @@ async def task_tool(
     subagent_reservation = parent_context.get(SUBAGENT_RESERVATION_CONTEXT_KEY)
     accepted_extension_generation = parent_context.get("accepted_extension_generation")
     accepted_extension_manifest_digest = parent_context.get("accepted_extension_manifest_digest")
+    resolved_agent_material = parent_context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+    from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+
+    if not isinstance(resolved_agent_material, ResolvedAgentMaterialV1):
+        resolved_agent_material = None
     from deerflow.extensions.mcp import (
         build_mcp_preparation_audit_sink,
         mcp_invocation_facts_from_context,
@@ -479,6 +485,8 @@ async def task_tool(
         executor_kwargs["mcp_invocation_facts"] = mcp_invocation_facts
     if mcp_preparation_audit_sink is not None:
         executor_kwargs["mcp_preparation_audit_sink"] = mcp_preparation_audit_sink
+    if resolved_agent_material is not None:
+        executor_kwargs["resolved_agent_material"] = resolved_agent_material
     executor = SubagentExecutor(**executor_kwargs)
 
     # Start background execution (always async to prevent blocking)
@@ -489,6 +497,8 @@ async def task_tool(
             status="failed",
             error=f"Invocation subagent limit ({subagent_reservation.limit}) reached",
         )
+    if resolved_agent_material is not None:
+        executor.retain_resolved_agent_material()
     task_id = executor.execute_async(prompt, task_id=tool_call_id)
 
     # Poll for task completion in backend (removes need for LLM to poll)

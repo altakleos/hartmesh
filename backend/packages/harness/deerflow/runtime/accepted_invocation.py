@@ -8,7 +8,10 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from deerflow.runtime.skill_snapshot import AcceptedSkillSnapshot
 
 from deerflow_extension_api import (
     InvocationIdentityV1,
@@ -173,6 +176,11 @@ class ResolvedAgentMaterialV1:
     enabled_skill_objects: tuple[Any, ...] = field(default=(), repr=False, compare=False)
     all_skill_objects: tuple[Any, ...] = field(default=(), repr=False, compare=False)
     user_id: str | None = field(default=None, repr=False, compare=False)
+    skill_snapshot: AcceptedSkillSnapshot | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         canonical_agent_id = canonicalize_agent_identifier(
@@ -199,11 +207,32 @@ class ResolvedAgentMaterialV1:
         object.__setattr__(self, "tool_groups", tuple(self.tool_groups))
         object.__setattr__(self, "tools", tuple(self.tools))
         object.__setattr__(self, "skills", tuple(_frozen_json_mapping(item) for item in self.skills))
+        object.__setattr__(self, "enabled_skill_objects", tuple(self.enabled_skill_objects))
+        object.__setattr__(self, "all_skill_objects", tuple(self.all_skill_objects))
         if isinstance(self.soul, bytes):
             soul = bytes(self.soul)
         else:
             soul = self.soul.encode("utf-8")
         object.__setattr__(self, "soul", soul)
+
+    def verify_process_material(self) -> None:
+        """Verify process-local immutable material immediately before use."""
+        if self.skill_snapshot is not None:
+            self.skill_snapshot.verify()
+
+    def retain_process_material(self) -> ResolvedAgentMaterialV1:
+        """Return an equivalent material record with an independent lease."""
+        if self.skill_snapshot is None:
+            return self
+        return replace(
+            self,
+            skill_snapshot=self.skill_snapshot.retain(),
+        )
+
+    def release_process_material(self) -> None:
+        """Idempotently release process-local material after launch or terminalization."""
+        if self.skill_snapshot is not None:
+            self.skill_snapshot.release()
 
     def projector(self) -> dict[str, Any]:
         return {

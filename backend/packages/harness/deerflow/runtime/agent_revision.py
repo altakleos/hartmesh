@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 from deerflow.config.agents_config import AgentConfig, load_agent_soul, validate_agent_name
 from deerflow.config.app_config import AppConfig
 from deerflow.persistence.agents import make_agent_store
 from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1, ResolvedAgentRevision, canonical_digest
+from deerflow.runtime.skill_snapshot import snapshot_effective_skills
 
 RESOLVED_AGENT_MATERIAL_CONTEXT_KEY = "__deerflow_resolved_agent_material_v1"
 
@@ -147,33 +146,6 @@ def _safe_settings(value: Any, *, path: str = "config") -> Any:
     return str(value)
 
 
-def _file_digest(path: Path) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return hashlib.sha256(b"").hexdigest()
-
-
-def _skill_content_digest(skill: Any) -> str:
-    root = Path(skill.skill_dir)
-    digest = hashlib.sha256()
-    try:
-        paths = sorted(path for path in root.rglob("*") if path.is_file() and not path.is_symlink())
-    except OSError:
-        paths = []
-    for path in paths:
-        try:
-            relative = path.relative_to(root).as_posix().encode("utf-8")
-            content = path.read_bytes()
-        except OSError:
-            continue
-        digest.update(len(relative).to_bytes(4, "big"))
-        digest.update(relative)
-        digest.update(len(content).to_bytes(8, "big"))
-        digest.update(content)
-    return digest.hexdigest()
-
-
 def _skills(app_config: AppConfig, *, user_id: str | None) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 
@@ -238,23 +210,20 @@ def resolve_agent_revision(
     groups = tuple(pinned_agent_config.tool_groups or ()) if pinned_agent_config else ()
     configured_tools = tuple(sorted(tool.name for tool in pinned_app_config.tools if not groups or tool.group in groups))
 
-    enabled_skills, all_skills = _skills(pinned_app_config, user_id=user_id)
+    enabled_skills, _ = _skills(pinned_app_config, user_id=user_id)
     if is_bootstrap:
         available_names: set[str] | None = {"bootstrap"}
     elif pinned_agent_config and pinned_agent_config.skills is not None:
         available_names = set(pinned_agent_config.skills)
     else:
         available_names = None
-    effective_skills = tuple(skill for skill in enabled_skills if available_names is None or skill.name in available_names)
-    skill_projection = tuple(
-        {
-            "name": skill.name,
-            "category": str(skill.category),
-            "manifest_digest": _file_digest(Path(skill.skill_file)),
-            "content_digest": _skill_content_digest(skill),
-        }
-        for skill in effective_skills
+    live_effective_skills = tuple(skill for skill in enabled_skills if available_names is None or skill.name in available_names)
+    skill_snapshot = snapshot_effective_skills(
+        live_effective_skills,
+        user_id=user_id,
     )
+    effective_skills = skill_snapshot.skills if skill_snapshot is not None else ()
+    skill_projection = tuple(projection.to_json() for projection in skill_snapshot.projections) if skill_snapshot is not None else ()
 
     agent_projection = None
     if pinned_agent_config is not None:
@@ -288,24 +257,32 @@ def resolve_agent_revision(
         "non_interactive": bool(cfg.get("non_interactive", False)),
         "channel_name": cfg.get("channel_name"),
     }
-    material = ResolvedAgentMaterialV1(
-        agent_id=agent_id,
-        storage_source=storage_source,
-        storage_version=storage_version,
-        agent_config=agent_projection,
-        soul=soul or "",
-        model_profile=model_profile,
-        tool_groups=groups,
-        tools=configured_tools,
-        skills=skill_projection,
-        runtime_defaults=runtime_defaults,
-        app_config=pinned_app_config,
-        agent_config_object=pinned_agent_config,
-        enabled_skill_objects=effective_skills,
-        all_skill_objects=all_skills,
-        user_id=user_id,
-    )
-    return ResolvedAgentRevision.from_material(material)
+    try:
+        material = ResolvedAgentMaterialV1(
+            agent_id=agent_id,
+            storage_source=storage_source,
+            storage_version=storage_version,
+            agent_config=agent_projection,
+            soul=soul or "",
+            model_profile=model_profile,
+            tool_groups=groups,
+            tools=configured_tools,
+            skills=skill_projection,
+            runtime_defaults=runtime_defaults,
+            app_config=pinned_app_config,
+            agent_config_object=pinned_agent_config,
+            enabled_skill_objects=effective_skills,
+            # An accepted invocation intentionally exposes only effective skills.
+            # Disabled/live registry entries are not executable revision material.
+            all_skill_objects=effective_skills,
+            user_id=user_id,
+            skill_snapshot=skill_snapshot,
+        )
+        return ResolvedAgentRevision.from_material(material)
+    except Exception:
+        if skill_snapshot is not None:
+            skill_snapshot.release()
+        raise
 
 
 __all__ = [

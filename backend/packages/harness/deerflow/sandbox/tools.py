@@ -181,6 +181,10 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
     # directory entry ("public/", as `ls` emits for dirs) is still recognized as
     # a category root rather than yielding an empty skill name.
     parts = [part for part in relative.split("/") if part]
+    if parts and parts[0] == ".accepted":
+        # Accepted snapshots already pin enablement and policy metadata. The
+        # mutable live registry must not replace or revoke their bytes.
+        return None
     if len(parts) >= 2 and parts[0] in ("public", "custom", "legacy"):
         return parts[1]
     if len(parts) >= 3 and parts[0] == "integrations":

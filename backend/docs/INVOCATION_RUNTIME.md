@@ -43,7 +43,7 @@ an ordinary unit test.
 | Split identity and sealed Origin | Effective subject, optional acting service, and trusted source evidence are non-interchangeable and caller-forgery resistant. | `backend/packages/extension-api/deerflow_extension_api/authorization.py`; `backend/app/gateway/services.py`; `backend/app/runtime/authorization.py` | `test_channel_human_cannot_be_promoted_by_internal_transport` | Source-specific launch tests | Implemented |
 | Trusted contributor context | One immutable trusted context carries validated persistable evidence, runtime-only values, and stable handles without secret persistence. | `backend/packages/extension-api/deerflow_extension_api/contributors.py`; `backend/packages/harness/deerflow/extensions/contributors.py`; `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/mcp/tools.py` | `test_worker_carries_one_trusted_context_without_parallel_attributes_path` | Store/event/response redaction tests | Implemented |
 | Restrictive authorization and constraints | Authority failures fail closed; v2 constraints bind accepted material and can only narrow the exactly enforced subagent ceiling. | `backend/app/runtime/authorization.py`; `backend/app/runtime/constraints.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/subagents/executor.py` | `test_v2_host_rejects_projection_for_different_bound_material`; `test_worker_enforces_zero_ceiling_before_any_subagent_dispatch` | Required-capability health/readiness tests | Implemented |
-| Pinned agent and extension material | Accepted agent material and extension generation remain pinned; drift fails before graph/model work. | `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py` | `test_restart_drift_fails_before_graph_construction_or_model_work` | Process-reconstruction tests | Implemented |
+| Pinned agent and extension material | Accepted agent material and extension generation remain pinned; every effective skill package is copied and hashed from one bounded immutable snapshot shared by lead, slash/deferred discovery, policy, sandbox, and subagent consumers; drift fails before graph/model work. | `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/agent_revision.py`; `backend/packages/harness/deerflow/runtime/skill_snapshot.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; skill middlewares and sandbox providers | `test_restart_drift_fails_before_graph_construction_or_model_work`; `test_same_process_live_edit_cannot_replace_accepted_slash_skill`; `test_deleting_live_tree_cannot_remove_accepted_supporting_material`; `test_live_allowed_tools_edit_cannot_widen_accepted_policy`; `test_snapshot_drift_fails_before_graph_construction` | Process-reconstruction tests; skill bytes are process-local and lost workers terminalize rather than resume | Implemented for the supported one-replica process contract |
 | Transactional lifecycle evidence | Every normal-run state change increments one state version and commits its safe lifecycle event atomically. | `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/packages/harness/deerflow/runtime/runs/store/base.py`; `backend/packages/harness/deerflow/runtime/runs/store/memory.py` | `test_sql_row_and_lifecycle_event_commit_together` | PostgreSQL CAS/cursor qualification | Implemented; PostgreSQL atomicity is a gated qualification |
 | Polling observation and bounded summaries | Authorized observation reads a pruning-aware bounded page and its source-aware summaries from one database snapshot. | `backend/packages/harness/deerflow/runtime/runs/lifecycle_query.py`; `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/app/runtime/api.py` | `test_context_query_excludes_other_owners_and_auxiliary_rows`; `test_malformed_ahead_and_pruned_cursors_are_typed`; `test_sql_context_page_loads_summary_rows_only_for_bounded_page_ids`; `test_postgres_query_uses_one_repeatable_read_snapshot` | Repeatable-read PostgreSQL query qualification | Implemented; PostgreSQL snapshot isolation is a gated qualification |
 | Clarification continuation | A clarification ends the current invocation successfully; the answer is a distinct invocation on the same thread. | `backend/packages/harness/deerflow/agents/middlewares/clarification_middleware.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/app/channels/manager.py` | `test_clarification_completes_then_answer_starts_new_same_thread_invocation`; `test_native_channel_revalidates_owner_dedupes_and_continues_clarification` | Native-channel characterization | Implemented; same-invocation suspension is not claimed |
@@ -516,6 +516,22 @@ execution settings and opaque secret-handle IDs, effective tool groups/tools, en
 manifest/content digests, and thinking/reasoning/planning/subagent defaults. Guard tests make
 new graph-factory configuration fields choose explicit inclusion or exclusion.
 
+Skill evidence is calculated from `AcceptedSkillSnapshot`, not from mutable live paths. The
+Gateway copies every non-symlink regular file in each effective skill package—including
+`SKILL.md`, supporting resources, scripts, and frontmatter used by tool/secret policy—into a
+content-addressed process-local tree before admission. It re-reads the source before atomic
+publication and rejects unreadable, changing, symlinked, special-file, escaping, duplicate, or
+over-limit material. Bounds are 64 skills, 256 files and 8 MiB per skill, 2,048 files and
+32 MiB per invocation, 2 MiB per file, and 512 UTF-8 bytes per relative path. Published files
+are read-only; accepted executable files retain only their read/execute bits.
+
+The snapshot-backed `Skill` records are the only durable-run inputs to prompt/slash activation,
+deferred discovery, skill-derived allowed-tool/secret policy, lead and subagent construction,
+and sandbox paths under `/mnt/skills/.accepted/<snapshot-digest>/...`. A later install, edit,
+delete, enable, or disable changes only a later invocation and revision. Empty accepted skill
+sets also remain empty and never fall back to the live registry. The ledger stores only stable
+skill identities, digests, counts, and bounded metadata—never bodies or host paths.
+
 The accepting worker receives and uses that exact captured object; lead and subagents inherit
 its revision digest and extension generation for audit. After restart, the worker resolves
 current material once. Only an equal digest allows that exact newly resolved object to become
@@ -523,6 +539,14 @@ the pinned factory input. A mismatch sets terminal error state with
 `stop_reason=agent_revision_drift` immediately before construction, so no graph or model work
 occurs. The runtime never reconstructs historical material or performs a compare followed by
 a mutable-state reread.
+
+Snapshots use process-local reference-counted leases so equal concurrent revisions and active
+background subagents may share one tree without racing cleanup. A child takes an independent
+lease before dispatch. An owning lease is released after success, failure, cancellation, task
+completion, or failed attachment; startup removes abandoned trees from an earlier process while
+preserving active leases. A process-lost worker is terminalized by the existing orphan contract.
+Historical skill bodies are not reconstructed and this mechanism is not a distributed artifact
+service.
 
 ## Capability health and required MCP preparation
 
