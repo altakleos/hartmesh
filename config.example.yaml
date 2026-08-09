@@ -1389,6 +1389,15 @@ sandbox:
 #   # the provisioner rejects all /api/* requests when PROVISIONER_API_KEY is unset.
 #   # Generate a strong key: openssl rand -hex 32
 #   # provisioner_api_key: $PROVISIONER_API_KEY
+#   # Kubernetes/Helm alternative: a projected, audience-bound ServiceAccount
+#   # token. The file is reread for rotation and is mutually exclusive with the
+#   # static API key. The provisioner validates its exact audience, namespace,
+#   # and ServiceAccount through TokenReview.
+#   # provisioner_service_account_token_file: /var/run/secrets/hartmesh-provisioner/token
+#   # Remote durable invocations with nonempty skills require the provisioner
+#   # profile below plus an RWX snapshot claim and digest-pinned sandbox and
+#   # verifier/gate images. `disabled` keeps remote AIO empty-only.
+#   # accepted_skill_projection_profile: disabled # disabled | rwx_verified_copy_v1
 #   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
 #   # environment variable, not sandbox.image from this config file.
 

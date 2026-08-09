@@ -118,6 +118,10 @@ _SKILL_PROJECTION_CLAIM_POLL_SECONDS = 0.05
 _SKILL_PROJECTION_CLAIM_TIMEOUT_SECONDS = 5.0
 
 
+class AcceptedSkillExecutionFenceError(RuntimeError):
+    """The exact accepted sandbox attempt is no longer authoritative."""
+
+
 async def _await_accepted_skill_projection_claim(
     *,
     user_id: str,
@@ -159,6 +163,75 @@ async def _await_accepted_skill_projection_claim(
         except TimeoutError:
             pass
     return False
+
+
+async def _materialize_accepted_skill_projection(
+    runtime: object,
+    *,
+    user_id: str,
+) -> tuple[str, object | None]:
+    """Prove accepted material before the authoritative running transition."""
+
+    from deerflow.sandbox import get_sandbox_provider
+    from deerflow.sandbox.sandbox_provider import (
+        AcceptedSkillSandboxBindingError,
+        accepted_skill_material_binding_from_runtime,
+        ensure_accepted_skill_binding,
+        invalidate_runtime_skill_projection_token,
+        release_accepted_skill_consumer,
+        require_runtime_accepted_skill_isolation,
+    )
+
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
+    thread_id = context.get("thread_id")
+    if not isinstance(thread_id, str):
+        raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
+    binding = accepted_skill_material_binding_from_runtime(
+        runtime,
+        user_id=user_id,
+    )
+    if binding is None:
+        raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
+    provider = get_sandbox_provider()
+    sandbox_id: str | None = None
+    token = None
+    try:
+        sandbox_id = await provider.acquire_bound_accepted_skills_async(
+            thread_id,
+            user_id=user_id,
+            binding=binding,
+        )
+        require_runtime_accepted_skill_isolation(
+            provider,
+            runtime,
+            sandbox_id=sandbox_id,
+        )
+        bound, token, _created = ensure_accepted_skill_binding(
+            runtime,
+            sandbox_id=sandbox_id,
+            user_id=user_id,
+        )
+        if bound is None:
+            raise RuntimeError("accepted_skill_snapshot_binding_missing")
+        await provider.bind_accepted_skill_snapshot_async(
+            sandbox_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            binding=bound,
+        )
+        context["sandbox_id"] = sandbox_id
+        return sandbox_id, provider.accepted_skill_execution_evidence(sandbox_id)
+    except Exception:
+        invalidate_runtime_skill_projection_token(runtime, token)
+        if token is not None:
+            await asyncio.to_thread(release_accepted_skill_consumer, token)
+        elif sandbox_id is not None:
+            await asyncio.to_thread(provider.release, sandbox_id)
+        raise AcceptedSkillSandboxBindingError(
+            "accepted_skill_snapshot_materialization_failed",
+        ) from None
 
 
 async def _persist_delivery_receipt(
@@ -775,6 +848,9 @@ async def run_agent(
     accepted_for_cleanup = record.accepted_invocation
     pinned_material_for_cleanup = accepted_for_cleanup.agent_revision.material if accepted_for_cleanup is not None else None
     skill_binding_user_id: str | None = None
+    materialization_sandbox_id: str | None = None
+    materialization_evidence = None
+    materialization_provider = None
 
     async def _finish_cancellation(
         action: str,
@@ -858,24 +934,8 @@ async def run_agent(
                 abort_event=record.abort_event,
             )
 
-        start_outcome = await run_manager.try_start(run_id)
-        if start_outcome is not RunStartOutcome.started:
-            if record.abort_event.is_set():
-                await _finish_cancellation(
-                    record.abort_action,
-                    restore_checkpoint=False,
-                )
-            return
-        started = True
-
         if extensions.needs_task_store:
             task_store = ExtensionData(run_id)
-
-        if not record.ownership_lost and thread_store is not None:
-            try:
-                await thread_store.update_status(thread_id, "running")
-            except Exception:
-                logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
         mode = ctx.checkpoint_channel_mode
         inject_checkpoint_mode(config, mode)
         checkpoint_config = {
@@ -1159,6 +1219,69 @@ async def run_agent(
                     config["context"][SUBAGENT_RESERVATION_CONTEXT_KEY] = runtime_ctx[SUBAGENT_RESERVATION_CONTEXT_KEY]
             initial_runnable_config = RunnableConfig(**config)
 
+        if accepted is not None and pinned_material_for_cleanup is not None and pinned_material_for_cleanup.skill_snapshot is not None:
+            materialization_sandbox_id, materialization_evidence = await _materialize_accepted_skill_projection(
+                runtime,
+                user_id=skill_binding_user_id,
+            )
+            if materialization_evidence is not None:
+                if not run_manager.heartbeat_enabled:
+                    raise AcceptedSkillExecutionFenceError(
+                        "accepted_skill_execution_lease_unavailable",
+                    )
+                from deerflow.sandbox import get_sandbox_provider
+
+                materialization_provider = get_sandbox_provider()
+
+                async def _renew_materialization() -> bool:
+                    assert materialization_provider is not None
+                    assert materialization_sandbox_id is not None
+                    return await materialization_provider.renew_accepted_skill_execution_async(
+                        materialization_sandbox_id,
+                        materialization_evidence,
+                    )
+
+                await run_manager.set_execution_lease_renewal(
+                    run_id,
+                    _renew_materialization,
+                )
+
+        if materialization_evidence is None:
+            start_outcome = await run_manager.try_start(run_id)
+        else:
+            start_outcome = await run_manager.try_start(
+                run_id,
+                execution_evidence=materialization_evidence,
+            )
+        if start_outcome is not RunStartOutcome.started:
+            if record.abort_event.is_set():
+                await _finish_cancellation(
+                    record.abort_action,
+                    restore_checkpoint=False,
+                )
+            return
+        started = True
+
+        if materialization_evidence is not None:
+            assert materialization_provider is not None
+            assert materialization_sandbox_id is not None
+            if record.ownership_lost or not await materialization_provider.validate_accepted_skill_execution_async(
+                materialization_sandbox_id,
+                materialization_evidence,
+            ):
+                raise AcceptedSkillExecutionFenceError(
+                    "accepted_skill_execution_fence_failed",
+                )
+
+        if not record.ownership_lost and thread_store is not None:
+            try:
+                await thread_store.update_status(thread_id, "running")
+            except Exception:
+                logger.debug(
+                    "Failed to update thread_meta status for %s (non-fatal)",
+                    thread_id,
+                )
+
         agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent_factory_kwargs["app_config"] = ctx.app_config
@@ -1281,6 +1404,16 @@ async def run_agent(
 
                         await qualification_counter("graph_starts", record)
                         qualification_graph_start_recorded = True
+                    if materialization_evidence is not None:
+                        assert materialization_provider is not None
+                        assert materialization_sandbox_id is not None
+                        if record.ownership_lost or not await materialization_provider.validate_accepted_skill_execution_async(
+                            materialization_sandbox_id,
+                            materialization_evidence,
+                        ):
+                            raise AcceptedSkillExecutionFenceError(
+                                "accepted_skill_execution_fence_failed",
+                            )
                     if len(lg_modes) == 1 and not stream_subgraphs:
                         # Single mode, no subgraphs: astream yields raw chunks
                         single_mode = lg_modes[0]
@@ -1438,6 +1571,30 @@ async def run_agent(
                 {"message": error_msg, "name": "ConstraintFenceError"},
             )
 
+    except AcceptedSkillExecutionFenceError as exc:
+        reason = str(exc)
+        error_msg = "Accepted sandbox material is no longer executable"
+        logger.warning("Run %s failed accepted sandbox fence: %s", run_id, reason)
+        await _ensure_finalizing_before_edit_failure(run_manager, record)
+        cancel_action = await run_manager.set_status_if_not_cancelled(
+            run_id,
+            RunStatus.error,
+            error=error_msg,
+            stop_reason=reason,
+            **terminal_status_kwargs,
+        )
+        if cancel_action is not None:
+            await _finish_cancellation(cancel_action)
+        else:
+            await bridge.publish(
+                run_id,
+                "error",
+                {
+                    "message": error_msg,
+                    "name": "AcceptedSkillExecutionFenceError",
+                },
+            )
+
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
@@ -1461,6 +1618,15 @@ async def run_agent(
             )
 
     finally:
+        if materialization_evidence is not None:
+            try:
+                await run_manager.set_execution_lease_renewal(run_id, None)
+            except Exception:
+                logger.warning(
+                    "Failed to clear accepted sandbox renewal for run %s",
+                    run_id,
+                    exc_info=True,
+                )
         if record.ownership_lost:
             logger.warning(
                 "Skipping durable finalization for run %s because this worker no longer owns its lease",

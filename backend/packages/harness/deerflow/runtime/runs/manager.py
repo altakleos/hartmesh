@@ -212,6 +212,12 @@ class RunRecord:
     caller_intent_json: dict[str, Any] | None = None
     caller_intent_digest: str | None = None
     caller_intent_digest_version: str | None = None
+    execution_evidence_json: dict[str, Any] | None = None
+    execution_evidence_digest: str | None = None
+    execution_lease_renewal: Callable[[], Awaitable[bool]] | None = field(
+        default=None,
+        repr=False,
+    )
     state_version: int = 0
     pending_lifecycle_type: LifecycleType | None = field(default=None, repr=False)
 
@@ -293,6 +299,8 @@ class RunManager:
         record.stop_reason = row.get("stop_reason")
         record.owner_worker_id = row.get("owner_worker_id")
         record.lease_expires_at = row.get("lease_expires_at")
+        record.execution_evidence_json = row.get("execution_evidence_json")
+        record.execution_evidence_digest = row.get("execution_evidence_digest")
         record.updated_at = row.get("updated_at") or record.updated_at
 
     def _thread_records_locked(self, thread_id: str) -> list[RunRecord]:
@@ -597,6 +605,8 @@ class RunManager:
             caller_intent_json=row.get("caller_intent_json"),
             caller_intent_digest=row.get("caller_intent_digest"),
             caller_intent_digest_version=row.get("caller_intent_digest_version"),
+            execution_evidence_json=row.get("execution_evidence_json"),
+            execution_evidence_digest=row.get("execution_evidence_digest"),
             state_version=row.get("state_version") or 0,
         )
 
@@ -937,7 +947,12 @@ class RunManager:
 
         return self._compute_edit_replay_visibility(list(records_by_id.values()))
 
-    async def try_start(self, run_id: str) -> RunStartOutcome:
+    async def try_start(
+        self,
+        run_id: str,
+        *,
+        execution_evidence: object | None = None,
+    ) -> RunStartOutcome:
         """Transition an uncancelled pending run to running before building the agent."""
         async with self._lock:
             record = self._runs.get(run_id)
@@ -950,12 +965,41 @@ class RunManager:
                     return RunStartOutcome.cancelled
 
             if self._store is not None:
-                try:
-                    updated = await self._call_store_with_retry(
-                        "start_run",
-                        run_id,
-                        lambda: self._store.start_run(run_id),
+                evidence_json = None
+                evidence_digest = None
+                if execution_evidence is not None:
+                    from deerflow.sandbox.sandbox_provider import (
+                        AcceptedSkillExecutionEvidenceV1,
                     )
+
+                    if not isinstance(
+                        execution_evidence,
+                        AcceptedSkillExecutionEvidenceV1,
+                    ):
+                        raise RunStartupError("Invalid sandbox execution evidence")
+                    if execution_evidence.run_id != run_id:
+                        raise RunStartupError(
+                            "Sandbox execution evidence belongs to a different run",
+                        )
+                    evidence_json = execution_evidence.to_persisted()
+                    evidence_digest = execution_evidence.digest
+                try:
+                    if evidence_json is None:
+                        updated = await self._call_store_with_retry(
+                            "start_run",
+                            run_id,
+                            lambda: self._store.start_run(run_id),
+                        )
+                    else:
+                        updated = await self._call_store_with_retry(
+                            "start_run",
+                            run_id,
+                            lambda: self._store.start_run(
+                                run_id,
+                                execution_evidence_json=evidence_json,
+                                execution_evidence_digest=evidence_digest,
+                            ),
+                        )
                 except Exception as exc:
                     raise RunStartupError(f"Failed to start run {run_id}: {exc}") from exc
                 if updated is False:
@@ -984,6 +1028,9 @@ class RunManager:
                     restore_stop_reason = record.stop_reason
                 else:
                     record.status = RunStatus.running
+                    if execution_evidence is not None:
+                        record.execution_evidence_json = execution_evidence.to_persisted()
+                        record.execution_evidence_digest = execution_evidence.digest
                     record.updated_at = _now_iso()
                     logger.info("Run %s -> %s", run_id, RunStatus.running.value)
                     return RunStartOutcome.started
@@ -996,6 +1043,19 @@ class RunManager:
                     stop_reason=restore_stop_reason,
                 )
             return RunStartOutcome.cancelled
+
+    async def set_execution_lease_renewal(
+        self,
+        run_id: str,
+        callback: Callable[[], Awaitable[bool]] | None,
+    ) -> None:
+        """Bind process-local material renewal to this run's durable ownership."""
+
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                raise RunStartupError(f"Cannot bind execution lease for unknown run {run_id}")
+            record.execution_lease_renewal = callback
 
     async def fail_start_if_pending(self, run_id: str, *, error: str) -> bool:
         """Mark an admitted run as failed if its worker task could not be attached."""
@@ -2490,6 +2550,22 @@ class RunManager:
                             reason="Lease renewal completed after the last confirmed lease had already expired.",
                         )
                         continue
+                    if record.execution_lease_renewal is not None:
+                        external_remaining = (confirmed_deadline - datetime.now(UTC)).total_seconds()
+                        try:
+                            if external_remaining <= 0:
+                                external_renewed = False
+                            else:
+                                async with asyncio.timeout(external_remaining):
+                                    external_renewed = await record.execution_lease_renewal()
+                        except Exception:
+                            external_renewed = False
+                        if not external_renewed:
+                            await self._mark_ownership_lost(
+                                record,
+                                reason=("The accepted sandbox attempt could not be renewed after durable run ownership renewal."),
+                            )
+                            continue
                     # Unsynced write is benign: ``lease_expires_at`` is the
                     # only field on an existing record this path mutates, so
                     # there is no concurrent writer to race against

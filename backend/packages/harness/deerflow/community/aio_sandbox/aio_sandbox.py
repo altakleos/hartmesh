@@ -43,7 +43,7 @@ class AioSandbox(Sandbox):
     from corrupting the container's single persistent session (see #1433).
     """
 
-    def __init__(self, id: str, base_url: str, home_dir: str | None = None):
+    def __init__(self, id: str, base_url: str, home_dir: str | None = None, *, request_headers: dict[str, str] | None = None):
         """Initialize the AIO sandbox.
 
         Args:
@@ -54,9 +54,22 @@ class AioSandbox(Sandbox):
         super().__init__(id)
         self._base_url = base_url
         if sandbox_http_trust_env(base_url):
-            self._client = AioSandboxClient(base_url=base_url, timeout=600)
+            client_kwargs: dict[str, object] = {
+                "base_url": base_url,
+                "timeout": 600,
+            }
+            if request_headers:
+                client_kwargs["headers"] = request_headers
+            self._client = AioSandboxClient(**client_kwargs)
         else:
-            direct_client = httpx.Client(timeout=600, follow_redirects=True, trust_env=False)
+            client_kwargs = {
+                "timeout": 600,
+                "follow_redirects": True,
+                "trust_env": False,
+            }
+            if request_headers:
+                client_kwargs["headers"] = request_headers
+            direct_client = httpx.Client(**client_kwargs)
             self._client = AioSandboxClient(
                 base_url=base_url,
                 timeout=600,

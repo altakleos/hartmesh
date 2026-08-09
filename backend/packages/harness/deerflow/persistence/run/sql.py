@@ -47,6 +47,7 @@ from deerflow.runtime.runs.store.base import (
     build_lifecycle_payload,
     lifecycle_owner_scope,
     lifecycle_type_for_status,
+    validate_execution_evidence_run,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -399,6 +400,9 @@ class RunRepository(RunStore):
                 row.error = transition.error
             if transition.stop_reason is not None:
                 row.stop_reason = transition.stop_reason
+            if transition.execution_evidence_json is not None:
+                row.execution_evidence_json = transition.execution_evidence_json
+                row.execution_evidence_digest = transition.execution_evidence_digest
             row.updated_at = datetime.now(UTC)
             event = await self._append_lifecycle_event(session, cursor_state, row, transition, payload=payload)
             await session.flush()
@@ -815,8 +819,15 @@ class RunRepository(RunStore):
         )
         return result.applied
 
-    async def start_run(self, run_id: str) -> bool:
+    async def start_run(
+        self,
+        run_id: str,
+        *,
+        execution_evidence_json: dict[str, Any] | None = None,
+        execution_evidence_digest: str | None = None,
+    ) -> bool:
         """Start only a still-pending run; cancelled rows must not be resurrected."""
+        validate_execution_evidence_run(run_id, execution_evidence_json)
         current = await self.get(run_id, user_id=None)
         if current is None:
             return False
@@ -828,7 +839,12 @@ class RunRepository(RunStore):
             run_id,
             expected_state_version=current["state_version"],
             expected_statuses=("pending",),
-            transition=LifecycleTransition(lifecycle_type=LifecycleType.started, status="running"),
+            transition=LifecycleTransition(
+                lifecycle_type=LifecycleType.started,
+                status="running",
+                execution_evidence_json=execution_evidence_json,
+                execution_evidence_digest=execution_evidence_digest,
+            ),
         )
         return result.applied
 

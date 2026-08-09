@@ -156,6 +156,10 @@ provisioner:
     create: true
     name: ""
     annotations: {}
+  # -- Audience for the short-lived projected Gateway ServiceAccount token.
+  #    The provisioner validates it with Kubernetes TokenReview and binds the
+  #    exact Gateway namespace and ServiceAccount name.
+  gatewayTokenAudience: hartmesh-provisioner
   resources:
     requests:
       cpu: 50m
@@ -180,6 +184,18 @@ provisioner:
   nodeHost: ""
   # -- Sandbox container port (must match the sandboxImage's listening port).
   sandboxPort: 8080
+  # -- Durable accepted-skill projection. `disabled` keeps remote AIO
+  # empty-only. `rwx_verified_copy_v1` copies an exact content-addressed
+  # snapshot from an actual RWX shared home PVC into a private per-Pod emptyDir,
+  # verifies it, and exposes it read-only through a capability gate. It adds no
+  # same-node affinity; sandbox and provisioner images must be digest-pinned.
+  acceptedSkillProjectionProfile: "disabled" # disabled | rwx_verified_copy_v1
+  acceptedAttempt:
+    # -- Native Lease TTL for one accepted-skill sandbox attempt.
+    leaseSeconds: 120
+    # -- Bounded stale-attempt reconciliation cadence and page size.
+    reconcileIntervalSeconds: 30
+    reconcileLimit: 100
 
 # -- PostgreSQL database. Bundled mode (default) deploys a single-instance
 #    postgres StatefulSet; set `enabled: false` to use an external managed DB.
@@ -325,6 +341,7 @@ config: |
   sandbox:
     use: deerflow.community.aio_sandbox:AioSandboxProvider
     provisioner_url: http://provisioner:8002
+    accepted_skill_projection_profile: disabled
     image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
     port: 8080
     replicas: 3

@@ -860,6 +860,31 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     )
     from app.runtime.readiness import RuntimeReadinessCoordinator
 
+    sandbox_projection_ready = None
+    construction_sandbox = getattr(construction_config, "sandbox", None)
+    if (
+        getattr(
+            construction_sandbox,
+            "accepted_skill_projection_profile",
+            "disabled",
+        )
+        == "rwx_verified_copy_v1"
+    ):
+        from deerflow.community.aio_sandbox.remote_backend import (
+            RemoteSandboxBackend,
+        )
+
+        provisioner_readiness_backend = RemoteSandboxBackend(
+            provisioner_url=str(construction_sandbox.provisioner_url),
+            api_key=construction_sandbox.provisioner_api_key or "",
+            service_account_token_file=(construction_sandbox.provisioner_service_account_token_file or ""),
+        )
+
+        async def sandbox_projection_ready() -> bool:
+            return await asyncio.to_thread(
+                provisioner_readiness_backend.accepted_skill_projection_ready,
+            )
+
     app.state.runtime_readiness = RuntimeReadinessCoordinator(
         health_monitor=capability_health_monitor,
         lifecycle_store=lambda: getattr(app.state, "run_store", None),
@@ -872,6 +897,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         ),
         extension_generation=lambda: int(getattr(app.state.capability_manifest, "extension_generation")),
         overall_timeout_seconds=(construction_deployment.readiness.overall_timeout_seconds),
+        sandbox_projection_ready=sandbox_projection_ready,
     )
 
     # Include routers

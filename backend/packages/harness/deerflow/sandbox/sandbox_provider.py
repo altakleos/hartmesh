@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import re
 import threading
 from abc import ABC, abstractmethod
@@ -26,6 +28,78 @@ class AcceptedSkillMaterialCapability(Enum):
 
     EMPTY_ONLY = "empty_only"
     IMMUTABLE_READ_ONLY = "immutable_read_only"
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedSkillExecutionEvidenceV1:
+    """Bounded non-secret proof of the exact accepted sandbox attempt."""
+
+    profile: str
+    attempt_id: str
+    snapshot_id: str
+    run_id: str
+    generation: int
+    pod_uid: str
+    lease_uid: str
+    runtime_image_ids_digest: str
+    verifier_receipt_digest: str
+    materialization_evidence_digest: str
+
+    def __post_init__(self) -> None:
+        if self.profile != "rwx_verified_copy_v1":
+            raise ValueError("accepted skill profile is invalid")
+        for value, field_name, maximum in (
+            (self.attempt_id, "attempt_id", 128),
+            (self.run_id, "run_id", 512),
+            (self.pod_uid, "pod_uid", 128),
+            (self.lease_uid, "lease_uid", 128),
+        ):
+            if not isinstance(value, str) or not value or len(value.encode("utf-8")) > maximum or any(ord(character) < 32 for character in value):
+                raise ValueError(f"accepted skill {field_name} is invalid")
+        for value, field_name in (
+            (self.snapshot_id, "snapshot_id"),
+            (
+                self.runtime_image_ids_digest,
+                "runtime_image_ids_digest",
+            ),
+            (
+                self.verifier_receipt_digest,
+                "verifier_receipt_digest",
+            ),
+            (
+                self.materialization_evidence_digest,
+                "materialization_evidence_digest",
+            ),
+        ):
+            if _SNAPSHOT_ID_PATTERN.fullmatch(value) is None:
+                raise ValueError(f"accepted skill {field_name} is invalid")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("accepted skill generation is invalid")
+
+    def to_persisted(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "profile": self.profile,
+            "attempt_id": self.attempt_id,
+            "snapshot_id": self.snapshot_id,
+            "run_id": self.run_id,
+            "generation": self.generation,
+            "pod_uid": self.pod_uid,
+            "lease_uid": self.lease_uid,
+            "runtime_image_ids_digest": self.runtime_image_ids_digest,
+            "verifier_receipt_digest": self.verifier_receipt_digest,
+            "materialization_evidence_digest": (self.materialization_evidence_digest),
+        }
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                self.to_persisted(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
 
 
 def reject_writable_accepted_skill_aliases(
@@ -103,6 +177,81 @@ def accepted_skill_binding_from_runtime(runtime: object) -> AcceptedSkillSandbox
     if token is None:
         return None
     return AcceptedSkillSandboxBindingV1.from_consumer_token(token)
+
+
+def accepted_skill_material_binding_from_runtime(
+    runtime: object,
+    *,
+    user_id: str,
+) -> AcceptedSkillSandboxBindingV1 | None:
+    """Return the committed pre-acquisition material request for this run."""
+
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        return None
+    snapshot_id = accepted_skill_snapshot_id_from_runtime(runtime)
+    if snapshot_id is _NO_BINDING:
+        return None
+    thread_id = context.get("thread_id")
+    run_id = context.get("run_id")
+    if not isinstance(thread_id, str) or not isinstance(run_id, str):
+        raise AcceptedSkillSandboxBindingError(
+            "accepted_skill_snapshot_runtime_identity_missing",
+        )
+    from deerflow.runtime.skill_projection import (
+        SkillProjectionBusyError,
+        get_skill_projection_coordinator,
+    )
+
+    try:
+        generation, committed_snapshot_id, evidence = get_skill_projection_coordinator().binding_for_committed_run(
+            user_id=user_id,
+            thread_id=thread_id,
+            run_id=run_id,
+        )
+    except SkillProjectionBusyError as exc:
+        from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+        from deerflow.runtime.agent_revision import (
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
+        )
+        from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+        material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+        if not isinstance(material, ResolvedAgentMaterialV1):
+            raise AcceptedSkillSandboxBindingError(
+                "accepted_skill_snapshot_binding_conflict",
+            ) from exc
+        fallback_evidence = SkillProjectionEvidence.from_snapshot(
+            material.skill_snapshot,
+        )
+        try:
+            coordinator = get_skill_projection_coordinator()
+            coordinator.claim_committed_run(
+                user_id=user_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                snapshot_id=snapshot_id,
+                evidence=fallback_evidence,
+            )
+            generation, committed_snapshot_id, evidence = coordinator.binding_for_committed_run(
+                user_id=user_id,
+                thread_id=thread_id,
+                run_id=run_id,
+            )
+        except Exception as fallback_exc:
+            raise AcceptedSkillSandboxBindingError(
+                "accepted_skill_snapshot_binding_conflict",
+            ) from fallback_exc
+    if committed_snapshot_id != snapshot_id:
+        raise AcceptedSkillSandboxBindingError(
+            "accepted_skill_snapshot_binding_conflict",
+        )
+    return AcceptedSkillSandboxBindingV1(
+        snapshot_id=committed_snapshot_id,
+        run_id=run_id,
+        generation=generation,
+        evidence=evidence,
+    )
 
 
 def accepted_skill_snapshot_id_from_runtime(runtime: object) -> str | None | object:
@@ -372,6 +521,63 @@ class SandboxProvider(ABC):
     async def acquire_accepted_skills_async(self, thread_id: str, *, user_id: str) -> str:
         return await asyncio.to_thread(
             self.acquire_accepted_skills,
+            thread_id,
+            user_id=user_id,
+        )
+
+    def accepted_skill_execution_evidence(
+        self,
+        sandbox_id: str,
+    ) -> AcceptedSkillExecutionEvidenceV1 | None:
+        """Return bounded execution evidence when the backend has a native attempt."""
+
+        del sandbox_id
+        return None
+
+    async def validate_accepted_skill_execution_async(
+        self,
+        sandbox_id: str,
+        evidence: AcceptedSkillExecutionEvidenceV1,
+    ) -> bool:
+        """Revalidate the exact materialized attempt before executable work."""
+
+        del sandbox_id, evidence
+        return False
+
+    async def renew_accepted_skill_execution_async(
+        self,
+        sandbox_id: str,
+        evidence: AcceptedSkillExecutionEvidenceV1,
+    ) -> bool:
+        """Renew the exact attempt after authoritative RunRow renewal."""
+
+        del sandbox_id, evidence
+        return False
+
+    def acquire_bound_accepted_skills(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+    ) -> str:
+        """Acquire and materialize accepted bytes before returning a sandbox."""
+
+        del binding
+        return self.acquire_accepted_skills(thread_id, user_id=user_id)
+
+    async def acquire_bound_accepted_skills_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+    ) -> str:
+        # Preserve providers that already implement the accepted-only async seam.
+        # The default contract does not consume the binding during acquisition;
+        # it is still validated by bind_accepted_skill_snapshot_async below.
+        del binding
+        return await self.acquire_accepted_skills_async(
             thread_id,
             user_id=user_id,
         )

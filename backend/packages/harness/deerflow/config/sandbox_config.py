@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
@@ -189,6 +189,10 @@ class SandboxConfig(BaseModel):
         ),
     )
 
+    provisioner_url: str | None = Field(
+        default=None,
+        description="Remote sandbox provisioner base URL.",
+    )
     provisioner_api_key: str | None = Field(
         default=None,
         description=(
@@ -198,5 +202,33 @@ class SandboxConfig(BaseModel):
             "the provisioner rejects all /api/* requests when the key is unset or mismatched."
         ),
     )
+    provisioner_service_account_token_file: str | None = Field(
+        default=None,
+        description=(
+            "Path to an audience-bound projected Kubernetes ServiceAccount token "
+            "used for provisioner management calls. Mutually exclusive with "
+            "provisioner_api_key; the token is reread for every request so rotation "
+            "does not require a Gateway restart."
+        ),
+    )
+    accepted_skill_projection_profile: Literal[
+        "disabled",
+        "rwx_verified_copy_v1",
+    ] = Field(
+        default="disabled",
+        description=("Remote AIO accepted-skill profile required by Gateway readiness. rwx_verified_copy_v1 requires an authenticated provisioner preflight."),
+    )
+
+    @model_validator(mode="after")
+    def _validate_provisioner_auth(self) -> "SandboxConfig":
+        if self.provisioner_api_key and self.provisioner_service_account_token_file:
+            raise ValueError(
+                "provisioner_api_key and provisioner_service_account_token_file are mutually exclusive",
+            )
+        if self.accepted_skill_projection_profile == "rwx_verified_copy_v1" and not self.provisioner_url:
+            raise ValueError(
+                "rwx_verified_copy_v1 requires sandbox.provisioner_url",
+            )
+        return self
 
     model_config = ConfigDict(extra="allow")

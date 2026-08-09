@@ -432,10 +432,28 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   user-data mode. Default `ReadWriteOnce`; use `ReadWriteMany` (NFS) on
   multi-node clusters so sandbox Pods on other nodes can mount it.
 - **Provisioner RBAC.** The provisioner gets a ServiceAccount with a namespaced
-  Role (get/list/watch/create/delete on pods + services) and a narrow ClusterRole
+  Role (get/list/watch/create/delete on pods and services; exact accepted-attempt
+  Secret, NetworkPolicy, and Lease lifecycle; and read-only PVC checks) and a narrow ClusterRole
   (namespace get/create). It uses in-cluster service-account creds — no
   kubeconfig mount. The unused update/patch/pods-exec/events verbs were dropped
   (audited against `docker/provisioner/app.py`).
+- **Immutable durable skills.** Set
+  `provisioner.acceptedSkillProjectionProfile: rwx_verified_copy_v1`, pin both
+  `provisioner.image.digest` and `provisioner.sandboxImage` by SHA-256 digest, and
+  use `persistence.home.accessMode: ReadWriteMany`. Helm rejects RWO rather than
+  adding same-node affinity. The provisioner readiness probe uses `/ready`, which
+  confirms the configured claim is `Bound` and actually reports RWX before admitting the profile.
+  Each sandbox init verifies the content-addressed snapshot into a private
+  `emptyDir`; the main container mounts only that copy read-only and is accessed
+  through a per-attempt capability gate. A Kubernetes Lease owns every accepted
+  attempt and is renewed by exact Pod/materialization identity; bounded expiry
+  reconciliation cleans process-lost attempts. Scheduling only prefers another
+  Gateway node when available and never requires same-node placement. Gateway-to-provisioner
+  management calls use a rotating projected ServiceAccount token with a dedicated audience; the
+  provisioner validates the exact Gateway namespace and ServiceAccount through TokenReview. This
+  management authentication is also rendered when the immutable projection profile is disabled,
+  because legacy remote AIO calls use the same protected API. Local evaluation can leave the profile
+  `disabled`, in which case remote durable runs remain empty-skill-only.
 
 ## Upgrading existing values
 

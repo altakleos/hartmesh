@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -79,6 +79,7 @@ class RuntimeReadinessCoordinator:
         persistence_ready: Callable[[], bool],
         extension_generation: Callable[[], int],
         overall_timeout_seconds: float,
+        sandbox_projection_ready: Callable[[], Awaitable[bool]] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if overall_timeout_seconds <= 0:
@@ -88,6 +89,7 @@ class RuntimeReadinessCoordinator:
         self._persistence_ready = persistence_ready
         self._extension_generation = extension_generation
         self._overall_timeout_seconds = overall_timeout_seconds
+        self._sandbox_projection_ready = sandbox_projection_ready
         self._clock = clock or (lambda: datetime.now(UTC))
         self._last_snapshot: RuntimeReadinessSnapshot | None = None
         self._admission_condition = asyncio.Condition()
@@ -142,11 +144,17 @@ class RuntimeReadinessCoordinator:
                 )
             return await store.lifecycle_readiness()
 
-        health_result, lifecycle_result = await asyncio.gather(
+        async def sandbox_projection_check() -> bool:
+            if self._sandbox_projection_ready is None:
+                return True
+            return await self._sandbox_projection_ready()
+
+        health_result, lifecycle_result, sandbox_projection_result = await asyncio.gather(
             self._health_monitor.admission_readiness(
                 expected_generation=expected_generation,
             ),
             lifecycle_check(),
+            sandbox_projection_check(),
             return_exceptions=True,
         )
         if isinstance(health_result, BaseException):
@@ -176,6 +184,18 @@ class RuntimeReadinessCoordinator:
             )
         elif not lifecycle_result.ready:
             reasons.append(lifecycle_result.reason_code)
+
+        if isinstance(sandbox_projection_result, BaseException):
+            if isinstance(sandbox_projection_result, asyncio.CancelledError):
+                raise sandbox_projection_result
+            reasons.append("sandbox_projection_unavailable")
+            correlation_id = self._log_dependency_failure(
+                "Accepted sandbox projection readiness check failed",
+                component="sandbox_projection",
+                error=sandbox_projection_result,
+            )
+        elif sandbox_projection_result is not True:
+            reasons.append("sandbox_projection_unavailable")
 
         unique_reasons = tuple(dict.fromkeys(reasons))
         return RuntimeReadinessSnapshot(

@@ -28,6 +28,7 @@ from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
     accepted_skill_access_from_runtime,
+    accepted_skill_material_binding_from_runtime,
     bind_runtime_accepted_skill_projection,
     bind_runtime_accepted_skill_projection_async,
     get_sandbox_provider,
@@ -1478,7 +1479,22 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     provider = get_sandbox_provider()
     user_id = resolve_runtime_user_id(runtime)
     accepted_skills_only, _snapshot_id = accepted_skill_access_from_runtime(runtime)
-    sandbox_id = provider.acquire_accepted_skills(thread_id, user_id=user_id) if accepted_skills_only else provider.acquire(thread_id, user_id=user_id)
+    if accepted_skills_only:
+        binding = accepted_skill_material_binding_from_runtime(
+            runtime,
+            user_id=user_id,
+        )
+        if binding is None:
+            raise SandboxRuntimeError(
+                "Accepted skill material binding is unavailable",
+            )
+        sandbox_id = provider.acquire_bound_accepted_skills(
+            thread_id,
+            user_id=user_id,
+            binding=binding,
+        )
+    else:
+        sandbox_id = provider.acquire(thread_id, user_id=user_id)
     try:
         bind_runtime_accepted_skill_projection(
             provider,
@@ -1549,7 +1565,22 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     provider = get_sandbox_provider()
     user_id = resolve_runtime_user_id(runtime)
     accepted_skills_only, _snapshot_id = accepted_skill_access_from_runtime(runtime)
-    sandbox_id = await provider.acquire_accepted_skills_async(thread_id, user_id=user_id) if accepted_skills_only else await provider.acquire_async(thread_id, user_id=user_id)
+    if accepted_skills_only:
+        binding = accepted_skill_material_binding_from_runtime(
+            runtime,
+            user_id=user_id,
+        )
+        if binding is None:
+            raise SandboxRuntimeError(
+                "Accepted skill material binding is unavailable",
+            )
+        sandbox_id = await provider.acquire_bound_accepted_skills_async(
+            thread_id,
+            user_id=user_id,
+            binding=binding,
+        )
+    else:
+        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
     try:
         await bind_runtime_accepted_skill_projection_async(
             provider,

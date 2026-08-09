@@ -235,6 +235,8 @@ imagePullSecrets:
 {{- $databaseBackend := ((index $databaseConfig "backend") | default "memory") -}}
 {{- $receiptConfig := (index $appConfig "dedupe_storage") | default dict -}}
 {{- $receiptBackend := ((index $receiptConfig "backend") | default "auto") -}}
+{{- $runOwnershipConfig := (index $appConfig "run_ownership") | default dict -}}
+{{- $runLeaseSeconds := ((index $runOwnershipConfig "lease_seconds") | default 30) -}}
 {{- if not (has $receiptBackend (list "auto" "memory" "postgres")) -}}
 {{- fail "config dedupe_storage.backend must be auto, memory, or postgres" -}}
 {{- end -}}
@@ -328,6 +330,39 @@ imagePullSecrets:
 {{- end -}}
 {{- if and .Values.provisioner.enabled (not .Values.provisioner.serviceAccount.create) (not .Values.provisioner.serviceAccount.name) -}}
 {{- fail "provisioner.serviceAccount.name is required when create=false" -}}
+{{- end -}}
+{{- if and .Values.provisioner.enabled (not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" (.Values.provisioner.gatewayTokenAudience | default ""))) -}}
+{{- fail "provisioner.gatewayTokenAudience must be 1-128 bounded ASCII identifier characters" -}}
+{{- end -}}
+{{- $acceptedSkillProfile := (default "disabled" .Values.provisioner.acceptedSkillProjectionProfile) -}}
+{{- if not (has $acceptedSkillProfile (list "disabled" "rwx_verified_copy_v1")) -}}
+{{- fail "provisioner.acceptedSkillProjectionProfile must be disabled or rwx_verified_copy_v1" -}}
+{{- end -}}
+{{- if eq $acceptedSkillProfile "rwx_verified_copy_v1" -}}
+{{- if lt (int .Values.provisioner.acceptedAttempt.leaseSeconds) (mul 2 (int .Values.provisioner.acceptedAttempt.reconcileIntervalSeconds)) -}}
+{{- fail "provisioner.acceptedAttempt.leaseSeconds must be at least twice reconcileIntervalSeconds" -}}
+{{- end -}}
+{{- if lt (int .Values.provisioner.acceptedAttempt.leaseSeconds) (mul 2 (int $runLeaseSeconds)) -}}
+{{- fail "provisioner.acceptedAttempt.leaseSeconds must be at least twice config run_ownership.lease_seconds" -}}
+{{- end -}}
+{{- if or (lt (int .Values.provisioner.acceptedAttempt.reconcileLimit) 1) (gt (int .Values.provisioner.acceptedAttempt.reconcileLimit) 500) -}}
+{{- fail "provisioner.acceptedAttempt.reconcileLimit must be in [1, 500]" -}}
+{{- end -}}
+  {{- if not .Values.provisioner.enabled -}}
+  {{- fail "rwx_verified_copy_v1 requires the provisioner" -}}
+  {{- end -}}
+  {{- if not .Values.persistence.home.enabled -}}
+  {{- fail "rwx_verified_copy_v1 requires the shared home PVC" -}}
+  {{- end -}}
+  {{- if ne .Values.persistence.home.accessMode "ReadWriteMany" -}}
+  {{- fail "rwx_verified_copy_v1 requires persistence.home.accessMode=ReadWriteMany; same-node RWO fallback is unsupported" -}}
+  {{- end -}}
+  {{- if not .Values.provisioner.image.digest -}}
+  {{- fail "rwx_verified_copy_v1 requires a digest-pinned provisioner verifier/gate image" -}}
+  {{- end -}}
+  {{- if not (regexMatch "^[^[:space:]@]+@sha256:[0-9a-f]{64}$" .Values.provisioner.sandboxImage) -}}
+  {{- fail "rwx_verified_copy_v1 requires provisioner.sandboxImage pinned by sha256 digest" -}}
+  {{- end -}}
 {{- end -}}
 
 {{- if gt (len .Values.gateway.extraEnvFrom) 16 -}}

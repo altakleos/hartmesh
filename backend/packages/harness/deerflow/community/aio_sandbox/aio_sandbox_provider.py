@@ -44,6 +44,7 @@ from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
+    AcceptedSkillExecutionEvidenceV1,
     AcceptedSkillMaterialCapability,
     AcceptedSkillSandboxBindingError,
     AcceptedSkillSandboxBindingV1,
@@ -284,7 +285,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if provisioner_url:
             logger.info(f"Using remote sandbox backend with provisioner at {provisioner_url}")
             api_key = self._config.get("provisioner_api_key", "")
-            return RemoteSandboxBackend(provisioner_url=provisioner_url, api_key=api_key)
+            return RemoteSandboxBackend(
+                provisioner_url=provisioner_url,
+                api_key=api_key,
+                service_account_token_file=self._config.get(
+                    "provisioner_service_account_token_file",
+                    "",
+                ),
+            )
 
         logger.info("Using local container sandbox backend")
         return LocalContainerBackend(
@@ -322,6 +330,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
             "provisioner_api_key": getattr(sandbox_config, "provisioner_api_key", None) or "",
+            "provisioner_service_account_token_file": getattr(
+                sandbox_config,
+                "provisioner_service_account_token_file",
+                None,
+            )
+            or "",
+            "accepted_skill_projection_profile": getattr(
+                sandbox_config,
+                "accepted_skill_projection_profile",
+                "disabled",
+            ),
         }
 
     @staticmethod
@@ -1156,6 +1175,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if not self._refresh_ownership(sandbox_id):
                 logger.warning("Lost sandbox ownership lease for %s; dropping it from this instance", sandbox_id)
                 self._forget_lost_sandbox(sandbox_id, expected_epoch=epoch)
+                continue
 
     def _forget_lost_sandbox(self, sandbox_id: str, *, expected_epoch: int | None = None) -> None:
         """Drop a sandbox whose lease we no longer hold, without touching the container.
@@ -1518,7 +1538,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return None
             self._warm_pool_identity.pop(sandbox_id, None)
             info, _ = warm_item
-            sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+            sandbox = (
+                AioSandbox(
+                    id=sandbox_id,
+                    base_url=info.sandbox_url,
+                    request_headers=dict(info.request_headers),
+                )
+                if info.request_headers
+                else AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+            )
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
             self._active_sandbox_identity[sandbox_id] = key
@@ -1561,7 +1589,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._assert_active_identity_available_locked(info.sandbox_id, key)
             self._assert_warm_identity_available_locked(info.sandbox_id, key)
 
-        sandbox = AioSandbox(id=info.sandbox_id, base_url=info.sandbox_url)
+        sandbox = (
+            AioSandbox(
+                id=info.sandbox_id,
+                base_url=info.sandbox_url,
+                request_headers=dict(info.request_headers),
+            )
+            if info.request_headers
+            else AioSandbox(id=info.sandbox_id, base_url=info.sandbox_url)
+        )
         # Ownership first, so a failure cannot leave a tracked-but-unowned sandbox.
         # There is no container to roll back (we did not create it), but the
         # host-side HTTP client constructed above is ours and must not leak —
@@ -1607,7 +1643,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _register_created_sandbox(self, thread_id: str | None, sandbox_id: str, info: SandboxInfo, *, user_id: str | None = None) -> str:
         """Track a newly-created sandbox in the active maps."""
-        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+        sandbox = (
+            AioSandbox(
+                id=sandbox_id,
+                base_url=info.sandbox_url,
+                request_headers=dict(info.request_headers),
+            )
+            if info.request_headers
+            else AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+        )
         key = (
             self._thread_key(
                 thread_id,
@@ -1870,6 +1914,53 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
         """Create a durable-run sandbox whose only skills mount is ``.accepted``."""
+        return self._acquire_accepted_skills_internal(
+            thread_id,
+            user_id=user_id,
+            binding=None,
+        )
+
+    def acquire_bound_accepted_skills(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+    ) -> str:
+        sandbox_id = self._acquire_accepted_skills_internal(
+            thread_id,
+            user_id=user_id,
+            binding=binding,
+        )
+        self.bind_accepted_skill_snapshot(
+            sandbox_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            binding=binding,
+        )
+        return sandbox_id
+
+    async def acquire_bound_accepted_skills_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+    ) -> str:
+        return await asyncio.to_thread(
+            self.acquire_bound_accepted_skills,
+            thread_id,
+            user_id=user_id,
+            binding=binding,
+        )
+
+    def _acquire_accepted_skills_internal(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1 | None,
+    ) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)
         try:
             skills_root = get_app_config().skills.container_path.rstrip("/")
@@ -1914,6 +2005,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 sandbox_id,
                 user_id=effective_user_id,
                 accepted_skills_only=True,
+                accepted_skill_binding=binding,
             )
             with self._lock:
                 accepted_ids = getattr(self, "_accepted_only_sandbox_ids", None)
@@ -1930,9 +2022,81 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self,
         sandbox_id: str,
     ) -> AcceptedSkillMaterialCapability:
-        if self.has_accepted_skill_isolation(sandbox_id):
-            return AcceptedSkillMaterialCapability.IMMUTABLE_READ_ONLY
-        return AcceptedSkillMaterialCapability.EMPTY_ONLY
+        if not self.has_accepted_skill_isolation(sandbox_id):
+            return AcceptedSkillMaterialCapability.EMPTY_ONLY
+        if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
+            with self._lock:
+                info = self._sandbox_infos.get(sandbox_id)
+            if info is None or info.accepted_skill_material is None:
+                return AcceptedSkillMaterialCapability.EMPTY_ONLY
+        return AcceptedSkillMaterialCapability.IMMUTABLE_READ_ONLY
+
+    def accepted_skill_execution_evidence(
+        self,
+        sandbox_id: str,
+    ) -> AcceptedSkillExecutionEvidenceV1 | None:
+        with self._lock:
+            info = self._sandbox_infos.get(sandbox_id)
+        receipt = None if info is None else info.accepted_skill_material
+        if receipt is None:
+            return None
+        return AcceptedSkillExecutionEvidenceV1(
+            profile=receipt.profile,
+            attempt_id=receipt.attempt_id,
+            snapshot_id=receipt.snapshot_id,
+            run_id=receipt.run_id,
+            generation=receipt.generation,
+            pod_uid=receipt.pod_uid,
+            lease_uid=receipt.lease_uid,
+            runtime_image_ids_digest=receipt.runtime_image_ids_digest,
+            verifier_receipt_digest=receipt.verifier_receipt_digest,
+            materialization_evidence_digest=(receipt.materialization_evidence_digest),
+        )
+
+    def _accepted_execution_info(
+        self,
+        sandbox_id: str,
+        evidence: AcceptedSkillExecutionEvidenceV1,
+    ) -> SandboxInfo | None:
+        with self._lock:
+            info = self._sandbox_infos.get(sandbox_id)
+        if info is None or info.accepted_skill_material is None:
+            return None
+        current = self.accepted_skill_execution_evidence(sandbox_id)
+        if current is None or current != evidence:
+            return None
+        return info
+
+    async def validate_accepted_skill_execution_async(
+        self,
+        sandbox_id: str,
+        evidence: AcceptedSkillExecutionEvidenceV1,
+    ) -> bool:
+        """Validate the exact remote Pod/Lease/materialization tuple."""
+
+        info = self._accepted_execution_info(sandbox_id, evidence)
+        if info is None or not isinstance(self._backend, RemoteSandboxBackend):
+            return False
+        try:
+            return await asyncio.to_thread(self._backend.is_alive, info)
+        except Exception:
+            logger.warning(
+                "Accepted sandbox execution fence unavailable for %s",
+                sandbox_id,
+            )
+            return False
+
+    async def renew_accepted_skill_execution_async(
+        self,
+        sandbox_id: str,
+        evidence: AcceptedSkillExecutionEvidenceV1,
+    ) -> bool:
+        """Renew only after the owning RunManager renewed its durable lease."""
+
+        info = self._accepted_execution_info(sandbox_id, evidence)
+        if info is None or not isinstance(self._backend, RemoteSandboxBackend):
+            return False
+        return await asyncio.to_thread(self._backend.renew_accepted_attempt, info)
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment without blocking the event loop.
@@ -2138,6 +2302,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         *,
         user_id: str | None = None,
         accepted_skills_only: bool = False,
+        accepted_skill_binding: AcceptedSkillSandboxBindingV1 | None = None,
     ) -> str:
         """Create a new sandbox via the backend.
 
@@ -2170,17 +2335,38 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             evicted = self._evict_oldest_warm()
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
-        info = self._backend.create(
-            thread_id,
-            sandbox_id,
-            extra_mounts=extra_mounts or None,
-            user_id=effective_user_id,
-            provision_lark_cli_runtime=provision_lark_cli_runtime,
-            provision_lark_cli_broker=provision_lark_cli_broker,
-        )
+        if isinstance(self._backend, RemoteSandboxBackend):
+            info = self._backend.create(
+                thread_id,
+                sandbox_id,
+                extra_mounts=extra_mounts or None,
+                user_id=effective_user_id,
+                provision_lark_cli_runtime=provision_lark_cli_runtime,
+                provision_lark_cli_broker=provision_lark_cli_broker,
+                accepted_skills_only=accepted_skills_only,
+                accepted_skill_binding=accepted_skill_binding,
+            )
+        else:
+            info = self._backend.create(
+                thread_id,
+                sandbox_id,
+                extra_mounts=extra_mounts or None,
+                user_id=effective_user_id,
+                provision_lark_cli_runtime=provision_lark_cli_runtime,
+                provision_lark_cli_broker=provision_lark_cli_broker,
+            )
 
         # Wait for sandbox to be ready
-        if not wait_for_sandbox_ready(info.sandbox_url, timeout=60):
+        ready = (
+            wait_for_sandbox_ready(
+                info.sandbox_url,
+                timeout=60,
+                headers=dict(info.request_headers),
+            )
+            if info.request_headers
+            else wait_for_sandbox_ready(info.sandbox_url, timeout=60)
+        )
+        if not ready:
             # The container is running but unowned: ownership is published by
             # ``_register_created_sandbox`` after this gate. Claim the teardown
             # lease before stopping it so a peer cannot adopt the not-yet-ready
@@ -2326,6 +2512,21 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     ) -> None:
         if self._identity_for_sandbox(sandbox_id) != (user_id, thread_id):
             raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_sandbox_identity_mismatch")
+        if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
+            with self._lock:
+                info = self._sandbox_infos.get(sandbox_id)
+            receipt = None if info is None else info.accepted_skill_material
+            if receipt is None:
+                if binding.snapshot_id is None:
+                    return
+                raise AcceptedSkillSandboxBindingError(
+                    "accepted_skill_snapshot_immutability_unsupported",
+                )
+            if receipt.profile != "rwx_verified_copy_v1" or receipt.snapshot_id != binding.snapshot_id or receipt.content_digest != binding.snapshot_id or receipt.run_id != binding.run_id or receipt.generation != binding.generation:
+                raise AcceptedSkillSandboxBindingError(
+                    "accepted_skill_snapshot_receipt_mismatch",
+                )
+            return
         from deerflow.runtime.skill_snapshot import bind_skill_snapshot_active_view
 
         try:
@@ -2341,6 +2542,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_failed") from exc
 
     def _clear_bound_accepted_skill_snapshot(self, sandbox_id: str) -> None:
+        if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
+            return
         identity = self._identity_for_sandbox(sandbox_id)
         if identity is None:
             return
@@ -2358,6 +2561,21 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         if not isinstance(clear, SkillProjectionClear):
             raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_clear_fence_invalid")
+        if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
+            if self._identity_for_sandbox(clear.sandbox_id) != (
+                clear.user_id,
+                clear.thread_id,
+            ):
+                return False
+            with self._lock:
+                info = self._sandbox_infos.get(clear.sandbox_id)
+            receipt = None if info is None else info.accepted_skill_material
+            if receipt is None:
+                return clear.snapshot_id is None
+            if receipt.snapshot_id != clear.snapshot_id or receipt.run_id != clear.run_id or receipt.generation != clear.generation:
+                return False
+            self.destroy(clear.sandbox_id)
+            return self.get(clear.sandbox_id) is None
         return clear_skill_snapshot_active_view(
             user_id=clear.user_id,
             thread_id=clear.thread_id,
@@ -2378,6 +2596,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             clear.thread_id,
         ):
             return False
+        if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
+            return self.get(clear.sandbox_id) is None
         return prove_skill_snapshot_active_view_absent(
             user_id=clear.user_id,
             thread_id=clear.thread_id,

@@ -50,6 +50,7 @@ _INVOCATION_REVISIONS = (
     "0013_invocation_lifecycle",
     "0014_canonical_caller_intent",
     "0015_inbound_receipts",
+    "0016_sandbox_execution_evidence",
 )
 _REVISION_COLUMNS = {
     "0011_accepted_invocation": {
@@ -76,6 +77,10 @@ _REVISION_COLUMNS = {
         "caller_intent_digest_version",
     },
     "0015_inbound_receipts": set(),
+    "0016_sandbox_execution_evidence": {
+        "execution_evidence_json",
+        "execution_evidence_digest",
+    },
 }
 
 _INBOUND_RECEIPT_COLUMNS = {
@@ -118,11 +123,15 @@ _ACCEPTED_COLUMNS = {
     "caller_intent_json": ("json", None, True),
     "caller_intent_digest": ("character varying", 64, True),
     "caller_intent_digest_version": ("character varying", 40, True),
+    "execution_evidence_json": ("json", None, True),
+    "execution_evidence_digest": ("character varying", 64, True),
 }
 _RUN_CHECKS = {
     "ck_runs_state_version_nonnegative",
     "ck_runs_external_key_pair",
     "ck_runs_keyed_request_digest",
+    "ck_runs_execution_evidence_pair",
+    "ck_runs_execution_evidence_run_only",
     "ck_runs_external_identity_run_only",
     "ck_runs_external_scope_length",
     "ck_runs_external_key_length",

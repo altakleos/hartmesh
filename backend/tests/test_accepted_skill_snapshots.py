@@ -24,6 +24,7 @@ from deerflow.agents.middlewares.skill_activation_middleware import (
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.runtime.accepted_invocation import (
     AcceptedInvocation,
@@ -39,6 +40,7 @@ from deerflow.runtime.agent_revision import (
 )
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.runtime.skill_snapshot import (
     SkillSnapshotError,
@@ -48,6 +50,7 @@ from deerflow.runtime.skill_snapshot import (
 )
 from deerflow.sandbox import tools as sandbox_tools
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+from deerflow.sandbox.sandbox_provider import AcceptedSkillExecutionEvidenceV1
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.subagents.config import SubagentConfig
@@ -1082,6 +1085,10 @@ async def test_terminal_worker_releases_snapshot_after_execution(
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._materialize_accepted_skill_projection",
+        AsyncMock(return_value=("sandbox:worker", None)),
+    )
     await run_agent(
         bridge,
         manager,
@@ -1097,7 +1104,9 @@ async def test_terminal_worker_releases_snapshot_after_execution(
 
 
 @pytest.mark.asyncio
-async def test_replacement_worker_waits_for_old_projection_before_start() -> None:
+async def test_replacement_worker_waits_for_old_projection_before_start(
+    monkeypatch,
+) -> None:
     material = ResolvedAgentMaterialV1(
         agent_id="lead-agent",
         storage_source="test",
@@ -1157,6 +1166,10 @@ async def test_replacement_worker_waits_for_old_projection_before_start() -> Non
         publish=AsyncMock(),
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._materialize_accepted_skill_projection",
+        AsyncMock(return_value=("sandbox:replacement", None)),
     )
     worker = asyncio.create_task(
         run_agent(
@@ -1530,6 +1543,201 @@ async def test_snapshot_drift_fails_before_graph_construction(
     assert record.status is RunStatus.error
     assert record.stop_reason == "agent_revision_drift"
     assert not material.skill_snapshot.root.exists()
+
+
+@pytest.mark.asyncio
+async def test_remote_materialization_failure_precedes_running_and_graph(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    skill_file = _write_skill(tmp_path, body="Pinned remote material")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject(
+        "thread-worker",
+        accepted_invocation=_accepted(revision),
+    )
+    factory_calls = 0
+
+    async def fail_materialization(*_args, **_kwargs):
+        raise RuntimeError("accepted_skill_snapshot_materialization_failed")
+
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._materialize_accepted_skill_projection",
+        fail_materialization,
+    )
+
+    def factory(*, config):
+        del config
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("graph construction must not run")
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    assert factory_calls == 0
+    assert record.status is RunStatus.error
+    events = await store.list_lifecycle_events(run_id=record.run_id)
+    assert [event["lifecycle_type"] for event in events] == ["accepted", "failed"]
+
+
+@pytest.mark.asyncio
+async def test_remote_materialization_replacement_fails_before_graph_construction(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    skill_file = _write_skill(tmp_path, body="Pinned remote material")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    store = MemoryRunStore()
+    manager = RunManager(
+        store=store,
+        run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True),
+    )
+    record = await manager.create_or_reject(
+        "thread-worker",
+        accepted_invocation=_accepted(revision),
+    )
+    evidence = AcceptedSkillExecutionEvidenceV1(
+        profile="rwx_verified_copy_v1",
+        attempt_id="sandbox-attempt",
+        snapshot_id=revision.material.skill_snapshot.snapshot_id,
+        run_id=record.run_id,
+        generation=0,
+        pod_uid="pod-1",
+        lease_uid="lease-1",
+        runtime_image_ids_digest="a" * 64,
+        verifier_receipt_digest="b" * 64,
+        materialization_evidence_digest="c" * 64,
+    )
+    provider = SimpleNamespace(
+        validate_accepted_skill_execution_async=AsyncMock(return_value=False),
+        renew_accepted_skill_execution_async=AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._materialize_accepted_skill_projection",
+        AsyncMock(return_value=("sandbox-1", evidence)),
+    )
+    monkeypatch.setattr("deerflow.sandbox.get_sandbox_provider", lambda: provider)
+    factory = AsyncMock(side_effect=AssertionError("graph construction must not run"))
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    factory.assert_not_called()
+    assert record.status is RunStatus.error
+    assert record.stop_reason == "accepted_skill_execution_fence_failed"
+
+
+@pytest.mark.asyncio
+async def test_remote_materialization_is_refenced_immediately_before_astream(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    skill_file = _write_skill(tmp_path, body="Pinned remote material")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    store = MemoryRunStore()
+    manager = RunManager(
+        store=store,
+        run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True),
+    )
+    record = await manager.create_or_reject(
+        "thread-worker",
+        accepted_invocation=_accepted(revision),
+    )
+    evidence = AcceptedSkillExecutionEvidenceV1(
+        profile="rwx_verified_copy_v1",
+        attempt_id="sandbox-attempt",
+        snapshot_id=revision.material.skill_snapshot.snapshot_id,
+        run_id=record.run_id,
+        generation=0,
+        pod_uid="pod-1",
+        lease_uid="lease-1",
+        runtime_image_ids_digest="a" * 64,
+        verifier_receipt_digest="b" * 64,
+        materialization_evidence_digest="c" * 64,
+    )
+    attempt_valid = True
+
+    async def validate_attempt(*_args, **_kwargs) -> bool:
+        return attempt_valid
+
+    provider = SimpleNamespace(
+        validate_accepted_skill_execution_async=AsyncMock(
+            side_effect=validate_attempt,
+        ),
+        renew_accepted_skill_execution_async=AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._materialize_accepted_skill_projection",
+        AsyncMock(return_value=("sandbox-1", evidence)),
+    )
+    monkeypatch.setattr("deerflow.sandbox.get_sandbox_provider", lambda: provider)
+
+    async def qualification_barrier(*_args, **_kwargs) -> None:
+        nonlocal attempt_valid
+        attempt_valid = False
+
+    monkeypatch.setattr(
+        "deerflow.runtime.kubernetes_qualification.qualification_counter",
+        qualification_barrier,
+    )
+    astream_calls = 0
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            nonlocal astream_calls
+            astream_calls += 1
+            yield {"messages": []}
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: Agent(),
+        graph_input={},
+        config={},
+    )
+
+    assert astream_calls == 0
+    assert provider.validate_accepted_skill_execution_async.await_count == 2
+    assert record.status is RunStatus.error
+    assert record.stop_reason == "accepted_skill_execution_fence_failed"
 
 
 def test_persisted_acceptance_contains_only_skill_evidence(

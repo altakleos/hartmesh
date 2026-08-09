@@ -381,6 +381,12 @@ def test_existing_service_account_metadata_and_referenced_mounts_render_safely(
             "exactly one secret or configMap source",
         ),
         (
+            lambda values: values["provisioner"].update(
+                {"gatewayTokenAudience": ""},
+            ),
+            "gatewayTokenAudience",
+        ),
+        (
             lambda values: values["gateway"].update({"extraVolumes": [{"name": "config", "configMap": {"name": "other"}}]}),
             "reserved or duplicated",
         ),
@@ -610,3 +616,138 @@ def test_live_qualification_values_render_the_exact_one_replica_profile(
     assert gateway["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] == 12
     assert "qualification-password" not in result.stdout
     assert "postgresql+asyncpg://" not in result.stdout
+
+
+def test_verified_accepted_skill_projection_rejects_same_node_rwo_fallback(
+    tmp_path: Path,
+) -> None:
+    values = _production_values()
+    values["provisioner"]["acceptedSkillProjectionProfile"] = "rwx_verified_copy_v1"
+    values["provisioner"]["sandboxImage"] = "registry.example/aio@sha256:" + ("c" * 64)
+    values["persistence"]["home"]["accessMode"] = "ReadWriteOnce"
+
+    result = _render(tmp_path, values, expect_success=False)
+
+    assert "requires persistence.home.accessMode=ReadWriteMany" in result.stderr
+    assert "same-node RWO fallback is unsupported" in result.stderr
+
+
+def test_verified_accepted_skill_projection_renders_pinned_cross_node_profile(
+    tmp_path: Path,
+) -> None:
+    values = _production_values()
+    values["provisioner"]["acceptedSkillProjectionProfile"] = "rwx_verified_copy_v1"
+    values["provisioner"]["sandboxImage"] = "registry.example/aio@sha256:" + ("c" * 64)
+    values["persistence"]["home"]["accessMode"] = "ReadWriteMany"
+
+    rendered = _render(tmp_path, values).stdout
+    provisioner = _workload(
+        rendered,
+        kind="Deployment",
+        component="provisioner",
+    )
+    assert provisioner["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["httpGet"]["path"] == "/ready"
+    environment = {item["name"]: item.get("value") for item in provisioner["spec"]["template"]["spec"]["containers"][0]["env"]}
+
+    assert environment["ACCEPTED_SKILL_PROJECTION_PROFILE"] == ("rwx_verified_copy_v1")
+    assert environment["ACCEPTED_SKILL_RUNTIME_IMAGE"] == ("deer-flow-provisioner@sha256:" + ("b" * 64))
+    assert environment["USERDATA_PVC_NAME"] == "deer-flow-deer-flow-home"
+    assert environment["ACCEPTED_ATTEMPT_LEASE_SECONDS"] == "120"
+    assert environment["ACCEPTED_ATTEMPT_RECONCILE_INTERVAL_SECONDS"] == "30"
+    assert environment["ACCEPTED_ATTEMPT_RECONCILE_LIMIT"] == "100"
+    assert environment["PROVISIONER_AUTH_AUDIENCE"] == "hartmesh-provisioner"
+    assert environment["PROVISIONER_GATEWAY_NAMESPACE"] == "deer-flow"
+    assert environment["PROVISIONER_GATEWAY_SERVICE_ACCOUNT"] == ("deer-flow-deer-flow-gateway")
+    documents = [document for document in yaml.safe_load_all(rendered) if isinstance(document, dict)]
+    gateway = _workload(rendered, kind="Deployment", component="gateway")
+    gateway_spec = gateway["spec"]["template"]["spec"]
+    identity_volume = next(volume for volume in gateway_spec["volumes"] if volume["name"] == "provisioner-identity")
+    token_projection = identity_volume["projected"]["sources"][0]["serviceAccountToken"]
+    assert token_projection == {
+        "audience": "hartmesh-provisioner",
+        "expirationSeconds": 600,
+        "path": "token",
+    }
+    gateway_mounts = gateway_spec["containers"][0]["volumeMounts"]
+    assert {
+        "name": "provisioner-identity",
+        "mountPath": "/var/run/secrets/hartmesh-provisioner",
+        "readOnly": True,
+    } in gateway_mounts
+    config_map = next(document for document in documents if document.get("kind") == "ConfigMap" and document.get("metadata", {}).get("name") == "deer-flow-deer-flow-config")
+    rendered_config = yaml.safe_load(config_map["data"]["config.yaml"])
+    assert rendered_config["sandbox"]["accepted_skill_projection_profile"] == ("rwx_verified_copy_v1")
+    assert rendered_config["sandbox"]["provisioner_service_account_token_file"] == "/var/run/secrets/hartmesh-provisioner/token"
+    assert rendered_config["run_ownership"]["heartbeat_enabled"] is True
+    provisioner_role = next(document for document in documents if document.get("kind") == "Role" and document.get("metadata", {}).get("name") == "deer-flow-deer-flow-provisioner")
+    pvc_rule = next(rule for rule in provisioner_role["rules"] if "persistentvolumeclaims" in rule["resources"])
+    assert pvc_rule["verbs"] == ["get"]
+    lease_rule = next(rule for rule in provisioner_role["rules"] if "leases" in rule["resources"])
+    assert lease_rule["apiGroups"] == ["coordination.k8s.io"]
+    assert lease_rule["verbs"] == [
+        "get",
+        "list",
+        "create",
+        "delete",
+        "update",
+    ]
+    cluster_role = next(document for document in documents if document.get("kind") == "ClusterRole" and document.get("metadata", {}).get("name") == "deer-flow-deer-flow-provisioner-ns")
+    token_review_rule = next(rule for rule in cluster_role["rules"] if "tokenreviews" in rule["resources"])
+    assert token_review_rule == {
+        "apiGroups": ["authentication.k8s.io"],
+        "resources": ["tokenreviews"],
+        "verbs": ["create"],
+    }
+
+
+def test_remote_provisioner_management_auth_is_wired_when_projection_is_disabled(
+    tmp_path: Path,
+) -> None:
+    """Legacy remote AIO must remain authenticated outside the RWX profile."""
+
+    values = copy.deepcopy(_VALUES)
+    values["provisioner"]["acceptedSkillProjectionProfile"] = "disabled"
+
+    result = _render(tmp_path, values)
+    gateway = _workload(result.stdout, kind="Deployment", component="gateway")
+    gateway_spec = gateway["spec"]["template"]["spec"]
+    gateway_container = gateway_spec["containers"][0]
+    identity_volume = next(volume for volume in gateway_spec["volumes"] if volume["name"] == "provisioner-identity")
+
+    assert identity_volume["projected"]["sources"] == [
+        {
+            "serviceAccountToken": {
+                "audience": "hartmesh-provisioner",
+                "expirationSeconds": 600,
+                "path": "token",
+            }
+        }
+    ]
+    assert {mount["name"]: mount for mount in gateway_container["volumeMounts"]}["provisioner-identity"]["readOnly"] is True
+
+    config_map = next(document for document in _documents(result.stdout) if document.get("kind") == "ConfigMap" and document.get("metadata", {}).get("name") == "deer-flow-deer-flow-config")
+    rendered_config = yaml.safe_load(config_map["data"]["config.yaml"])
+    assert rendered_config["sandbox"]["provisioner_service_account_token_file"] == ("/var/run/secrets/hartmesh-provisioner/token")
+
+
+def test_verified_accepted_skill_projection_rejects_unsafe_lease_timing(
+    tmp_path: Path,
+) -> None:
+    values = _production_values()
+    values["provisioner"]["acceptedSkillProjectionProfile"] = "rwx_verified_copy_v1"
+    values["provisioner"]["sandboxImage"] = "registry.example/aio@sha256:" + ("c" * 64)
+    values["provisioner"]["acceptedAttempt"] = {
+        "leaseSeconds": 59,
+        "reconcileIntervalSeconds": 30,
+        "reconcileLimit": 100,
+    }
+    values["persistence"]["home"]["accessMode"] = "ReadWriteMany"
+
+    result = _render(tmp_path, values, expect_success=False)
+
+    assert "leaseSeconds must be at least twice reconcileIntervalSeconds" in (result.stderr)
+
+    values["provisioner"]["acceptedAttempt"]["leaseSeconds"] = 120
+    _set_config_value(values, ("run_ownership", "lease_seconds"), 61)
+    result = _render(tmp_path, values, expect_success=False)
+    assert "leaseSeconds must be at least twice config run_ownership.lease_seconds" in result.stderr
