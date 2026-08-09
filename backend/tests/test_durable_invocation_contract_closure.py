@@ -118,11 +118,76 @@ def test_clarification_observation_and_recovery_decisions_are_explicit() -> None
     guide = _runtime_guide()
 
     assert "A clarification request completes its current invocation successfully" in guide
-    assert "The user's answer starts a new invocation on the same thread" in guide
+    assert "The user's answer starts a new invocation on the same DeerFlow thread" in guide
     assert "`input_required` is not a v1 lifecycle state" in guide
     assert "Polling `DurableInvocationPort.observe` is the supported durable evidence path" in guide
     assert "No event sink or broker is required for correctness" in guide
     assert "Repository process-loss simulation is not Kubernetes pod-recovery qualification" in guide
+
+
+def test_runtime_semantics_are_consistent_across_public_and_model_facing_docs() -> None:
+    guide = _runtime_guide()
+    root_readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    api_guide = (_BACKEND_ROOT / "docs" / "API.md").read_text(encoding="utf-8")
+    runtime_api_guide = (_BACKEND_ROOT / "packages" / "runtime-api" / "README.md").read_text(encoding="utf-8")
+    runtime_api_contract = (_BACKEND_ROOT / "packages" / "runtime-api" / "deerflow_runtime_api" / "__init__.py").read_text(encoding="utf-8")
+    extension_api_guide = (_BACKEND_ROOT / "packages" / "extension-api" / "README.md").read_text(encoding="utf-8")
+    backend_guide = (_BACKEND_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    clarification_middleware = (_BACKEND_ROOT / "packages" / "harness" / "deerflow" / "agents" / "middlewares" / "clarification_middleware.py").read_text(encoding="utf-8")
+    clarification_tool = (_BACKEND_ROOT / "packages" / "harness" / "deerflow" / "tools" / "builtins" / "clarification_tool.py").read_text(encoding="utf-8")
+    lead_prompt = (_BACKEND_ROOT / "packages" / "harness" / "deerflow" / "agents" / "lead_agent" / "prompt.py").read_text(encoding="utf-8")
+    normalized_guide = " ".join(guide.split())
+    normalized_runtime_api_contract = " ".join(runtime_api_contract.split())
+
+    for required in (
+        "canonical caller intent",
+        "accepted effective execution",
+        "does not rerun contributors, authorization, constraints, default resolution, agent/profile routing, or model execution",
+        "Cursor polling of transactional lifecycle rows is the authoritative v1 evidence path",
+        "optional at-least-once acceleration",
+        "same DeerFlow thread, checkpoints, memory, workspace, and conversation context",
+        "one startup-frozen process generation",
+        "does not coordinate simultaneous generations or rolling replicas",
+        "terminalized as failed with `stop_reason=orphan_recovered`",
+        "does not resume model execution",
+        "A product retry is a new invocation under the new process generation",
+        "Ingress receipt boundary",
+        "Admission boundary",
+        "Execution boundary",
+        "Observation boundary",
+        "Outbound delivery boundary",
+        "does not promise exactly-once model execution",
+        "application-hosted in-process `InvocationRuntime` Adapter",
+        "local, non-durable embedded `DeerFlowClient`",
+        "opt-in deterministic fault injection",
+        "disabled in ordinary processes",
+    ):
+        assert required in normalized_guide
+
+    assert "canonical caller intent" in runtime_api_guide
+    assert "accepted effective execution" in runtime_api_guide
+    assert "canonical caller intent" in normalized_runtime_api_contract
+    assert "accepted effective execution" in normalized_runtime_api_contract
+    assert "authoritative v1 evidence path" in normalized_runtime_api_contract
+    assert "new invocation on the same DeerFlow thread" in root_readme
+    assert "new invocation on the same DeerFlow thread" in api_guide
+    assert "one startup-frozen process generation" in extension_api_guide
+    assert "one startup-frozen process generation" in backend_guide
+    assert "does not enter `InvocationRuntime`" in backend_guide
+
+    for model_facing_text in (clarification_middleware, clarification_tool, lead_prompt):
+        normalized_model_text = " ".join(model_facing_text.split())
+        assert "ends the current invocation successfully" in normalized_model_text
+        assert "new invocation on the same DeerFlow thread" in normalized_model_text
+
+    for stale_clarification_claim in (
+        "Waits for user response before continuing",
+        "Wait for the user's response before continuing",
+        "[Execution stops - wait for user response]",
+    ):
+        assert stale_clarification_claim not in clarification_middleware
+        assert stale_clarification_claim not in clarification_tool
+        assert stale_clarification_claim not in lead_prompt
 
 
 def test_declared_non_goals_are_complete_and_separate_from_defects() -> None:

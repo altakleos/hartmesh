@@ -186,7 +186,7 @@ def test_seed_scopes_one_synthetic_run_per_inherited_turn() -> None:
 
 
 def test_seed_opens_a_new_turn_at_a_hidden_clarification_reply() -> None:
-    """An answered clarification resumes as its own run, so the reply is a turn
+    """An answered clarification starts its own run, so the reply is a turn
     boundary exactly like a visible user message."""
     response = {
         "version": 1,

@@ -293,12 +293,14 @@ A normal `RunRow` is both the accepted invocation and the executable run; auxili
 operation rows are never invocations. Keyed admission stores `external_scope`,
 `external_key`, a `caller-intent-canonical-json-v1` projection/digest, and the separate
 `sha256-canonical-json-v1` accepted effective-execution digest atomically with the pending row.
-The caller-intent projection records only the execution semantics supplied through the
-caller-facing contract. The effective projection records server-resolved defaults and pinned
-principal, Origin, agent-revision, extension, contributor, thread, and execution facts used by
-authorization, constraints, and the worker. A partial unique index over scope/key arbitrates
-concurrent processes. The store returns only `created`, `known_same`, or `key_conflict`, and
-`InvocationRuntime` attaches a worker only for `created`.
+The two named projections have separate jobs. **Canonical caller intent** records only the
+execution semantics supplied through the caller-facing contract and decides equal replay versus
+conflict. **Accepted effective execution** records server-resolved defaults, resolved
+agent/profile material, the accepted constraints projection, extension generation, and pinned
+principal, Origin, contributor, thread, and execution facts used by authorization and the
+worker. A partial unique index over scope/key arbitrates concurrent processes. The store
+returns only `created`, `known_same`, or `key_conflict`, and `InvocationRuntime` attaches a
+worker only for `created`.
 
 HTTP create/stream/wait routes accept `Idempotency-Key`. Their scope is tied to the
 authenticated server subject; auth-disabled mode uses the configured default user and an
@@ -344,13 +346,48 @@ invalid rather than being silently omitted.
 A known visible row is first checked against current authenticated principal/base-Origin and
 explicit binding evidence, then only the fresh canonical caller intent is compared. Equality
 returns the same row in active or terminal state and reuses its accepted effective projection
-and lifecycle without rerunning contributors, start authorization, constraint projection,
-default or alias resolution, or graph execution. Replay never starts with accepted effective
-values and overwrites only fields present on the retry. Rows written before caller-intent
-evidence exists remain readable, but a keyed replay conflicts because equality cannot be
-proven. A different key still follows the independent active-thread rule (`reject` is
-thread-busy; `interrupt`/`rollback` supersede atomically). The replay guarantee ends when the
-retained row is deleted.
+and lifecycle. An equal retry does not rerun contributors, authorization, constraints, default
+resolution, agent/profile routing, or model execution. Here authorization means start/admission
+authorization; current observe authorization still applies before a retained row is revealed.
+An explicitly caller-requested revision remains part of caller intent; host-resolved revision
+and profile material remain accepted effective execution. Replay never starts with accepted
+effective values and overwrites only fields present on the retry. Rows written before
+caller-intent evidence exists remain readable, but a keyed replay conflicts because equality
+cannot be proven. A different key still follows the independent active-thread rule (`reject`
+is thread-busy; `interrupt`/`rollback` supersede atomically). The replay guarantee ends when
+the retained row is deleted.
+
+## Durability boundaries
+
+Hartmesh separates the boundaries instead of treating “durable invocation” as an end-to-end
+exactly-once claim:
+
+- **Ingress receipt boundary** — a signed GitHub delivery using PostgreSQL receipt storage is
+  acknowledged only after the bounded verified-source envelope is committed. Unsupported native
+  sources, unverified development webhooks, and local memory/SQLite receipt modes are
+  `best_effort`; provider delivery and `MessageBus` notification before a durable receipt remain
+  outside the guarantee.
+- **Admission boundary** — invocation durability begins when the normal `RunRow`, acceptance
+  evidence, external-key arbitration, and `accepted` lifecycle row commit. Before that commit
+  there is no retained invocation. After it, an equal key/intent converges on that row while it is
+  retained, including after response loss.
+- **Execution boundary** — only the admission creator attaches a worker, and accepted agent,
+  constraint, trusted-context, and extension material is pinned for that worker. Hartmesh does
+  not promise exactly-once model execution, resumable model execution after process loss, or
+  rollback of already-committed external tool effects. A process may die before execution,
+  during a model/tool call, or after an external side effect.
+- **Observation boundary** — Cursor polling of transactional lifecycle rows is the
+  authoritative v1 evidence path. The run row and lifecycle journal, read through
+  `DurableInvocationPort.observe`, establish current state; a push sink is optional
+  at-least-once acceleration and never a synchronous completion dependency.
+- **Outbound delivery boundary** — SSE/stream retention, native-channel replies, provider
+  acknowledgements after receipt admission, and other outbound delivery are separate from
+  invocation/lifecycle durability. Delivery to an external provider and external side effects
+  are not made exactly once by invocation idempotency.
+
+The supported topology has one Gateway replica. Multi-replica execution ownership, scheduler
+high availability, unsupported source receipts, broker delivery, and provider-side outbound
+delivery remain outside this contract.
 
 ## Embedded runtime API and lifecycle observation
 
@@ -450,18 +487,21 @@ observation. Opaque `next_cursor`, `minimum_available_cursor`, and
 pages advance to the fence without skipping a future match. Reads are at least
 once, so consumers deduplicate with stable event IDs/cursors.
 
-Polling `DurableInvocationPort.observe` is the supported durable evidence path.
+Polling `DurableInvocationPort.observe` is the supported durable evidence path. Cursor polling
+of transactional lifecycle rows is the authoritative v1 evidence path.
 No event sink or broker is required for correctness: observation reads the authoritative run
-state and its transactional lifecycle journal directly. A push sink or event broker may be
-added only as a separately reviewed delivery mechanism and cannot become an undeclared
-correctness or release criterion.
+state and its transactional lifecycle journal directly. A push sink or event broker is optional
+at-least-once acceleration only; it is never a synchronous model-completion dependency and
+cannot become an undeclared correctness or release criterion.
 
-### Clarification is continuation, not suspension
+### Clarification continues the thread, not the invocation
 
 A clarification request completes its current invocation successfully with the structured
 request for more information as its result.
-The user's answer starts a new invocation on the same thread, so ordinary idempotency,
-acceptance, and lifecycle rules apply to that answer.
+The user's answer starts a new invocation on the same DeerFlow thread, so ordinary idempotency,
+acceptance, and lifecycle rules apply to that answer. That new invocation reuses the same
+DeerFlow thread, checkpoints, memory, workspace, and conversation context; it does not resume
+the completed graph execution.
 `input_required` is not a v1 lifecycle state. If a future contract supports true suspension
 and resumption of the same invocation, it may add an explicit nonterminal event only through a
 separately reviewed, versioned lifecycle change.
@@ -477,8 +517,11 @@ lifecycle row in the same transaction. The complete v1 vocabulary is `accepted`,
 neither row nor journal. Interrupt/rollback replacement commits every predecessor
 transition and the replacement acceptance as one ordered batch.
 
-Process death after acceptance is recovered by the current lease/orphan scan as `failed`
-with `orphan_recovered`; attachment failure is `worker_attachment_failed`. These guarantees
+An active invocation lost with its process is terminalized as failed with
+`stop_reason=orphan_recovered`; it does not resume model execution. A product retry is a new
+invocation under the new process generation, while a replay of the lost invocation's retained
+external key only returns that terminal row.
+Attachment failure is `worker_attachment_failed`. These guarantees
 make retained keyed retries converge, but do not provide scheduler HA or a multi-replica
 Gateway ownership design beyond the explicitly configured PostgreSQL lease and stream
 primitives. Live pod termination is qualified only by the separate opt-in
@@ -552,6 +595,8 @@ scenario skip, timeout, unreached barrier, or evidence-write failure into a
 failed qualification. Runtime barriers and the deterministic no-network model
 exist only behind the test-only `DEERFLOW_TEST_KUBERNETES_RUNTIME=1` environment
 injected by the qualification ConfigMap; there is no diagnostic HTTP endpoint.
+These qualification hooks are opt-in deterministic fault injection, are disabled in ordinary
+processes, and are not part of the runtime API.
 Passing machine-readable evidence binds the image digest, chart version/digest,
 safe configuration digest, Alembic head, exact database/cache pod, volume, and
 image identities plus their versions, confirmed context, operator-reported
@@ -627,6 +672,12 @@ deployment report exposes the safe manifest, separately labelled health snapshot
 persistence truth, optional artifact provenance, and qualification state; the portable
 runtime capabilities record deliberately does not.
 
+One immutable extension generation means one startup-frozen process generation in the
+supported one-replica profile. A restart constructs the next generation only in the new
+process; Hartmesh does not coordinate simultaneous generations or rolling replicas. An
+already accepted invocation stays bound to its process generation until it finishes or is
+terminalized by process-loss recovery.
+
 The same coordinator fences every genuinely absent HTTP, scheduled-task, native-channel, and
 embedded-service invocation before normalization and durable acceptance. It runs required
 health probes concurrently with bounded lifecycle integrity under the configured overall
@@ -648,9 +699,12 @@ cannot satisfy an operator requirement.
 ## Compatibility and deferred scope
 
 Existing LangGraph SDK and DeerFlow REST create/stream/wait response contracts remain
-compatible facades over the durable Gateway path. The synchronous `DeerFlowClient` remains a
-documented non-durable local graph path; applications that need durable embedded parity use
-the supported asynchronous `deerflow-runtime-api` adapter instead.
+compatible facades over the durable Gateway path. The application-hosted in-process
+`InvocationRuntime` Adapter is the durable embedded surface and implements
+`DurableInvocationPort` over the same Gateway-owned admission, lifecycle, and policy machinery.
+The local, non-durable embedded `DeerFlowClient` is a direct synchronous graph client and does
+not enter `InvocationRuntime`; applications that need durable embedded parity use the supported
+asynchronous `deerflow-runtime-api` adapter instead.
 
 The following are deliberate non-goals, not latent requirements or defects:
 

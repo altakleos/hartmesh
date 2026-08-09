@@ -848,8 +848,11 @@ does not affect equality; array order does. A new accepted request returns `201 
 equal retained caller intent returns `200 known` without a second worker; a changed or removed
 intent field returns `409 conflict`; and an independently busy thread returns
 `409 thread_busy`. Transport details outside the strict DTO do not participate. The accepted
-effective execution projection is retained separately and reused on replay. The guarantee lasts
-while the retained normal run row exists. Auxiliary operation rows are never visible.
+effective execution projection is retained separately and reused on replay. Equal replay does
+not rerun contributors, authorization, constraints, default resolution, agent/profile routing,
+or model execution. This refers to start/admission authorization; current observe authorization
+still applies before a retained row is revealed. The guarantee lasts while the retained normal
+run row exists. Auxiliary operation rows are never visible.
 
 Observation pages contain `next_cursor`, `minimum_available_cursor`, and
 `read_fence_cursor`. Cursor tokens are opaque. Empty filtered pages advance to
@@ -868,10 +871,18 @@ Lifecycle event types are exactly `accepted`, `started`,
 `state_version` and commits its matching safe event atomically; the run row,
 not the journal, remains authoritative.
 
-Polling either observation route is the supported durable evidence path; no event sink or
-broker is required for correctness. A clarification request completes its current invocation
-successfully, and the answer starts a new invocation on the same thread. The v1 lifecycle does
-not define `input_required` or same-invocation suspension/resumption.
+Polling either observation route is the supported durable evidence path; cursor polling of the
+transactional lifecycle rows is authoritative, and a push sink is at most optional
+at-least-once acceleration. A clarification request completes its current invocation
+successfully, and the answer starts a new invocation on the same DeerFlow thread, reusing that
+thread's checkpoints, memory, workspace, and conversation context. The v1 lifecycle does not
+define `input_required` or same-invocation suspension/resumption.
+
+Durability starts at committed invocation acceptance, or at the earlier PostgreSQL native
+receipt commit for a source that explicitly reports durable ingress. It does not promise
+exactly-once model execution, process-resumable execution, provider/bus delivery before a
+durable receipt, outbound provider delivery, rollback of external side effects, or
+multi-replica execution ownership. See `INVOCATION_RUNTIME.md` for the complete boundary table.
 
 Success status mapping is `201` for `created`, `202` for cancellation
 `requested`, and `200` for `known`, observations, capabilities,

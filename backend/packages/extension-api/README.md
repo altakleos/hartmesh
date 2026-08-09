@@ -112,6 +112,11 @@ shares that exact object across current route, resource, model, tool, skill-disc
 agent-assembly checks. Legacy class-path providers remain supported and may be atomically
 replaced when their hot-reloaded configuration changes.
 
+For durable invocations, one immutable generation means one startup-frozen process generation
+in the supported one-replica topology. Accepted invocations pin that generation. A restart
+constructs a later process generation; the public extension contract does not coordinate
+simultaneous generations, rolling replicas, or hot replacement of accepted material.
+
 Operator `authorization.service_observation_grants` is deliberately not another extension
 permission contract. It gives an exactly authenticated service only a finite host-owned
 run/thread/owner/source search scope. The provider still receives the current
