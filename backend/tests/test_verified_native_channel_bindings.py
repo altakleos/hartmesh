@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -46,6 +47,8 @@ from deerflow.runtime.accepted_invocation import (
 )
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.store.base import LifecycleType
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 _SECRET = "verified-binding-test-secret"
@@ -60,10 +63,30 @@ class _RecordingRuntime:
     def __init__(self, runtime) -> None:
         self.runtime = runtime
         self.receipts = []
+        self.intents = []
 
     async def launch(self, intent):
+        self.intents.append(intent)
         receipt = await self.runtime.launch(intent)
         self.receipts.append(receipt)
+        return receipt
+
+
+class _LoseCreatedResponseRuntime(_RecordingRuntime):
+    """Commit one selected launch, then model loss of its first response."""
+
+    def __init__(self, runtime, *, external_key: str) -> None:
+        super().__init__(runtime)
+        self.external_key = external_key
+        self.response_lost = False
+
+    async def launch(self, intent):
+        self.intents.append(intent)
+        receipt = await self.runtime.launch(intent)
+        self.receipts.append(receipt)
+        if intent.external_key == self.external_key and receipt.created and not self.response_lost:
+            self.response_lost = True
+            raise RuntimeError("simulated response loss after committed admission")
         return receipt
 
 
@@ -569,6 +592,197 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
             assert client.threads.create.await_count == 1
 
     finally:
+        reset_app_config()
+
+
+@pytest.mark.anyio
+async def test_buffered_followup_uses_its_own_delivery_key_through_real_runtime(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """K2 must not be replayed as changed caller intent under K1's key."""
+
+    monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+    from deerflow.runtime import MemoryStreamBridge
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+
+    async def owner_user(*_args, **_kwargs):
+        return SimpleNamespace(
+            id="owner-1",
+            system_role="user",
+            oauth_provider=None,
+            oauth_id=None,
+        )
+
+    monkeypatch.setattr(
+        "app.gateway.services.resolve_trusted_internal_owner_for_attribution",
+        owner_user,
+    )
+    bridge = MemoryStreamBridge()
+    graph_store = InMemoryStore()
+    run_manager = RunManager(store=MemoryRunStore())
+    app = FastAPI()
+    app.state.runtime_readiness = _ReadyAdmissionFence()
+    app.state.stream_bridge = bridge
+    app.state.run_manager = run_manager
+    app.state.checkpointer = InMemorySaver()
+    app.state.store = graph_store
+    app.state.run_event_store = MemoryRunEventStore()
+    app.state.run_events_config = None
+    app.state.thread_store = MemoryThreadMetaStore(graph_store)
+
+    channel_store = ChannelStore(path=tmp_path / "channels.json")
+    thread_id = "github-followup-thread"
+    channel_store.set_thread_id(
+        "github",
+        "acme/widgets",
+        thread_id,
+        topic_id="7:reviewer",
+        user_id="octocat",
+    )
+    client = MagicMock()
+    client.threads.update = AsyncMock()
+    client.runs.create = AsyncMock()
+    runtime = _LoseCreatedResponseRuntime(
+        build_channel_invocation_runtime(app),
+        external_key="delivery-k2",
+    )
+    manager = ChannelManager(
+        bus=MessageBus(),
+        store=channel_store,
+        require_bound_identity=True,
+        invocation_runtime=runtime,
+        get_stream_bridge=lambda: bridge,
+    )
+    manager._client = client
+
+    binding = InternalVerifiedNativeBinding(
+        kind=InternalVerifiedNativeBindingKind.webhook_route,
+        reference="route:v1:sha256:" + "c" * 64,
+    )
+
+    def delivery(
+        message_id: str,
+        text: str,
+        *,
+        sender: str = "octocat",
+    ) -> InboundMessage:
+        return InboundMessage(
+            channel_name="github",
+            chat_id="acme/widgets",
+            topic_id="7:reviewer",
+            workspace_id="acme/widgets",
+            user_id=sender,
+            owner_user_id="owner-1",
+            text=text,
+            verified_source_binding=binding,
+            metadata={
+                "message_id": message_id,
+                "agent_name": "reviewer",
+                "github": {
+                    "delivery_id": message_id,
+                    "installation_id": 1234,
+                    "recursion_limit": 50,
+                },
+            },
+        )
+
+    revision = ResolvedAgentRevision.from_material(
+        ResolvedAgentMaterialV1(
+            agent_id="reviewer",
+            storage_source="file",
+            storage_version="test",
+            agent_config={"name": "reviewer"},
+            soul="test",
+            model_profile={},
+        )
+    )
+    first_release = asyncio.Event()
+    graph_starts: list[str] = []
+
+    async def controlled_run_agent(*args, **_kwargs):
+        run_id = args[2].run_id
+        await run_manager.try_start(run_id)
+        graph_starts.append(run_id)
+        if len(graph_starts) == 1:
+            await first_release.wait()
+        await run_manager.set_status(
+            run_id,
+            RunStatus.success,
+            lifecycle_type=LifecycleType.succeeded,
+        )
+        await bridge.publish_end(run_id)
+
+    async def wait_until(predicate, *, timeout: float = 2.0) -> None:
+        async with asyncio.timeout(timeout):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
+    try:
+        with (
+            patch("app.gateway.services.resolve_agent_revision", return_value=revision),
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch(
+                "app.gateway.github.app_auth.mint_installation_token",
+                new_callable=AsyncMock,
+                return_value="transient-test-token",
+            ),
+            patch("app.gateway.services.run_agent", side_effect=controlled_run_agent),
+        ):
+            await manager._handle_chat(delivery("delivery-k1", "first work"))
+            await wait_until(lambda: len(graph_starts) == 1)
+
+            await manager._handle_chat(delivery("delivery-k2", "follow-up work"))
+            await manager._handle_chat(
+                delivery(
+                    "delivery-k3",
+                    "second follow-up work",
+                    sender="hubot",
+                )
+            )
+            assert len(manager._followup_buffers[thread_id]) == 2
+            retained_k2 = next(iter(manager._followup_buffers[thread_id].values()))
+            assert "github_token" not in retained_k2.run_context
+            assert "transient-test-token" not in repr(retained_k2)
+
+            first_release.set()
+            await wait_until(lambda: len(graph_starts) == 2)
+            await wait_until(lambda: runtime.response_lost)
+            assert next(iter(manager._followup_buffers[thread_id].values())) is retained_k2
+
+            # A later drain replays the exact K2 entry. The known receipt
+            # watches K2's retained terminal marker, which then chains K3.
+            await manager._drain_followups_for_thread(client, thread_id)
+            await wait_until(lambda: len(graph_starts) == 3)
+            await wait_until(lambda: thread_id not in manager._followup_buffers)
+
+        assert len(runtime.receipts) == 4
+        first, followup, replay, second_followup = runtime.receipts
+        assert len(graph_starts) == 3
+        assert len({first.record.run_id, followup.record.run_id, second_followup.record.run_id}) == 3
+        assert first.record.external_key == "raw:delivery-k1"
+        assert followup.record.external_key == "raw:delivery-k2"
+        assert second_followup.record.external_key == "raw:delivery-k3"
+        assert replay.created is False
+        assert replay.record.run_id == followup.record.run_id
+        assert first.record.accepted_invocation.origin.references["provider_message_id"] == "delivery-k1"
+        assert followup.record.accepted_invocation.origin.references["provider_message_id"] == "delivery-k2"
+        assert second_followup.record.accepted_invocation.origin.references["provider_message_id"] == "delivery-k3"
+        for receipt in (followup, second_followup):
+            accepted = receipt.record.accepted_invocation
+            assert accepted.origin.references["binding_kind"] == "webhook_route"
+            assert accepted.origin.references["binding_reference"] == binding.reference
+            trusted_binding = next(reference.value for reference in accepted.trusted_context.origin.references if reference.key == "binding_reference")
+            assert trusted_binding == binding.reference
+        assert followup.record.accepted_invocation.principal.channel_user_id == "octocat"
+        assert second_followup.record.accepted_invocation.principal.channel_user_id == "hubot"
+    finally:
+        first_release.set()
+        await manager.stop()
         reset_app_config()
 
 

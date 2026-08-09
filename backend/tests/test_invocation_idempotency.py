@@ -577,7 +577,7 @@ async def test_run_manager_replays_same_row_active_and_after_every_terminal_stat
 async def test_run_manager_distinguishes_key_conflict_from_thread_busy() -> None:
     manager = RunManager(store=MemoryRunStore())
     scope = scope_for_http("user", "owner-1")
-    await manager.ensure_or_reject(
+    created = await manager.ensure_or_reject(
         "thread-manager",
         external_scope=scope,
         external_key=normalize_external_key("key-1"),
@@ -609,6 +609,7 @@ async def test_run_manager_distinguishes_key_conflict_from_thread_busy() -> None
             user_id="owner-1",
         )
     assert not isinstance(exc_info.value, IdempotencyConflictError)
+    assert exc_info.value.active_run_id == created.record.run_id
 
 
 @pytest.mark.anyio

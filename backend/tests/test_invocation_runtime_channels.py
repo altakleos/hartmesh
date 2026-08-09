@@ -23,6 +23,7 @@ from app.runtime.invocation import (
     InternalNativeChannelFacts,
     InternalSourceKind,
 )
+from app.runtime.native_binding import build_verified_webhook_route_binding
 
 
 class _RuntimeSpy:
@@ -223,10 +224,18 @@ async def test_buffered_followup_launch_enters_runtime(tmp_path) -> None:
         topic_id=None,
         workspace_id="org/repo",
         metadata={"message_id": "delivery-1:owner-1:reviewer", "agent_name": "reviewer"},
+        connection_id=None,
+        verified_source_binding=build_verified_webhook_route_binding(
+            provider="github",
+            installation_reference=1234,
+            owner_user_id="owner-1",
+            agent_id="reviewer",
+            repository_reference="org/repo",
+        ),
     )
     manager._buffer_followup("thread-1", replace(carrier, text="please include the edge case"))
 
-    await manager._drain_followups_for_thread(client, "thread-1", carrier)
+    await manager._drain_followups_for_thread(client, "thread-1")
 
     assert len(runtime.intents) == 1
     intent = runtime.intents[0]

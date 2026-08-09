@@ -90,8 +90,9 @@ class ChannelRunPolicy:
             log + reply with the generic busy message: the triggering
             message is appended to a per-thread follow-up buffer, and a
             background watcher subscribes to the active run's
-            ``StreamBridge`` stream so it can coalesce the buffer into a
-            follow-up run as soon as that run ends. This targets
+            ``StreamBridge`` stream so it can launch each buffered source
+            delivery as its own FIFO-chained run as soon as the prior run
+            ends. This targets
             ``fire_and_forget`` channels whose ``send`` is otherwise the
             only feedback a busy sender gets (e.g. GitHub, where ``send``
             is log-only) — without it, a concurrent comment is silently
