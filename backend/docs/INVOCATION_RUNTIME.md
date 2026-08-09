@@ -46,6 +46,7 @@ an ordinary unit test.
 | Pinned agent and extension material | Accepted agent material and extension generation remain pinned; every effective skill package is copied and hashed from one bounded immutable snapshot shared by lead, slash/deferred discovery, policy, sandbox, and subagent consumers; drift fails before graph/model work. | `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/agent_revision.py`; `backend/packages/harness/deerflow/runtime/skill_snapshot.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; skill middlewares and sandbox providers | `test_restart_drift_fails_before_graph_construction_or_model_work`; `test_same_process_live_edit_cannot_replace_accepted_slash_skill`; `test_deleting_live_tree_cannot_remove_accepted_supporting_material`; `test_live_allowed_tools_edit_cannot_widen_accepted_policy`; `test_snapshot_drift_fails_before_graph_construction` | Process-reconstruction tests; skill bytes are process-local and lost workers terminalize rather than resume | Implemented for the supported one-replica process contract |
 | Transactional lifecycle evidence | Every normal-run state change increments one state version and commits its safe lifecycle event atomically. | `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/packages/harness/deerflow/runtime/runs/store/base.py`; `backend/packages/harness/deerflow/runtime/runs/store/memory.py` | `test_sql_row_and_lifecycle_event_commit_together` | PostgreSQL CAS/cursor qualification | Implemented; PostgreSQL atomicity is a gated qualification |
 | Polling observation and bounded summaries | Authorized observation reads a pruning-aware bounded page and its source-aware summaries from one database snapshot. | `backend/packages/harness/deerflow/runtime/runs/lifecycle_query.py`; `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/app/runtime/api.py` | `test_context_query_excludes_other_owners_and_auxiliary_rows`; `test_malformed_ahead_and_pruned_cursors_are_typed`; `test_sql_context_page_loads_summary_rows_only_for_bounded_page_ids`; `test_postgres_query_uses_one_repeatable_read_snapshot` | Repeatable-read PostgreSQL query qualification | Implemented; PostgreSQL snapshot isolation is a gated qualification |
+| Scoped service observation | An authenticated service is owner-scoped unless an operator grants a finite run/thread/owner/source search scope; the current coherent authorization provider still makes the final observe decision. | `backend/app/runtime/visibility.py`; `backend/app/runtime/invocation.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_ordinary_service_cannot_observe_another_owner_or_trigger_policy`; `test_current_authorization_denial_overrides_a_valid_visibility_grant`; `test_context_pagination_stays_inside_the_finite_owner_scope` | Memory and SQL bounded-query tests; no external service | Implemented |
 | Clarification continuation | A clarification ends the current invocation successfully; the answer is a distinct invocation on the same thread. | `backend/packages/harness/deerflow/agents/middlewares/clarification_middleware.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/app/channels/manager.py` | `test_clarification_completes_then_answer_starts_new_same_thread_invocation`; `test_native_channel_revalidates_owner_dedupes_and_continues_clarification` | Native-channel characterization | Implemented; same-invocation suspension is not claimed |
 | Graceful shutdown and process recovery | One deadline coordinator freezes admission, stops producers, drains runs, flushes memory, then closes dependencies; unsettled durable runs use orphan recovery. | `backend/app/gateway/shutdown.py`; `backend/packages/harness/deerflow/runtime/runs/manager.py` | `test_shutdown_orders_producers_runs_memory_and_dependencies`; `test_orphan_recovery_records_failed_with_stable_reason` | Process-loss simulations; live pod evidence is separate | Implemented for one replica |
 | PostgreSQL schema and arbitration | Real Alembic predecessor data upgrades through accepted/idempotency/lifecycle evidence and remains repository-readable after the promised downgrade/re-upgrade path. | `backend/packages/harness/deerflow/persistence/migrations/versions/0011_accepted_invocation.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0012_invocation_idempotency.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0013_invocation_lifecycle.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0014_canonical_caller_intent.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io` | `postgres_contract` with `DEERFLOW_TEST_POSTGRES_URL` | Qualified only when the mandatory PostgreSQL gate passes |
@@ -174,11 +175,19 @@ and an evidence digest in `decision_evidence_json`; provider metadata, messages,
 are never stored. A denial or indeterminate result creates no run or lifecycle event and
 does no graph/model/tool work.
 
-Observation first applies the existing owner/route visibility boundary. A visible run uses
-`action="observe"`, target `run:<run-id>`; a visible thread feed makes one decision for
-`context:<thread-id>`. Cancellation similarly applies visibility, then `action="cancel"`
-for `run:<run-id>` before the atomic cancellation receipt/state mutation. Unknown or
-owner-invisible rows do not call policy. Observe/cancel decisions are not cached.
+Observation first applies owner/admin visibility. An authenticated service remains owner-scoped
+unless operator `authorization.service_observation_grants` supplies a current finite search
+scope for that exact service. A grant may select bounded run, thread/context, owner, or sealed
+source-kind identities; selectors are OR-composed, resolved before SQL, and never come from a
+request role, transport location, source facts, or `visibility_prevalidated`. Grants require
+enabled invocation observe authorization. They only make a row eligible for lookup: the same
+coherent provider must then allow `resource="invocation"`, `action="observe"`, target
+`run:<run-id>` or `context:<thread-id>` before anything is returned. Scope resolution and the
+authorization decision are re-evaluated on every request, so revocation applies to the next
+poll without replacing the authorization provider or its generation. Cancellation does not use
+observation grants and remains owner/admin-scoped before
+`action="cancel"`. Unknown and grant-invisible rows do not call policy and remain
+indistinguishable. Observe/cancel decisions are not cached.
 
 For keyed replay, lookup and visibility happen first. A known row receives a fresh observe
 decision and is compared with its stored accepted evidence without rerunning start policy or
@@ -384,10 +393,13 @@ on run, thread, current status, and state version, and a singular snapshot agree
 with the top-level current state. Historical lifecycle events intentionally keep
 their transition-time state rather than being rewritten to the latest state.
 
-Visibility and optional observe authorization run before the store query.
-Context observation can filter the strict source kinds `http`,
-`scheduled_task`, `native_channel`, and `service`; filtering never weakens owner
-scope. PostgreSQL pages use one read-only repeatable-read snapshot and SQLite
+Visibility and observe authorization run before serialization. The default query is
+owner/admin-scoped. For an operator-granted service, the host projects a maximum of 128 finite
+run/thread/owner/source selectors into an immutable grant that lives at most 30 seconds and into
+the exact SQL or memory-store predicate before paging;
+the current authorization decision follows the visibility match. Context observation can also
+apply the caller's strict source-kind filter `http`, `scheduled_task`, `native_channel`, or
+`service`; that filter only narrows the resolved scope. PostgreSQL pages use one read-only repeatable-read snapshot and SQLite
 pages one explicit read transaction for cursor metadata, events, and summaries.
 Only distinct run IDs present in the bounded event page are materialized, so a
 long thread cannot turn one page into an all-run scan. Limits are 1–500 events,

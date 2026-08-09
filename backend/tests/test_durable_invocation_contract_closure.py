@@ -50,6 +50,7 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
         "Pinned agent and extension material",
         "Transactional lifecycle evidence",
         "Polling observation and bounded summaries",
+        "Scoped service observation",
         "Clarification continuation",
         "Graceful shutdown and process recovery",
         "PostgreSQL schema and arbitration",

@@ -9,12 +9,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from deerflow_extension_api import validate_thread_identifier
+
 _CURSOR_VERSION = "deerflow.lifecycle.cursor/v1"
 INVOCATION_SOURCE_KINDS = frozenset({"http", "scheduled_task", "native_channel", "service"})
 MAX_LIFECYCLE_PAGE_SIZE = 500
 MAX_INVOCATION_SUMMARY_BYTES = 16 * 1024
 _MAX_CORRELATION_REFERENCES = 64
 _MAX_CORRELATION_VALUE_BYTES = 1024
+_MAX_VISIBILITY_SELECTORS = 128
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _PUBLIC_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,191}\Z", re.ASCII)
 
@@ -41,6 +44,42 @@ class CursorAhead(ValueError):
 
 class LifecycleOrderingCorruption(RuntimeError):
     """Lifecycle events and their global cursor metadata cannot be reconciled."""
+
+
+@dataclass(frozen=True)
+class LifecycleVisibilityScope:
+    """Finite host-resolved visibility predicate for one exact context query."""
+
+    thread_id: str
+    allow_context: bool = False
+    run_ids: tuple[str, ...] = ()
+    owner_ids: tuple[str, ...] = ()
+    source_kinds: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "thread_id",
+            validate_thread_identifier(
+                self.thread_id,
+                field_name="lifecycle visibility thread_id",
+            ),
+        )
+        for name in ("run_ids", "owner_ids", "source_kinds"):
+            values = getattr(self, name)
+            if not isinstance(values, tuple) or any(not isinstance(value, str) or not value for value in values):
+                raise ValueError(f"lifecycle visibility {name} must contain non-empty strings")
+            if len(values) != len(set(values)):
+                raise ValueError(f"lifecycle visibility {name} contains duplicates")
+        if len(self.run_ids) + len(self.owner_ids) + len(self.source_kinds) > _MAX_VISIBILITY_SELECTORS:
+            raise ValueError("lifecycle visibility scope exceeds its selector bound")
+        if any(value not in INVOCATION_SOURCE_KINDS for value in self.source_kinds):
+            raise ValueError("lifecycle visibility scope has an unsupported source kind")
+        if not (self.allow_context or self.run_ids or self.owner_ids or self.source_kinds):
+            raise ValueError("lifecycle visibility scope must grant a finite selector")
+
+    def permits(self, *, run_id: str, owner_id: str | None, source_kind: str | None) -> bool:
+        return bool(self.allow_context or run_id in self.run_ids or (owner_id is not None and owner_id in self.owner_ids) or source_kind in self.source_kinds)
 
 
 def encode_lifecycle_cursor(cursor: int) -> str:
@@ -86,6 +125,7 @@ class LifecycleQuery:
     limit: int = 100
     include_snapshot: bool = True
     source_kind: str | None = None
+    visibility_scope: LifecycleVisibilityScope | None = None
 
     def __post_init__(self) -> None:
         if (self.run_id is None) == (self.thread_id is None):
@@ -96,6 +136,13 @@ class LifecycleQuery:
             decode_lifecycle_cursor(self.cursor)
         if self.source_kind is not None and self.source_kind not in INVOCATION_SOURCE_KINDS:
             raise ValueError("unsupported invocation source kind")
+        if self.visibility_scope is not None and not isinstance(
+            self.visibility_scope,
+            LifecycleVisibilityScope,
+        ):
+            raise TypeError("visibility_scope must be a LifecycleVisibilityScope or None")
+        if self.visibility_scope is not None and self.visibility_scope.thread_id != self.thread_id:
+            raise ValueError("lifecycle visibility scope is bound to another exact context")
 
 
 @dataclass(frozen=True)

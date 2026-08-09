@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 38
+config_version: 39
 
 # ============================================================================
 # Logging
@@ -2428,6 +2428,17 @@ authorization:
     observe_enabled: false
     cancel_enabled: false
     timeout_seconds: 2.0
+  # Optional finite cross-owner read scopes for explicitly authenticated
+  # integration services. Setting any grant also requires enabled: true,
+  # observe_enabled: true, and one healthy AuthorizationProvider. Selectors
+  # are OR-composed and bounded to 128 values per service; policy still makes
+  # the final invocation:observe decision on every request. Grant edits and
+  # revocation are re-read on the next observation request.
+  # service_observation_grants:
+  #   - service_id: lifecycle-consumer
+  #     thread_ids: [thread-1]
+  #     # Other finite selectors: run_ids, owner_ids, source_kinds.
+  #     # source_kinds: [native_channel, scheduled_task]
 
 # ============================================================================
 # Circuit Breaker Configuration

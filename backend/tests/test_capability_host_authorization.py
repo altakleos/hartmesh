@@ -187,6 +187,26 @@ def test_plugin_factory_provider_is_constructed_once_at_startup():
     assert disabled.provider is None
 
 
+def test_service_visibility_grant_reload_does_not_replace_authorization_generation():
+    from app.gateway.authorization import AuthorizationProviderResolver
+    from deerflow.config.authorization_config import AuthorizationConfig
+
+    def config(run_id: str) -> AuthorizationConfig:
+        return AuthorizationConfig(
+            enabled=True,
+            invocation_operations={"observe_enabled": True},
+            service_observation_grants=[
+                {"service_id": "service-1", "run_ids": [run_id]},
+            ],
+        )
+
+    resolver = AuthorizationProviderResolver(_plugin_extensions(), config("run-a"))
+    first = resolver.snapshot()
+    after_grant_reload = resolver.resolve(config("run-b"))
+
+    assert after_grant_reload is first
+
+
 @pytest.mark.asyncio
 async def test_gateway_authorization_paths_share_one_provider_at_a_generation(monkeypatch):
     from app.gateway.authorization import AuthorizationProviderResolver

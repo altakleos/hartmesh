@@ -94,6 +94,13 @@ authenticated_service_id]` and routes every operation through the existing
 `InvocationRuntime`; it does not implement policy, persistence, or execution
 independently.
 
+Embedded and HTTP service principals are owner-scoped by default. An operator may configure a
+finite host-side observation grant for a specifically authenticated service, but no portable
+request carries that grant. It bounds which run/thread/owner/source rows the host may search;
+the current `invocation:observe` authorization decision is still mandatory. Revocation is
+checked on the next poll, grant-invisible and nonexistent targets share the same public failure,
+and cancellation never inherits an observation grant.
+
 Lifecycle cursor tokens are opaque. Callers persist `next_cursor`, handle
 `cursor_gap` by resuming at `minimum_available_cursor`, reject `cursor_ahead`,
 and may safely repeat a page by deduplicating stable event IDs/cursors. Reads are

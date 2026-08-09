@@ -14,9 +14,14 @@ from deerflow_extension_api import ConstraintProjectionV1, ConstraintProjectionV
 
 from app.runtime.idempotency import CanonicalCallerIntent
 from app.runtime.native_binding import InternalVerifiedNativeBinding
+from app.runtime.visibility import ObservationVisibilityResolver, ServiceObservationGrant
 from deerflow.runtime import CancelOutcome, DisconnectMode, RunRecord
 from deerflow.runtime.accepted_invocation import AcceptedInvocation
-from deerflow.runtime.runs.lifecycle_query import LifecyclePage, LifecycleQuery
+from deerflow.runtime.runs.lifecycle_query import (
+    LifecyclePage,
+    LifecycleQuery,
+    LifecycleVisibilityScope,
+)
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
     CancellationRequestOutcome,
@@ -410,10 +415,22 @@ class DurableRuns(Protocol):
 
     async def observe(self, run_id: str, principal: InvocationPrincipal) -> RunRecord | None: ...
 
+    async def observe_granted(
+        self,
+        run_id: str,
+        grant: ServiceObservationGrant,
+    ) -> RunRecord | None: ...
+
     async def context_visible(
         self,
         thread_id: str,
         principal: InvocationPrincipal,
+    ) -> bool: ...
+
+    async def context_visible_granted(
+        self,
+        thread_id: str,
+        scope: LifecycleVisibilityScope,
     ) -> bool: ...
 
     async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage: ...
@@ -526,6 +543,7 @@ class InvocationRuntime:
         authorization: InvocationAuthorization | None = None,
         constraints: InvocationConstraints | None = None,
         admission_fence: InvocationAdmissionFence | None = None,
+        visibility: ObservationVisibilityResolver | None = None,
         task_factory: TaskFactory = asyncio.create_task,
     ) -> None:
         self._normalizer = normalizer
@@ -533,7 +551,49 @@ class InvocationRuntime:
         self._authorization = authorization or _DisabledInvocationAuthorization()
         self._constraints = constraints or _AbsentInvocationConstraints()
         self._admission_fence = admission_fence
+        self._visibility = visibility
         self._task_factory = task_factory
+
+    async def _observation_grant(
+        self,
+        principal: InvocationPrincipal,
+    ) -> ServiceObservationGrant | None | InvocationAuthorizationOutcome:
+        from app.runtime.visibility import is_authenticated_service
+
+        if self._visibility is None or not is_authenticated_service(principal):
+            return None
+        try:
+            grant = await self._visibility.resolve(principal)
+            if grant is None:
+                return None
+            if not isinstance(grant, ServiceObservationGrant):
+                raise TypeError("visibility resolver returned an invalid grant")
+            if grant.service_id != principal.user_id or not grant.is_current():
+                raise ValueError("visibility resolver returned stale or mismatched evidence")
+            return grant
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            from app.runtime.visibility import diagnose_visibility_resolution_failure
+
+            diagnose_visibility_resolution_failure(principal, exc)
+            return InvocationAuthorizationOutcome.indeterminate
+
+    async def _observe_visible(
+        self,
+        run_id: str,
+        principal: InvocationPrincipal,
+    ) -> tuple[RunRecord | None, ServiceObservationGrant | None] | InvocationAuthorizationOutcome:
+        record = await self._runs.observe(run_id, principal)
+        if record is not None:
+            return record, None
+        grant = await self._observation_grant(principal)
+        if grant is InvocationAuthorizationOutcome.indeterminate:
+            return grant
+        if grant is None:
+            return None, None
+        record = await self._runs.observe_granted(run_id, grant)
+        return record, grant
 
     @staticmethod
     def _rejection(
@@ -687,10 +747,21 @@ class InvocationRuntime:
         run_id: str,
         principal: InvocationPrincipal,
     ) -> RunRecord | NotFoundOrInvisible | InvocationAuthorizationOutcome:
-        record = await self._runs.observe(run_id, principal)
+        visible = await self._observe_visible(run_id, principal)
+        if visible is InvocationAuthorizationOutcome.indeterminate:
+            return visible
+        record, grant = visible
         if record is None:
             return NotFoundOrInvisible.not_found_or_invisible
         decision = await self._authorization.authorize_observe(record, principal)
+        if grant is not None:
+            from app.runtime.visibility import audit_service_observation
+
+            audit_service_observation(
+                grant,
+                target_kind="run",
+                authorization=decision.outcome,
+            )
         if rejection := self._rejection(decision):
             return rejection
         return record
@@ -705,16 +776,27 @@ class InvocationRuntime:
         self,
         query: InternalInvocationLifecycleQuery,
     ) -> InternalLifecycleObservation | NotFoundOrInvisible | InvocationAuthorizationOutcome:
-        record = await self._runs.observe(query.run_id, query.principal)
+        visible = await self._observe_visible(query.run_id, query.principal)
+        if visible is InvocationAuthorizationOutcome.indeterminate:
+            return visible
+        record, grant = visible
         if record is None:
             return NotFoundOrInvisible.not_found_or_invisible
         decision = await self._authorization.authorize_observe(record, query.principal)
+        if grant is not None:
+            from app.runtime.visibility import audit_service_observation
+
+            audit_service_observation(
+                grant,
+                target_kind="run",
+                authorization=decision.outcome,
+            )
         if rejection := self._rejection(decision):
             return rejection
         page = await self._runs.query_lifecycle(
             LifecycleQuery(
                 run_id=query.run_id,
-                owner_scope=self._owner_scope(query.principal),
+                owner_scope=(None if grant is not None else self._owner_scope(query.principal)),
                 cursor=query.cursor,
                 limit=query.limit,
                 # A singular observation always needs state from the same
@@ -741,22 +823,42 @@ class InvocationRuntime:
         self,
         query: InternalContextLifecycleQuery,
     ) -> InternalLifecycleObservation | NotFoundOrInvisible | InvocationAuthorizationOutcome:
+        grant = None
         if not await self._runs.context_visible(query.thread_id, query.principal):
-            return NotFoundOrInvisible.not_found_or_invisible
+            resolved = await self._observation_grant(query.principal)
+            if resolved is InvocationAuthorizationOutcome.indeterminate:
+                return resolved
+            if resolved is None:
+                return NotFoundOrInvisible.not_found_or_invisible
+            grant = resolved
+            scope = grant.lifecycle_scope(query.thread_id)
+            if scope is None:
+                return NotFoundOrInvisible.not_found_or_invisible
+            if not await self._runs.context_visible_granted(query.thread_id, scope):
+                return NotFoundOrInvisible.not_found_or_invisible
         decision = await self._authorization.authorize_context_observe(
             query.thread_id,
             query.principal,
         )
+        if grant is not None:
+            from app.runtime.visibility import audit_service_observation
+
+            audit_service_observation(
+                grant,
+                target_kind="context",
+                authorization=decision.outcome,
+            )
         if rejection := self._rejection(decision):
             return rejection
         page = await self._runs.query_lifecycle(
             LifecycleQuery(
                 thread_id=query.thread_id,
-                owner_scope=self._owner_scope(query.principal),
+                owner_scope=(None if grant is not None else self._owner_scope(query.principal)),
                 cursor=query.cursor,
                 limit=query.limit,
                 include_snapshot=query.include_snapshot,
                 source_kind=query.source_kind,
+                visibility_scope=(grant.lifecycle_scope(query.thread_id) if grant is not None else None),
             )
         )
         return InternalLifecycleObservation(record=None, page=page)

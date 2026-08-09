@@ -20,7 +20,7 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
-from .lifecycle_query import LifecyclePage, LifecycleQuery
+from .lifecycle_query import LifecyclePage, LifecycleQuery, LifecycleVisibilityScope
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .store.base import (
     AdmissionOutcome,
@@ -825,6 +825,17 @@ class RunManager:
         if self._store is None or not self._store.durable_lifecycle:
             raise RuntimeError("the configured run store has no durable lifecycle query support")
         return await self._store.query_lifecycle(query)
+
+    async def context_visible_in_scope(
+        self,
+        thread_id: str,
+        scope: LifecycleVisibilityScope,
+    ) -> bool:
+        """Check one exact context against a host-resolved finite scope."""
+
+        if self._store is None or not self._store.durable_lifecycle:
+            return False
+        return await self._store.context_visible_in_scope(thread_id, scope)
 
     async def prune_lifecycle_through(self, cursor: str) -> str:
         """Administratively prune a committed lifecycle prefix."""

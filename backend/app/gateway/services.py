@@ -80,6 +80,7 @@ from app.runtime.invocation import (
     thaw_host_value,
 )
 from app.runtime.native_binding import InternalVerifiedNativeBindingKind
+from app.runtime.visibility import ObservationVisibilityResolver, ServiceObservationGrant
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.agents_config import validate_agent_name
@@ -127,7 +128,11 @@ from deerflow.runtime.checkpoint_mode import (
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
-from deerflow.runtime.runs.lifecycle_query import LifecyclePage, LifecycleQuery
+from deerflow.runtime.runs.lifecycle_query import (
+    LifecyclePage,
+    LifecycleQuery,
+    LifecycleVisibilityScope,
+)
 from deerflow.runtime.runs.manager import IdempotencyConflictError
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.runs.store.base import CancellationRequestOutcome
@@ -2390,6 +2395,19 @@ class _GatewayDurableRuns:
             return None
         return record
 
+    async def observe_granted(
+        self,
+        run_id: str,
+        grant: ServiceObservationGrant,
+    ) -> RunRecord | None:
+        record = await get_run_manager(self._request).get(
+            run_id,
+            user_id=None,
+        )
+        if record is None or record.operation_kind is not ThreadOperationKind.run:
+            return None
+        return record if grant.permits(record) else None
+
     async def context_visible(
         self,
         thread_id: str,
@@ -2417,6 +2435,16 @@ class _GatewayDurableRuns:
             limit=1,
         )
         return bool(records)
+
+    async def context_visible_granted(
+        self,
+        thread_id: str,
+        scope: LifecycleVisibilityScope,
+    ) -> bool:
+        return await get_run_manager(self._request).context_visible_in_scope(
+            thread_id,
+            scope,
+        )
 
     async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage:
         return await get_run_manager(self._request).query_lifecycle(query)
@@ -2488,6 +2516,13 @@ def invocation_observation_enabled(request: Any) -> bool:
     return settings is not None and settings.observe_enabled is True
 
 
+def _observation_visibility(request: Any) -> ObservationVisibilityResolver | None:
+    """Return the application-owned service visibility resolver, when configured."""
+
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    return getattr(app_state, "service_observation_visibility_resolver", None)
+
+
 async def authorize_context_observation(
     request: Request,
     thread_id: str,
@@ -2508,6 +2543,7 @@ def build_invocation_runtime(request: Request) -> InvocationRuntime:
         runs=_GatewayDurableRuns(request),
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
+        visibility=_observation_visibility(request),
         admission_fence=request.app.state.runtime_readiness,
     )
 
@@ -2531,6 +2567,7 @@ def build_scheduled_invocation_runtime(app: Any) -> InvocationRuntime:
         runs=_GatewayDurableRuns(request),
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
+        visibility=_observation_visibility(request),
         admission_fence=app.state.runtime_readiness,
     )
 
@@ -2554,6 +2591,7 @@ def build_channel_invocation_runtime(app: Any) -> InvocationRuntime:
         runs=_GatewayDurableRuns(request),
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
+        visibility=_observation_visibility(request),
         admission_fence=app.state.runtime_readiness,
     )
 
@@ -2590,6 +2628,7 @@ def build_service_invocation_runtime(
         runs=_GatewayDurableRuns(request),
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
+        visibility=_observation_visibility(request),
         admission_fence=app.state.runtime_readiness,
     )
 

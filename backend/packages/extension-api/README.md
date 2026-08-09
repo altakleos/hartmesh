@@ -112,6 +112,14 @@ shares that exact object across current route, resource, model, tool, skill-disc
 agent-assembly checks. Legacy class-path providers remain supported and may be atomically
 replaced when their hot-reloaded configuration changes.
 
+Operator `authorization.service_observation_grants` is deliberately not another extension
+permission contract. It gives an exactly authenticated service only a finite host-owned
+run/thread/owner/source search scope. The provider still receives the current
+`resource="invocation", action="observe"` request for every matched run or context and remains
+the sole binary authority. Grant revocation is re-read on the next observation request;
+it does not replace the provider or its authorization generation. Transport trust, service
+role text, and caller-supplied attributes cannot create a scope.
+
 Extensions may also contribute observational middleware. Its existing isolation remains
 fail-open; authorization-provider factories are authoritative startup capabilities and do
 not use that observational failure policy.
