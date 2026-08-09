@@ -46,6 +46,52 @@ class PersistenceTier(StrEnum):
     shared_durable = "shared_durable"
 
 
+class IngressDeliveryGuarantee(StrEnum):
+    """Acknowledgment boundary for one native ingress source."""
+
+    best_effort = "best_effort"
+    durable = "durable"
+
+
+@dataclass(frozen=True)
+class NativeIngressReport:
+    """Finite per-source receipt durability kept out of portable capabilities."""
+
+    sources: tuple[tuple[str, IngressDeliveryGuarantee], ...] = ()
+
+    def __post_init__(self) -> None:
+        normalized = tuple(sorted((str(source), IngressDeliveryGuarantee(guarantee)) for source, guarantee in self.sources))
+        if len(normalized) != len({source for source, _ in normalized}):
+            raise ValueError("native ingress report contains duplicate sources")
+        if any(_SAFE_ID_RE.fullmatch(source) is None for source, _ in normalized):
+            raise ValueError("native ingress source must be a bounded safe identifier")
+        object.__setattr__(self, "sources", normalized)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "sources": {source: guarantee.value for source, guarantee in self.sources},
+        }
+
+
+def describe_native_ingress(config: Any) -> NativeIngressReport:
+    """Describe configured source support without claiming bus durability."""
+
+    database = getattr(config, "database", None)
+    database_backend = getattr(database, "backend", "memory")
+    dedupe = getattr(config, "dedupe_storage", None)
+    receipt_backend = getattr(dedupe, "backend", "auto")
+    if hasattr(receipt_backend, "value"):
+        receipt_backend = receipt_backend.value
+    extra = getattr(config, "model_extra", None) or {}
+    channels = extra.get("channels", {}) if isinstance(extra, dict) else {}
+    github = channels.get("github", {}) if isinstance(channels, dict) else {}
+    if not isinstance(github, dict) or not github.get("enabled", False):
+        return NativeIngressReport()
+    guarantee = IngressDeliveryGuarantee.durable if database_backend == "postgres" and receipt_backend != "memory" else IngressDeliveryGuarantee.best_effort
+    return NativeIngressReport(sources=(("github", guarantee),))
+
+
 @dataclass(frozen=True)
 class PersistenceReport:
     """Persistence facts; transaction atomicity is independent of durability."""
@@ -114,6 +160,9 @@ def validate_deployment_profile(config: Any) -> None:
     )
     if profile is DeploymentProfile.durable_production and persistence.tier is PersistenceTier.process_local:
         raise ValueError("durable_production cannot use process-local invocation state")
+    ingress = describe_native_ingress(config)
+    if profile is DeploymentProfile.durable_production and any(guarantee is not IngressDeliveryGuarantee.durable for _source, guarantee in ingress.sources):
+        raise ValueError("durable_production requires PostgreSQL inbound receipt storage for every enabled durable native source")
 
 
 def _bounded_optional(value: str | None, *, field_name: str, limit: int) -> str | None:
@@ -306,6 +355,7 @@ class DeploymentReport:
     admission_readiness: RuntimeReadinessSnapshot | None = None
     provenance: DeploymentProvenance = field(default_factory=DeploymentProvenance)
     qualification: DeploymentQualification = field(default_factory=DeploymentQualification)
+    native_ingress: NativeIngressReport = field(default_factory=NativeIngressReport)
     api_version: Literal["deerflow.deployment/v1"] = field(
         default=DEPLOYMENT_API_VERSION,
         init=False,
@@ -340,6 +390,7 @@ class DeploymentReport:
             ),
             "provenance": self.provenance.to_dict(),
             "persistence": self.persistence.to_dict(),
+            "native_ingress": self.native_ingress.to_dict(),
             "qualification": self.qualification.to_dict(),
         }
 
@@ -368,6 +419,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         readiness_supplier: Callable[[], RuntimeReadinessSnapshot | None] | None = None,
         provenance: DeploymentProvenance | None = None,
         qualification: DeploymentQualification | None = None,
+        native_ingress: NativeIngressReport | None = None,
     ) -> None:
         self._profile = DeploymentProfile(profile)
         self._persistence = describe_persistence(
@@ -379,6 +431,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         self._readiness_supplier = readiness_supplier or (lambda: None)
         self._provenance = provenance or DeploymentProvenance()
         self._qualification = qualification or DeploymentQualification()
+        self._native_ingress = native_ingress or NativeIngressReport()
 
     @property
     def persistence_ready(self) -> bool:
@@ -406,6 +459,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             readiness_supplier=self._readiness_supplier,
             provenance=self._provenance,
             qualification=self._qualification,
+            native_ingress=self._native_ingress,
         )
 
     async def deployment_report(self) -> DeploymentReport:
@@ -417,6 +471,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             admission_readiness=self._readiness_supplier(),
             provenance=self._provenance,
             qualification=self._qualification,
+            native_ingress=self._native_ingress,
         )
 
 
@@ -428,9 +483,12 @@ __all__ = [
     "DeploymentReport",
     "DeploymentReportPort",
     "GatewayDeploymentReporter",
+    "IngressDeliveryGuarantee",
+    "NativeIngressReport",
     "PersistenceReport",
     "PersistenceTier",
     "QualificationEvidence",
     "describe_persistence",
+    "describe_native_ingress",
     "validate_deployment_profile",
 ]

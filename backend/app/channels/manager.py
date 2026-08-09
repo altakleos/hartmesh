@@ -22,6 +22,12 @@ from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
+from app.channels.inbound_receipts import (
+    InboundProcessingDisposition,
+    InboundProcessingResult,
+    InboundReceiptProcessor,
+    InboundReceiptWakeup,
+)
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
@@ -1098,6 +1104,7 @@ class ChannelManager:
         inbound_dedupe_store: InboundDedupeStore | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
         invocation_runtime: InvocationRuntime | None = None,
+        inbound_receipt_processor: InboundReceiptProcessor | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -1122,6 +1129,7 @@ class ChannelManager:
         # transport for direct/standalone managers where the Gateway is a real
         # process boundary rather than an in-process dependency.
         self._invocation_runtime = invocation_runtime
+        self._inbound_receipt_processor = inbound_receipt_processor
         self._client = None  # lazy init — langgraph_sdk async client
         self._channel_metadata_synced: set[str] = set()
         # Per-conversation locks so concurrent inbound messages for the same
@@ -1866,6 +1874,17 @@ class ChannelManager:
             except asyncio.CancelledError:
                 break
 
+            if isinstance(msg, InboundReceiptWakeup):
+                processor = self._inbound_receipt_processor
+                if processor is None:
+                    logger.error(
+                        "inbound receipt wakeup ignored code=processor_unavailable receipt_id=%s",
+                        msg.receipt_id,
+                    )
+                    continue
+                processor.schedule(msg.receipt_id)
+                continue
+
             # Dedupe before logging "received" so a provider retrying an event N
             # times does not log N accepts; duplicates are logged once as ignored.
             # Note: this manager-level dedupe only guards the agent run / final
@@ -1962,7 +1981,33 @@ class ChannelManager:
         if exc:
             logger.error("[Manager] unhandled error in message task: %s", exc, exc_info=exc)
 
-    async def _handle_message(self, msg: InboundMessage) -> None:
+    async def process_inbound_receipt_message(
+        self,
+        msg: InboundMessage,
+    ) -> InboundProcessingResult:
+        """Process one claimed durable envelope and return its fenced outcome."""
+
+        result = await self._handle_message(msg, durable_receipt=True)
+        if not isinstance(result, InboundProcessingResult):
+            raise RuntimeError("durable inbound processing produced no receipt outcome")
+        return result
+
+    def set_inbound_receipt_processor(
+        self,
+        processor: InboundReceiptProcessor | None,
+    ) -> None:
+        """Bind the startup-owned processor before the dispatch loop starts."""
+
+        if self._running:
+            raise RuntimeError("inbound receipt processor is startup-only")
+        self._inbound_receipt_processor = processor
+
+    async def _handle_message(
+        self,
+        msg: InboundMessage,
+        *,
+        durable_receipt: bool = False,
+    ) -> InboundProcessingResult | None:
         msg = _apply_effective_owner(msg)
         try:
             # Non-command chat can be rejected before it consumes a semaphore
@@ -1974,13 +2019,42 @@ class ChannelManager:
                 bound_identity_rejection = await self._get_bound_identity_rejection(msg)
             if bound_identity_rejection is not None:
                 await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
-                return
+                return (
+                    InboundProcessingResult(
+                        disposition=InboundProcessingDisposition.completed,
+                        outcome_code="identity_rejected",
+                    )
+                    if durable_receipt
+                    else None
+                )
 
             async with self._semaphore:
                 if msg.msg_type == InboundMessageType.COMMAND:
                     await self._handle_command(msg)
+                    if durable_receipt:
+                        return InboundProcessingResult(
+                            disposition=InboundProcessingDisposition.completed,
+                            outcome_code="command_completed",
+                        )
                 else:
-                    await self._handle_chat(msg, bound_identity_checked=True)
+                    result = await self._handle_chat(
+                        msg,
+                        bound_identity_checked=True,
+                        durable_receipt=durable_receipt,
+                    )
+                    if durable_receipt:
+                        if isinstance(result, InboundProcessingResult):
+                            return result
+                        if isinstance(result, str) and result:
+                            return InboundProcessingResult(
+                                disposition=InboundProcessingDisposition.admitted,
+                                run_id=result,
+                                outcome_code="admitted",
+                            )
+                        return InboundProcessingResult(
+                            disposition=InboundProcessingDisposition.completed,
+                            outcome_code="rejected",
+                        )
         except InvalidChannelSessionConfigError as exc:
             logger.warning(
                 "Invalid channel session config for %s (chat=%s): %s",
@@ -1989,6 +2063,11 @@ class ChannelManager:
                 exc,
             )
             await self._send_error(msg, str(exc))
+            if durable_receipt:
+                return InboundProcessingResult(
+                    disposition=InboundProcessingDisposition.completed,
+                    outcome_code="invalid_session",
+                )
         except SlashSkillCommandResolutionError as exc:
             logger.warning(
                 "Slash skill command resolution failed for %s (chat=%s): %s",
@@ -1997,17 +2076,32 @@ class ChannelManager:
                 exc,
             )
             await self._send_error(msg, str(exc))
-        except Exception:
-            logger.exception(
-                "Error handling message from %s (chat=%s)",
-                msg.channel_name,
-                msg.chat_id,
-            )
+            if durable_receipt:
+                return InboundProcessingResult(
+                    disposition=InboundProcessingDisposition.completed,
+                    outcome_code="invalid_command",
+                )
+        except Exception as exc:
+            if durable_receipt:
+                logger.warning(
+                    "durable inbound handling failed code=message_processing_error channel=%s exception_class=%s",
+                    msg.channel_name,
+                    exc.__class__.__name__,
+                )
+            else:
+                logger.exception(
+                    "Error handling message from %s (chat=%s)",
+                    msg.channel_name,
+                    msg.chat_id,
+                )
             # Transient/unexpected failure: release the dedupe key so a provider
             # redelivery of the same message can recover instead of being dropped
             # for the dedupe TTL.
             await self._release_inbound_dedupe_key(msg)
             await self._send_error(msg, "An internal error occurred. Please try again.")
+            if durable_receipt:
+                raise
+        return None
 
     # -- chat handling -----------------------------------------------------
 
@@ -2258,7 +2352,8 @@ class ChannelManager:
         extra_context: dict[str, Any] | None = None,
         *,
         bound_identity_checked: bool = False,
-    ) -> None:
+        durable_receipt: bool = False,
+    ) -> str | InboundProcessingResult | None:
         # Normal entry paths already run the bound-identity check in
         # _handle_message() or _handle_command(). Keep this default False so
         # direct callers and future internal paths still fail closed.
@@ -2296,12 +2391,13 @@ class ChannelManager:
                 serial_lock_acquired = True
             if queued:
                 await self._publish_progress_update(msg, thread_id, "thinking...")
-            await self._handle_chat_on_thread(
+            return await self._handle_chat_on_thread(
                 client,
                 msg,
                 thread_id,
                 extra_context=extra_context,
                 storage_user_id=storage_user_id,
+                durable_receipt=durable_receipt,
             )
         finally:
             self._finish_serialized_thread_run(
@@ -2319,7 +2415,8 @@ class ChannelManager:
         *,
         extra_context: dict[str, Any] | None = None,
         storage_user_id: str | None = None,
-    ) -> None:
+        durable_receipt: bool = False,
+    ) -> str | InboundProcessingResult | None:
         if storage_user_id is None:
             storage_user_id = _channel_storage_user_id(msg)
 
@@ -2413,6 +2510,11 @@ class ChannelManager:
             except Exception as exc:
                 if _is_thread_busy_error(exc):
                     logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                    if durable_receipt:
+                        return InboundProcessingResult(
+                            disposition=InboundProcessingDisposition.deferred,
+                            outcome_code="thread_busy",
+                        )
                     if policy.buffer_followups_on_busy:
                         buffered = self._buffer_followup(
                             thread_id,
@@ -2434,7 +2536,8 @@ class ChannelManager:
                 raise
             if policy.buffer_followups_on_busy:
                 self._maybe_spawn_followup_watcher(thread_id, result)
-            return
+            run_id = result.get("run_id") if isinstance(result, Mapping) else None
+            return str(run_id) if run_id else None
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
         try:

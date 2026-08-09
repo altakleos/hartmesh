@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import unicodedata
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -213,6 +214,7 @@ async def fanout_event(
     *,
     operator_default_mention_login: str | None = None,
     verified_request: VerifiedGitHubWebhookRequest | None = None,
+    inbound_sink: Callable[[Sequence[InboundMessage]], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Translate one webhook delivery into N inbound messages.
 
@@ -234,6 +236,9 @@ async def fanout_event(
             configured installation and receives a server-derived route binding.
             Its provider delivery id may be absent; that leaves admission unkeyed
             without discarding the authenticated route evidence.
+        inbound_sink: Optional host-owned atomic batch sink. The signed Gateway
+            route supplies the durable receipt sink; local dispatcher tests and
+            unverified development paths retain direct MessageBus delivery.
 
     Returns:
         A summary dict for the route response: ``{"matched_agents": [...],
@@ -267,6 +272,7 @@ async def fanout_event(
 
     matched_names = [m.agent.name for m in matches]
     fired: list[str] = []
+    fired_messages: list[InboundMessage] = []
     skipped: list[dict[str, str]] = []
 
     sender_login = (payload.get("sender") or {}).get("login")
@@ -538,8 +544,14 @@ async def fanout_event(
             event,
             reason,
         )
-        await bus.publish_inbound(msg)
+        fired_messages.append(msg)
         fired.append(agent.name)
+
+    if inbound_sink is not None:
+        await inbound_sink(tuple(fired_messages))
+    else:
+        for message in fired_messages:
+            await bus.publish_inbound(message)
 
     return {
         "matched_agents": matched_names,

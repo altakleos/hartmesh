@@ -23,7 +23,13 @@ from alembic import command
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 import deerflow.persistence.models  # noqa: F401
+from app.channels.inbound_receipts import InboundReceiptEnvelope, SqlInboundReceiptStore
+from app.channels.message_bus import InboundMessage
 from app.runtime.idempotency import CanonicalCallerIntent, canonical_request_digest, normalize_external_key, scope_for_http
+from app.runtime.native_binding import (
+    InternalVerifiedNativeBinding,
+    InternalVerifiedNativeBindingKind,
+)
 from deerflow.persistence.bootstrap import _get_alembic_config, _get_head_revision
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.run.sql import RunRepository
@@ -43,6 +49,7 @@ _INVOCATION_REVISIONS = (
     "0012_invocation_idempotency",
     "0013_invocation_lifecycle",
     "0014_canonical_caller_intent",
+    "0015_inbound_receipts",
 )
 _REVISION_COLUMNS = {
     "0011_accepted_invocation": {
@@ -68,6 +75,29 @@ _REVISION_COLUMNS = {
         "caller_intent_digest",
         "caller_intent_digest_version",
     },
+    "0015_inbound_receipts": set(),
+}
+
+_INBOUND_RECEIPT_COLUMNS = {
+    "receipt_id": ("character varying", 36, False),
+    "provider": ("character varying", 64, False),
+    "binding_kind": ("character varying", 32, False),
+    "binding_reference": ("character varying", 320, False),
+    "provider_delivery_id": ("character varying", 320, False),
+    "thread_id": ("character varying", 64, False),
+    "payload_json": ("json", None, False),
+    "payload_digest": ("character varying", 64, False),
+    "state": ("character varying", 16, False),
+    "lease_owner": ("character varying", 96, True),
+    "lease_expires_at": ("timestamp with time zone", None, True),
+    "fencing_token": ("integer", None, False),
+    "attempt_count": ("integer", None, False),
+    "next_attempt_at": ("timestamp with time zone", None, False),
+    "run_id": ("character varying", 64, True),
+    "outcome_code": ("character varying", 64, True),
+    "received_at": ("timestamp with time zone", None, False),
+    "updated_at": ("timestamp with time zone", None, False),
+    "completed_at": ("timestamp with time zone", None, True),
 }
 
 _ACCEPTED_COLUMNS = {
@@ -307,6 +337,9 @@ async def _legacy_snapshot(engine: AsyncEngine) -> list[dict[str, object]]:
 
 
 async def _assert_revision_columns(engine: AsyncEngine, schema: str, revision: str) -> None:
+    if revision == "0015_inbound_receipts":
+        await _assert_inbound_receipt_ddl(engine, schema)
+        return
     columns = await _column_contract(engine, schema, "runs")
     for name in _REVISION_COLUMNS[revision]:
         assert columns[name][:3] == _ACCEPTED_COLUMNS[name]
@@ -389,6 +422,32 @@ async def _assert_lifecycle_ddl(engine: AsyncEngine, schema: str) -> None:
     assert tuple(singleton) == (1, 0, 0)
 
 
+async def _assert_inbound_receipt_ddl(engine: AsyncEngine, schema: str) -> None:
+    columns = await _column_contract(engine, schema, "inbound_receipts")
+    for name, expected in _INBOUND_RECEIPT_COLUMNS.items():
+        assert columns[name][:3] == expected
+    constraints, indexes = await _schema_names(engine, schema)
+    assert {
+        "ck_inbound_receipts_state",
+        "ck_inbound_receipts_counters_nonnegative",
+        "ck_inbound_receipts_claim_has_lease",
+        "ck_inbound_receipts_admitted_has_run",
+        "ck_inbound_receipts_identity_bounds",
+        "ck_inbound_receipts_digest_format",
+    } <= constraints["inbound_receipts"]
+    for name, index_columns in {
+        "ix_inbound_receipts_due": (
+            "state",
+            "next_attempt_at",
+            "received_at",
+            "receipt_id",
+        ),
+        "ix_inbound_receipts_run_id": ("run_id",),
+        "ix_inbound_receipts_completed_at": ("completed_at",),
+    }.items():
+        _assert_index_definition(indexes, name, index_columns)
+
+
 async def _assert_postgres_head_contract(engine: AsyncEngine, schema: str) -> None:
     run_columns = await _column_contract(engine, schema, "runs")
     for column, (data_type, length, nullable) in _ACCEPTED_COLUMNS.items():
@@ -409,6 +468,7 @@ async def _assert_postgres_head_contract(engine: AsyncEngine, schema: str) -> No
     )
     await _assert_idempotency_ddl(engine, schema)
     await _assert_lifecycle_ddl(engine, schema)
+    await _assert_inbound_receipt_ddl(engine, schema)
 
 
 async def _assert_postgres_checks_reject_invalid_rows(engine: AsyncEngine) -> None:
@@ -702,6 +762,60 @@ async def test_fresh_postgres_migration_chain_reaches_exact_head_schema() -> Non
         await _assert_postgres_head_contract(engine, schema)
         await _assert_postgres_checks_reject_invalid_rows(engine)
         await _assert_lifecycle_constraints_reject_invalid_rows(engine)
+
+
+@pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for PostgreSQL receipt arbitration",
+)
+async def test_postgres_inbound_receipt_acquisition_and_claim_are_atomic() -> None:
+    async with _isolated_postgres_schema() as (schema, engine):
+        await _upgrade(engine, schema, "head")
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        store = SqlInboundReceiptStore(sessions)
+        envelope = InboundReceiptEnvelope.from_message(
+            InboundMessage(
+                channel_name="github",
+                chat_id="hartmesh/runtime",
+                user_id="octocat",
+                text="Review this change",
+                topic_id="17:reviewer",
+                owner_user_id="owner-1",
+                workspace_id="hartmesh/runtime",
+                verified_source_binding=InternalVerifiedNativeBinding(
+                    kind=InternalVerifiedNativeBindingKind.webhook_route,
+                    reference="route:v1:sha256:" + ("a" * 64),
+                ),
+                metadata={
+                    "message_id": "delivery-postgres:owner-1:reviewer",
+                    "agent_name": "reviewer",
+                    "preferred_thread_id": "thread-postgres-receipt",
+                    "github": {
+                        "repo": "hartmesh/runtime",
+                        "number": 17,
+                        "event": "pull_request",
+                        "delivery_id": "delivery-postgres",
+                        "installation_id": 42,
+                        "recursion_limit": 100,
+                        "thread_id": "thread-postgres-receipt",
+                    },
+                },
+            )
+        )
+
+        first, second = await asyncio.gather(
+            store.receive_batch((envelope,)),
+            store.receive_batch((envelope,)),
+        )
+        assert first[0].receipt_id == second[0].receipt_id
+
+        claims = await asyncio.gather(
+            store.claim(first[0].receipt_id, lease_owner="worker-a", lease_seconds=30),
+            store.claim(first[0].receipt_id, lease_owner="worker-b", lease_seconds=30),
+        )
+        assert sum(claim is not None for claim in claims) == 1
 
 
 @pytest.mark.anyio

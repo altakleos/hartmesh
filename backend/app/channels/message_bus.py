@@ -148,7 +148,10 @@ class MessageBus:
     """
 
     def __init__(self) -> None:
-        self._inbound_queue: asyncio.Queue[InboundMessage] = asyncio.Queue()
+        # Durable receipt wake-ups intentionally share the dispatch queue. The
+        # wake-up carries only a receipt id; ChannelManager reloads and fences
+        # the authoritative row before reconstructing an InboundMessage.
+        self._inbound_queue: asyncio.Queue[Any] = asyncio.Queue()
         self._outbound_listeners: list[OutboundCallback] = []
 
     # -- inbound -----------------------------------------------------------
@@ -164,12 +167,17 @@ class MessageBus:
             self._inbound_queue.qsize(),
         )
 
-    async def get_inbound(self) -> InboundMessage:
+    async def get_inbound(self) -> Any:
         """Block until the next inbound message is available."""
         return await self._inbound_queue.get()
 
+    async def publish_receipt_wakeup(self, wakeup: Any) -> None:
+        """Enqueue a loss-tolerant durable-receipt notification."""
+
+        await self._inbound_queue.put(wakeup)
+
     @property
-    def inbound_queue(self) -> asyncio.Queue[InboundMessage]:
+    def inbound_queue(self) -> asyncio.Queue[Any]:
         return self._inbound_queue
 
     # -- outbound ----------------------------------------------------------

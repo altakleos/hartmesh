@@ -1246,6 +1246,13 @@ source binding: interactive channels revalidate their connection/owner row,
 while signed GitHub deliveries match the configured installation and trusted
 agent/repository registry route. Unverified local webhook mode remains unkeyed,
 and no webhook creates a synthetic interactive connection.
+In a PostgreSQL-backed deployment, the signed GitHub route atomically stores one
+bounded leased receipt per matched binding before returning success. Receipt recovery
+can reclaim an expired worker, defer a busy thread in FIFO order, and resolve a run
+accepted before a crash with the same stable key. The in-memory message bus only wakes
+receipt processing. Local memory/SQLite channel delivery remains explicitly
+`best_effort`; the administrator deployment report, not portable capabilities, reports
+that per-source ingress guarantee.
 Each accepted invocation is the normal durable run row itself; checkpoint and
 artifact reservation rows are internal operations and never appear in this API.
 `GET /health` is process liveness and remains healthy during a recoverable authority or

@@ -43,6 +43,7 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
     expected_concerns = {
         "Application Module and portable Adapters",
         "All durable launch sources",
+        "Keyed native ingress receipts",
         "Canonical keyed replay",
         "Split identity and sealed Origin",
         "Trusted contributor context",
@@ -74,6 +75,11 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
             assert test_name in collected_test_names, test_name
 
     required_row_evidence = {
+        "Keyed native ingress receipts": {
+            "test_received_payload_survives_process_loss_before_claim",
+            "test_response_loss_after_admission_replays_known_run_before_binding",
+            "test_signed_route_reaches_real_runtime_and_redelivery_replays",
+        },
         "All durable launch sources": {
             "test_gateway_create_stream_wait_routes_share_durable_admission",
             "test_scheduled_occurrence_enters_runtime_with_typed_execution_facts",

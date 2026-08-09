@@ -114,7 +114,7 @@ def test_qualification_evidence_is_strict_complete_and_digestible(tmp_path: Path
         chart_version="2.1.0",
         chart_digest="sha256:" + ("b" * 64),
         configuration_digest="sha256:" + ("c" * 64),
-        migration_head="0014_canonical_caller_intent",
+        migration_head="0015_inbound_receipts",
         stores=(
             StoreContinuityEvidence(
                 component="postgres",

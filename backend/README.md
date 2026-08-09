@@ -449,15 +449,15 @@ the only execution path, which keeps operational mistakes off the table. See
 CI qualifies the durable invocation migration tail against the real PostgreSQL
 service, not SQLite: it installs an empty schema to head, upgrades representative
 normal and auxiliary rows from `0010_run_cancel_request` through revisions
-0011–0014, checks exact constraints/indexes, and runs the existing concurrent
-admission/lifecycle contracts. The marked suite must not skip when
+0011–0015, checks exact constraints/indexes (including leased inbound receipts),
+and runs the existing concurrent admission/lifecycle/receipt contracts. The marked suite must not skip when
 `DEERFLOW_TEST_POSTGRES_URL` is configured and prints the PostgreSQL version and
 Alembic head in the job output.
 
 Downgrade to `0010_run_cancel_request` is structurally supported for rollback,
-but it necessarily drops data introduced by 0011–0014: accepted invocation
+but it necessarily drops data introduced by 0011–0015: accepted invocation
 evidence, external idempotency identity, caller intent, state versions, and the
-lifecycle journal. The underlying normal and auxiliary `runs` rows survive, and
+lifecycle journal, plus inbound receipt rows. The underlying normal and auxiliary `runs` rows survive, and
 re-upgrade makes them readable as legacy version-zero rows; it cannot reconstruct
 the dropped evidence or events. Stop writers and take a database backup before
 using that downgrade path.

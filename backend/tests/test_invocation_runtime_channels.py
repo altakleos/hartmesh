@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
+from app.channels.inbound_receipts import InboundProcessingDisposition
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
@@ -24,6 +26,7 @@ from app.runtime.invocation import (
     InternalSourceKind,
 )
 from app.runtime.native_binding import build_verified_webhook_route_binding
+from deerflow.runtime import ConflictError as RuntimeConflictError
 
 
 class _RuntimeSpy:
@@ -38,6 +41,11 @@ class _RuntimeSpy:
                 thread_id=intent.thread_id,
             )
         )
+
+
+class _BusyRuntime:
+    async def launch(self, _intent):
+        raise RuntimeConflictError("thread is busy")
 
 
 class _ConnectionRepository:
@@ -243,6 +251,47 @@ async def test_buffered_followup_launch_enters_runtime(tmp_path) -> None:
     assert intent.native_channel.provider == "github"
     assert "please include the edge case" in intent.input["messages"][0]["content"]
     client.runs.create.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_durable_receipt_busy_result_defers_without_process_local_buffer(
+    tmp_path,
+) -> None:
+    manager = _manager(tmp_path, _BusyRuntime())
+    manager._client = _client()
+    manager._semaphore = asyncio.Semaphore(1)
+    manager.store.set_thread_id(
+        "github",
+        "org/repo",
+        "thread-1",
+        topic_id="7:reviewer",
+    )
+    message = _bound_message(
+        channel_name="github",
+        chat_id="org/repo",
+        topic_id="7:reviewer",
+        workspace_id="org/repo",
+        metadata={
+            "message_id": "delivery-busy:owner-1:reviewer",
+            "agent_name": "reviewer",
+            "preferred_thread_id": "thread-1",
+            "github": {"delivery_id": "delivery-busy"},
+        },
+        connection_id=None,
+        verified_source_binding=build_verified_webhook_route_binding(
+            provider="github",
+            installation_reference=1234,
+            owner_user_id="owner-1",
+            agent_id="reviewer",
+            repository_reference="org/repo",
+        ),
+    )
+
+    result = await manager.process_inbound_receipt_message(message)
+
+    assert result.disposition is InboundProcessingDisposition.deferred
+    assert result.outcome_code == "thread_busy"
+    assert manager._followup_buffers == {}
 
 
 @pytest.mark.anyio
