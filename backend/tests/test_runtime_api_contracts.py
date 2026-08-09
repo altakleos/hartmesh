@@ -235,6 +235,402 @@ def test_every_public_record_round_trips_strictly() -> None:
         record_from_dict({"api_version": "deerflow.runtime/v1", "kind": "invocation.unknown"})
 
 
+@pytest.mark.parametrize("row_kind", ["snapshot", "event"])
+@pytest.mark.parametrize("construction", ["direct", "from_dict", "record_from_dict"])
+def test_observation_rejects_cross_thread_snapshots_and_events(
+    row_kind: str,
+    construction: str,
+) -> None:
+    from deerflow_runtime_api import InvocationObservation, record_from_dict
+
+    values = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "running",
+        "state_version": 2,
+        "snapshots": (
+            {
+                "run_id": "run-2",
+                "thread_id": "thread-2",
+                "status": "running",
+                "state_version": 2,
+            },
+        )
+        if row_kind == "snapshot"
+        else (),
+        "events": (
+            {
+                "event_id": "event-2",
+                "cursor": "opaque-2",
+                "run_id": "run-2",
+                "thread_id": "thread-2",
+                "lifecycle_type": "started",
+                "state_version": 2,
+                "status": "running",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "payload": {"version": 1},
+            },
+        )
+        if row_kind == "event"
+        else (),
+        "next_cursor": "opaque-2",
+        "minimum_available_cursor": "opaque-0",
+        "read_fence_cursor": "opaque-2",
+    }
+
+    with pytest.raises(ValueError, match="observed thread"):
+        if construction == "direct":
+            InvocationObservation(**values)
+        else:
+            wire = {
+                **values,
+                "snapshots": list(values["snapshots"]),
+                "events": list(values["events"]),
+                "api_version": "deerflow.runtime/v1",
+                "kind": "invocation.observation",
+            }
+            if construction == "from_dict":
+                InvocationObservation.from_dict(wire)
+            else:
+                record_from_dict(wire)
+
+
+@pytest.mark.parametrize("row_kind", ["snapshot", "event"])
+@pytest.mark.parametrize("construction", ["direct", "wire"])
+def test_singular_observation_rejects_another_runs_rows(
+    row_kind: str,
+    construction: str,
+) -> None:
+    from deerflow_runtime_api import InvocationObservation, record_from_dict
+
+    snapshot = {
+        "run_id": "run-2",
+        "thread_id": "thread-1",
+        "status": "running",
+        "state_version": 2,
+    }
+    event = {
+        "event_id": "event-2",
+        "cursor": "opaque-2",
+        "run_id": "run-2",
+        "thread_id": "thread-1",
+        "lifecycle_type": "started",
+        "state_version": 2,
+        "status": "running",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "payload": {"version": 1},
+    }
+    values = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "running",
+        "state_version": 2,
+        "snapshots": (snapshot,) if row_kind == "snapshot" else (),
+        "events": (event,) if row_kind == "event" else (),
+        "next_cursor": "opaque-2",
+        "minimum_available_cursor": "opaque-0",
+        "read_fence_cursor": "opaque-2",
+    }
+
+    with pytest.raises(ValueError, match="observed run"):
+        if construction == "direct":
+            InvocationObservation(**values)
+        else:
+            record_from_dict(
+                {
+                    **values,
+                    "snapshots": list(values["snapshots"]),
+                    "events": list(values["events"]),
+                    "api_version": "deerflow.runtime/v1",
+                    "kind": "invocation.observation",
+                }
+            )
+
+
+@pytest.mark.parametrize(
+    ("run_id", "summary_run_id", "summary_thread_id", "message"),
+    [
+        (None, "run-1", "thread-2", "observed thread"),
+        ("run-1", "run-2", "thread-1", "observed run"),
+    ],
+)
+def test_observation_rejects_a_summary_from_another_context(
+    run_id: str | None,
+    summary_run_id: str,
+    summary_thread_id: str,
+    message: str,
+) -> None:
+    from deerflow_runtime_api import InvocationObservation, InvocationSummaryV1
+
+    with pytest.raises(ValueError, match=message):
+        InvocationObservation(
+            run_id=run_id,
+            thread_id="thread-1",
+            status="pending" if run_id is not None else None,
+            state_version=1 if run_id is not None else None,
+            snapshots=(),
+            events=(),
+            next_cursor="opaque-1",
+            minimum_available_cursor="opaque-0",
+            read_fence_cursor="opaque-1",
+            summaries=(
+                InvocationSummaryV1(
+                    run_id=summary_run_id,
+                    thread_id=summary_thread_id,
+                    status="pending",
+                    state_version=1,
+                    source_kind="http",
+                ),
+            ),
+        )
+
+
+@pytest.mark.parametrize("collection", ["snapshots", "summaries"])
+@pytest.mark.parametrize("construction", ["direct", "wire"])
+def test_observation_rejects_duplicate_snapshot_or_summary_run_ids(
+    collection: str,
+    construction: str,
+) -> None:
+    from deerflow_runtime_api import InvocationObservation, InvocationSummaryV1, record_from_dict
+
+    snapshot = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "pending",
+        "state_version": 1,
+    }
+    summary = InvocationSummaryV1(
+        run_id="run-1",
+        thread_id="thread-1",
+        status="pending",
+        state_version=1,
+        source_kind="http",
+    )
+    values = {
+        "run_id": None,
+        "thread_id": "thread-1",
+        "status": None,
+        "state_version": None,
+        "snapshots": (snapshot, snapshot) if collection == "snapshots" else (snapshot,),
+        "events": (),
+        "next_cursor": "opaque-1",
+        "minimum_available_cursor": "opaque-0",
+        "read_fence_cursor": "opaque-1",
+        "summaries": (summary, summary) if collection == "summaries" else (),
+    }
+
+    with pytest.raises(ValueError, match="duplicate"):
+        if construction == "direct":
+            InvocationObservation(**values)
+        else:
+            record_from_dict(
+                {
+                    **values,
+                    "snapshots": list(values["snapshots"]),
+                    "events": [],
+                    "summaries": [item.to_dict() for item in values["summaries"]],
+                    "api_version": "deerflow.runtime/v1",
+                    "kind": "invocation.observation",
+                }
+            )
+
+
+@pytest.mark.parametrize("construction", ["direct", "wire"])
+def test_observation_rejects_a_summary_without_a_materialized_snapshot(
+    construction: str,
+) -> None:
+    from deerflow_runtime_api import InvocationObservation, InvocationSummaryV1, record_from_dict
+
+    summary = InvocationSummaryV1(
+        run_id="run-1",
+        thread_id="thread-1",
+        status="pending",
+        state_version=1,
+        source_kind="http",
+    )
+    values = {
+        "run_id": None,
+        "thread_id": "thread-1",
+        "status": None,
+        "state_version": None,
+        "snapshots": (),
+        "events": (),
+        "next_cursor": "opaque-1",
+        "minimum_available_cursor": "opaque-0",
+        "read_fence_cursor": "opaque-1",
+        "summaries": (summary,),
+    }
+
+    with pytest.raises(ValueError, match="materialized snapshot"):
+        if construction == "direct":
+            InvocationObservation(**values)
+        else:
+            record_from_dict(
+                {
+                    **values,
+                    "snapshots": [],
+                    "events": [],
+                    "summaries": [summary.to_dict()],
+                    "api_version": "deerflow.runtime/v1",
+                    "kind": "invocation.observation",
+                }
+            )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("status", "running"), ("state_version", 2)],
+)
+@pytest.mark.parametrize("construction", ["direct", "wire"])
+def test_observation_rejects_summary_snapshot_state_mismatch(
+    field: str,
+    value: object,
+    construction: str,
+) -> None:
+    from deerflow_runtime_api import InvocationObservation, InvocationSummaryV1, record_from_dict
+
+    snapshot = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "pending",
+        "state_version": 1,
+    }
+    summary_values = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "pending",
+        "state_version": 1,
+        "source_kind": "http",
+        field: value,
+    }
+    summary = InvocationSummaryV1(**summary_values)
+    values = {
+        "run_id": None,
+        "thread_id": "thread-1",
+        "status": None,
+        "state_version": None,
+        "snapshots": (snapshot,),
+        "events": (),
+        "next_cursor": "opaque-1",
+        "minimum_available_cursor": "opaque-0",
+        "read_fence_cursor": "opaque-1",
+        "summaries": (summary,),
+    }
+
+    with pytest.raises(ValueError, match="summary and snapshot"):
+        if construction == "direct":
+            InvocationObservation(**values)
+        else:
+            record_from_dict(
+                {
+                    **values,
+                    "snapshots": [snapshot],
+                    "events": [],
+                    "summaries": [summary.to_dict()],
+                    "api_version": "deerflow.runtime/v1",
+                    "kind": "invocation.observation",
+                }
+            )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("status", "success"), ("state_version", 3)],
+)
+@pytest.mark.parametrize("construction", ["direct", "wire"])
+def test_singular_observation_rejects_current_snapshot_state_mismatch(
+    field: str,
+    value: object,
+    construction: str,
+) -> None:
+    from deerflow_runtime_api import InvocationObservation, record_from_dict
+
+    snapshot = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "running",
+        "state_version": 2,
+        field: value,
+    }
+    values = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "running",
+        "state_version": 2,
+        "snapshots": (snapshot,),
+        "events": (),
+        "next_cursor": "opaque-2",
+        "minimum_available_cursor": "opaque-0",
+        "read_fence_cursor": "opaque-2",
+    }
+
+    with pytest.raises(ValueError, match="top-level current state"):
+        if construction == "direct":
+            InvocationObservation(**values)
+        else:
+            record_from_dict(
+                {
+                    **values,
+                    "snapshots": [snapshot],
+                    "events": [],
+                    "api_version": "deerflow.runtime/v1",
+                    "kind": "invocation.observation",
+                }
+            )
+
+
+def test_context_observation_accepts_historical_events_and_summary_subsets() -> None:
+    from deerflow_runtime_api import InvocationObservation, InvocationSummaryV1, record_from_dict
+
+    observation = InvocationObservation(
+        run_id=None,
+        thread_id="thread-1",
+        status=None,
+        state_version=None,
+        snapshots=(
+            {
+                "run_id": "run-1",
+                "thread_id": "thread-1",
+                "status": "success",
+                "state_version": 3,
+            },
+            {
+                "run_id": "run-2",
+                "thread_id": "thread-1",
+                "status": "running",
+                "state_version": 2,
+            },
+        ),
+        events=(
+            {
+                "event_id": "event-1",
+                "cursor": "opaque-1",
+                "run_id": "run-1",
+                "thread_id": "thread-1",
+                "lifecycle_type": "accepted",
+                "state_version": 1,
+                "status": "pending",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "payload": {"version": 1},
+            },
+        ),
+        next_cursor="opaque-2",
+        minimum_available_cursor="opaque-0",
+        read_fence_cursor="opaque-2",
+        summaries=(
+            InvocationSummaryV1(
+                run_id="run-1",
+                thread_id="thread-1",
+                status="success",
+                state_version=3,
+                source_kind="http",
+            ),
+        ),
+    )
+
+    assert record_from_dict(observation.to_dict()) == observation
+
+
 @pytest.mark.parametrize(
     ("lifecycle_type", "status"),
     [

@@ -213,11 +213,13 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                 (snapshot for snapshot in result.page.snapshots if snapshot.get("run_id") == record.run_id),
                 None,
             )
-        if authoritative_snapshot is not None:
-            thread_id = str(authoritative_snapshot["thread_id"])
-        elif record is not None:
-            thread_id = record.thread_id
         try:
+            if isinstance(request, InvocationQuery):
+                if record is None or record.run_id != request.run_id:
+                    return unexpected_adapter_failure("observe", exc_info=False)
+                thread_id = record.thread_id
+                if authoritative_snapshot is not None and (str(authoritative_snapshot["run_id"]) != request.run_id or str(authoritative_snapshot["thread_id"]) != thread_id):
+                    return unexpected_adapter_failure("observe", exc_info=False)
             snapshots = tuple(
                 {
                     "run_id": str(row["run_id"]),
@@ -267,7 +269,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                 for event in result.page.events
             )
             return InvocationObservation(
-                run_id=(str(authoritative_snapshot["run_id"]) if authoritative_snapshot is not None else (record.run_id if record is not None else None)),
+                run_id=(request.run_id if isinstance(request, InvocationQuery) else None),
                 thread_id=thread_id or "",
                 status=(_status_value(authoritative_snapshot["status"]) if authoritative_snapshot is not None else (_status_value(record.status) if record is not None else None)),
                 state_version=(int(authoritative_snapshot["state_version"]) if authoritative_snapshot is not None else (record.state_version if record is not None else None)),

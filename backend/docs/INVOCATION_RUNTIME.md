@@ -376,6 +376,14 @@ accepted-context, authorization, and constraint evidence digests. Static facts
 are not copied into each event. Historical rows without a sealed Origin retain
 legacy event/snapshot readability but cannot prove a summary.
 
+The portable observation validates the complete page relationship on direct
+construction and wire parsing. All snapshots and events belong to the observed
+thread; a singular query contains only its requested run. Snapshot and summary
+run IDs are unique, every summary joins to one materialized snapshot and agrees
+on run, thread, current status, and state version, and a singular snapshot agrees
+with the top-level current state. Historical lifecycle events intentionally keep
+their transition-time state rather than being rewritten to the latest state.
+
 Visibility and optional observe authorization run before the store query.
 Context observation can filter the strict source kinds `http`,
 `scheduled_task`, `native_channel`, and `service`; filtering never weakens owner

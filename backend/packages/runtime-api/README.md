@@ -35,7 +35,15 @@ fields, kinds, versions, non-finite numbers, and unsupported shapes.
 Observation snapshots and lifecycle events have fixed field sets. Status
 values, lifecycle types, lifecycle/status pairs, and state versions are
 validated against the complete v1 state machine; policy reasons and internal
-host types are never serialized.
+host types are never serialized. The observation itself enforces relational
+integrity: every snapshot and event belongs to its top-level thread; singular
+pages contain only their top-level run; and snapshot and summary run IDs are
+unique. Each summary must join to exactly one snapshot in that page and match
+its run, thread, current status, and state version. A singular current snapshot
+also matches the top-level current state. Historical events keep their recorded
+transition state and are not required to equal the latest snapshot. Empty
+summary collections and summary subsets remain valid for legacy or intentionally
+unsummarized rows.
 
 An observation may include immutable `InvocationSummaryV1` records for normal
 runs represented by that bounded event page. A summary contains current

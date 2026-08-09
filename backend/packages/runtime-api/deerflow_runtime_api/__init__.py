@@ -576,7 +576,12 @@ class InvocationObservation(_Record):
     Event IDs/cursors make repeated pages harmless. ``next_cursor`` advances
     within ``read_fence_cursor`` and ``minimum_available_cursor`` identifies
     the retention boundary after pruning. ``summaries`` joins safe accepted
-    evidence for only the normal runs materialized by this page.
+    evidence for only the normal runs materialized by this page. Every row
+    belongs to ``thread_id``; singular pages additionally bind every row to
+    ``run_id``. Snapshot and summary run IDs are unique, each summary matches
+    one snapshot's immutable identity and current state, and a singular
+    snapshot matches the top-level current state. Historical events retain
+    their own transition state and need not equal that current state.
     """
 
     KIND: ClassVar[str] = "invocation.observation"
@@ -604,10 +609,24 @@ class InvocationObservation(_Record):
         snapshots = _fixed_public_rows(self.snapshots, expected=_SNAPSHOT_FIELDS, label="snapshots")
         for snapshot in snapshots:
             _validate_snapshot(snapshot)
+            if snapshot["thread_id"] != self.thread_id:
+                raise ValueError("observation snapshots must belong to the observed thread")
+            if self.run_id is not None and snapshot["run_id"] != self.run_id:
+                raise ValueError("singular observation snapshots must belong to the observed run")
+        if len({snapshot["run_id"] for snapshot in snapshots}) != len(snapshots):
+            raise ValueError("observation snapshots contain duplicate run IDs")
+        if self.run_id is not None and snapshots:
+            current = snapshots[0]
+            if current["status"] != self.status or current["state_version"] != self.state_version:
+                raise ValueError("singular observation snapshot must agree with the top-level current state")
         object.__setattr__(self, "snapshots", snapshots)
         events = _fixed_public_rows(self.events, expected=_EVENT_FIELDS, label="events")
         for event in events:
             _validate_lifecycle_event(event)
+            if event["thread_id"] != self.thread_id:
+                raise ValueError("observation events must belong to the observed thread")
+            if self.run_id is not None and event["run_id"] != self.run_id:
+                raise ValueError("singular observation events must belong to the observed run")
         object.__setattr__(self, "events", events)
         _nonempty(self.next_cursor, "next_cursor")
         _nonempty(self.minimum_available_cursor, "minimum_available_cursor")
@@ -619,6 +638,15 @@ class InvocationObservation(_Record):
             raise ValueError("observation summaries must belong to the observed thread")
         if self.run_id is not None and any(summary.run_id != self.run_id for summary in summaries):
             raise ValueError("singular observation summaries must belong to the observed run")
+        if len({summary.run_id for summary in summaries}) != len(summaries):
+            raise ValueError("observation summaries contain duplicate run IDs")
+        snapshot_by_run_id = {snapshot["run_id"]: snapshot for snapshot in snapshots}
+        if any(summary.run_id not in snapshot_by_run_id for summary in summaries):
+            raise ValueError("every observation summary must have one materialized snapshot")
+        for summary in summaries:
+            snapshot = snapshot_by_run_id[summary.run_id]
+            if summary.status != snapshot["status"] or summary.state_version != snapshot["state_version"]:
+                raise ValueError("observation summary and snapshot current state must agree")
         object.__setattr__(self, "summaries", summaries)
         encoded = json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
         if len(encoded) > MAX_OBSERVATION_PAYLOAD_BYTES:
