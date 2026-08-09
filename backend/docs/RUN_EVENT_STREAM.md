@@ -108,6 +108,11 @@ SELECT; SQLite uses one explicit read transaction. Cursor metadata, events,
 and joined `InvocationSummaryV1` rows consequently represent one database
 snapshot across process restarts. Summaries carry bounded accepted source and
 digest evidence once; lifecycle events do not duplicate those static facts.
+The portable page rejects mixed-context data: every snapshot/event must match
+the observed thread, singular pages must match the observed run, snapshot and
+summary run IDs are unique, and each summary must match one page snapshot's
+identity and current state. Historical event states remain valid transition
+evidence and need not equal the latest snapshot.
 For context pages, the store fetches summary/snapshot rows only for distinct run
 IDs in the returned event page—not every run in the thread. The page limit is
 1–500, lifecycle payloads are limited to 4 KiB, summaries to 16 KiB, and the

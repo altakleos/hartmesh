@@ -99,7 +99,14 @@ def test_observation_carries_typed_summaries_and_reads_legacy_wire() -> None:
         thread_id="thread-1",
         status="pending",
         state_version=1,
-        snapshots=(),
+        snapshots=(
+            {
+                "run_id": "run-1",
+                "thread_id": "thread-1",
+                "status": "pending",
+                "state_version": 1,
+            },
+        ),
         events=(),
         next_cursor="lc1.next",
         minimum_available_cursor="lc1.minimum",
@@ -538,6 +545,58 @@ async def test_in_process_observation_maps_source_filter_and_typed_summaries() -
     assert result.summaries[0].source_kind == "native_channel"
     assert result.summaries[0].correlation_references[0].value == "message-1"
     assert runtime.query.source_kind == "native_channel"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_kind", ["memory", "sql"])
+async def test_memory_and_sql_pages_satisfy_portable_observation_relationships(
+    store_kind: str,
+    tmp_path,
+) -> None:
+    from deerflow_runtime_api import ContextInvocationsQuery, InvocationObservation
+
+    from app.runtime.api import InProcessInvocationRuntime
+    from app.runtime.invocation import InternalLifecycleObservation
+    from deerflow.runtime.runs.lifecycle_query import LifecycleQuery
+
+    engine = None
+    if store_kind == "memory":
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        store = MemoryRunStore()
+    else:
+        from deerflow.persistence.base import Base
+        from deerflow.persistence.run.sql import RunRepository
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'portable-observation.db'}")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        store = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
+
+    try:
+        await store.put(
+            "run-1",
+            thread_id="thread-1",
+            user_id="owner-1",
+            **_accepted_fields("http", "request-1"),
+        )
+        page = await store.query_lifecycle(LifecycleQuery(thread_id="thread-1"))
+
+        class Runtime:
+            async def observe_context_lifecycle(self, _query):
+                return InternalLifecycleObservation(record=None, page=page)
+
+        observation = await InProcessInvocationRuntime(
+            Runtime(),
+            authenticated_service_id="owner-1",
+        ).observe(ContextInvocationsQuery(thread_id="thread-1"))
+
+        assert isinstance(observation, InvocationObservation)
+        assert tuple(snapshot["run_id"] for snapshot in observation.snapshots) == ("run-1",)
+        assert tuple(summary.run_id for summary in observation.summaries) == ("run-1",)
+    finally:
+        if engine is not None:
+            await engine.dispose()
 
 
 @pytest.mark.anyio

@@ -183,6 +183,44 @@ async def test_observe_maps_only_fixed_public_snapshot_and_event_fields() -> Non
 
 
 @pytest.mark.anyio
+async def test_observe_fails_safely_when_internal_page_crosses_the_requested_run() -> None:
+    from app.runtime.api import InProcessInvocationRuntime
+    from app.runtime.invocation import InternalLifecycleObservation
+    from deerflow.runtime.runs.lifecycle_query import LifecyclePage, encode_lifecycle_cursor
+
+    cross_context_snapshot = {
+        "run_id": "run-2",
+        "thread_id": "thread-2",
+        "status": "running",
+        "state_version": 2,
+    }
+
+    class Runtime(_Runtime):
+        async def observe_invocation_lifecycle(self, _query):
+            return InternalLifecycleObservation(
+                record=_record(),
+                page=LifecyclePage(
+                    snapshots=(cross_context_snapshot,),
+                    events=(),
+                    next_cursor=encode_lifecycle_cursor(2),
+                    minimum_available_cursor=encode_lifecycle_cursor(0),
+                    read_fence_cursor=encode_lifecycle_cursor(2),
+                ),
+                authoritative_snapshot=cross_context_snapshot,
+            )
+
+    result = await InProcessInvocationRuntime(
+        Runtime(),
+        authenticated_service_id="service-1",
+    ).observe(InvocationQuery(run_id="run-1"))
+
+    assert isinstance(result, RuntimeFailure)
+    assert result.code is FailureCode.indeterminate
+    assert "run-2" not in str(result.to_dict())
+    assert "thread-2" not in str(result.to_dict())
+
+
+@pytest.mark.anyio
 async def test_context_observe_uses_one_context_query_without_singular_state() -> None:
     from app.runtime.api import InProcessInvocationRuntime
     from app.runtime.invocation import InternalLifecycleObservation
