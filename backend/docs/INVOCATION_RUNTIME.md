@@ -50,7 +50,7 @@ an ordinary unit test.
 | Scoped service observation | An authenticated service is owner-scoped unless an operator grants a finite run/thread/owner/source search scope; the current coherent authorization provider still makes the final observe decision. | `backend/app/runtime/visibility.py`; `backend/app/runtime/invocation.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_ordinary_service_cannot_observe_another_owner_or_trigger_policy`; `test_current_authorization_denial_overrides_a_valid_visibility_grant`; `test_context_pagination_stays_inside_the_finite_owner_scope` | Memory and SQL bounded-query tests; no external service | Implemented |
 | Clarification continuation | A clarification ends the current invocation successfully; the answer is a distinct invocation on the same thread. | `backend/packages/harness/deerflow/agents/middlewares/clarification_middleware.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/app/channels/manager.py` | `test_clarification_completes_then_answer_starts_new_same_thread_invocation`; `test_native_channel_revalidates_owner_dedupes_and_continues_clarification` | Native-channel characterization | Implemented; same-invocation suspension is not claimed |
 | Graceful shutdown and process recovery | One deadline coordinator freezes admission, stops producers, drains runs, flushes memory, then closes dependencies; unsettled durable runs use orphan recovery. | `backend/app/gateway/shutdown.py`; `backend/packages/harness/deerflow/runtime/runs/manager.py` | `test_shutdown_orders_producers_runs_memory_and_dependencies`; `test_orphan_recovery_records_failed_with_stable_reason` | Process-loss simulations; live pod evidence is separate | Implemented for one replica |
-| PostgreSQL schema and arbitration | Real Alembic predecessor data upgrades through accepted/idempotency/lifecycle/receipt evidence and remains repository-readable after the promised downgrade/re-upgrade path. | `backend/packages/harness/deerflow/persistence/migrations/versions/0011_accepted_invocation.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0012_invocation_idempotency.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0013_invocation_lifecycle.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0014_canonical_caller_intent.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0015_inbound_receipts.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io`; `test_postgres_inbound_receipt_acquisition_and_claim_are_atomic` | `postgres_contract` with `DEERFLOW_TEST_POSTGRES_URL` | Qualified only when the mandatory PostgreSQL gate passes |
+| PostgreSQL schema and arbitration | Real Alembic predecessor data upgrades through accepted/idempotency/lifecycle/receipt/execution evidence and remains repository-readable after the promised downgrade/re-upgrade path. | `backend/packages/harness/deerflow/persistence/migrations/versions/0011_accepted_invocation.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0012_invocation_idempotency.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0013_invocation_lifecycle.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0014_canonical_caller_intent.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0015_inbound_receipts.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0016_sandbox_execution_evidence.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io`; `test_postgres_inbound_receipt_acquisition_and_claim_are_atomic` | `postgres_contract` with `DEERFLOW_TEST_POSTGRES_URL` | Qualified only when the mandatory PostgreSQL gate passes |
 | One-replica deployment truth | Production requires one Gateway, shared durable PostgreSQL, compatible readiness/shutdown timing, and digest-pinned Gateway plus enabled provisioner execution artifacts; process-local mode makes no durability claim. | `backend/app/runtime/deployment.py`; `deploy/helm/deer-flow/values.yaml`; `deploy/helm/deer-flow/templates/gateway-deployment.yaml`; `deploy/helm/deer-flow/templates/provisioner-deployment.yaml` | `test_production_mode_requires_pinned_runtime_images_and_one_replica`; `test_production_mode_rejects_process_local_storage` | Helm lint/render and storage-profile checks | Implemented; not a high-availability claim |
 | Live Kubernetes pod recovery | The opt-in harness emits one strict canonical artifact; the report exposes only an operator assertion, while the offline verifier independently matches its digest, run/namespace, image, chart, config, schema, scope, and complete scenario set. | `backend/packages/harness/deerflow/qualification_evidence.py`; `backend/tests/support/kubernetes_qualification.py`; `backend/app/runtime/deployment.py`; `backend/scripts/verify_qualification_evidence.py` | `test_exact_external_evidence_verifies_against_declared_reference_and_subjects`; `test_real_one_replica_pod_recovery_contract` | `kubernetes_contract` artifact plus a successful exact-subject offline verification | Unqualified when absent; operator-asserted when declared; externally verified only after the offline verifier succeeds |
 | Legacy compatibility and native execution | Existing LangGraph/REST facades retain their responses and native lead-agent, skill, memory, subagent, sandbox, and thread behavior. | `backend/app/gateway/routers/runs.py`; `backend/app/gateway/routers/thread_runs.py`; `backend/packages/harness/deerflow/agents/lead_agent/agent.py`; `backend/packages/harness/deerflow/agents/memory`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/sandbox/middleware.py` | `test_gateway_mounts_runtime_routes_without_replacing_legacy_runs`; `test_full_chain_order`; `test_make_lead_agent_custom_skill_allowlist_does_not_activate_tool_policy`; `test_after_agent_queues_memory_under_runtime_user`; `test_aexecute_propagates_one_trusted_run_context_without_free_form_attributes`; `test_sandbox_middleware_state_matches_thread_state_sandbox_field` | Full offline compatibility suite | Implemented; synchronous client durability remains deferred |
@@ -651,12 +651,38 @@ retains those live views. File, list, search, and shell paths are also restricte
 exact accepted subtree before sandbox I/O. Before the first model
 call, the sandbox provider binds exactly that accepted digest to a per-user, per-thread active
 view; sibling snapshots are not mounted. An accepted empty skill set binds an empty view and
-never falls back to the live registry. Docker/AIO mounts nonempty accepted material through an
-OS-enforced read-only boundary while retaining sandbox command execution. A writable configured
-host mount that overlaps that accepted host view is rejected even under an unrelated container
-path. Local, E2B, and custom providers remain explicitly empty-only until they prove an
-equivalent boundary; a nonempty snapshot on any of them fails before graph/model execution.
-Use AIO for the production path that executes nonempty durable accepted skills.
+never falls back to the live registry. Local Docker-backed AIO mounts nonempty accepted material
+through an OS-enforced read-only boundary. Kubernetes/provisioner AIO advertises the same
+`immutable_read_only` capability only after an `rwx_verified_copy_v1` Pod returns an exact
+run/generation/snapshot/Pod-UID receipt, including the verifier-authored copy digest, and becomes reachable through its per-attempt capability
+gate. Its init container traverses and copies the exact content-addressed RWX snapshot into a
+private per-Pod `emptyDir`, recomputes the canonical digest twice, and the sandbox mounts only
+that completed private copy read-only. The source PVC is never mounted into the sandbox and no
+live skill projection is present. A source mutation after verification therefore cannot replace
+the execution bytes. The profile requires actual `ReadWriteMany` storage, pinned sandbox and
+verifier/gate images, and cross-node Pod networking; it deliberately uses no same-node affinity.
+A writable configured host mount that overlaps accepted material is rejected. Local, E2B,
+unqualified remote AIO, and custom providers remain explicitly empty-only until they prove an
+equivalent boundary; a nonempty snapshot fails before graph/model execution.
+
+For remote AIO, materialization completes before the authoritative pending-to-running
+transition and before graph construction. One native Kubernetes Lease owns the Pod, immutable
+evidence/capability Secrets, and NetworkPolicy. The process that owns the sandbox renews the
+exact Lease UID, Pod UID, and materialization digest only after the authoritative RunRow worker
+lease has renewed successfully. The worker revalidates the same tuple before graph construction
+and again after all other pre-stream awaits, immediately before `astream`; expired Leases are reclaimed in bounded
+pages and Kubernetes garbage collection removes their children. A response-loss retry reuses
+only the same attempt identity and in-memory capability. The full bounded receipt (snapshot,
+run, generation, Pod and Lease UIDs, runtime image-ID digest, and materialization digest) is
+written to the authoritative `RunRow` in the same transaction that changes it to `running`; the
+`started` lifecycle payload contains only its digest. A process restart cannot recover the
+ephemeral capability and therefore follows the documented orphan-terminalization behavior.
+
+Provisioner management is separate from the per-attempt data-plane capability. The Helm profile
+projects a rotating ServiceAccount token into the Gateway, scopes it to the provisioner audience,
+and has the provisioner verify its exact namespace and ServiceAccount through TokenReview. Gateway
+readiness authenticates to `/api/capabilities` and requires `rwx_verified_copy_v1`; a profile,
+token, PVC, image, or networking failure blocks new admission while liveness remains independent.
 
 Admission reserves one process-local projection owner inside the thread admission lock. Atomic
 creation promotes that owner to the committed run; equal known-key replay bypasses the busy

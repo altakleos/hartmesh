@@ -30,7 +30,7 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
    - Resource limits (CPU, memory, ephemeral storage)
    - Readiness/liveness probes
 
-3. **Service Creation**: A Service is created to expose the Pod. By default this is a NodePort Service for Docker Compose compatibility. Set `SANDBOX_SERVICE_TYPE=ClusterIP` when the backend runs inside the Kubernetes cluster.
+3. **Access resource**: Legacy sandboxes receive a Service. A durable accepted-skill Pod uses its exact Pod IP through a capability gate instead, so a replacement Pod cannot inherit the old data-plane identity.
 
 4. **Access URL**: In NodePort mode, the provisioner returns `http://{NODE_HOST}:{NodePort}`. In ClusterIP mode, it returns a Kubernetes service DNS URL like `http://sandbox-{sandbox_id}-svc.{namespace}.svc.cluster.local:8080`.
 
@@ -158,6 +158,11 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty | Optional `subPath` template for `SKILLS_PVC_NAME`. Supports `{user_id}` and `{thread_id}`. When empty, the skills PVC root is mounted unchanged |
 | `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
+| `ACCEPTED_SKILL_PROJECTION_PROFILE` | disabled | Set to `rwx_verified_copy_v1` to enable verified nonempty durable skill snapshots. The configured home claim must report `ReadWriteMany`. |
+| `ACCEPTED_SKILL_RUNTIME_IMAGE` | empty | Digest-pinned provisioner image containing `accepted_skills.py`; used for the verifier init container and capability gate. Required by `rwx_verified_copy_v1`. |
+| `ACCEPTED_ATTEMPT_LEASE_SECONDS` | `120` | Native Lease duration for one accepted sandbox attempt (30–900 seconds). |
+| `ACCEPTED_ATTEMPT_RECONCILE_INTERVAL_SECONDS` | `30` | Bounded expiry-reconciliation cadence (5–300 seconds); keep the Lease duration at least twice this value. |
+| `ACCEPTED_ATTEMPT_RECONCILE_LIMIT` | `100` | Maximum expired attempt Leases inspected per reconciliation page (1–500). |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
 | `SANDBOX_SERVICE_TYPE` | `NodePort` | Service type for sandbox access. Use `ClusterIP` when backend and provisioner run inside the same Kubernetes cluster |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
@@ -170,6 +175,43 @@ Provisioner-created sandbox Pods use the provisioner's `SANDBOX_IMAGE` environme
 For persistent dependencies, build an image that extends the default `all-in-one-sandbox` image and set `SANDBOX_IMAGE` to your published tag. A from-scratch image must remain compatible with the AIO sandbox HTTP API consumed by `agent-sandbox`, keep `/mnt/user-data` writable, and listen on the configured sandbox port.
 
 See [Building a Custom AIO Sandbox Image](../../backend/docs/CONFIGURATION.md#building-a-custom-aio-sandbox-image) for the runtime contract and a minimal Dockerfile example.
+
+### Durable accepted skills on Kubernetes
+
+`rwx_verified_copy_v1` supports nonempty immutable skill snapshots without placing the Gateway
+and sandbox on the same node. The Gateway publishes the accepted content-addressed snapshot
+beneath the shared home claim. The provisioner mounts only that exact snapshot subpath read-only
+into a verifier init container. The verifier performs bounded symlink-safe traversal, copies the
+bytes into a private per-Pod `emptyDir`, recomputes Hartmesh's canonical digest from both source
+and destination, and publishes the completed copy atomically. The sandbox receives only the
+private copy at `/mnt/skills/.accepted`, mounted read-only; it receives neither the RWX source nor
+the mutable live skill projections.
+
+The accepted Pod is reached directly through an in-Pod capability gate. The high-entropy
+capability exists only in process memory and an immutable Pod Secret; it is not serialized into
+run rows, lifecycle events, checkpoints, or logs. A receipt must match snapshot digest, run,
+generation, Pod UID, Lease UID, the verifier-authored receipt digest, and the digest-pinned
+verifier/gate and sandbox image IDs before
+remote AIO advertises `immutable_read_only`. The Lease is the owner root for the Pod, immutable
+Secrets, and NetworkPolicy. The owning Gateway renews the exact materialization tuple; a bounded
+reconciler deletes expired Lease UIDs, letting Kubernetes garbage collection remove children.
+Process restart does not adopt such a Pod because the capability is intentionally unrecoverable;
+the corresponding lost worker follows the existing orphan-terminalization contract.
+
+Gateway management calls use a distinct projected ServiceAccount token. The token is audience
+bound, reread on every request for rotation, and checked with TokenReview against the exact Gateway
+namespace and ServiceAccount. The Gateway's readiness path authenticates to `/api/capabilities`
+and requires the configured projection profile before it admits new work. The per-attempt bearer
+capability remains narrower and is accepted only by that attempt's in-Pod gate.
+
+Both `SANDBOX_IMAGE` and `ACCEPTED_SKILL_RUNTIME_IMAGE` must be SHA-256 digest references. The
+provisioner's `/ready` endpoint also reads the configured PVC and rejects a non-Bound or non-RWX
+claim. Helm rejects RWO rather than adding a same-node requirement. Accepted Pods have only a
+soft preference for a different Gateway node. Cross-node CNI/PVC behavior remains a live
+qualification concern; this profile adds no same-node fallback and does not turn chart rendering
+into live-cluster evidence. The repository's ordinary and process-loss suites do not qualify this
+cross-node path; an artifact-bound live cluster run with a real RWX implementation remains an
+explicit release gate.
 
 ### Lark CLI sandbox runtime (Pattern A)
 

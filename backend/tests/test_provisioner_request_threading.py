@@ -326,3 +326,65 @@ async def test_auth_middleware_unset_key(monkeypatch: pytest.MonkeyPatch, provis
 
         r = await client.get("/api/sandboxes", headers={"X-API-Key": "anything"})
         assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_accepts_only_bound_gateway_service_account_token(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "")
+    monkeypatch.setattr(
+        provisioner_module,
+        "PROVISIONER_AUTH_AUDIENCE",
+        "hartmesh-provisioner",
+    )
+    monkeypatch.setattr(
+        provisioner_module,
+        "PROVISIONER_GATEWAY_NAMESPACE",
+        "runtime",
+    )
+    monkeypatch.setattr(
+        provisioner_module,
+        "PROVISIONER_GATEWAY_SERVICE_ACCOUNT",
+        "gateway",
+    )
+    reviewed: list[object] = []
+
+    class Authentication:
+        def create_token_review(self, body, *, _request_timeout: int):
+            reviewed.append(body)
+            assert _request_timeout == 2
+            assert body.spec.audiences == ["hartmesh-provisioner"]
+            return SimpleNamespace(
+                status=SimpleNamespace(
+                    authenticated=True,
+                    audiences=["hartmesh-provisioner"],
+                    user=SimpleNamespace(
+                        username="system:serviceaccount:runtime:gateway",
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(
+        provisioner_module,
+        "authentication_v1",
+        Authentication(),
+    )
+    transport = httpx.ASGITransport(app=provisioner_module.app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(
+            "/api/capabilities",
+            headers={"Authorization": "Bearer projected-token"},
+        )
+        assert response.status_code == 200
+        response = await client.get(
+            "/api/capabilities",
+            headers={"Authorization": "Bearer "},
+        )
+        assert response.status_code == 401
+
+    assert len(reviewed) == 1

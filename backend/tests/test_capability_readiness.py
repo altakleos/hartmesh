@@ -623,6 +623,56 @@ async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
     assert recovered.json() == {"status": "ready"}
 
 
+@pytest.mark.asyncio
+async def test_gateway_readiness_authenticates_required_remote_skill_profile(
+    monkeypatch,
+) -> None:
+    import app.gateway.app as app_module
+    import deerflow.extensions as extensions_module
+    from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.runtime.runs.store.base import LifecycleReadiness
+
+    config = AppConfig(
+        sandbox=SandboxConfig(
+            use="deerflow.community.aio_sandbox:AioSandboxProvider",
+            provisioner_url="http://provisioner:8002",
+            provisioner_service_account_token_file="/projected/token",
+            accepted_skill_projection_profile="rwx_verified_copy_v1",
+        ),
+    )
+    monkeypatch.setattr(app_module, "get_app_config", lambda: config)
+    monkeypatch.setattr(
+        extensions_module,
+        "load_extensions",
+        lambda _plugins: (ExtensionRegistry().build(), []),
+    )
+    results = iter((False, True))
+    monkeypatch.setattr(
+        RemoteSandboxBackend,
+        "accepted_skill_projection_ready",
+        lambda _self: next(results),
+    )
+    app = app_module.create_app()
+
+    class HealthyLifecycle:
+        async def lifecycle_readiness(self):
+            return LifecycleReadiness(True)
+
+    app.state.run_store = HealthyLifecycle()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        unavailable = await client.get("/ready")
+        recovered = await client.get("/ready")
+
+    assert unavailable.status_code == 503
+    assert recovered.status_code == 200
+
+
 def test_admin_deployment_report_separates_immutable_manifest_from_mutable_health() -> None:
     manifest = build_capability_manifest(ExtensionRegistry().build(generation=14))
     checked_at = datetime(2026, 8, 7, tzinfo=UTC)

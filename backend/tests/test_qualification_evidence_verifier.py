@@ -60,7 +60,7 @@ def _passing_evidence() -> KubernetesQualificationEvidence:
         chart_version="2.1.0",
         chart_digest="sha256:" + ("b" * 64),
         configuration_digest="sha256:" + ("c" * 64),
-        migration_head="0015_inbound_receipts",
+        migration_head="0016_sandbox_execution_evidence",
         stores=(
             StoreContinuityEvidence(
                 component="postgres",
@@ -93,7 +93,7 @@ def _expectation() -> QualificationEvidenceExpectation:
         chart_version="2.1.0",
         chart_digest="sha256:" + ("b" * 64),
         configuration_digest="sha256:" + ("c" * 64),
-        migration_head="0015_inbound_receipts",
+        migration_head="0016_sandbox_execution_evidence",
         scope="durable_one_replica_pod_recovery",
         namespace="hartmesh-qualification-a1b2c3",
         required_scenarios=KubernetesQualificationEvidence.REQUIRED_SCENARIOS,
@@ -273,7 +273,7 @@ def _command_arguments(path: Path, digest: str) -> list[str]:
         "--configuration-digest",
         "sha256:" + ("c" * 64),
         "--migration-head",
-        "0015_inbound_receipts",
+        "0016_sandbox_execution_evidence",
         "--scope",
         "durable_one_replica_pod_recovery",
         "--namespace",

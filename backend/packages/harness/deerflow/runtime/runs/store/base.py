@@ -27,6 +27,8 @@ from deerflow.runtime.runs.lifecycle_query import (
 _LIFECYCLE_EVIDENCE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 _LIFECYCLE_SAFE_REASONS = {
     "agent_revision_drift",
+    "accepted_skill_execution_fence_failed",
+    "accepted_skill_execution_lease_unavailable",
     "constraint_evidence_mismatch",
     "constraint_expired_before_start",
     "loop_capped",
@@ -134,6 +136,8 @@ class LifecycleTransition:
     stop_reason: str | None = None
     reason: str | None = None
     evidence: dict[str, str | int | bool | None | list[str | int | bool | None]] = field(default_factory=dict)
+    execution_evidence_json: dict[str, Any] | None = None
+    execution_evidence_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +175,37 @@ def build_lifecycle_payload(transition: LifecycleTransition) -> dict[str, Any]:
 
     validate_lifecycle_transition(transition)
     payload: dict[str, Any] = {"version": 1}
+    if (transition.execution_evidence_json is None) != (transition.execution_evidence_digest is None):
+        raise ValueError("execution evidence and digest must be supplied together")
+    if transition.execution_evidence_json is not None:
+        if transition.lifecycle_type is not LifecycleType.started:
+            raise ValueError("execution evidence is supported only for started")
+        evidence = transition.execution_evidence_json
+        if not isinstance(evidence, dict) or set(evidence) != {
+            "version",
+            "profile",
+            "attempt_id",
+            "snapshot_id",
+            "run_id",
+            "generation",
+            "pod_uid",
+            "lease_uid",
+            "runtime_image_ids_digest",
+            "verifier_receipt_digest",
+            "materialization_evidence_digest",
+        }:
+            raise ValueError("execution evidence has invalid fields")
+        encoded_evidence = json.dumps(
+            evidence,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded_evidence) > 4096:
+            raise ValueError("execution evidence exceeds 4096 UTF-8 bytes")
+        evidence_digest = hashlib.sha256(encoded_evidence).hexdigest()
+        if evidence_digest != transition.execution_evidence_digest:
+            raise ValueError("execution evidence digest mismatch")
+        payload["execution_evidence_digest"] = evidence_digest
     if transition.reason is not None:
         if transition.reason not in _LIFECYCLE_SAFE_REASONS:
             raise ValueError(f"unsupported lifecycle reason: {transition.reason!r}")
@@ -200,6 +235,16 @@ def build_lifecycle_payload(transition: LifecycleTransition) -> dict[str, Any]:
     if len(encoded) > 4096:
         raise ValueError("lifecycle payload exceeds 4096 UTF-8 bytes")
     return payload
+
+
+def validate_execution_evidence_run(
+    run_id: str,
+    evidence: dict[str, Any] | None,
+) -> None:
+    """Reject relationally valid evidence bound to a different run row."""
+
+    if evidence is not None and evidence.get("run_id") != run_id:
+        raise ValueError("execution evidence belongs to a different run")
 
 
 @dataclass(frozen=True)
@@ -448,7 +493,13 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def start_run(self, run_id: str) -> bool:
+    async def start_run(
+        self,
+        run_id: str,
+        *,
+        execution_evidence_json: dict[str, Any] | None = None,
+        execution_evidence_digest: str | None = None,
+    ) -> bool:
         """Atomically transition a pending run to running.
 
         Returns ``False`` when the row is missing or no longer pending.

@@ -47,6 +47,12 @@ spec:
               value: "1"
             - name: K8S_NAMESPACE
               value: {{ include "deer-flow.namespace" . | quote }}
+            - name: PROVISIONER_AUTH_AUDIENCE
+              value: {{ .Values.provisioner.gatewayTokenAudience | quote }}
+            - name: PROVISIONER_GATEWAY_NAMESPACE
+              value: {{ include "deer-flow.namespace" . | quote }}
+            - name: PROVISIONER_GATEWAY_SERVICE_ACCOUNT
+              value: {{ include "deer-flow.serviceAccountName" . | quote }}
             - name: SANDBOX_IMAGE
               value: {{ .Values.provisioner.sandboxImage | quote }}
             # In-cluster API access via the mounted ServiceAccount token.
@@ -83,9 +89,23 @@ spec:
             {{- end }}
             - name: SANDBOX_CONTAINER_PORT
               value: {{ .Values.provisioner.sandboxPort | quote }}
+            - name: ACCEPTED_SKILL_PROJECTION_PROFILE
+              value: {{ .Values.provisioner.acceptedSkillProjectionProfile | default "disabled" | quote }}
+            {{- if eq (default "disabled" .Values.provisioner.acceptedSkillProjectionProfile) "rwx_verified_copy_v1" }}
+            # The digest-pinned provisioner image contains both the verifier and
+            # the per-attempt data-plane gate.
+            - name: ACCEPTED_SKILL_RUNTIME_IMAGE
+              value: {{ include "deer-flow.provisionerImage" . | quote }}
+            - name: ACCEPTED_ATTEMPT_LEASE_SECONDS
+              value: {{ .Values.provisioner.acceptedAttempt.leaseSeconds | quote }}
+            - name: ACCEPTED_ATTEMPT_RECONCILE_INTERVAL_SECONDS
+              value: {{ .Values.provisioner.acceptedAttempt.reconcileIntervalSeconds | quote }}
+            - name: ACCEPTED_ATTEMPT_RECONCILE_LIMIT
+              value: {{ .Values.provisioner.acceptedAttempt.reconcileLimit | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10

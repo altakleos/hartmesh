@@ -54,6 +54,14 @@ class RunRow(Base):
     caller_intent_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     caller_intent_digest_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
+    # Bounded proof of the exact sandbox materialization used when this row
+    # atomically entered ``running``. Nullable for legacy/local executions.
+    execution_evidence_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    execution_evidence_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
     # Convenience fields (for listing pages without querying RunEventStore)
     message_count: Mapped[int] = mapped_column(default=0)
     first_human_message: Mapped[str | None] = mapped_column(Text)
@@ -96,6 +104,14 @@ class RunRow(Base):
         CheckConstraint(
             "operation_kind = 'run' OR (external_scope IS NULL AND external_key IS NULL AND request_digest IS NULL AND request_digest_version IS NULL)",
             name="ck_runs_external_identity_run_only",
+        ),
+        CheckConstraint(
+            "(execution_evidence_json IS NULL) = (execution_evidence_digest IS NULL)",
+            name="ck_runs_execution_evidence_pair",
+        ),
+        CheckConstraint(
+            "execution_evidence_digest IS NULL OR (operation_kind = 'run' AND length(execution_evidence_digest) = 64)",
+            name="ck_runs_execution_evidence_run_only",
         ),
         CheckConstraint(
             "external_scope IS NULL OR length(external_scope) <= 96",

@@ -17,6 +17,7 @@ from deerflow.sandbox import get_sandbox_provider
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.sandbox_provider import (
     _NO_BINDING,
+    accepted_skill_material_binding_from_runtime,
     accepted_skill_snapshot_id_from_runtime,
     ensure_accepted_skill_binding,
     invalidate_runtime_skill_projection_token,
@@ -58,15 +59,35 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         super().__init__()
         self._lazy_init = lazy_init
 
-    def _acquire_sandbox(self, thread_id: str, *, user_id: str, accepted_skills_only: bool = False) -> str:
+    def _acquire_sandbox(self, thread_id: str, *, user_id: str, accepted_skills_only: bool = False, runtime: Runtime | None = None) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = provider.acquire_accepted_skills(thread_id, user_id=user_id) if accepted_skills_only else provider.acquire(thread_id, user_id=user_id)
+        if accepted_skills_only:
+            binding = accepted_skill_material_binding_from_runtime(runtime, user_id=user_id)
+            if binding is None:
+                raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
+            sandbox_id = provider.acquire_bound_accepted_skills(
+                thread_id,
+                user_id=user_id,
+                binding=binding,
+            )
+        else:
+            sandbox_id = provider.acquire(thread_id, user_id=user_id)
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
-    async def _acquire_sandbox_async(self, thread_id: str, *, user_id: str, accepted_skills_only: bool = False) -> str:
+    async def _acquire_sandbox_async(self, thread_id: str, *, user_id: str, accepted_skills_only: bool = False, runtime: Runtime | None = None) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = await provider.acquire_accepted_skills_async(thread_id, user_id=user_id) if accepted_skills_only else await provider.acquire_async(thread_id, user_id=user_id)
+        if accepted_skills_only:
+            binding = accepted_skill_material_binding_from_runtime(runtime, user_id=user_id)
+            if binding is None:
+                raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
+            sandbox_id = await provider.acquire_bound_accepted_skills_async(
+                thread_id,
+                user_id=user_id,
+                binding=binding,
+            )
+        else:
+            sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
@@ -90,6 +111,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if isinstance(sandbox_id, str) and not has_accepted_binding:
             return super().before_agent(state, runtime)
         provider = get_sandbox_provider()
+        prebound = False
+        runtime_sandbox_id = (runtime.context or {}).get("sandbox_id")
+        if has_accepted_binding and not isinstance(sandbox_id, str) and isinstance(runtime_sandbox_id, str) and provider.get(runtime_sandbox_id) is not None:
+            sandbox_id = runtime_sandbox_id
+            prebound = True
         if has_accepted_binding and isinstance(sandbox_id, str) and provider.get(sandbox_id) is not None and not provider.has_accepted_skill_isolation(sandbox_id):
             provider.release(sandbox_id)
             sandbox_id = None
@@ -99,6 +125,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 thread_id,
                 user_id=user_id,
                 accepted_skills_only=has_accepted_binding,
+                runtime=runtime,
             )
         if has_accepted_binding:
             token = None
@@ -131,7 +158,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 if acquired and token is None and not released:
                     provider.release(sandbox_id)
                 raise
-        if acquired:
+        if acquired or prebound:
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return super().before_agent(state, runtime)
@@ -151,6 +178,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if isinstance(sandbox_id, str) and not has_accepted_binding:
             return await super().abefore_agent(state, runtime)
         provider = get_sandbox_provider()
+        prebound = False
+        runtime_sandbox_id = (runtime.context or {}).get("sandbox_id")
+        if has_accepted_binding and not isinstance(sandbox_id, str) and isinstance(runtime_sandbox_id, str) and provider.get(runtime_sandbox_id) is not None:
+            sandbox_id = runtime_sandbox_id
+            prebound = True
         if has_accepted_binding and isinstance(sandbox_id, str) and provider.get(sandbox_id) is not None and not provider.has_accepted_skill_isolation(sandbox_id):
             await self._release_sandbox_async(sandbox_id)
             sandbox_id = None
@@ -160,6 +192,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 thread_id,
                 user_id=user_id,
                 accepted_skills_only=has_accepted_binding,
+                runtime=runtime,
             )
         if has_accepted_binding:
             token = None
@@ -195,7 +228,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 if acquired and token is None and not released:
                     await self._release_sandbox_async(sandbox_id)
                 raise
-        if acquired:
+        if acquired or prebound:
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return await super().abefore_agent(state, runtime)

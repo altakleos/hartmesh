@@ -777,10 +777,16 @@ effective skill package. Its prompts, slash activation, deferred reads, supporti
 Editing, deleting, enabling, or disabling a live skill affects later invocations, not a run
 that was already accepted. Snapshot bodies remain process-local and are removed after the
 worker terminates; the durable ledger stores only stable identities, digests, and bounded
-metadata. Docker/AIO mounts nonempty accepted material read-only while retaining sandbox
-commands. Local, E2B, and custom providers accept only an explicitly empty skill set and fail
-before model work when effective skills are present; use AIO for production durable runs that
-execute nonempty accepted skills. A
+metadata. Local Docker-backed AIO mounts nonempty accepted material read-only while retaining
+sandbox commands. Kubernetes/provisioner AIO supports the same contract only with the
+`rwx_verified_copy_v1` profile: a verifier copies the exact content-addressed snapshot from an
+RWX claim into a private per-Pod `emptyDir`, verifies the canonical digest, and the sandbox sees
+only that private copy through a read-only mount. Gateway management calls use a short-lived,
+audience-bound projected ServiceAccount token that the provisioner validates with TokenReview;
+Gateway readiness authenticates to the provisioner and requires the exact profile before new
+admission. Local, E2B, unqualified remote AIO, and custom
+providers accept only an explicitly empty skill set and fail before model work when effective
+skills are present. A
 worker lost with its process follows normal orphan terminalization rather than
 resuming from reconstructed historical skill bytes.
 
@@ -792,7 +798,7 @@ An enabled skill's `allowed-tools` policy applies only after that skill is expli
 
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
-Disabling a skill also removes it from the live sandbox filesystem view, so later work follows the updated enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Durable runs use an accepted-only acquisition profile that excludes mutable `/mnt/skills/{public,custom,legacy,integrations}` trees. Docker/AIO exposes the selected `/mnt/skills/.accepted` digest through an OS-enforced read-only mount and retains command execution. Local, E2B, and custom providers are empty-only until they can prove the same hard boundary; nonempty material fails closed before model execution. Legacy non-durable execution retains the live projections. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
+Disabling a skill also removes it from the live sandbox filesystem view, so later work follows the updated enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Durable runs use an accepted-only acquisition profile that excludes mutable `/mnt/skills/{public,custom,legacy,integrations}` trees. Local Docker AIO exposes the selected `/mnt/skills/.accepted` digest through an OS-enforced read-only mount. Remote Kubernetes AIO does so only when `rwx_verified_copy_v1` is configured with a real RWX claim and digest-pinned sandbox and verifier/gate images; the provisioner readiness check validates those prerequisites and each created Pod must return an exact materialization receipt before the provider advertises `immutable_read_only`. The design uses cross-node RWX storage and direct Pod networking. A soft scheduling preference places accepted sandboxes away from Gateway Pods when capacity permits, but there is no required same-node or different-node affinity. All other remote profiles, Local, E2B, and custom providers are empty-only until they prove the same hard boundary. Legacy non-durable execution retains the live projections.
 
 Managed integrations install shared read-only skill packs without mixing them
 into custom skills. The Lark/Feishu CLI integration is available under

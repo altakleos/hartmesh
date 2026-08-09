@@ -42,6 +42,7 @@ from deerflow.runtime.runs.store.base import (
     build_lifecycle_payload,
     lifecycle_owner_scope,
     lifecycle_type_for_status,
+    validate_execution_evidence_run,
 )
 
 _TERMINAL_STATUSES = {"success", "error", "timeout", "interrupted"}
@@ -246,6 +247,9 @@ class MemoryRunStore(RunStore):
             row["error"] = transition.error
         if transition.stop_reason is not None:
             row["stop_reason"] = transition.stop_reason
+        if transition.execution_evidence_json is not None:
+            row["execution_evidence_json"] = transition.execution_evidence_json
+            row["execution_evidence_digest"] = transition.execution_evidence_digest
         row["updated_at"] = datetime.now(UTC).isoformat()
         event = self._append_lifecycle_event(row, transition, payload=payload)
         return LifecycleTransitionResult(applied=True, row=row, event=event)
@@ -394,6 +398,8 @@ class MemoryRunStore(RunStore):
             "caller_intent_json": caller_intent_json if operation_kind == "run" else None,
             "caller_intent_digest": caller_intent_digest if operation_kind == "run" else None,
             "caller_intent_digest_version": caller_intent_digest_version if operation_kind == "run" else None,
+            "execution_evidence_json": None,
+            "execution_evidence_digest": None,
             # ``put`` is an idempotent snapshot write. Preserve a cancellation
             # request that may have raced a retry of an earlier snapshot.
             "cancel_action": existing.get("cancel_action") if existing else None,
@@ -522,7 +528,14 @@ class MemoryRunStore(RunStore):
         )
         return result.applied
 
-    async def start_run(self, run_id) -> bool:
+    async def start_run(
+        self,
+        run_id,
+        *,
+        execution_evidence_json=None,
+        execution_evidence_digest=None,
+    ) -> bool:
+        validate_execution_evidence_run(run_id, execution_evidence_json)
         run = self._runs.get(run_id)
         if run is None or run["status"] != "pending" or run.get("cancel_action") is not None:
             return False
@@ -530,7 +543,12 @@ class MemoryRunStore(RunStore):
             run_id,
             expected_state_version=run["state_version"],
             expected_statuses=("pending",),
-            transition=LifecycleTransition(lifecycle_type=LifecycleType.started, status="running"),
+            transition=LifecycleTransition(
+                lifecycle_type=LifecycleType.started,
+                status="running",
+                execution_evidence_json=execution_evidence_json,
+                execution_evidence_digest=execution_evidence_digest,
+            ),
         )
         return result.applied
 
@@ -954,6 +972,8 @@ class MemoryRunStore(RunStore):
             "caller_intent_json": caller_intent_json if operation_kind == "run" else None,
             "caller_intent_digest": caller_intent_digest if operation_kind == "run" else None,
             "caller_intent_digest_version": caller_intent_digest_version if operation_kind == "run" else None,
+            "execution_evidence_json": None,
+            "execution_evidence_digest": None,
             "state_version": 1 if operation_kind == "run" else 0,
         }
         self._runs[run_id] = new_row

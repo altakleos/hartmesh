@@ -221,6 +221,11 @@ spec:
               mountPath: /app/backend/.deer-flow
               subPath: deer-flow
             {{- end }}
+            {{- if .Values.provisioner.enabled }}
+            - name: provisioner-identity
+              mountPath: /var/run/secrets/hartmesh-provisioner
+              readOnly: true
+            {{- end }}
             {{- with .Values.gateway.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -245,6 +250,16 @@ spec:
         - name: home
           persistentVolumeClaim:
             claimName: {{ include "deer-flow.homePVC" . }}
+        {{- end }}
+        {{- if .Values.provisioner.enabled }}
+        - name: provisioner-identity
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  audience: {{ .Values.provisioner.gatewayTokenAudience | quote }}
+                  expirationSeconds: 600
+                  path: token
         {{- end }}
         {{- with .Values.gateway.extraVolumes }}
         {{- toYaml . | nindent 8 }}

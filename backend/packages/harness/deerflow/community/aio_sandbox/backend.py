@@ -41,7 +41,12 @@ def sandbox_http_trust_env(sandbox_url: str) -> bool:
     return not (address.is_loopback or address.is_private or address.is_link_local)
 
 
-def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
+def wait_for_sandbox_ready(
+    sandbox_url: str,
+    timeout: int = 30,
+    *,
+    headers: dict[str, str] | None = None,
+) -> bool:
     """Poll sandbox health endpoint until ready or timeout.
 
     Args:
@@ -56,7 +61,13 @@ def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
         session.trust_env = sandbox_http_trust_env(sandbox_url)
         while time.time() - start_time < timeout:
             try:
-                response = session.get(f"{sandbox_url}/v1/sandbox", timeout=5)
+                request_kwargs: dict[str, object] = {"timeout": 5}
+                if headers:
+                    request_kwargs["headers"] = headers
+                response = session.get(
+                    f"{sandbox_url}/v1/sandbox",
+                    **request_kwargs,
+                )
                 if response.status_code == 200:
                     return True
             except requests.exceptions.RequestException:
@@ -65,7 +76,13 @@ def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
     return False
 
 
-async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll_interval: float = 1.0) -> bool:
+async def wait_for_sandbox_ready_async(
+    sandbox_url: str,
+    timeout: int = 30,
+    poll_interval: float = 1.0,
+    *,
+    headers: dict[str, str] | None = None,
+) -> bool:
     """Async variant of sandbox readiness polling.
 
     Use this from async runtime paths so sandbox startup waits do not block the
@@ -81,7 +98,15 @@ async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll
             if remaining <= 0:
                 break
             try:
-                response = await client.get(f"{sandbox_url}/v1/sandbox", timeout=min(5.0, remaining))
+                request_kwargs: dict[str, object] = {
+                    "timeout": min(5.0, remaining),
+                }
+                if headers:
+                    request_kwargs["headers"] = headers
+                response = await client.get(
+                    f"{sandbox_url}/v1/sandbox",
+                    **request_kwargs,
+                )
                 if response.status_code == 200:
                     return True
             except httpx.RequestError:
@@ -111,6 +136,8 @@ class SandboxBackend(ABC):
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
+        accepted_skills_only: bool = False,
+        accepted_skill_binding: object | None = None,
     ) -> SandboxInfo:
         """Create/provision a new sandbox.
 
@@ -127,6 +154,10 @@ class SandboxBackend(ABC):
                 broker sidecar (Pattern B, issue #4338) so credentials stay out of
                 the sandbox. Supersedes ``provision_lark_cli_runtime`` when the
                 backend supports it; backends that can't do this ignore it.
+            accepted_skill_binding: Optional immutable accepted-skill request.
+                Only a backend with a verified materialization contract may use it.
+            accepted_skills_only: Exclude every mutable live-skill projection even
+                when the accepted set is empty.
 
         Returns:
             SandboxInfo with connection details.
@@ -156,6 +187,16 @@ class SandboxBackend(ABC):
             True if the sandbox appears to be alive.
         """
         ...
+
+    def renew_accepted_attempt(self, info: SandboxInfo) -> bool:
+        """Renew a backend-native accepted-material attempt when present.
+
+        Backends without an expiring native attempt keep their existing
+        lifecycle semantics. Remote Kubernetes overrides this fail-closed seam.
+        """
+
+        del info
+        return True
 
     @abstractmethod
     def discover(self, sandbox_id: str) -> SandboxInfo | None:

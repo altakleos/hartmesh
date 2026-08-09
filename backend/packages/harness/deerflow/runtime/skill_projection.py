@@ -239,6 +239,23 @@ class SkillProjectionCoordinator:
         ):
             raise SkillProjectionBusyError()
 
+    def binding_for_committed_run(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        run_id: str,
+    ) -> tuple[int, str | None, SkillProjectionEvidence]:
+        """Return the exact accepted projection already owned by ``run_id``."""
+
+        key = self._key(user_id, thread_id)
+        _validate_text(run_id, "run_id")
+        with self._lock:
+            state = self._states.get(key)
+            if state is None or state.run_id != run_id or state.clearing is not None or not isinstance(state.evidence, SkillProjectionEvidence):
+                raise SkillProjectionBusyError()
+            return state.generation, state.snapshot_id, state.evidence
+
     def try_claim_committed_run(
         self,
         *,
