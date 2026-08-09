@@ -1264,7 +1264,13 @@ can reclaim an expired worker, defer a busy thread in FIFO order, and resolve a 
 accepted before a crash with the same stable key. The in-memory message bus only wakes
 receipt processing. Local memory/SQLite channel delivery remains explicitly
 `best_effort`; the administrator deployment report, not portable capabilities, reports
-that per-source ingress guarantee.
+that per-source ingress guarantee. GitHub is reported `durable` only while HMAC
+authentication and PostgreSQL receipt storage are both active. The explicit unverified
+webhook opt-in is local-development-only and stays `best_effort` even with PostgreSQL;
+the durable profile rejects that configuration and does not fall back to it after secret
+loss. Verified-ingress eligibility is frozen when the Gateway is composed: adding a
+previously absent secret requires restart, while replacing one nonblank secret with another
+continues to support request-time rotation.
 Each accepted invocation is the normal durable run row itself; checkpoint and
 artifact reservation rows are internal operations and never appear in this API.
 The pre-admission ingress receipt (where supported), committed invocation acceptance,

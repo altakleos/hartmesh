@@ -16,10 +16,13 @@ from app.channels.inbound_receipts import (
     SqlInboundReceiptStore,
 )
 from app.channels.message_bus import InboundMessage
+from app.channels.service import ChannelService
 from app.runtime.native_binding import (
     InternalVerifiedNativeBinding,
     InternalVerifiedNativeBindingKind,
 )
+from deerflow.config.app_config import AppConfig
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.persistence.base import Base
 from deerflow.persistence.inbound_receipt.model import InboundReceiptRow
 
@@ -61,6 +64,55 @@ def _envelope(
             created_at=created_at,
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_durable_profile_never_falls_back_to_message_bus_without_receipts() -> None:
+    raw = AppConfig(sandbox=SandboxConfig(use="test")).model_dump(mode="python")
+    raw["deployment"]["profile"] = "durable_production"
+    raw["database"]["backend"] = "sqlite"
+    config = AppConfig.model_validate(raw)
+    service = ChannelService(channels_config={}, app_config=config)
+    message = InboundMessage(
+        channel_name="github",
+        chat_id="repo:issue:17",
+        user_id="octocat",
+        text="review",
+    )
+
+    with pytest.raises(RuntimeError, match="durable inbound receipt processor"):
+        await service.accept_verified_inbound_batch((message,))
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(service.bus.get_inbound(), timeout=0.01)
+
+
+@pytest.mark.asyncio
+async def test_durable_profile_rejects_non_durable_receipt_processor() -> None:
+    class BestEffortProcessor:
+        durable = False
+
+        async def receive_batch(self, messages) -> None:
+            raise AssertionError("best-effort processor must not receive durable ingress")
+
+    raw = AppConfig(sandbox=SandboxConfig(use="test")).model_dump(mode="python")
+    raw["deployment"]["profile"] = "durable_production"
+    raw["database"]["backend"] = "sqlite"
+    config = AppConfig.model_validate(raw)
+    service = ChannelService(channels_config={}, app_config=config)
+    service.inbound_receipt_processor = BestEffortProcessor()
+
+    with pytest.raises(RuntimeError, match="durable inbound receipt processor"):
+        await service.accept_verified_inbound_batch(
+            (
+                InboundMessage(
+                    channel_name="github",
+                    chat_id="repo:issue:17",
+                    user_id="octocat",
+                    text="review",
+                ),
+            )
+        )
 
 
 @pytest.mark.asyncio

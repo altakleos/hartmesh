@@ -128,9 +128,16 @@ handles. The current signed GitHub path rejects transient attachments rather tha
 persisting their bytes. Webhook secrets, access tokens, raw provider payloads, resolved
 credentials, and arbitrary metadata never enter the receipt. The administrator
 deployment report exposes `native_ingress.v1` per enabled source as `durable` or
-`best_effort`; portable runtime capabilities do not. SQLite/memory and explicitly
-memory-backed receipt configuration remain local convenience and cannot satisfy the
-durable production profile.
+`best_effort`; portable runtime capabilities do not. `durable` is the conjunction of
+current HMAC-authenticated webhook mode and PostgreSQL receipt storage. The explicit
+unverified webhook opt-in is available only in `local_development` and remains
+`best_effort` even when PostgreSQL is configured. A durable process whose secret is
+removed becomes not-ready and rejects requests rather than falling through to the
+development bus path. SQLite/memory and explicitly memory-backed receipt configuration
+remain local convenience and cannot satisfy the durable production profile.
+Verified-ingress eligibility is startup-frozen. A secret added after Gateway composition
+does not mount the absent route or upgrade its deployment report until restart; rotating
+one configured nonblank secret to another remains request-time behavior.
 
 `InboundReceiptProcessor` owns both recovery and in-flight claim tasks. Channel
 shutdown stops producers, cancels and awaits those tasks, and leaves an interrupted
@@ -362,7 +369,7 @@ the retained row is deleted.
 Hartmesh separates the boundaries instead of treating “durable invocation” as an end-to-end
 exactly-once claim:
 
-- **Ingress receipt boundary** — a signed GitHub delivery using PostgreSQL receipt storage is
+- **Ingress receipt boundary** — an HMAC-verified GitHub delivery using PostgreSQL receipt storage is
   acknowledged only after the bounded verified-source envelope is committed. Unsupported native
   sources, unverified development webhooks, and local memory/SQLite receipt modes are
   `best_effort`; provider delivery and `MessageBus` notification before a durable receipt remain

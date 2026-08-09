@@ -129,7 +129,7 @@ class RuntimeReadinessCoordinator:
         reasons: list[str] = []
         correlation_id: str | None = None
         if not self._persistence_ready():
-            reasons.append("persistence_profile_unsatisfied")
+            reasons.append("deployment_profile_unsatisfied")
 
         expected_generation = self._extension_generation()
         store = self._store()

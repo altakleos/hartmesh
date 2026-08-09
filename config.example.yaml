@@ -1954,8 +1954,12 @@ database:
 # backend: memory   -- Process-local best-effort ingress only. An acknowledged
 #                       delivery can be lost with the Gateway process.
 # backend: postgres -- Store leased receipts in the application PostgreSQL DB.
-#                       Required for an enabled durable native source in the
-#                       durable_production profile.
+#                       Required together with current HMAC webhook
+#                       authentication for an enabled durable native source in
+#                       the durable_production profile. Unverified development
+#                       webhooks remain best_effort with any receipt backend.
+#                       Adding a previously absent HMAC secret requires Gateway
+#                       restart before verified ingress can be advertised.
 #
 # dedupe_storage:
 #   backend: auto

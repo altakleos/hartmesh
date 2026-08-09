@@ -30,10 +30,8 @@ Feishu/Slack/etc.) takes care of posting the agent's reply back to GitHub.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import logging
-import os
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -42,13 +40,20 @@ from app.gateway.github.dispatcher import (
     VerifiedGitHubWebhookRequest,
     fanout_event,
 )
+from app.gateway.github.webhook_auth import (
+    ALLOW_UNVERIFIED_GITHUB_WEBHOOKS_ENV,
+    GITHUB_WEBHOOK_SECRET_ENV,
+    GitHubWebhookAuth,
+    GitHubWebhookAuthMode,
+    resolve_github_webhook_auth,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 
-_SECRET_ENV_VAR = "GITHUB_WEBHOOK_SECRET"
-_ALLOW_UNVERIFIED_ENV_VAR = "DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS"
+_SECRET_ENV_VAR = GITHUB_WEBHOOK_SECRET_ENV
+_ALLOW_UNVERIFIED_ENV_VAR = ALLOW_UNVERIFIED_GITHUB_WEBHOOKS_ENV
 
 # Events we explicitly recognise. Anything else still returns 200 (so
 # GitHub does not retry) but is logged as "unhandled" for visibility.
@@ -65,31 +70,18 @@ _KNOWN_EVENTS: frozenset[str] = frozenset(
 
 
 def _get_webhook_secret() -> str | None:
-    """Return the configured webhook secret, or None if unset.
+    """Compatibility accessor delegated to the canonical auth Module."""
 
-    Read at request time so operators can rotate the secret without a
-    full process restart. Treats empty strings as "unset" so a stray
-    ``GITHUB_WEBHOOK_SECRET=`` in ``.env`` does not silently disable
-    signature verification.
-    """
-    value = os.environ.get(_SECRET_ENV_VAR)
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
+    return resolve_github_webhook_auth().secret
 
 
 def _unverified_webhooks_allowed() -> bool:
-    """Return True iff the explicit dev opt-in for unverified deliveries is set.
+    """Compatibility accessor delegated to the canonical auth Module."""
 
-    Truthy values: ``1``, ``true``, ``yes``, ``on`` (case-insensitive).
-    Anything else (including unset) is False.
-    """
-    raw = os.environ.get(_ALLOW_UNVERIFIED_ENV_VAR, "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    return resolve_github_webhook_auth().mode is GitHubWebhookAuthMode.unverified_development
 
 
-def is_route_enabled() -> bool:
+def is_route_enabled(*, deployment_profile: object = "local_development") -> bool:
     """Return True iff the GitHub webhook route should be mounted.
 
     Mounted when either:
@@ -102,22 +94,18 @@ def is_route_enabled() -> bool:
     even by accident. Called by :mod:`app.gateway.app` at router
     inclusion time.
     """
-    return _get_webhook_secret() is not None or _unverified_webhooks_allowed()
+    return resolve_github_webhook_auth(
+        deployment_profile=deployment_profile,
+    ).route_enabled
 
 
 def _verify_signature(secret: str, body: bytes, signature_header: str | None) -> bool:
-    """Verify the GitHub ``X-Hub-Signature-256`` HMAC.
+    """Compatibility helper delegated to the canonical auth Module."""
 
-    Expected header format: ``sha256=<hex>``. Returns False if the header
-    is missing, malformed, or fails constant-time comparison.
-    """
-    if not signature_header:
-        return False
-    if not signature_header.startswith("sha256="):
-        return False
-    provided = signature_header.removeprefix("sha256=").strip()
-    expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(provided, expected)
+    return GitHubWebhookAuth(
+        mode=GitHubWebhookAuthMode.hmac_sha256_verified,
+        secret=secret,
+    ).verify(body, signature_header)
 
 
 def _summarise_event(event: str, payload: dict[str, Any]) -> str:
@@ -226,10 +214,17 @@ async def receive_github_webhook(
     """
     body = await request.body()
 
-    secret = _get_webhook_secret()
+    deployment_profile = getattr(
+        request.app.state,
+        "deployment_profile",
+        "local_development",
+    )
+    authentication = resolve_github_webhook_auth(
+        deployment_profile=deployment_profile,
+    )
     verified_request: VerifiedGitHubWebhookRequest | None = None
-    if secret is None:
-        if not _unverified_webhooks_allowed():
+    if authentication.mode is not GitHubWebhookAuthMode.hmac_sha256_verified:
+        if authentication.mode is GitHubWebhookAuthMode.disabled:
             # Should be unreachable if startup-time is_route_enabled() was honored,
             # but a runtime rotation that cleared the secret without a restart
             # would land here. Refuse the delivery.
@@ -251,7 +246,7 @@ async def receive_github_webhook(
             _ALLOW_UNVERIFIED_ENV_VAR,
         )
     else:
-        if not _verify_signature(secret, body, x_hub_signature_256):
+        if not authentication.verify(body, x_hub_signature_256):
             logger.warning(
                 "github_webhook: signature verification FAILED (event=%s delivery=%s)",
                 x_github_event,
