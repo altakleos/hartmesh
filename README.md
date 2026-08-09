@@ -1214,8 +1214,11 @@ requires an `external_key`, while DeerFlow derives its scope from the
 authenticated user/service; equal retries compare the complete canonical caller
 intent, return the retained run, and never attach a second worker. Adding,
 removing, or changing an execution option conflicts; accepted server defaults
-and pinned facts are retained separately and reused. Invocation/context reads apply owner/admin
-visibility by default. Operators can give a specifically authenticated integration service a
+and pinned facts are retained separately as accepted effective execution and reused. Equal
+replay does not rerun contributors, authorization, constraints, default resolution,
+agent/profile routing, or model execution. This refers to start/admission authorization;
+current observe authorization still applies before a retained run is revealed.
+Invocation/context reads apply owner/admin visibility by default. Operators can give a specifically authenticated integration service a
 bounded `run_ids`, `thread_ids`, `owner_ids`, or `source_kinds` search grant under
 `authorization.service_observation_grants`; this requires enabled observe authorization, never
 grants cancellation, and is re-evaluated on every poll. The grant only selects rows eligible
@@ -1231,9 +1234,11 @@ pages expose opaque `next_cursor`, `minimum_available_cursor`, and
 stable event ID/cursor.
 
 Polling observe is the supported durable evidence path; an event sink or broker is not
-required for correctness. Clarification completes the current invocation successfully with a
-request for more information, and the user's answer starts a new invocation on the same
-thread. The current lifecycle has no `input_required` state or same-invocation suspension.
+required for correctness and any push path is only optional at-least-once acceleration.
+Clarification completes the current invocation successfully with a request for more
+information, and the user's answer starts a new invocation on the same DeerFlow thread,
+reusing its checkpoints, memory, workspace, and conversation context. The current lifecycle
+has no `input_required` state or same-invocation suspension.
 
 The transport returns `201` for a created invocation, `202` for a newly
 requested cancellation, `200` for known/observed/already-finished outcomes,
@@ -1262,6 +1267,13 @@ receipt processing. Local memory/SQLite channel delivery remains explicitly
 that per-source ingress guarantee.
 Each accepted invocation is the normal durable run row itself; checkpoint and
 artifact reservation rows are internal operations and never appear in this API.
+The pre-admission ingress receipt (where supported), committed invocation acceptance,
+pinned execution, cursor-polled observation, and outbound delivery are separate durability
+boundaries. The contract does not promise exactly-once or resumable model execution,
+provider/bus delivery before a durable receipt, exactly-once outbound delivery, rollback of
+external side effects, or multi-replica execution ownership. A process-lost active invocation
+is terminalized as failed with `stop_reason=orphan_recovered`; a product retry is a new
+invocation under the new startup-frozen process generation.
 `GET /health` is process liveness and remains healthy during a recoverable authority or
 database outage. `GET /ready` reports only ready/not-ready and proves fresh current-generation
 health for operator-required authorization, contributors, constraints, and MCP preparation,
@@ -1271,7 +1283,9 @@ its stored evidence.
 Administrators obtain the immutable capability manifest, separate live-health
 snapshot, bounded provenance, persistence tier, and qualification state from
 `/deployment`; `/capabilities` remains strict and transport-identical to the
-in-process Adapter.
+in-process Adapter. One immutable extension generation is one startup-frozen process
+generation in the supported one-replica profile; a restart creates the next generation and
+does not coordinate simultaneous generations or rolling replicas.
 
 Operator-installed invocation-constraint providers should use the v2 extension contract.
 It receives only sealed identity, source, thread, revision, and manifest references and can
@@ -1290,7 +1304,7 @@ multi-replica ownership design exists.
 
 ## Embedded Python Client
 
-DeerFlow can be used as an embedded Python library without running the full HTTP services. The synchronous `DeerFlowClient` provides direct, non-durable local graph execution and does not enter `InvocationRuntime`; use the asynchronous `deerflow-runtime-api` in-process adapter through its standard-library-only `DurableInvocationPort` Protocol when durable ensure/observe/control semantics are required. Its validated records are transitively immutable snapshots, and `to_dict()` returns a fresh mutable wire copy. Its other methods return the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
+DeerFlow can be used as an embedded Python library without running the full HTTP services. The synchronous `DeerFlowClient` provides direct, non-durable local graph execution and does not enter `InvocationRuntime`; use the application-hosted asynchronous `deerflow-runtime-api` in-process Adapter through its standard-library-only `DurableInvocationPort` Protocol when durable ensure/observe/control semantics are required. The Adapter's validated records are transitively immutable snapshots, and `to_dict()` returns a fresh mutable wire copy. `DeerFlowClient` management helpers may retain Gateway-aligned response schemas, but that wire-shape compatibility does not provide Gateway admission, recovery, cancellation, or lifecycle observation. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
 
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
 IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores

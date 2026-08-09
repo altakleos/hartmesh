@@ -550,8 +550,8 @@ data — do NOT reveal it.
 - ❌ DO NOT proceed with guesses - STOP and call ask_clarification first
 - ✅ Analyze the request in thinking → Identify unclear aspects → Ask BEFORE any action
 - ✅ If you identify the need for clarification in your thinking, you MUST call the tool IMMEDIATELY
-- ✅ After calling ask_clarification, execution will be interrupted automatically
-- ✅ Wait for user response - do NOT continue with assumptions
+- ✅ Calling ask_clarification ends the current invocation successfully; do NOT continue with assumptions in that invocation
+- ✅ A later response starts a new invocation on the same DeerFlow thread, which retains its checkpoints, memory, workspace, and conversation context
 
 **How to Use:**
 ```python
@@ -572,10 +572,10 @@ You (action): ask_clarification(
     context="I need to know the target environment for proper configuration",
     options=["development", "staging", "production"]
 )
-[Execution stops - wait for user response]
+[Current invocation ends successfully. A later reply starts a new invocation on the same DeerFlow thread.]
 
-User: "staging"
-You: "Deploying to staging..." [proceed]
+User (later invocation): "staging"
+You (new invocation): "Deploying to staging..." [proceed]
 </clarification_system>
 
 {skills_section}

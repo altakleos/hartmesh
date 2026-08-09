@@ -275,8 +275,10 @@ class InvocationOptionsV1(_Record):
 class InvocationEnsureRequest(_Record):
     """One source-keyed durable invocation request.
 
-    Equal retries reuse the retained invocation; changed caller intent returns
-    a conflict. Principal, scope, Origin, and accepted facts are host supplied.
+    These fields form canonical caller intent. Equal intent reuses the retained
+    invocation and its separately accepted effective execution; changed intent
+    conflicts. Replay does not repeat admission resolution or execution.
+    Principal, scope, Origin, and accepted facts are host supplied.
     """
 
     KIND: ClassVar[str] = "invocation.ensure"
@@ -573,6 +575,9 @@ def _validate_snapshot(row: Mapping[str, ImmutableJsonValue]) -> None:
 class InvocationObservation(_Record):
     """One access-filtered, bounded, at-least-once lifecycle page.
 
+    Cursor polling of these transactional lifecycle rows is the authoritative
+    v1 evidence path and does not require an event sink. An asynchronous push
+    path can accelerate delivery but cannot replace this correctness surface.
     Event IDs/cursors make repeated pages harmless. ``next_cursor`` advances
     within ``read_fence_cursor`` and ``minimum_available_cursor`` identifies
     the retention boundary after pruning. ``summaries`` joins safe accepted
@@ -813,7 +818,7 @@ class DurableInvocationPort(Protocol):
         self,
         request: InvocationEnsureRequest,
     ) -> InvocationEnsureReceipt | RuntimeFailure:
-        """Create or reuse one invocation for the request's external key."""
+        """Create or reuse by canonical intent and retain accepted execution."""
 
         ...
 

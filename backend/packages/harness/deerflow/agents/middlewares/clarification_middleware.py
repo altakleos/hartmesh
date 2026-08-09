@@ -67,16 +67,17 @@ class ClarificationMiddlewareState(AgentState):
 
 
 class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
-    """Intercepts clarification tool calls and interrupts execution to present questions to the user.
+    """Intercept clarification tool calls and present questions to the user.
 
     When the model calls the `ask_clarification` tool, this middleware:
     1. Intercepts the tool call before execution
     2. Extracts the clarification question and metadata
     3. Formats a user-friendly message
-    4. Returns a Command that interrupts execution and presents the question
-    5. Waits for user response before continuing
+    4. Returns a ``Command(goto=END)`` that presents the question
+    5. The middleware ends the current invocation successfully
 
-    This replaces the tool-based approach where clarification continued the conversation flow.
+    A later user response starts a new invocation on the same DeerFlow thread;
+    this middleware does not suspend and resume the invocation that asked.
     """
 
     state_schema = ClarificationMiddlewareState

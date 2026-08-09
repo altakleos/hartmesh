@@ -83,7 +83,10 @@ array order is significant. Null `agent_hint`, model/thinking, checkpoint, and i
 mean omission; `multitask_strategy="reject"` is the explicit wire default. Adding, removing, or
 changing any other intent conflicts. HTTP-only delivery metadata cannot participate because it
 is not part of this contract. An equal replay returns the retained invocation in any lifecycle
-state and reuses its pinned effective projection without resolving defaults or executing again.
+state and reuses its accepted effective execution without rerunning contributors,
+authorization, constraints, default resolution, agent/profile routing, or model execution.
+That is the start/admission path; current observe authorization still runs before a retained
+invocation is revealed.
 
 ## Host adapters
 
@@ -94,7 +97,9 @@ authenticates that service ID before construction. The adapter derives a
 domain-separated canonical scope from `["service",
 authenticated_service_id]` and routes every operation through the existing
 `InvocationRuntime`; it does not implement policy, persistence, or execution
-independently.
+independently. This application-hosted in-process Adapter is distinct from the
+local synchronous `DeerFlowClient`, which runs a graph directly and does not
+provide durable admission, lifecycle observation, cancellation, or recovery.
 
 Embedded and HTTP service principals are owner-scoped by default. An operator may configure a
 finite host-side observation grant for a specifically authenticated service, but no portable
@@ -114,11 +119,13 @@ the requested page rather than total thread history. Events, cursor metadata,
 and joined summaries come from one database snapshot; filtered empty pages
 still advance to the captured global fence.
 
-Polling `DurableInvocationPort.observe` is the supported durable evidence path. The
-transactional journal and authoritative snapshot do not depend on an event sink or broker;
-push delivery is deferred and is not a correctness requirement. A clarification result is a
-successful completion of its invocation, and the caller's answer is a new invocation on the
-same thread. V1 deliberately has no `input_required` lifecycle state.
+Polling `DurableInvocationPort.observe` is the supported durable evidence path. Cursor polling
+of transactional lifecycle rows is authoritative in v1. The transactional journal and
+authoritative snapshot do not depend on an event sink or broker; push delivery can only be
+optional at-least-once acceleration and is not a correctness requirement. A clarification
+result is a successful completion of its invocation, and the caller's answer is a new
+invocation on the same DeerFlow thread, reusing its checkpoints, memory, workspace, and
+conversation context. V1 deliberately has no `input_required` lifecycle state.
 
 Gateway's authenticated `/api/runtime/v1` routes consume the same Protocol and
 records. The transport-neutral conformance suite runs against both the embedded
