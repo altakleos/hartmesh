@@ -74,7 +74,11 @@ class NativeIngressReport:
         }
 
 
-def describe_native_ingress(config: Any) -> NativeIngressReport:
+def describe_native_ingress(
+    config: Any,
+    *,
+    verified_sources: frozenset[str] = frozenset(),
+) -> NativeIngressReport:
     """Describe configured source support without claiming bus durability."""
 
     database = getattr(config, "database", None)
@@ -88,7 +92,7 @@ def describe_native_ingress(config: Any) -> NativeIngressReport:
     github = channels.get("github", {}) if isinstance(channels, dict) else {}
     if not isinstance(github, dict) or not github.get("enabled", False):
         return NativeIngressReport()
-    guarantee = IngressDeliveryGuarantee.durable if database_backend == "postgres" and receipt_backend != "memory" else IngressDeliveryGuarantee.best_effort
+    guarantee = IngressDeliveryGuarantee.durable if ("github" in verified_sources and database_backend == "postgres" and receipt_backend in {"auto", "postgres"}) else IngressDeliveryGuarantee.best_effort
     return NativeIngressReport(sources=(("github", guarantee),))
 
 
@@ -142,7 +146,11 @@ def describe_persistence(
     raise ValueError("unsupported persistence backend")
 
 
-def validate_deployment_profile(config: Any) -> None:
+def validate_deployment_profile(
+    config: Any,
+    *,
+    verified_sources: frozenset[str] = frozenset(),
+) -> None:
     """Reject a production durability promise backed by process-local state."""
 
     deployment = getattr(config, "deployment", None)
@@ -160,9 +168,12 @@ def validate_deployment_profile(config: Any) -> None:
     )
     if profile is DeploymentProfile.durable_production and persistence.tier is PersistenceTier.process_local:
         raise ValueError("durable_production cannot use process-local invocation state")
-    ingress = describe_native_ingress(config)
+    ingress = describe_native_ingress(
+        config,
+        verified_sources=verified_sources,
+    )
     if profile is DeploymentProfile.durable_production and any(guarantee is not IngressDeliveryGuarantee.durable for _source, guarantee in ingress.sources):
-        raise ValueError("durable_production requires PostgreSQL inbound receipt storage for every enabled durable native source")
+        raise ValueError("durable_production requires verified durable native ingress with PostgreSQL inbound receipt storage for every enabled native source")
 
 
 def _bounded_optional(value: str | None, *, field_name: str, limit: int) -> str | None:
@@ -421,6 +432,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         provenance: DeploymentProvenance | None = None,
         qualification: DeploymentQualification | None = None,
         native_ingress: NativeIngressReport | None = None,
+        native_ingress_supplier: Callable[[], NativeIngressReport] | None = None,
     ) -> None:
         self._profile = DeploymentProfile(profile)
         self._persistence = describe_persistence(
@@ -432,7 +444,10 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         self._readiness_supplier = readiness_supplier or (lambda: None)
         self._provenance = provenance or DeploymentProvenance()
         self._qualification = qualification or DeploymentQualification()
-        self._native_ingress = native_ingress or NativeIngressReport()
+        if native_ingress is not None and native_ingress_supplier is not None:
+            raise ValueError("native_ingress and native_ingress_supplier are mutually exclusive")
+        static_native_ingress = native_ingress or NativeIngressReport()
+        self._native_ingress_supplier = native_ingress_supplier or (lambda: static_native_ingress)
 
     @property
     def persistence_ready(self) -> bool:
@@ -441,6 +456,16 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         if self._profile is DeploymentProfile.local_development:
             return True
         return self._persistence.restart_durable and self._persistence.atomic_lifecycle
+
+    @property
+    def admission_profile_ready(self) -> bool:
+        """Whether persistence and enabled ingress satisfy the profile."""
+
+        if not self.persistence_ready:
+            return False
+        if self._profile is DeploymentProfile.local_development:
+            return True
+        return all(guarantee is IngressDeliveryGuarantee.durable for _source, guarantee in self._native_ingress_supplier().sources)
 
     def with_runtime_store(
         self,
@@ -460,7 +485,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             readiness_supplier=self._readiness_supplier,
             provenance=self._provenance,
             qualification=self._qualification,
-            native_ingress=self._native_ingress,
+            native_ingress_supplier=self._native_ingress_supplier,
         )
 
     async def deployment_report(self) -> DeploymentReport:
@@ -472,7 +497,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             admission_readiness=self._readiness_supplier(),
             provenance=self._provenance,
             qualification=self._qualification,
-            native_ingress=self._native_ingress,
+            native_ingress=self._native_ingress_supplier(),
         )
 
 

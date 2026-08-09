@@ -179,7 +179,7 @@ async def test_process_local_persistence_blocks_durable_admission() -> None:
     assert await coordinator.ready_for_admission() is False
     snapshot = coordinator.last_snapshot
     assert snapshot is not None
-    assert snapshot.reason_codes == ("persistence_profile_unsatisfied",)
+    assert snapshot.reason_codes == ("deployment_profile_unsatisfied",)
 
 
 @pytest.mark.asyncio

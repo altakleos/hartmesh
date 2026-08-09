@@ -122,6 +122,8 @@ class ChannelService:
         self.store = ChannelStore()
         self._connection_repo = connection_repo
         self._get_stream_bridge = get_stream_bridge
+        deployment = getattr(app_config, "deployment", None)
+        self._durable_production = getattr(deployment, "profile", None) == "durable_production"
         config = dict(channels_config or {})
         langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
         gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
@@ -313,9 +315,14 @@ class ChannelService:
         batch = tuple(messages)
         if not batch:
             return
-        if self.inbound_receipt_processor is not None:
-            await self.inbound_receipt_processor.receive_batch(batch)
+        processor = self.inbound_receipt_processor
+        if processor is not None:
+            if self._durable_production and not getattr(processor, "durable", False):
+                raise RuntimeError("durable inbound receipt processor is unavailable")
+            await processor.receive_batch(batch)
             return
+        if self._durable_production:
+            raise RuntimeError("durable inbound receipt processor is unavailable")
         for message in batch:
             await self.bus.publish_inbound(message)
 

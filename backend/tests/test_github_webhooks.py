@@ -383,6 +383,24 @@ def test_unset_secret_with_dev_optin_accepts_unverified(client: TestClient, monk
     assert any("UNVERIFIED delivery" in rec.message and "dev/loopback mode ONLY" in rec.message for rec in caplog.records)
 
 
+def test_durable_profile_never_falls_back_to_unverified_after_secret_loss(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client.app.state.deployment_profile = "durable_production"
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setenv("DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS", "1")
+    body = json.dumps({"zen": "ok"}).encode()
+
+    response = client.post(
+        "/api/webhooks/github",
+        content=body,
+        headers={"X-GitHub-Event": "ping", "X-GitHub-Delivery": DELIVERY_ID},
+    )
+
+    assert response.status_code == 503
+
+
 def test_empty_string_secret_rejects_without_optin(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty/whitespace-only secret is treated as unset by
     :func:`_get_webhook_secret`, so the fail-closed path applies (503) unless

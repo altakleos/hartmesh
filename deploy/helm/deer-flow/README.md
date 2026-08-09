@@ -265,9 +265,15 @@ the chart's database backend is PostgreSQL; an explicit `postgres` is equivalent
 `memory` retains local best-effort behavior and is rejected by the
 `durable_production` chart contract. The authenticated deployment report exposes a
 versioned `native_ingress` map with `durable` or `best_effort` per enabled source.
-Durable means the webhook commits every bounded fan-out receipt before acknowledgment;
+Durable requires both current HMAC authentication and PostgreSQL receipt storage, and
+means the webhook commits every bounded fan-out receipt before acknowledgment. The
+explicit unverified local-development mode remains `best_effort` even with PostgreSQL;
+it cannot satisfy `durable_production`. Removing the HMAC secret makes the Gateway
+not-ready and requests fail closed rather than falling through to that development mode;
 it does not mean that the process-local `MessageBus` is durable, and it does not claim
-multi-replica channel ownership.
+multi-replica channel ownership. Verified-ingress eligibility is frozen at Gateway
+composition, so adding a previously absent HMAC secret requires restart; rotating an
+already configured nonblank secret remains request-time behavior.
 
 The default internal health probe timeout is 2 seconds and the complete readiness evaluation
 is capped at 5 seconds. The chart's Gateway readiness probe uses `timeoutSeconds: 6`, so

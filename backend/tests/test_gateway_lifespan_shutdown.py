@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi import FastAPI
 
 
@@ -122,6 +123,55 @@ def test_lifespan_sweeps_upload_staging_files_on_startup():
     cleanup_upload_staging_files.assert_called_once_with()
     close_oidc_service.assert_awaited_once()
     stop_channel_service.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_durable_gateway_startup_fails_when_receipt_channel_cannot_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.gateway.app import lifespan
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    raw = AppConfig(sandbox=SandboxConfig(use="test")).model_dump(mode="python")
+    raw["deployment"]["profile"] = "durable_production"
+    raw["database"]["backend"] = "postgres"
+    raw["channels"] = {"github": {"enabled": True}}
+    raw["memory"]["enabled"] = False
+    startup_config = AppConfig.model_validate(raw)
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "startup-secret")
+    monkeypatch.delenv(
+        "DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS",
+        raising=False,
+    )
+    app = FastAPI()
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch(
+            "app.gateway.app.get_gateway_config",
+            return_value=MagicMock(host="x", port=0),
+        ),
+        patch("app.gateway.app.ensure_browser_runtime_available"),
+        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app._ensure_admin_user", AsyncMock()),
+        patch("app.gateway.app.cleanup_stale_upload_staging_files", return_value=0),
+        patch("deerflow.runtime.skill_snapshot.cleanup_abandoned_skill_snapshots", return_value=0),
+        patch("deerflow.skills.projection.ensure_public_skill_projection", return_value=False),
+        patch("app.gateway.services.build_channel_invocation_runtime", return_value=object()),
+        patch(
+            "app.channels.service.start_channel_service",
+            side_effect=RuntimeError("database credential must stay private"),
+        ),
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match="durable native ingress failed to initialize",
+        ) as caught:
+            async with lifespan(app):
+                raise AssertionError("lifespan must not start serving")
+
+    assert "credential" not in str(caught.value)
 
 
 async def _run_lifespan_with_memory_flush(*, enabled: bool, flush_return: bool | Exception) -> MagicMock:

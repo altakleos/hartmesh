@@ -20,6 +20,7 @@ from app.runtime.deployment import (
     DeploymentQualification,
     GatewayDeploymentReporter,
     IngressDeliveryGuarantee,
+    NativeIngressReport,
     PersistenceTier,
     describe_native_ingress,
     describe_persistence,
@@ -310,12 +311,53 @@ def test_native_ingress_report_distinguishes_durable_and_best_effort() -> None:
         )
 
     local = describe_native_ingress(config(database="sqlite", receipt_backend="memory"))
-    durable = describe_native_ingress(config(database="postgres", receipt_backend="auto"))
+    unverified_postgres = describe_native_ingress(
+        config(database="postgres", receipt_backend="auto"),
+    )
+    durable = describe_native_ingress(
+        config(database="postgres", receipt_backend="auto"),
+        verified_sources=frozenset({"github"}),
+    )
 
     assert local.sources == (("github", IngressDeliveryGuarantee.best_effort),)
+    assert unverified_postgres.sources == (("github", IngressDeliveryGuarantee.best_effort),)
     assert durable.sources == (("github", IngressDeliveryGuarantee.durable),)
     assert local.to_dict()["sources"] == {"github": "best_effort"}
     assert durable.to_dict()["sources"] == {"github": "durable"}
+
+
+def test_durable_profile_rejects_unverified_github_even_with_postgres_receipts() -> None:
+    config = SimpleNamespace(
+        deployment=SimpleNamespace(profile="durable_production"),
+        database=SimpleNamespace(backend="postgres"),
+        dedupe_storage=SimpleNamespace(backend="auto"),
+        model_extra={"channels": {"github": {"enabled": True}}},
+    )
+
+    with pytest.raises(ValueError, match="verified durable native ingress"):
+        validate_deployment_profile(config, verified_sources=frozenset())
+
+
+def test_durable_profile_readiness_tracks_current_native_ingress_authentication() -> None:
+    current = NativeIngressReport(
+        sources=(("github", IngressDeliveryGuarantee.best_effort),),
+    )
+    reporter = GatewayDeploymentReporter(
+        profile=DeploymentProfile.durable_production,
+        database_backend="postgres",
+        atomic_lifecycle=True,
+        manifest=build_capability_manifest(ExtensionRegistry().build(generation=7)),
+        health_monitor=_HealthMonitor(),
+        native_ingress_supplier=lambda: current,
+    )
+
+    assert reporter.admission_profile_ready is False
+
+    current = NativeIngressReport(
+        sources=(("github", IngressDeliveryGuarantee.durable),),
+    )
+
+    assert reporter.admission_profile_ready is True
 
 
 def test_durable_profile_rejects_enabled_source_without_postgres_receipts() -> None:

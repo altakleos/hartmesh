@@ -200,9 +200,42 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         startup_config = get_app_config()
         configure_logging(startup_config)
         ensure_browser_runtime_available(startup_config)
-        from app.runtime.deployment import validate_deployment_profile
+        from app.gateway.github.webhook_auth import (
+            GitHubWebhookAuthMode,
+            resolve_github_webhook_auth,
+        )
+        from app.runtime.deployment import (
+            DeploymentProfile,
+            describe_native_ingress,
+            validate_deployment_profile,
+        )
 
-        validate_deployment_profile(startup_config)
+        startup_deployment = getattr(startup_config, "deployment", None)
+        startup_profile = getattr(
+            startup_deployment,
+            "profile",
+            DeploymentProfile.local_development,
+        )
+        webhook_auth = resolve_github_webhook_auth(
+            deployment_profile=startup_profile,
+        )
+        current_verified_sources = frozenset({"github"}) if webhook_auth.mode is GitHubWebhookAuthMode.hmac_sha256_verified else frozenset()
+        composition_verified_sources = getattr(
+            app.state,
+            "verified_native_sources_at_composition",
+            current_verified_sources,
+        )
+        verified_sources = frozenset(composition_verified_sources).intersection(current_verified_sources)
+        startup_native_ingress = describe_native_ingress(
+            startup_config,
+            verified_sources=verified_sources,
+        )
+        validate_deployment_profile(
+            startup_config,
+            verified_sources=verified_sources,
+        )
+        durable_native_ingress_required = startup_profile == DeploymentProfile.durable_production and bool(startup_native_ingress.sources)
+        app.state.deployment_profile = startup_profile
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
     except Exception as e:
@@ -325,7 +358,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 invocation_runtime=build_channel_invocation_runtime(app),
             )
             logger.info("Channel service started: %s", channel_service.get_status())
-        except Exception:
+        except Exception as exc:
+            if durable_native_ingress_required:
+                raise RuntimeError("durable native ingress failed to initialize") from exc
             logger.exception("No IM channels configured or channel service failed to start")
 
         try:
@@ -769,12 +804,34 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         if construction_authorization.invocation_operations.observe_enabled
         else None
     )
+    from app.gateway.github.webhook_auth import (
+        GitHubWebhookAuthMode,
+        resolve_github_webhook_auth,
+    )
     from app.runtime.deployment import (
         DeploymentProvenance,
         DeploymentQualification,
         GatewayDeploymentReporter,
         describe_native_ingress,
     )
+
+    app.state.deployment_profile = construction_deployment.profile
+    composition_webhook_auth = resolve_github_webhook_auth(
+        deployment_profile=construction_deployment.profile,
+    )
+    composition_verified_sources = frozenset({"github"}) if composition_webhook_auth.mode is GitHubWebhookAuthMode.hmac_sha256_verified else frozenset()
+    app.state.verified_native_sources_at_composition = composition_verified_sources
+
+    def current_native_ingress():
+        webhook_auth = resolve_github_webhook_auth(
+            deployment_profile=construction_deployment.profile,
+        )
+        current_verified_sources = frozenset({"github"}) if webhook_auth.mode is GitHubWebhookAuthMode.hmac_sha256_verified else frozenset()
+        verified_sources = composition_verified_sources.intersection(current_verified_sources)
+        return describe_native_ingress(
+            construction_config,
+            verified_sources=verified_sources,
+        )
 
     try:
         deployment_provenance = DeploymentProvenance.from_environment()
@@ -799,7 +856,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         ),
         provenance=deployment_provenance,
         qualification=deployment_qualification,
-        native_ingress=describe_native_ingress(construction_config),
+        native_ingress_supplier=current_native_ingress,
     )
     from app.runtime.readiness import RuntimeReadinessCoordinator
 
@@ -809,7 +866,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         persistence_ready=lambda: bool(
             getattr(
                 getattr(app.state, "deployment_reporter", None),
-                "persistence_ready",
+                "admission_profile_ready",
                 False,
             )
         ),
@@ -899,7 +956,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # dev opt-in is set). A misconfigured deployment without a secret cannot
     # serve forged deliveries because the URL responds 404 — there is no
     # handler to reach.
-    if github_webhooks.is_route_enabled():
+    if composition_webhook_auth.route_enabled:
         app.include_router(github_webhooks.router)
         logger.info("GitHub webhooks route mounted at /api/webhooks/github")
     else:

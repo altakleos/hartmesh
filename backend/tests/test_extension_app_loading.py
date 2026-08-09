@@ -238,6 +238,78 @@ def test_create_app_fails_closed_for_required_extension_with_malformed_api_marke
         app_module.create_app()
 
 
+@pytest.mark.asyncio
+async def test_full_gateway_reports_only_hmac_authenticated_postgres_ingress_as_durable(
+    monkeypatch,
+    stub_app_config,
+):
+    import app.gateway.app as app_module
+    from deerflow.config.app_config import AppConfig
+
+    raw = stub_app_config.model_dump(mode="python")
+    raw["database"]["backend"] = "postgres"
+    raw["deployment"]["profile"] = "durable_production"
+    raw["channels"] = {"github": {"enabled": True}}
+    config = AppConfig.model_validate(raw)
+    monkeypatch.setattr(app_module, "get_app_config", lambda: config)
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "gateway-construction-secret")
+    monkeypatch.setenv("DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS", "1")
+
+    app = app_module.create_app()
+    report = await app.state.deployment_reporter.deployment_report()
+    ready_reporter = app.state.deployment_reporter.with_runtime_store(
+        profile="durable_production",
+        database_backend="postgres",
+        atomic_lifecycle=True,
+    )
+
+    assert report.native_ingress.to_dict()["sources"] == {"github": "durable"}
+    assert ready_reporter.admission_profile_ready is True
+
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "   ")
+    degraded = await ready_reporter.deployment_report()
+
+    assert degraded.native_ingress.to_dict()["sources"] == {"github": "best_effort"}
+    assert ready_reporter.admission_profile_ready is False
+
+
+@pytest.mark.asyncio
+async def test_full_gateway_downgrades_unverified_postgres_ingress_and_refuses_route(
+    monkeypatch,
+    stub_app_config,
+):
+    import app.gateway.app as app_module
+    from deerflow.config.app_config import AppConfig
+
+    raw = stub_app_config.model_dump(mode="python")
+    raw["database"]["backend"] = "postgres"
+    raw["deployment"]["profile"] = "durable_production"
+    raw["channels"] = {"github": {"enabled": True}}
+    config = AppConfig.model_validate(raw)
+    monkeypatch.setattr(app_module, "get_app_config", lambda: config)
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setenv("DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS", "1")
+
+    app = app_module.create_app()
+    report = await app.state.deployment_reporter.deployment_report()
+    ready_reporter = app.state.deployment_reporter.with_runtime_store(
+        profile="durable_production",
+        database_backend="postgres",
+        atomic_lifecycle=True,
+    )
+
+    assert report.native_ingress.to_dict()["sources"] == {"github": "best_effort"}
+    assert ready_reporter.admission_profile_ready is False
+    assert not any(getattr(route, "path", None) == "/api/webhooks/github" for route in app.routes)
+
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "added-after-composition")
+    unchanged = await ready_reporter.deployment_report()
+
+    assert unchanged.native_ingress.to_dict()["sources"] == {"github": "best_effort"}
+    assert ready_reporter.admission_profile_ready is False
+    assert not any(getattr(route, "path", None) == "/api/webhooks/github" for route in app.routes)
+
+
 def test_create_app_wires_required_mcp_host_health_and_shared_authorization(
     monkeypatch,
     stub_app_config,
