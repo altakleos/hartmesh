@@ -233,7 +233,7 @@ class DeploymentProvenance:
 
 @dataclass(frozen=True)
 class QualificationEvidence:
-    """One completed, externally produced qualification artifact reference."""
+    """One operator-declared reference to a purportedly passing artifact."""
 
     qualification_id: str
     artifact_digest: str
@@ -265,7 +265,7 @@ class QualificationEvidence:
 
 @dataclass(frozen=True)
 class DeploymentQualification:
-    """Completed evidence, or an explicit statement that none was supplied."""
+    """Operator-declared evidence references, never in-process attestation."""
 
     evidence: tuple[QualificationEvidence, ...] = ()
 
@@ -291,7 +291,7 @@ class DeploymentQualification:
 
     @classmethod
     def from_environment(cls) -> DeploymentQualification:
-        """Read bounded deployer-supplied completed qualification evidence."""
+        """Read bounded operator assertions without fetching their artifacts."""
 
         raw = os.getenv("DEER_FLOW_QUALIFICATION_EVIDENCE")
         if raw is None:
@@ -339,6 +339,7 @@ class DeploymentQualification:
         return {
             "version": 1,
             "status": "qualified" if self.evidence else "unqualified",
+            "trust": "operator_asserted" if self.evidence else "none_declared",
             "evidence": [item.to_dict() for item in self.evidence],
         }
 

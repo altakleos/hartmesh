@@ -314,7 +314,11 @@ application deadline. It supports existing ServiceAccounts, bounded pod
 metadata, and structured Secret/ConfigMap references without copying secret
 values into ConfigMaps. Safe image/source provenance and optional completed
 qualification identifiers appear only in the administrator deployment report;
-the portable capabilities record remains unchanged. The chart intentionally
+the portable capabilities record remains unchanged. A declared identifier is labelled
+`operator_asserted`; it becomes exact-deployment evidence only when the offline verifier
+matches the independently supplied artifact digest, image, chart, configuration, schema,
+scope, namespace/run, and complete scenario set. See the Helm deployment guide for the
+command. The chart intentionally
 adds no PodDisruptionBudget, topology spread, leader election, or zero-downtime
 claim until the runtime has a real multi-replica design. See the
 [Helm deployment guide](deploy/helm/deer-flow/README.md).
@@ -916,7 +920,10 @@ the per-probe/overall timeouts. Administrators can inspect the safe
 manifest and separately labelled live health through
 `GET /api/runtime/v1/deployment`; that report also distinguishes lifecycle atomicity
 from process-local, node-durable, and shared-durable storage, exposes bounded image/source
-provenance when supplied, and says `unqualified` unless completed evidence exists. The
+provenance when supplied, and says `unqualified`/`none_declared` unless an operator supplies
+an evidence reference. A supplied reference remains `operator_asserted`; the Gateway does
+not fetch or attest it. The offline verifier alone emits
+`external_evidence_verified` after exact digest and subject matching. The
 portable `GET /api/runtime/v1/capabilities` response remains the exact strict
 transport-independent runtime record. Plugin configuration, secrets, identities, raw
 exceptions, and request data are excluded.

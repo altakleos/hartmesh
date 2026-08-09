@@ -57,8 +57,10 @@ snapshots but cannot manufacture a summary.
 
 `RuntimeCapabilities` is the same exact strict record over every Adapter. Extension
 manifest/health, build provenance, persistence tier, and qualification evidence are
-deployment facts and therefore never appear in this package. Gateway exposes those
-separately through an authenticated administrative Interface. Unexpected host Adapter
+deployment facts and therefore never appear in this package. Gateway exposes an
+operator-asserted reference separately through an authenticated administrative Interface;
+exact artifact verification is an offline deployment concern, not a portable runtime
+capability. Unexpected host Adapter
 exceptions may return only an `indeterminate` failure with a bounded correlation ID;
 raw exception text and deployment internals remain outside the portable wire contract.
 

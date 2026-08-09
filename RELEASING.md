@@ -70,6 +70,26 @@ distinguishes it from a release.
    ```
    Pushing the tag triggers the publishing workflows (below).
 
+## Durable runtime qualification evidence
+
+The administrator deployment report is not remote attestation. With no reference it reports
+`status: unqualified` and `trust: none_declared`. When an operator configures a bounded
+Kubernetes qualification reference, v1 retains `status: qualified` for wire compatibility
+but reports `trust: operator_asserted`. That state proves only that the operator declared an
+artifact digest.
+
+For a release gate, obtain the evidence artifact through an independently controlled path or
+artifact store, then run `backend/scripts/verify_qualification_evidence.py`. Supply the
+declared report digest and independently expected qualification ID, image digest, chart
+version/digest, rendered configuration digest, Alembic head, scope, namespace, and every
+required scenario. Only exit zero with `status: verified` and
+`trust: external_evidence_verified` is exact-artifact evidence. A missing artifact, a default
+Kubernetes test skip, or an operator-asserted reference is an unpassed release gate. The full
+offline command is in the [Helm deployment guide](deploy/helm/deer-flow/README.md#deployment-identity-and-qualification).
+
+The verifier performs no network fetch and does not validate signatures. Its current proof is
+the canonical artifact SHA-256 plus exact subject and complete passing-scenario match.
+
 ## What CI publishes on a `v*` tag
 
 - `.github/workflows/container.yaml` — builds and pushes `backend`,

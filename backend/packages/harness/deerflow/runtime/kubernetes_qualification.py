@@ -18,14 +18,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-QUALIFICATION_SCENARIOS = (
-    "accepted_before_client_response",
-    "accepted_before_worker_start",
-    "active_execution",
-    "terminal_before_lifecycle_commit",
-    "graceful_rollout_termination",
-    "forced_kill_after_graceful_deadline",
-)
+from deerflow.qualification_evidence import QUALIFICATION_SCENARIOS
+
 _SCENARIOS = frozenset(QUALIFICATION_SCENARIOS)
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _EXTERNAL_KEY_PREFIX = "raw:k8s-qual-v1:"

@@ -559,9 +559,16 @@ persistence, runtime `durable_production`, and termination/probe settings that
 cover the application's bounded readiness and shutdown work. Gateway
 ServiceAccounts have no chart-created RBAC and no API-token automount by
 default; structured extra environment/volume inputs carry only Secret or
-ConfigMap references. Bounded source revision and completed qualification
-evidence enter the administrator deployment report through trusted environment
-fields, never portable capabilities. The chart deliberately omits PDB,
+ConfigMap references. Bounded source revision and operator-declared qualification
+references enter the administrator deployment report through trusted environment
+fields, never portable capabilities. Treat that evidence as an operator assertion, not an
+in-process attestation: v1 `qualified` must carry `trust=operator_asserted`, while absence
+uses `unqualified` plus `trust=none_declared`. The strict canonical Kubernetes artifact
+schema and SHA-256 rules live in `deerflow.qualification_evidence`; both the live
+harness and `scripts/verify_qualification_evidence.py` use that owner. Only the offline
+verifier's `external_evidence_verified` result proves the declared digest and independently
+supplied image/chart/config/schema/run/namespace/scope/scenario subjects match. The Gateway
+never fetches evidence paths or URLs. The chart deliberately omits PDB,
 topology-spread, leader-election, and zero-downtime claims until multi-replica
 ownership exists. Render validation is pinned by
 `tests/test_helm_durable_deployment_contract.py`.

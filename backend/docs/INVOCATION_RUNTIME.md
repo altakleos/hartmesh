@@ -52,7 +52,7 @@ an ordinary unit test.
 | Graceful shutdown and process recovery | One deadline coordinator freezes admission, stops producers, drains runs, flushes memory, then closes dependencies; unsettled durable runs use orphan recovery. | `backend/app/gateway/shutdown.py`; `backend/packages/harness/deerflow/runtime/runs/manager.py` | `test_shutdown_orders_producers_runs_memory_and_dependencies`; `test_orphan_recovery_records_failed_with_stable_reason` | Process-loss simulations; live pod evidence is separate | Implemented for one replica |
 | PostgreSQL schema and arbitration | Real Alembic predecessor data upgrades through accepted/idempotency/lifecycle/receipt evidence and remains repository-readable after the promised downgrade/re-upgrade path. | `backend/packages/harness/deerflow/persistence/migrations/versions/0011_accepted_invocation.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0012_invocation_idempotency.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0013_invocation_lifecycle.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0014_canonical_caller_intent.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0015_inbound_receipts.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io`; `test_postgres_inbound_receipt_acquisition_and_claim_are_atomic` | `postgres_contract` with `DEERFLOW_TEST_POSTGRES_URL` | Qualified only when the mandatory PostgreSQL gate passes |
 | One-replica deployment truth | Production requires one Gateway, shared durable PostgreSQL, compatible readiness/shutdown timing, and digest-pinned Gateway plus enabled provisioner execution artifacts; process-local mode makes no durability claim. | `backend/app/runtime/deployment.py`; `deploy/helm/deer-flow/values.yaml`; `deploy/helm/deer-flow/templates/gateway-deployment.yaml`; `deploy/helm/deer-flow/templates/provisioner-deployment.yaml` | `test_production_mode_requires_pinned_runtime_images_and_one_replica`; `test_production_mode_rejects_process_local_storage` | Helm lint/render and storage-profile checks | Implemented; not a high-availability claim |
-| Live Kubernetes pod recovery | Only a complete artifact-bound opt-in real-pod run can qualify graceful/abrupt one-replica recovery. | `backend/packages/harness/deerflow/runtime/kubernetes_qualification.py`; `backend/tests/support/kubernetes_qualification.py`; `backend/app/runtime/deployment.py` | `test_real_one_replica_pod_recovery_contract` | `kubernetes_contract` evidence for the deployed image/chart/config/schema | Unqualified when the live gate is skipped or evidence does not match |
+| Live Kubernetes pod recovery | The opt-in harness emits one strict canonical artifact; the report exposes only an operator assertion, while the offline verifier independently matches its digest, run/namespace, image, chart, config, schema, scope, and complete scenario set. | `backend/packages/harness/deerflow/qualification_evidence.py`; `backend/tests/support/kubernetes_qualification.py`; `backend/app/runtime/deployment.py`; `backend/scripts/verify_qualification_evidence.py` | `test_exact_external_evidence_verifies_against_declared_reference_and_subjects`; `test_real_one_replica_pod_recovery_contract` | `kubernetes_contract` artifact plus a successful exact-subject offline verification | Unqualified when absent; operator-asserted when declared; externally verified only after the offline verifier succeeds |
 | Legacy compatibility and native execution | Existing LangGraph/REST facades retain their responses and native lead-agent, skill, memory, subagent, sandbox, and thread behavior. | `backend/app/gateway/routers/runs.py`; `backend/app/gateway/routers/thread_runs.py`; `backend/packages/harness/deerflow/agents/lead_agent/agent.py`; `backend/packages/harness/deerflow/agents/memory`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/sandbox/middleware.py` | `test_gateway_mounts_runtime_routes_without_replacing_legacy_runs`; `test_full_chain_order`; `test_make_lead_agent_custom_skill_allowlist_does_not_activate_tool_policy`; `test_after_agent_queues_memory_under_runtime_user`; `test_aexecute_propagates_one_trusted_run_context_without_free_form_attributes`; `test_sandbox_middleware_state_matches_thread_state_sandbox_field` | Full offline compatibility suite | Implemented; synchronous client durability remains deferred |
 
 ## Trust and sealing
@@ -406,9 +406,15 @@ The report also carries the latest safe admission-readiness status, reason codes
 and correlation identifier. Raw provider/database exception text remains internal.
 Unexpected Adapter exceptions become bounded indeterminate failures with a
 correlation ID matching a safe internal diagnostic; exception text is never public.
-The deployment process may supply bounded image/source provenance and completed
-qualification evidence through trusted environment fields. Invalid evidence
-degrades to explicit `unqualified`; neither those deployment facts nor their
+The deployment process may supply bounded image/source provenance and a qualification
+artifact reference through trusted environment fields. The v1 report retains
+`status="qualified"` for wire compatibility but pairs it with
+`trust="operator_asserted"`; this states only that the operator declared a bounded
+reference. With no reference it returns `status="unqualified"` and
+`trust="none_declared"`. The Gateway does not fetch or attest the artifact. Exact digest,
+deployment subjects, and scenario coverage become
+`trust="external_evidence_verified"` only in the separate offline verifier result. Invalid
+declarations degrade to explicit unqualified state; neither deployment facts nor their
 configuration enter the portable runtime Interface.
 
 Lifecycle observations return authoritative events plus bounded
@@ -549,19 +555,23 @@ injected by the qualification ConfigMap; there is no diagnostic HTTP endpoint.
 Passing machine-readable evidence binds the image digest, chart version/digest,
 safe configuration digest, Alembic head, exact database/cache pod, volume, and
 image identities plus their versions, confirmed context, operator-reported
-driver, scenario outcomes, and timestamp. Only after all
-scenarios pass does the chart feed the bounded identifier, scope, artifact
-digest, and pass state into the administrator deployment report. Collection or
-skip never produces qualification. This is one-replica pod recovery evidence,
+driver, scenario outcomes, and timestamp. Only after all scenarios pass does the harness
+feed the bounded identifier, scope, artifact digest, and pass state into the administrator
+deployment report. That report is still an operator assertion. A release or deployment
+controller independently supplies the artifact and expected subjects to
+`backend/scripts/verify_qualification_evidence.py`; only a zero exit with
+`status="verified"` proves that exact artifact match. Collection, skip, or a declared JSON
+reference alone never produces verified evidence. This is one-replica pod recovery evidence,
 not scheduler HA, failover, active-active execution, or zero-downtime rollout.
 
 The supported production topology has one Gateway replica and shared PostgreSQL for durable
 state. When configured, shared Redis provides the bounded transient stream bridge used for
 SSE reconnect; Redis is not the authoritative invocation or lifecycle store, and its delivery
 semantics do not replace polling observation.
-`process_local` survives neither process restart nor pod loss. An operator may report live
-recovery as qualified only when the bounded evidence matches the deployed image, chart,
-configuration, and schema identities. The default skip is an unpassed release gate.
+`process_local` survives neither process restart nor pod loss. An operator may declare live
+recovery evidence, but exact matching of the deployed image, chart, configuration, schema,
+run/namespace, scope, and required scenarios is an offline release/deployment gate. The
+default skip and an unverified declaration are both unpassed release gates.
 
 ## Pinned agent construction
 
