@@ -34,6 +34,11 @@ def _create_triggers(dialect: str) -> None:
             "RETURN OLD; "
             "END IF; END; $$"
         )
+        # Legacy bootstrap creates the current ORM schema before stamping the
+        # baseline and replaying migrations.  Replace triggers that the model
+        # metadata may therefore have installed already.
+        op.execute("DROP TRIGGER IF EXISTS trg_run_lifecycle_retained_insert ON run_lifecycle_events")
+        op.execute("DROP TRIGGER IF EXISTS trg_run_lifecycle_retained_delete ON run_lifecycle_events")
         op.execute("CREATE TRIGGER trg_run_lifecycle_retained_insert AFTER INSERT ON run_lifecycle_events FOR EACH ROW EXECUTE FUNCTION deerflow_update_lifecycle_retained_count()")
         op.execute("CREATE TRIGGER trg_run_lifecycle_retained_delete AFTER DELETE ON run_lifecycle_events FOR EACH ROW EXECUTE FUNCTION deerflow_update_lifecycle_retained_count()")
 
