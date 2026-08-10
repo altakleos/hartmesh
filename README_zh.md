@@ -1,6 +1,6 @@
 # HartMesh
 
-[English](README.md) | 简体中文 | [日本語](README_ja.md) | [Français](README_fr.md) | [Русский](README_ru.md)
+[English](README.md) | 简体中文 | [日本語](README_ja.md) | [Français](README_fr.md) | [Русский](README_ru.md) | [Español](README_es.md) | [Português](README_pt.md) | [Deutsch](README_de.md)
 
 ## DeerFlow 智能体的可靠执行层。
 

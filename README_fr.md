@@ -1,6 +1,6 @@
 # HartMesh
 
-[English](README.md) | [简体中文](README_zh.md) | [日本語](README_ja.md) | Français | [Русский](README_ru.md)
+[English](README.md) | [简体中文](README_zh.md) | [日本語](README_ja.md) | Français | [Русский](README_ru.md) | [Español](README_es.md) | [Português](README_pt.md) | [Deutsch](README_de.md)
 
 ## La couche d’exécution fiable pour les agents DeerFlow.
 

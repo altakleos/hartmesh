@@ -1,6 +1,6 @@
 # HartMesh
 
-[English](README.md) | [简体中文](README_zh.md) | 日本語 | [Français](README_fr.md) | [Русский](README_ru.md)
+[English](README.md) | [简体中文](README_zh.md) | 日本語 | [Français](README_fr.md) | [Русский](README_ru.md) | [Español](README_es.md) | [Português](README_pt.md) | [Deutsch](README_de.md)
 
 ## DeerFlow エージェントの信頼できる実行レイヤー。
 
