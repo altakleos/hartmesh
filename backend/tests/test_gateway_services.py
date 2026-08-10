@@ -2125,6 +2125,13 @@ async def _capture_start_run_graph_input(
         record = await start_run(body, "thread-command-test", request)
         await record.task
 
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    assert not get_skill_projection_coordinator().is_busy(
+        user_id=record.user_id,
+        thread_id=record.thread_id,
+    )
+
     return captured["graph_input"]
 
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
+from support.postgres import postgres_async_url
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_engine, init_engine_from_config
@@ -28,7 +29,12 @@ pytestmark = pytest.mark.skipif(
 async def test_postgres_schema_places_orm_checkpointer_and_store_tables_together():
     """Verify a real PostgreSQL backend places all persistence tables in one schema."""
     schema = f"deerflow_test_{uuid.uuid4().hex[:12]}"
-    db_config = DatabaseConfig(backend="postgres", postgres_url=POSTGRES_URL or "", postgres_schema=schema)
+    assert POSTGRES_URL is not None
+    db_config = DatabaseConfig(
+        backend="postgres",
+        postgres_url=postgres_async_url(POSTGRES_URL),
+        postgres_schema=schema,
+    )
     app_config = SimpleNamespace(checkpointer=None, database=db_config)
 
     await init_engine_from_config(db_config)
@@ -36,6 +42,9 @@ async def test_postgres_schema_places_orm_checkpointer_and_store_tables_together
     assert engine is not None
 
     try:
+        async with engine.connect() as conn:
+            public_before = {row.table_name for row in (await conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"))).all()}
+
         async with make_checkpointer(app_config) as checkpointer:
             assert checkpointer is not None
         async with make_store(app_config) as store:
@@ -58,10 +67,11 @@ async def test_postgres_schema_places_orm_checkpointer_and_store_tables_together
 
         by_schema = {(row.table_schema, row.table_name) for row in rows}
         orm_tables = {"runs", "run_events", "threads_meta", "feedback", "users"}
-        assert {("public", table) for table in orm_tables}.isdisjoint(by_schema)
         assert {(schema, table) for table in orm_tables}.issubset(by_schema)
         assert any(table_schema == schema and "checkpoint" in table_name for table_schema, table_name in by_schema)
         assert any(table_schema == schema and ("store" in table_name or "migration" in table_name) for table_schema, table_name in by_schema)
+        public_after = {table_name for table_schema, table_name in by_schema if table_schema == "public"}
+        assert public_after == public_before
     finally:
         async with engine.begin() as conn:
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
@@ -85,6 +95,10 @@ def test_sync_postgres_schema_places_checkpointer_and_store_tables_together():
     checkpointer_config = _resolve_checkpointer_config(SimpleNamespace(checkpointer=None, database=db_config))
     store_config = _resolve_store_config(SimpleNamespace(checkpointer=None, database=db_config))
 
+    assert POSTGRES_URL is not None
+    with psycopg.connect(POSTGRES_URL, autocommit=True) as conn:
+        public_before = {table_name for (table_name,) in conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'").fetchall()}
+
     try:
         with _sync_checkpointer_cm(checkpointer_config) as checkpointer:
             assert checkpointer is not None
@@ -105,8 +119,8 @@ def test_sync_postgres_schema_places_checkpointer_and_store_tables_together():
         by_schema = {(table_schema, table_name) for table_schema, table_name in rows}
         assert any(table_schema == schema and "checkpoint" in table_name for table_schema, table_name in by_schema)
         assert any(table_schema == schema and ("store" in table_name or "migration" in table_name) for table_schema, table_name in by_schema)
-        # The DeerFlow LangGraph tables must NOT leak into public.
-        assert not any(table_schema == "public" and ("checkpoint" in table_name or table_name == "store") for table_schema, table_name in by_schema)
+        public_after = {table_name for table_schema, table_name in by_schema if table_schema == "public"}
+        assert public_after == public_before
     finally:
         with psycopg.connect(POSTGRES_URL or "", autocommit=True) as conn:
             conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
