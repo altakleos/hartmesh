@@ -113,9 +113,17 @@ def _remove_tree(path: Path) -> None:
         current_path = Path(current)
         for name in files:
             file_path = current_path / name
+            # Never chmod an attacker-inserted symlink: some POSIX builds do
+            # not implement ``chmod(..., follow_symlinks=False)`` and raising
+            # here would strand the immutable lease. Unlinking a symlink does
+            # not touch its target and needs only the writable parent we
+            # prepared in the first walk.
+            if file_path.is_symlink():
+                file_path.unlink(missing_ok=True)
+                continue
             try:
                 file_path.chmod(0o600, follow_symlinks=False)
-            except OSError:
+            except (NotImplementedError, OSError):
                 pass
             file_path.unlink(missing_ok=True)
         for name in directories:

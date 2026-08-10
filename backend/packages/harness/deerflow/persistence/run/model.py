@@ -235,6 +235,14 @@ def _seed_lifecycle_cursor_after_create(
 ) -> None:
     """Seed fresh full schemas without repairing corrupt partial schemas."""
 
+    requested_tables = _kwargs.get("tables")
+    if requested_tables is not None:
+        requested_names = {table.name for table in requested_tables}
+        if not {"run_lifecycle_cursor_state", "run_lifecycle_events"} <= requested_names:
+            # Metadata ``after_create`` also fires for partial create_all()
+            # calls. Those callers do not own lifecycle DDL and must not
+            # reinstall triggers on an already-versioned shared database.
+            return
     tables = set(inspect(connection).get_table_names())
     if not {"run_lifecycle_cursor_state", "run_lifecycle_events"} <= tables:
         # Legacy bootstrap deliberately creates only the baseline table subset.

@@ -25,6 +25,20 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
 
 
+def test_partial_metadata_create_does_not_reinstall_lifecycle_triggers() -> None:
+    """A partial table bootstrap must not mutate an existing lifecycle ledger."""
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run.model import _seed_lifecycle_cursor_after_create
+    from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
+
+    _seed_lifecycle_cursor_after_create(
+        Base.metadata,
+        object(),
+        tables=[WebhookDeliveryRow.__table__],
+    )
+
+
 @pytest.mark.anyio
 async def test_normal_admission_creates_version_one_and_accepted_event() -> None:
     store = MemoryRunStore()
