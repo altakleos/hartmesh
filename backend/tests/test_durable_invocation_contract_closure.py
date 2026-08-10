@@ -75,6 +75,12 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
             assert test_name in collected_test_names, test_name
 
     required_row_evidence = {
+        "Canonical keyed replay": {
+            "test_cancelled_atomic_admission_reconciles_commit_before_return",
+            "test_cancelled_atomic_unique_failure_does_not_retry_admission",
+            "test_cancelled_known_replay_does_not_close_retained_run",
+            "test_cancelled_reservation_releases_commit_before_return",
+        },
         "Keyed native ingress receipts": {
             "test_received_payload_survives_process_loss_before_claim",
             "test_thread_contention_outlives_poison_budget_and_preserves_fifo",

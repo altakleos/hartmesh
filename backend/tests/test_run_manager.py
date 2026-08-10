@@ -13,6 +13,7 @@ from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy, RunStartOutcome
+from deerflow.runtime.runs.store.base import CancellationRequestOutcome
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -127,6 +128,57 @@ class PausedLostLeaseRunStore(MemoryRunStore):
         self.renewal_started.set()
         await self.finish_renewal.wait()
         return False
+
+
+class CommitBeforeReturnRunStore(MemoryRunStore):
+    """Expose cancellation after atomic commit but before its result is returned."""
+
+    # A custom store must opt in explicitly; inheriting implementation code is
+    # not proof of lifecycle atomicity in the public RunStore contract.
+    durable_lifecycle = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pause_after_commit = False
+        self.pause_after_ensure = False
+        self.atomic_committed = asyncio.Event()
+        self.release_result = asyncio.Event()
+        self.ensure_decided = asyncio.Event()
+        self.release_ensure = asyncio.Event()
+
+    async def create_thread_operation_atomic(self, run_id, **kwargs):
+        result = await super().create_thread_operation_atomic(run_id, **kwargs)
+        if self.pause_after_commit:
+            self.atomic_committed.set()
+            await self.release_result.wait()
+        return result
+
+    async def ensure_run_atomic(self, run_id, **kwargs):
+        result = await super().ensure_run_atomic(run_id, **kwargs)
+        if self.pause_after_ensure:
+            self.ensure_decided.set()
+            await self.release_ensure.wait()
+        return result
+
+
+class CancelledUniqueRetryRunStore(MemoryRunStore):
+    """Return a retryable unique failure after the request was cancelled."""
+
+    durable_lifecycle = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.atomic_attempts = 0
+        self.first_attempt_started = asyncio.Event()
+        self.release_first_attempt = asyncio.Event()
+
+    async def create_thread_operation_atomic(self, run_id, **kwargs):
+        self.atomic_attempts += 1
+        if self.atomic_attempts == 1:
+            self.first_attempt_started.set()
+            await self.release_first_attempt.wait()
+            raise sqlite3.IntegrityError("UNIQUE constraint failed: runs.thread_id")
+        return await super().create_thread_operation_atomic(run_id, **kwargs)
 
 
 async def _stored_statuses(store: MemoryRunStore, *run_ids: str) -> dict[str, Any]:
@@ -441,6 +493,55 @@ async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
     assert stored_running is not None
     assert stored_running["status"] == RunStatus.running.value
     assert stored_running["error"] is None
+
+
+@pytest.mark.anyio
+async def test_fail_start_reports_cancel_winner_committed_during_persistence():
+    """A durable cancel committed before local signalling beats attach failure."""
+
+    class PausedCancelStore(MemoryRunStore):
+        durable_lifecycle = True
+
+        def __init__(self):
+            super().__init__()
+            self.cancel_committed = asyncio.Event()
+            self.release_cancel_result = asyncio.Event()
+
+        async def request_cancel_fenced(self, *args, **kwargs):
+            result = await super().request_cancel_fenced(*args, **kwargs)
+            self.cancel_committed.set()
+            await self.release_cancel_result.wait()
+            return result
+
+    store = PausedCancelStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("thread-cancel-attach-race")
+    cancel_task = asyncio.create_task(
+        manager.request_cancel_fenced(
+            record.run_id,
+            action="interrupt",
+            expected_state_version=record.state_version,
+        )
+    )
+    await asyncio.wait_for(store.cancel_committed.wait(), timeout=1)
+
+    retained_failure = await manager.fail_start_if_pending(
+        record.run_id,
+        error="thread metadata unavailable",
+    )
+    store.release_cancel_result.set()
+    outcome = await asyncio.wait_for(cancel_task, timeout=1)
+
+    assert retained_failure is False
+    assert outcome is CancellationRequestOutcome.requested
+    assert record.status is RunStatus.interrupted
+    assert record.error is None
+    assert record.stop_reason is None
+    row = await store.get(record.run_id)
+    assert row is not None
+    assert row["status"] == RunStatus.interrupted.value
+    assert row["error"] is None
+    assert row.get("stop_reason") is None
 
 
 @pytest.mark.anyio
@@ -991,6 +1092,159 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     assert old.abort_event.is_set() is False
     assert stored_old is not None
     assert stored_old["status"] == "running"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+@pytest.mark.parametrize("keyed", [False, True])
+async def test_cancelled_atomic_admission_reconciles_commit_before_return(
+    strategy: str,
+    keyed: bool,
+) -> None:
+    """A committed unseen replacement is registered, closed, and never orphaned."""
+
+    store = CommitBeforeReturnRunStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+    store.pause_after_commit = True
+
+    if keyed:
+        admission = manager.ensure_or_reject(
+            "thread-1",
+            external_scope="scope-1",
+            external_key="delivery-1",
+            request_digest="a" * 64,
+            request_digest_version="request-v1",
+            caller_intent_json={"message": "follow-up"},
+            caller_intent_digest="b" * 64,
+            caller_intent_digest_version="intent-v1",
+            multitask_strategy=strategy,
+        )
+    else:
+        admission = manager.create_or_reject(
+            "thread-1",
+            multitask_strategy=strategy,
+        )
+    admission_task = asyncio.create_task(admission)
+
+    await asyncio.wait_for(store.atomic_committed.wait(), timeout=1)
+    admission_task.cancel()
+    store.release_result.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(admission_task, timeout=1)
+
+    stored_rows = await store.list_by_thread("thread-1")
+    assert len(stored_rows) == 2
+    stored_replacement = next(row for row in stored_rows if row["run_id"] != old.run_id)
+    expected_old_status = RunStatus.error.value if strategy == "rollback" else RunStatus.interrupted.value
+    assert next(row for row in stored_rows if row["run_id"] == old.run_id)["status"] == expected_old_status
+    assert stored_replacement["status"] == RunStatus.interrupted.value
+    assert all(row["status"] not in (RunStatus.pending.value, RunStatus.running.value) for row in stored_rows)
+
+    local_rows = await manager.list_by_thread("thread-1")
+    local_replacement = next(row for row in local_rows if row.run_id == stored_replacement["run_id"])
+    assert local_replacement.status == RunStatus.interrupted
+    assert local_replacement.abort_event.is_set()
+    assert not await manager.has_inflight("thread-1")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+async def test_cancelled_atomic_unique_failure_does_not_retry_admission(
+    strategy: str,
+) -> None:
+    """Once cancelled, a retryable store race cannot create replacement work."""
+
+    store = CancelledUniqueRetryRunStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+
+    admission_task = asyncio.create_task(
+        manager.create_or_reject(
+            "thread-1",
+            multitask_strategy=strategy,
+        )
+    )
+    await asyncio.wait_for(store.first_attempt_started.wait(), timeout=1)
+    admission_task.cancel()
+    store.release_first_attempt.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(admission_task, timeout=1)
+
+    assert store.atomic_attempts == 1
+    stored_rows = await store.list_by_thread("thread-1")
+    assert [row["run_id"] for row in stored_rows] == [old.run_id]
+    assert stored_rows[0]["status"] == RunStatus.running.value
+    assert list(manager._runs) == [old.run_id]
+    assert old.status == RunStatus.running
+    assert not old.abort_event.is_set()
+
+
+@pytest.mark.anyio
+async def test_cancelled_reservation_releases_commit_before_return() -> None:
+    """Cancellation cannot strand a committed thread-operation reservation."""
+
+    store = CommitBeforeReturnRunStore()
+    manager = RunManager(store=store)
+    store.pause_after_commit = True
+
+    async def reserve() -> None:
+        async with manager.reserve_thread_operation(
+            "thread-1",
+            kind=ThreadOperationKind.checkpoint_write,
+        ):
+            raise AssertionError("cancelled reservation must not enter its body")
+
+    reservation_task = asyncio.create_task(reserve())
+    await asyncio.wait_for(store.atomic_committed.wait(), timeout=1)
+    reservation_task.cancel()
+    store.release_result.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(reservation_task, timeout=1)
+
+    assert await store.list_inflight() == []
+    assert manager._runs == {}
+    assert manager._runs_by_thread == {}
+    assert not await manager.has_inflight("thread-1")
+
+
+@pytest.mark.anyio
+async def test_cancelled_known_replay_does_not_close_retained_run() -> None:
+    """Cancelling a known-equal lookup never cancels the accepted invocation."""
+
+    store = CommitBeforeReturnRunStore()
+    identity = {
+        "external_scope": "scope-1",
+        "external_key": "delivery-1",
+        "request_digest": "a" * 64,
+        "request_digest_version": "request-v1",
+        "caller_intent_json": {"message": "original"},
+        "caller_intent_digest": "b" * 64,
+        "caller_intent_digest_version": "intent-v1",
+    }
+    writer = RunManager(store=store)
+    accepted = await writer.ensure_or_reject("thread-1", **identity)
+    store.pause_after_ensure = True
+    reader = RunManager(store=store)
+
+    replay_task = asyncio.create_task(reader.ensure_or_reject("thread-1", **identity))
+    await asyncio.wait_for(store.ensure_decided.wait(), timeout=1)
+    replay_task.cancel()
+    store.release_ensure.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(replay_task, timeout=1)
+
+    retained = await store.get(accepted.record.run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.pending.value
+    assert retained["cancel_action"] is None
+    assert reader._runs == {}
 
 
 @pytest.mark.anyio

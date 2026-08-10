@@ -816,6 +816,39 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
     assert internal_row is None
 
 
+def test_internal_owner_cannot_adopt_another_owners_thread() -> None:
+    import asyncio
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    thread_store = MemoryThreadMetaStore(store)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-b"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        await thread_store.create("owned-thread", user_id="owner-a", metadata={"owner": "a"})
+        with pytest.raises(HTTPException) as exc_info:
+            await threads.create_thread(
+                threads.ThreadCreateRequest(thread_id="owned-thread", metadata={}),
+                request,
+            )
+        retained = await thread_store.get("owned-thread", user_id=None)
+        return exc_info.value, retained
+
+    error, retained = asyncio.run(_scenario())
+
+    assert error.status_code == 409
+    assert error.detail == "Thread ID is already in use"
+    assert retained is not None
+    assert retained["user_id"] == "owner-a"
+    assert retained["metadata"] == {"owner": "a"}
+
+
 def test_goal_thread_creation_uses_internal_owner_header() -> None:
     import asyncio
 

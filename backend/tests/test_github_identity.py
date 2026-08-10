@@ -9,6 +9,7 @@ import pytest
 from app.gateway.github.identity import (
     GITHUB_THREAD_NAMESPACE,
     extract_target,
+    resolve_conversation_identity,
     resolve_thread_id,
 )
 
@@ -68,6 +69,50 @@ def test_thread_id_rejects_empty_agent_name() -> None:
         resolve_thread_id("a/b", 1, "   ")
     with pytest.raises(ValueError):
         resolve_thread_id("a/b", 1, None)  # type: ignore[arg-type]
+
+
+def test_verified_conversation_identity_is_scoped_to_route_binding() -> None:
+    from app.runtime import build_verified_webhook_route_binding
+
+    alice_binding = build_verified_webhook_route_binding(
+        provider="github",
+        installation_reference=1234,
+        owner_user_id="alice",
+        agent_id="reviewer",
+        repository_reference="a/b",
+    )
+    bob_binding = build_verified_webhook_route_binding(
+        provider="github",
+        installation_reference=1234,
+        owner_user_id="bob",
+        agent_id="reviewer",
+        repository_reference="a/b",
+    )
+
+    alice = resolve_conversation_identity(
+        "a/b",
+        7,
+        "reviewer",
+        verified_binding=alice_binding,
+    )
+    alice_replay = resolve_conversation_identity(
+        "a/b",
+        7,
+        "reviewer",
+        verified_binding=alice_binding,
+    )
+    bob = resolve_conversation_identity(
+        "a/b",
+        7,
+        "reviewer",
+        verified_binding=bob_binding,
+    )
+
+    assert alice == alice_replay
+    assert alice.version == 2
+    assert alice.thread_id != bob.thread_id
+    assert alice.topic_id != bob.topic_id
+    assert alice.topic_id.startswith("github-conversation:v2:sha256:")
 
 
 # ---------------------------------------------------------------------------

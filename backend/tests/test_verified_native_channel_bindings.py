@@ -59,6 +59,19 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 _SECRET = "verified-binding-test-secret"
 
 
+def _verified_request(
+    delivery_id: str,
+    *,
+    event: str = "pull_request",
+    body: bytes = b"verified-test-event",
+) -> VerifiedGitHubWebhookRequest:
+    return VerifiedGitHubWebhookRequest.attest(
+        delivery_id,
+        event=event,
+        body=body,
+    )
+
+
 class _ReadyAdmissionFence:
     async def ready_for_admission(self) -> bool:
         return True
@@ -101,6 +114,7 @@ def _write_github_agent(
     owner: str = "owner-1",
     name: str = "reviewer",
     installation_id: int | None = 1234,
+    recursion_limit: int = 100,
 ) -> None:
     agent_dir = base / "users" / owner / "agents" / name
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -110,6 +124,7 @@ def _write_github_agent(
                 "name": name,
                 "github": {
                     "installation_id": installation_id,
+                    "recursion_limit": recursion_limit,
                     "bindings": [
                         {
                             "repo": "acme/widgets",
@@ -248,7 +263,7 @@ async def test_verified_dispatch_requires_matching_trusted_installation(
         "pull_request",
         "delivery-1",
         mismatched,
-        verified_request=VerifiedGitHubWebhookRequest("delivery-1"),
+        verified_request=_verified_request("delivery-1"),
     )
     assert result["fired_agents"] == []
     assert result["skipped"] == [{"agent": "reviewer", "reason": "installation_mismatch"}]
@@ -260,7 +275,7 @@ async def test_verified_dispatch_requires_matching_trusted_installation(
         "pull_request",
         "delivery-1",
         payload,
-        verified_request=VerifiedGitHubWebhookRequest("delivery-1"),
+        verified_request=_verified_request("delivery-1"),
     )
     assert result["fired_agents"] == ["reviewer"]
     message = await bus.get_inbound()
@@ -278,7 +293,7 @@ async def test_verified_dispatch_requires_matching_trusted_installation(
         "pull_request",
         "delivery-2",
         malformed,
-        verified_request=VerifiedGitHubWebhookRequest("delivery-2"),
+        verified_request=_verified_request("delivery-2"),
     )
     assert result["fired_agents"] == []
     assert result["skipped"] == [{"agent": "reviewer", "reason": "installation_mismatch"}]
@@ -292,11 +307,42 @@ async def test_verified_dispatch_requires_matching_trusted_installation(
         "pull_request",
         "delivery-3",
         payload,
-        verified_request=VerifiedGitHubWebhookRequest("delivery-3"),
+        verified_request=_verified_request("delivery-3"),
     )
     assert result["fired_agents"] == []
     assert result["skipped"] == [{"agent": "reviewer", "reason": "installation_unconfigured"}]
     assert unconfigured_bus.inbound_queue.empty()
+
+
+@pytest.mark.anyio
+async def test_verified_dispatch_scopes_conversation_to_each_owner_binding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    _invalidate_cache()
+    _write_github_agent(tmp_path, owner="alice")
+    _write_github_agent(tmp_path, owner="bob")
+    bus = MessageBus()
+
+    result = await fanout_event(
+        bus,
+        "pull_request",
+        "delivery-shared",
+        _github_payload(),
+        verified_request=_verified_request("delivery-shared"),
+    )
+
+    assert result["fired_agents"] == ["reviewer", "reviewer"]
+    messages = [await bus.get_inbound(), await bus.get_inbound()]
+    by_owner = {message.owner_user_id: message for message in messages}
+    assert set(by_owner) == {"alice", "bob"}
+    assert by_owner["alice"].topic_id != by_owner["bob"].topic_id
+    assert by_owner["alice"].metadata["preferred_thread_id"] != by_owner["bob"].metadata["preferred_thread_id"]
+    assert by_owner["alice"].verified_source_binding != by_owner["bob"].verified_source_binding
 
 
 @pytest.mark.anyio
@@ -327,7 +373,7 @@ async def test_verified_dispatch_rejects_ambiguous_registry_match(
         "pull_request",
         "delivery-1",
         _github_payload(),
-        verified_request=VerifiedGitHubWebhookRequest("delivery-1"),
+        verified_request=_verified_request("delivery-1"),
     )
 
     assert result["fired_agents"] == []
@@ -449,7 +495,8 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
 
     monkeypatch.setattr(paths_module, "_paths", None)
     _invalidate_cache()
-    _write_github_agent(tmp_path)
+    _write_github_agent(tmp_path, owner="alice")
+    _write_github_agent(tmp_path, owner="bob")
 
     graph_store = InMemoryStore()
     run_manager = RunManager(store=MemoryRunStore())
@@ -485,9 +532,9 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
 
     import app.channels.service as service_module
 
-    async def owner_user(*_args, **_kwargs):
+    async def owner_user(_request, owner_user_id):
         return SimpleNamespace(
-            id="owner-1",
+            id=owner_user_id,
             system_role="user",
             oauth_provider=None,
             oauth_id=None,
@@ -579,21 +626,31 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
                 )
                 assert response.status_code == 200
                 for _ in range(100):
-                    if recording_runtime.receipts:
+                    if len(recording_runtime.receipts) == 2:
                         break
                     await asyncio.sleep(0.01)
-                assert recording_runtime.receipts
-                first = recording_runtime.receipts[0]
-                assert first.record.task is not None
-                await first.record.task
+                assert len(recording_runtime.receipts) == 2
+                first_receipts = tuple(recording_runtime.receipts)
+                for receipt in first_receipts:
+                    assert receipt.record.task is not None
+                    await receipt.record.task
                 for _ in range(100):
                     async with receipt_sessions() as session:
-                        stored = await session.scalar(sa.select(InboundReceiptRow).where(InboundReceiptRow.provider_delivery_id == "delivery-1"))
-                    if stored is not None and stored.state == "completed":
+                        stored_rows = tuple(await session.scalars(sa.select(InboundReceiptRow).where(InboundReceiptRow.provider_delivery_id == "delivery-1")))
+                    if len(stored_rows) == 2 and all(stored.state == "completed" for stored in stored_rows):
                         break
                     await asyncio.sleep(0.01)
-                assert stored is not None
-                assert stored.state == "completed"
+                assert len(stored_rows) == 2
+                assert all(stored.state == "completed" for stored in stored_rows)
+                assert all(stored.provider_event_digest is not None for stored in stored_rows)
+
+                # The verified provider event is unchanged, but live execution
+                # policy has changed since the first receipt. Redelivery must
+                # retain the original accepted envelope instead of conflicting
+                # or silently rewriting its policy.
+                _write_github_agent(tmp_path, owner="alice", recursion_limit=200)
+                _write_github_agent(tmp_path, owner="bob", recursion_limit=200)
+                _invalidate_cache()
 
                 redelivery = await http.post(
                     "/api/webhooks/github",
@@ -603,29 +660,40 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
                 assert redelivery.status_code == 200
                 await asyncio.sleep(0)
 
-            assert len(recording_runtime.receipts) == 1
-            assert first.created is True
-            assert stored.run_id == first.record.run_id
-            assert run_agent.await_count == 1
+            assert len(recording_runtime.receipts) == 2
+            assert all(receipt.created is True for receipt in first_receipts)
+            assert {stored.run_id for stored in stored_rows} == {receipt.record.run_id for receipt in first_receipts}
+            assert all(stored.payload_json["policy_metadata"]["github"]["recursion_limit"] == 100 for stored in stored_rows)
+            assert run_agent.await_count == 2
 
-            accepted = first.record.accepted_invocation
-            assert accepted is not None
-            binding_reference = accepted.origin.references["binding_reference"]
-            assert accepted.origin.references["binding_kind"] == "webhook_route"
-            assert binding_reference.startswith("route:v1:sha256:")
-            assert accepted.trusted_context is not None
-            trusted_binding = next(reference.value for reference in accepted.trusted_context.origin.references if reference.key == "binding_reference")
-            assert trusted_binding == binding_reference
             from deerflow.extensions.mcp import McpInvocationFacts
 
-            mcp_facts = McpInvocationFacts.from_accepted(
-                accepted,
-                run_id=first.record.run_id,
-            )
-            mcp_binding = next(reference.value for reference in mcp_facts.origin.references if reference.key == "binding_reference")
-            assert mcp_binding == binding_reference
-            assert "transient-test-token" not in json.dumps(accepted.to_persisted())
-            assert client.threads.create.await_count == 1
+            principals: set[str] = set()
+            thread_ids: set[str] = set()
+            bindings: set[str] = set()
+            for receipt in first_receipts:
+                accepted = receipt.record.accepted_invocation
+                assert accepted is not None
+                principals.add(accepted.principal.user_id)
+                thread_ids.add(receipt.record.thread_id)
+                binding_reference = accepted.origin.references["binding_reference"]
+                bindings.add(binding_reference)
+                assert accepted.origin.references["binding_kind"] == "webhook_route"
+                assert binding_reference.startswith("route:v1:sha256:")
+                assert accepted.trusted_context is not None
+                trusted_binding = next(reference.value for reference in accepted.trusted_context.origin.references if reference.key == "binding_reference")
+                assert trusted_binding == binding_reference
+                mcp_facts = McpInvocationFacts.from_accepted(
+                    accepted,
+                    run_id=receipt.record.run_id,
+                )
+                mcp_binding = next(reference.value for reference in mcp_facts.origin.references if reference.key == "binding_reference")
+                assert mcp_binding == binding_reference
+                assert "transient-test-token" not in json.dumps(accepted.to_persisted())
+            assert principals == {"alice", "bob"}
+            assert len(thread_ids) == 2
+            assert len(bindings) == 2
+            assert client.threads.create.await_count == 2
 
     finally:
         await receipt_processor.stop()
@@ -938,7 +1006,7 @@ async def test_buzz_repository_binding_retains_durable_event_key(tmp_path: Path)
 
 
 @pytest.mark.anyio
-async def test_authenticated_github_request_without_delivery_id_keeps_route_binding(
+async def test_authenticated_github_request_without_delivery_id_is_rejected_before_dispatch(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -985,12 +1053,9 @@ async def test_authenticated_github_request_without_delivery_id_keeps_route_bind
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["dispatch"]["fired_agents"] == ["reviewer"]
-    message = await bus.get_inbound()
-    assert message.metadata["message_id"] is None
-    assert message.verified_source_binding is not None
-    assert message.verified_source_binding.kind == "webhook_route"
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid verified GitHub delivery identity"}
+    assert bus.inbound_queue.empty()
 
 
 @pytest.mark.anyio

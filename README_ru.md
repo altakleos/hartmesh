@@ -399,7 +399,7 @@ HartMesh сохраняет существующие namespaces `deerflow.*`, и
 
 Эти hashes подтверждают происхождение, а не обещание сопровождения.
 
-Граф Alembic в этом checkout линеен: `0011_mcp_tasks` → `0011_accepted_invocation` → миграции вызовов до `0018_inbound_receipt_failures`.
+Граф Alembic в этом checkout линеен: `0011_mcp_tasks` → `0011_accepted_invocation` → миграции вызовов до `0019_inbound_event_identity`.
 
 Операторам PostgreSQL следует остановить writers и сделать backup перед rollback; руководство по миграциям находится в [backend/AGENTS.md](backend/AGENTS.md).
 

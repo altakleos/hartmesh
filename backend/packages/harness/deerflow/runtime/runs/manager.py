@@ -60,6 +60,13 @@ _UNIQUE_PGCODE = "23505"
 _SQLITE_UNIQUE_ERRORCODE = sqlite3.SQLITE_CONSTRAINT_UNIQUE
 
 
+@dataclass(slots=True)
+class _AdmissionCancellation:
+    """Cancellation observed while an atomic store decision is in flight."""
+
+    requested: bool = False
+
+
 def _generate_worker_id() -> str:
     """Generate a unique worker identifier: ``hostname:hex_uuid``."""
     return f"{socket.gethostname()}:{uuid.uuid4().hex}"
@@ -1119,10 +1126,10 @@ class RunManager:
             record.execution_lease_renewal = callback
 
     async def fail_start_if_pending(self, run_id: str, *, error: str) -> bool:
-        """Mark an admitted run as failed if its worker task could not be attached."""
+        """Mark an admitted run failed and report whether that failure won."""
         async with self._lock:
             record = self._runs.get(run_id)
-            if record is None or record.status != RunStatus.pending:
+            if record is None or record.status != RunStatus.pending or record.abort_event.is_set():
                 return False
             record.status = RunStatus.error
             record.error = error
@@ -1137,7 +1144,43 @@ class RunManager:
             stop_reason="worker_attachment_failed",
             lifecycle_type=LifecycleType.failed,
         )
-        return True
+        async with self._lock:
+            current = self._runs.get(run_id)
+            return bool(current is record and record.status == RunStatus.error and record.error == error and record.stop_reason == "worker_attachment_failed")
+
+    async def finalize_pending_cancellation(self, run_id: str) -> bool:
+        """Terminalize a cancellation that won before graph preflight began."""
+
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return False
+            if record.status not in (RunStatus.pending, RunStatus.running):
+                if record.abort_event.is_set():
+                    record.finalizing = False
+                    return True
+                return False
+            action = record.abort_action
+            if not record.abort_event.is_set() or action not in ("interrupt", "rollback"):
+                return False
+            record.status = RunStatus.error if action == "rollback" else RunStatus.interrupted
+            record.error = "Rolled back by user" if action == "rollback" else None
+            record.stop_reason = None
+            record.pending_lifecycle_type = LifecycleType.cancelled
+            record.updated_at = _now_iso()
+
+        await self._persist_status(
+            record,
+            record.status,
+            error=record.error,
+            lifecycle_type=LifecycleType.cancelled,
+        )
+        async with self._lock:
+            current = self._runs.get(run_id)
+            if current is record:
+                record.finalizing = False
+                return record.status not in (RunStatus.pending, RunStatus.running)
+        return False
 
     async def get_many_by_thread(
         self,
@@ -1558,13 +1601,27 @@ class RunManager:
                 user_id=user_id,
             ),
         )
+        signalled_action: str | None = None
         if result.row is not None:
             async with self._lock:
                 local_record = self._runs.get(run_id)
                 if local_record is not None:
                     self._sync_record_from_store_row(local_record, result.row)
-        if result.outcome is CancellationRequestOutcome.requested:
-            await self._signal_local_cancel(run_id, action=action)
+                    winning_action = result.row.get("cancel_action")
+                    if winning_action in ("interrupt", "rollback") and local_record.status in (RunStatus.pending, RunStatus.running):
+                        local_record.abort_action = winning_action
+                        local_record.abort_event.set()
+                        task_active = local_record.task is not None and not local_record.task.done()
+                        local_record.finalizing = task_active
+                        if task_active and local_record.status == RunStatus.running:
+                            local_record.task.cancel()
+                        signalled_action = winning_action
+        if signalled_action is not None:
+            logger.info(
+                "Run %s cancellation signalled locally (action=%s)",
+                run_id,
+                signalled_action,
+            )
         return result.outcome
 
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> CancelOutcome:
@@ -1867,8 +1924,66 @@ class RunManager:
             caller_intent_digest_version=caller_intent_digest_version,
         )
 
+    async def _await_atomic_admission_result(
+        self,
+        operation: str,
+        run_id: str,
+        call: Callable[[], Awaitable[Any]],
+        cancellation: _AdmissionCancellation,
+    ) -> Any:
+        """Drain one atomic store decision even when its caller is cancelled.
+
+        A durable store may commit before its coroutine returns the materialized
+        row.  Propagating cancellation into that coroutine would make the caller
+        unable to distinguish a rollback from a committed, unseen admission.  A
+        dedicated shielded task therefore reaches a definite result. Cancellation
+        is recorded in a shared state object before that result is inspected, so
+        an exceptional decision cannot erase it and trigger another admission.
+        """
+
+        decision = asyncio.create_task(
+            self._call_store_with_retry(operation, run_id, call),
+            name=f"deerflow-atomic-admission-{run_id}",
+        )
+        while not decision.done():
+            try:
+                await asyncio.shield(decision)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is None or current.cancelling() == 0:
+                    # The store task, rather than this request, was cancelled.
+                    # Its atomic implementation owns rollback semantics.
+                    raise
+                cancellation.requested = True
+        return decision.result()
+
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
-        """Terminalize an unseen replacement and confirm its durable state."""
+        """Terminalize an unseen run or release an unseen reservation."""
+        if record.operation_kind != ThreadOperationKind.run:
+            try:
+                if self._store is not None:
+                    await self._call_store_with_retry(
+                        "release cancelled thread operation",
+                        record.run_id,
+                        lambda: self._store.delete_thread_operation(
+                            record.run_id,
+                            user_id=record.user_id,
+                        ),
+                    )
+                    stored = await self._call_store_with_retry(
+                        "verify cancelled thread operation release",
+                        record.run_id,
+                        lambda: self._store.get(record.run_id, user_id=record.user_id),
+                    )
+                    if stored is not None:
+                        raise RuntimeError("cancelled thread operation remains active")
+            finally:
+                async with self._lock:
+                    if self._runs.get(record.run_id) is record:
+                        self._runs.pop(record.run_id, None)
+                        self._unindex_run_locked(record.run_id, record.thread_id)
+            return
+
         await self.cancel(record.run_id)
         if self._store is None:
             return
@@ -1937,6 +2052,47 @@ class RunManager:
             if self._runs.get(record.run_id) is record:
                 self._sync_record_from_store_row(record, stored)
 
+    async def _drain_cancelled_admission_cleanup(self, record: RunRecord) -> None:
+        """Finish compensation despite repeated request cancellation."""
+
+        cleanup = asyncio.create_task(
+            self._close_cancelled_admission(record),
+            name=f"deerflow-close-cancelled-admission-{record.run_id}",
+        )
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        try:
+            cleanup.result()
+        except asyncio.CancelledError as exc:
+            from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
+
+            log_bounded_failure(
+                logger,
+                bounded_diagnostic(
+                    code="cancelled_admission_cleanup_cancelled",
+                    operation="close_cancelled_admission",
+                    error=exc,
+                    capability_id="run_store",
+                ),
+            )
+        except Exception as exc:
+            from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
+
+            log_bounded_failure(
+                logger,
+                bounded_diagnostic(
+                    code="cancelled_admission_cleanup_failed",
+                    operation="close_cancelled_admission",
+                    error=exc,
+                    capability_id="run_store",
+                ),
+            )
+
     async def _admit_thread_operation(
         self,
         thread_id: str,
@@ -1985,6 +2141,7 @@ class RunManager:
         interrupted_records: list[RunRecord] = []
         created_store_row: dict[str, Any] | None = None
         claimed_store_rows: dict[str, dict[str, Any]] = {}
+        admission_cancellation = _AdmissionCancellation()
         record = RunRecord(
             run_id=run_id,
             thread_id=thread_id,
@@ -2055,7 +2212,7 @@ class RunManager:
                 keyed = external_scope is not None and external_key is not None
                 if keyed:
                     try:
-                        store_admission = await self._call_store_with_retry(
+                        store_admission = await self._await_atomic_admission_result(
                             "ensure_run_atomic",
                             run_id,
                             lambda: self._store.ensure_run_atomic(
@@ -2080,10 +2237,15 @@ class RunManager:
                                 grace_seconds=grace_seconds,
                                 **accepted_persisted,
                             ),
+                            admission_cancellation,
                         )
                     except ConflictError:
+                        if admission_cancellation.requested:
+                            raise asyncio.CancelledError() from None
                         raise
                     except Exception as exc:
+                        if admission_cancellation.requested:
+                            raise asyncio.CancelledError() from None
                         if _is_unique_violation(exc):
                             raise ConflictError(f"Thread {thread_id} already has an active run") from exc
                         raise
@@ -2091,12 +2253,14 @@ class RunManager:
                         stored_record = self._replay_record_from_store(store_admission.row)
                         if stored_record.user_id != user_id:
                             raise IdempotencyConflictError("Idempotency key is not visible to this principal")
+                        if admission_cancellation.requested:
+                            raise asyncio.CancelledError()
                         return RunAdmission(record=stored_record, outcome=store_admission.outcome)
                     created_store_row = store_admission.row
                     claimed_store_rows = {row["run_id"]: row for row in store_admission.claimed}
                 elif multitask_strategy == "reject":
                     try:
-                        created_store_row, claimed_rows = await self._call_store_with_retry(
+                        atomic_result = await self._await_atomic_admission_result(
                             "create_thread_operation_atomic",
                             run_id,
                             lambda: self._store.create_thread_operation_atomic(
@@ -2115,11 +2279,17 @@ class RunManager:
                                 grace_seconds=grace_seconds,
                                 **accepted_persisted,
                             ),
+                            admission_cancellation,
                         )
+                        created_store_row, claimed_rows = atomic_result
                         claimed_store_rows = {row["run_id"]: row for row in claimed_rows}
                     except ConflictError:
+                        if admission_cancellation.requested:
+                            raise asyncio.CancelledError() from None
                         raise
                     except Exception as exc:
+                        if admission_cancellation.requested:
+                            raise asyncio.CancelledError() from None
                         if _is_unique_violation(exc):
                             raise ConflictError(f"Thread {thread_id} already has an active run") from exc
                         raise
@@ -2130,7 +2300,7 @@ class RunManager:
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
-                            created_store_row, claimed_rows = await self._call_store_with_retry(
+                            atomic_result = await self._await_atomic_admission_result(
                                 "create_thread_operation_atomic",
                                 run_id,
                                 lambda: self._store.create_thread_operation_atomic(
@@ -2149,10 +2319,14 @@ class RunManager:
                                     grace_seconds=grace_seconds,
                                     **accepted_persisted,
                                 ),
+                                admission_cancellation,
                             )
+                            created_store_row, claimed_rows = atomic_result
                             claimed_store_rows = {row["run_id"]: row for row in claimed_rows}
                             break
                         except Exception as exc:
+                            if admission_cancellation.requested:
+                                raise asyncio.CancelledError() from None
                             is_unique = _is_unique_violation(exc)
                             if is_unique and attempt + 1 < max_retries:
                                 continue
@@ -2208,22 +2382,14 @@ class RunManager:
                         interrupted_record.status,
                     )
         except asyncio.CancelledError:
-            cleanup = asyncio.create_task(self._close_cancelled_admission(record))
-            cleanup.set_name(f"deerflow-close-cancelled-admission-{record.run_id}")
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    break
-            try:
-                cleanup.result()
-            except asyncio.CancelledError:
-                logger.error("Cancelled admission cleanup task was itself cancelled for run %s", record.run_id)
-            except Exception:
-                logger.exception("Failed to close run %s after admission was cancelled", record.run_id)
-            raise
+            admission_cancellation.requested = True
+        except Exception:
+            if not admission_cancellation.requested:
+                raise
+
+        if admission_cancellation.requested:
+            await self._drain_cancelled_admission_cleanup(record)
+            raise asyncio.CancelledError()
 
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return RunAdmission(record=record, outcome=AdmissionOutcome.created)

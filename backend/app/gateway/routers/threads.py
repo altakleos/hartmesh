@@ -45,7 +45,7 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
-from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY
+from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, ThreadMetaAlreadyExistsError
 from deerflow.runtime import serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
@@ -591,13 +591,12 @@ async def _ensure_thread_for_goal(thread_id: str, request: Request) -> None:
     thread_owner_user_id = get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
 
-    record = await thread_store.get(thread_id, **thread_owner_kwargs)
-    if record is None and thread_owner_user_id:
-        unscoped_record = await thread_store.get(thread_id, user_id=None)
-        if unscoped_record is not None:
-            if unscoped_record.get("user_id") != thread_owner_user_id:
-                await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
-            record = await thread_store.get(thread_id, **thread_owner_kwargs)
+    record = await _resolve_existing_thread(
+        thread_store,
+        thread_id,
+        thread_owner_user_id,
+        thread_owner_kwargs,
+    )
     if record is None:
         try:
             await thread_store.create(thread_id, metadata={}, **thread_owner_kwargs)
@@ -681,18 +680,20 @@ async def _resolve_existing_thread(
 ) -> dict | None:
     """Return the existing thread_meta record for an idempotent create.
 
-    When the caller carries a trusted internal owner but only a legacy unscoped
-    (``user_id=None``) row exists, claim it for that owner before returning.
+    When the caller carries a trusted internal owner but only a legacy unowned
+    (``user_id=None``) row exists, atomically claim it before returning.
     Both the fast path and the insert-race recovery path resolve through here so
     a thread's ownership does not diverge based on which path found the record.
+    A row already assigned to another owner is never transferred.
     """
     existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if existing_record is None and thread_owner_user_id:
-        unscoped_record = await thread_store.get(thread_id, user_id=None)
-        if unscoped_record is not None:
-            if unscoped_record.get("user_id") != thread_owner_user_id:
-                await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
-            existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+        await thread_store.claim_unowned(thread_id, thread_owner_user_id)
+        existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+        if existing_record is None:
+            unscoped_record = await thread_store.get(thread_id, user_id=None)
+            if unscoped_record is not None:
+                raise HTTPException(status_code=409, detail="Thread ID is already in use")
     return existing_record
 
 
@@ -738,14 +739,15 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             **thread_owner_kwargs,
             metadata=body.metadata,
         )
-    except IntegrityError:
+    except (IntegrityError, ThreadMetaAlreadyExistsError):
         # The idempotency read above and this insert are not atomic: a
         # concurrent request for the same thread_id can commit in between, so
         # the SQL-backed store rejects ours on the duplicate primary key.
         # Honour the documented idempotency contract by resolving the
         # now-existing record — running the same owner reconciliation the fast
-        # path does — instead of surfacing the conflict as a 500. (The memory
-        # store overwrites rather than raising, so it never reaches here.)
+        # path does — instead of surfacing the conflict as a 500. Both stores
+        # reject replacement; SQL may still expose IntegrityError through a
+        # compatibility test double or older adapter.
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
             return _existing_thread_response(thread_id, existing_record)

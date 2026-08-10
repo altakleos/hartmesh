@@ -29,6 +29,10 @@ class InvalidMetadataFilterError(ValueError):
     """Raised when all client-supplied metadata filter keys are rejected."""
 
 
+class ThreadMetaAlreadyExistsError(RuntimeError):
+    """Raised when a create would replace an existing thread metadata row."""
+
+
 class ThreadMetaStore(abc.ABC):
     @abc.abstractmethod
     async def create(
@@ -40,6 +44,11 @@ class ThreadMetaStore(abc.ABC):
         display_name: str | None = None,
         metadata: dict | None = None,
     ) -> dict:
+        """Create a row without replacing an existing thread.
+
+        Raise :class:`ThreadMetaAlreadyExistsError` when ``thread_id`` is
+        already present.
+        """
         pass
 
     @abc.abstractmethod
@@ -93,6 +102,17 @@ class ThreadMetaStore(abc.ABC):
 
         Intended for trusted internal repair/migration paths. No-op if the
         row does not exist or the caller fails the owner check.
+        """
+        pass
+
+    @abc.abstractmethod
+    async def claim_unowned(self, thread_id: str, owner_user_id: str) -> bool:
+        """Atomically assign a legacy NULL-owned row to ``owner_user_id``.
+
+        Return ``True`` only when this call changed the row. Missing rows and
+        rows that already have any owner return ``False``. This operation is
+        the only supported adoption path; unlike :meth:`update_owner`, it can
+        never transfer an owned thread.
         """
         pass
 

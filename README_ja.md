@@ -399,7 +399,7 @@ HartMesh は既存の `deerflow.*` namespace、package 名、`DEER_FLOW_*` 変�
 
 これらの hash は provenance であり、maintenance promise ではありません。
 
-この checkout の Alembic graph は線形です：`0011_mcp_tasks` → `0011_accepted_invocation` → `0018_inbound_receipt_failures` までの invocation migration。
+この checkout の Alembic graph は線形です：`0011_mcp_tasks` → `0011_accepted_invocation` → `0019_inbound_event_identity` までの invocation migration。
 
 PostgreSQL operator は rollback 前に writer を停止し data を backup してください。migration guidance は [backend/AGENTS.md](backend/AGENTS.md) にあります。
 

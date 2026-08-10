@@ -34,6 +34,7 @@ class InboundReceiptRow(Base):
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_event_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     state: Mapped[str] = mapped_column(String(16), nullable=False)
     lease_owner: Mapped[str | None] = mapped_column(String(96), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -78,6 +79,10 @@ class InboundReceiptRow(Base):
         CheckConstraint(
             "length(payload_digest) = 64 AND lower(payload_digest) = payload_digest",
             name="ck_inbound_receipts_digest_format",
+        ),
+        CheckConstraint(
+            "provider_event_digest IS NULL OR (length(provider_event_digest) = 64 AND lower(provider_event_digest) = provider_event_digest)",
+            name="ck_inbound_receipts_provider_event_digest_format",
         ),
         Index(
             "ix_inbound_receipts_due",

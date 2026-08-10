@@ -101,6 +101,17 @@ def _set_config_value(
     values["config"] = yaml.safe_dump(config, sort_keys=False)
 
 
+def test_gateway_rollouts_preserve_single_process_ownership(tmp_path: Path) -> None:
+    rendered = _render(tmp_path, _production_values()).stdout
+    gateway = _workload(rendered, kind="Deployment", component="gateway")
+
+    assert gateway["spec"]["replicas"] == 1
+    assert gateway["spec"]["strategy"] == {
+        "type": "Recreate",
+        "rollingUpdate": None,
+    }
+
+
 def test_runtime_images_render_tags_or_digests_without_combining_them(
     tmp_path: Path,
 ) -> None:

@@ -165,7 +165,7 @@ they resolve from the selected Secret):
 
 ```yaml
 config: |
-  config_version: 33
+  config_version: 39
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -255,9 +255,10 @@ The validated mode requires one replica, pinned Gateway/provisioner images,
 `durable_production` profile. Safe provenance, persistence tier, qualification
 state, and safe admission-readiness reason codes are available only to an authenticated administrator
 at `GET /api/runtime/v1/deployment`; portable runtime support remains the strict
-`GET /api/runtime/v1/capabilities` record. Plugin registrations and their manifest
-generation are startup-only; deploy a restart to adopt changes, while in-flight invocations
-stay pinned to the generation they accepted.
+`GET /api/runtime/v1/capabilities` record. Plugin registrations, required
+capabilities, `agent_storage`, `dedupe_storage`, deployment profile, and their
+derived manifest/storage composition are startup-only; deploy a restart to adopt
+changes, while in-flight invocations stay pinned to the generation they accepted.
 
 Signed GitHub ingress also participates in that deployment truth. The default
 `config.dedupe_storage.backend: auto` selects PostgreSQL leased receipt storage when
@@ -412,7 +413,12 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   ```
 - **Graceful shutdown & memory drain.** The Gateway owns one ordered deadline: freeze admission; stop channels and scheduler; interrupt/drain local runs; flush memory; close dependencies. Application phase budgets live in `config -> deployment.shutdown`, while `memory.shutdown_flush_timeout_seconds` owns the memory phase. By default the chart computes `terminationGracePeriodSeconds` from their sum plus `gateway.preStopSleepSeconds` (default 5s) and `gateway.shutdownSchedulingHeadroomSeconds` (default 3s). Set `gateway.terminationGracePeriodSeconds` only for an explicit override, and never below that derived requirement. A timed-out run remains subject to durable orphan recovery after restart. The opt-in suite above, not this configuration statement, is the live one-replica pod-termination evidence.
 - **Gateway replicas.** The supported local and production topology is one
-  Gateway replica. `durable_one_replica` rejects any other count. The chart does
+  Gateway replica. `durable_one_replica` rejects any other count, and the
+  Gateway Deployment uses `strategy.type: Recreate` so an upgrade terminates
+  the old execution owner before creating its replacement. The rendered
+  strategy explicitly clears previously defaulted RollingUpdate settings
+  during upgrade. Replacement causes an availability gap; it is not a
+  zero-downtime claim. The chart does
   not install a PodDisruptionBudget, topology spread, leader election, or a
   rolling-zero-downtime policy because those controls would imply coordination
   the runtime does not yet provide. They remain deferred until a real
@@ -432,11 +438,15 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   user-data mode. Default `ReadWriteOnce`; use `ReadWriteMany` (NFS) on
   multi-node clusters so sandbox Pods on other nodes can mount it.
 - **Provisioner RBAC.** The provisioner gets a ServiceAccount with a namespaced
-  Role (get/list/watch/create/delete on pods and services; exact accepted-attempt
+  Role (get/list/watch/create/delete on pods and services; application-managed
   Secret, NetworkPolicy, and Lease lifecycle; and read-only PVC checks) and a narrow ClusterRole
-  (namespace get/create). It uses in-cluster service-account creds — no
-  kubeconfig mount. The unused update/patch/pods-exec/events verbs were dropped
-  (audited against `docker/provisioner/app.py`).
+  (namespace get/create plus TokenReview). It uses in-cluster service-account
+  credentials — no kubeconfig mount. The Role applies to every named resource
+  kind in the release namespace, not only label-matched sandbox objects;
+  Kubernetes RBAC cannot narrow these verbs by attempt label. Treat the
+  provisioner as a trusted namespace control-plane component. The unused
+  update/patch/pods-exec/events verbs were dropped (audited against
+  `docker/provisioner/app.py`).
 - **Immutable durable skills.** Set
   `provisioner.acceptedSkillProjectionProfile: rwx_verified_copy_v2`, pin both
   `provisioner.image.digest` and `provisioner.sandboxImage` by SHA-256 digest, and
@@ -511,7 +521,8 @@ in-place updates — a `helm upgrade` that changes only a ConfigMap would leave
 pods on stale config. Each pod template carries a `checksum/*` annotation (SHA256
 of the rendered ConfigMap): `checksum/config` + `checksum/extensions` on the
 gateway, `checksum/nginx` on nginx. Any content change alters the pod spec and
-triggers a rolling restart.
+triggers workload replacement. The Gateway specifically uses `Recreate`, so its
+old Pod terminates before the replacement Pod is created.
 
 **Resource defaults.** Every workload ships with modest requests+limits in
 `values.yaml`; override per workload (`gateway.resources`, `frontend.resources`,

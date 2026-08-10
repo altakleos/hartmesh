@@ -88,6 +88,8 @@ from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MES
 from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
+from deerflow.diagnostics import bounded_diagnostic
+from deerflow.persistence.thread_meta import ThreadMetaAlreadyExistsError
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -259,6 +261,7 @@ _TERMINAL_RUN_STATUSES = {
 }
 
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
+_PREGRAPH_FINALIZE_TIMEOUT_SECONDS = 5.0
 
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = frozenset(
     {
@@ -300,6 +303,38 @@ def _consume_task_result(task: asyncio.Task) -> None:
         task.exception()
 
 
+def _log_thread_metadata_failure(
+    error: BaseException,
+    *,
+    code: str,
+    thread_id: str,
+) -> None:
+    """Emit bounded ownership-metadata diagnostics without exception text."""
+
+    diagnostic = bounded_diagnostic(
+        code=code,
+        operation="ensure_thread_metadata",
+        error=error,
+        capability_id="thread_meta",
+    )
+    logger.warning(
+        "thread metadata operation failed code=%s operation=%s error_class=%s capability_id=%s thread_id=%s correlation_id=%s",
+        diagnostic.code,
+        diagnostic.operation,
+        diagnostic.error_class,
+        diagnostic.capability_id,
+        sanitize_log_param(thread_id),
+        diagnostic.correlation_id,
+        extra={
+            "diagnostic_code": diagnostic.code,
+            "operation": diagnostic.operation,
+            "exception_class": diagnostic.error_class,
+            "capability_id": diagnostic.capability_id,
+            "correlation_id": diagnostic.correlation_id,
+        },
+    )
+
+
 def _log_thread_metadata_task_result(task: asyncio.Task, *, thread_id: str) -> None:
     """Log detached metadata setup failures while ignoring cancellation."""
     if task.cancelled():
@@ -308,12 +343,85 @@ def _log_thread_metadata_task_result(task: asyncio.Task, *, thread_id: str) -> N
         task.result()
     except asyncio.CancelledError:
         return
-    except Exception:
-        logger.warning(
-            "Failed to ensure thread_meta for %s after worker detached (non-fatal)",
-            sanitize_log_param(thread_id),
-            exc_info=True,
+    except Exception as exc:
+        _log_thread_metadata_failure(
+            exc,
+            code="thread_metadata_detached_failure",
+            thread_id=thread_id,
         )
+
+
+def _log_pregraph_stream_failure(
+    error: BaseException,
+    *,
+    operation: str,
+    run_id: str,
+) -> None:
+    """Emit bounded diagnostics when a pre-graph terminal stream write fails."""
+
+    diagnostic = bounded_diagnostic(
+        code="pregraph_stream_finalize_failed",
+        operation=operation,
+        error=error,
+        capability_id="stream_bridge",
+    )
+    logger.warning(
+        "pre-graph stream operation failed code=%s operation=%s error_class=%s capability_id=%s run_id=%s correlation_id=%s",
+        diagnostic.code,
+        diagnostic.operation,
+        diagnostic.error_class,
+        diagnostic.capability_id,
+        sanitize_log_param(run_id),
+        diagnostic.correlation_id,
+        extra={
+            "diagnostic_code": diagnostic.code,
+            "operation": diagnostic.operation,
+            "exception_class": diagnostic.error_class,
+            "capability_id": diagnostic.capability_id,
+            "correlation_id": diagnostic.correlation_id,
+        },
+    )
+
+
+async def _finalize_pregraph_stream(
+    bridge: StreamBridge,
+    record: RunRecord,
+    *,
+    error_message: str | None,
+) -> None:
+    """Close both live and late stream consumers without entering graph preflight."""
+
+    if error_message is not None:
+        try:
+            await bridge.publish(
+                record.run_id,
+                "error",
+                {
+                    "message": error_message,
+                    "name": "RunStartupError",
+                },
+            )
+        except Exception as exc:
+            _log_pregraph_stream_failure(
+                exc,
+                operation="publish_error",
+                run_id=record.run_id,
+            )
+    try:
+        await bridge.publish_end(record.run_id)
+    except Exception as exc:
+        _log_pregraph_stream_failure(
+            exc,
+            operation="publish_end",
+            run_id=record.run_id,
+        )
+        return
+    cleanup = asyncio.create_task(bridge.cleanup(record.run_id, delay=60))
+    cleanup.add_done_callback(_consume_task_result)
+
+
+class _ThreadOwnershipConflict(RuntimeError):
+    """An admitted run cannot execute against another owner's thread state."""
 
 
 async def _ensure_thread_metadata(
@@ -324,19 +432,34 @@ async def _ensure_thread_metadata(
 ) -> None:
     """Ensure an admitted run's thread exists without delaying task attachment."""
     thread_store = run_ctx.thread_store
-    existing = await thread_store.get(record.thread_id)
-    if existing is None and owner_user_id:
-        unscoped = await thread_store.get(record.thread_id, user_id=None)
-        if unscoped is not None:
-            if unscoped.get("user_id") != owner_user_id:
-                await thread_store.update_owner(record.thread_id, owner_user_id, user_id=None)
-            existing = await thread_store.get(record.thread_id)
+    record_owner_user_id = getattr(record, "user_id", None)
+    if owner_user_id and record_owner_user_id and owner_user_id != record_owner_user_id:
+        raise _ThreadOwnershipConflict("thread ownership conflict")
+    effective_owner_user_id = owner_user_id or record_owner_user_id
+    owner_kwargs = {"user_id": effective_owner_user_id} if effective_owner_user_id else {}
+    existing = await thread_store.get(record.thread_id, **owner_kwargs)
+    if existing is None and effective_owner_user_id:
+        await thread_store.claim_unowned(record.thread_id, effective_owner_user_id)
+        existing = await thread_store.get(record.thread_id, **owner_kwargs)
+        if existing is None and await thread_store.get(record.thread_id, user_id=None) is not None:
+            raise _ThreadOwnershipConflict("thread ownership conflict")
     if existing is None:
-        await thread_store.create(
-            record.thread_id,
-            assistant_id=record.assistant_id,
-            metadata=record.metadata,
-        )
+        try:
+            await thread_store.create(
+                record.thread_id,
+                assistant_id=record.assistant_id,
+                metadata=record.metadata,
+                **owner_kwargs,
+            )
+        except ThreadMetaAlreadyExistsError:
+            if effective_owner_user_id:
+                await thread_store.claim_unowned(
+                    record.thread_id,
+                    effective_owner_user_id,
+                )
+            existing = await thread_store.get(record.thread_id, **owner_kwargs)
+            if existing is None:
+                raise _ThreadOwnershipConflict("thread ownership conflict") from None
 
 
 async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
@@ -2225,15 +2348,15 @@ class _GatewayLaunchNormalizer:
         # ownership from the path param -- cannot protect them. Enforce thread
         # ownership before admission. Internal channel runs act on behalf of the
         # connection owner carried in X-DeerFlow-Owner-User-Id, so they remain
-        # scoped to that owner instead of bypassing the check.
+        # scoped exclusively to that owner instead of inheriting the internal
+        # carrier account's thread access.
         user = getattr(self._request.state, "user", None)
         if user is not None:
-            allowed = await run_ctx.thread_store.check_access(intent.thread_id, str(user.id))
-            if not allowed and owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
-                # Channel workers may act for the connection owner named in the
-                # trusted header (for example, claiming a legacy default-owned
-                # channel thread for its real owner).
-                allowed = await run_ctx.thread_store.check_access(intent.thread_id, owner_user_id)
+            access_owner_user_id = owner_user_id if owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE else str(user.id)
+            allowed = await run_ctx.thread_store.check_access(
+                intent.thread_id,
+                access_owner_user_id,
+            )
             if not allowed:
                 raise HTTPException(status_code=404, detail=f"Thread {intent.thread_id} not found")
 
@@ -2323,7 +2446,11 @@ class _GatewayLaunchNormalizer:
             raise
         caller_intent = identity.caller_intent if identity is not None else None
 
-        async def run_after_metadata(record: RunRecord) -> None:
+        entered_run_agent = False
+
+        async def run_after_metadata_body(record: RunRecord) -> None:
+            nonlocal entered_run_agent
+            requires_owned_metadata = bool(owner_user_id or getattr(record, "user_id", None))
             metadata_task = asyncio.create_task(
                 _ensure_thread_metadata(
                     run_ctx,
@@ -2333,30 +2460,46 @@ class _GatewayLaunchNormalizer:
             )
             abort_task = asyncio.create_task(record.abort_event.wait())
             metadata_failure_logged = False
+            startup_failure: str | None = None
+            abort_before_metadata = False
             try:
                 done, _ = await asyncio.wait(
                     (metadata_task, abort_task),
                     timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if metadata_task in done:
+                if abort_task in done:
+                    abort_before_metadata = True
+                elif metadata_task in done:
                     try:
                         metadata_task.result()
                     except asyncio.CancelledError:
                         pass
-                    except Exception:
+                    except _ThreadOwnershipConflict as exc:
                         metadata_failure_logged = True
-                        logger.warning(
-                            "Failed to ensure thread_meta for %s (non-fatal)",
-                            sanitize_log_param(intent.thread_id),
-                            exc_info=True,
+                        _log_thread_metadata_failure(
+                            exc,
+                            code="thread_ownership_conflict",
+                            thread_id=intent.thread_id,
                         )
+                        startup_failure = "Thread ownership conflict prevented execution"
+                    except Exception as exc:
+                        metadata_failure_logged = True
+                        _log_thread_metadata_failure(
+                            exc,
+                            code="thread_metadata_setup_failed",
+                            thread_id=intent.thread_id,
+                        )
+                        if requires_owned_metadata:
+                            startup_failure = "Thread ownership metadata was unavailable before execution"
                 elif abort_task not in done:
-                    logger.warning(
-                        "Timed out ensuring thread_meta for %s after %.1fs",
-                        sanitize_log_param(intent.thread_id),
-                        _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
+                    _log_thread_metadata_failure(
+                        TimeoutError("thread metadata setup deadline elapsed"),
+                        code="thread_metadata_setup_timeout",
+                        thread_id=intent.thread_id,
                     )
+                    if requires_owned_metadata:
+                        startup_failure = "Thread ownership metadata was unavailable before execution"
             finally:
                 if metadata_task.done():
                     if not metadata_failure_logged:
@@ -2375,8 +2518,28 @@ class _GatewayLaunchNormalizer:
                 if not abort_task.done():
                     abort_task.cancel()
                     abort_task.add_done_callback(_consume_task_result)
-            # Continue even after metadata abort/timeout: run_agent's startup
-            # barrier is the single path that finalizes pending cancellation.
+            if startup_failure is not None:
+                failure_retained = await run_mgr.fail_start_if_pending(
+                    record.run_id,
+                    error=startup_failure,
+                )
+                if not failure_retained:
+                    await run_mgr.finalize_pending_cancellation(record.run_id)
+                await _finalize_pregraph_stream(
+                    bridge,
+                    record,
+                    error_message=(startup_failure if failure_retained else None),
+                )
+                return
+            if abort_before_metadata:
+                await run_mgr.finalize_pending_cancellation(record.run_id)
+                await _finalize_pregraph_stream(
+                    bridge,
+                    record,
+                    error_message=None,
+                )
+                return
+            entered_run_agent = True
             await run_agent(
                 bridge,
                 run_mgr,
@@ -2390,6 +2553,51 @@ class _GatewayLaunchNormalizer:
                 interrupt_before=thaw_host_value(intent.interrupt_before),
                 interrupt_after=thaw_host_value(intent.interrupt_after),
             )
+
+        async def run_after_metadata(record: RunRecord) -> None:
+            try:
+                await run_after_metadata_body(record)
+            except asyncio.CancelledError:
+                if entered_run_agent or not record.abort_event.is_set():
+                    raise
+
+                async def finalize_cancelled_pregraph() -> None:
+                    await run_mgr.finalize_pending_cancellation(record.run_id)
+                    await _finalize_pregraph_stream(
+                        bridge,
+                        record,
+                        error_message=None,
+                    )
+
+                finalizer = asyncio.create_task(finalize_cancelled_pregraph())
+                finalizer.add_done_callback(_consume_task_result)
+                deadline = asyncio.get_running_loop().time() + _PREGRAPH_FINALIZE_TIMEOUT_SECONDS
+                while not finalizer.done():
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        finalizer.cancel()
+                        _log_pregraph_stream_failure(
+                            TimeoutError("pre-graph cancellation finalizer deadline elapsed"),
+                            operation="cancelled_worker_finalize",
+                            run_id=record.run_id,
+                        )
+                        return
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(finalizer),
+                            timeout=remaining,
+                        )
+                    except asyncio.CancelledError:
+                        continue
+                    except TimeoutError as exc:
+                        finalizer.cancel()
+                        _log_pregraph_stream_failure(
+                            exc,
+                            operation="cancelled_worker_finalize",
+                            run_id=record.run_id,
+                        )
+                        return
+                finalizer.result()
 
         try:
             prepared = PreparedLaunch(

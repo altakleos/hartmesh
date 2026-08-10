@@ -25,6 +25,7 @@ delivery timeout is never at risk.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import unicodedata
 from collections.abc import Awaitable, Callable, Sequence
@@ -32,7 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
-from app.gateway.github.identity import extract_target, resolve_thread_id
+from app.gateway.github.identity import extract_target, resolve_conversation_identity
 from app.gateway.github.prompts import build_prompt
 from app.gateway.github.registry import build_github_agent_registry, lookup_agents
 from app.gateway.github.triggers import event_should_fire
@@ -46,17 +47,46 @@ logger = logging.getLogger(__name__)
 class VerifiedGitHubWebhookRequest:
     """Host attestation created only after the route verifies the HMAC."""
 
-    delivery_id: str | None
+    delivery_id: str
+    provider_event_digest: str
 
     def __post_init__(self) -> None:
-        if self.delivery_id is None:
-            return
         if not isinstance(self.delivery_id, str) or not self.delivery_id:
             raise ValueError("verified GitHub delivery id must be a non-empty string")
         if len(self.delivery_id.encode("utf-8")) > 255:
             raise ValueError("verified GitHub delivery id must not exceed 255 UTF-8 bytes")
         if any(unicodedata.category(character) == "Cc" for character in self.delivery_id):
             raise ValueError("verified GitHub delivery id must not contain control characters")
+        if (
+            not isinstance(self.provider_event_digest, str)
+            or len(self.provider_event_digest) != 64
+            or self.provider_event_digest.lower() != self.provider_event_digest
+            or any(character not in "0123456789abcdef" for character in self.provider_event_digest)
+        ):
+            raise ValueError("verified GitHub provider event digest must be lowercase SHA-256")
+
+    @classmethod
+    def attest(
+        cls,
+        delivery_id: str | None,
+        *,
+        event: str,
+        body: bytes,
+    ) -> VerifiedGitHubWebhookRequest:
+        """Bind the authenticated body and bounded routing event header."""
+
+        if not isinstance(event, str) or not event:
+            raise ValueError("verified GitHub event must be a non-empty string")
+        event_bytes = event.encode("utf-8")
+        if len(event_bytes) > 128 or any(unicodedata.category(character) == "Cc" for character in event):
+            raise ValueError("verified GitHub event is malformed")
+        if not isinstance(body, bytes):
+            raise TypeError("verified GitHub body must be bytes")
+        framed = b"deerflow-github-provider-event-v1\0" + len(event_bytes).to_bytes(2, "big") + event_bytes + len(body).to_bytes(8, "big") + body
+        return cls(
+            delivery_id=delivery_id,
+            provider_event_digest=hashlib.sha256(framed).hexdigest(),
+        )
 
 
 def _is_self_event(
@@ -234,8 +264,9 @@ async def fanout_event(
         verified_request: Host attestation created by the route only after HMAC
             verification. When present, each fired match must also prove the
             configured installation and receives a server-derived route binding.
-            Its provider delivery id may be absent; that leaves admission unkeyed
-            without discarding the authenticated route evidence.
+            A fired signed route must also carry a stable provider delivery id
+            before the durable receipt sink acknowledges it. Only unverified
+            development dispatch may remain unkeyed.
         inbound_sink: Optional host-owned atomic batch sink. The signed Gateway
             route supplies the durable receipt sink; local dispatcher tests and
             unverified development paths retain direct MessageBus delivery.
@@ -449,18 +480,20 @@ async def fanout_event(
 
         # 8. Build prompt + publish inbound message onto the bus.
         prompt = build_prompt(event, payload)
-        thread_id = resolve_thread_id(repo, number, agent.name)
+        conversation = resolve_conversation_identity(
+            repo,
+            number,
+            agent.name,
+            verified_binding=verified_source_binding,
+        )
+        thread_id = conversation.thread_id
 
-        # We hand the ChannelManager a deterministic thread id via the
-        # store so its _lookup_thread_id() hits on first arrival and
-        # reuses the same thread on subsequent webhooks for the same
-        # (PR, agent) pair. The store key is
-        # ``("github", repo, f"{number}:{agent_name}")``, so each agent
-        # bound to the same PR gets its own store row — coder and
-        # reviewer on ``owner/repo#7`` never collide.
-        # (The store accepts a pre-known thread id; manager will fall
-        # through to _create_thread() the very first time.)
-        topic_id = f"{number}:{agent.name}"
+        # We hand ChannelManager a deterministic v2 thread id and topic. Both
+        # bind the verified route reference as well as repo/number/agent, so
+        # same-named agents owned by different users never share mappings,
+        # checkpoints, receipt FIFO, or thread authority. The manager creates
+        # the pre-known thread id on first use and caches that same mapping.
+        topic_id = conversation.topic_id
         # Inbound dedupe identity for ChannelManager._is_duplicate_inbound,
         # mirroring the stable per-message id the other channels stamp (Slack
         # `ts`, Telegram `message_id`, WeChat/WeCom `message_id`, …) that the
@@ -506,6 +539,7 @@ async def fanout_event(
             # workspace on the chat id.
             workspace_id=repo,
             verified_source_binding=verified_source_binding,
+            verified_provider_event_digest=(verified_request.provider_event_digest if verified_request is not None else None),
             metadata={
                 # Stable inbound-dedupe id keyed by the manager — see
                 # ``dedupe_message_id`` above.

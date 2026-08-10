@@ -177,6 +177,8 @@ class McpCallIndeterminateV1:
 
 @runtime_checkable
 class McpInterceptor(Protocol):
+    """Prepare one protected MCP call from bounded trusted invocation facts."""
+
     async def prepare_call(
         self,
         request: McpCallProjectionV1,

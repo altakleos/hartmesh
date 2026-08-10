@@ -24,6 +24,7 @@ _COLUMNS = {
     "thread_id",
     "payload_json",
     "payload_digest",
+    "provider_event_digest",
     "state",
     "lease_owner",
     "lease_expires_at",
@@ -44,6 +45,7 @@ _CHECKS = {
     "ck_inbound_receipts_admitted_has_run",
     "ck_inbound_receipts_identity_bounds",
     "ck_inbound_receipts_digest_format",
+    "ck_inbound_receipts_provider_event_digest_format",
 }
 _INDEXES = {
     "ix_inbound_receipts_due",
@@ -102,6 +104,47 @@ async def test_upgrade_downgrade_and_reupgrade_preserve_legacy_schema(tmp_path: 
 
         await asyncio.to_thread(command.downgrade, config, "0014_canonical_caller_intent")
         assert not _table_columns(path)
+        await asyncio.to_thread(command.upgrade, config, "head")
+        assert _table_columns(path) == _COLUMNS
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_event_identity_upgrade_preserves_legacy_receipt_without_invented_evidence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "event-identity.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    config = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(command.upgrade, config, "0018_inbound_receipt_failures")
+        sync = sa.create_engine(f"sqlite:///{path}")
+        with sync.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "INSERT INTO inbound_receipts "
+                    "(receipt_id, provider, binding_kind, binding_reference, provider_delivery_id, "
+                    "thread_id, payload_json, payload_digest, state, fencing_token, attempt_count, failure_count) "
+                    "VALUES ('legacy-receipt', 'github', 'webhook_route', 'route-1', "
+                    "'delivery-1', 'thread-1', '{}', :digest, 'received', 0, 0, 0)"
+                ),
+                {"digest": "a" * 64},
+            )
+        sync.dispose()
+
+        await asyncio.to_thread(command.upgrade, config, "head")
+        sync = sa.create_engine(f"sqlite:///{path}")
+        with sync.connect() as connection:
+            assert connection.execute(sa.text("SELECT provider_event_digest FROM inbound_receipts WHERE receipt_id = 'legacy-receipt'")).scalar_one() is None
+        sync.dispose()
+
+        await asyncio.to_thread(command.downgrade, config, "0018_inbound_receipt_failures")
+        sync = sa.create_engine(f"sqlite:///{path}")
+        with sync.connect() as connection:
+            assert connection.execute(sa.text("SELECT payload_digest FROM inbound_receipts WHERE receipt_id = 'legacy-receipt'")).scalar_one() == "a" * 64
+        sync.dispose()
+
         await asyncio.to_thread(command.upgrade, config, "head")
         assert _table_columns(path) == _COLUMNS
     finally:
