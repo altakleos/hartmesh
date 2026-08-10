@@ -18,12 +18,12 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 from deerflow_extension_api import ConstraintProjectionV1
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.postgres import postgres_async_url
 
 from app.runtime.idempotency import REQUEST_DIGEST_VERSION, CanonicalCallerIntent, canonical_request_digest, normalize_external_key, scope_for_http
 from app.runtime.invocation import (
@@ -55,14 +55,6 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
-
-
-def _postgres_async_url(url: str) -> str:
-    if url.startswith("postgresql://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
-    parts = urlsplit(url)
-    query = urlencode((key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key not in {"sslmode", "channel_binding"})
-    return urlunsplit(parts._replace(query=query))
 
 
 class _Normalizer:
@@ -139,10 +131,16 @@ class _DurableRuns:
     async def prepare_admission(self, _launch: PreparedLaunch) -> None:
         return None
 
-    async def admit(self, launch: PreparedLaunch) -> DurableAdmission:
+    async def admit(
+        self,
+        launch: PreparedLaunch,
+        *,
+        candidate_run_id: str,
+    ) -> DurableAdmission:
         admission = await self.manager.ensure_or_reject(
             launch.thread_id,
             launch.assistant_id,
+            candidate_run_id=candidate_run_id,
             external_scope=launch.external_scope or "",
             external_key=launch.external_key or "",
             request_digest=launch.request_digest or "",
@@ -169,6 +167,13 @@ class _DurableRuns:
     async def fail_start(self, record, error: str) -> None:
         await self.manager.fail_start_if_pending(record.run_id, error=error)
 
+    async def attach_worker(self, record, worker, task_factory):
+        return await self.manager.attach_worker_once(
+            record.run_id,
+            worker,
+            task_factory,
+        )
+
 
 class _ProcessLostAfterAdmission(BaseException):
     """Simulate a process-fatal exit that bypasses application cleanup."""
@@ -179,8 +184,16 @@ class _LoseAfterAdmissionRuns(_DurableRuns):
         super().__init__(manager)
         self.committed: DurableAdmission | None = None
 
-    async def admit(self, launch: PreparedLaunch) -> DurableAdmission:
-        self.committed = await super().admit(launch)
+    async def admit(
+        self,
+        launch: PreparedLaunch,
+        *,
+        candidate_run_id: str,
+    ) -> DurableAdmission:
+        self.committed = await super().admit(
+            launch,
+            candidate_run_id=candidate_run_id,
+        )
         raise _ProcessLostAfterAdmission
 
 
@@ -528,7 +541,7 @@ async def test_postgres_independent_sessions_force_key_and_thread_arbitration() 
     """Both callers miss preflight before PostgreSQL arbitrates contested inserts."""
 
     assert _POSTGRES_URL is not None
-    database_url = _postgres_async_url(_POSTGRES_URL)
+    database_url = postgres_async_url(_POSTGRES_URL)
     left_engine = create_async_engine(database_url)
     right_engine = create_async_engine(database_url)
     async with left_engine.begin() as connection:

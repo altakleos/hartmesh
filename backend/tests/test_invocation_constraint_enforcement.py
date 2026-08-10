@@ -163,10 +163,15 @@ class _Runs:
     async def prepare_admission(self, _launch):
         self.events.append("prepare")
 
-    async def admit(self, launch):
+    async def admit(self, launch, *, candidate_run_id):
         self.events.append("admit")
         self.admitted_launch = launch
+        self.record.run_id = candidate_run_id
         return DurableAdmission(self.record, AdmissionOutcome.created)
+
+    async def attach_worker(self, record, worker, task_factory):
+        record.task = task_factory(worker)
+        return record.task
 
     async def find_by_external_identity(self, _identity):
         self.events.append("lookup")
@@ -222,12 +227,17 @@ def _constraint_evidence(limit: int = 2) -> dict:
 async def test_constraints_run_after_authorization_and_before_atomic_admission() -> None:
     events: list[str] = []
     runs = _Runs(events)
+
+    def attach_discarded(worker):
+        worker.close()
+        return asyncio.create_task(asyncio.sleep(0))
+
     runtime = InvocationRuntime(
         normalizer=_Normalizer(events),
         runs=runs,
         authorization=_Authorization(),
         constraints=_Constraints(events, InternalConstraintDecision.projected_evidence(_constraint_evidence())),
-        task_factory=lambda worker: worker.close(),
+        task_factory=attach_discarded,
     )
 
     receipt = await runtime.launch(InternalLaunchIntent(thread_id="thread-1"))
@@ -237,6 +247,7 @@ async def test_constraints_run_after_authorization_and_before_atomic_admission()
     evidence = runs.admitted_launch.accepted_invocation.decision_evidence
     assert evidence["decisions"] == ({"policy_id": "allow"},)
     assert evidence["constraints"]["max_total_subagents"] == 2
+    await receipt.record.task
 
 
 @pytest.mark.asyncio

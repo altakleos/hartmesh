@@ -91,6 +91,7 @@ def _client(user):
     app.state.run_event_store.list_messages = AsyncMock(return_value=[])
     run_manager = MagicMock()
     run_manager.create_or_reject = AsyncMock(side_effect=ConflictError("sentinel: owner check passed"))
+    run_manager.fail_start_if_pending = AsyncMock(return_value=False)
     app.state.run_manager = run_manager
 
     async def resolve_owner(_request, owner_user_id):

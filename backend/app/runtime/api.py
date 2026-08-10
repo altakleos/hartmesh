@@ -40,6 +40,7 @@ from app.runtime.invocation import (
     InvocationRuntime,
     NotFoundOrInvisible,
 )
+from app.runtime.service_identity import validate_persisted_service_id
 from deerflow.runtime.runs.lifecycle_query import (
     CursorAhead,
     CursorGap,
@@ -261,7 +262,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                     extension_manifest_digest=summary.get("extension_manifest_digest"),
                     caller_intent_digest=summary.get("caller_intent_digest"),
                     accepted_context_digest=summary.get("accepted_context_digest"),
-                    authorization_evidence_digests=tuple(summary.get("authorization_evidence_digests") or ()),
+                    authorization_evidence_digests=tuple(summary.get("authorization_evidence_digests", ())),
                     constraint_evidence_digest=summary.get("constraint_evidence_digest"),
                 )
                 for summary in result.page.summaries
@@ -347,8 +348,7 @@ class InProcessInvocationRuntime(InvocationRuntimeAPI):
         *,
         authenticated_service_id: str,
     ) -> None:
-        if not authenticated_service_id:
-            raise ValueError("authenticated_service_id must not be empty")
+        authenticated_service_id = validate_persisted_service_id(authenticated_service_id)
         super().__init__(
             runtime,
             principal=InvocationPrincipal(

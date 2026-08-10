@@ -130,11 +130,34 @@ bounded due pages, reclaims expired claims, and admits only the earliest unfinis
 for a thread. `thread_busy` is schedulable contention, not poison: it defers the unchanged row
 on a fixed non-tight cadence, preserves FIFO through restart, and never increments the failure
 counter, even beyond the normal poison exhaustion horizon. Malformed or failing processing uses
-bounded exponential retry and eventually dead-letters; completed/dead-letter retention is
-explicit and bounded. A crash after invocation acceptance but before receipt binding replays the
+bounded exponential retry and eventually dead-letters; completed-row retention is explicit and
+bounded. A crash after invocation acceptance but before receipt binding replays the
 same external key and binds the known-equal run; contributors, policy, graph, and model
 do not run a second time. Commands and rejections complete with a bounded outcome and no
 invented run ID.
+
+Unresolved dead letters are not removed by automatic retention. Administrators have one
+narrow operations surface under `/api/channels/inbound-receipts`: for each finite state,
+a summary reads at most the requested cap plus one indexed receipt identity (maximum cap 1,000),
+reports capped counts, and reports oldest due age only for the `received` and `deferred`
+states where `next_attempt_at` has that meaning; exact-ID inspection returns only bounded state/digest/counter/timestamp
+evidence and never the retained envelope, text, binding reference, or provider delivery ID.
+Exact-ID requeue is a single compare-and-set requiring `dead_letter`, `run_id IS NULL`,
+the expected fencing token, payload digest, and exact provider-event digest (or explicit
+`null` only for a legacy row that has no event proof). A winner moves the row to `deferred`,
+increments fencing,
+preserves the envelope, verified provider-event evidence, and total attempt count, resets
+only the poison failure budget, clears terminal/lease fields, and publishes a receipt-ID
+wake-up after the transaction commits. Concurrent or stale attempts return a bounded
+conflict. The POST uses normal administrator authentication and CSRF protection. There is
+no receipt enumeration, bulk requeue, or bulk delete API. Automatic cleanup removes only
+completed rows and repeats the state/cutoff predicates on deletion so a stale candidate
+read cannot delete a row whose state changed.
+Dead-letter creation and operator requeue emit structured stable codes with receipt and
+correlation/fencing evidence. Requeue audit records contain a domain-separated pseudonymous
+reference derived from the authenticated administrator, never the raw user identifier.
+Unexpected operator-store failures return one bounded correlated `503`; exception text,
+message content, and retained envelopes are not logged or returned.
 
 Persisted envelopes contain only the finite normalized text/type, owner/agent/thread
 route, verified binding, safe provider correlation, and supported stable attachment
@@ -408,7 +431,18 @@ exactly-once claim:
 - **Admission boundary** — invocation durability begins when the normal `RunRow`, acceptance
   evidence, external-key arbitration, and `accepted` lifecycle row commit. Before that commit
   there is no retained invocation. After it, an equal key/intent converges on that row while it is
-  retained, including after response loss.
+  retained, including after response loss. Each attempt proposes one candidate run UUID; finding
+  that exact UUID after a lost store response proves that this attempt owns worker attachment,
+  while the same external key bound to another UUID is only a replay. The application keeps one
+  admission supervisor and readiness permit until the creator has exactly one attached worker or
+  an authoritative `worker_attachment_failed` terminal transition. It never abandons a still-
+  resolving admission task on an elapsed request timeout. If both the commit response and the
+  exact candidate read are temporarily unavailable, a process-local compensation registry keeps
+  readiness closed and retains only bounded candidate plus displaced-run identity. Once the exact
+  candidate proves a replacement committed, compensation fences any local displaced workers and
+  terminalizes the unattached candidate; it never starts model work. A known-created row whose
+  attachment-failure write becomes uncertain remains supervised and keeps readiness/shutdown
+  fenced until that same exact-row compensation proves a durable terminal state.
 - **Execution boundary** — only the admission creator attaches a worker, and accepted agent,
   constraint, trusted-context, and extension material is pinned for that worker. Hartmesh does
   not promise exactly-once model execution, resumable model execution after process loss, or
@@ -476,7 +510,8 @@ provenance, persistence tier, and explicit qualification status. Persistence
 atomicity is independent from restart/pod-loss durability: memory is
 `process_local`, SQLite is `node_durable`, and PostgreSQL is `shared_durable`.
 The `durable_production` deployment profile fails startup/readiness with
-process-local state; `local_development` remains an explicit convenience profile.
+process-local state or an unbounded PostgreSQL command timeout; `local_development`
+remains an explicit convenience profile where disabling that timeout is permitted.
 The report also carries the latest safe admission-readiness status, reason codes,
 and correlation identifier. Provider/database/Adapter messages and tracebacks are neither
 public nor retained in ordinary diagnostics or logs. Every portable HTTP operation uses one
@@ -602,8 +637,8 @@ invocation rollback. Operators must quiesce writers and back up PostgreSQL befor
 `app.gateway.shutdown.GracefulShutdownCoordinator` is the sole production owner
 of shutdown ordering and deadline accounting. It atomically closes the admission
 permit seam, stops channel and scheduler producers, requests interruption and
-bounded drain of locally active runs, flushes memory only after admission and run
-writers are quiescent, then closes retrieval, memory, browser, OIDC, stream, and
+bounded drain of locally active runs, flushes memory only after channel, scheduler,
+admission, and run writers are quiescent, then closes retrieval, memory, browser, OIDC, stream, and
 database resources. Concurrent or repeated shutdown calls share one result and do
 not emit duplicate terminal transitions.
 
@@ -612,12 +647,19 @@ dependency sub-budgets. The memory phase uses
 `memory.shutdown_flush_timeout_seconds`; their sum is the absolute application
 deadline. A timed-out subsystem records only a stable code, error class, phase,
 and correlation ID while later phases continue within the remaining deadline. If
-admission or run quiescence cannot be proven, the coordinator deliberately skips
-memory flush/close rather than racing a late writer. Active locally owned runs are
+any writer quiescence cannot be proven, the coordinator deliberately skips
+memory flush/close and runtime dependency close rather than racing a late writer.
+Runtime callbacks are detached from the surrounding context manager before shutdown,
+so an unsafe explicit-close skip is not undone by implicit stack cleanup. Active locally owned runs are
 requested to interrupt; any run still unsettled is left to the existing durable
-orphan recovery on restart. Normal acceptance holds the admission permit through
-worker attachment, so graceful shutdown cannot enter between those operations;
-process loss after committed acceptance but before attachment remains an
+orphan recovery on restart. Durable PostgreSQL deployments require a finite driver
+command timeout so an unresolved admission cannot outlive every shutdown budget.
+Normal acceptance holds the admission permit through
+the supervised worker attachment or terminal compensation, so graceful shutdown
+cannot enter between those operations. Request cancellation before attachment
+terminalizes the creator; shutdown also terminalizes any locally supervised taskless row before
+reporting run quiescence. An unresolved candidate compensation keeps readiness and shutdown
+non-quiescent until storage proves absence or terminal state. Actual process loss after committed acceptance remains an
 `orphan_recovered` case. Pending/running local tasks receive `interrupt`, a real
 terminal commit that wins the race is preserved, and already-terminal rows are
 untouched. These guarantees cover the supported one-replica
@@ -734,6 +776,25 @@ token, PVC, image, or networking failure blocks new admission while liveness rem
 Repository fake-Kubernetes and Helm-render tests cover every bound field and drift fence, but do
 not qualify live cross-node CNI/RWX execution. That claim remains absent until an artifact-bound
 opt-in Kubernetes qualification passes against the deployed image/chart/config/schema subjects.
+The live nonempty-skill gate is the separately versioned
+`deerflow.kubernetes-accepted-skill-qualification/v2` artifact with scope
+`durable_one_replica_rwx_verified_copy_v2_nonempty_skill`. The existing marked
+runner selects it only through `DEERFLOW_TEST_KUBERNETES_SCOPE` and then requires
+exact Gateway, provisioner/verifier, and sandbox digests, an explicit RWX storage
+class, two Ready schedulable nodes, distinct admitted Gateway/sandbox nodes,
+deterministic nonempty bytes and allowed-tool metadata, a materialized verifier
+receipt bound to RunRow execution evidence, an observed Lease renewal, and
+Gateway replacement plus cleanup after exact Lease owner loss. Lease owner loss
+does not rehydrate the same run's sandbox: the per-attempt capability is
+intentionally non-recoverable, so that path fails closed and proves cleanup only.
+The renewal proof requires the same Lease UID, accepted-attempt holder, and qualified
+duration plus a strictly advancing bounded RFC3339 `renewTime`; a `resourceVersion`
+change alone is not renewal evidence. The verifier and materialization gate are shipped
+by the provisioner artifact, so v2 evidence and expectations require their exact pinned
+image reference and digest to equal the provisioner subject while still reporting both roles.
+The v1 pod recovery artifact remains readable and is not upgraded into this stronger claim.
+Both scopes remain skipped and unpassed by default; neither offline/fake coverage
+nor a declared reference qualifies live cross-node execution.
 
 Admission reserves one process-local projection owner inside the thread admission lock. Atomic
 creation promotes that owner to the committed run; equal known-key replay bypasses the busy

@@ -161,6 +161,84 @@ class CommitBeforeReturnRunStore(MemoryRunStore):
         return result
 
 
+class ResponseLostAfterCommitRunStore(MemoryRunStore):
+    """Commit one candidate row, then lose the store response exactly once."""
+
+    durable_lifecycle = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lose_create_response = False
+        self.lose_ensure_response = False
+
+    async def create_thread_operation_atomic(self, run_id, **kwargs):
+        result = await super().create_thread_operation_atomic(run_id, **kwargs)
+        if self.lose_create_response:
+            self.lose_create_response = False
+            raise OSError("response lost after durable commit")
+        return result
+
+    async def ensure_run_atomic(self, run_id, **kwargs):
+        result = await super().ensure_run_atomic(run_id, **kwargs)
+        if self.lose_ensure_response:
+            self.lose_ensure_response = False
+            raise OSError("response lost after durable commit")
+        return result
+
+
+class ResponseLostWithUnavailableCandidateReadStore(ResponseLostAfterCommitRunStore):
+    """Lose the commit response, then recover exact-candidate reads on demand."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.candidate_reads_available = False
+
+    async def get(self, run_id, *, user_id=None):
+        if not self.candidate_reads_available:
+            raise OSError("candidate lookup unavailable")
+        return await super().get(run_id, user_id=user_id)
+
+
+class ResponseLostWithUnavailablePredecessorReadStore(ResponseLostAfterCommitRunStore):
+    """Find the committed candidate, then lose the displaced-row response."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.predecessor_run_id: str | None = None
+        self.candidate_run_id: str | None = None
+        self.fail_predecessor_read = False
+        self.candidate_reads_available = True
+
+    async def get(self, run_id, *, user_id=None):
+        if run_id == self.candidate_run_id and not self.candidate_reads_available:
+            raise OSError("candidate lookup unavailable")
+        if run_id == self.predecessor_run_id and self.fail_predecessor_read:
+            self.fail_predecessor_read = False
+            self.candidate_reads_available = False
+            raise OSError("predecessor lookup unavailable")
+        return await super().get(run_id, user_id=user_id)
+
+
+class FailStartPersistenceUnavailableStore(MemoryRunStore):
+    """Lose every terminal-write and verification call until recovery."""
+
+    durable_lifecycle = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_terminalization = False
+
+    async def transition_run_atomic(self, *args, **kwargs):
+        if self.fail_terminalization:
+            raise OSError("terminal transition unavailable")
+        return await super().transition_run_atomic(*args, **kwargs)
+
+    async def get(self, *args, **kwargs):
+        if self.fail_terminalization:
+            raise OSError("terminal verification unavailable")
+        return await super().get(*args, **kwargs)
+
+
 class CancelledUniqueRetryRunStore(MemoryRunStore):
     """Return a retryable unique failure after the request was cancelled."""
 
@@ -493,6 +571,41 @@ async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
     assert stored_running is not None
     assert stored_running["status"] == RunStatus.running.value
     assert stored_running["error"] is None
+
+
+@pytest.mark.anyio
+async def test_fail_start_persistence_uncertainty_stays_supervised_until_compensated():
+    store = FailStartPersistenceUnavailableStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject(
+        "thread-fail-start-persistence",
+        candidate_run_id="c82eb225-e312-4eb2-aaf8-597b10df3c21",
+    )
+    store.fail_terminalization = True
+
+    with pytest.raises(OSError, match="terminal (?:transition|verification) unavailable"):
+        await manager.fail_start_if_pending(
+            record.run_id,
+            error="worker attachment failed",
+        )
+
+    assert record.status is RunStatus.pending
+    assert record.attachment_supervised is True
+    assert record.abort_event.is_set()
+    assert manager.admission_compensations_ready() is False
+    assert await manager.shutdown(timeout=0.01) is False
+
+    store.fail_terminalization = False
+    assert await manager.drain_admission_compensations(timeout=1) is True
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == RunStatus.error.value
+    assert stored["stop_reason"] == "worker_attachment_failed"
+    assert record.status is RunStatus.error
+    assert record.attachment_supervised is False
+    assert record.finalizing is False
+    assert await manager.shutdown(timeout=1) is True
 
 
 @pytest.mark.anyio
@@ -1148,6 +1261,271 @@ async def test_cancelled_atomic_admission_reconciles_commit_before_return(
     assert local_replacement.status == RunStatus.interrupted
     assert local_replacement.abort_event.is_set()
     assert not await manager.has_inflight("thread-1")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("keyed", [False, True])
+async def test_response_lost_creator_is_reconciled_by_candidate_id(
+    keyed: bool,
+) -> None:
+    store = ResponseLostAfterCommitRunStore()
+    manager = RunManager(store=store)
+    candidate_run_id = "a9af5c6d-fad6-4b04-b2c2-76e72913b4d2"
+
+    if keyed:
+        store.lose_ensure_response = True
+        admitted = await manager.ensure_or_reject(
+            "thread-response-loss",
+            candidate_run_id=candidate_run_id,
+            external_scope="scope-1",
+            external_key="delivery-1",
+            request_digest="a" * 64,
+            request_digest_version="request-v1",
+            caller_intent_json={"message": "hello"},
+            caller_intent_digest="b" * 64,
+            caller_intent_digest_version="intent-v1",
+        )
+        assert admitted.outcome.value == "created"
+        record = admitted.record
+    else:
+        store.lose_create_response = True
+        record = await manager.create_or_reject(
+            "thread-response-loss",
+            candidate_run_id=candidate_run_id,
+        )
+
+    assert record.run_id == candidate_run_id
+    assert record.attachment_supervised is True
+    assert (await store.get(candidate_run_id))["status"] == RunStatus.pending.value
+
+
+@pytest.mark.anyio
+async def test_unresolved_candidate_is_terminalized_after_store_recovery() -> None:
+    store = ResponseLostWithUnavailableCandidateReadStore()
+    store.lose_create_response = True
+    manager = RunManager(store=store)
+    candidate_run_id = "d11cd8f8-d78d-4546-a680-e071643b8ea3"
+
+    with pytest.raises(OSError, match="response lost after durable commit"):
+        await manager.create_or_reject(
+            "thread-unresolved-candidate",
+            candidate_run_id=candidate_run_id,
+        )
+
+    assert manager.admission_compensations_ready() is False
+    store.candidate_reads_available = True
+    assert await manager.drain_admission_compensations(timeout=1) is True
+    assert manager.admission_compensations_ready() is True
+
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.error.value
+    assert retained["stop_reason"] == "worker_attachment_failed"
+    events = await store.list_lifecycle_events(run_id=candidate_run_id)
+    assert [event["lifecycle_type"].value for event in events] == [
+        "accepted",
+        "failed",
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+@pytest.mark.parametrize("keyed", [False, True])
+async def test_response_lost_replacement_remains_compensated_when_predecessor_read_fails(
+    strategy: str,
+    keyed: bool,
+) -> None:
+    store = ResponseLostWithUnavailablePredecessorReadStore()
+    manager = RunManager(store=store)
+    predecessor = await manager.create("thread-replacement-response-loss")
+    await manager.set_status(predecessor.run_id, RunStatus.running)
+    predecessor_task = asyncio.create_task(asyncio.Event().wait())
+    predecessor.task = predecessor_task
+    await asyncio.sleep(0)
+    candidate_run_id = "e13c82b8-2dbd-4a02-9463-7188de5608e1"
+    store.predecessor_run_id = predecessor.run_id
+    store.candidate_run_id = candidate_run_id
+    store.fail_predecessor_read = True
+    store.lose_ensure_response = keyed
+    store.lose_create_response = not keyed
+
+    with pytest.raises(OSError, match="response lost after durable commit"):
+        if keyed:
+            await manager.ensure_or_reject(
+                "thread-replacement-response-loss",
+                candidate_run_id=candidate_run_id,
+                external_scope="scope-1",
+                external_key="delivery-1",
+                request_digest="a" * 64,
+                request_digest_version="request-v1",
+                caller_intent_json={"message": "replacement"},
+                caller_intent_digest="b" * 64,
+                caller_intent_digest_version="intent-v1",
+                multitask_strategy=strategy,
+            )
+        else:
+            await manager.create_or_reject(
+                "thread-replacement-response-loss",
+                candidate_run_id=candidate_run_id,
+                multitask_strategy=strategy,
+            )
+
+    assert manager.admission_compensations_ready() is False
+    assert candidate_run_id not in manager._runs
+    await asyncio.sleep(0)
+    assert predecessor.abort_event.is_set()
+    assert predecessor_task.cancelled()
+    assert predecessor.status is (RunStatus.error if strategy == "rollback" else RunStatus.interrupted)
+    store.candidate_reads_available = True
+    assert await manager.drain_admission_compensations(timeout=1) is True
+
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.error.value
+    assert retained["stop_reason"] == "worker_attachment_failed"
+    events = await store.list_lifecycle_events(run_id=candidate_run_id)
+    assert [event["lifecycle_type"].value for event in events] == [
+        "accepted",
+        "failed",
+    ]
+    retained_predecessor = await store.get(predecessor.run_id)
+    assert retained_predecessor is not None
+    assert retained_predecessor["status"] == (RunStatus.error.value if strategy == "rollback" else RunStatus.interrupted.value)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+@pytest.mark.parametrize("keyed", [False, True])
+async def test_delayed_candidate_reconciliation_fences_committed_replacement_predecessor(
+    strategy: str,
+    keyed: bool,
+) -> None:
+    store = ResponseLostWithUnavailableCandidateReadStore()
+    manager = RunManager(store=store)
+    store.candidate_reads_available = True
+    predecessor = await manager.create("thread-delayed-replacement")
+    await manager.set_status(predecessor.run_id, RunStatus.running)
+    predecessor_task = asyncio.create_task(asyncio.Event().wait())
+    predecessor.task = predecessor_task
+    await asyncio.sleep(0)
+    candidate_run_id = "25c31a53-f81f-4f2c-8bbb-9e67e176978c"
+    store.candidate_reads_available = False
+    store.lose_ensure_response = keyed
+    store.lose_create_response = not keyed
+
+    with pytest.raises(OSError, match="response lost after durable commit"):
+        if keyed:
+            await manager.ensure_or_reject(
+                "thread-delayed-replacement",
+                candidate_run_id=candidate_run_id,
+                external_scope="scope-1",
+                external_key="delivery-delayed",
+                request_digest="c" * 64,
+                request_digest_version="request-v1",
+                caller_intent_json={"message": "replacement"},
+                caller_intent_digest="d" * 64,
+                caller_intent_digest_version="intent-v1",
+                multitask_strategy=strategy,
+            )
+        else:
+            await manager.create_or_reject(
+                "thread-delayed-replacement",
+                candidate_run_id=candidate_run_id,
+                multitask_strategy=strategy,
+            )
+
+    assert predecessor.abort_event.is_set() is False
+    store.candidate_reads_available = True
+    assert await manager.drain_admission_compensations(timeout=1) is True
+    await asyncio.sleep(0)
+
+    assert predecessor.abort_event.is_set()
+    assert predecessor_task.cancelled()
+    assert predecessor.status is (RunStatus.error if strategy == "rollback" else RunStatus.interrupted)
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.error.value
+    assert retained["stop_reason"] == "worker_attachment_failed"
+
+
+@pytest.mark.anyio
+async def test_shutdown_reports_unresolved_candidate_until_store_recovers() -> None:
+    store = ResponseLostWithUnavailableCandidateReadStore()
+    store.lose_create_response = True
+    manager = RunManager(store=store)
+
+    with pytest.raises(OSError, match="response lost after durable commit"):
+        await manager.create_or_reject(
+            "thread-unresolved-shutdown",
+            candidate_run_id="46b76be7-e5a0-4385-a419-fcf7bde7b090",
+        )
+
+    assert await manager.shutdown(timeout=0.01) is False
+    store.candidate_reads_available = True
+    assert await manager.drain_admission_compensations(timeout=1) is True
+
+
+@pytest.mark.anyio
+async def test_direct_admission_without_candidate_has_no_attachment_supervisor() -> None:
+    manager = RunManager(store=MemoryRunStore())
+
+    record = await manager.create_or_reject("thread-unsupervised")
+
+    assert record.attachment_supervised is False
+
+
+@pytest.mark.anyio
+async def test_worker_attachment_is_exactly_once() -> None:
+    manager = RunManager(store=MemoryRunStore())
+    record = await manager.create_or_reject(
+        "thread-attach-once",
+        candidate_run_id="fa0d7c92-82a5-44a3-a88e-5cb0e095a793",
+    )
+
+    async def worker() -> None:
+        return None
+
+    first_worker = worker()
+    task = await manager.attach_worker_once(
+        record.run_id,
+        first_worker,
+        asyncio.create_task,
+    )
+    await task
+
+    second_worker = worker()
+    with pytest.raises(RuntimeError, match="already resolved"):
+        await manager.attach_worker_once(
+            record.run_id,
+            second_worker,
+            asyncio.create_task,
+        )
+    second_worker.close()
+
+
+@pytest.mark.anyio
+async def test_shutdown_terminalizes_taskless_supervised_admission() -> None:
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject(
+        "thread-shutdown-attachment",
+        candidate_run_id="3bd65d48-0362-42d4-a472-d718b31d90e4",
+    )
+
+    assert record.task is None
+    assert record.attachment_supervised is True
+
+    assert await manager.shutdown(timeout=1) is True
+
+    retained = await store.get(record.run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.error.value
+    assert retained["stop_reason"] == "worker_attachment_failed"
+    events = await store.list_lifecycle_events(run_id=record.run_id)
+    assert [event["lifecycle_type"].value for event in events] == [
+        "accepted",
+        "failed",
+    ]
 
 
 @pytest.mark.anyio

@@ -64,6 +64,54 @@ def test_invocation_summary_is_strict_immutable_and_round_trips() -> None:
     }
 
 
+@pytest.mark.parametrize("construction", ["direct", "wire"])
+def test_invocation_summary_rejects_null_authorization_evidence_members(construction: str) -> None:
+    from deerflow_runtime_api import InvocationSummaryV1, record_from_dict
+
+    values = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "pending",
+        "state_version": 1,
+        "source_kind": "http",
+        "authorization_evidence_digests": (None,),
+    }
+    with pytest.raises(ValueError, match="lowercase SHA-256 digest"):
+        if construction == "direct":
+            InvocationSummaryV1(**values)
+        else:
+            wire = InvocationSummaryV1(
+                run_id="run-1",
+                thread_id="thread-1",
+                status="pending",
+                state_version=1,
+                source_kind="http",
+            ).to_dict()
+            wire["authorization_evidence_digests"] = [None]
+            record_from_dict(wire)
+
+
+@pytest.mark.parametrize(
+    "digests",
+    [
+        ("a" * 64, "a" * 64),
+        tuple(f"{index:064x}" for index in range(65)),
+    ],
+)
+def test_invocation_summary_bounds_unique_authorization_evidence(digests: tuple[str, ...]) -> None:
+    from deerflow_runtime_api import InvocationSummaryV1
+
+    with pytest.raises(ValueError, match="authorization evidence"):
+        InvocationSummaryV1(
+            run_id="run-1",
+            thread_id="thread-1",
+            status="pending",
+            state_version=1,
+            source_kind="http",
+            authorization_evidence_digests=digests,
+        )
+
+
 def test_correlation_reference_snapshots_nested_caller_values() -> None:
     from deerflow_runtime_api import InvocationCorrelationReferenceV1
 
@@ -545,6 +593,45 @@ async def test_in_process_observation_maps_source_filter_and_typed_summaries() -
     assert result.summaries[0].source_kind == "native_channel"
     assert result.summaries[0].correlation_references[0].value == "message-1"
     assert runtime.query.source_kind == "native_channel"
+
+
+@pytest.mark.anyio
+async def test_in_process_observation_rejects_null_authorization_evidence_instead_of_coercing_it() -> None:
+    from deerflow_runtime_api import ContextInvocationsQuery, FailureCode, RuntimeFailure
+
+    from app.runtime.api import InProcessInvocationRuntime
+    from app.runtime.invocation import InternalLifecycleObservation
+    from deerflow.runtime.runs.lifecycle_query import LifecyclePage, encode_lifecycle_cursor
+
+    class Runtime:
+        async def observe_context_lifecycle(self, _query):
+            cursor = encode_lifecycle_cursor(1)
+            return InternalLifecycleObservation(
+                record=None,
+                page=LifecyclePage(
+                    snapshots=({"run_id": "run-1", "thread_id": "thread-1", "status": "pending", "state_version": 1},),
+                    summaries=(
+                        {
+                            "run_id": "run-1",
+                            "thread_id": "thread-1",
+                            "status": "pending",
+                            "state_version": 1,
+                            "source_kind": "http",
+                            "correlation_references": (),
+                            "authorization_evidence_digests": (None,),
+                        },
+                    ),
+                    events=(),
+                    next_cursor=cursor,
+                    minimum_available_cursor=encode_lifecycle_cursor(0),
+                    read_fence_cursor=cursor,
+                ),
+            )
+
+    result = await InProcessInvocationRuntime(Runtime(), authenticated_service_id="service-1").observe(ContextInvocationsQuery(thread_id="thread-1"))
+
+    assert isinstance(result, RuntimeFailure)
+    assert result.code is FailureCode.indeterminate
 
 
 @pytest.mark.anyio

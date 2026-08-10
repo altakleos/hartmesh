@@ -45,7 +45,6 @@ jobs:
       DEERFLOW_TEST_GATEWAY_IMAGE_REPOSITORY: ${{ inputs.image_repository }}
       DEERFLOW_TEST_GATEWAY_IMAGE_DIGEST: ${{ inputs.image_digest }}
       DEERFLOW_TEST_KUBERNETES_EVIDENCE: ${{ github.workspace }}/artifacts/kubernetes-qualification.json
-      KUBECONFIG: ${{ runner.temp }}/qualification-kubeconfig
 
     steps:
       - name: Checkout exact chart and harness
@@ -64,6 +63,9 @@ jobs:
 
       - name: Install kubectl CLI for the opt-in job
         uses: azure/setup-kubectl@v4.0.1
+
+      - name: Configure isolated kubeconfig path
+        run: printf 'KUBECONFIG=%s\n' "$RUNNER_TEMP/qualification-kubeconfig" >> "$GITHUB_ENV"
 
       - name: Materialize the explicitly supplied disposable-cluster config
         env:

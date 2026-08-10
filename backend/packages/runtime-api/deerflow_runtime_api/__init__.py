@@ -30,6 +30,7 @@ _AGENT_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}\Z", re.ASCII)
 _THREAD_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
 _MAX_CORRELATION_VALUE_BYTES = 1024
 _MAX_CORRELATION_REFERENCES = 64
+_MAX_AUTHORIZATION_EVIDENCE_DIGESTS = 64
 _MAX_INVOCATION_SUMMARY_BYTES = 16 * 1024
 MAX_OBSERVATION_PAGE_SIZE = 500
 MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES = 4 * 1024
@@ -482,8 +483,13 @@ class InvocationSummaryV1(_Record):
         ):
             _optional_digest(getattr(self, name), name)
         authorization_digests = tuple(self.authorization_evidence_digests)
+        if len(authorization_digests) > _MAX_AUTHORIZATION_EVIDENCE_DIGESTS:
+            raise ValueError("an invocation summary may contain at most 64 authorization evidence digests")
         for digest in authorization_digests:
-            _optional_digest(digest, "authorization_evidence_digest")
+            if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+                raise ValueError("authorization_evidence_digest must be a lowercase SHA-256 digest")
+        if len(set(authorization_digests)) != len(authorization_digests):
+            raise ValueError("invocation summary authorization evidence digests must be unique")
         object.__setattr__(self, "authorization_evidence_digests", authorization_digests)
         encoded = json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
         if len(encoded) > _MAX_INVOCATION_SUMMARY_BYTES:

@@ -82,6 +82,7 @@ from app.runtime.invocation import (
     thaw_host_value,
 )
 from app.runtime.native_binding import InternalVerifiedNativeBindingKind
+from app.runtime.service_identity import validate_persisted_service_id
 from app.runtime.visibility import ObservationVisibilityResolver, ServiceObservationGrant
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -2009,7 +2010,7 @@ async def _seal_accepted_invocation(
                     external_key_reference=(normalize_external_key(intent.external_key) if intent.external_key is not None else None),
                 )
             )
-        except BaseException:
+        except (Exception, asyncio.CancelledError):
             try:
                 await _release_unattached_agent_material(config)
             except asyncio.CancelledError:
@@ -2640,40 +2641,6 @@ class _GatewayDurableRuns:
         self._projection_reservations: dict[int, object] = {}
         self._projection_supersessions: dict[int, object] = {}
 
-    @staticmethod
-    async def _resolve_cancellation_safe(awaitable, *, resolution_seconds: float = 5.0):
-        """Bound resolution of an admission-store operation after cancellation.
-
-        SQL admission can commit in a worker thread after the awaiting task has
-        received cancellation. Shielding gives that operation a short, absolute
-        window to report database truth without letting shutdown wait forever.
-        """
-        task = asyncio.create_task(awaitable)
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError as cancellation:
-            if task.done():
-                return task.result()
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + resolution_seconds
-            while not task.done():
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    task.add_done_callback(_consume_task_result)
-                    raise cancellation
-                try:
-                    return await asyncio.wait_for(
-                        asyncio.shield(task),
-                        timeout=remaining,
-                    )
-                except TimeoutError:
-                    task.add_done_callback(_consume_task_result)
-                    raise cancellation
-                except asyncio.CancelledError:
-                    if task.done():
-                        return task.result()
-            return task.result()
-
     @asynccontextmanager
     async def admission_scope(self, thread_id: str):
         async with goal_thread_lock(thread_id):
@@ -2756,40 +2723,106 @@ class _GatewayDurableRuns:
             user_id=identity.user_id,
         )
 
-    async def admit(self, launch: PreparedLaunch) -> DurableAdmission | RunRecord:
+    @staticmethod
+    async def _terminalize_unattached_candidate(
+        run_manager,
+        candidate_run_id: str,
+    ) -> None:
+        fail_start = getattr(run_manager, "fail_start_if_pending", None)
+        if not callable(fail_start):
+            return
+        cleanup = asyncio.create_task(
+            fail_start(
+                candidate_run_id,
+                error="worker_attachment_failed",
+            ),
+            name=f"deerflow-abort-admission-handoff-{candidate_run_id}",
+        )
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        cleanup.result()
+
+    async def admit(
+        self,
+        launch: PreparedLaunch,
+        *,
+        candidate_run_id: str,
+    ) -> DurableAdmission | RunRecord:
         run_manager = get_run_manager(self._request)
         launch_identity = id(launch)
         reservation = self._projection_reservations.pop(launch_identity, None)
         supersession = self._projection_supersessions.pop(launch_identity, None)
-        if launch.external_scope is None:
-            try:
-                record = await self._resolve_cancellation_safe(
-                    run_manager.create_or_reject(
-                        launch.thread_id,
-                        launch.assistant_id,
-                        on_disconnect=launch.on_disconnect,
-                        metadata=thaw_host_value(launch.metadata),
-                        kwargs=thaw_host_value(launch.kwargs),
-                        multitask_strategy=launch.multitask_strategy,
-                        model_name=launch.model_name,
-                        user_id=launch.user_id,
-                        accepted_invocation=launch.accepted_invocation,
-                    )
+        try:
+            if launch.external_scope is None:
+                record = await run_manager.create_or_reject(
+                    launch.thread_id,
+                    launch.assistant_id,
+                    candidate_run_id=candidate_run_id,
+                    on_disconnect=launch.on_disconnect,
+                    metadata=thaw_host_value(launch.metadata),
+                    kwargs=thaw_host_value(launch.kwargs),
+                    multitask_strategy=launch.multitask_strategy,
+                    model_name=launch.model_name,
+                    user_id=launch.user_id,
+                    accepted_invocation=launch.accepted_invocation,
                 )
-            except (Exception, asyncio.CancelledError):
                 if reservation is not None:
                     from deerflow.runtime.skill_projection import get_skill_projection_coordinator
 
-                    get_skill_projection_coordinator().abort_admission(reservation)
-                raise
+                    get_skill_projection_coordinator().promote_admission(
+                        reservation,
+                        run_id=record.run_id,
+                    )
+                elif supersession is not None:
+                    from deerflow.runtime.skill_projection import (
+                        SkillProjectionEvidence,
+                        get_skill_projection_coordinator,
+                    )
+
+                    snapshot = launch.accepted_invocation.agent_revision.material.skill_snapshot
+                    get_skill_projection_coordinator().promote_supersession(
+                        supersession,
+                        run_id=record.run_id,
+                        snapshot_id=None if snapshot is None else snapshot.snapshot_id,
+                        evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+                    )
+                return record
+            if launch.external_key is None or launch.request_digest is None or launch.request_digest_version is None or launch.caller_intent_json is None or launch.caller_intent_digest is None or launch.caller_intent_digest_version is None:
+                raise RuntimeError("keyed launch is missing canonical admission evidence")
+            admission = await run_manager.ensure_or_reject(
+                launch.thread_id,
+                launch.assistant_id,
+                candidate_run_id=candidate_run_id,
+                on_disconnect=launch.on_disconnect,
+                metadata=thaw_host_value(launch.metadata),
+                kwargs=thaw_host_value(launch.kwargs),
+                multitask_strategy=launch.multitask_strategy,
+                model_name=launch.model_name,
+                user_id=launch.user_id,
+                accepted_invocation=launch.accepted_invocation,
+                external_scope=launch.external_scope,
+                external_key=launch.external_key,
+                request_digest=launch.request_digest,
+                request_digest_version=launch.request_digest_version,
+                caller_intent_json=thaw_host_value(launch.caller_intent_json),
+                caller_intent_digest=launch.caller_intent_digest,
+                caller_intent_digest_version=launch.caller_intent_digest_version,
+            )
             if reservation is not None:
                 from deerflow.runtime.skill_projection import get_skill_projection_coordinator
 
-                get_skill_projection_coordinator().promote_admission(
-                    reservation,
-                    run_id=record.run_id,
-                )
-            elif supersession is not None:
+                coordinator = get_skill_projection_coordinator()
+                if admission.outcome is AdmissionOutcome.created:
+                    coordinator.promote_admission(
+                        reservation,
+                        run_id=admission.record.run_id,
+                    )
+                else:
+                    coordinator.abort_admission(reservation)
+            elif supersession is not None and admission.outcome is AdmissionOutcome.created:
                 from deerflow.runtime.skill_projection import (
                     SkillProjectionEvidence,
                     get_skill_projection_coordinator,
@@ -2798,89 +2831,34 @@ class _GatewayDurableRuns:
                 snapshot = launch.accepted_invocation.agent_revision.material.skill_snapshot
                 get_skill_projection_coordinator().promote_supersession(
                     supersession,
-                    run_id=record.run_id,
+                    run_id=admission.record.run_id,
                     snapshot_id=None if snapshot is None else snapshot.snapshot_id,
                     evidence=SkillProjectionEvidence.from_snapshot(snapshot),
                 )
-            return record
-        if launch.external_key is None or launch.request_digest is None or launch.request_digest_version is None or launch.caller_intent_json is None or launch.caller_intent_digest is None or launch.caller_intent_digest_version is None:
-            if reservation is not None:
-                from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-                get_skill_projection_coordinator().abort_admission(reservation)
-            raise RuntimeError("keyed launch is missing canonical admission evidence")
-        try:
-            admission = await self._resolve_cancellation_safe(
-                run_manager.ensure_or_reject(
-                    launch.thread_id,
-                    launch.assistant_id,
-                    on_disconnect=launch.on_disconnect,
-                    metadata=thaw_host_value(launch.metadata),
-                    kwargs=thaw_host_value(launch.kwargs),
-                    multitask_strategy=launch.multitask_strategy,
-                    model_name=launch.model_name,
-                    user_id=launch.user_id,
-                    accepted_invocation=launch.accepted_invocation,
-                    external_scope=launch.external_scope,
-                    external_key=launch.external_key,
-                    request_digest=launch.request_digest,
-                    request_digest_version=launch.request_digest_version,
-                    caller_intent_json=thaw_host_value(launch.caller_intent_json),
-                    caller_intent_digest=launch.caller_intent_digest,
-                    caller_intent_digest_version=launch.caller_intent_digest_version,
-                )
-            )
-        except (Exception, asyncio.CancelledError) as admission_error:
-            try:
-                committed = await self._resolve_cancellation_safe(
-                    run_manager.get_by_external_identity(
-                        launch.external_scope,
-                        launch.external_key,
-                        user_id=launch.user_id,
-                    )
-                )
-            except (Exception, asyncio.CancelledError):
-                committed = None
-            if committed is None:
-                if reservation is not None:
-                    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-                    get_skill_projection_coordinator().abort_admission(reservation)
-                raise admission_error
-            same_intent = (
-                committed.caller_intent_json == thaw_host_value(launch.caller_intent_json) and committed.caller_intent_digest == launch.caller_intent_digest and committed.caller_intent_digest_version == launch.caller_intent_digest_version
-            )
-            outcome = AdmissionOutcome.known_same if same_intent else AdmissionOutcome.key_conflict
-            if reservation is not None:
-                from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-                get_skill_projection_coordinator().abort_admission(reservation)
-            return DurableAdmission(record=committed, outcome=outcome)
-        if reservation is not None:
+            return DurableAdmission(record=admission.record, outcome=admission.outcome)
+        except BaseException:
             from deerflow.runtime.skill_projection import get_skill_projection_coordinator
 
             coordinator = get_skill_projection_coordinator()
-            if admission.outcome is AdmissionOutcome.created:
-                coordinator.promote_admission(
-                    reservation,
-                    run_id=admission.record.run_id,
-                )
-            else:
+            if reservation is not None:
                 coordinator.abort_admission(reservation)
-        elif supersession is not None and admission.outcome is AdmissionOutcome.created:
-            from deerflow.runtime.skill_projection import (
-                SkillProjectionEvidence,
-                get_skill_projection_coordinator,
+            coordinator.release_unactivated_run(
+                user_id=launch.user_id or DEFAULT_USER_ID,
+                thread_id=launch.thread_id,
+                run_id=candidate_run_id,
             )
+            await self._terminalize_unattached_candidate(
+                run_manager,
+                candidate_run_id,
+            )
+            raise
 
-            snapshot = launch.accepted_invocation.agent_revision.material.skill_snapshot
-            get_skill_projection_coordinator().promote_supersession(
-                supersession,
-                run_id=admission.record.run_id,
-                snapshot_id=None if snapshot is None else snapshot.snapshot_id,
-                evidence=SkillProjectionEvidence.from_snapshot(snapshot),
-            )
-        return DurableAdmission(record=admission.record, outcome=admission.outcome)
+    async def attach_worker(self, record, worker, task_factory):
+        return await get_run_manager(self._request).attach_worker_once(
+            record.run_id,
+            worker,
+            task_factory,
+        )
 
     async def fail_start(self, record: RunRecord, error: str) -> None:
         from deerflow.runtime.skill_projection import get_skill_projection_coordinator
@@ -3123,8 +3101,7 @@ def build_service_invocation_runtime(
 ) -> InvocationRuntime:
     """Construct an embedded-service runtime with a host-owned identity."""
 
-    if not authenticated_service_id:
-        raise ValueError("authenticated_service_id must not be empty")
+    authenticated_service_id = validate_persisted_service_id(authenticated_service_id)
     request = SimpleNamespace(
         app=app,
         headers={},

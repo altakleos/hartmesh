@@ -517,6 +517,9 @@ imagePullSecrets:
   {{- if ne $databaseBackend "postgres" -}}
   {{- fail "durable_one_replica requires config database.backend=postgres" -}}
   {{- end -}}
+  {{- if not ((index $databaseConfig "command_timeout") | default false) -}}
+  {{- fail "durable_one_replica requires a finite database.command_timeout" -}}
+  {{- end -}}
   {{- if eq $receiptBackend "memory" -}}
   {{- fail "durable_one_replica requires PostgreSQL inbound receipt storage; dedupe_storage.backend cannot be memory" -}}
   {{- end -}}

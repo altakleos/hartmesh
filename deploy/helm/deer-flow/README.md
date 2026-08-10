@@ -332,6 +332,41 @@ cd backend
 PYTHONPATH=. uv run pytest -m kubernetes_contract -v -s
 ```
 
+Nonempty durable skills use a separate, explicit evidence scope. It reuses the
+same marked test, confirmed context, namespace confinement, chart, PostgreSQL,
+Redis, and offline verifier, but additionally requires two schedulable nodes,
+an RWX storage class, and exact provisioner/verifier/sandbox image identities.
+The verifier container is shipped in the provisioner image, so those two
+operator-supplied references and digests must match exactly. The v2 evidence
+schema and offline expectation reject any other combination rather than
+accepting a structurally impossible qualification artifact.
+
+```bash
+export DEERFLOW_TEST_KUBERNETES_SCOPE=durable_one_replica_rwx_verified_copy_v2_nonempty_skill
+export DEERFLOW_TEST_PROVISIONER_IMAGE_REPOSITORY=registry.example/hartmesh/provisioner
+export DEERFLOW_TEST_PROVISIONER_IMAGE_DIGEST=sha256:<64-lowercase-hex>
+export DEERFLOW_TEST_VERIFIER_IMAGE_REPOSITORY="$DEERFLOW_TEST_PROVISIONER_IMAGE_REPOSITORY"
+export DEERFLOW_TEST_VERIFIER_IMAGE_DIGEST="$DEERFLOW_TEST_PROVISIONER_IMAGE_DIGEST"
+export DEERFLOW_TEST_SANDBOX_IMAGE_REPOSITORY=registry.example/hartmesh/sandbox
+export DEERFLOW_TEST_SANDBOX_IMAGE_DIGEST=sha256:<64-lowercase-hex>
+export DEERFLOW_TEST_KUBERNETES_RWX_STORAGE_CLASS=<rwx-storage-class>
+PYTHONPATH=. uv run pytest -m kubernetes_contract -v -s
+```
+
+That v2 run seeds bounded deterministic skill bytes and allowed-tool metadata,
+requires Gateway and accepted sandbox Pods on different Ready schedulable nodes,
+observes the TokenReview-protected materialization and a real Lease renewal,
+faults Gateway and Lease ownership, proves cleanup of the exact owned sandbox
+resources, and writes v2 evidence only after offline exact-subject validation.
+Lease owner loss deliberately fails closed; this scope does not claim same-run
+sandbox rehydration or replacement.
+A renewal is proven only when the Lease keeps the exact UID, accepted-attempt
+holder, and qualified duration while its bounded RFC3339 `spec.renewTime`
+strictly advances. A `metadata.resourceVersion` change by itself is not renewal
+evidence. Offline fakes pin this predicate and the v2 orchestration, but only an
+artifact from the opt-in live run qualifies cross-node Kubernetes behavior.
+An absent v2 artifact leaves nonempty remote skill execution unqualified.
+
 After the run, obtain the declared digest/reference from the administrator report and the
 artifact from the independently configured evidence path or artifact store. Supply expected
 subjects from the deployment controller, not from untrusted fields inside the artifact:
@@ -356,6 +391,16 @@ PYTHONPATH=. uv run python scripts/verify_qualification_evidence.py \
   --required-scenario graceful_rollout_termination \
   --required-scenario forced_kill_after_graceful_deadline
 ```
+
+For the nonempty-skill v2 scope, pass the same Gateway digest through
+`--image-digest`, add `--provisioner-image-digest`,
+`--verifier-image-digest`, and `--sandbox-image-digest`, select scope
+`durable_one_replica_rwx_verified_copy_v2_nonempty_skill`, and independently
+require these five scenarios: `nonempty_material_execution`,
+`token_review_and_lease_renewal`, `gateway_replacement_cleanup`,
+`sandbox_owner_loss_cleanup`, and `process_loss_cleanup`. Do not derive the
+expected scenario set from the artifact being verified. The verifier rejects a
+v1 artifact under the v2 expectation and vice versa.
 
 Success is one bounded JSON record with `status: verified` and
 `trust: external_evidence_verified`; every mismatch exits nonzero with a stable code. The
@@ -411,7 +456,7 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
     external:
       existingSecret: deer-flow-managed-postgres # key: database-url
   ```
-- **Graceful shutdown & memory drain.** The Gateway owns one ordered deadline: freeze admission; stop channels and scheduler; interrupt/drain local runs; flush memory; close dependencies. Application phase budgets live in `config -> deployment.shutdown`, while `memory.shutdown_flush_timeout_seconds` owns the memory phase. By default the chart computes `terminationGracePeriodSeconds` from their sum plus `gateway.preStopSleepSeconds` (default 5s) and `gateway.shutdownSchedulingHeadroomSeconds` (default 3s). Set `gateway.terminationGracePeriodSeconds` only for an explicit override, and never below that derived requirement. A timed-out run remains subject to durable orphan recovery after restart. The opt-in suite above, not this configuration statement, is the live one-replica pod-termination evidence.
+- **Graceful shutdown & memory drain.** The Gateway owns one ordered deadline: freeze admission; stop channels and scheduler; interrupt/drain local runs; flush memory; close dependencies. Application phase budgets live in `config -> deployment.shutdown`, while `memory.shutdown_flush_timeout_seconds` owns the memory phase. The durable profile also requires a finite `config.database.command_timeout`; `null` remains available only to non-durable local profiles because an unbounded database command could otherwise defeat the admission and shutdown budgets. By default the chart computes `terminationGracePeriodSeconds` from their sum plus `gateway.preStopSleepSeconds` (default 5s) and `gateway.shutdownSchedulingHeadroomSeconds` (default 3s). Set `gateway.terminationGracePeriodSeconds` only for an explicit override, and never below that derived requirement. A timed-out run remains subject to durable orphan recovery after restart. The opt-in suite above, not this configuration statement, is the live one-replica pod-termination evidence.
 - **Gateway replicas.** The supported local and production topology is one
   Gateway replica. `durable_one_replica` rejects any other count, and the
   Gateway Deployment uses `strategy.type: Recreate` so an upgrade terminates

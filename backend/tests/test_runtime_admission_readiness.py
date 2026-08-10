@@ -183,6 +183,26 @@ async def test_process_local_persistence_blocks_durable_admission() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unresolved_admission_compensation_blocks_readiness() -> None:
+    coordinator = RuntimeReadinessCoordinator(
+        health_monitor=_Health(
+            [CapabilityReadinessSnapshot(status="ready", health=())],
+        ),
+        lifecycle_store=lambda: _Lifecycle([LifecycleReadiness(True)]),
+        persistence_ready=lambda: True,
+        extension_generation=lambda: 7,
+        admission_compensations_ready=lambda: False,
+        clock=lambda: datetime(2026, 8, 8, tzinfo=UTC),
+        overall_timeout_seconds=1,
+    )
+
+    assert await coordinator.ready_for_admission() is False
+    snapshot = coordinator.last_snapshot
+    assert snapshot is not None
+    assert snapshot.reason_codes == ("admission_compensation_pending",)
+
+
+@pytest.mark.asyncio
 async def test_overall_timeout_is_bounded_and_cancels_dependency_work() -> None:
     cancelled = asyncio.Event()
 

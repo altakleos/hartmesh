@@ -907,6 +907,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         extension_generation=lambda: int(getattr(app.state.capability_manifest, "extension_generation")),
         overall_timeout_seconds=(construction_deployment.readiness.overall_timeout_seconds),
         sandbox_projection_ready=sandbox_projection_ready,
+        admission_compensations_ready=lambda: bool(getattr(app.state, "run_manager", None) is None or app.state.run_manager.admission_compensations_ready()),
     )
 
     # Include routers

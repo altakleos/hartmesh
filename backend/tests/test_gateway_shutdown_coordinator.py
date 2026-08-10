@@ -105,7 +105,9 @@ async def test_hung_subsystems_cannot_extend_global_deadline() -> None:
 
     assert elapsed < budgets.total_seconds + 0.1
     assert {item.phase for item in report.diagnostics} >= {"channels", "browser"}
-    assert all(item.code == "shutdown_phase_timeout" for item in report.diagnostics)
+    assert next(item for item in report.diagnostics if item.phase == "channels").code == "shutdown_phase_timeout"
+    assert next(item for item in report.diagnostics if item.phase == "browser").code == "shutdown_phase_timeout"
+    assert "memory_flush_skipped_active_writers" in {item.code for item in report.diagnostics}
 
 
 @pytest.mark.asyncio
@@ -136,6 +138,79 @@ async def test_memory_is_not_flushed_when_admissions_or_runs_are_not_quiescent()
     assert flushed is False
     assert report.memory_flushed is False
     assert "memory_flush_skipped_active_writers" in {item.code for item in report.diagnostics}
+
+
+@pytest.mark.asyncio
+async def test_runtime_dependencies_remain_open_when_admission_is_not_quiescent() -> None:
+    from app.gateway.shutdown import GracefulShutdownCoordinator, ShutdownBudgets
+
+    runtime_closed = False
+
+    async def close_runtime() -> None:
+        nonlocal runtime_closed
+        runtime_closed = True
+
+    coordinator = GracefulShutdownCoordinator(
+        budgets=ShutdownBudgets.uniform(0.01),
+        begin_admission_drain=lambda: asyncio.sleep(0, result=False),
+        stop_channels=lambda: asyncio.sleep(0),
+        stop_scheduler=lambda: asyncio.sleep(0),
+        drain_runs=lambda _timeout: asyncio.sleep(0, result=True),
+        flush_memory=lambda _timeout: True,
+        close_memory=lambda: None,
+        close_browser=lambda: asyncio.sleep(0),
+        close_oidc=lambda: asyncio.sleep(0),
+        close_runtime=close_runtime,
+    )
+
+    report = await coordinator.shutdown()
+
+    assert report.admissions_quiescent is False
+    assert runtime_closed is False
+    assert "runtime_dependencies_close_skipped_active_users" in {item.code for item in report.diagnostics}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_producer", ["channels", "scheduler"])
+async def test_unsettled_producer_blocks_memory_flush_and_runtime_close(
+    blocked_producer: str,
+) -> None:
+    from app.gateway.shutdown import GracefulShutdownCoordinator, ShutdownBudgets
+
+    flushed = False
+    runtime_closed = False
+
+    async def hang() -> None:
+        await asyncio.Future()
+
+    def flush(_timeout: float) -> bool:
+        nonlocal flushed
+        flushed = True
+        return True
+
+    async def close_runtime() -> None:
+        nonlocal runtime_closed
+        runtime_closed = True
+
+    coordinator = GracefulShutdownCoordinator(
+        budgets=ShutdownBudgets.uniform(0.01),
+        begin_admission_drain=lambda: asyncio.sleep(0, result=True),
+        stop_channels=(hang if blocked_producer == "channels" else lambda: asyncio.sleep(0)),
+        stop_scheduler=(hang if blocked_producer == "scheduler" else lambda: asyncio.sleep(0)),
+        drain_runs=lambda _timeout: asyncio.sleep(0, result=True),
+        flush_memory=flush,
+        close_memory=lambda: None,
+        close_browser=lambda: asyncio.sleep(0),
+        close_oidc=lambda: asyncio.sleep(0),
+        close_runtime=close_runtime,
+    )
+
+    report = await coordinator.shutdown()
+
+    assert report.channels_quiescent is (blocked_producer != "channels")
+    assert report.scheduler_quiescent is (blocked_producer != "scheduler")
+    assert flushed is False
+    assert runtime_closed is False
 
 
 @pytest.mark.asyncio

@@ -334,9 +334,10 @@ Read these limits before following any deployment guide:
 - Kubernetes/PostgreSQL qualification requires exact passing evidence for the named image, chart, configuration, schema, topology, scope, and scenarios.
 - A collected or skipped opt-in gate is not a qualification pass.
 
-For the audited source snapshot, the external PostgreSQL and Kubernetes opt-in gates were not configured and no exact passing qualification artifact was present.
-
-Those are unpassed release gates, not evidence that the implemented behavior is absent.
+The PostgreSQL and Kubernetes suites are environment-gated release checks. A
+default skip, a configured job that fails before its assertions, or an artifact
+that does not independently verify against the exact deployment subjects is an
+unpassed gate—not durability or recovery evidence.
 
 | Mode | Reported boundary |
 | --- | --- |
