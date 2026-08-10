@@ -231,12 +231,59 @@ class MemoryRunStore(RunStore):
         transition: LifecycleTransition,
         user_id: str | None = None,
     ) -> LifecycleTransitionResult:
+        return self._transition_run_atomic(
+            run_id,
+            expected_state_version=expected_state_version,
+            expected_statuses=expected_statuses,
+            transition=transition,
+            user_id=user_id,
+        )
+
+    @_atomic_memory_mutation
+    async def transition_owned_run_atomic(
+        self,
+        run_id: str,
+        *,
+        expected_state_version: int,
+        expected_statuses: tuple[str, ...] | None,
+        transition: LifecycleTransition,
+        expected_owner_worker_id: str,
+        require_unexpired_lease: bool,
+        user_id: str | None = None,
+    ) -> LifecycleTransitionResult:
+        return self._transition_run_atomic(
+            run_id,
+            expected_state_version=expected_state_version,
+            expected_statuses=expected_statuses,
+            transition=transition,
+            user_id=user_id,
+            expected_owner_worker_id=expected_owner_worker_id,
+            require_unexpired_lease=require_unexpired_lease,
+        )
+
+    def _transition_run_atomic(
+        self,
+        run_id: str,
+        *,
+        expected_state_version: int,
+        expected_statuses: tuple[str, ...] | None,
+        transition: LifecycleTransition,
+        user_id: str | None,
+        expected_owner_worker_id: str | None = None,
+        require_unexpired_lease: bool = False,
+    ) -> LifecycleTransitionResult:
         payload = build_lifecycle_payload(transition)
         row = self._runs.get(run_id)
         if row is None or row.get("operation_kind", "run") != "run":
             return LifecycleTransitionResult(applied=False)
         if user_id is not None and row.get("user_id") != user_id:
             return LifecycleTransitionResult(applied=False)
+        if expected_owner_worker_id is not None and not self._owned_run_fence_matches(
+            row,
+            expected_owner_worker_id=expected_owner_worker_id,
+            require_unexpired_lease=require_unexpired_lease,
+        ):
+            return LifecycleTransitionResult(applied=False, row=row)
         if row["state_version"] != expected_state_version:
             return LifecycleTransitionResult(applied=False, row=row)
         if expected_statuses is not None and row["status"] not in expected_statuses:
@@ -253,6 +300,28 @@ class MemoryRunStore(RunStore):
         row["updated_at"] = datetime.now(UTC).isoformat()
         event = self._append_lifecycle_event(row, transition, payload=payload)
         return LifecycleTransitionResult(applied=True, row=row, event=event)
+
+    @staticmethod
+    def _owned_run_fence_matches(
+        row: dict[str, Any],
+        *,
+        expected_owner_worker_id: str,
+        require_unexpired_lease: bool,
+    ) -> bool:
+        if row.get("owner_worker_id") != expected_owner_worker_id:
+            return False
+        if not require_unexpired_lease:
+            return True
+        lease_expires_at = row.get("lease_expires_at")
+        if not isinstance(lease_expires_at, str):
+            return False
+        try:
+            deadline = datetime.fromisoformat(lease_expires_at)
+        except ValueError:
+            return False
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=UTC)
+        return deadline > datetime.now(UTC)
 
     @_atomic_memory_mutation
     async def request_cancel_fenced(
@@ -280,6 +349,24 @@ class MemoryRunStore(RunStore):
     ) -> CancellationRequestResult:
         return self._request_cancel_atomic(run_id, action=action, user_id=user_id)
 
+    @_atomic_memory_mutation
+    async def request_cancel_owned(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        expected_owner_worker_id: str,
+        require_unexpired_lease: bool,
+        user_id: str | None = None,
+    ) -> CancellationRequestResult:
+        return self._request_cancel_atomic(
+            run_id,
+            action=action,
+            user_id=user_id,
+            expected_owner_worker_id=expected_owner_worker_id,
+            require_unexpired_lease=require_unexpired_lease,
+        )
+
     def _request_cancel_atomic(
         self,
         run_id: str,
@@ -287,12 +374,20 @@ class MemoryRunStore(RunStore):
         action: str,
         expected_state_version: int | None = None,
         user_id: str | None = None,
+        expected_owner_worker_id: str | None = None,
+        require_unexpired_lease: bool = False,
     ) -> CancellationRequestResult:
         if action not in ("interrupt", "rollback"):
             raise ValueError(f"Unsupported cancellation action: {action}")
         row = self._runs.get(run_id)
         if row is None or row.get("operation_kind", "run") != "run" or (user_id is not None and row.get("user_id") != user_id):
             return CancellationRequestResult(CancellationRequestOutcome.not_found_or_invisible)
+        if expected_owner_worker_id is not None and not self._owned_run_fence_matches(
+            row,
+            expected_owner_worker_id=expected_owner_worker_id,
+            require_unexpired_lease=require_unexpired_lease,
+        ):
+            return CancellationRequestResult(CancellationRequestOutcome.stale)
         if row.get("cancel_action") == action:
             return CancellationRequestResult(CancellationRequestOutcome.already_requested, row=row)
         if row["status"] in _TERMINAL_STATUSES:

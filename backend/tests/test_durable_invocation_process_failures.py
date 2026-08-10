@@ -57,6 +57,43 @@ from deerflow.runtime.runs.worker import RunContext, run_agent
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
 
 
+class _TemporarilyUnavailableRunRepository:
+    """Fault gate around the production repository's terminal CAS operations."""
+
+    durable_lifecycle = True
+
+    def __init__(self, inner: RunRepository) -> None:
+        self._inner = inner
+        self.available = True
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+    def _require_available(self) -> None:
+        if not self.available:
+            raise OSError("test-only PostgreSQL terminalization outage")
+
+    async def get(self, *args, **kwargs):
+        self._require_available()
+        return await self._inner.get(*args, **kwargs)
+
+    async def request_cancel_compat(self, *args, **kwargs):
+        self._require_available()
+        return await self._inner.request_cancel_compat(*args, **kwargs)
+
+    async def request_cancel_owned(self, *args, **kwargs):
+        self._require_available()
+        return await self._inner.request_cancel_owned(*args, **kwargs)
+
+    async def transition_run_atomic(self, *args, **kwargs):
+        self._require_available()
+        return await self._inner.transition_run_atomic(*args, **kwargs)
+
+    async def transition_owned_run_atomic(self, *args, **kwargs):
+        self._require_available()
+        return await self._inner.transition_owned_run_atomic(*args, **kwargs)
+
+
 class _Normalizer:
     def __init__(self, counts: dict[str, int]) -> None:
         self.counts = counts
@@ -628,3 +665,55 @@ async def test_postgres_independent_sessions_force_key_and_thread_arbitration() 
             await session.commit()
         await left_engine.dispose()
         await right_engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for PostgreSQL compensation qualification",
+)
+async def test_postgres_cancelled_unattached_candidate_stays_supervised_through_store_outage() -> None:
+    """A real PostgreSQL row is terminalized once after exact-candidate recovery."""
+
+    assert _POSTGRES_URL is not None
+    engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    inner = RunRepository(factory)
+    store = _TemporarilyUnavailableRunRepository(inner)
+    manager = RunManager(store=store)
+    unique = uuid.uuid4().hex
+    candidate_run_id = str(uuid.uuid4())
+    try:
+        record = await manager.create_or_reject(
+            f"thread-cancel-compensation-{unique}",
+            candidate_run_id=candidate_run_id,
+            user_id=f"owner-{unique}",
+        )
+        store.available = False
+        assert await manager.cancel_start_if_pending(record.run_id) is True
+
+        assert record.status is RunStatus.pending
+        assert record.task is None
+        assert record.attachment_supervised is True
+        assert manager.admission_compensations_ready() is False
+
+        store.available = True
+        assert await manager.drain_admission_compensations(timeout=5) is True
+        durable = await inner.get(candidate_run_id, user_id=f"owner-{unique}")
+        assert durable is not None
+        assert durable["status"] == RunStatus.interrupted.value
+        events = await inner.list_lifecycle_events(run_id=candidate_run_id)
+        assert [event["lifecycle_type"] for event in events] == [
+            LifecycleType.accepted,
+            LifecycleType.cancellation_requested,
+            LifecycleType.cancelled,
+        ]
+    finally:
+        await manager.shutdown(timeout=1)
+        async with factory() as session:
+            await session.execute(delete(RunRow).where(RunRow.run_id == candidate_run_id))
+            await session.commit()
+        await engine.dispose()

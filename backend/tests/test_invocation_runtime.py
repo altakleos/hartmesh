@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 
+from app.gateway import services
 from app.runtime.invocation import (
     InternalCancelReceipt,
     InternalCancelRequest,
@@ -22,7 +23,10 @@ from app.runtime.invocation import (
     NotFoundOrInvisible,
     PreparedLaunch,
 )
-from deerflow.runtime import CancelOutcome, ConflictError, DisconnectMode, RunRecord, RunStatus
+from deerflow.runtime import CancelOutcome, ConflictError, DisconnectMode, RunManager, RunRecord, RunStatus
+from deerflow.runtime.runs.manager import PersistenceRetryPolicy
+from deerflow.runtime.runs.store.base import LifecycleType
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
 def _record() -> RunRecord:
@@ -176,6 +180,9 @@ class _Runs:
 
     async def fail_start(self, _record: RunRecord, _error: str) -> None:
         self.failures.append((_record, _error))
+
+    async def cancel_start(self, _record: RunRecord) -> None:
+        self.failures.append((_record, "cancelled"))
 
     async def observe(
         self,
@@ -447,7 +454,106 @@ async def test_cancellation_after_commit_before_worker_attachment_terminalizes_c
 
     assert runs.attachments == 0
     assert runs.record.task is None
-    assert runs.failures == [(runs.record, "worker_attachment_failed")]
+    assert runs.failures == [(runs.record, "cancelled")]
+
+
+@pytest.mark.anyio
+async def test_gateway_cancellation_before_attachment_retains_cancel_intent_through_store_outage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.runtime import kubernetes_qualification
+
+    class _OutageStore(MemoryRunStore):
+        durable_lifecycle = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.available = True
+
+        def _require_available(self) -> None:
+            if not self.available:
+                raise OSError("terminal persistence unavailable")
+
+        async def get(self, *args, **kwargs):
+            self._require_available()
+            return await super().get(*args, **kwargs)
+
+        async def request_cancel_compat(self, *args, **kwargs):
+            self._require_available()
+            return await super().request_cancel_compat(*args, **kwargs)
+
+        async def request_cancel_owned(self, *args, **kwargs):
+            self._require_available()
+            return await super().request_cancel_owned(*args, **kwargs)
+
+        async def transition_run_atomic(self, *args, **kwargs):
+            self._require_available()
+            return await super().transition_run_atomic(*args, **kwargs)
+
+        async def transition_owned_run_atomic(self, *args, **kwargs):
+            self._require_available()
+            return await super().transition_owned_run_atomic(*args, **kwargs)
+
+        async def authoritative_get(self, run_id: str):
+            return await super().get(run_id)
+
+    store = _OutageStore()
+    manager = RunManager(
+        store=store,
+        persistence_retry_policy=PersistenceRetryPolicy(
+            max_attempts=1,
+            initial_delay=0,
+        ),
+    )
+    monkeypatch.setattr(services, "get_run_manager", lambda _request: manager)
+    monkeypatch.setattr(
+        services,
+        "ensure_checkpoint_history_seeded",
+        AsyncMock(),
+    )
+    reached = asyncio.Event()
+
+    async def barrier(point: str, _record: RunRecord) -> bool:
+        if point == "accepted_before_worker_start":
+            reached.set()
+            await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(kubernetes_qualification, "qualification_barrier", barrier)
+    runtime = InvocationRuntime(
+        normalizer=_Normalizer([]),
+        runs=services._GatewayDurableRuns(SimpleNamespace()),
+    )
+    launch = asyncio.create_task(
+        runtime.launch(InternalLaunchIntent(thread_id="thread-cancel-outage")),
+    )
+    await reached.wait()
+    record = next(iter(manager._runs.values()))
+    store.available = False
+    launch.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await launch
+
+    retained = await store.authoritative_get(record.run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.pending.value
+    assert record.status == RunStatus.pending
+    assert record.attachment_supervised is True
+    assert manager.admission_compensations_ready() is False
+    assert await manager.shutdown(timeout=0.01) is False
+
+    store.available = True
+    assert await manager.drain_admission_compensations(timeout=1) is True
+    retained = await store.authoritative_get(record.run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.interrupted.value
+    events = await store.list_lifecycle_events(run_id=record.run_id)
+    assert [event["lifecycle_type"] for event in events] == [
+        LifecycleType.accepted,
+        LifecycleType.cancellation_requested,
+        LifecycleType.cancelled,
+    ]
 
 
 @pytest.mark.anyio

@@ -27,6 +27,7 @@ from sqlalchemy.orm import aliased
 
 from app.channels.inbound_receipt_operations import (
     INBOUND_RECEIPT_STATES,
+    InboundDeadLetterDiscardRequest,
     InboundDeadLetterInspection,
     InboundDeadLetterRequeueRequest,
     InboundReceiptOperationsSummary,
@@ -716,6 +717,47 @@ class SqlInboundReceiptStore:
                         outcome_code="operator_requeued",
                         updated_at=requeued_at,
                         completed_at=None,
+                    )
+                    .returning(InboundReceiptRow.fencing_token)
+                )
+                return result.scalar_one_or_none()
+
+    async def discard_dead_letter(
+        self,
+        request: InboundDeadLetterDiscardRequest,
+        *,
+        discarded_at: datetime,
+    ) -> int | None:
+        """CAS one unresolved dead letter into ordinary completed retention."""
+
+        if not isinstance(request, InboundDeadLetterDiscardRequest):
+            raise TypeError("discard requires an InboundDeadLetterDiscardRequest")
+        if discarded_at.tzinfo is None or discarded_at.utcoffset() is None:
+            raise ValueError("discarded_at must be timezone-aware")
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    update(InboundReceiptRow)
+                    .where(
+                        InboundReceiptRow.receipt_id == request.receipt_id,
+                        InboundReceiptRow.state == InboundReceiptState.dead_letter.value,
+                        InboundReceiptRow.run_id.is_(None),
+                        InboundReceiptRow.fencing_token == request.expected_fencing_token,
+                        InboundReceiptRow.payload_digest == request.expected_payload_digest,
+                        (InboundReceiptRow.provider_event_digest.is_(None) if request.expected_provider_event_digest is None else InboundReceiptRow.provider_event_digest == request.expected_provider_event_digest),
+                    )
+                    .values(
+                        state=InboundReceiptState.completed.value,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        fencing_token=InboundReceiptRow.fencing_token + 1,
+                        # The existing schema keeps this column non-null for all
+                        # states. Completed rows are excluded from due scans, so
+                        # pinning it to completion time carries no retry meaning.
+                        next_attempt_at=discarded_at,
+                        outcome_code="operator_discarded",
+                        updated_at=discarded_at,
+                        completed_at=discarded_at,
                     )
                     .returning(InboundReceiptRow.fencing_token)
                 )

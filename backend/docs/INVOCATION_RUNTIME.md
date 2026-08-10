@@ -149,11 +149,18 @@ increments fencing,
 preserves the envelope, verified provider-event evidence, and total attempt count, resets
 only the poison failure budget, clears terminal/lease fields, and publishes a receipt-ID
 wake-up after the transaction commits. Concurrent or stale attempts return a bounded
-conflict. The POST uses normal administrator authentication and CSRF protection. There is
-no receipt enumeration, bulk requeue, or bulk delete API. Automatic cleanup removes only
-completed rows and repeats the state/cutoff predicates on deletion so a stale candidate
-read cannot delete a row whose state changed.
-Dead-letter creation and operator requeue emit structured stable codes with receipt and
+conflict. A permanently invalid row can instead be logically discarded through a second
+exact compare-and-set with the same fences. Discard requires `run_id IS NULL`, moves the
+row to `completed` with `outcome_code=operator_discarded`, increments fencing, clears lease
+and retry ownership, and deliberately publishes no processing wake-up. The retained
+envelope remains available only for the ordinary completed-row forensic window and is then
+removed by the existing bounded retention cleanup. The POSTs use normal administrator
+authentication and CSRF protection. Omitting provider-event evidence is rejected; an
+explicit `null` matches only a legacy SQL `NULL`. There is no receipt enumeration, bulk
+requeue, bulk discard, or bulk delete API. Automatic cleanup removes only completed rows
+and repeats the state/cutoff predicates on deletion so a stale candidate read cannot delete
+a row whose state changed.
+Dead-letter creation, operator requeue, and operator discard emit structured stable codes with receipt and
 correlation/fencing evidence. Requeue audit records contain a domain-separated pseudonymous
 reference derived from the authenticated administrator, never the raw user identifier.
 Unexpected operator-store failures return one bounded correlated `503`; exception text,
@@ -433,16 +440,21 @@ exactly-once claim:
   there is no retained invocation. After it, an equal key/intent converges on that row while it is
   retained, including after response loss. Each attempt proposes one candidate run UUID; finding
   that exact UUID after a lost store response proves that this attempt owns worker attachment,
-  while the same external key bound to another UUID is only a replay. The application keeps one
-  admission supervisor and readiness permit until the creator has exactly one attached worker or
-  an authoritative `worker_attachment_failed` terminal transition. It never abandons a still-
-  resolving admission task on an elapsed request timeout. If both the commit response and the
+  while the same external key bound to another UUID is a peer outcome—either an equal replay or a
+  changed-intent conflict—and never creator ownership. The application keeps one admission
+  supervisor and readiness permit until the creator has exactly one attached worker or one
+  intended authoritative terminal state: cancellation or `worker_attachment_failed`. It never
+  abandons a still-resolving admission task on an elapsed request timeout. If both the commit response and the
   exact candidate read are temporarily unavailable, a process-local compensation registry keeps
-  readiness closed and retains only bounded candidate plus displaced-run identity. Once the exact
-  candidate proves a replacement committed, compensation fences any local displaced workers and
-  terminalizes the unattached candidate; it never starts model work. A known-created row whose
-  attachment-failure write becomes uncertain remains supervised and keeps readiness/shutdown
-  fenced until that same exact-row compensation proves a durable terminal state.
+  readiness closed and retains only bounded candidate, intended terminal disposition, and
+  displaced-run identity. Registrations merge monotonically: commit proof and predecessor
+  identities cannot be lost, while cancellation intent narrows a generic attachment-failure
+  disposition. The compensator uses capped progress-resetting backoff rather than a tight poll.
+  Once the exact candidate proves a replacement committed, compensation fences any local displaced
+  workers and terminalizes the unattached candidate; it never starts model work. A known-created
+  row whose cancellation or attachment-failure write becomes uncertain stays non-attachable and
+  supervised, and local state does not advance beyond durable truth. Readiness and shutdown remain
+  fenced until exact-row compensation proves absence or one durable intended terminal state.
 - **Execution boundary** — only the admission creator attaches a worker, and accepted agent,
   constraint, trusted-context, and extension material is pinned for that worker. Hartmesh does
   not promise exactly-once model execution, resumable model execution after process loss, or
