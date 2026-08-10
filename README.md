@@ -385,15 +385,25 @@ Python plugins are trusted operator code loaded at startup from top-level `plugi
 
 An accepted invocation pins one startup-frozen extension generation. Skill changes affect later admission; plugin changes require a Gateway restart to create a new generation. Neither changes already accepted work.
 
+The managed Lark/Feishu CLI integration remains user-scoped. After connecting,
+**Change Lark app** can replace that user's App ID and App Secret without
+reinstalling the skill pack: the CLI validates the new app before activation,
+removes the previous app's OAuth tokens, and starts authorization for the new
+app. In sandboxed execution, the credential-bearing config root remains
+read-only while its `config/locks` subdirectory is mounted separately for
+bounded CLI coordination writes.
+
 ## Compatibility, upstream baseline, and release status
 
 HartMesh preserves existing `deerflow.*` namespaces, package names, `DEER_FLOW_*` variables, Docker and Helm identifiers, filesystem paths, and Gateway compatibility surfaces.
 
 The product comparison is the fixed local range `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`.
 
-At the 2026-08-09 repository audit, the separately inspected `deerflow/main` snapshot was `e401ae2d7b8e4fc73fc82a1143c989c54f3f4de6`, one upstream-only commit beyond the shared base.
+HartMesh `main` incorporates upstream `deerflow/main` through
+`17531d7c118d6111b863f945ff910a7889a235b0` (2026-08-10).
 
-That is context, not the baseline above, and HartMesh makes no evergreen superiority claim.
+That synchronization point is context, not the comparison baseline above, and
+HartMesh makes no evergreen superiority claim.
 
 This repository does not yet document a HartMesh sync cadence, API/configuration/database compatibility window, support window, security-fix intake policy, or upstream-contribution policy.
 
