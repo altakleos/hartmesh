@@ -39,18 +39,18 @@ an ordinary unit test.
 |---|---|---|---|---|---|
 | Application Module and portable Adapters | One application-layer invocation Module owns ensure/observe/control; the in-process and HTTP Adapters implement one host-independent Protocol. | `backend/app/runtime/invocation.py`; `backend/app/runtime/api.py`; `backend/packages/runtime-api/deerflow_runtime_api/__init__.py` | `test_runtime_transport_conformance` | Strict HTTP/in-process conformance | Implemented |
 | All durable launch sources | HTTP create/stream/wait, Scheduled Tasks, native channels, and embedded services enter the same durable admission boundary. | `backend/app/gateway/services.py`; `backend/app/scheduler/service.py`; `backend/app/channels/manager.py`; `backend/app/runtime/api.py` | `test_gateway_create_stream_wait_routes_share_durable_admission`; `test_scheduled_occurrence_enters_runtime_with_typed_execution_facts`; `test_authenticated_channel_launch_enters_runtime_with_typed_source_facts`; `test_ensure_builds_a_host_trusted_service_launch_intent` | Offline launch-source characterization | Implemented |
-| Keyed native ingress receipts | Signed GitHub acknowledges only after an atomic bounded receipt batch; leased/fenced recovery composes with stable-key invocation replay, and busy work stays durable FIFO. | `backend/app/channels/inbound_receipts.py`; `backend/app/channels/service.py`; `backend/app/gateway/github/dispatcher.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0015_inbound_receipts.py` | `test_received_payload_survives_process_loss_before_claim`; `test_response_loss_after_admission_replays_known_run_before_binding`; `test_signed_route_reaches_real_runtime_and_redelivery_replays` | PostgreSQL receipt concurrency/migration qualification | Implemented for signed GitHub with PostgreSQL; other/local paths report best-effort |
+| Keyed native ingress receipts | Signed GitHub acknowledges only after an atomic bounded receipt batch; leased/fenced recovery composes with stable-key invocation replay; `thread_busy` preserves durable FIFO without consuming the poison budget. | `backend/app/channels/inbound_receipts.py`; `backend/app/channels/service.py`; `backend/app/gateway/github/dispatcher.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0015_inbound_receipts.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0018_inbound_receipt_failures.py` | `test_received_payload_survives_process_loss_before_claim`; `test_thread_contention_outlives_poison_budget_and_preserves_fifo`; `test_poison_receipt_dead_letters_without_exposing_exception_text`; `test_response_loss_after_admission_replays_known_run_before_binding`; `test_signed_route_reaches_real_runtime_and_redelivery_replays` | PostgreSQL receipt concurrency/migration qualification | Implemented for signed GitHub with PostgreSQL; other/local paths report best-effort |
 | Canonical keyed replay | Atomic external-key arbitration compares caller intent, retains accepted effective execution, and attaches only one worker. | `backend/app/runtime/idempotency.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_http_replay_conflicts_when_original_execution_field_is_removed` | PostgreSQL equal/unequal race qualification | Implemented; PostgreSQL locking is a gated qualification |
 | Split identity and sealed Origin | Effective subject, optional acting service, and trusted source evidence are non-interchangeable and caller-forgery resistant. | `backend/packages/extension-api/deerflow_extension_api/authorization.py`; `backend/app/gateway/services.py`; `backend/app/runtime/authorization.py` | `test_channel_human_cannot_be_promoted_by_internal_transport` | Source-specific launch tests | Implemented |
-| Trusted contributor context | One immutable trusted context carries validated persistable evidence, runtime-only values, and stable handles without secret persistence. | `backend/packages/extension-api/deerflow_extension_api/contributors.py`; `backend/packages/harness/deerflow/extensions/contributors.py`; `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/mcp/tools.py` | `test_worker_carries_one_trusted_context_without_parallel_attributes_path` | Store/event/response redaction tests | Implemented |
-| Restrictive authorization and constraints | Authority failures fail closed; v2 constraints bind accepted material and can only narrow the exactly enforced subagent ceiling. | `backend/app/runtime/authorization.py`; `backend/app/runtime/constraints.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/subagents/executor.py` | `test_v2_host_rejects_projection_for_different_bound_material`; `test_worker_enforces_zero_ceiling_before_any_subagent_dispatch` | Required-capability health/readiness tests | Implemented |
-| Pinned agent and extension material | Accepted agent material and extension generation remain pinned; every effective skill package is copied and hashed from one bounded immutable snapshot shared by lead, slash/deferred discovery, policy, sandbox, and subagent consumers; drift fails before graph/model work. | `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/agent_revision.py`; `backend/packages/harness/deerflow/runtime/skill_snapshot.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; skill middlewares and sandbox providers | `test_restart_drift_fails_before_graph_construction_or_model_work`; `test_same_process_live_edit_cannot_replace_accepted_slash_skill`; `test_deleting_live_tree_cannot_remove_accepted_supporting_material`; `test_live_allowed_tools_edit_cannot_widen_accepted_policy`; `test_snapshot_drift_fails_before_graph_construction` | Process-reconstruction tests; skill bytes are process-local and lost workers terminalize rather than resume | Implemented for the supported one-replica process contract |
-| Transactional lifecycle evidence | Every normal-run state change increments one state version and commits its safe lifecycle event atomically. | `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/packages/harness/deerflow/runtime/runs/store/base.py`; `backend/packages/harness/deerflow/runtime/runs/store/memory.py` | `test_sql_row_and_lifecycle_event_commit_together` | PostgreSQL CAS/cursor qualification | Implemented; PostgreSQL atomicity is a gated qualification |
+| Trusted contributor and hydrated evidence | One immutable trusted context carries validated persistable evidence, runtime-only values, and stable handles without secret persistence; reconstruction recomputes every derivable digest and refuses contradictory retained authority before replay/observe/cancel/recovery. | `backend/packages/extension-api/deerflow_extension_api/contributors.py`; `backend/packages/harness/deerflow/extensions/contributors.py`; `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/runs/manager.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/mcp/tools.py` | `test_worker_carries_one_trusted_context_without_parallel_attributes_path`; `test_hydration_recomputes_bound_effective_and_trusted_evidence`; `test_store_reconstruction_rejects_corrupt_accepted_evidence_before_recovery`; `test_external_replay_lookup_rejects_corrupt_accepted_evidence_with_stable_error` | Store/event/response redaction and reconstruction tests | Implemented; wholly absent legacy evidence uses the non-privileged compatibility path |
+| Restrictive authorization and constraints | Authority failures fail closed; required async operations are validated at startup; v2 constraints bind accepted material and can only narrow a dispatch ledger that gives equal retries one physical start. | `backend/app/runtime/authorization.py`; `backend/app/runtime/constraints.py`; `backend/packages/harness/deerflow/diagnostics.py`; `backend/packages/harness/deerflow/runtime/constraints.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/tools/builtins/task_tool.py` | `test_v2_host_rejects_projection_for_different_bound_material`; `test_worker_enforces_zero_ceiling_before_any_subagent_dispatch`; `test_task_dispatch_inflight_equal_replay_waits_for_one_physical_start`; `test_create_app_fails_closed_for_malformed_required_v2_constraints_provider` | Required-capability health/readiness tests | Implemented |
+| Pinned agent and extension material | Accepted agent material and extension generation remain pinned; every effective skill package is copied and hashed from one bounded immutable snapshot shared by lead, slash/deferred discovery, policy, sandbox, and subagent consumers; remote v2 execution binds and revalidates the admitted isolation tuple before graph/model work. | `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/agent_revision.py`; `backend/packages/harness/deerflow/runtime/skill_snapshot.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py`; `docker/provisioner/app.py` | `test_restart_drift_fails_before_graph_construction_or_model_work`; `test_same_process_live_edit_cannot_replace_accepted_slash_skill`; `test_live_allowed_tools_edit_cannot_widen_accepted_policy`; `test_remote_v1_material_receipt_is_compatibility_only`; `test_accepted_pod_isolation_digest_binds_every_pod_security_field`; `test_v2_execution_fence_rereads_every_supporting_resource` | Fake-Kubernetes and Helm-render evidence only; live cross-node exact-artifact qualification is separate | Implemented offline; live cross-node execution remains unqualified until the opt-in gate passes |
+| Transactional lifecycle evidence | Every normal-run state change increments one state version and commits its safe lifecycle event atomically; maintained retained-cardinality plus bounded edge reads detects interior deletion. | `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0017_lifecycle_integrity.py`; `backend/packages/harness/deerflow/runtime/runs/store/base.py`; `backend/packages/harness/deerflow/runtime/runs/store/memory.py` | `test_sql_row_and_lifecycle_event_commit_together`; `test_lifecycle_readiness_rejects_deleted_interior_event_without_scanning` | PostgreSQL CAS/cursor qualification | Implemented; PostgreSQL atomicity is a gated qualification |
 | Polling observation and bounded summaries | Authorized observation reads a pruning-aware bounded page and its source-aware summaries from one database snapshot. | `backend/packages/harness/deerflow/runtime/runs/lifecycle_query.py`; `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/app/runtime/api.py` | `test_context_query_excludes_other_owners_and_auxiliary_rows`; `test_malformed_ahead_and_pruned_cursors_are_typed`; `test_sql_context_page_loads_summary_rows_only_for_bounded_page_ids`; `test_postgres_query_uses_one_repeatable_read_snapshot` | Repeatable-read PostgreSQL query qualification | Implemented; PostgreSQL snapshot isolation is a gated qualification |
 | Scoped service observation | An authenticated service is owner-scoped unless an operator grants a finite run/thread/owner/source search scope; the current coherent authorization provider still makes the final observe decision. | `backend/app/runtime/visibility.py`; `backend/app/runtime/invocation.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_ordinary_service_cannot_observe_another_owner_or_trigger_policy`; `test_current_authorization_denial_overrides_a_valid_visibility_grant`; `test_context_pagination_stays_inside_the_finite_owner_scope` | Memory and SQL bounded-query tests; no external service | Implemented |
 | Clarification continuation | A clarification ends the current invocation successfully; the answer is a distinct invocation on the same thread. | `backend/packages/harness/deerflow/agents/middlewares/clarification_middleware.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/app/channels/manager.py` | `test_clarification_completes_then_answer_starts_new_same_thread_invocation`; `test_native_channel_revalidates_owner_dedupes_and_continues_clarification` | Native-channel characterization | Implemented; same-invocation suspension is not claimed |
 | Graceful shutdown and process recovery | One deadline coordinator freezes admission, stops producers, drains runs, flushes memory, then closes dependencies; unsettled durable runs use orphan recovery. | `backend/app/gateway/shutdown.py`; `backend/packages/harness/deerflow/runtime/runs/manager.py` | `test_shutdown_orders_producers_runs_memory_and_dependencies`; `test_orphan_recovery_records_failed_with_stable_reason` | Process-loss simulations; live pod evidence is separate | Implemented for one replica |
-| PostgreSQL schema and arbitration | Real Alembic predecessor data upgrades through accepted/idempotency/lifecycle/receipt/execution evidence and remains repository-readable after the promised downgrade/re-upgrade path. | `backend/packages/harness/deerflow/persistence/migrations/versions/0011_accepted_invocation.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0012_invocation_idempotency.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0013_invocation_lifecycle.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0014_canonical_caller_intent.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0015_inbound_receipts.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0016_sandbox_execution_evidence.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io`; `test_postgres_inbound_receipt_acquisition_and_claim_are_atomic` | `postgres_contract` with `DEERFLOW_TEST_POSTGRES_URL` | Qualified only when the mandatory PostgreSQL gate passes |
+| PostgreSQL schema and arbitration | The real `0011_mcp_tasks` predecessor (including MCP-task data) upgrades through the invocation tail, supported rollback stops at that predecessor, and re-upgrade preserves unrelated state. | `backend/packages/harness/deerflow/persistence/migrations/versions/0011_mcp_tasks.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0011_accepted_invocation.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0017_lifecycle_integrity.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0018_inbound_receipt_failures.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io`; `test_postgres_inbound_receipt_acquisition_and_claim_are_atomic` | `postgres_contract` with `DEERFLOW_TEST_POSTGRES_URL` | Qualified only when the mandatory PostgreSQL gate passes; SQLite is not PostgreSQL evidence |
 | One-replica deployment truth | Production requires one Gateway, shared durable PostgreSQL, compatible readiness/shutdown timing, and digest-pinned Gateway plus enabled provisioner execution artifacts; process-local mode makes no durability claim. | `backend/app/runtime/deployment.py`; `deploy/helm/deer-flow/values.yaml`; `deploy/helm/deer-flow/templates/gateway-deployment.yaml`; `deploy/helm/deer-flow/templates/provisioner-deployment.yaml` | `test_production_mode_requires_pinned_runtime_images_and_one_replica`; `test_production_mode_rejects_process_local_storage` | Helm lint/render and storage-profile checks | Implemented; not a high-availability claim |
 | Live Kubernetes pod recovery | The opt-in harness emits one strict canonical artifact; the report exposes only an operator assertion, while the offline verifier independently matches its digest, run/namespace, image, chart, config, schema, scope, and complete scenario set. | `backend/packages/harness/deerflow/qualification_evidence.py`; `backend/tests/support/kubernetes_qualification.py`; `backend/app/runtime/deployment.py`; `backend/scripts/verify_qualification_evidence.py` | `test_exact_external_evidence_verifies_against_declared_reference_and_subjects`; `test_real_one_replica_pod_recovery_contract` | `kubernetes_contract` artifact plus a successful exact-subject offline verification | Unqualified when absent; operator-asserted when declared; externally verified only after the offline verifier succeeds |
 | Legacy compatibility and native execution | Existing LangGraph/REST facades retain their responses and native lead-agent, skill, memory, subagent, sandbox, and thread behavior. | `backend/app/gateway/routers/runs.py`; `backend/app/gateway/routers/thread_runs.py`; `backend/packages/harness/deerflow/agents/lead_agent/agent.py`; `backend/packages/harness/deerflow/agents/memory`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/sandbox/middleware.py` | `test_gateway_mounts_runtime_routes_without_replacing_legacy_runs`; `test_full_chain_order`; `test_make_lead_agent_custom_skill_allowlist_does_not_activate_tool_policy`; `test_after_agent_queues_memory_under_runtime_user`; `test_aexecute_propagates_one_trusted_run_context_without_free_form_attributes`; `test_sandbox_middleware_state_matches_thread_state_sandbox_field` | Full offline compatibility suite | Implemented; synchronous client durability remains deferred |
@@ -87,6 +87,16 @@ semantics. The accepting worker binds the run ID
 and installs this exact immutable object at the lead execution seam; authorization,
 constraints, MCP, and subagents consume it rather than assembling parallel dictionaries.
 
+Store hydration is an integrity fence, not deserialization by trust. It validates digest
+format and revision identity, recomputes the principal, base and finalized Origin,
+caller/effective request, accepted-context, and runtime-identity bindings wherever their
+persisted facts make that proof possible, and reapplies fresh-seal cross-field invariants.
+Two present representations that disagree fail before replay authorization, graph
+construction, cancel mutation, or orphan takeover and surface only
+`accepted_evidence_invalid`. A row with the complete legacy evidence family absent remains
+readable through a non-privileged compatibility path; Hartmesh never guesses equality or
+authority from partial contradictory evidence.
+
 Identity has three non-interchangeable parts. `EffectiveSubjectV1` is the human or service
 whose authority the invocation exercises. `ActingServiceV1` is optional and identifies the
 authenticated/delegating service representing that subject. `InvocationOrigin` contains
@@ -114,10 +124,14 @@ carries only receipt-ID wake-ups; duplicate or lost wake-ups do not change the l
 
 The receipt lifecycle is `received -> claimed -> admitted(run_id) -> completed`, with
 `deferred` for a bounded retry and `dead_letter` for exhausted or permanently invalid
-input. A claim has an owner, expiry, attempt counter, and monotonically increasing
+input. A claim has an owner, expiry, total attempt counter, poison-only failure counter, and monotonically increasing
 fencing token. Only that token may bind, defer, complete, or dead-letter. Recovery reads
 bounded due pages, reclaims expired claims, and admits only the earliest unfinished row
-for a thread. A crash after invocation acceptance but before receipt binding replays the
+for a thread. `thread_busy` is schedulable contention, not poison: it defers the unchanged row
+on a fixed non-tight cadence, preserves FIFO through restart, and never increments the failure
+counter, even beyond the normal poison exhaustion horizon. Malformed or failing processing uses
+bounded exponential retry and eventually dead-letters; completed/dead-letter retention is
+explicit and bounded. A crash after invocation acceptance but before receipt binding replays the
 same external key and binds the known-equal run; contributors, policy, graph, and model
 do not run a second time. Commands and rejections complete with a bounded outcome and no
 invented run ID.
@@ -250,7 +264,12 @@ binary permission authority, and dynamic effects remain subject to operation-tim
 authorization and MCP preparation.
 
 The Capability Host runs the provider directly—not through observational fail-open
-middleware—with its own two-second timeout and timezone-aware clock. V2 binds the exact
+middleware—with its own two-second timeout and timezone-aware clock. Startup validates the
+declared authoritative operation itself: required authorization `aauthorize`, contributor
+`contribute`, constraints `project`, and MCP `prepare_call` methods must be async functions;
+an ordinary synchronous method is malformed even if its return value happens to be awaitable.
+Optional malformed contributions retain only their documented fail-open behavior, and health
+probe sync/async compatibility remains a separate contract. V2 binds the exact
 request, trusted context, thread, agent/profile revisions, manifest, and extension generation
 to its projection and evidence. It rejects unknown fields, malformed/binding evidence,
 future skew beyond 30 seconds, expired or over-15-minute projections, unsupported mandatory
@@ -283,10 +302,13 @@ end the run with `constraint_evidence_mismatch`; queue/pre-stream expiry uses
 `constraint_expired_before_start`; both occur with zero graph/model work.
 
 For `max_total_subagents`, the worker installs one invocation-scoped, concurrency-safe
-reservation counter into the lead runtime. The task tool reserves a stable tool-call ID
-immediately before each dispatch, shares that same object with delegated subagents, rejects
-the dispatch that would exceed the limit, and does not double-count a retry of an already
-reserved ID. The existing token-budget and delegation-ledger middleware remain useful
+dispatch ledger into the lead runtime and shares it with delegated subagents. The task tool
+hashes the prompt, resolved subagent/options/tools, accepted revision/generation/constraint,
+and skill snapshot immediately before dispatch. A new ID/intent is `NEW` and consumes one
+physical-start slot; an equal in-flight or completed retry is `REPLAY` and awaits/reuses the
+same defensively copied result. Changed intent under one ID is `CONFLICT`; a new ID after the
+ceiling is `EXHAUSTED`. Zero therefore starts nothing, and cancellation closes the ledger and
+wakes equal waiters without a second executor. The existing token-budget and delegation-ledger middleware remain useful
 observational/post-response guards, but neither is advertised as this exact boundary;
 exact token limits are deferred.
 
@@ -447,9 +469,12 @@ atomicity is independent from restart/pod-loss durability: memory is
 The `durable_production` deployment profile fails startup/readiness with
 process-local state; `local_development` remains an explicit convenience profile.
 The report also carries the latest safe admission-readiness status, reason codes,
-and correlation identifier. Raw provider/database exception text remains internal.
-Unexpected Adapter exceptions become bounded indeterminate failures with a
-correlation ID matching a safe internal diagnostic; exception text is never public.
+and correlation identifier. Provider/database/Adapter messages and tracebacks are neither
+public nor retained in ordinary diagnostics or logs. Every portable HTTP operation uses one
+failure wrapper: an unexpected exception becomes the strict versioned `runtime.error`
+envelope with HTTP 503 `indeterminate`, while the matching internal diagnostic contains only
+the stable code, exception class, bounded operation/capability or contribution identifier,
+and correlation ID.
 The deployment process may supply bounded image/source provenance and a qualification
 artifact reference through trusted environment fields. The v1 report retains
 `status="qualified"` for wire compatibility but pairs it with
@@ -539,23 +564,24 @@ process-loss simulation, image construction, and Helm rendering are separate evi
 becomes live pod evidence by implication or aggregation.
 
 The PostgreSQL migration qualification starts both from an empty schema and from
-the real main-line predecessor `0010_run_cancel_request` with representative
-normal and auxiliary rows. It applies 0011–0015 individually, verifies the
-accepted/idempotency/caller-intent columns, checks and partial indexes, validates
-the lifecycle singleton/journal/index contract and inbound receipt arbitration, and then uses `RunRepository` for
+the real durable-invocation predecessor `0011_mcp_tasks` with representative
+normal, auxiliary, and MCP-task rows. It applies every invocation revision through
+`0018_inbound_receipt_failures`, verifies accepted/idempotency/caller-intent columns,
+checks and partial indexes, validates lifecycle singleton/journal/index/retained-cardinality
+and inbound receipt arbitration, and then uses `RunRepository` for
 replay, cancellation, orphan recovery, lifecycle, and summary reads/writes. The
 same CI marker suite retains the independent-session equal/unequal admission,
 lifecycle CAS/cursor ordering, and repeatable-read query races. With
 `DEERFLOW_TEST_POSTGRES_URL` configured, any marked skip fails the session;
 SQLite remains a fast compatibility tier rather than PostgreSQL evidence.
 
-Alembic can structurally downgrade this feature tail to 0010 and re-upgrade it,
-but the older schema cannot represent accepted evidence, external retry keys,
-canonical caller intent, state versions, lifecycle events, or inbound receipts. Downgrade therefore
-preserves the base `runs` rows while deliberately dropping those feature fields
-and journal rows; re-upgrade reads them conservatively as legacy version-zero
-rows and does not invent lost evidence. Operators must quiesce writers and back
-up PostgreSQL before rollback.
+The supported feature-tail downgrade stops at `0011_mcp_tasks` and re-upgrade proves the
+representative MCP task survives. That predecessor cannot represent accepted evidence,
+external retry keys, canonical caller intent, state versions, lifecycle events, inbound
+receipts, or execution evidence, so those feature facts are deliberately lost and are not
+invented on re-upgrade. A further technical downgrade to `0010_run_cancel_request` executes
+the unrelated MCP-task downgrade and destroys MCP-task state; it is not the supported
+invocation rollback. Operators must quiesce writers and back up PostgreSQL before rollback.
 
 ## Graceful Gateway shutdown
 
@@ -653,13 +679,18 @@ call, the sandbox provider binds exactly that accepted digest to a per-user, per
 view; sibling snapshots are not mounted. An accepted empty skill set binds an empty view and
 never falls back to the live registry. Local Docker-backed AIO mounts nonempty accepted material
 through an OS-enforced read-only boundary. Kubernetes/provisioner AIO advertises the same
-`immutable_read_only` capability only after an `rwx_verified_copy_v1` Pod returns an exact
-run/generation/snapshot/Pod-UID receipt, including the verifier-authored copy digest, and becomes reachable through its per-attempt capability
+`immutable_read_only` capability only after an `rwx_verified_copy_v2` Pod returns a complete
+receipt and becomes reachable through its per-attempt capability
 gate. Its init container traverses and copies the exact content-addressed RWX snapshot into a
 private per-Pod `emptyDir`, recomputes the canonical digest twice, and the sandbox mounts only
 that completed private copy read-only. The source PVC is never mounted into the sandbox and no
 live skill projection is present. A source mutation after verification therefore cannot replace
-the execution bytes. The profile requires actual `ReadWriteMany` storage, pinned sandbox and
+the execution bytes. A v1 receipt remains parseable for backward readability but is always
+`empty_only` and cannot authorize nonempty material. The v2 receipt binds the accepted
+run/snapshot/generation, Pod UID and canonical admitted isolation digest, Lease UID/attempt,
+exact NetworkPolicy UID/spec digest, immutable evidence/capability Secret UIDs and digests,
+pinned sandbox/verifier images plus observed image-ID digest, verifier receipt, and final
+materialization digest. The profile requires actual `ReadWriteMany` storage, pinned sandbox and
 verifier/gate images, and cross-node Pod networking; it deliberately uses no same-node affinity.
 A writable configured host mount that overlaps accepted material is rejected. Local, E2B,
 unqualified remote AIO, and custom providers remain explicitly empty-only until they prove an
@@ -667,13 +698,13 @@ equivalent boundary; a nonempty snapshot fails before graph/model execution.
 
 For remote AIO, materialization completes before the authoritative pending-to-running
 transition and before graph construction. One native Kubernetes Lease owns the Pod, immutable
-evidence/capability Secrets, and NetworkPolicy. The process that owns the sandbox renews the
-exact Lease UID, Pod UID, and materialization digest only after the authoritative RunRow worker
-lease has renewed successfully. The worker revalidates the same tuple before graph construction
-and again after all other pre-stream awaits, immediately before `astream`; expired Leases are reclaimed in bounded
+evidence/capability Secrets, and NetworkPolicy. An AlreadyExists response is reusable only when
+owner identity and canonical spec match exactly. Response-loss replay, active/warm reuse, and
+Lease renewal re-read the complete v2 tuple; the owning process renews only after the
+authoritative RunRow worker lease has renewed successfully. The worker revalidates the same
+tuple before graph construction and again after all other pre-stream awaits, immediately before `astream`; any deletion, replacement, unsupported version, or drift fails closed. Expired Leases are reclaimed in bounded
 pages and Kubernetes garbage collection removes their children. A response-loss retry reuses
-only the same attempt identity and in-memory capability. The full bounded receipt (snapshot,
-run, generation, Pod and Lease UIDs, runtime image-ID digest, and materialization digest) is
+only the same attempt identity and in-memory capability. The full bounded v2 receipt is
 written to the authoritative `RunRow` in the same transaction that changes it to `running`; the
 `started` lifecycle payload contains only its digest. A process restart cannot recover the
 ephemeral capability and therefore follows the documented orphan-terminalization behavior.
@@ -681,8 +712,11 @@ ephemeral capability and therefore follows the documented orphan-terminalization
 Provisioner management is separate from the per-attempt data-plane capability. The Helm profile
 projects a rotating ServiceAccount token into the Gateway, scopes it to the provisioner audience,
 and has the provisioner verify its exact namespace and ServiceAccount through TokenReview. Gateway
-readiness authenticates to `/api/capabilities` and requires `rwx_verified_copy_v1`; a profile,
+readiness authenticates to `/api/capabilities` and requires `rwx_verified_copy_v2`; a profile,
 token, PVC, image, or networking failure blocks new admission while liveness remains independent.
+Repository fake-Kubernetes and Helm-render tests cover every bound field and drift fence, but do
+not qualify live cross-node CNI/RWX execution. That claim remains absent until an artifact-bound
+opt-in Kubernetes qualification passes against the deployed image/chart/config/schema subjects.
 
 Admission reserves one process-local projection owner inside the thread admission lock. Atomic
 creation promotes that owner to the committed run; equal known-key replay bypasses the busy
@@ -724,7 +758,7 @@ timestamp. `GET /health` remains minimal process liveness during recoverable dep
 outages; `GET /ready` fails closed for missing, failed, stale, unhealthy, or
 generation-mismatched operator-required authorization,
 contributors, invocation constraints, or required MCP preparation, and for corrupt lifecycle
-cursor ordering and an unsatisfied durable deployment profile. The administrator-only
+cursor ordering, pruning bounds, retained cardinality, or event edges and an unsatisfied durable deployment profile. Lifecycle inserts and pruning update an independent retained count in the same transaction; readiness compares it with the cursor range and first/last retained rows using bounded reads, so an interior deletion cannot remain healthy. The administrator-only
 deployment report exposes the safe manifest, separately labelled health snapshots,
 persistence truth, optional artifact provenance, and qualification state; the portable
 runtime capabilities record deliberately does not.
@@ -744,6 +778,13 @@ reuses its accepted evidence without rerunning health or authority code. Default
 live under startup-only `deployment.readiness`: 10-second cache/admission health, 30-second
 diagnostic staleness, two-second per-probe timeout, five-second overall timeout, and a required
 failure threshold fixed to one.
+
+Required authoritative operations are validated at host construction: authorization,
+contributor, constraint, and MCP preparation methods declared async by their public contract
+must be async functions. A synchronous implementation fails required startup with one bounded
+attributed diagnostic; optional contributions preserve only their documented fail-open path.
+Provider exceptions record only stable code, class, bounded operation/contribution identity,
+and correlation ID—never the message, traceback, configuration, request, or secret.
 
 Required MCP interceptors run only after the coherent authorization provider allows. At the
 final network fence, the host verifies the pinned generation and fresh required health, then

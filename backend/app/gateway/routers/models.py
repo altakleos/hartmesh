@@ -11,6 +11,7 @@ from app.gateway.authz import (
 from app.gateway.deps import get_config, get_optional_user_from_request
 from deerflow.authz.provider import AuthzDecision, AuthzRequest
 from deerflow.config.app_config import AppConfig
+from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +113,14 @@ async def list_models(
                         raise TypeError("AuthorizationProvider.filter_resources must return list[str]")
                     allowed_set = set(allowed_names)
                     visible_models = [m for m in config.models if m.name in allowed_set]
-                except Exception:
-                    logger.warning("Authorization provider failed while filtering models", exc_info=True)
+                except Exception as exc:
+                    diagnostic = bounded_diagnostic(
+                        code="authorization_model_filter_failed",
+                        operation="filter_authorized_models",
+                        error=exc,
+                        capability_id="authorization_provider",
+                    )
+                    log_bounded_failure(logger, diagnostic)
                     visible_models = [] if fail_closed else config.models
 
     models = [
@@ -193,12 +200,15 @@ async def get_model(
                     if not isinstance(decision, AuthzDecision):
                         raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
                     allowed = decision.allow
-                except Exception:
-                    logger.warning(
-                        "Authorization provider failed while checking model:use for %s",
-                        model_name,
-                        exc_info=True,
+                except Exception as exc:
+                    diagnostic = bounded_diagnostic(
+                        code="authorization_model_decision_failed",
+                        operation="authorize_model_use",
+                        error=exc,
+                        capability_id="authorization_provider",
+                        contribution_id=model_name,
                     )
+                    log_bounded_failure(logger, diagnostic)
                     allowed = not fail_closed
                 if not allowed:
                     raise HTTPException(status_code=403, detail=f"Model '{model_name}' is not available for your role")

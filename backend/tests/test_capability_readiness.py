@@ -386,6 +386,8 @@ async def test_authority_probe_exception_is_fail_closed_and_safely_correlated(
     assert "never-publish" not in str(public)
     matching = [record for record in caplog.records if getattr(record, "correlation_id", None) == snapshot.correlation_id]
     assert len(matching) == 1
+    assert matching[0].exception_class == "RuntimeError"
+    assert "never-publish" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -569,6 +571,29 @@ async def test_lifecycle_readiness_uses_only_bounded_edge_queries(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_readiness_rejects_deleted_interior_event_without_scanning(
+    tmp_path,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'readiness-interior-gap.db'}")
+    store = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        for index in range(6):
+            await store.put(f"run-{index}", thread_id=f"thread-{index}")
+        assert (await store.lifecycle_readiness()).ready is True
+
+        async with engine.begin() as connection:
+            await connection.execute(text("DELETE FROM run_lifecycle_events WHERE cursor = 3"))
+
+        readiness = await store.lifecycle_readiness()
+        assert readiness.ready is False
+        assert readiness.reason_code == "lifecycle_event_cardinality_invalid"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
     monkeypatch,
 ) -> None:
@@ -639,7 +664,7 @@ async def test_gateway_readiness_authenticates_required_remote_skill_profile(
             use="deerflow.community.aio_sandbox:AioSandboxProvider",
             provisioner_url="http://provisioner:8002",
             provisioner_service_account_token_file="/projected/token",
-            accepted_skill_projection_profile="rwx_verified_copy_v1",
+            accepted_skill_projection_profile="rwx_verified_copy_v2",
         ),
     )
     monkeypatch.setattr(app_module, "get_app_config", lambda: config)

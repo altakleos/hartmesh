@@ -179,6 +179,32 @@ async def test_route_permissions_fail_closed_denies_only_the_failed_permission(m
 
 
 @pytest.mark.asyncio
+async def test_route_permission_provider_failure_diagnostic_redacts_exception_text(
+    monkeypatch,
+    caplog,
+):
+    marker = "credential=route-provider-secret-marker"
+
+    class _MaliciousProvider(_RecordingProvider):
+        async def aauthorize(self, request):
+            raise RuntimeError(marker)
+
+    resolver = _enable_authorization(monkeypatch, _MaliciousProvider(), fail_closed=True)
+
+    with caplog.at_level("WARNING", logger="app.gateway.authz"):
+        permissions = await resolve_route_permissions(
+            _user(),
+            is_internal=False,
+            resolver=resolver,
+        )
+
+    assert permissions == []
+    assert marker not in caplog.text
+    assert "authorization_decision_failed" in caplog.text
+    assert any(getattr(record, "correlation_id", None) for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypatch):
     provider = _RecordingProvider(errors={Permissions.RUNS_CANCEL})
     resolver = _enable_authorization(monkeypatch, provider, fail_closed=False)
@@ -213,7 +239,12 @@ async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypa
         ),
     ],
 )
-async def test_route_permissions_apply_failure_mode_to_provider_resolution(monkeypatch, fail_closed, expected):
+async def test_route_permissions_apply_failure_mode_to_provider_resolution(
+    monkeypatch,
+    caplog,
+    fail_closed,
+    expected,
+):
     config = AuthorizationConfig(
         enabled=True,
         fail_closed=fail_closed,
@@ -223,9 +254,12 @@ async def test_route_permissions_apply_failure_mode_to_provider_resolution(monke
 
     class _FailingResolver:
         def resolve(self, config):
-            raise ValueError("invalid provider configuration")
+            raise ValueError("credential=resolver-secret-marker")
 
-    assert await resolve_route_permissions(_user(), is_internal=False, resolver=_FailingResolver()) == expected
+    with caplog.at_level("WARNING", logger="app.gateway.authz"):
+        assert await resolve_route_permissions(_user(), is_internal=False, resolver=_FailingResolver()) == expected
+    assert "resolver-secret-marker" not in caplog.text
+    assert "authorization_provider_resolution_failed" in caplog.text
 
 
 @pytest.mark.asyncio

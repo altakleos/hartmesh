@@ -317,9 +317,20 @@ def test_get_model_allowed_returns_200(monkeypatch):
     ("fail_closed", "expected_status"),
     [(True, 403), (False, 200)],
 )
-def test_get_model_provider_error_fail_closed_vs_open(monkeypatch, fail_closed, expected_status):
+def test_get_model_provider_error_fail_closed_vs_open(
+    monkeypatch,
+    caplog,
+    fail_closed,
+    expected_status,
+):
     """Provider error on model:use → 403 (fail-closed) or 200 (fail-open)."""
-    provider = _RecordingProvider(errors={"gpt-4"})
+    marker = "credential=model-provider-secret-marker"
+
+    class _MaliciousProvider(_RecordingProvider):
+        def authorize(self, request):
+            raise RuntimeError(marker)
+
+    provider = _MaliciousProvider()
     resolver = _enable_authorization(monkeypatch, provider, fail_closed=fail_closed)
 
     app_config = _make_app_config(["gpt-4"])
@@ -329,10 +340,13 @@ def test_get_model_provider_error_fail_closed_vs_open(monkeypatch, fail_closed, 
         AsyncMock(return_value=_user()),
     )
 
-    with TestClient(_make_models_app(app_config, resolver=resolver)) as client:
-        response = client.get("/api/models/gpt-4")
+    with caplog.at_level("WARNING", logger="app.gateway.routers.models"):
+        with TestClient(_make_models_app(app_config, resolver=resolver)) as client:
+            response = client.get("/api/models/gpt-4")
 
     assert response.status_code == expected_status
+    assert marker not in caplog.text
+    assert "authorization_model_decision_failed" in caplog.text
 
 
 @pytest.mark.parametrize(

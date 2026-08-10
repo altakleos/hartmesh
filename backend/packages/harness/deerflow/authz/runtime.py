@@ -7,15 +7,40 @@ per agent build and passes the same instance to Layer 1 and Layer 2).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from deerflow.authz.provider import AuthorizationProvider, AuthzRequest
 from deerflow.config.authorization_config import AuthorizationConfig
+from deerflow.diagnostics import (
+    bounded_diagnostic,
+    log_bounded_failure,
+    require_async_authoritative_operation,
+)
 from deerflow.reflection import resolve_variable
 
 AUTHORIZATION_PROVIDER_CONTEXT_KEY = "__deerflow_authorization_provider"
+logger = logging.getLogger(__name__)
+
+
+def _legacy_provider_failure(
+    *,
+    code: str,
+    operation: str,
+    error: BaseException,
+) -> ValueError:
+    """Return one safely attributable startup failure for legacy providers."""
+
+    diagnostic = bounded_diagnostic(
+        code=code,
+        operation=operation,
+        error=error,
+        capability_id="authorization_provider:legacy",
+    )
+    log_bounded_failure(logger, diagnostic, level=logging.ERROR)
+    return ValueError(f"authorization provider initialization failed: code={diagnostic.code} error_class={diagnostic.error_class} correlation_id={diagnostic.correlation_id}")
 
 
 @dataclass(frozen=True)
@@ -60,16 +85,36 @@ def resolve_authorization_provider(
     try:
         provider_cls = resolve_variable(class_path, expected_type=type)
     except (ImportError, ValueError) as err:
-        raise ValueError(f"Failed to resolve authorization provider class '{class_path}': {err}") from err
+        raise _legacy_provider_failure(
+            code="authorization_provider_resolution_failed",
+            operation="resolve_authorization_provider",
+            error=err,
+        ) from None
 
     kwargs = dict(config.provider.config) if config.provider.config else {}
     try:
         instance = provider_cls(**kwargs)
     except Exception as err:
-        raise ValueError(f"Failed to construct authorization provider '{class_path}': {err}") from err
+        raise _legacy_provider_failure(
+            code="authorization_provider_initialization_failed",
+            operation="construct_authorization_provider",
+            error=err,
+        ) from None
 
     if not isinstance(instance, AuthorizationProvider):
-        raise ValueError(f"Authorization provider '{class_path}' does not satisfy the AuthorizationProvider Protocol")
+        raise _legacy_provider_failure(
+            code="authorization_provider_contract_invalid",
+            operation="validate_authorization_provider",
+            error=TypeError("authorization_provider_protocol_invalid"),
+        ) from None
+    try:
+        require_async_authoritative_operation(instance, "aauthorize")
+    except TypeError as err:
+        raise _legacy_provider_failure(
+            code="authoritative_operation_not_async",
+            operation="aauthorize",
+            error=err,
+        ) from None
 
     from deerflow.authz.rbac import RbacAuthorizationProvider
 
@@ -77,6 +122,10 @@ def resolve_authorization_provider(
         try:
             instance.validate_role(config.default_role, field="authorization.default_role")
         except ValueError as err:
-            raise ValueError(f"Invalid authorization default_role for provider '{class_path}': {err}") from err
+            raise _legacy_provider_failure(
+                code="authorization_default_role_invalid",
+                operation="validate_authorization_default_role",
+                error=err,
+            ) from None
 
     return instance

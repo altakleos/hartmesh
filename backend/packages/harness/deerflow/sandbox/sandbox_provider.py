@@ -102,6 +102,98 @@ class AcceptedSkillExecutionEvidenceV1:
         ).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class AcceptedSkillExecutionEvidenceV2:
+    """Complete non-secret proof of one v2 Kubernetes execution tuple."""
+
+    profile: str
+    attempt_id: str
+    snapshot_id: str
+    run_id: str
+    generation: int
+    pod_uid: str
+    pod_isolation_digest: str
+    lease_uid: str
+    network_policy_uid: str
+    network_policy_spec_digest: str
+    evidence_secret_uid: str
+    evidence_secret_digest: str
+    capability_secret_uid: str
+    capability_secret_digest: str
+    sandbox_image_digest: str
+    accepted_skill_runtime_image_digest: str
+    runtime_image_ids_digest: str
+    verifier_receipt_digest: str
+    materialization_evidence_digest: str
+
+    def __post_init__(self) -> None:
+        if self.profile != "rwx_verified_copy_v2":
+            raise ValueError("accepted skill profile is invalid")
+        for value, field_name, maximum in (
+            (self.attempt_id, "attempt_id", 128),
+            (self.run_id, "run_id", 512),
+            (self.pod_uid, "pod_uid", 128),
+            (self.lease_uid, "lease_uid", 128),
+            (self.network_policy_uid, "network_policy_uid", 128),
+            (self.evidence_secret_uid, "evidence_secret_uid", 128),
+            (self.capability_secret_uid, "capability_secret_uid", 128),
+        ):
+            if not isinstance(value, str) or not value or len(value.encode("utf-8")) > maximum or any(ord(character) < 32 for character in value):
+                raise ValueError(f"accepted skill {field_name} is invalid")
+        for field_name in (
+            "snapshot_id",
+            "pod_isolation_digest",
+            "network_policy_spec_digest",
+            "evidence_secret_digest",
+            "capability_secret_digest",
+            "sandbox_image_digest",
+            "accepted_skill_runtime_image_digest",
+            "runtime_image_ids_digest",
+            "verifier_receipt_digest",
+            "materialization_evidence_digest",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or _SNAPSHOT_ID_PATTERN.fullmatch(value) is None:
+                raise ValueError(f"accepted skill {field_name} is invalid")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("accepted skill generation is invalid")
+        materialization_wire = {
+            "version": 2,
+            **{name: getattr(self, name) for name in self.__dataclass_fields__ if name != "materialization_evidence_digest"},
+            "content_digest": self.snapshot_id,
+        }
+        expected_materialization_digest = hashlib.sha256(
+            json.dumps(
+                materialization_wire,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+        if self.materialization_evidence_digest != expected_materialization_digest:
+            raise ValueError(
+                "accepted skill materialization evidence digest is invalid",
+            )
+
+    def to_persisted(self) -> dict[str, object]:
+        return {
+            "version": 2,
+            **{name: getattr(self, name) for name in self.__dataclass_fields__},
+        }
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                self.to_persisted(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+
+
+AcceptedSkillExecutionEvidence = AcceptedSkillExecutionEvidenceV1 | AcceptedSkillExecutionEvidenceV2
+
+
 def reject_writable_accepted_skill_aliases(
     accepted_root: str | Path,
     mounts: list[tuple[str, bool]],
@@ -528,7 +620,7 @@ class SandboxProvider(ABC):
     def accepted_skill_execution_evidence(
         self,
         sandbox_id: str,
-    ) -> AcceptedSkillExecutionEvidenceV1 | None:
+    ) -> AcceptedSkillExecutionEvidence | None:
         """Return bounded execution evidence when the backend has a native attempt."""
 
         del sandbox_id
@@ -537,7 +629,7 @@ class SandboxProvider(ABC):
     async def validate_accepted_skill_execution_async(
         self,
         sandbox_id: str,
-        evidence: AcceptedSkillExecutionEvidenceV1,
+        evidence: AcceptedSkillExecutionEvidence,
     ) -> bool:
         """Revalidate the exact materialized attempt before executable work."""
 
@@ -547,7 +639,7 @@ class SandboxProvider(ABC):
     async def renew_accepted_skill_execution_async(
         self,
         sandbox_id: str,
-        evidence: AcceptedSkillExecutionEvidenceV1,
+        evidence: AcceptedSkillExecutionEvidence,
     ) -> bool:
         """Renew the exact attempt after authoritative RunRow renewal."""
 

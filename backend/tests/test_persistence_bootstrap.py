@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0016_sandbox_execution_evidence"
+HEAD = "0018_inbound_receipt_failures"
 BASELINE = "0001_baseline"
 
 

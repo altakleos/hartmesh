@@ -44,6 +44,7 @@ def test_orm_metadata_declares_lifecycle_tables_checks_and_indexes() -> None:
         "ck_run_lifecycle_cursor_singleton",
         "ck_run_lifecycle_cursor_nonnegative",
         "ck_run_lifecycle_pruned_range",
+        "ck_run_lifecycle_retained_count_nonnegative",
     }
     assert {index.name for index in RunLifecycleEventRow.__table__.indexes} >= _INDEXES
 
@@ -60,9 +61,14 @@ async def test_fresh_schema_has_lifecycle_tables_and_seed(tmp_path: Path) -> Non
     assert _TABLES <= _tables(path)
     assert "state_version" in _run_columns(path)
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT singleton_id, last_cursor, pruned_through FROM run_lifecycle_cursor_state").fetchall() == [(1, 0, 0)]
+        assert connection.execute("SELECT singleton_id, last_cursor, pruned_through, retained_count FROM run_lifecycle_cursor_state").fetchall() == [(1, 0, 0, 0)]
         indexes = {row[1] for row in connection.execute("PRAGMA index_list(run_lifecycle_events)")}
         assert _INDEXES <= indexes
+        triggers = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+        assert {
+            "trg_run_lifecycle_retained_insert",
+            "trg_run_lifecycle_retained_delete",
+        } <= triggers
 
 
 @pytest.mark.asyncio
@@ -110,6 +116,67 @@ async def test_upgrade_downgrade_reupgrade_preserves_legacy_and_auxiliary_rows(
         await asyncio.to_thread(command.upgrade, config, "head")
         with sqlite3.connect(path) as connection:
             assert connection.execute("SELECT run_id, state_version FROM runs ORDER BY run_id").fetchall() == [("aux", 0), ("legacy", 0)]
-            assert connection.execute("SELECT singleton_id, last_cursor, pruned_through FROM run_lifecycle_cursor_state").fetchall() == [(1, 0, 0)]
+            assert connection.execute("SELECT singleton_id, last_cursor, pruned_through, retained_count FROM run_lifecycle_cursor_state").fetchall() == [(1, 0, 0, 0)]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_integrity_upgrade_backfills_and_survives_round_trip(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "integrity-upgrade.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    config = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(
+            command.upgrade,
+            config,
+            "0016_sandbox_execution_evidence",
+        )
+    finally:
+        await engine.dispose()
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO runs "
+            "(run_id, thread_id, status, state_version, operation_kind, "
+            "multitask_strategy, metadata_json, kwargs_json, message_count, "
+            "total_input_tokens, total_output_tokens, total_tokens, llm_call_count, "
+            "lead_agent_tokens, subagent_tokens, middleware_tokens, "
+            "token_usage_by_model, created_at, updated_at) "
+            "VALUES ('legacy-event-run', 'thread-legacy', 'pending', 1, 'run', "
+            "'reject', '{}', '{}', 0, 0, 0, 0, 0, 0, 0, 0, '{}', "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO run_lifecycle_events "
+            "(event_id, cursor, run_id, thread_id, owner_scope, lifecycle_type, "
+            "state_version, status, payload_json) "
+            "VALUES ('legacy-event', 1, 'legacy-event-run', 'thread-legacy', "
+            "'anonymous', 'accepted', 1, 'pending', '{}')"
+        )
+        connection.execute("UPDATE run_lifecycle_cursor_state SET last_cursor = 1 WHERE singleton_id = 1")
+        connection.commit()
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    config = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(command.upgrade, config, "head")
+        with sqlite3.connect(path) as connection:
+            assert connection.execute("SELECT retained_count FROM run_lifecycle_cursor_state").fetchone() == (1,)
+
+        await asyncio.to_thread(
+            command.downgrade,
+            config,
+            "0016_sandbox_execution_evidence",
+        )
+        with sqlite3.connect(path) as connection:
+            assert "retained_count" not in {row[1] for row in connection.execute("PRAGMA table_info(run_lifecycle_cursor_state)")}
+            assert connection.execute("SELECT count(*) FROM run_lifecycle_events").fetchone() == (1,)
+
+        await asyncio.to_thread(command.upgrade, config, "head")
+        with sqlite3.connect(path) as connection:
+            assert connection.execute("SELECT retained_count FROM run_lifecycle_cursor_state").fetchone() == (1,)
     finally:
         await engine.dispose()

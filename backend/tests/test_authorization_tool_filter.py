@@ -96,8 +96,10 @@ class TestFilterToolsByAuthorization:
         )
         assert [t.name for t in result] == ["web_search", "read_file"]
 
-    def test_fail_closed_on_provider_error(self):
+    def test_fail_closed_on_provider_error(self, caplog):
         """When provider raises and fail_closed=True, deny all tools."""
+
+        marker = "credential=tool-filter-secret-marker"
 
         class _ExplodingProvider:
             name = "exploding"
@@ -109,16 +111,19 @@ class TestFilterToolsByAuthorization:
                 raise RuntimeError("boom")
 
             def filter_resources(self, principal, resource_type, candidates):
-                raise RuntimeError("boom")
+                raise RuntimeError(marker)
 
         tools = [_make_tool("bash"), _make_tool("web_search")]
-        result = filter_tools_by_authorization(
-            tools,
-            provider=_ExplodingProvider(),
-            principal=Principal(role="user"),
-            fail_closed=True,
-        )
+        with caplog.at_level("WARNING", logger="deerflow.authz.enforcement"):
+            result = filter_tools_by_authorization(
+                tools,
+                provider=_ExplodingProvider(),
+                principal=Principal(role="user"),
+                fail_closed=True,
+            )
         assert result == []
+        assert marker not in caplog.text
+        assert "authorization_resource_filter_failed" in caplog.text
 
     def test_fail_open_on_provider_error(self):
         """When provider raises and fail_closed=False, keep original tools."""

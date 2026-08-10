@@ -1397,7 +1397,7 @@ sandbox:
 #   # Remote durable invocations with nonempty skills require the provisioner
 #   # profile below plus an RWX snapshot claim and digest-pinned sandbox and
 #   # verifier/gate images. `disabled` keeps remote AIO empty-only.
-#   # accepted_skill_projection_profile: disabled # disabled | rwx_verified_copy_v1
+#   # accepted_skill_projection_profile: disabled # disabled | rwx_verified_copy_v2
 #   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
 #   # environment variable, not sandbox.image from this config file.
 

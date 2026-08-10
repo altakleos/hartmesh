@@ -393,7 +393,9 @@ def test_v1_registration_cannot_satisfy_a_v2_operator_requirement() -> None:
         )
 
 
-def test_required_v2_initialization_failure_stops_startup_without_raw_error_text() -> None:
+def test_required_v2_initialization_failure_stops_startup_without_raw_error_text(
+    caplog,
+) -> None:
     registry = ExtensionRegistry()
 
     def _broken_factory():
@@ -409,13 +411,15 @@ def test_required_v2_initialization_failure_stops_startup_without_raw_error_text
             )
         )
 
-    with pytest.raises(ConstraintStartupError) as captured:
-        InvocationConstraintsHost(
-            registry.build(),
-            required_capabilities=(INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2,),
-        )
+    with caplog.at_level("ERROR", logger="deerflow.extensions.constraints"):
+        with pytest.raises(ConstraintStartupError) as captured:
+            InvocationConstraintsHost(
+                registry.build(),
+                required_capabilities=(INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2,),
+            )
     assert "RuntimeError" in str(captured.value)
     assert "credential-like-private-text" not in str(captured.value)
+    assert "credential-like-private-text" not in caplog.text
 
 
 def test_v2_registration_has_distinct_manifest_and_required_health_identity() -> None:

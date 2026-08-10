@@ -622,7 +622,7 @@ def test_verified_accepted_skill_projection_rejects_same_node_rwo_fallback(
     tmp_path: Path,
 ) -> None:
     values = _production_values()
-    values["provisioner"]["acceptedSkillProjectionProfile"] = "rwx_verified_copy_v1"
+    values["provisioner"]["acceptedSkillProjectionProfile"] = "rwx_verified_copy_v2"
     values["provisioner"]["sandboxImage"] = "registry.example/aio@sha256:" + ("c" * 64)
     values["persistence"]["home"]["accessMode"] = "ReadWriteOnce"
 
@@ -636,7 +636,7 @@ def test_verified_accepted_skill_projection_renders_pinned_cross_node_profile(
     tmp_path: Path,
 ) -> None:
     values = _production_values()
-    values["provisioner"]["acceptedSkillProjectionProfile"] = "rwx_verified_copy_v1"
+    values["provisioner"]["acceptedSkillProjectionProfile"] = "rwx_verified_copy_v2"
     values["provisioner"]["sandboxImage"] = "registry.example/aio@sha256:" + ("c" * 64)
     values["persistence"]["home"]["accessMode"] = "ReadWriteMany"
 
@@ -649,7 +649,7 @@ def test_verified_accepted_skill_projection_renders_pinned_cross_node_profile(
     assert provisioner["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["httpGet"]["path"] == "/ready"
     environment = {item["name"]: item.get("value") for item in provisioner["spec"]["template"]["spec"]["containers"][0]["env"]}
 
-    assert environment["ACCEPTED_SKILL_PROJECTION_PROFILE"] == ("rwx_verified_copy_v1")
+    assert environment["ACCEPTED_SKILL_PROJECTION_PROFILE"] == ("rwx_verified_copy_v2")
     assert environment["ACCEPTED_SKILL_RUNTIME_IMAGE"] == ("deer-flow-provisioner@sha256:" + ("b" * 64))
     assert environment["USERDATA_PVC_NAME"] == "deer-flow-deer-flow-home"
     assert environment["ACCEPTED_ATTEMPT_LEASE_SECONDS"] == "120"
@@ -676,7 +676,7 @@ def test_verified_accepted_skill_projection_renders_pinned_cross_node_profile(
     } in gateway_mounts
     config_map = next(document for document in documents if document.get("kind") == "ConfigMap" and document.get("metadata", {}).get("name") == "deer-flow-deer-flow-config")
     rendered_config = yaml.safe_load(config_map["data"]["config.yaml"])
-    assert rendered_config["sandbox"]["accepted_skill_projection_profile"] == ("rwx_verified_copy_v1")
+    assert rendered_config["sandbox"]["accepted_skill_projection_profile"] == ("rwx_verified_copy_v2")
     assert rendered_config["sandbox"]["provisioner_service_account_token_file"] == "/var/run/secrets/hartmesh-provisioner/token"
     assert rendered_config["run_ownership"]["heartbeat_enabled"] is True
     provisioner_role = next(document for document in documents if document.get("kind") == "Role" and document.get("metadata", {}).get("name") == "deer-flow-deer-flow-provisioner")
@@ -734,7 +734,7 @@ def test_verified_accepted_skill_projection_rejects_unsafe_lease_timing(
     tmp_path: Path,
 ) -> None:
     values = _production_values()
-    values["provisioner"]["acceptedSkillProjectionProfile"] = "rwx_verified_copy_v1"
+    values["provisioner"]["acceptedSkillProjectionProfile"] = "rwx_verified_copy_v2"
     values["provisioner"]["sandboxImage"] = "registry.example/aio@sha256:" + ("c" * 64)
     values["provisioner"]["acceptedAttempt"] = {
         "leaseSeconds": 59,

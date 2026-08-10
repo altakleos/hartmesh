@@ -9,7 +9,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
-from uuid import uuid4
 
 from deerflow.extensions.capabilities import (
     CapabilityHealthSnapshot,
@@ -116,16 +115,16 @@ class RuntimeReadinessCoordinator:
         component: str,
         error: BaseException,
     ) -> str:
-        correlation_id = uuid4().hex
-        logger.error(
-            message,
-            exc_info=(type(error), error, error.__traceback__),
-            extra={
-                "correlation_id": correlation_id,
-                "readiness_component": component,
-            },
+        from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
+
+        diagnostic = bounded_diagnostic(
+            code="readiness_dependency_failure",
+            operation="readiness_check",
+            error=error,
+            capability_id=component,
         )
-        return correlation_id
+        log_bounded_failure(logger, diagnostic, level=logging.ERROR)
+        return diagnostic.correlation_id
 
     async def _evaluate(self) -> RuntimeReadinessSnapshot:
         reasons: list[str] = []

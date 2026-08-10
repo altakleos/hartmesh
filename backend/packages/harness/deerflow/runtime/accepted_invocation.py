@@ -24,6 +24,40 @@ from deerflow_extension_api import (
 _DIGEST_VERSION = 1
 _AGENT_REVISION_VERSION = 1
 _DECISION_EVIDENCE_V1 = {"version": 1, "decisions": []}
+_SHA256_LENGTH = 64
+_EFFECTIVE_EXECUTION_PROJECTION_KEY = "__accepted_request_projection_v1"
+_REQUEST_DIGEST_VERSION = "sha256-canonical-json-v1"
+_CANONICAL_EXECUTION_SEMANTICS = "canonical_execution_v2"
+_EFFECTIVE_EXECUTION_FIELDS_V1 = frozenset(
+    {
+        "thread_id",
+        "agent_selector",
+        "agent_revision_digest",
+        "principal_digest",
+        "base_origin_digest",
+        "accepted_context_digest",
+        "runtime_identity_digest",
+        "contributor_execution_digest",
+        "extension_generation",
+        "input",
+        "command",
+        "multitask_strategy",
+        "checkpoint",
+        "interrupt_before",
+        "interrupt_after",
+        "execution_context",
+        "recursion_limit",
+    }
+)
+_ACCEPTED_CONTEXT_REFERENCE_KEYS = frozenset(
+    {
+        "non_interactive",
+        "is_plan_mode",
+        "subagent_enabled",
+        "max_concurrent_subagents",
+        "max_total_subagents",
+    }
+)
 
 # Host-internal runtime context keys. Callers may not supply either value;
 # the worker installs them only from the accepted record after its fences pass.
@@ -55,6 +89,40 @@ def canonical_digest(value: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def canonical_effective_execution_digest(value: Any) -> str:
+    """Hash the host-internal effective execution projection contract."""
+
+    canonical = json.dumps(
+        {
+            "version": _REQUEST_DIGEST_VERSION,
+            "request": _canonical_value(value),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _require_digest(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str) or len(value) != _SHA256_LENGTH or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _require_matching_digest(
+    value: object,
+    expected: str,
+    *,
+    field_name: str,
+) -> str:
+    digest = _require_digest(value, field_name=field_name)
+    if digest != expected:
+        raise ValueError(f"{field_name} does not match its persisted facts")
+    return digest
 
 
 def _frozen_json_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
@@ -417,8 +485,37 @@ class AcceptedInvocation:
         revision_json = row.get("agent_revision_json")
         origin_json = row.get("origin_json")
         principal_json = row.get("principal_projection_json")
-        if not revision_digest or not isinstance(revision_json, Mapping) or not isinstance(origin_json, Mapping) or not isinstance(principal_json, Mapping):
+        accepted_fields = (
+            revision_digest,
+            revision_json,
+            origin_json,
+            principal_json,
+            row.get("principal_projection_digest"),
+            row.get("base_origin_digest"),
+            row.get("accepted_context_digest"),
+        )
+        if all(value is None for value in accepted_fields):
             return None
+        if not isinstance(revision_json, Mapping) or not isinstance(origin_json, Mapping) or not isinstance(principal_json, Mapping):
+            raise ValueError("accepted invocation evidence is incomplete")
+
+        principal_version = principal_json.get("version")
+        if principal_version not in {1, 2}:
+            raise ValueError("principal projection has an unsupported version")
+        known_principal_fields = {
+            "version",
+            "user_id",
+            "role",
+            "oauth_provider",
+            "oauth_id",
+            "channel_user_id",
+            "is_internal",
+            "identity",
+        }
+        if set(principal_json) - known_principal_fields:
+            raise ValueError("principal projection has unknown fields")
+        if principal_version == 2 and set(principal_json) != known_principal_fields:
+            raise ValueError("principal projection version 2 is missing fields")
         identity_json = principal_json.get("identity")
         principal = PrincipalProjection(
             user_id=principal_json.get("user_id"),
@@ -429,10 +526,38 @@ class AcceptedInvocation:
             is_internal=bool(principal_json.get("is_internal", False)),
             identity=(InvocationIdentityV1.from_json(identity_json) if isinstance(identity_json, Mapping) else None),
         )
+        if principal_version == 2:
+            if principal.identity is None:
+                raise ValueError("principal projection version 2 requires split identity")
+            if principal.to_json() != _deep_thaw(principal_json):
+                raise ValueError("principal projection contradicts its split identity")
+        persisted_principal_digest = _require_matching_digest(
+            row.get("principal_projection_digest"),
+            canonical_digest({"version": _DIGEST_VERSION, "principal": principal.to_json()}),
+            field_name="principal projection digest",
+        )
+
+        known_origin_fields = {
+            "version",
+            "source_kind",
+            "references",
+            "contributor_references",
+        }
+        if origin_json.get("version") != 1 or set(origin_json) - known_origin_fields:
+            raise ValueError("accepted Origin has unknown fields or an unsupported version")
+        references = origin_json.get("references")
+        contributor_references = origin_json.get("contributor_references", ())
+        if not isinstance(references, Mapping) or not isinstance(contributor_references, (list, tuple)):
+            raise ValueError("accepted Origin references are malformed")
         origin = InvocationOrigin(
             source_kind=str(origin_json.get("source_kind")),
-            references=origin_json.get("references") or {},
-            contributor_references=tuple(origin_json.get("contributor_references") or ()),
+            references=references,
+            contributor_references=tuple(contributor_references),
+        )
+        persisted_base_origin_digest = _require_matching_digest(
+            row.get("base_origin_digest"),
+            canonical_digest({"version": _DIGEST_VERSION, "origin": origin.base_json()}),
+            field_name="base Origin digest",
         )
         if principal.identity is None and principal.user_id is not None and origin.source_kind in {"native_channel", "scheduled_task"}:
             # Legacy rows did not distinguish a represented human from the
@@ -440,29 +565,235 @@ class AcceptedInvocation:
             # remove that historical privilege, but never prove service
             # authority or reconstruct an acting service.
             principal = replace(principal, is_internal=False)
-        revision = ResolvedAgentRevision(
-            agent_id=str(revision_json.get("agent_id") or "default"),
-            digest=str(revision_digest),
-            storage_source=str(revision_json.get("storage_source") or "unknown"),
-            storage_version=str(revision_json.get("storage_version") or "unknown"),
+
+        if revision_json.get("version") != _AGENT_REVISION_VERSION:
+            raise ValueError("agent revision has an unsupported version")
+        expected_revision_fields = {
+            "version",
+            "agent_id",
+            "storage_source",
+            "storage_version",
+            "digest",
+        }
+        if set(revision_json) != expected_revision_fields:
+            raise ValueError("agent revision has unknown or missing fields")
+        persisted_revision_digest = _require_digest(
+            revision_digest,
+            field_name="agent revision digest",
         )
-        decision_evidence = row.get("decision_evidence_json") or copy.deepcopy(_DECISION_EVIDENCE_V1)
-        trusted_json = decision_evidence.get("trusted_run_context") if isinstance(decision_evidence, Mapping) else None
+        _require_matching_digest(
+            revision_json.get("digest"),
+            persisted_revision_digest,
+            field_name="agent revision digest",
+        )
+        revision = ResolvedAgentRevision(
+            agent_id=canonicalize_agent_identifier(
+                revision_json.get("agent_id"),
+                field_name="persisted agent revision id",
+            ),
+            digest=persisted_revision_digest,
+            storage_source=str(revision_json.get("storage_source")),
+            storage_version=str(revision_json.get("storage_version")),
+        )
+        thread_id = validate_thread_identifier(row.get("thread_id"), field_name="persisted thread_id")
+        extension_generation = row.get("extension_generation")
+        if type(extension_generation) is not int or extension_generation < 0:
+            raise ValueError("extension generation must be a non-negative integer")
+        persisted_context_digest = _require_digest(
+            row.get("accepted_context_digest"),
+            field_name="accepted context digest",
+        )
+        decision_evidence = row.get("decision_evidence_json")
+        if decision_evidence is None:
+            decision_evidence = copy.deepcopy(_DECISION_EVIDENCE_V1)
+        if not isinstance(decision_evidence, Mapping):
+            raise ValueError("accepted decision evidence must be a mapping")
+        if decision_evidence.get("version") != 1 or not isinstance(decision_evidence.get("decisions", []), (list, tuple)):
+            raise ValueError("accepted decision evidence has an unsupported version or malformed decisions")
+        trusted_json = decision_evidence.get("trusted_run_context")
+        if "trusted_run_context" in decision_evidence and not isinstance(trusted_json, Mapping):
+            raise ValueError("trusted run-context evidence is malformed")
         trusted_context = TrustedRunContextV1.from_persisted_json(trusted_json) if isinstance(trusted_json, Mapping) else None
+        manifest_evidence = decision_evidence.get("capability_manifest")
+        manifest_digest: str | None = None
+        if manifest_evidence is not None:
+            if not isinstance(manifest_evidence, Mapping) or set(manifest_evidence) != {"version", "generation", "digest"} or manifest_evidence.get("version") != 1:
+                raise ValueError("extension manifest evidence is malformed")
+            if manifest_evidence.get("generation") != extension_generation:
+                raise ValueError("extension manifest generation contradicts accepted evidence")
+            manifest_digest = _require_digest(
+                manifest_evidence.get("digest"),
+                field_name="extension manifest digest",
+            )
+        if trusted_context is not None:
+            if principal.identity != trusted_context.identity:
+                raise ValueError("trusted context identity contradicts the accepted principal")
+            if origin.source_kind != trusted_context.origin.source_kind:
+                raise ValueError("trusted context Origin contradicts the accepted source")
+            if thread_id != trusted_context.thread_id:
+                raise ValueError("trusted context thread contradicts the accepted thread")
+            if revision.agent_id != trusted_context.agent_revision.agent_id or revision.digest != trusted_context.agent_revision.digest:
+                raise ValueError("trusted context agent revision contradicts accepted evidence")
+            if extension_generation != trusted_context.extension_generation:
+                raise ValueError("trusted context extension generation contradicts accepted evidence")
+            if manifest_digest != trusted_context.extension_manifest_digest:
+                raise ValueError("trusted context extension manifest contradicts accepted evidence")
+
+            trusted_base_references: dict[str, Any] = {}
+            for reference in trusted_context.origin.references:
+                if reference.storage_class != "persistable" or reference.purpose != "correlation" or reference.key in trusted_base_references:
+                    raise ValueError("trusted Origin references contradict accepted evidence")
+                trusted_base_references[reference.key] = reference.value
+            if _canonical_value(trusted_base_references) != _canonical_value(origin.references):
+                raise ValueError("trusted Origin references contradict accepted evidence")
+
+            expected_contributor_references: list[dict[str, Any]] = []
+            for reference in trusted_context.origin.contributor_references:
+                prefix = "origin_contributor:"
+                if not reference.capability_id.startswith(prefix):
+                    raise ValueError("trusted Origin contributor identity contradicts accepted evidence")
+                item = reference.reference
+                if item.storage_class != "persistable":
+                    continue
+                expected_contributor_references.append(
+                    {
+                        "contribution_id": reference.capability_id.removeprefix(prefix),
+                        "namespace": reference.namespace,
+                        "key": item.key,
+                        "value": item.value,
+                        "storage_class": item.storage_class,
+                        "purpose": item.purpose,
+                    }
+                )
+            if _canonical_value(expected_contributor_references) != _canonical_value(origin.contributor_references):
+                raise ValueError("trusted Origin contributors contradict accepted evidence")
+
+            expected_trusted_origin_digest = canonical_digest(
+                {
+                    "version": 1,
+                    "source_kind": trusted_context.origin.source_kind,
+                    "references": [
+                        {
+                            "key": reference.key,
+                            "value": reference.value,
+                            "storage_class": reference.storage_class,
+                            "purpose": reference.purpose,
+                        }
+                        for reference in trusted_context.origin.references
+                    ],
+                    "contributor_references": [reference.to_json() for reference in trusted_context.origin.contributor_references],
+                }
+            )
+            _require_matching_digest(
+                trusted_context.origin.digest,
+                expected_trusted_origin_digest,
+                field_name="trusted Origin digest",
+            )
+            if "external_key" in row and trusted_context.external_key_reference != row.get("external_key"):
+                raise ValueError("trusted context external key contradicts accepted evidence")
+
+        runtime_identity_digest = ""
+        contributor_execution_digest = ""
+        kwargs = row.get("kwargs")
+        effective_projection = kwargs.get(_EFFECTIVE_EXECUTION_PROJECTION_KEY) if isinstance(kwargs, Mapping) else None
+        if effective_projection is not None:
+            if not isinstance(effective_projection, Mapping):
+                raise ValueError("accepted effective execution projection is malformed")
+            projection_fields = set(effective_projection)
+            accepted_semantics = effective_projection.get("accepted_digest_semantics")
+            expected_projection_fields = set(_EFFECTIVE_EXECUTION_FIELDS_V1)
+            if accepted_semantics == _CANONICAL_EXECUTION_SEMANTICS:
+                expected_projection_fields.add("accepted_digest_semantics")
+            elif "accepted_digest_semantics" in projection_fields:
+                raise ValueError("accepted effective execution projection version is unsupported")
+            if projection_fields != expected_projection_fields:
+                raise ValueError("accepted effective execution projection has unknown or missing fields")
+            if row.get("request_digest_version") != _REQUEST_DIGEST_VERSION:
+                raise ValueError("accepted effective execution digest version is unsupported")
+            _require_matching_digest(
+                row.get("request_digest"),
+                canonical_effective_execution_digest(effective_projection),
+                field_name="effective execution digest",
+            )
+            expected_identities = {
+                "thread_id": thread_id,
+                "agent_revision_digest": revision.digest,
+                "principal_digest": persisted_principal_digest,
+                "base_origin_digest": persisted_base_origin_digest,
+                "accepted_context_digest": persisted_context_digest,
+                "extension_generation": extension_generation,
+            }
+            for field_name, expected in expected_identities.items():
+                if effective_projection.get(field_name) != expected:
+                    raise ValueError(f"accepted effective execution {field_name} contradicts accepted evidence")
+            runtime_identity_digest = _require_digest(
+                effective_projection.get("runtime_identity_digest"),
+                field_name="runtime identity digest",
+            )
+            contributor_execution_digest = _require_digest(
+                effective_projection.get("contributor_execution_digest"),
+                field_name="contributor execution digest",
+            )
+            execution_context = effective_projection.get("execution_context")
+            if not isinstance(execution_context, Mapping):
+                raise ValueError("accepted effective execution context is malformed")
+            context_references = {key: execution_context[key] for key in _ACCEPTED_CONTEXT_REFERENCE_KEYS if key in execution_context}
+            expected_context_digest = canonical_digest(
+                {
+                    "version": _DIGEST_VERSION,
+                    "context": context_references,
+                    "contributor_execution_digest": contributor_execution_digest,
+                    "trusted_context_execution_digest": (None if trusted_context is None else trusted_context.execution_digest),
+                }
+            )
+            _require_matching_digest(
+                persisted_context_digest,
+                expected_context_digest,
+                field_name="accepted context digest",
+            )
+            if accepted_semantics == _CANONICAL_EXECUTION_SEMANTICS:
+                checkpoint = effective_projection.get("checkpoint")
+                if not isinstance(checkpoint, Mapping):
+                    raise ValueError("accepted effective checkpoint is malformed")
+                expected_runtime_identity_digest = canonical_digest(
+                    {
+                        "version": _DIGEST_VERSION,
+                        "principal_digest": persisted_principal_digest,
+                        "base_origin_digest": persisted_base_origin_digest,
+                        "thread_id": thread_id,
+                        "agent_revision_digest": revision.digest,
+                        "input": effective_projection.get("input"),
+                        "execution_options": {
+                            "multitask_strategy": effective_projection.get("multitask_strategy"),
+                            "interrupt_before": effective_projection.get("interrupt_before"),
+                            "interrupt_after": effective_projection.get("interrupt_after"),
+                            "checkpoint_id": checkpoint.get("checkpoint_id"),
+                            "recursion_limit": effective_projection.get("recursion_limit"),
+                        },
+                        "extension_generation": extension_generation,
+                        "extension_manifest_digest": manifest_digest,
+                        "accepted_context_digest": persisted_context_digest,
+                    }
+                )
+                _require_matching_digest(
+                    runtime_identity_digest,
+                    expected_runtime_identity_digest,
+                    field_name="runtime identity digest",
+                )
         return cls(
             principal=principal,
             origin=origin,
-            thread_id=str(row.get("thread_id") or ""),
+            thread_id=thread_id,
             context_references={},
             agent_revision=revision,
             normalized_input={},
             execution_options={},
-            extension_generation=int(row.get("extension_generation") or 0),
-            principal_digest=str(row.get("principal_projection_digest") or ""),
-            base_origin_digest=str(row.get("base_origin_digest") or ""),
-            accepted_context_digest=str(row.get("accepted_context_digest") or ""),
-            runtime_identity_digest="",
-            contributor_execution_digest="",
+            extension_generation=extension_generation,
+            principal_digest=persisted_principal_digest,
+            base_origin_digest=persisted_base_origin_digest,
+            accepted_context_digest=persisted_context_digest,
+            runtime_identity_digest=runtime_identity_digest,
+            contributor_execution_digest=contributor_execution_digest,
             trusted_context=trusted_context,
             decision_evidence=decision_evidence,
         )

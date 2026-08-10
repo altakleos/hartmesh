@@ -317,21 +317,25 @@ def test_gateway_scrubs_caller_supplied_identity_actor_and_origin() -> None:
 
 
 def test_legacy_channel_projection_cannot_promote_human() -> None:
+    principal_json = {
+        "version": 1,
+        "user_id": "owner-1",
+        "role": "member",
+        "oauth_provider": None,
+        "oauth_id": None,
+        "channel_user_id": "platform-user",
+        "is_internal": False,
+    }
+    origin_json = {
+        "version": 1,
+        "source_kind": "native_channel",
+        "references": {"provider": "telegram"},
+    }
     accepted = AcceptedInvocation.from_persisted(
         {
             "thread_id": "thread-1",
-            "principal_projection_json": {
-                "version": 1,
-                "user_id": "owner-1",
-                "role": "member",
-                "channel_user_id": "platform-user",
-                "is_internal": True,
-            },
-            "origin_json": {
-                "version": 1,
-                "source_kind": "native_channel",
-                "references": {"provider": "telegram"},
-            },
+            "principal_projection_json": principal_json,
+            "origin_json": origin_json,
             "agent_revision_json": {
                 "version": 1,
                 "agent_id": "lead_agent",
@@ -340,8 +344,8 @@ def test_legacy_channel_projection_cannot_promote_human() -> None:
                 "digest": "a" * 64,
             },
             "agent_revision_digest": "a" * 64,
-            "principal_projection_digest": "b" * 64,
-            "base_origin_digest": "c" * 64,
+            "principal_projection_digest": canonical_digest({"version": 1, "principal": principal_json}),
+            "base_origin_digest": canonical_digest({"version": 1, "origin": origin_json}),
             "accepted_context_digest": "d" * 64,
             "extension_generation": 1,
         }
@@ -354,21 +358,25 @@ def test_legacy_channel_projection_cannot_promote_human() -> None:
 
 
 def test_legacy_channel_origin_demotes_internal_flag_without_sender_field() -> None:
+    principal_json = {
+        "version": 1,
+        "user_id": "owner-1",
+        "role": "internal",
+        "oauth_provider": None,
+        "oauth_id": None,
+        "channel_user_id": None,
+        "is_internal": True,
+    }
+    origin_json = {
+        "version": 1,
+        "source_kind": "native_channel",
+        "references": {"provider": "telegram"},
+    }
     accepted = AcceptedInvocation.from_persisted(
         {
             "thread_id": "thread-legacy-channel",
-            "principal_projection_json": {
-                "version": 1,
-                "user_id": "owner-1",
-                "role": "internal",
-                "channel_user_id": None,
-                "is_internal": True,
-            },
-            "origin_json": {
-                "version": 1,
-                "source_kind": "native_channel",
-                "references": {"provider": "telegram"},
-            },
+            "principal_projection_json": principal_json,
+            "origin_json": origin_json,
             "agent_revision_json": {
                 "version": 1,
                 "agent_id": "lead_agent",
@@ -377,8 +385,8 @@ def test_legacy_channel_origin_demotes_internal_flag_without_sender_field() -> N
                 "digest": "a" * 64,
             },
             "agent_revision_digest": "a" * 64,
-            "principal_projection_digest": "b" * 64,
-            "base_origin_digest": "c" * 64,
+            "principal_projection_digest": canonical_digest({"version": 1, "principal": principal_json}),
+            "base_origin_digest": canonical_digest({"version": 1, "origin": origin_json}),
             "accepted_context_digest": "d" * 64,
             "extension_generation": 1,
         }

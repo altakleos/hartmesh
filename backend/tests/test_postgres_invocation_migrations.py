@@ -20,6 +20,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import pytest
 import sqlalchemy as sa
 from alembic import command
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 import deerflow.persistence.models  # noqa: F401
@@ -43,7 +45,7 @@ from deerflow.runtime.runs.store.base import (
 )
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
-_PRE_FEATURE_REVISION = "0010_run_cancel_request"
+_PRE_FEATURE_REVISION = "0011_mcp_tasks"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
     "0012_invocation_idempotency",
@@ -51,6 +53,8 @@ _INVOCATION_REVISIONS = (
     "0014_canonical_caller_intent",
     "0015_inbound_receipts",
     "0016_sandbox_execution_evidence",
+    "0017_lifecycle_integrity",
+    "0018_inbound_receipt_failures",
 )
 _REVISION_COLUMNS = {
     "0011_accepted_invocation": {
@@ -81,6 +85,8 @@ _REVISION_COLUMNS = {
         "execution_evidence_json",
         "execution_evidence_digest",
     },
+    "0017_lifecycle_integrity": set(),
+    "0018_inbound_receipt_failures": set(),
 }
 
 _INBOUND_RECEIPT_COLUMNS = {
@@ -97,6 +103,7 @@ _INBOUND_RECEIPT_COLUMNS = {
     "lease_expires_at": ("timestamp with time zone", None, True),
     "fencing_token": ("integer", None, False),
     "attempt_count": ("integer", None, False),
+    "failure_count": ("integer", None, False),
     "next_attempt_at": ("timestamp with time zone", None, False),
     "run_id": ("character varying", 64, True),
     "outcome_code": ("character varying", 64, True),
@@ -163,6 +170,7 @@ _LIFECYCLE_CURSOR_COLUMNS = {
     "singleton_id": ("integer", None, False),
     "last_cursor": ("bigint", None, False),
     "pruned_through": ("bigint", None, False),
+    "retained_count": ("bigint", None, False),
 }
 _LEGACY_COLUMNS = (
     "run_id",
@@ -345,6 +353,33 @@ async def _legacy_snapshot(engine: AsyncEngine) -> list[dict[str, object]]:
         return [dict(row) for row in rows]
 
 
+async def _mcp_task_snapshot(engine: AsyncEngine) -> dict[str, object]:
+    async with engine.connect() as connection:
+        row = (
+            (
+                await connection.execute(
+                    sa.text(
+                        """
+                    SELECT id, user_id, thread_id, run_id, tool_call_id,
+                           server_name, driver_name, remote_task_id, task_name,
+                           status, result, error, input_required, driver_data,
+                           notification_status, next_poll_at, last_polled_at,
+                           last_poll_error, poll_attempt_count,
+                           consecutive_poll_error_count, lease_owner,
+                           lease_expires_at, cancel_requested_at, completed_at,
+                           created_at, updated_at
+                    FROM mcp_tasks
+                    WHERE id = 'legacy-mcp-task'
+                    """
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    return dict(row)
+
+
 async def _assert_revision_columns(engine: AsyncEngine, schema: str, revision: str) -> None:
     if revision == "0015_inbound_receipts":
         await _assert_inbound_receipt_ddl(engine, schema)
@@ -406,6 +441,7 @@ async def _assert_lifecycle_ddl(engine: AsyncEngine, schema: str) -> None:
         "ck_run_lifecycle_cursor_singleton",
         "ck_run_lifecycle_cursor_nonnegative",
         "ck_run_lifecycle_pruned_range",
+        "ck_run_lifecycle_retained_count_nonnegative",
     }
     event_checks = {
         "ck_run_lifecycle_event_cursor_positive",
@@ -427,8 +463,8 @@ async def _assert_lifecycle_ddl(engine: AsyncEngine, schema: str) -> None:
         _assert_index_definition(indexes, name, columns)
 
     async with engine.connect() as connection:
-        singleton = (await connection.execute(sa.text("SELECT singleton_id, last_cursor, pruned_through FROM run_lifecycle_cursor_state"))).one()
-    assert tuple(singleton) == (1, 0, 0)
+        singleton = (await connection.execute(sa.text("SELECT singleton_id, last_cursor, pruned_through, retained_count FROM run_lifecycle_cursor_state"))).one()
+    assert tuple(singleton) == (1, 0, 0, 0)
 
 
 async def _assert_inbound_receipt_ddl(engine: AsyncEngine, schema: str) -> None:
@@ -752,6 +788,22 @@ def test_ci_runs_the_mandatory_postgres_contract_gate_and_records_identity() -> 
     assert workflow.count("DEERFLOW_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}") >= 2
 
 
+def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
+    config = AlembicConfig()
+    config.set_main_option(
+        "script_location",
+        str(Path(__file__).resolve().parents[1] / "packages" / "harness" / "deerflow" / "persistence" / "migrations"),
+    )
+    script = ScriptDirectory.from_config(config)
+
+    accepted = script.get_revision("0011_accepted_invocation")
+
+    assert accepted is not None
+    assert accepted.down_revision == "0011_mcp_tasks"
+    assert _PRE_FEATURE_REVISION == accepted.down_revision
+    assert _INVOCATION_REVISIONS[0] == accepted.revision
+
+
 @pytest.mark.anyio
 @pytest.mark.postgres_contract
 @pytest.mark.skipif(
@@ -890,8 +942,41 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
                         "created_at": legacy_created_at,
                     },
                 )
+            await connection.execute(
+                sa.text(
+                    """
+                    INSERT INTO mcp_tasks (
+                        id, user_id, thread_id, run_id, tool_call_id,
+                        server_name, driver_name, remote_task_id, task_name,
+                        status, result, error, input_required, driver_data,
+                        notification_status, next_poll_at, last_polled_at,
+                        last_poll_error, poll_attempt_count,
+                        consecutive_poll_error_count, lease_owner,
+                        lease_expires_at, cancel_requested_at, completed_at,
+                        created_at, updated_at
+                    ) VALUES (
+                        'legacy-mcp-task', 'legacy-owner', 'legacy-mcp-thread',
+                        NULL, 'legacy-tool-call', 'legacy-server', 'legacy-driver',
+                        'legacy-remote-task', 'Legacy MCP task', 'running',
+                        CAST('{"progress":25}' AS json), NULL,
+                        CAST('{"question":"continue?"}' AS json),
+                        CAST('{"cursor":"opaque"}' AS json), 'pending',
+                        :next_poll_at, :last_polled_at, NULL, 3, 1,
+                        'legacy-mcp-worker', :lease_expires_at, NULL, NULL,
+                        :created_at, :created_at
+                    )
+                    """
+                ),
+                {
+                    "next_poll_at": legacy_created_at + timedelta(minutes=1),
+                    "last_polled_at": legacy_created_at,
+                    "lease_expires_at": legacy_lease_expires_at,
+                    "created_at": legacy_created_at,
+                },
+            )
 
         legacy_before = await _legacy_snapshot(engine)
+        mcp_task_before = await _mcp_task_snapshot(engine)
         assert len(legacy_before) == 2
         assert legacy_before[0]["operation_kind"] == "checkpoint_write"
         assert legacy_before[0]["status"] == "error"
@@ -906,6 +991,7 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
             assert expected_columns <= revision_columns.keys()
             await _assert_revision_columns(engine, schema, revision)
             assert await _legacy_snapshot(engine) == legacy_before
+            assert await _mcp_task_snapshot(engine) == mcp_task_before
             async with engine.connect() as connection:
                 assert await connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == revision
                 assert await connection.scalar(sa.text("SELECT count(*) FROM runs")) == 2
@@ -1074,10 +1160,10 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
         assert summary["accepted_context_digest"] == "3" * 64
         assert summary["extension_manifest_digest"] == "7" * 64
 
-        # Downgrade is structurally supported, but invocation evidence and the
-        # lifecycle journal are intentionally not representable at revision
-        # 0010. The normal/auxiliary rows survive; their new-feature fields and
-        # lifecycle history do not.
+        # Feature-tail downgrade is structurally supported back to the real
+        # pre-invocation main-line schema. Invocation evidence and lifecycle
+        # history are not representable there, while unrelated MCP task state
+        # must survive unchanged.
         await _downgrade(engine, schema, _PRE_FEATURE_REVISION)
         downgraded_columns = await _column_contract(engine, schema, "runs")
         assert _ACCEPTED_COLUMNS.keys().isdisjoint(downgraded_columns)
@@ -1085,12 +1171,15 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
             table_names = set(await connection.run_sync(lambda sync: sa.inspect(sync).get_table_names()))
             assert "run_lifecycle_events" not in table_names
             assert "run_lifecycle_cursor_state" not in table_names
+            assert "mcp_tasks" in table_names
             assert await connection.scalar(sa.text("SELECT count(*) FROM runs")) == 4
         assert await _legacy_snapshot(engine) == legacy_before
+        assert await _mcp_task_snapshot(engine) == mcp_task_before
 
         await _upgrade(engine, schema, "head")
         await _assert_postgres_head_contract(engine, schema)
         assert await _legacy_snapshot(engine) == legacy_before
+        assert await _mcp_task_snapshot(engine) == mcp_task_before
         reupgraded = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
         retained = await reupgraded.get("qualified-run", user_id=None)
         assert retained is not None

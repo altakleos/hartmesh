@@ -59,16 +59,28 @@ def _failure(code: FailureCode, **detail: Any) -> RuntimeFailure:
     return RuntimeFailure(code=code, detail={"version": 1, **detail})
 
 
-def unexpected_adapter_failure(operation: str, *, exc_info: bool = True) -> RuntimeFailure:
+def unexpected_adapter_failure(
+    operation: str,
+    *,
+    exception: BaseException | None = None,
+    exception_class: str | None = None,
+    exc_info: bool | None = None,
+) -> RuntimeFailure:
     """Correlate an internal diagnostic without exposing exception text."""
 
     correlation_id = uuid4().hex
+    if exception_class is None:
+        exception_class = exception.__class__.__name__ if exception is not None else "RuntimeProtocolError"
     logger.error(
-        "Unexpected durable invocation adapter failure",
-        exc_info=exc_info,
+        "durable invocation adapter failure code=runtime_adapter_indeterminate operation=%s exception_class=%s correlation_id=%s",
+        operation,
+        exception_class,
+        correlation_id,
         extra={
             "correlation_id": correlation_id,
             "runtime_operation": operation,
+            "exception_class": exception_class,
+            "diagnostic_code": "runtime_adapter_indeterminate",
         },
     )
     return _failure(FailureCode.indeterminate, correlation_id=correlation_id)

@@ -214,9 +214,10 @@ class SandboxConfig(BaseModel):
     accepted_skill_projection_profile: Literal[
         "disabled",
         "rwx_verified_copy_v1",
+        "rwx_verified_copy_v2",
     ] = Field(
         default="disabled",
-        description=("Remote AIO accepted-skill profile required by Gateway readiness. rwx_verified_copy_v1 requires an authenticated provisioner preflight."),
+        description=("Remote AIO accepted-skill profile required by Gateway readiness. rwx_verified_copy_v2 requires an authenticated provisioner preflight; v1 is compatibility-only and cannot advertise nonempty immutable material."),
     )
 
     @model_validator(mode="after")
@@ -225,9 +226,13 @@ class SandboxConfig(BaseModel):
             raise ValueError(
                 "provisioner_api_key and provisioner_service_account_token_file are mutually exclusive",
             )
-        if self.accepted_skill_projection_profile == "rwx_verified_copy_v1" and not self.provisioner_url:
+        if self.accepted_skill_projection_profile == "rwx_verified_copy_v1":
             raise ValueError(
-                "rwx_verified_copy_v1 requires sandbox.provisioner_url",
+                "rwx_verified_copy_v1 is compatibility-only and cannot prove nonempty immutable skills; migrate to rwx_verified_copy_v2",
+            )
+        if self.accepted_skill_projection_profile in {"rwx_verified_copy_v1", "rwx_verified_copy_v2"} and not self.provisioner_url:
+            raise ValueError(
+                f"{self.accepted_skill_projection_profile} requires sandbox.provisioner_url",
             )
         return self
 

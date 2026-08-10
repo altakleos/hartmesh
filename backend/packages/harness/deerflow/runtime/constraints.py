@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
 from collections.abc import Callable, Mapping
+from concurrent.futures import Future
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from threading import Lock
 from typing import Any
 
@@ -149,17 +154,52 @@ def validate_constraint_fence(
     return projection
 
 
-class InvocationSubagentReservation:
-    """One concurrency-safe, retry-idempotent reservation counter per run."""
+class SubagentDispatchOutcome(StrEnum):
+    """Finite arbitration outcomes for one invocation-scoped dispatch ID."""
 
-    __slots__ = ("_limit", "_lock", "_reserved_ids")
+    new = "new"
+    replay = "replay"
+    conflict = "conflict"
+    exhausted = "exhausted"
+
+
+@dataclass(frozen=True)
+class SubagentDispatchTicket:
+    """Opaque handle returned by one dispatch-ledger arbitration."""
+
+    dispatch_id: str
+    intent_digest: str
+    outcome: SubagentDispatchOutcome
+    _future: Future[Any] | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class _DispatchFailed:
+    error_class: str
+
+
+@dataclass(frozen=True)
+class _DispatchCancelled:
+    pass
+
+
+class InvocationSubagentDispatchLedger:
+    """Concurrency-safe physical-start ledger shared by a run and its children.
+
+    The ledger retains only the canonical intent digest and a bounded terminal
+    tool result. It never retains the mutable prompt/options used to compute the
+    digest. Identical in-flight and completed retries share one physical start.
+    """
+
+    __slots__ = ("_closed", "_entries", "_limit", "_lock")
 
     def __init__(self, limit: int) -> None:
         if type(limit) is not int or limit < 0:
-            raise ValueError("subagent reservation limit must be a non-negative integer")
+            raise ValueError("subagent dispatch limit must be a non-negative integer")
         self._limit = limit
         self._lock = Lock()
-        self._reserved_ids: set[str] = set()
+        self._entries: dict[str, tuple[str, Future[Any]]] = {}
+        self._closed = False
 
     @property
     def limit(self) -> int:
@@ -168,24 +208,138 @@ class InvocationSubagentReservation:
     @property
     def reserved(self) -> int:
         with self._lock:
-            return len(self._reserved_ids)
+            return len(self._entries)
+
+    @staticmethod
+    def _validate_identity(dispatch_id: str, intent_digest: str) -> None:
+        if not isinstance(dispatch_id, str) or not dispatch_id or len(dispatch_id.encode("utf-8")) > 256 or any(ord(character) < 32 or ord(character) == 127 for character in dispatch_id):
+            raise ValueError("subagent dispatch_id must be a bounded non-empty string")
+        if not isinstance(intent_digest, str) or len(intent_digest) != 64 or any(character not in "0123456789abcdef" for character in intent_digest):
+            raise ValueError("subagent intent_digest must be a lowercase SHA-256 digest")
+
+    def acquire(
+        self,
+        dispatch_id: str,
+        intent_digest: str,
+    ) -> SubagentDispatchTicket:
+        """Arbitrate one dispatch without starting execution."""
+
+        self._validate_identity(dispatch_id, intent_digest)
+        with self._lock:
+            if self._closed:
+                return SubagentDispatchTicket(
+                    dispatch_id,
+                    intent_digest,
+                    SubagentDispatchOutcome.exhausted,
+                )
+            existing = self._entries.get(dispatch_id)
+            if existing is not None:
+                existing_digest, future = existing
+                return SubagentDispatchTicket(
+                    dispatch_id,
+                    intent_digest,
+                    (SubagentDispatchOutcome.replay if existing_digest == intent_digest else SubagentDispatchOutcome.conflict),
+                    future,
+                )
+            if len(self._entries) >= self._limit:
+                return SubagentDispatchTicket(
+                    dispatch_id,
+                    intent_digest,
+                    SubagentDispatchOutcome.exhausted,
+                )
+            future: Future[Any] = Future()
+            self._entries[dispatch_id] = (intent_digest, future)
+            return SubagentDispatchTicket(
+                dispatch_id,
+                intent_digest,
+                SubagentDispatchOutcome.new,
+                future,
+            )
+
+    def complete(self, ticket: SubagentDispatchTicket, result: Any) -> None:
+        """Publish one immutable terminal result for equal replays."""
+
+        future = self._owned_future(ticket)
+        if not future.done():
+            future.set_result(copy.deepcopy(result))
+
+    def fail(self, ticket: SubagentDispatchTicket, error: BaseException) -> None:
+        """Publish a bounded failure without retaining provider exception text."""
+
+        future = self._owned_future(ticket)
+        if not future.done():
+            future.set_result(_DispatchFailed(type(error).__name__))
+
+    def cancel(self, ticket: SubagentDispatchTicket) -> None:
+        """Publish invocation cancellation to any identical waiter."""
+
+        future = self._owned_future(ticket)
+        if not future.done():
+            future.set_result(_DispatchCancelled())
+
+    def _owned_future(self, ticket: SubagentDispatchTicket) -> Future[Any]:
+        if ticket.outcome is not SubagentDispatchOutcome.new or ticket._future is None:
+            raise ValueError("only the winning dispatch ticket may publish a result")
+        with self._lock:
+            existing = self._entries.get(ticket.dispatch_id)
+            if existing != (ticket.intent_digest, ticket._future):
+                raise ValueError("subagent dispatch ticket is no longer owned by this ledger")
+        return ticket._future
+
+    async def replay_result(self, ticket: SubagentDispatchTicket) -> Any:
+        """Await and defensively copy the winning in-flight or terminal result."""
+
+        if ticket.outcome is not SubagentDispatchOutcome.replay or ticket._future is None:
+            raise ValueError("only an equal replay ticket has a reusable result")
+        value = await asyncio.shield(asyncio.wrap_future(ticket._future))
+        if isinstance(value, _DispatchCancelled):
+            raise asyncio.CancelledError
+        if isinstance(value, _DispatchFailed):
+            raise RuntimeError(f"subagent dispatch failed ({value.error_class})") from None
+        return copy.deepcopy(value)
+
+    def close(self) -> None:
+        """Idempotently release terminal results and cancel incomplete waiters."""
+
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            entries = tuple(self._entries.values())
+            self._entries.clear()
+        for _digest, future in entries:
+            if not future.done():
+                future.set_result(_DispatchCancelled())
 
     def reserve(self, dispatch_id: str) -> bool:
-        if not isinstance(dispatch_id, str) or not dispatch_id:
-            raise ValueError("subagent dispatch_id must be a non-empty string")
-        with self._lock:
-            if dispatch_id in self._reserved_ids:
-                return True
-            if len(self._reserved_ids) >= self._limit:
-                return False
-            self._reserved_ids.add(dispatch_id)
-            return True
+        """Compatibility adapter for pre-ledger internal callers.
+
+        It reserves a stable legacy intent but cannot publish/reuse results;
+        production task dispatch uses :meth:`acquire` directly.
+        """
+
+        ticket = self.acquire(
+            dispatch_id,
+            canonical_digest({"version": 1, "legacy_subagent_dispatch": dispatch_id}),
+        )
+        return ticket.outcome in {
+            SubagentDispatchOutcome.new,
+            SubagentDispatchOutcome.replay,
+        }
+
+
+# Backward source compatibility for internal integrations while the runtime
+# context now supplies the deeper dispatch-ledger semantics.
+InvocationSubagentReservation = InvocationSubagentDispatchLedger
 
 
 __all__ = [
     "ConstraintFenceError",
     "INVOCATION_CONSTRAINTS_CONTEXT_KEY",
     "SUBAGENT_RESERVATION_CONTEXT_KEY",
+    "InvocationSubagentDispatchLedger",
     "InvocationSubagentReservation",
+    "SubagentDispatchOutcome",
+    "SubagentDispatchTicket",
     "validate_constraint_fence",
 ]

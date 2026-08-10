@@ -9,7 +9,6 @@ middleware stack is position-sensitive.
 from __future__ import annotations
 
 import logging
-import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, packages_distributions, version
@@ -19,6 +18,7 @@ from typing import Any, Literal
 from deerflow_extension_api import API_VERSION
 from pydantic import BaseModel, ConfigDict, Field
 
+from deerflow.diagnostics import BoundedDiagnostic, bounded_diagnostic
 from deerflow.extensions.registry import ExtensionRegistry, LoadedExtensions
 from deerflow.reflection import resolve_variable
 
@@ -59,6 +59,7 @@ class Diagnostic:
     error_class: str | None = None
     correlation_id: str | None = None
     contribution_id: str | None = None
+    operation: str | None = None
 
     @classmethod
     def error(cls, source: str, message: str) -> Diagnostic:
@@ -87,15 +88,33 @@ class Diagnostic:
     ) -> Diagnostic:
         """Build a bounded failure diagnostic without retaining provider text."""
 
-        error_name = type(error).__name__
-        safe_error_name = "".join(character if character.isascii() and (character.isalnum() or character == "_") else "_" for character in error_name)
+        diagnostic = bounded_diagnostic(
+            code=code,
+            operation="extension_operation",
+            error=error,
+            contribution_id=source,
+        )
+        return cls.from_bounded(source, diagnostic, message=message)
+
+    @classmethod
+    def from_bounded(
+        cls,
+        source: str,
+        diagnostic: BoundedDiagnostic,
+        *,
+        message: str | None = None,
+    ) -> Diagnostic:
+        """Adapt the shared bounded diagnostic without changing its identity."""
+
         return cls(
             "error",
             source,
-            message or code,
-            code=code,
-            error_class=(safe_error_name or "Exception")[:128],
-            correlation_id=uuid.uuid4().hex,
+            message or f"{diagnostic.code}:{diagnostic.operation}",
+            code=diagnostic.code,
+            error_class=diagnostic.error_class,
+            correlation_id=diagnostic.correlation_id,
+            contribution_id=diagnostic.contribution_id,
+            operation=diagnostic.operation,
         )
 
 

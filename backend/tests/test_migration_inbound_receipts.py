@@ -29,6 +29,7 @@ _COLUMNS = {
     "lease_expires_at",
     "fencing_token",
     "attempt_count",
+    "failure_count",
     "next_attempt_at",
     "run_id",
     "outcome_code",
@@ -91,9 +92,9 @@ async def test_upgrade_downgrade_and_reupgrade_preserve_legacy_schema(tmp_path: 
                 sa.text(
                     "INSERT INTO inbound_receipts "
                     "(receipt_id, provider, binding_kind, binding_reference, provider_delivery_id, "
-                    "thread_id, payload_json, payload_digest, state, fencing_token, attempt_count) "
+                    "thread_id, payload_json, payload_digest, state, fencing_token, attempt_count, failure_count) "
                     "VALUES ('receipt-1', 'github', 'webhook_route', 'route-1', 'delivery-1', "
-                    "'thread-1', '{}', :digest, 'received', 0, 0)"
+                    "'thread-1', '{}', :digest, 'received', 0, 0, 0)"
                 ),
                 {"digest": "a" * 64},
             )

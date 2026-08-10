@@ -639,7 +639,6 @@ async def test_start_request_uses_only_sealed_host_facts_and_returns_bounded_evi
         object(),
         AuthzDecision(allow="yes"),
         AuthzDecision(allow=True, reasons=[AuthzReason(code="bad code")]),
-        AuthzDecision(allow=True, metadata={"nested": object()}),
     ],
 )
 async def test_provider_failure_or_malformed_decision_is_indeterminate(provider_result) -> None:
@@ -674,6 +673,31 @@ async def test_provider_timeout_is_indeterminate() -> None:
     result = await authorization.authorize_start(launch)
 
     assert result.outcome is InvocationAuthorizationOutcome.indeterminate
+
+
+@pytest.mark.anyio
+async def test_provider_exception_is_fail_closed_and_never_logged_verbatim(
+    caplog,
+) -> None:
+    marker = "authorization-provider-secret-marker"
+    provider = _Provider(RuntimeError(marker))
+    authorization = _provider_authorization(provider, start_enabled=True)
+    launch = SimpleNamespace(
+        accepted_invocation=_accepted(),
+        external_scope=None,
+        external_key=None,
+        request_digest=None,
+        request_digest_version=None,
+    )
+
+    with caplog.at_level("WARNING", logger="app.runtime.authorization"):
+        result = await authorization.authorize_start(launch)
+
+    assert result.outcome is InvocationAuthorizationOutcome.indeterminate
+    assert marker not in caplog.text
+    record = next(item for item in caplog.records if getattr(item, "diagnostic_code", None) == "authorization_indeterminate")
+    assert record.exception_class == "RuntimeError"
+    assert len(record.correlation_id) == 32
 
 
 @pytest.mark.anyio

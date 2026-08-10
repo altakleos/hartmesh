@@ -220,7 +220,7 @@ async def test_same_thread_receipts_claim_in_fifo_order_and_defer_without_loss(t
     assert await store.claim(second.receipt_id, lease_owner="worker", lease_seconds=30) is None
     first_claim = await store.claim(first.receipt_id, lease_owner="worker", lease_seconds=30)
     assert first_claim is not None
-    assert await store.defer(
+    assert await store.defer_contention(
         first.receipt_id,
         lease_owner="worker",
         fencing_token=first_claim.fencing_token,
@@ -235,6 +235,7 @@ async def test_same_thread_receipts_claim_in_fifo_order_and_defer_without_loss(t
     current[0] += timedelta(seconds=5)
     retried = await store.claim(first.receipt_id, lease_owner="worker", lease_seconds=30)
     assert retried is not None
+    assert retried.failure_count == 0
     assert await store.complete(
         first.receipt_id,
         lease_owner="worker",
@@ -242,6 +243,97 @@ async def test_same_thread_receipts_claim_in_fifo_order_and_defer_without_loss(t
         outcome_code="rejected",
     )
     assert await store.claim(second.receipt_id, lease_owner="worker", lease_seconds=30) is not None
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_thread_contention_outlives_poison_budget_and_preserves_fifo(tmp_path) -> None:
+    """A healthy busy thread never spends the malformed-receipt budget."""
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'receipts.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all, tables=[InboundReceiptRow.__table__])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    current = [now]
+    store = SqlInboundReceiptStore(sessions, clock=lambda: current[0])
+    first, second = await store.receive_batch(
+        (
+            _envelope(delivery_id="delivery-busy-k2", created_at=now.timestamp()),
+            _envelope(
+                delivery_id="delivery-busy-k3",
+                created_at=(now + timedelta(seconds=1)).timestamp(),
+            ),
+        )
+    )
+    outcomes = [
+        InboundProcessingResult(
+            disposition=InboundProcessingDisposition.deferred,
+            outcome_code="thread_busy",
+        )
+        for _ in range(10)
+    ]
+    outcomes.append(
+        InboundProcessingResult(
+            disposition=InboundProcessingDisposition.admitted,
+            run_id="run-k2",
+            outcome_code="admitted",
+        )
+    )
+
+    async def process(_message):
+        return outcomes.pop(0)
+
+    async def no_wakeup(_wakeup) -> None:
+        return None
+
+    # max_attempts is the poison-failure budget. Ten legitimate contentions
+    # deliberately exceed both that budget and the former exponential horizon.
+    for attempt in range(11):
+        processor = InboundReceiptProcessor(
+            store=store,
+            publish_wakeup=no_wakeup,
+            process_message=process,
+            lease_owner=f"gateway-{attempt}",
+            retry_delay_seconds=2,
+            contention_delay_seconds=30,
+            max_attempts=2,
+            clock=lambda: current[0],
+        )
+        await processor.process(first.receipt_id)
+        if attempt < 10:
+            async with sessions() as session:
+                row = await session.get(InboundReceiptRow, first.receipt_id)
+                assert row is not None
+                assert row.state == "deferred"
+                assert row.failure_count == 0
+                assert row.attempt_count == attempt + 1
+            # Simulate replacement processes over five minutes of contention.
+            current[0] += timedelta(seconds=30)
+            assert (
+                await store.claim(
+                    second.receipt_id,
+                    lease_owner="out-of-order",
+                    lease_seconds=30,
+                )
+                is None
+            )
+
+    async with sessions() as session:
+        row = await session.get(InboundReceiptRow, first.receipt_id)
+        assert row is not None
+        assert row.state == "completed"
+        assert row.run_id == "run-k2"
+        assert row.failure_count == 0
+
+    second_claim = await store.claim(
+        second.receipt_id,
+        lease_owner="gateway-k3",
+        lease_seconds=30,
+    )
+    assert second_claim is not None
+    assert second_claim.envelope.provider_delivery_id == "delivery-busy-k3"
 
     await engine.dispose()
 
@@ -377,6 +469,7 @@ async def test_poison_receipt_dead_letters_without_exposing_exception_text(
         assert row.state == "dead_letter"
         assert row.run_id is None
         assert row.outcome_code == "attempts_exhausted"
+        assert row.failure_count == 1
     assert "must-never-be-logged" not in caplog.text
     assert "RuntimeError" in caplog.text
 

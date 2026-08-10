@@ -21,12 +21,15 @@ from deerflow.runtime.accepted_invocation import (
     INVOCATION_IDENTITY_CONTEXT_KEY,
     INVOCATION_ORIGIN_CONTEXT_KEY,
     TRUSTED_RUN_CONTEXT_KEY,
+    canonical_digest,
 )
 from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
 from deerflow.runtime.constraints import (
     INVOCATION_CONSTRAINTS_CONTEXT_KEY,
     SUBAGENT_RESERVATION_CONTEXT_KEY,
+    InvocationSubagentDispatchLedger,
     InvocationSubagentReservation,
+    SubagentDispatchOutcome,
 )
 from deerflow.runtime.skill_projection import (
     SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
@@ -448,6 +451,62 @@ async def task_tool(
         available_tools_kwargs["app_config"] = resolved_app_config
     tools = get_available_tools(**available_tools_kwargs)
 
+    dispatch_ledger = subagent_reservation if isinstance(subagent_reservation, InvocationSubagentDispatchLedger) else None
+    dispatch_ticket = None
+    if dispatch_ledger is not None:
+        snapshot = resolved_agent_material.skill_snapshot if resolved_agent_material is not None else None
+        dispatch_intent_digest = canonical_digest(
+            {
+                "version": 1,
+                "prompt": prompt,
+                "subagent_type": subagent_type,
+                "subagent_config": {
+                    "name": config.name,
+                    "system_prompt": config.system_prompt,
+                    "tools": config.tools,
+                    "disallowed_tools": config.disallowed_tools,
+                    "skills": config.skills,
+                    "effective_model": effective_model,
+                    "max_turns": config.max_turns,
+                    "timeout_seconds": config.timeout_seconds,
+                },
+                "effective_tools": sorted(str(getattr(item, "name", type(item).__name__)) for item in tools),
+                "accepted_agent_revision_digest": parent_context.get("accepted_agent_revision_digest"),
+                "accepted_extension_generation": accepted_extension_generation,
+                "accepted_extension_manifest_digest": accepted_extension_manifest_digest,
+                "constraint_evidence_digest": getattr(
+                    invocation_constraints,
+                    "evidence_digest",
+                    None,
+                ),
+                "skill_snapshot_id": getattr(snapshot, "snapshot_id", None),
+                "skill_snapshot_digest": getattr(snapshot, "content_digest", None),
+            }
+        )
+        dispatch_ticket = dispatch_ledger.acquire(
+            tool_call_id,
+            dispatch_intent_digest,
+        )
+        if dispatch_ticket.outcome is SubagentDispatchOutcome.exhausted:
+            return _task_result_command(
+                tool_call_id=tool_call_id,
+                status="failed",
+                error=f"Invocation subagent limit ({dispatch_ledger.limit}) reached",
+            )
+        if dispatch_ticket.outcome is SubagentDispatchOutcome.conflict:
+            return _task_result_command(
+                tool_call_id=tool_call_id,
+                status="failed",
+                error="Subagent dispatch ID was reused with different intent",
+            )
+        if dispatch_ticket.outcome is SubagentDispatchOutcome.replay:
+            return await dispatch_ledger.replay_result(dispatch_ticket)
+
+    def complete_dispatch(result: str | Command) -> str | Command:
+        if dispatch_ledger is not None and dispatch_ticket is not None:
+            dispatch_ledger.complete(dispatch_ticket, result)
+        return result
+
     # Create executor
     executor_kwargs = {
         "config": config,
@@ -496,19 +555,23 @@ async def task_tool(
         executor_kwargs["resolved_agent_material"] = resolved_agent_material
     if skill_projection_token is not None:
         executor_kwargs["skill_projection_token"] = skill_projection_token
-    executor = SubagentExecutor(**executor_kwargs)
+    try:
+        executor = SubagentExecutor(**executor_kwargs)
+    except BaseException as exc:
+        if dispatch_ledger is not None and dispatch_ticket is not None:
+            dispatch_ledger.fail(dispatch_ticket, exc)
+        raise
 
     # Start background execution (always async to prevent blocking)
     # Use tool_call_id as task_id for better traceability
-    if isinstance(subagent_reservation, InvocationSubagentReservation) and not subagent_reservation.reserve(tool_call_id):
-        return _task_result_command(
-            tool_call_id=tool_call_id,
-            status="failed",
-            error=f"Invocation subagent limit ({subagent_reservation.limit}) reached",
-        )
-    if resolved_agent_material is not None:
-        executor.retain_resolved_agent_material(tool_call_id)
-    task_id = executor.execute_async(prompt, task_id=tool_call_id)
+    try:
+        if resolved_agent_material is not None:
+            executor.retain_resolved_agent_material(tool_call_id)
+        task_id = executor.execute_async(prompt, task_id=tool_call_id)
+    except BaseException as exc:
+        if dispatch_ledger is not None and dispatch_ticket is not None:
+            dispatch_ledger.fail(dispatch_ticket, exc)
+        raise
 
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0
@@ -519,17 +582,21 @@ async def task_tool(
 
     logger.info(f"[trace={trace_id}] Started background task {task_id} (subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)")
 
-    writer = get_stream_writer()
-    # Send Task Started message'
-    await aemit_custom_event(
-        {
-            "type": "task_started",
-            "task_id": task_id,
-            "description": description,
-            "model_name": effective_model,
-        },
-        writer=writer,
-    )
+    try:
+        writer = get_stream_writer()
+        await aemit_custom_event(
+            {
+                "type": "task_started",
+                "task_id": task_id,
+                "description": description,
+                "model_name": effective_model,
+            },
+            writer=writer,
+        )
+    except BaseException as exc:
+        if dispatch_ledger is not None and dispatch_ticket is not None:
+            dispatch_ledger.fail(dispatch_ticket, exc)
+        raise
 
     try:
         while True:
@@ -543,10 +610,12 @@ async def task_tool(
                 )
                 cleanup_background_task(task_id)
                 error = f"Task {task_id} disappeared from background tasks"
-                return _task_result_command(
-                    tool_call_id=tool_call_id,
-                    status="failed",
-                    error=error,
+                return complete_dispatch(
+                    _task_result_command(
+                        tool_call_id=tool_call_id,
+                        status="failed",
+                        error=error,
+                    )
                 )
 
             # Log status changes for debugging
@@ -600,13 +669,15 @@ async def task_tool(
                 # stop_reason carries a guardrail cap (token_capped / turn_capped)
                 # when the run was ended early but still produced a final answer
                 # — the work survives on result_brief like a clean success.
-                return _task_result_command(
-                    tool_call_id=tool_call_id,
-                    status="completed",
-                    result=result.result,
-                    stop_reason=result.stop_reason,
-                    model_name=effective_model,
-                    usage=usage,
+                return complete_dispatch(
+                    _task_result_command(
+                        tool_call_id=tool_call_id,
+                        status="completed",
+                        result=result.result,
+                        stop_reason=result.stop_reason,
+                        model_name=effective_model,
+                        usage=usage,
+                    )
                 )
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
@@ -626,13 +697,15 @@ async def task_tool(
                 # A turn-capped run with no usable output surfaces as failed +
                 # stop_reason=turn_capped; the cap note lets the lead tell "out
                 # of budget" from "broken subagent".
-                return _task_result_command(
-                    tool_call_id=tool_call_id,
-                    status="failed",
-                    error=result.error,
-                    stop_reason=result.stop_reason,
-                    model_name=effective_model,
-                    usage=usage,
+                return complete_dispatch(
+                    _task_result_command(
+                        tool_call_id=tool_call_id,
+                        status="failed",
+                        error=result.error,
+                        stop_reason=result.stop_reason,
+                        model_name=effective_model,
+                        usage=usage,
+                    )
                 )
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
@@ -649,12 +722,14 @@ async def task_tool(
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
                 cleanup_background_task(task_id)
-                return _task_result_command(
-                    tool_call_id=tool_call_id,
-                    status="cancelled",
-                    error=result.error,
-                    model_name=effective_model,
-                    usage=usage,
+                return complete_dispatch(
+                    _task_result_command(
+                        tool_call_id=tool_call_id,
+                        status="cancelled",
+                        error=result.error,
+                        model_name=effective_model,
+                        usage=usage,
+                    )
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
@@ -671,12 +746,14 @@ async def task_tool(
                 )
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
                 cleanup_background_task(task_id)
-                return _task_result_command(
-                    tool_call_id=tool_call_id,
-                    status="timed_out",
-                    error=result.error,
-                    model_name=effective_model,
-                    usage=usage,
+                return complete_dispatch(
+                    _task_result_command(
+                        tool_call_id=tool_call_id,
+                        status="timed_out",
+                        error=result.error,
+                        model_name=effective_model,
+                        usage=usage,
+                    )
                 )
 
             # Still running, wait before next poll
@@ -707,14 +784,18 @@ async def task_tool(
                 request_cancel_background_task(task_id)
                 _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
                 message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
-                return _task_result_command(
-                    tool_call_id=tool_call_id,
-                    status="polling_timed_out",
-                    error=message,
-                    model_name=effective_model,
-                    usage=usage,
+                return complete_dispatch(
+                    _task_result_command(
+                        tool_call_id=tool_call_id,
+                        status="polling_timed_out",
+                        error=message,
+                        model_name=effective_model,
+                        usage=usage,
+                    )
                 )
     except asyncio.CancelledError:
+        if dispatch_ledger is not None and dispatch_ticket is not None:
+            dispatch_ledger.cancel(dispatch_ticket)
         # Signal the background subagent thread to stop cooperatively.
         request_cancel_background_task(task_id)
 
@@ -737,6 +818,8 @@ async def task_tool(
             _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
         _subagent_usage_cache.pop(tool_call_id, None)
         raise
-    except Exception:
+    except Exception as exc:
+        if dispatch_ledger is not None and dispatch_ticket is not None:
+            dispatch_ledger.fail(dispatch_ticket, exc)
         _subagent_usage_cache.pop(tool_call_id, None)
         raise

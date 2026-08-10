@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -26,6 +29,10 @@ from deerflow_extension_api import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.runtime.idempotency import (
+    REQUEST_DIGEST_VERSION,
+    canonical_request_digest,
+)
 from app.runtime.invocation import InternalLaunchIntent
 from deerflow.extensions.contributors import ContributorHost, ContributorIndeterminateError
 from deerflow.extensions.registry import ExtensionRegistry
@@ -47,7 +54,10 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
 
 
-def _trusted_context() -> TrustedRunContextV1:
+def _trusted_context(
+    *,
+    origin_references: dict[str, object] | None = None,
+) -> TrustedRunContextV1:
     identity = InvocationIdentityV1(
         effective_subject=EffectiveSubjectV1(kind="human", subject_id="user-1", role="member"),
         acting_service=ActingServiceV1(service_id="channel:telegram"),
@@ -82,9 +92,38 @@ def _trusted_context() -> TrustedRunContextV1:
             purpose="secret_handle",
         ),
     )
+    safe_origin_references = tuple(
+        SafeContextReferenceV1(
+            key=key,
+            value=value,
+            storage_class="persistable",
+            purpose="correlation",
+        )
+        for key, value in sorted((origin_references or {}).items())
+    )
+    origin_digest = canonical_digest(
+        {
+            "version": 1,
+            "source_kind": "native_channel",
+            "references": [
+                {
+                    "key": reference.key,
+                    "value": reference.value,
+                    "storage_class": reference.storage_class,
+                    "purpose": reference.purpose,
+                }
+                for reference in safe_origin_references
+            ],
+            "contributor_references": [],
+        }
+    )
     return TrustedRunContextV1(
         identity=identity,
-        origin=SealedOriginV1(source_kind="native_channel", digest="a" * 64),
+        origin=SealedOriginV1(
+            source_kind="native_channel",
+            references=safe_origin_references,
+            digest=origin_digest,
+        ),
         thread_id="thread-1",
         external_key_reference="raw:event-1",
         agent_revision=ResolvedAgentRevisionReferenceV1(agent_id="lead-agent", digest="b" * 64),
@@ -236,6 +275,187 @@ def test_accepted_invocation_persists_trusted_safe_evidence_and_recovers_fail_cl
     tampered["decision_evidence_json"]["trusted_run_context"]["persistable_references"][0]["reference"]["value"] = "forged-region"
     with pytest.raises(ValueError, match="evidence digest"):
         AcceptedInvocation.from_persisted({"thread_id": trusted.thread_id, **tampered})
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda row: row.__setitem__("principal_projection_digest", "0" * 64),
+            "principal projection digest",
+        ),
+        (
+            lambda row: row["origin_json"]["references"].__setitem__("provider", "forged"),
+            "base Origin digest",
+        ),
+        (
+            lambda row: row["agent_revision_json"].__setitem__("digest", "0" * 64),
+            "agent revision digest",
+        ),
+        (
+            lambda row: row.__setitem__("extension_generation", 8),
+            "generation",
+        ),
+        (
+            lambda row: row["decision_evidence_json"]["capability_manifest"].__setitem__("digest", "0" * 64),
+            "extension manifest",
+        ),
+    ],
+)
+def test_accepted_invocation_hydration_rejects_contradictory_evidence(
+    mutate,
+    message: str,
+) -> None:
+    trusted = _trusted_context(origin_references={"provider": "telegram"})
+    accepted = AcceptedInvocation.seal(
+        principal=PrincipalProjection(identity=trusted.identity),
+        origin=InvocationOrigin(
+            source_kind="native_channel",
+            references={"provider": "telegram"},
+        ),
+        thread_id=trusted.thread_id,
+        context_references={},
+        agent_revision=ResolvedAgentRevision(
+            agent_id=trusted.agent_revision.agent_id,
+            digest=trusted.agent_revision.digest,
+            storage_source="file",
+            storage_version="v1",
+        ),
+        normalized_input={"messages": []},
+        execution_options={},
+        extension_generation=trusted.extension_generation,
+        extension_manifest_digest=trusted.extension_manifest_digest,
+        contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        trusted_context=trusted,
+    )
+    persisted = {"thread_id": trusted.thread_id, **accepted.to_persisted()}
+    mutate(persisted)
+
+    with pytest.raises(ValueError, match=message):
+        AcceptedInvocation.from_persisted(copy.deepcopy(persisted))
+
+
+def _accepted_row_with_effective_projection() -> dict[str, object]:
+    trusted = _trusted_context(origin_references={"provider": "telegram"})
+    execution_options = {
+        "multitask_strategy": "reject",
+        "interrupt_before": None,
+        "interrupt_after": None,
+        "checkpoint_id": None,
+        "recursion_limit": 100,
+    }
+    accepted = AcceptedInvocation.seal(
+        principal=PrincipalProjection(identity=trusted.identity),
+        origin=InvocationOrigin(
+            source_kind="native_channel",
+            references={"provider": "telegram"},
+        ),
+        thread_id=trusted.thread_id,
+        context_references={"max_total_subagents": 2},
+        agent_revision=ResolvedAgentRevision(
+            agent_id=trusted.agent_revision.agent_id,
+            digest=trusted.agent_revision.digest,
+            storage_source="file",
+            storage_version="v1",
+        ),
+        normalized_input={"messages": []},
+        execution_options=execution_options,
+        extension_generation=trusted.extension_generation,
+        extension_manifest_digest=trusted.extension_manifest_digest,
+        contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        trusted_context=trusted,
+    )
+    effective = {
+        "accepted_digest_semantics": "canonical_execution_v2",
+        "thread_id": accepted.thread_id,
+        "agent_selector": "default",
+        "agent_revision_digest": accepted.agent_revision.digest,
+        "principal_digest": accepted.principal_digest,
+        "base_origin_digest": accepted.base_origin_digest,
+        "accepted_context_digest": accepted.accepted_context_digest,
+        "runtime_identity_digest": accepted.runtime_identity_digest,
+        "contributor_execution_digest": accepted.contributor_execution_digest,
+        "extension_generation": accepted.extension_generation,
+        "input": {"messages": []},
+        "command": None,
+        "multitask_strategy": "reject",
+        "checkpoint": {},
+        "interrupt_before": None,
+        "interrupt_after": None,
+        "execution_context": {"max_total_subagents": 2},
+        "recursion_limit": 100,
+    }
+    return {
+        "run_id": "run-1",
+        "thread_id": trusted.thread_id,
+        "external_key": trusted.external_key_reference,
+        "request_digest": canonical_request_digest(effective),
+        "request_digest_version": REQUEST_DIGEST_VERSION,
+        "kwargs": {"__accepted_request_projection_v1": effective},
+        **accepted.to_persisted(),
+    }
+
+
+def _forge_self_consistent_trusted_origin_digest(row: dict[str, object]) -> None:
+    trusted = row["decision_evidence_json"]["trusted_run_context"]
+    trusted["origin"]["digest"] = "0" * 64
+    projection = copy.deepcopy(trusted)
+    projection.pop("evidence_digest")
+    trusted["evidence_digest"] = hashlib.sha256(
+        json.dumps(
+            projection,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _mutate_effective_projection(
+    row: dict[str, object],
+    field_name: str,
+    value: object,
+) -> None:
+    projection = row["kwargs"]["__accepted_request_projection_v1"]
+    projection[field_name] = value
+    row["request_digest"] = canonical_request_digest(projection)
+
+
+def _forge_self_consistent_accepted_context_digest(row: dict[str, object]) -> None:
+    row["accepted_context_digest"] = "0" * 64
+    _mutate_effective_projection(row, "accepted_context_digest", "0" * 64)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda row: row.__setitem__("request_digest", "0" * 64),
+            "effective execution digest",
+        ),
+        (
+            lambda row: _mutate_effective_projection(row, "runtime_identity_digest", "0" * 64),
+            "runtime identity digest",
+        ),
+        (
+            _forge_self_consistent_accepted_context_digest,
+            "accepted context digest",
+        ),
+        (
+            _forge_self_consistent_trusted_origin_digest,
+            "trusted Origin digest",
+        ),
+    ],
+)
+def test_hydration_recomputes_bound_effective_and_trusted_evidence(
+    mutate,
+    message: str,
+) -> None:
+    row = _accepted_row_with_effective_projection()
+    mutate(row)
+
+    with pytest.raises(ValueError, match=message):
+        AcceptedInvocation.from_persisted(copy.deepcopy(row))
 
 
 def _worker_accepted(*, persisted_recovery: bool = False) -> tuple[AcceptedInvocation, ResolvedAgentMaterialV1]:

@@ -10,6 +10,10 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from deerflow.runtime.accepted_invocation import (
+    canonical_effective_execution_digest,
+)
+
 REQUEST_DIGEST_VERSION = "sha256-canonical-json-v1"
 CALLER_INTENT_DIGEST_VERSION = "caller-intent-canonical-json-v1"
 SYSTEM_TASK_OWNER = "__deerflow_system__"
@@ -236,7 +240,11 @@ class EffectiveExecutionProjection:
         if not isinstance(normalized, dict):  # pragma: no cover - type contract
             raise TypeError("effective execution projection must be an object")
         object.__setattr__(self, "value", _freeze_json(normalized))
-        object.__setattr__(self, "digest", canonical_request_digest(normalized))
+        object.__setattr__(
+            self,
+            "digest",
+            canonical_effective_execution_digest(normalized),
+        )
 
     def to_persisted(self) -> dict[str, Any]:
         return _thaw_json(self.value)

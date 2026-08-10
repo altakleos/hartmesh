@@ -245,7 +245,7 @@ curl http://localhost:2026/health          # gateway health via nginx
 
 The Gateway pod uses `GET /ready` for readiness and `GET /health` for liveness.
 Readiness includes operator-required authoritative capability health, lifecycle-cursor
-and retained event-edge integrity, database availability, and the configured deployment
+and transactionally maintained retained-cardinality/bound integrity, database availability, and the configured deployment
 durability promise, but its unauthenticated body
 is deliberately only `{"status":"ready"}` or `{"status":"not_ready"}`. Defaults use
 `deployment.mode: local_evaluation` and `deployment.profile: local_development`,
@@ -438,22 +438,28 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   kubeconfig mount. The unused update/patch/pods-exec/events verbs were dropped
   (audited against `docker/provisioner/app.py`).
 - **Immutable durable skills.** Set
-  `provisioner.acceptedSkillProjectionProfile: rwx_verified_copy_v1`, pin both
+  `provisioner.acceptedSkillProjectionProfile: rwx_verified_copy_v2`, pin both
   `provisioner.image.digest` and `provisioner.sandboxImage` by SHA-256 digest, and
   use `persistence.home.accessMode: ReadWriteMany`. Helm rejects RWO rather than
   adding same-node affinity. The provisioner readiness probe uses `/ready`, which
   confirms the configured claim is `Bound` and actually reports RWX before admitting the profile.
   Each sandbox init verifies the content-addressed snapshot into a private
   `emptyDir`; the main container mounts only that copy read-only and is accessed
-  through a per-attempt capability gate. A Kubernetes Lease owns every accepted
-  attempt and is renewed by exact Pod/materialization identity; bounded expiry
+  through a per-attempt capability gate. The receipt binds the admitted Pod isolation
+  digest, Lease and Pod UIDs, exact NetworkPolicy UID/spec, immutable Secret identities,
+  pinned images, verifier receipt, and final materialization digest. A Kubernetes Lease owns every accepted
+  attempt; response-loss replay, renewal, reuse, and execution fencing re-read that complete
+  tuple, while bounded expiry
   reconciliation cleans process-lost attempts. Scheduling only prefers another
   Gateway node when available and never requires same-node placement. Gateway-to-provisioner
   management calls use a rotating projected ServiceAccount token with a dedicated audience; the
   provisioner validates the exact Gateway namespace and ServiceAccount through TokenReview. This
   management authentication is also rendered when the immutable projection profile is disabled,
   because legacy remote AIO calls use the same protected API. Local evaluation can leave the profile
-  `disabled`, in which case remote durable runs remain empty-skill-only.
+  `disabled`, in which case remote durable runs remain empty-skill-only. Legacy v1
+  receipts are readable compatibility records but also remain empty-skill-only. Fake-Kubernetes
+  and rendered-chart tests prove the contract and drift fences, not live cross-node CNI/RWX;
+  exact-artifact Kubernetes qualification remains a separate opt-in release gate.
 
 ## Upgrading existing values
 

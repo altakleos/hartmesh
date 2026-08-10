@@ -513,6 +513,58 @@ async def test_normal_rows_persist_safe_facts_and_auxiliary_rows_do_not() -> Non
 
 
 @pytest.mark.asyncio
+async def test_store_reconstruction_rejects_corrupt_accepted_evidence_before_recovery() -> None:
+    store = MemoryRunStore()
+    writer = RunManager(store=store)
+    record = await writer.create_or_reject(
+        "thread-corrupt-reconstruction",
+        user_id="u1",
+        accepted_invocation=_accepted(_material()),
+    )
+    store._runs[record.run_id]["principal_projection_digest"] = "0" * 64
+
+    reconstructed = RunManager(store=store)
+    assert await reconstructed.get(record.run_id, user_id="u1") is None
+    assert (
+        await reconstructed.reconcile_orphaned_inflight_runs(
+            error="worker disappeared",
+        )
+        == []
+    )
+    persisted = await store.get(record.run_id, user_id=None)
+    assert persisted is not None
+    assert persisted["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_external_replay_lookup_rejects_corrupt_accepted_evidence_with_stable_error() -> None:
+    store = MemoryRunStore()
+    writer = RunManager(store=store)
+    accepted = _accepted(_material())
+    admission = await writer.ensure_or_reject(
+        "thread-corrupt-replay",
+        external_scope="http:user:u1",
+        external_key="request-1",
+        request_digest="1" * 64,
+        request_digest_version="sha256-canonical-json-v1",
+        caller_intent_json={"version": 1, "fields": {}},
+        caller_intent_digest="2" * 64,
+        caller_intent_digest_version="sha256-canonical-json-v1",
+        user_id="u1",
+        accepted_invocation=accepted,
+    )
+    store._runs[admission.record.run_id]["principal_projection_digest"] = "0" * 64
+
+    reconstructed = RunManager(store=store)
+    with pytest.raises(RuntimeError, match="^accepted_evidence_invalid$"):
+        await reconstructed.get_by_external_identity(
+            "http:user:u1",
+            "request-1",
+            user_id="u1",
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("intent", "expected"),
     [

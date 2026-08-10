@@ -241,6 +241,13 @@ class RunStartupError(RuntimeError):
     """Raised when durable startup cannot be resolved safely."""
 
 
+class AcceptedEvidenceIntegrityError(RuntimeError):
+    """Raised when a retained idempotent run has contradictory evidence."""
+
+    def __init__(self) -> None:
+        super().__init__("accepted_evidence_invalid")
+
+
 OrphanRecoveryCallback = Callable[[list[RunRecord]], Awaitable[None]]
 
 
@@ -610,6 +617,26 @@ class RunManager:
             state_version=row.get("state_version") or 0,
         )
 
+    @classmethod
+    def _replay_record_from_store(cls, row: dict[str, Any]) -> RunRecord:
+        """Hydrate replay evidence or expose only one bounded integrity code."""
+
+        try:
+            return cls._record_from_store(row)
+        except Exception as exc:
+            from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
+
+            log_bounded_failure(
+                logger,
+                bounded_diagnostic(
+                    code="accepted_evidence_invalid",
+                    operation="hydrate_idempotent_replay",
+                    error=exc,
+                    capability_id="run_store",
+                ),
+            )
+            raise AcceptedEvidenceIntegrityError() from None
+
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
         row_recovery_payload: dict[str, Any] | None = None
@@ -768,8 +795,18 @@ class RunManager:
             return None
         try:
             row = await self._store.get(run_id, user_id=user_id)
-        except Exception:
-            logger.warning("Failed to hydrate run %s from store", run_id, exc_info=True)
+        except Exception as exc:
+            from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
+
+            log_bounded_failure(
+                logger,
+                bounded_diagnostic(
+                    code="run_hydration_failed",
+                    operation="load_run",
+                    error=exc,
+                    capability_id="run_store",
+                ),
+            )
             return None
         # Re-check after store await: a concurrent create() may have inserted the
         # in-memory record while the store call was in flight.
@@ -781,8 +818,18 @@ class RunManager:
             return None
         try:
             return self._record_from_store(row)
-        except Exception:
-            logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
+        except Exception as exc:
+            from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
+
+            log_bounded_failure(
+                logger,
+                bounded_diagnostic(
+                    code="accepted_evidence_invalid",
+                    operation="hydrate_accepted_invocation",
+                    error=exc,
+                    capability_id="run_store",
+                ),
+            )
             return None
 
     async def aget(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
@@ -825,8 +872,18 @@ class RunManager:
             if run_id and run_id not in records_by_id:
                 try:
                     records_by_id[run_id] = self._record_from_store(row)
-                except Exception:
-                    logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
+                except Exception as exc:
+                    from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
+
+                    log_bounded_failure(
+                        logger,
+                        bounded_diagnostic(
+                            code="accepted_evidence_invalid",
+                            operation="hydrate_accepted_invocation",
+                            error=exc,
+                            capability_id="run_store",
+                        ),
+                    )
         return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
 
     async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage:
@@ -970,11 +1027,15 @@ class RunManager:
                 if execution_evidence is not None:
                     from deerflow.sandbox.sandbox_provider import (
                         AcceptedSkillExecutionEvidenceV1,
+                        AcceptedSkillExecutionEvidenceV2,
                     )
 
                     if not isinstance(
                         execution_evidence,
-                        AcceptedSkillExecutionEvidenceV1,
+                        (
+                            AcceptedSkillExecutionEvidenceV1,
+                            AcceptedSkillExecutionEvidenceV2,
+                        ),
                     ):
                         raise RunStartupError("Invalid sandbox execution evidence")
                     if execution_evidence.run_id != run_id:
@@ -1762,7 +1823,7 @@ class RunManager:
         row = await self._store.get_by_external_identity(external_scope, external_key)
         if row is None or (user_id is not None and row.get("user_id") != user_id):
             return None
-        return self._record_from_store(row)
+        return self._replay_record_from_store(row)
 
     async def ensure_or_reject(
         self,
@@ -2027,7 +2088,7 @@ class RunManager:
                             raise ConflictError(f"Thread {thread_id} already has an active run") from exc
                         raise
                     if store_admission.outcome is not AdmissionOutcome.created:
-                        stored_record = self._record_from_store(store_admission.row)
+                        stored_record = self._replay_record_from_store(store_admission.row)
                         if stored_record.user_id != user_id:
                             raise IdempotencyConflictError("Idempotency key is not visible to this principal")
                         return RunAdmission(record=stored_record, outcome=store_admission.outcome)
@@ -2267,8 +2328,18 @@ class RunManager:
         for row in rows:
             try:
                 record = self._record_from_store(row)
-            except Exception:
-                logger.warning("Failed to map orphaned run row during reconciliation", exc_info=True)
+            except Exception as exc:
+                from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
+
+                log_bounded_failure(
+                    logger,
+                    bounded_diagnostic(
+                        code="accepted_evidence_invalid",
+                        operation="hydrate_orphaned_invocation",
+                        error=exc,
+                        capability_id="run_store",
+                    ),
+                )
                 continue
 
             async with self._lock:

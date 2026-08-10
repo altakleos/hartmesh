@@ -122,7 +122,7 @@ class GuardrailAuthorizationAdapter:
             allow=d.allow,
             reasons=[GuardrailReason(code=r.code, message=r.message) for r in d.reasons],
             policy_id=d.policy_id,
-            metadata=d.metadata,
+            metadata=d.to_dict()["metadata"],
             provider_receipt=AuthorizedToolCallReceipt(
                 provider=provider,
                 request=request,

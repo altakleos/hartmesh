@@ -183,11 +183,16 @@ class RunLifecycleCursorStateRow(Base):
     singleton_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     last_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
     pruned_through: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    retained_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
 
     __table_args__ = (
         CheckConstraint("singleton_id = 1", name="ck_run_lifecycle_cursor_singleton"),
         CheckConstraint("last_cursor >= 0", name="ck_run_lifecycle_cursor_nonnegative"),
         CheckConstraint("pruned_through >= 0 AND pruned_through <= last_cursor", name="ck_run_lifecycle_pruned_range"),
+        CheckConstraint(
+            "retained_count >= 0",
+            name="ck_run_lifecycle_retained_count_nonnegative",
+        ),
     )
 
 
@@ -236,7 +241,38 @@ def _seed_lifecycle_cursor_after_create(
         return
     if connection.scalar(text("SELECT count(*) FROM run_lifecycle_events")):
         return
-    connection.execute(text("INSERT INTO run_lifecycle_cursor_state (singleton_id, last_cursor, pruned_through) SELECT 1, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM run_lifecycle_cursor_state WHERE singleton_id = 1)"))
+    connection.execute(text("INSERT INTO run_lifecycle_cursor_state (singleton_id, last_cursor, pruned_through, retained_count) SELECT 1, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM run_lifecycle_cursor_state WHERE singleton_id = 1)"))
+    _install_lifecycle_integrity_triggers(connection)
+
+
+def _install_lifecycle_integrity_triggers(connection: Connection) -> None:
+    """Maintain an independent retained-row count in the ledger transaction."""
+
+    if connection.dialect.name == "sqlite":
+        connection.execute(
+            text("CREATE TRIGGER IF NOT EXISTS trg_run_lifecycle_retained_insert AFTER INSERT ON run_lifecycle_events BEGIN UPDATE run_lifecycle_cursor_state SET retained_count = retained_count + 1 WHERE singleton_id = 1; END")
+        )
+        connection.execute(
+            text("CREATE TRIGGER IF NOT EXISTS trg_run_lifecycle_retained_delete AFTER DELETE ON run_lifecycle_events BEGIN UPDATE run_lifecycle_cursor_state SET retained_count = retained_count - 1 WHERE singleton_id = 1; END")
+        )
+    elif connection.dialect.name == "postgresql":
+        connection.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION deerflow_update_lifecycle_retained_count() "
+                "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                "IF TG_OP = 'INSERT' THEN "
+                "UPDATE run_lifecycle_cursor_state SET retained_count = retained_count + 1 WHERE singleton_id = 1; "
+                "RETURN NEW; "
+                "ELSE "
+                "UPDATE run_lifecycle_cursor_state SET retained_count = retained_count - 1 WHERE singleton_id = 1; "
+                "RETURN OLD; "
+                "END IF; END; $$"
+            )
+        )
+        connection.execute(text("DROP TRIGGER IF EXISTS trg_run_lifecycle_retained_insert ON run_lifecycle_events"))
+        connection.execute(text("CREATE TRIGGER trg_run_lifecycle_retained_insert AFTER INSERT ON run_lifecycle_events FOR EACH ROW EXECUTE FUNCTION deerflow_update_lifecycle_retained_count()"))
+        connection.execute(text("DROP TRIGGER IF EXISTS trg_run_lifecycle_retained_delete ON run_lifecycle_events"))
+        connection.execute(text("CREATE TRIGGER trg_run_lifecycle_retained_delete AFTER DELETE ON run_lifecycle_events FOR EACH ROW EXECUTE FUNCTION deerflow_update_lifecycle_retained_count()"))
 
 
 # Empty-database bootstrap uses ``Base.metadata.create_all`` and stamps the

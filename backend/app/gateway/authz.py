@@ -43,6 +43,7 @@ from fastapi import HTTPException, Request
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
 from deerflow.config.authorization_config import AuthorizationConfig
+from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 
 if TYPE_CHECKING:
     from app.gateway.auth.models import User
@@ -176,8 +177,14 @@ async def resolve_route_permissions(
         provider = resolver.resolve(config).provider
         if provider is None:
             raise ValueError("authorization is enabled but provider resolution returned None")
-    except Exception:
-        logger.warning("Failed to resolve authorization provider for Gateway routes", exc_info=True)
+    except Exception as exc:
+        diagnostic = bounded_diagnostic(
+            code="authorization_provider_resolution_failed",
+            operation="resolve_route_authorization_provider",
+            error=exc,
+            capability_id="authorization_provider",
+        )
+        log_bounded_failure(logger, diagnostic)
         return [] if config.fail_closed else list(_ALL_PERMISSIONS)
 
     if identity is None and not is_internal:
@@ -202,13 +209,16 @@ async def resolve_route_permissions(
                     user_id=str(user.id),
                 )
             ).identity
-        except Exception:
+        except Exception as exc:
             # An enabled provider must never make a decision using transport
             # trust when the effective subject cannot be established.
-            logger.warning(
-                "Failed to resolve split identity for Gateway route authorization",
-                exc_info=True,
+            diagnostic = bounded_diagnostic(
+                code="authorization_identity_resolution_failed",
+                operation="resolve_route_identity",
+                error=exc,
+                capability_id="authorization_provider",
             )
+            log_bounded_failure(logger, diagnostic)
             return []
 
     # Align with Phase 1B's tool path: internal callers (IM channel workers,
@@ -250,12 +260,15 @@ async def resolve_route_permissions(
                 raise TypeError("AuthorizationProvider.aauthorize must return AuthzDecision")
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.warning(
-                "Authorization provider failed while evaluating route permission %s",
-                permission,
-                exc_info=True,
+        except Exception as exc:
+            diagnostic = bounded_diagnostic(
+                code="authorization_decision_failed",
+                operation="authorize_route_permission",
+                error=exc,
+                capability_id="authorization_provider",
+                contribution_id=permission,
             )
+            log_bounded_failure(logger, diagnostic)
             return permission if not config.fail_closed else None
         return permission if decision.allow else None
 
@@ -303,9 +316,15 @@ def resolve_model_authorization(
         provider = resolver.resolve(config).provider
         if provider is None:
             raise ValueError("authorization is enabled but provider resolution returned None")
-    except Exception:
-        logger.warning("Failed to resolve authorization provider for model routes", exc_info=True)
-        raise _AuthorizationUnavailable(fail_closed=config.fail_closed)
+    except Exception as exc:
+        diagnostic = bounded_diagnostic(
+            code="authorization_provider_resolution_failed",
+            operation="resolve_model_authorization_provider",
+            error=exc,
+            capability_id="authorization_provider",
+        )
+        log_bounded_failure(logger, diagnostic)
+        raise _AuthorizationUnavailable(fail_closed=config.fail_closed) from None
 
     from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 

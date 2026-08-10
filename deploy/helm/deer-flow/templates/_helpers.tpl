@@ -335,10 +335,10 @@ imagePullSecrets:
 {{- fail "provisioner.gatewayTokenAudience must be 1-128 bounded ASCII identifier characters" -}}
 {{- end -}}
 {{- $acceptedSkillProfile := (default "disabled" .Values.provisioner.acceptedSkillProjectionProfile) -}}
-{{- if not (has $acceptedSkillProfile (list "disabled" "rwx_verified_copy_v1")) -}}
-{{- fail "provisioner.acceptedSkillProjectionProfile must be disabled or rwx_verified_copy_v1" -}}
+{{- if not (has $acceptedSkillProfile (list "disabled" "rwx_verified_copy_v2")) -}}
+{{- fail "provisioner.acceptedSkillProjectionProfile must be disabled or rwx_verified_copy_v2" -}}
 {{- end -}}
-{{- if eq $acceptedSkillProfile "rwx_verified_copy_v1" -}}
+{{- if eq $acceptedSkillProfile "rwx_verified_copy_v2" -}}
 {{- if lt (int .Values.provisioner.acceptedAttempt.leaseSeconds) (mul 2 (int .Values.provisioner.acceptedAttempt.reconcileIntervalSeconds)) -}}
 {{- fail "provisioner.acceptedAttempt.leaseSeconds must be at least twice reconcileIntervalSeconds" -}}
 {{- end -}}
@@ -349,19 +349,19 @@ imagePullSecrets:
 {{- fail "provisioner.acceptedAttempt.reconcileLimit must be in [1, 500]" -}}
 {{- end -}}
   {{- if not .Values.provisioner.enabled -}}
-  {{- fail "rwx_verified_copy_v1 requires the provisioner" -}}
+  {{- fail "rwx_verified_copy_v2 requires the provisioner" -}}
   {{- end -}}
   {{- if not .Values.persistence.home.enabled -}}
-  {{- fail "rwx_verified_copy_v1 requires the shared home PVC" -}}
+  {{- fail "rwx_verified_copy_v2 requires the shared home PVC" -}}
   {{- end -}}
   {{- if ne .Values.persistence.home.accessMode "ReadWriteMany" -}}
-  {{- fail "rwx_verified_copy_v1 requires persistence.home.accessMode=ReadWriteMany; same-node RWO fallback is unsupported" -}}
+  {{- fail "rwx_verified_copy_v2 requires persistence.home.accessMode=ReadWriteMany; same-node RWO fallback is unsupported" -}}
   {{- end -}}
   {{- if not .Values.provisioner.image.digest -}}
-  {{- fail "rwx_verified_copy_v1 requires a digest-pinned provisioner verifier/gate image" -}}
+  {{- fail "rwx_verified_copy_v2 requires a digest-pinned provisioner verifier/gate image" -}}
   {{- end -}}
   {{- if not (regexMatch "^[^[:space:]@]+@sha256:[0-9a-f]{64}$" .Values.provisioner.sandboxImage) -}}
-  {{- fail "rwx_verified_copy_v1 requires provisioner.sandboxImage pinned by sha256 digest" -}}
+  {{- fail "rwx_verified_copy_v2 requires provisioner.sandboxImage pinned by sha256 digest" -}}
   {{- end -}}
 {{- end -}}
 

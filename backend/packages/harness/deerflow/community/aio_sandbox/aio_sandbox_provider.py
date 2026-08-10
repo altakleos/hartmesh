@@ -44,7 +44,8 @@ from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
-    AcceptedSkillExecutionEvidenceV1,
+    AcceptedSkillExecutionEvidence,
+    AcceptedSkillExecutionEvidenceV2,
     AcceptedSkillMaterialCapability,
     AcceptedSkillSandboxBindingError,
     AcceptedSkillSandboxBindingV1,
@@ -65,7 +66,7 @@ from .ownership import (
     resolve_ownership_config,
 )
 from .remote_backend import RemoteSandboxBackend
-from .sandbox_info import SandboxInfo
+from .sandbox_info import AcceptedSkillMaterialReceiptV2, SandboxInfo
 
 logger = logging.getLogger(__name__)
 
@@ -2027,27 +2028,39 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
             with self._lock:
                 info = self._sandbox_infos.get(sandbox_id)
-            if info is None or info.accepted_skill_material is None:
+            if info is None or not isinstance(
+                info.accepted_skill_material,
+                AcceptedSkillMaterialReceiptV2,
+            ):
                 return AcceptedSkillMaterialCapability.EMPTY_ONLY
         return AcceptedSkillMaterialCapability.IMMUTABLE_READ_ONLY
 
     def accepted_skill_execution_evidence(
         self,
         sandbox_id: str,
-    ) -> AcceptedSkillExecutionEvidenceV1 | None:
+    ) -> AcceptedSkillExecutionEvidence | None:
         with self._lock:
             info = self._sandbox_infos.get(sandbox_id)
         receipt = None if info is None else info.accepted_skill_material
-        if receipt is None:
+        if not isinstance(receipt, AcceptedSkillMaterialReceiptV2):
             return None
-        return AcceptedSkillExecutionEvidenceV1(
+        return AcceptedSkillExecutionEvidenceV2(
             profile=receipt.profile,
             attempt_id=receipt.attempt_id,
             snapshot_id=receipt.snapshot_id,
             run_id=receipt.run_id,
             generation=receipt.generation,
             pod_uid=receipt.pod_uid,
+            pod_isolation_digest=receipt.pod_isolation_digest,
             lease_uid=receipt.lease_uid,
+            network_policy_uid=receipt.network_policy_uid,
+            network_policy_spec_digest=receipt.network_policy_spec_digest,
+            evidence_secret_uid=receipt.evidence_secret_uid,
+            evidence_secret_digest=receipt.evidence_secret_digest,
+            capability_secret_uid=receipt.capability_secret_uid,
+            capability_secret_digest=receipt.capability_secret_digest,
+            sandbox_image_digest=receipt.sandbox_image_digest,
+            accepted_skill_runtime_image_digest=(receipt.accepted_skill_runtime_image_digest),
             runtime_image_ids_digest=receipt.runtime_image_ids_digest,
             verifier_receipt_digest=receipt.verifier_receipt_digest,
             materialization_evidence_digest=(receipt.materialization_evidence_digest),
@@ -2056,7 +2069,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _accepted_execution_info(
         self,
         sandbox_id: str,
-        evidence: AcceptedSkillExecutionEvidenceV1,
+        evidence: AcceptedSkillExecutionEvidence,
     ) -> SandboxInfo | None:
         with self._lock:
             info = self._sandbox_infos.get(sandbox_id)
@@ -2070,7 +2083,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     async def validate_accepted_skill_execution_async(
         self,
         sandbox_id: str,
-        evidence: AcceptedSkillExecutionEvidenceV1,
+        evidence: AcceptedSkillExecutionEvidence,
     ) -> bool:
         """Validate the exact remote Pod/Lease/materialization tuple."""
 
@@ -2089,7 +2102,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     async def renew_accepted_skill_execution_async(
         self,
         sandbox_id: str,
-        evidence: AcceptedSkillExecutionEvidenceV1,
+        evidence: AcceptedSkillExecutionEvidence,
     ) -> bool:
         """Renew only after the owning RunManager renewed its durable lease."""
 
@@ -2522,7 +2535,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 raise AcceptedSkillSandboxBindingError(
                     "accepted_skill_snapshot_immutability_unsupported",
                 )
-            if receipt.profile != "rwx_verified_copy_v1" or receipt.snapshot_id != binding.snapshot_id or receipt.content_digest != binding.snapshot_id or receipt.run_id != binding.run_id or receipt.generation != binding.generation:
+            if (
+                not isinstance(receipt, AcceptedSkillMaterialReceiptV2)
+                or receipt.profile != "rwx_verified_copy_v2"
+                or receipt.snapshot_id != binding.snapshot_id
+                or receipt.content_digest != binding.snapshot_id
+                or receipt.run_id != binding.run_id
+                or receipt.generation != binding.generation
+            ):
                 raise AcceptedSkillSandboxBindingError(
                     "accepted_skill_snapshot_receipt_mismatch",
                 )

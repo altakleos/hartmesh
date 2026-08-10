@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
+from collections.abc import Callable
 from typing import Annotated, Any
 
 from deerflow_runtime_api import (
@@ -90,6 +92,21 @@ def _runtime_failure_response(failure: RuntimeFailure) -> JSONResponse:
     )
 
 
+async def _invoke_runtime_operation(
+    operation: str,
+    invoke: Callable[[], Any],
+) -> Any | RuntimeFailure:
+    """Translate every portable-port failure through one bounded boundary."""
+
+    try:
+        result = invoke()
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+    except Exception as exc:
+        return unexpected_adapter_failure(operation, exception=exc)
+
+
 def _paging_values(
     request: Request,
     *,
@@ -128,12 +145,11 @@ async def runtime_capabilities(
         )
     except HTTPException as exc:
         return runtime_error_response(exc.status_code, FailureCode.denied)
-    try:
-        capabilities = runtime.capabilities()
-    except Exception:
-        return _runtime_failure_response(unexpected_adapter_failure("capabilities"))
+    capabilities = await _invoke_runtime_operation("capabilities", runtime.capabilities)
+    if isinstance(capabilities, RuntimeFailure):
+        return _runtime_failure_response(capabilities)
     if not isinstance(capabilities, RuntimeCapabilities):
-        return _runtime_failure_response(unexpected_adapter_failure("capabilities", exc_info=False))
+        return _runtime_failure_response(unexpected_adapter_failure("capabilities"))
     return JSONResponse(content=capabilities.to_dict())
 
 
@@ -153,9 +169,12 @@ async def runtime_deployment_report(request: Request) -> JSONResponse:
         return runtime_error_response(503, FailureCode.indeterminate)
     try:
         report = await reporter.deployment_report()
-    except Exception:
-        logger.exception("Runtime deployment report collection failed")
-        return runtime_error_response(503, FailureCode.indeterminate)
+    except Exception as exc:
+        failure = unexpected_adapter_failure(
+            "deployment_report",
+            exception=exc,
+        )
+        return _runtime_failure_response(failure)
     return JSONResponse(content=report.to_dict())
 
 
@@ -169,7 +188,7 @@ async def ensure_invocation(
     parsed = await _read_record(request, InvocationEnsureRequest)
     if isinstance(parsed, JSONResponse):
         return parsed
-    result = await runtime.ensure(parsed)
+    result = await _invoke_runtime_operation("ensure", lambda: runtime.ensure(parsed))
     if isinstance(result, RuntimeFailure):
         return _runtime_failure_response(result)
     status_by_disposition = {
@@ -181,7 +200,7 @@ async def ensure_invocation(
         EnsureDisposition.thread_busy: 409,
     }
     if not isinstance(result, InvocationEnsureReceipt):
-        return runtime_error_response(503, FailureCode.indeterminate)
+        return _runtime_failure_response(unexpected_adapter_failure("ensure"))
     if result.disposition in {EnsureDisposition.created, EnsureDisposition.known}:
         return JSONResponse(
             status_code=status_by_disposition[result.disposition],
@@ -209,11 +228,11 @@ async def observe_invocation(
         query = InvocationQuery(run_id=run_id, cursor=cursor, limit=limit)
     except (TypeError, ValueError):
         return runtime_error_response(422, FailureCode.invalid_request)
-    result = await runtime.observe(query)
+    result = await _invoke_runtime_operation("observe", lambda: runtime.observe(query))
     if isinstance(result, RuntimeFailure):
         return _runtime_failure_response(result)
     if not isinstance(result, InvocationObservation):
-        return runtime_error_response(503, FailureCode.indeterminate)
+        return _runtime_failure_response(unexpected_adapter_failure("observe"))
     return JSONResponse(content=result.to_dict())
 
 
@@ -238,11 +257,11 @@ async def observe_context_invocations(
         )
     except (TypeError, ValueError):
         return runtime_error_response(422, FailureCode.invalid_request)
-    result = await runtime.observe(query)
+    result = await _invoke_runtime_operation("observe", lambda: runtime.observe(query))
     if isinstance(result, RuntimeFailure):
         return _runtime_failure_response(result)
     if not isinstance(result, InvocationObservation):
-        return runtime_error_response(503, FailureCode.indeterminate)
+        return _runtime_failure_response(unexpected_adapter_failure("observe"))
     return JSONResponse(content=result.to_dict())
 
 
@@ -259,11 +278,11 @@ async def control_invocation(
         return parsed
     if parsed.run_id != run_id:
         return runtime_error_response(422, FailureCode.invalid_request)
-    result = await runtime.control(parsed)
+    result = await _invoke_runtime_operation("control", lambda: runtime.control(parsed))
     if isinstance(result, RuntimeFailure):
         return _runtime_failure_response(result)
     if not isinstance(result, InvocationControlReceipt):
-        return runtime_error_response(503, FailureCode.indeterminate)
+        return _runtime_failure_response(unexpected_adapter_failure("control"))
     status_by_disposition = {
         ControlDisposition.requested: 202,
         ControlDisposition.already_requested: 200,

@@ -677,9 +677,18 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         # `required: true` makes the extension part of the startup contract.
         # Booting without it would silently change configured behaviour.
         raise
-    except Exception:
-        logger.exception("Extension loading failed; continuing with no extensions")
-        loaded_extensions, extension_diagnostics = EMPTY_EXTENSIONS, []
+    except Exception as exc:
+        from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
+        from deerflow.extensions.loader import Diagnostic
+
+        diagnostic = bounded_diagnostic(
+            code="extension_loading_failed",
+            operation="load_extensions",
+            error=exc,
+        )
+        log_bounded_failure(logger, diagnostic, level=logging.ERROR)
+        loaded_extensions = EMPTY_EXTENSIONS
+        extension_diagnostics = [Diagnostic.from_bounded("extension_loader", diagnostic)]
     from deerflow.extensions.capabilities import route_required_capabilities
     from deerflow.extensions.contributors import ContributorHost
     from deerflow.extensions.loader import Diagnostic
@@ -868,7 +877,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             "accepted_skill_projection_profile",
             "disabled",
         )
-        == "rwx_verified_copy_v1"
+        == "rwx_verified_copy_v2"
     ):
         from deerflow.community.aio_sandbox.remote_backend import (
             RemoteSandboxBackend,
