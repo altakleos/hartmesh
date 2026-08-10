@@ -212,6 +212,45 @@ _LEGACY_COLUMNS = (
     "updated_at",
 )
 
+_LEGACY_TOKEN_USAGE_BY_MODEL = '{"legacy-model":{"input_tokens":11,"output_tokens":13}}'
+
+
+def _legacy_run_insert_statement() -> sa.TextClause:
+    return sa.text(
+        """
+        INSERT INTO runs (
+            run_id, thread_id, assistant_id, user_id, status,
+            operation_kind, model_name, multitask_strategy,
+            metadata_json, kwargs_json, error, stop_reason,
+            message_count, total_input_tokens, total_output_tokens,
+            total_tokens, llm_call_count, lead_agent_tokens,
+            subagent_tokens, middleware_tokens, token_usage_by_model,
+            first_human_message, last_ai_message, follow_up_to_run_id,
+            owner_worker_id, lease_expires_at, cancel_action,
+            cancel_requested_at,
+            created_at, updated_at
+        ) VALUES (
+            :run_id, :thread_id, :assistant_id, 'legacy-owner', :status,
+            :operation_kind, :model_name, 'reject',
+            CAST(:metadata AS json), CAST(:kwargs AS json), :error, :stop_reason,
+            3, 11, 13, 24, 2, 17, 7, 0, CAST(:token_usage_by_model AS json),
+            :first_human_message, :last_ai_message, :follow_up_to_run_id,
+            :owner_worker_id, :lease_expires_at, 'interrupt',
+            :cancel_requested_at,
+            :created_at, :created_at
+        )
+        """
+    )
+
+
+def test_legacy_run_fixture_binds_json_as_one_value() -> None:
+    """JSON punctuation must not be parsed as SQLAlchemy bind names."""
+
+    parameters = _legacy_run_insert_statement().compile().params
+    assert "token_usage_by_model" in parameters
+    assert "11" not in parameters
+    assert "13" not in parameters
+
 
 def _revision_at_least(revision: str, introduced_at: str) -> bool:
     return _INVOCATION_REVISIONS.index(revision) >= _INVOCATION_REVISIONS.index(introduced_at)
@@ -980,31 +1019,7 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
                 ("legacy-auxiliary", "checkpoint_write"),
             ):
                 await connection.execute(
-                    sa.text(
-                        """
-                        INSERT INTO runs (
-                            run_id, thread_id, assistant_id, user_id, status,
-                            operation_kind, model_name, multitask_strategy,
-                            metadata_json, kwargs_json, error, stop_reason,
-                            message_count, total_input_tokens, total_output_tokens,
-                            total_tokens, llm_call_count, lead_agent_tokens,
-                            subagent_tokens, middleware_tokens, token_usage_by_model,
-                            first_human_message, last_ai_message, follow_up_to_run_id,
-                            owner_worker_id, lease_expires_at, cancel_action,
-                            cancel_requested_at,
-                            created_at, updated_at
-                        ) VALUES (
-                            :run_id, :thread_id, :assistant_id, 'legacy-owner', :status,
-                            :operation_kind, :model_name, 'reject',
-                            CAST(:metadata AS json), CAST(:kwargs AS json), :error, :stop_reason,
-                            3, 11, 13, 24, 2, 17, 7, 0, CAST('{"legacy-model":{"input_tokens":11,"output_tokens":13}}' AS json),
-                            :first_human_message, :last_ai_message, :follow_up_to_run_id,
-                            :owner_worker_id, :lease_expires_at, 'interrupt',
-                            :cancel_requested_at,
-                            :created_at, :created_at
-                        )
-                        """
-                    ),
+                    _legacy_run_insert_statement(),
                     {
                         "run_id": run_id,
                         "thread_id": f"thread-{run_id}",
@@ -1014,6 +1029,7 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
                         "model_name": f"model-{operation_kind}",
                         "metadata": f'{{"legacy":true,"kind":"{operation_kind}"}}',
                         "kwargs": f'{{"legacy_option":"{operation_kind}"}}',
+                        "token_usage_by_model": _LEGACY_TOKEN_USAGE_BY_MODEL,
                         "error": None if operation_kind == "run" else "legacy auxiliary error",
                         "stop_reason": None if operation_kind == "run" else "legacy_auxiliary",
                         "first_human_message": f"first-{run_id}",

@@ -611,8 +611,17 @@ async def test_postgres_independent_sessions_force_key_and_thread_arbitration() 
         )
         assert sum(not isinstance(result, Exception) for result in busy_results) == 1
         assert sum(isinstance(result, ConflictError) for result in busy_results) == 1
-        assert busy_left_store.external_identity_lookups == 1
-        assert busy_right_store.external_identity_lookups == 1
+        # The winner needs only its preflight lookup. The loser performs two
+        # additional bounded reads: one to classify the unique-index conflict
+        # inside ``ensure_run_atomic`` and one to reconcile the candidate run
+        # after the failed atomic admission. Which session wins is deliberately
+        # nondeterministic.
+        assert sorted(
+            (
+                busy_left_store.external_identity_lookups,
+                busy_right_store.external_identity_lookups,
+            )
+        ) == [1, 3]
     finally:
         async with left_factory() as session:
             await session.execute(delete(RunRow).where(RunRow.thread_id.in_((same_thread, busy_thread))))
