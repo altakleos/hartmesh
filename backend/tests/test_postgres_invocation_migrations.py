@@ -9,6 +9,7 @@ evidence for PostgreSQL DDL, locking, or transaction behavior.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -942,6 +943,26 @@ def test_intermediate_revision_contracts_exclude_future_schema() -> None:
 )
 def test_revision_without_run_columns_has_no_empty_legacy_predicate(revision: str) -> None:
     assert _legacy_null_predicate(revision) is None
+
+
+def test_lifecycle_integrity_migration_replaces_preexisting_postgres_triggers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy create-all bootstrap may install the current triggers before 0017."""
+
+    migration = importlib.import_module("deerflow.persistence.migrations.versions.0017_lifecycle_integrity")
+    statements: list[str] = []
+    monkeypatch.setattr(migration.op, "execute", statements.append)
+
+    migration._create_triggers("postgresql")
+
+    insert_drop = next(index for index, statement in enumerate(statements) if statement.startswith("DROP TRIGGER IF EXISTS trg_run_lifecycle_retained_insert"))
+    insert_create = next(index for index, statement in enumerate(statements) if statement.startswith("CREATE TRIGGER trg_run_lifecycle_retained_insert"))
+    delete_drop = next(index for index, statement in enumerate(statements) if statement.startswith("DROP TRIGGER IF EXISTS trg_run_lifecycle_retained_delete"))
+    delete_create = next(index for index, statement in enumerate(statements) if statement.startswith("CREATE TRIGGER trg_run_lifecycle_retained_delete"))
+
+    assert insert_drop < insert_create
+    assert delete_drop < delete_create
 
 
 @pytest.mark.anyio
