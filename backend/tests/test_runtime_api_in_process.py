@@ -23,6 +23,23 @@ from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 from deerflow.runtime.runs.store.base import CancellationRequestOutcome, LifecycleType
 
 
+@pytest.mark.parametrize("service_id", ["s" * 64, "界" * 64])
+def test_in_process_runtime_accepts_the_persisted_service_id_boundary(service_id: str) -> None:
+    from app.runtime.api import InProcessInvocationRuntime
+
+    adapter = InProcessInvocationRuntime(object(), authenticated_service_id=service_id)
+
+    assert isinstance(adapter, InProcessInvocationRuntime)
+
+
+@pytest.mark.parametrize("service_id", ["s" * 65, "界" * 65])
+def test_in_process_runtime_rejects_service_ids_beyond_the_persisted_owner_domain(service_id: str) -> None:
+    from app.runtime.api import InProcessInvocationRuntime
+
+    with pytest.raises(ValueError, match="persisted service id"):
+        InProcessInvocationRuntime(object(), authenticated_service_id=service_id)
+
+
 @pytest.mark.anyio
 async def test_unexpected_adapter_failure_is_publicly_bounded_and_internally_correlated(
     caplog,

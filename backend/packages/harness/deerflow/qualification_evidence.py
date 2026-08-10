@@ -29,6 +29,15 @@ QUALIFICATION_EVIDENCE_API_VERSION = "deerflow.kubernetes-qualification/v1"
 QUALIFICATION_EVIDENCE_KIND = "kubernetes.qualification.evidence"
 QUALIFICATION_SCOPE = "durable_one_replica_pod_recovery"
 QUALIFICATION_VERIFICATION_API_VERSION = "deerflow.qualification-verification/v1"
+ACCEPTED_SKILL_QUALIFICATION_EVIDENCE_API_VERSION_V2 = "deerflow.kubernetes-accepted-skill-qualification/v2"
+ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2 = "durable_one_replica_rwx_verified_copy_v2_nonempty_skill"
+ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2 = (
+    "nonempty_material_execution",
+    "token_review_and_lease_renewal",
+    "gateway_replacement_cleanup",
+    "sandbox_owner_loss_cleanup",
+    "process_loss_cleanup",
+)
 MAX_QUALIFICATION_EVIDENCE_BYTES = 64 * 1024
 
 _SAFE_NAMESPACE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?\Z")
@@ -100,6 +109,21 @@ def _reject_duplicate_object_fields(
 
 def _reject_non_finite_number(_value: str) -> object:
     raise ValueError("qualification evidence contains non-finite numbers")
+
+
+def _parse_canonical_qualification_json(payload: bytes) -> object:
+    if not isinstance(payload, bytes) or not payload:
+        raise ValueError("qualification evidence must be non-empty bytes")
+    if len(payload) > MAX_QUALIFICATION_EVIDENCE_BYTES:
+        raise ValueError("qualification evidence exceeds 64 KiB")
+    try:
+        return json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_object_fields,
+            parse_constant=_reject_non_finite_number,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("qualification evidence must be valid UTF-8 JSON") from exc
 
 
 @dataclass(frozen=True)
@@ -237,6 +261,387 @@ class StoreContinuityEvidence:
             return cls(**value)
         except (TypeError, ValueError) as exc:
             raise ValueError("store continuity evidence values are invalid") from exc
+
+
+def _require_image_reference(reference: str, digest: str, *, name: str) -> None:
+    _bounded_safe(reference, name=f"{name}_reference", limit=576)
+    if _IMAGE_DIGEST.fullmatch(digest) is None:
+        raise ValueError(f"{name}_digest is invalid")
+    if not reference.endswith("@" + digest):
+        raise ValueError(f"{name}_reference must be pinned to {name}_digest")
+
+
+def _require_sha256(value: str, *, name: str) -> None:
+    if _IMAGE_DIGEST.fullmatch(value) is None:
+        raise ValueError(f"{name} is invalid")
+
+
+def _accepted_skill_scenario_requires_replacement(name: str) -> bool:
+    return name in {
+        "gateway_replacement_cleanup",
+        "process_loss_cleanup",
+    }
+
+
+@dataclass(frozen=True)
+class AcceptedSkillScenarioEvidenceV2:
+    """One completed live assertion in the nonempty accepted-skill profile."""
+
+    name: str
+    run_id: str
+    result_digest: str
+    replacement_observed: bool
+    cleanup_outcome: Literal["deleted", "quarantined"]
+    status: Literal["passed"] = "passed"
+
+    def __post_init__(self) -> None:
+        if self.name not in ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2:
+            raise ValueError("accepted-skill scenario name is invalid")
+        _bounded_safe(self.run_id, name="accepted-skill scenario run_id", limit=128)
+        _require_sha256(self.result_digest, name="accepted-skill scenario result_digest")
+        expected_replacement = _accepted_skill_scenario_requires_replacement(self.name)
+        if type(self.replacement_observed) is not bool or self.replacement_observed is not expected_replacement:
+            raise ValueError("accepted-skill replacement evidence is inconsistent")
+        if self.cleanup_outcome not in {"deleted", "quarantined"}:
+            raise ValueError("accepted-skill cleanup evidence is invalid")
+        if self.status != "passed":
+            raise ValueError("accepted-skill scenario evidence must be passed")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "status": self.status,
+            "run_id": self.run_id,
+            "result_digest": self.result_digest,
+            "replacement_observed": self.replacement_observed,
+            "cleanup_outcome": self.cleanup_outcome,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> AcceptedSkillScenarioEvidenceV2:
+        fields = {
+            "name",
+            "status",
+            "run_id",
+            "result_digest",
+            "replacement_observed",
+            "cleanup_outcome",
+        }
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError("accepted-skill scenario fields are invalid")
+        try:
+            return cls(**value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("accepted-skill scenario values are invalid") from exc
+
+
+@dataclass(frozen=True)
+class AcceptedSkillQualificationEnvironmentV2:
+    """Exact cross-node, RWX, identity, and Lease facts observed live."""
+
+    kubernetes_server_version: str
+    cluster_context: str
+    cluster_driver: str | None
+    namespace: str
+    schedulable_nodes: tuple[str, ...]
+    gateway_node: str
+    sandbox_node: str
+    rwx_storage_class: str
+    rwx_volume_uid: str
+    token_review_authenticated: bool
+    gateway_service_account: str
+    lease_uid: str
+    lease_renewals: int
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "kubernetes_server_version",
+            "cluster_context",
+            "gateway_node",
+            "sandbox_node",
+            "rwx_storage_class",
+            "rwx_volume_uid",
+            "gateway_service_account",
+            "lease_uid",
+        ):
+            _bounded_safe(getattr(self, field_name), name=field_name, limit=256)
+        if self.cluster_driver is not None and _SAFE_ID.fullmatch(self.cluster_driver) is None:
+            raise ValueError("cluster_driver is invalid")
+        if _SAFE_NAMESPACE.fullmatch(self.namespace) is None or not self.namespace.startswith("hartmesh-qualification-"):
+            raise ValueError("accepted-skill evidence namespace is invalid")
+        nodes = tuple(self.schedulable_nodes)
+        if not 2 <= len(nodes) <= 128 or len(nodes) != len(set(nodes)):
+            raise ValueError("accepted-skill qualification requires at least two unique schedulable nodes")
+        for node in nodes:
+            _bounded_safe(node, name="schedulable node", limit=253)
+        if self.gateway_node not in nodes or self.sandbox_node not in nodes:
+            raise ValueError("observed workload nodes must be schedulable nodes")
+        if self.gateway_node == self.sandbox_node:
+            raise ValueError("accepted-skill qualification must observe cross-node execution")
+        if self.token_review_authenticated is not True:
+            raise ValueError("accepted-skill qualification requires successful TokenReview")
+        if type(self.lease_renewals) is not int or not 1 <= self.lease_renewals <= 1_000_000:
+            raise ValueError("accepted-skill qualification requires bounded Lease renewal evidence")
+        object.__setattr__(self, "schedulable_nodes", nodes)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "kubernetes_server_version": self.kubernetes_server_version,
+            "cluster_context": self.cluster_context,
+            "cluster_driver": self.cluster_driver,
+            "namespace": self.namespace,
+            "schedulable_nodes": list(self.schedulable_nodes),
+            "gateway_node": self.gateway_node,
+            "sandbox_node": self.sandbox_node,
+            "rwx_storage_class": self.rwx_storage_class,
+            "rwx_volume_uid": self.rwx_volume_uid,
+            "token_review_authenticated": self.token_review_authenticated,
+            "gateway_service_account": self.gateway_service_account,
+            "lease_uid": self.lease_uid,
+            "lease_renewals": self.lease_renewals,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> AcceptedSkillQualificationEnvironmentV2:
+        fields = {
+            "kubernetes_server_version",
+            "cluster_context",
+            "cluster_driver",
+            "namespace",
+            "schedulable_nodes",
+            "gateway_node",
+            "sandbox_node",
+            "rwx_storage_class",
+            "rwx_volume_uid",
+            "token_review_authenticated",
+            "gateway_service_account",
+            "lease_uid",
+            "lease_renewals",
+        }
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError("accepted-skill environment fields are invalid")
+        nodes = value.get("schedulable_nodes")
+        if not isinstance(nodes, list):
+            raise ValueError("schedulable_nodes must be a list")
+        try:
+            return cls(**{**value, "schedulable_nodes": tuple(nodes)})
+        except (TypeError, ValueError) as exc:
+            raise ValueError("accepted-skill environment values are invalid") from exc
+
+
+@dataclass(frozen=True)
+class AcceptedSkillMaterialEvidenceV2:
+    """Digests and bounds for the deterministic nonempty accepted skill."""
+
+    skill_name: str
+    snapshot_digest: str
+    skill_tree_digest: str
+    allowed_tool_policy_digest: str
+    file_count: int
+    total_bytes: int
+    materialization_digest: str
+    receipt_digest: str
+
+    def __post_init__(self) -> None:
+        if _SAFE_ID.fullmatch(self.skill_name) is None:
+            raise ValueError("qualified skill name is invalid")
+        for field_name in (
+            "snapshot_digest",
+            "skill_tree_digest",
+            "allowed_tool_policy_digest",
+            "materialization_digest",
+            "receipt_digest",
+        ):
+            _require_sha256(getattr(self, field_name), name=field_name)
+        if type(self.file_count) is not int or not 1 <= self.file_count <= 4096:
+            raise ValueError("qualified skill must contain a bounded nonempty file set")
+        if type(self.total_bytes) is not int or not 1 <= self.total_bytes <= 64 * 1024 * 1024:
+            raise ValueError("qualified skill bytes are invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "skill_name": self.skill_name,
+            "snapshot_digest": self.snapshot_digest,
+            "skill_tree_digest": self.skill_tree_digest,
+            "allowed_tool_policy_digest": self.allowed_tool_policy_digest,
+            "file_count": self.file_count,
+            "total_bytes": self.total_bytes,
+            "materialization_digest": self.materialization_digest,
+            "receipt_digest": self.receipt_digest,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> AcceptedSkillMaterialEvidenceV2:
+        fields = {
+            "skill_name",
+            "snapshot_digest",
+            "skill_tree_digest",
+            "allowed_tool_policy_digest",
+            "file_count",
+            "total_bytes",
+            "materialization_digest",
+            "receipt_digest",
+        }
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError("accepted-skill material fields are invalid")
+        try:
+            return cls(**value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("accepted-skill material values are invalid") from exc
+
+
+@dataclass(frozen=True)
+class KubernetesAcceptedSkillQualificationEvidenceV2:
+    """Strict proof of live cross-node nonempty ``rwx_verified_copy_v2`` use."""
+
+    REQUIRED_SCENARIOS: ClassVar[tuple[str, ...]] = ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2
+    API_VERSION: ClassVar[str] = ACCEPTED_SKILL_QUALIFICATION_EVIDENCE_API_VERSION_V2
+    SCOPE: ClassVar[str] = ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2
+
+    qualification_id: str
+    gateway_image_reference: str
+    gateway_image_digest: str
+    provisioner_image_reference: str
+    provisioner_image_digest: str
+    verifier_image_reference: str
+    verifier_image_digest: str
+    sandbox_image_reference: str
+    sandbox_image_digest: str
+    chart_version: str
+    chart_digest: str
+    configuration_digest: str
+    migration_head: str
+    environment: AcceptedSkillQualificationEnvironmentV2
+    material: AcceptedSkillMaterialEvidenceV2
+    scenarios: tuple[AcceptedSkillScenarioEvidenceV2, ...]
+    completed_at: datetime
+
+    def __post_init__(self) -> None:
+        if _SAFE_ID.fullmatch(self.qualification_id) is None:
+            raise ValueError("qualification_id is invalid")
+        for name in ("gateway_image", "provisioner_image", "verifier_image", "sandbox_image"):
+            _require_image_reference(
+                getattr(self, f"{name}_reference"),
+                getattr(self, f"{name}_digest"),
+                name=name,
+            )
+        if self.verifier_image_reference != self.provisioner_image_reference or self.verifier_image_digest != self.provisioner_image_digest:
+            raise ValueError(
+                "verifier image must exactly match the provisioner image",
+            )
+        _bounded_safe(self.chart_version, name="chart_version", limit=256)
+        _bounded_safe(self.migration_head, name="migration_head", limit=256)
+        _require_sha256(self.chart_digest, name="chart_digest")
+        _require_sha256(self.configuration_digest, name="configuration_digest")
+        if not isinstance(self.environment, AcceptedSkillQualificationEnvironmentV2):
+            raise TypeError("accepted-skill environment evidence is invalid")
+        if not isinstance(self.material, AcceptedSkillMaterialEvidenceV2):
+            raise TypeError("accepted-skill material evidence is invalid")
+        scenarios = tuple(self.scenarios)
+        if tuple(item.name for item in scenarios) != self.REQUIRED_SCENARIOS:
+            raise ValueError("accepted-skill scenario coverage is incomplete or out of order")
+        if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
+            raise ValueError("completed_at must be timezone-aware")
+        object.__setattr__(self, "scenarios", scenarios)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "api_version": self.API_VERSION,
+            "kind": QUALIFICATION_EVIDENCE_KIND,
+            "status": "passed",
+            "scope": self.SCOPE,
+            "qualification_id": self.qualification_id,
+            "artifacts": {
+                "gateway_image_reference": self.gateway_image_reference,
+                "gateway_image_digest": self.gateway_image_digest,
+                "provisioner_image_reference": self.provisioner_image_reference,
+                "provisioner_image_digest": self.provisioner_image_digest,
+                "verifier_image_reference": self.verifier_image_reference,
+                "verifier_image_digest": self.verifier_image_digest,
+                "sandbox_image_reference": self.sandbox_image_reference,
+                "sandbox_image_digest": self.sandbox_image_digest,
+                "chart_version": self.chart_version,
+                "chart_digest": self.chart_digest,
+                "configuration_digest": self.configuration_digest,
+                "migration_head": self.migration_head,
+            },
+            "environment": self.environment.to_dict(),
+            "material": self.material.to_dict(),
+            "scenarios": [item.to_dict() for item in self.scenarios],
+            "completed_at": self.completed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        }
+
+    def canonical_bytes(self) -> bytes:
+        payload = _canonical_json_bytes(self.to_dict())
+        if len(payload) > MAX_QUALIFICATION_EVIDENCE_BYTES:
+            raise ValueError("qualification evidence exceeds 64 KiB")
+        return payload
+
+    @classmethod
+    def from_dict(cls, value: object) -> KubernetesAcceptedSkillQualificationEvidenceV2:
+        fields = {
+            "api_version",
+            "kind",
+            "status",
+            "scope",
+            "qualification_id",
+            "artifacts",
+            "environment",
+            "material",
+            "scenarios",
+            "completed_at",
+        }
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError("accepted-skill evidence fields are invalid")
+        if value["api_version"] != cls.API_VERSION or value["kind"] != QUALIFICATION_EVIDENCE_KIND or value["status"] != "passed" or value["scope"] != cls.SCOPE:
+            raise ValueError("accepted-skill evidence discriminator is invalid")
+        artifacts = value["artifacts"]
+        artifact_fields = {
+            "gateway_image_reference",
+            "gateway_image_digest",
+            "provisioner_image_reference",
+            "provisioner_image_digest",
+            "verifier_image_reference",
+            "verifier_image_digest",
+            "sandbox_image_reference",
+            "sandbox_image_digest",
+            "chart_version",
+            "chart_digest",
+            "configuration_digest",
+            "migration_head",
+        }
+        scenarios = value["scenarios"]
+        if not isinstance(artifacts, dict) or set(artifacts) != artifact_fields:
+            raise ValueError("accepted-skill artifact fields are invalid")
+        if not isinstance(scenarios, list) or len(scenarios) > 32:
+            raise ValueError("accepted-skill scenarios must be a bounded list")
+        completed_at_raw = value["completed_at"]
+        if not isinstance(completed_at_raw, str) or len(completed_at_raw) > 64 or _RFC3339.fullmatch(completed_at_raw) is None:
+            raise ValueError("completed_at must be a bounded RFC3339 timestamp")
+        try:
+            return cls(
+                qualification_id=value["qualification_id"],
+                **artifacts,
+                environment=AcceptedSkillQualificationEnvironmentV2.from_dict(value["environment"]),
+                material=AcceptedSkillMaterialEvidenceV2.from_dict(value["material"]),
+                scenarios=tuple(AcceptedSkillScenarioEvidenceV2.from_dict(item) for item in scenarios),
+                completed_at=datetime.fromisoformat(completed_at_raw.replace("Z", "+00:00")),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            if isinstance(exc, ValueError) and "scenario coverage" in str(exc):
+                raise
+            raise ValueError("accepted-skill evidence values are invalid") from exc
+
+    @classmethod
+    def from_bytes(cls, payload: bytes) -> KubernetesAcceptedSkillQualificationEvidenceV2:
+        value = _parse_canonical_qualification_json(payload)
+        evidence = cls.from_dict(value)
+        if payload != evidence.canonical_bytes():
+            raise ValueError("qualification evidence is not canonical v2 JSON")
+        return evidence
+
+    def write(self, path: Path) -> None:
+        write_qualification_evidence(path, self.canonical_bytes())
 
 
 @dataclass(frozen=True)
@@ -409,18 +814,7 @@ class KubernetesQualificationEvidence:
     def from_bytes(cls, payload: bytes) -> KubernetesQualificationEvidence:
         """Parse one bounded canonical artifact and reject alternate encodings."""
 
-        if not isinstance(payload, bytes) or not payload:
-            raise ValueError("qualification evidence must be non-empty bytes")
-        if len(payload) > MAX_QUALIFICATION_EVIDENCE_BYTES:
-            raise ValueError("qualification evidence exceeds 64 KiB")
-        try:
-            value = json.loads(
-                payload.decode("utf-8"),
-                object_pairs_hook=_reject_duplicate_object_fields,
-                parse_constant=_reject_non_finite_number,
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-            raise ValueError("qualification evidence must be valid UTF-8 JSON") from exc
+        value = _parse_canonical_qualification_json(payload)
         evidence = cls.from_dict(value)
         if payload != evidence.canonical_bytes():
             raise ValueError("qualification evidence is not canonical v1 JSON")
@@ -564,6 +958,51 @@ class QualificationEvidenceExpectation:
         object.__setattr__(self, "required_scenarios", scenarios)
 
 
+@dataclass(frozen=True)
+class AcceptedSkillQualificationExpectationV2:
+    """Independent subjects required for live accepted-skill evidence v2."""
+
+    qualification_id: str
+    gateway_image_digest: str
+    provisioner_image_digest: str
+    verifier_image_digest: str
+    sandbox_image_digest: str
+    chart_version: str
+    chart_digest: str
+    configuration_digest: str
+    migration_head: str
+    scope: str
+    namespace: str
+    required_scenarios: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if _SAFE_ID.fullmatch(self.qualification_id) is None:
+            raise ValueError("expected qualification_id is invalid")
+        for field_name in (
+            "gateway_image_digest",
+            "provisioner_image_digest",
+            "verifier_image_digest",
+            "sandbox_image_digest",
+            "chart_digest",
+            "configuration_digest",
+        ):
+            _require_sha256(getattr(self, field_name), name=f"expected {field_name}")
+        if self.verifier_image_digest != self.provisioner_image_digest:
+            raise ValueError(
+                "expected verifier image must exactly match the provisioner image",
+            )
+        _bounded_safe(self.chart_version, name="expected chart_version", limit=256)
+        _bounded_safe(self.migration_head, name="expected migration_head", limit=256)
+        if self.scope != ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2:
+            raise ValueError("expected accepted-skill scope is invalid")
+        if _SAFE_NAMESPACE.fullmatch(self.namespace) is None:
+            raise ValueError("expected namespace is invalid")
+        scenarios = tuple(self.required_scenarios)
+        if scenarios != ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2:
+            raise ValueError("expected accepted-skill scenarios are invalid")
+        object.__setattr__(self, "required_scenarios", scenarios)
+
+
 class QualificationVerificationError(ValueError):
     """Safe verifier failure carrying one stable machine-readable code."""
 
@@ -598,7 +1037,7 @@ def verify_qualification_evidence(
     artifact: bytes,
     *,
     declared_digest: str,
-    expected: QualificationEvidenceExpectation,
+    expected: QualificationEvidenceExpectation | AcceptedSkillQualificationExpectationV2,
 ) -> QualificationVerificationResult:
     """Verify digest before parsing, then require exact independent subjects."""
 
@@ -611,9 +1050,36 @@ def verify_qualification_evidence(
     if actual_digest != declared_digest:
         raise QualificationVerificationError("artifact_digest_mismatch")
     try:
-        evidence = KubernetesQualificationEvidence.from_bytes(artifact)
+        evidence = KubernetesAcceptedSkillQualificationEvidenceV2.from_bytes(artifact) if isinstance(expected, AcceptedSkillQualificationExpectationV2) else KubernetesQualificationEvidence.from_bytes(artifact)
     except (TypeError, ValueError) as exc:
         raise QualificationVerificationError("artifact_invalid") from exc
+    if isinstance(expected, AcceptedSkillQualificationExpectationV2):
+        if not isinstance(evidence, KubernetesAcceptedSkillQualificationEvidenceV2):
+            raise QualificationVerificationError("artifact_invalid")
+        subjects = {
+            "qualification_id": evidence.qualification_id,
+            "gateway_image_digest": evidence.gateway_image_digest,
+            "provisioner_image_digest": evidence.provisioner_image_digest,
+            "verifier_image_digest": evidence.verifier_image_digest,
+            "sandbox_image_digest": evidence.sandbox_image_digest,
+            "chart_version": evidence.chart_version,
+            "chart_digest": evidence.chart_digest,
+            "configuration_digest": evidence.configuration_digest,
+            "migration_head": evidence.migration_head,
+            "scope": evidence.SCOPE,
+            "namespace": evidence.environment.namespace,
+        }
+        if any(subjects[name] != getattr(expected, name) for name in subjects):
+            raise QualificationVerificationError("subject_mismatch")
+        if tuple(item.name for item in evidence.scenarios) != expected.required_scenarios:
+            raise QualificationVerificationError("scenario_mismatch")
+        return QualificationVerificationResult(
+            qualification_id=evidence.qualification_id,
+            scope=evidence.SCOPE,
+            artifact_digest=actual_digest,
+        )
+    if not isinstance(evidence, KubernetesQualificationEvidence):
+        raise QualificationVerificationError("artifact_invalid")
     subjects = {
         "qualification_id": evidence.qualification_id,
         "image_digest": evidence.image_digest,
@@ -636,6 +1102,14 @@ def verify_qualification_evidence(
 
 
 __all__ = [
+    "ACCEPTED_SKILL_QUALIFICATION_EVIDENCE_API_VERSION_V2",
+    "ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2",
+    "ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2",
+    "AcceptedSkillMaterialEvidenceV2",
+    "AcceptedSkillQualificationEnvironmentV2",
+    "AcceptedSkillQualificationExpectationV2",
+    "AcceptedSkillScenarioEvidenceV2",
+    "KubernetesAcceptedSkillQualificationEvidenceV2",
     "KubernetesQualificationEvidence",
     "KubernetesQualificationFailureEvidence",
     "MAX_QUALIFICATION_EVIDENCE_BYTES",

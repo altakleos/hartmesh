@@ -15,7 +15,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 import sqlalchemy as sa
@@ -23,6 +22,7 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from support.postgres import postgres_async_url
 
 import deerflow.persistence.models  # noqa: F401
 from app.channels.inbound_receipts import (
@@ -213,18 +213,37 @@ _LEGACY_COLUMNS = (
 )
 
 
-def _postgres_async_url(url: str) -> str:
-    if url.startswith("postgresql://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
-    parts = urlsplit(url)
-    query = urlencode((key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key not in {"sslmode", "channel_binding"})
-    return urlunsplit(parts._replace(query=query))
+def _revision_at_least(revision: str, introduced_at: str) -> bool:
+    return _INVOCATION_REVISIONS.index(revision) >= _INVOCATION_REVISIONS.index(introduced_at)
+
+
+def _lifecycle_cursor_columns_at(revision: str) -> dict[str, tuple[str, int | None, bool]]:
+    columns = dict(_LIFECYCLE_CURSOR_COLUMNS)
+    if not _revision_at_least(revision, "0017_lifecycle_integrity"):
+        columns.pop("retained_count")
+    return columns
+
+
+def _inbound_receipt_columns_at(revision: str) -> dict[str, tuple[str, int | None, bool]]:
+    columns = dict(_INBOUND_RECEIPT_COLUMNS)
+    if not _revision_at_least(revision, "0018_inbound_receipt_failures"):
+        columns.pop("failure_count")
+    if not _revision_at_least(revision, "0019_inbound_event_identity"):
+        columns.pop("provider_event_digest")
+    return columns
+
+
+def _legacy_null_predicate(revision: str) -> str | None:
+    columns = _REVISION_COLUMNS[revision]
+    if not columns:
+        return None
+    return " OR ".join(f"{name} IS NOT NULL" for name in sorted(columns))
 
 
 @asynccontextmanager
 async def _isolated_postgres_schema() -> AsyncIterator[tuple[str, AsyncEngine]]:
     assert _POSTGRES_URL is not None
-    database_url = _postgres_async_url(_POSTGRES_URL)
+    database_url = postgres_async_url(_POSTGRES_URL)
     admin_engine = create_async_engine(database_url)
     schema = f"invocation_migration_{uuid.uuid4().hex}"
     async with admin_engine.begin() as connection:
@@ -388,9 +407,6 @@ async def _mcp_task_snapshot(engine: AsyncEngine) -> dict[str, object]:
 
 
 async def _assert_revision_columns(engine: AsyncEngine, schema: str, revision: str) -> None:
-    if revision == "0015_inbound_receipts":
-        await _assert_inbound_receipt_ddl(engine, schema)
-        return
     columns = await _column_contract(engine, schema, "runs")
     for name in _REVISION_COLUMNS[revision]:
         assert columns[name][:3] == _ACCEPTED_COLUMNS[name]
@@ -398,9 +414,13 @@ async def _assert_revision_columns(engine: AsyncEngine, schema: str, revision: s
         if revision == "0013_invocation_lifecycle":
             assert columns["state_version"][3] == "0"
             assert await connection.scalar(sa.text("SELECT count(*) FROM runs WHERE run_id LIKE 'legacy-%' AND state_version <> 0")) == 0
-        else:
-            introduced_values = " OR ".join(f"{name} IS NOT NULL" for name in sorted(_REVISION_COLUMNS[revision]))
+        elif introduced_values := _legacy_null_predicate(revision):
             assert await connection.scalar(sa.text(f"SELECT count(*) FROM runs WHERE run_id LIKE 'legacy-%' AND ({introduced_values})")) == 0
+
+    if revision in {"0013_invocation_lifecycle", "0017_lifecycle_integrity"}:
+        await _assert_lifecycle_ddl(engine, schema, revision=revision)
+    elif revision in {"0015_inbound_receipts", "0018_inbound_receipt_failures", "0019_inbound_event_identity"}:
+        await _assert_inbound_receipt_ddl(engine, schema, revision=revision)
 
 
 async def _assert_idempotency_ddl(engine: AsyncEngine, schema: str) -> None:
@@ -426,10 +446,12 @@ async def _assert_idempotency_ddl(engine: AsyncEngine, schema: str) -> None:
     )
 
 
-async def _assert_lifecycle_ddl(engine: AsyncEngine, schema: str) -> None:
+async def _assert_lifecycle_ddl(engine: AsyncEngine, schema: str, *, revision: str = "0019_inbound_event_identity") -> None:
     cursor_columns = await _column_contract(engine, schema, "run_lifecycle_cursor_state")
-    for name, expected in _LIFECYCLE_CURSOR_COLUMNS.items():
+    expected_cursor_columns = _lifecycle_cursor_columns_at(revision)
+    for name, expected in expected_cursor_columns.items():
         assert cursor_columns[name][:3] == expected
+    assert ("retained_count" in cursor_columns) is _revision_at_least(revision, "0017_lifecycle_integrity")
     assert cursor_columns["last_cursor"][3] == "0"
     assert cursor_columns["pruned_through"][3] == "0"
 
@@ -448,8 +470,9 @@ async def _assert_lifecycle_ddl(engine: AsyncEngine, schema: str) -> None:
         "ck_run_lifecycle_cursor_singleton",
         "ck_run_lifecycle_cursor_nonnegative",
         "ck_run_lifecycle_pruned_range",
-        "ck_run_lifecycle_retained_count_nonnegative",
     }
+    if _revision_at_least(revision, "0017_lifecycle_integrity"):
+        cursor_checks.add("ck_run_lifecycle_retained_count_nonnegative")
     event_checks = {
         "ck_run_lifecycle_event_cursor_positive",
         "ck_run_lifecycle_event_version_positive",
@@ -470,24 +493,33 @@ async def _assert_lifecycle_ddl(engine: AsyncEngine, schema: str) -> None:
         _assert_index_definition(indexes, name, columns)
 
     async with engine.connect() as connection:
-        singleton = (await connection.execute(sa.text("SELECT singleton_id, last_cursor, pruned_through, retained_count FROM run_lifecycle_cursor_state"))).one()
-    assert tuple(singleton) == (1, 0, 0, 0)
+        singleton = (await connection.execute(sa.text(f"SELECT {', '.join(expected_cursor_columns)} FROM run_lifecycle_cursor_state"))).one()
+    assert tuple(singleton) == tuple(1 if name == "singleton_id" else 0 for name in expected_cursor_columns)
 
 
-async def _assert_inbound_receipt_ddl(engine: AsyncEngine, schema: str) -> None:
+async def _assert_inbound_receipt_ddl(engine: AsyncEngine, schema: str, *, revision: str = "0019_inbound_event_identity") -> None:
     columns = await _column_contract(engine, schema, "inbound_receipts")
-    for name, expected in _INBOUND_RECEIPT_COLUMNS.items():
+    expected_columns = _inbound_receipt_columns_at(revision)
+    for name, expected in expected_columns.items():
         assert columns[name][:3] == expected
+    assert ("failure_count" in columns) is _revision_at_least(revision, "0018_inbound_receipt_failures")
+    assert ("provider_event_digest" in columns) is _revision_at_least(revision, "0019_inbound_event_identity")
     constraints, indexes = await _schema_names(engine, schema)
-    assert {
+    expected_constraints = {
         "ck_inbound_receipts_state",
         "ck_inbound_receipts_counters_nonnegative",
         "ck_inbound_receipts_claim_has_lease",
         "ck_inbound_receipts_admitted_has_run",
         "ck_inbound_receipts_identity_bounds",
         "ck_inbound_receipts_digest_format",
-        "ck_inbound_receipts_provider_event_digest_format",
-    } <= constraints["inbound_receipts"]
+    }
+    if _revision_at_least(revision, "0019_inbound_event_identity"):
+        expected_constraints.add("ck_inbound_receipts_provider_event_digest_format")
+    assert expected_constraints <= constraints["inbound_receipts"]
+    assert ("ck_inbound_receipts_provider_event_digest_format" in constraints["inbound_receipts"]) is _revision_at_least(revision, "0019_inbound_event_identity")
+    definitions = await _constraint_definitions(engine, schema, "inbound_receipts")
+    counter_definition = _normalized_ddl(definitions["ck_inbound_receipts_counters_nonnegative"][1])
+    assert ("failure_count" in counter_definition) is _revision_at_least(revision, "0018_inbound_receipt_failures")
     for name, index_columns in {
         "ix_inbound_receipts_due": (
             "state",
@@ -810,6 +842,35 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     assert accepted.down_revision == "0011_mcp_tasks"
     assert _PRE_FEATURE_REVISION == accepted.down_revision
     assert _INVOCATION_REVISIONS[0] == accepted.revision
+    actual_tail = tuple(revision.revision for revision in reversed(list(script.iterate_revisions("head", _PRE_FEATURE_REVISION))))
+    assert actual_tail == _INVOCATION_REVISIONS
+
+
+def test_intermediate_revision_contracts_exclude_future_schema() -> None:
+    assert "retained_count" not in _lifecycle_cursor_columns_at("0013_invocation_lifecycle")
+    assert "retained_count" in _lifecycle_cursor_columns_at("0017_lifecycle_integrity")
+
+    receipt_v1 = _inbound_receipt_columns_at("0015_inbound_receipts")
+    receipt_failures = _inbound_receipt_columns_at("0018_inbound_receipt_failures")
+    receipt_identity = _inbound_receipt_columns_at("0019_inbound_event_identity")
+    assert "failure_count" not in receipt_v1
+    assert "provider_event_digest" not in receipt_v1
+    assert "failure_count" in receipt_failures
+    assert "provider_event_digest" not in receipt_failures
+    assert "provider_event_digest" in receipt_identity
+
+
+@pytest.mark.parametrize(
+    "revision",
+    (
+        "0015_inbound_receipts",
+        "0017_lifecycle_integrity",
+        "0018_inbound_receipt_failures",
+        "0019_inbound_event_identity",
+    ),
+)
+def test_revision_without_run_columns_has_no_empty_legacy_predicate(revision: str) -> None:
+    assert _legacy_null_predicate(revision) is None
 
 
 @pytest.mark.anyio
@@ -1019,8 +1080,6 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
                 assert await connection.scalar(sa.text("SELECT count(*) FROM runs")) == 2
             if revision == "0012_invocation_idempotency":
                 await _assert_idempotency_ddl(engine, schema)
-            elif revision == "0013_invocation_lifecycle":
-                await _assert_lifecycle_ddl(engine, schema)
 
         await _assert_postgres_head_contract(engine, schema)
 

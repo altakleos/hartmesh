@@ -194,6 +194,7 @@ class DatabaseConfig(BaseModel):
     command_timeout: float | None = Field(
         default=30,
         gt=0,
+        allow_inf_nan=False,
         description="Timeout in seconds for app ORM PostgreSQL commands. Set to null to disable the command timeout.",
     )
     postgres_schema: str = Field(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import json
@@ -2150,7 +2151,15 @@ async def test_accepted_attempt_renews_only_after_authoritative_run_lease() -> N
         store=store,
         run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True),
     )
-    record = await manager.create_or_reject("thread-evidence")
+    record = await manager.create_or_reject(
+        "thread-evidence",
+        candidate_run_id="44444444-4444-4444-8444-444444444444",
+    )
+    task = await manager.attach_worker_once(
+        record.run_id,
+        asyncio.sleep(3600),
+        asyncio.create_task,
+    )
     evidence = AcceptedSkillExecutionEvidenceV1(
         profile="rwx_verified_copy_v1",
         attempt_id="sandbox-attempt",
@@ -2177,6 +2186,8 @@ async def test_accepted_attempt_renews_only_after_authoritative_run_lease() -> N
 
     renew.assert_awaited_once_with()
     assert record.ownership_lost is False
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -2186,7 +2197,15 @@ async def test_rejected_accepted_attempt_renewal_fences_the_running_worker() -> 
         store=store,
         run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True),
     )
-    record = await manager.create_or_reject("thread-evidence")
+    record = await manager.create_or_reject(
+        "thread-evidence",
+        candidate_run_id="55555555-5555-4555-8555-555555555555",
+    )
+    task = await manager.attach_worker_once(
+        record.run_id,
+        asyncio.sleep(3600),
+        asyncio.create_task,
+    )
     assert await manager.try_start(record.run_id) is RunStartOutcome.started
     renew = AsyncMock(return_value=False)
     await manager.set_execution_lease_renewal(record.run_id, renew)
@@ -2196,3 +2215,6 @@ async def test_rejected_accepted_attempt_renewal_fences_the_running_worker() -> 
     renew.assert_awaited_once_with()
     assert record.ownership_lost is True
     assert record.abort_event.is_set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()

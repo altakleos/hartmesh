@@ -145,9 +145,12 @@ class ChannelService:
             invocation_runtime=invocation_runtime,
         )
         self.inbound_receipt_processor = None
+        self.inbound_receipt_operations = None
         if _uses_postgres_receipts(app_config):
+            from app.channels.inbound_receipt_operations import InboundReceiptOperations
             from app.channels.inbound_receipts import (
                 InboundReceiptProcessor,
+                InboundReceiptWakeup,
                 SqlInboundReceiptStore,
             )
             from deerflow.persistence.engine import get_session_factory
@@ -155,10 +158,19 @@ class ChannelService:
             session_factory = get_session_factory()
             if session_factory is None:
                 raise RuntimeError("PostgreSQL inbound receipt storage is unavailable")
+            receipt_store = SqlInboundReceiptStore(session_factory)
             self.inbound_receipt_processor = InboundReceiptProcessor(
-                store=SqlInboundReceiptStore(session_factory),
+                store=receipt_store,
                 publish_wakeup=self.bus.publish_receipt_wakeup,
                 process_message=self.manager.process_inbound_receipt_message,
+            )
+
+            async def publish_operator_wakeup(receipt_id: str) -> None:
+                await self.bus.publish_receipt_wakeup(InboundReceiptWakeup(receipt_id))
+
+            self.inbound_receipt_operations = InboundReceiptOperations(
+                store=receipt_store,
+                publish_wakeup=publish_operator_wakeup,
             )
             self.manager.set_inbound_receipt_processor(self.inbound_receipt_processor)
         self._channels: dict[str, Any] = {}  # name -> Channel instance

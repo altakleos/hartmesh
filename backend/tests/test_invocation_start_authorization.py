@@ -142,9 +142,14 @@ class _Runs:
     async def prepare_admission(self, _launch):
         self.events.append("prepare")
 
-    async def admit(self, _launch):
+    async def admit(self, _launch, *, candidate_run_id):
         self.events.append("admit")
+        self.record.run_id = candidate_run_id
         return DurableAdmission(self.record, self.admission_outcome)
+
+    async def attach_worker(self, record, worker, task_factory):
+        record.task = task_factory(worker)
+        return record.task
 
     async def find_by_external_identity(self, _identity):
         self.events.append("lookup")
@@ -384,11 +389,12 @@ async def test_concurrent_first_callers_consult_start_but_only_creator_attaches(
             async with self.lock:
                 yield
 
-        async def admit(self, _launch):
+        async def admit(self, _launch, *, candidate_run_id):
             self.events.append("admit")
             if self.created:
                 return DurableAdmission(self.record, AdmissionOutcome.known_same)
             self.created = True
+            self.record.run_id = candidate_run_id
             return DurableAdmission(self.record, AdmissionOutcome.created)
 
     runs = RacingRuns(events)
@@ -440,10 +446,11 @@ async def test_allowed_start_evidence_is_attached_before_durable_admission() -> 
             return InternalAuthorizationDecision.allowed(evidence=evidence)
 
     class CapturingRuns(_Runs):
-        async def admit(self, launch):
+        async def admit(self, launch, *, candidate_run_id):
             self.events.append("admit")
             assert launch.accepted_invocation is not accepted
             assert launch.accepted_invocation.to_persisted()["decision_evidence_json"] == evidence
+            self.record.run_id = candidate_run_id
             return DurableAdmission(self.record, AdmissionOutcome.created)
 
     runs = CapturingRuns(events)

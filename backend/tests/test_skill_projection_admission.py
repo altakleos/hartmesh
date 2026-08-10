@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -134,7 +135,10 @@ async def test_atomic_replacement_commits_while_old_projection_remains_exclusive
     try:
         async with adapter.admission_scope(thread_id):
             await adapter.prepare_admission(launch)
-            admitted = await adapter.admit(launch)
+            admitted = await adapter.admit(
+                launch,
+                candidate_run_id=str(uuid.uuid4()),
+            )
 
         assert admitted.outcome is AdmissionOutcome.created
         old_row = await store.get(old.run_id)
@@ -220,7 +224,10 @@ async def test_atomic_replacement_promotes_after_unactivated_owner_is_superseded
     try:
         async with adapter.admission_scope(thread_id):
             await adapter.prepare_admission(launch)
-            admitted = await adapter.admit(launch)
+            admitted = await adapter.admit(
+                launch,
+                candidate_run_id=str(uuid.uuid4()),
+            )
 
         assert admitted.outcome is AdmissionOutcome.created
         assert coordinator.release_unactivated_run(
@@ -273,7 +280,10 @@ async def test_known_key_under_lock_bypasses_projection_busy_and_seed(
     try:
         async with adapter.admission_scope(thread_id):
             await adapter.prepare_admission(launch)
-            admitted = await adapter.admit(launch)
+            admitted = await adapter.admit(
+                launch,
+                candidate_run_id=str(uuid.uuid4()),
+            )
         assert admitted.outcome is AdmissionOutcome.known_same
         seed.assert_not_awaited()
         manager.ensure_or_reject.assert_awaited_once()
@@ -332,7 +342,10 @@ async def test_concurrent_equal_key_loser_rechecks_under_lock_and_converges(
         launch = (launch_one, launch_two)[index]
         async with adapter.admission_scope(thread_id):
             await adapter.prepare_admission(launch)
-            return await adapter.admit(launch)
+            return await adapter.admit(
+                launch,
+                candidate_run_id=str(uuid.uuid4()),
+            )
 
     outcomes = await asyncio.gather(admit(0), admit(1))
     assert [item.outcome for item in outcomes] == [
@@ -398,7 +411,10 @@ async def test_unkeyed_admission_cancellation_aborts_unpromoted_projection(
     with pytest.raises(asyncio.CancelledError):
         async with adapter.admission_scope(thread_id):
             await adapter.prepare_admission(launch)
-            await adapter.admit(launch)
+            await adapter.admit(
+                launch,
+                candidate_run_id=str(uuid.uuid4()),
+            )
 
     assert not get_skill_projection_coordinator().is_busy(
         user_id="projection-owner",
@@ -407,7 +423,7 @@ async def test_unkeyed_admission_cancellation_aborts_unpromoted_projection(
 
 
 @pytest.mark.asyncio
-async def test_caller_cancellation_waits_for_bounded_created_admission_ownership(
+async def test_gateway_does_not_detach_or_reclassify_cancelled_admission(
     monkeypatch,
 ) -> None:
     thread_id = "projection-created-during-cancel"
@@ -438,39 +454,23 @@ async def test_caller_cancellation_waits_for_bounded_created_admission_ownership
 
     async with adapter.admission_scope(thread_id):
         await adapter.prepare_admission(launch)
-        admission_task = asyncio.create_task(adapter.admit(launch))
+        admission_task = asyncio.create_task(
+            adapter.admit(
+                launch,
+                candidate_run_id=str(uuid.uuid4()),
+            )
+        )
         await started.wait()
         admission_task.cancel()
         release.set()
-        admitted = await admission_task
+        with pytest.raises(asyncio.CancelledError):
+            await admission_task
 
-    assert admitted.outcome is AdmissionOutcome.created
-    assert get_skill_projection_coordinator().release_unactivated_run(
+    assert not get_skill_projection_coordinator().release_unactivated_run(
         user_id="projection-owner",
         thread_id=thread_id,
         run_id=record.run_id,
     )
-
-
-@pytest.mark.asyncio
-async def test_cancellation_resolution_window_is_bounded() -> None:
-    release = asyncio.Event()
-
-    async def hung_operation():
-        await release.wait()
-
-    task = asyncio.create_task(
-        services._GatewayDurableRuns._resolve_cancellation_safe(
-            hung_operation(),
-            resolution_seconds=0.01,
-        )
-    )
-    await asyncio.sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    release.set()
-    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -494,7 +494,10 @@ async def test_keyed_evidence_validation_aborts_prepared_projection(
     async with adapter.admission_scope(thread_id):
         await adapter.prepare_admission(launch)
         with pytest.raises(RuntimeError, match="canonical admission evidence"):
-            await adapter.admit(launch)
+            await adapter.admit(
+                launch,
+                candidate_run_id=str(uuid.uuid4()),
+            )
 
     assert not get_skill_projection_coordinator().is_busy(
         user_id="projection-owner",
@@ -504,7 +507,7 @@ async def test_keyed_evidence_validation_aborts_prepared_projection(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [OSError, asyncio.CancelledError])
-async def test_ambiguous_keyed_admission_recovers_committed_row_without_creator_claim(
+async def test_gateway_does_not_guess_creator_ownership_after_admission_failure(
     monkeypatch,
     failure,
 ) -> None:
@@ -541,12 +544,65 @@ async def test_ambiguous_keyed_admission_recovers_committed_row_without_creator_
 
     async with adapter.admission_scope(thread_id):
         await adapter.prepare_admission(launch)
-        admitted = await adapter.admit(launch)
+        with pytest.raises(failure):
+            await adapter.admit(
+                launch,
+                candidate_run_id=str(uuid.uuid4()),
+            )
 
-    assert admitted.outcome is AdmissionOutcome.known_same
-    assert admitted.record is record
-    assert manager.lookup_count == 2
+    assert manager.lookup_count == 1
     assert not get_skill_projection_coordinator().is_busy(
         user_id="projection-owner",
         thread_id=thread_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_gateway_real_manager_recovers_response_lost_creator_by_candidate_id(
+    monkeypatch,
+) -> None:
+    thread_id = "projection-response-lost-creator"
+    candidate_run_id = "773be6ee-2915-45e1-af81-84a6694fd712"
+
+    class _ResponseLostStore(MemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lose_response = True
+
+        async def ensure_run_atomic(self, run_id, **kwargs):
+            result = await super().ensure_run_atomic(run_id, **kwargs)
+            if self.lose_response:
+                self.lose_response = False
+                raise OSError("lost after commit")
+            return result
+
+    manager = RunManager(store=_ResponseLostStore())
+    monkeypatch.setattr(services, "get_run_manager", lambda _request: manager)
+    monkeypatch.setattr(
+        services,
+        "ensure_checkpoint_history_seeded",
+        AsyncMock(),
+    )
+    adapter = services._GatewayDurableRuns(SimpleNamespace())
+    launch = _launch(thread_id=thread_id, external_key="response-lost-key")
+
+    try:
+        async with adapter.admission_scope(thread_id):
+            await adapter.prepare_admission(launch)
+            admitted = await adapter.admit(
+                launch,
+                candidate_run_id=candidate_run_id,
+            )
+
+        assert admitted.outcome is AdmissionOutcome.created
+        assert admitted.record.run_id == candidate_run_id
+        assert admitted.record.attachment_supervised is True
+    finally:
+        await adapter.fail_start(
+            await manager.get(candidate_run_id),
+            "worker_attachment_failed",
+        )
+        assert not get_skill_projection_coordinator().is_busy(
+            user_id="projection-owner",
+            thread_id=thread_id,
+        )

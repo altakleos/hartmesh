@@ -219,6 +219,88 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_langgraph_runtime_fallback_does_not_close_after_unproven_run_drain(
+    monkeypatch,
+) -> None:
+    """Direct lifespan fallback retains resources when run drain is unproven."""
+    from fastapi import FastAPI
+
+    from app.gateway.deps import langgraph_runtime
+
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def probe_checkpointer(_config):
+        try:
+            yield object()
+        finally:
+            events.append("checkpointer_closed")
+
+    @asynccontextmanager
+    async def fake_resource(_config):
+        yield object()
+
+    async def fake_close_engine():
+        events.append("engine_closed")
+
+    monkeypatch.setattr(
+        "deerflow.runtime.checkpointer.async_provider.make_checkpointer",
+        probe_checkpointer,
+    )
+    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", fake_resource)
+    monkeypatch.setattr("deerflow.runtime.make_store", fake_resource)
+    monkeypatch.setattr(
+        "deerflow.persistence.engine.init_engine_from_config",
+        lambda _db: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        "deerflow.persistence.engine.close_engine",
+        fake_close_engine,
+    )
+    monkeypatch.setattr(
+        "deerflow.persistence.engine.get_session_factory",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.runtime.events.store.make_run_event_store",
+        lambda _cfg: object(),
+    )
+    monkeypatch.setattr(
+        "deerflow.persistence.thread_meta.make_thread_store",
+        lambda _sf, _store: object(),
+    )
+
+    app = FastAPI()
+    startup_config = SimpleNamespace(
+        database=SimpleNamespace(
+            backend="memory",
+            checkpoint_channel_mode="full",
+            checkpoint_delta=SimpleNamespace(snapshot_frequency=10),
+        ),
+        run_events=None,
+    )
+
+    async with langgraph_runtime(app, startup_config):
+
+        async def unresolved_shutdown(*, timeout: float) -> bool:
+            assert timeout > 0
+            events.append("run_drain_unproven")
+            return False
+
+        app.state.run_manager.shutdown = unresolved_shutdown
+
+    assert events == ["run_drain_unproven"]
+
+    # Explicit safe ownership remains available for a later proven close.
+    await app.state.close_runtime_dependencies()
+    assert events == [
+        "run_drain_unproven",
+        "checkpointer_closed",
+        "engine_closed",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_drain_flushes_real_graph_checkpoint_before_close():
     """End-to-end #3373 guard with a REAL langgraph graph + checkpointer.
 

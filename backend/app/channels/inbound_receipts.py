@@ -25,6 +25,14 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import aliased
 
+from app.channels.inbound_receipt_operations import (
+    INBOUND_RECEIPT_STATES,
+    InboundDeadLetterInspection,
+    InboundDeadLetterRequeueRequest,
+    InboundReceiptOperationsSummary,
+    InboundReceiptStateSummary,
+    validate_inbound_receipt_id,
+)
 from app.channels.message_bus import InboundMessage, InboundMessageType
 from app.runtime.native_binding import (
     InternalVerifiedNativeBinding,
@@ -559,6 +567,160 @@ class SqlInboundReceiptStore:
                     receipts.append(_row_to_receipt(row))
         return tuple(receipts)
 
+    async def summarize_states(
+        self,
+        *,
+        per_state_cap: int,
+        observed_at: datetime,
+    ) -> InboundReceiptOperationsSummary:
+        """Return capped state counts and indexed due ages with bounded reads."""
+
+        if not isinstance(per_state_cap, int) or isinstance(per_state_cap, bool) or not 1 <= per_state_cap <= 1_000:
+            raise ValueError("per_state_cap must be between 1 and 1000")
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("observed_at must be timezone-aware")
+        summaries: list[InboundReceiptStateSummary] = []
+        async with self._session_factory() as session:
+            for state in INBOUND_RECEIPT_STATES:
+                receipt_ids = (
+                    await session.scalars(
+                        select(InboundReceiptRow.receipt_id)
+                        .where(InboundReceiptRow.state == state)
+                        .order_by(
+                            InboundReceiptRow.next_attempt_at,
+                            InboundReceiptRow.received_at,
+                            InboundReceiptRow.receipt_id,
+                        )
+                        .limit(per_state_cap + 1)
+                    )
+                ).all()
+                oldest_due_age: int | None = None
+                if state in {
+                    InboundReceiptState.received.value,
+                    InboundReceiptState.deferred.value,
+                }:
+                    oldest_due = await session.scalar(
+                        select(InboundReceiptRow.next_attempt_at)
+                        .where(
+                            InboundReceiptRow.state == state,
+                            InboundReceiptRow.next_attempt_at <= observed_at,
+                        )
+                        .order_by(
+                            InboundReceiptRow.next_attempt_at,
+                            InboundReceiptRow.received_at,
+                            InboundReceiptRow.receipt_id,
+                        )
+                        .limit(1)
+                    )
+                    if oldest_due is not None:
+                        if oldest_due.tzinfo is None or oldest_due.utcoffset() is None:
+                            oldest_due = oldest_due.replace(tzinfo=UTC)
+                        oldest_due_age = max(
+                            0,
+                            int((observed_at - oldest_due).total_seconds()),
+                        )
+                summaries.append(
+                    InboundReceiptStateSummary(
+                        state=state,
+                        count=min(len(receipt_ids), per_state_cap),
+                        capped=len(receipt_ids) > per_state_cap,
+                        oldest_due_age_seconds=oldest_due_age,
+                    )
+                )
+        return InboundReceiptOperationsSummary(
+            generated_at=observed_at,
+            per_state_cap=per_state_cap,
+            states=tuple(summaries),
+        )
+
+    async def inspect_dead_letter(
+        self,
+        receipt_id: str,
+    ) -> InboundDeadLetterInspection | None:
+        """Read one exact dead letter without loading its retained envelope."""
+
+        validate_inbound_receipt_id(receipt_id)
+        async with self._session_factory() as session:
+            row = (
+                await session.execute(
+                    select(
+                        InboundReceiptRow.receipt_id,
+                        InboundReceiptRow.provider,
+                        InboundReceiptRow.binding_kind,
+                        InboundReceiptRow.thread_id,
+                        InboundReceiptRow.payload_digest,
+                        InboundReceiptRow.provider_event_digest,
+                        InboundReceiptRow.fencing_token,
+                        InboundReceiptRow.attempt_count,
+                        InboundReceiptRow.failure_count,
+                        InboundReceiptRow.outcome_code,
+                        InboundReceiptRow.received_at,
+                        InboundReceiptRow.updated_at,
+                        InboundReceiptRow.completed_at,
+                    ).where(
+                        InboundReceiptRow.receipt_id == receipt_id,
+                        InboundReceiptRow.state == InboundReceiptState.dead_letter.value,
+                        InboundReceiptRow.run_id.is_(None),
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            return None
+        return InboundDeadLetterInspection(
+            receipt_id=row.receipt_id,
+            provider=row.provider,
+            binding_kind=row.binding_kind,
+            thread_id=row.thread_id,
+            payload_digest=row.payload_digest,
+            provider_event_digest=row.provider_event_digest,
+            fencing_token=row.fencing_token,
+            attempt_count=row.attempt_count,
+            failure_count=row.failure_count,
+            outcome_code=row.outcome_code,
+            received_at=row.received_at,
+            updated_at=row.updated_at,
+            completed_at=row.completed_at,
+        )
+
+    async def requeue_dead_letter(
+        self,
+        request: InboundDeadLetterRequeueRequest,
+        *,
+        requeued_at: datetime,
+    ) -> int | None:
+        """CAS one unresolved dead letter back to pending receipt processing."""
+
+        if not isinstance(request, InboundDeadLetterRequeueRequest):
+            raise TypeError("requeue requires an InboundDeadLetterRequeueRequest")
+        if requeued_at.tzinfo is None or requeued_at.utcoffset() is None:
+            raise ValueError("requeued_at must be timezone-aware")
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    update(InboundReceiptRow)
+                    .where(
+                        InboundReceiptRow.receipt_id == request.receipt_id,
+                        InboundReceiptRow.state == InboundReceiptState.dead_letter.value,
+                        InboundReceiptRow.run_id.is_(None),
+                        InboundReceiptRow.fencing_token == request.expected_fencing_token,
+                        InboundReceiptRow.payload_digest == request.expected_payload_digest,
+                        (InboundReceiptRow.provider_event_digest.is_(None) if request.expected_provider_event_digest is None else InboundReceiptRow.provider_event_digest == request.expected_provider_event_digest),
+                    )
+                    .values(
+                        state=InboundReceiptState.deferred.value,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        fencing_token=InboundReceiptRow.fencing_token + 1,
+                        failure_count=0,
+                        next_attempt_at=requeued_at,
+                        outcome_code="operator_requeued",
+                        updated_at=requeued_at,
+                        completed_at=None,
+                    )
+                    .returning(InboundReceiptRow.fencing_token)
+                )
+                return result.scalar_one_or_none()
+
     async def list_due(self, *, limit: int) -> tuple[InboundReceipt, ...]:
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("receipt page limit must be between 1 and 500")
@@ -910,7 +1072,7 @@ class SqlInboundReceiptStore:
                 return result.scalar_one_or_none() is not None
 
     async def cleanup_completed(self, *, older_than: datetime, limit: int) -> int:
-        """Delete at most ``limit`` retained terminal rows older than a cutoff."""
+        """Delete old completed rows; unresolved dead letters require review."""
 
         if older_than.tzinfo is None or older_than.utcoffset() is None:
             raise ValueError("cleanup cutoff must be timezone-aware")
@@ -922,12 +1084,7 @@ class SqlInboundReceiptStore:
                     await session.scalars(
                         select(InboundReceiptRow.receipt_id)
                         .where(
-                            InboundReceiptRow.state.in_(
-                                (
-                                    InboundReceiptState.completed.value,
-                                    InboundReceiptState.dead_letter.value,
-                                )
-                            ),
+                            InboundReceiptRow.state == InboundReceiptState.completed.value,
                             InboundReceiptRow.completed_at < older_than,
                         )
                         .order_by(InboundReceiptRow.completed_at, InboundReceiptRow.receipt_id)
@@ -938,7 +1095,16 @@ class SqlInboundReceiptStore:
                     return 0
                 from sqlalchemy import delete
 
-                result = await session.execute(delete(InboundReceiptRow).where(InboundReceiptRow.receipt_id.in_(ids)))
+                result = await session.execute(
+                    delete(InboundReceiptRow).where(
+                        InboundReceiptRow.receipt_id.in_(ids),
+                        # Repeat the eligibility predicates so a row changed
+                        # between the bounded candidate read and this delete
+                        # cannot be removed under stale assumptions.
+                        InboundReceiptRow.state == InboundReceiptState.completed.value,
+                        InboundReceiptRow.completed_at < older_than,
+                    )
+                )
                 return int(result.rowcount or 0)
 
 
@@ -1160,7 +1326,7 @@ class InboundReceiptProcessor:
             self._retry_delay_seconds * (2 ** max(0, claim.failure_count)),
             60,
         )
-        await self.store.defer_failure(
+        state = await self.store.defer_failure(
             claim.receipt_id,
             lease_owner=self._lease_owner,
             fencing_token=claim.fencing_token,
@@ -1168,6 +1334,12 @@ class InboundReceiptProcessor:
             outcome_code=outcome_code,
             max_failures=self._max_attempts,
         )
+        if state is InboundReceiptState.dead_letter:
+            logger.warning(
+                "inbound receipt terminalized code=inbound_receipt_dead_letter receipt_id=%s fencing_token=%s outcome_code=attempts_exhausted",
+                claim.receipt_id,
+                claim.fencing_token,
+            )
 
     async def _recovery_loop(self) -> None:
         while self._running:

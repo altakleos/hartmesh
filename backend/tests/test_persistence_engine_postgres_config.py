@@ -31,6 +31,14 @@ def test_database_command_timeout_defaults_to_30_seconds() -> None:
     assert config.command_timeout == 30
 
 
+@pytest.mark.parametrize("command_timeout", [float("inf"), float("-inf")])
+def test_database_command_timeout_rejects_non_finite_values(
+    command_timeout: float,
+) -> None:
+    with pytest.raises(ValueError):
+        DatabaseConfig(command_timeout=command_timeout)
+
+
 def test_database_pool_recycle_defaults_to_300_seconds() -> None:
     config = DatabaseConfig()
 

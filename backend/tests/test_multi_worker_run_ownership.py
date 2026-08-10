@@ -615,7 +615,15 @@ async def test_periodic_terminalization_does_not_block_lease_renewal_or_shutdown
         run_ownership_config=_lease_config(heartbeat_enabled=True, lease_seconds=5),
         on_orphans_recovered=on_orphans_recovered,
     )
-    active = await manager.create_or_reject("active-thread")
+    active = await manager.create_or_reject(
+        "active-thread",
+        candidate_run_id="11111111-1111-4111-8111-111111111111",
+    )
+    active_task = await manager.attach_worker_once(
+        active.run_id,
+        asyncio.sleep(3600),
+        asyncio.create_task,
+    )
     await manager.set_status(active.run_id, RunStatus.running)
     original_expiry = active.lease_expires_at
     expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
@@ -643,6 +651,8 @@ async def test_periodic_terminalization_does_not_block_lease_renewal_or_shutdown
     callback_release.set()
     await asyncio.wait_for(shutdown_task, timeout=1.0)
     assert callback_finished.is_set() is True
+    active_task.cancel()
+    await asyncio.gather(active_task, return_exceptions=True)
 
 
 @pytest.mark.anyio
@@ -673,7 +683,15 @@ async def test_periodic_store_scan_does_not_block_real_heartbeat_loop():
         store=store,
         run_ownership_config=_lease_config(heartbeat_enabled=True, lease_seconds=5),
     )
-    active = await manager.create_or_reject("active-thread")
+    active = await manager.create_or_reject(
+        "active-thread",
+        candidate_run_id="22222222-2222-4222-8222-222222222222",
+    )
+    active_task = await manager.attach_worker_once(
+        active.run_id,
+        asyncio.sleep(3600),
+        asyncio.create_task,
+    )
     await manager.set_status(active.run_id, RunStatus.running)
 
     await manager.start_heartbeat()
@@ -686,6 +704,8 @@ async def test_periodic_store_scan_does_not_block_real_heartbeat_loop():
     store.scan_release.set()
     await manager.stop_heartbeat()
     await manager._drain_orphan_recovery_task(timeout=0.5)
+    active_task.cancel()
+    await asyncio.gather(active_task, return_exceptions=True)
 
 
 @pytest.mark.anyio
@@ -803,7 +823,15 @@ async def test_heartbeat_renews_active_run_leases():
     store = MemoryRunStore()
     manager = _make_manager(store=store, run_ownership_config=config)
 
-    record = await manager.create_or_reject("thread-1")
+    record = await manager.create_or_reject(
+        "thread-1",
+        candidate_run_id="33333333-3333-4333-8333-333333333333",
+    )
+    task = await manager.attach_worker_once(
+        record.run_id,
+        asyncio.sleep(3600),
+        asyncio.create_task,
+    )
     await manager.set_status(record.run_id, RunStatus.running)
 
     original_lease = record.lease_expires_at
@@ -819,6 +847,8 @@ async def test_heartbeat_renews_active_run_leases():
     assert record.lease_expires_at is not None
     # Lease should have been extended
     assert record.lease_expires_at >= original_lease
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.anyio
@@ -838,7 +868,10 @@ async def test_heartbeat_renews_pending_run_before_task_is_spawned():
     store = MemoryRunStore()
     manager = _make_manager(store=store, run_ownership_config=config)
 
-    record = await manager.create_or_reject("thread-1")
+    record = await manager.create_or_reject(
+        "thread-1",
+        candidate_run_id="66666666-6666-4666-8666-666666666666",
+    )
     assert record.status == RunStatus.pending
     # No task has been spawned — this is the regression sentinel.
     assert record.task is None

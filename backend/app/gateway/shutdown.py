@@ -105,6 +105,8 @@ class ShutdownReport:
     """Immutable result shared by every repeated shutdown caller."""
 
     admissions_quiescent: bool
+    channels_quiescent: bool
+    scheduler_quiescent: bool
     runs_quiescent: bool
     memory_flushed: bool
     diagnostics: tuple[ShutdownDiagnostic, ...]
@@ -189,8 +191,20 @@ class GracefulShutdownCoordinator:
             default=False,
         )
         admissions_quiescent = admissions is not False
-        await bounded("channels", self._budgets.channel_seconds, self._stop_channels)
-        await bounded("scheduler", self._budgets.scheduler_seconds, self._stop_scheduler)
+        channels = await bounded(
+            "channels",
+            self._budgets.channel_seconds,
+            self._stop_channels,
+            default=False,
+        )
+        channels_quiescent = channels is not False
+        scheduler = await bounded(
+            "scheduler",
+            self._budgets.scheduler_seconds,
+            self._stop_scheduler,
+            default=False,
+        )
+        scheduler_quiescent = scheduler is not False
         run_budget = min(self._budgets.run_seconds, max(0.0, deadline - loop.time()))
         runs_quiescent = bool(
             await bounded(
@@ -203,7 +217,8 @@ class GracefulShutdownCoordinator:
 
         memory_flushed = False
         memory_attempt_complete = False
-        if admissions_quiescent and runs_quiescent:
+        writers_quiescent = admissions_quiescent and channels_quiescent and scheduler_quiescent and runs_quiescent
+        if writers_quiescent:
             memory_budget = min(self._budgets.memory_seconds, max(0.0, deadline - loop.time()))
             incomplete = object()
 
@@ -243,7 +258,7 @@ class GracefulShutdownCoordinator:
         retrieval_stopped = True
         if self._stop_retrieval is not None:
             retrieval_stopped = (await dependency("retrieval", self._stop_retrieval)) is not False
-        if admissions_quiescent and runs_quiescent and memory_attempt_complete and retrieval_stopped:
+        if writers_quiescent and memory_attempt_complete and retrieval_stopped:
             await dependency(
                 "memory_close",
                 lambda: _run_sync_daemon(self._close_memory),
@@ -252,10 +267,19 @@ class GracefulShutdownCoordinator:
             dependency_count -= 1
         await dependency("browser", self._close_browser)
         await dependency("oidc", self._close_oidc)
-        if self._close_runtime is not None:
+        if self._close_runtime is not None and writers_quiescent:
             await dependency("runtime_dependencies", self._close_runtime)
+        elif self._close_runtime is not None:
+            diagnostics.append(
+                self._diagnostic(
+                    "runtime_dependencies",
+                    "runtime_dependencies_close_skipped_active_users",
+                )
+            )
         return ShutdownReport(
             admissions_quiescent=admissions_quiescent,
+            channels_quiescent=channels_quiescent,
+            scheduler_quiescent=scheduler_quiescent,
             runs_quiescent=runs_quiescent,
             memory_flushed=memory_flushed,
             diagnostics=tuple(diagnostics),

@@ -506,6 +506,27 @@ def test_production_mode_rejects_process_local_inbound_receipts(
 
 
 @pytest.mark.parametrize(
+    ("command_timeout", "expected_error"),
+    [
+        (None, "requires a finite database.command_timeout"),
+        (float("inf"), None),
+    ],
+)
+def test_production_mode_rejects_unbounded_postgres_commands(
+    tmp_path: Path,
+    command_timeout: float | None,
+    expected_error: str | None,
+) -> None:
+    values = _production_values()
+    _set_config_value(values, ("database", "command_timeout"), command_timeout)
+
+    result = _render(tmp_path, values, expect_success=False)
+
+    if expected_error is not None:
+        assert expected_error in result.stderr
+
+
+@pytest.mark.parametrize(
     ("mutator", "message"),
     [
         (

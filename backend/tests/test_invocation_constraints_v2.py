@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
@@ -708,10 +709,10 @@ async def test_replay_reuses_v2_evidence_while_a_new_invocation_gets_a_new_proje
         async def prepare_admission(self, _launch):
             return None
 
-        async def admit(self, launch):
+        async def admit(self, launch, *, candidate_run_id):
             now = datetime.now(UTC).isoformat()
             record = RunRecord(
-                run_id=f"run-{len(self.records) + 1}",
+                run_id=candidate_run_id,
                 thread_id=launch.thread_id,
                 assistant_id=launch.assistant_id,
                 status=RunStatus.pending,
@@ -724,6 +725,10 @@ async def test_replay_reuses_v2_evidence_while_a_new_invocation_gets_a_new_proje
             )
             self.records[launch.external_key] = record
             return DurableAdmission(record, AdmissionOutcome.created)
+
+        async def attach_worker(self, record, worker, task_factory):
+            record.task = task_factory(worker)
+            return record.task
 
         async def observe(self, run_id, _principal):
             return next((record for record in self.records.values() if record.run_id == run_id), None)
@@ -739,12 +744,17 @@ async def test_replay_reuses_v2_evidence_while_a_new_invocation_gets_a_new_proje
             return InternalAuthorizationDecision.allowed()
 
     runs = _Runs()
+
+    def attach_discarded(worker):
+        worker.close()
+        return asyncio.create_task(asyncio.sleep(0))
+
     runtime = InvocationRuntime(
         normalizer=_Normalizer(),
         runs=runs,
         authorization=_Authorization(),
         constraints=ProviderInvocationConstraints(_Host()),
-        task_factory=lambda worker: worker.close(),
+        task_factory=attach_discarded,
     )
 
     first = await runtime.launch(InternalLaunchIntent(thread_id="thread-1", external_key="key-1"))
@@ -753,10 +763,12 @@ async def test_replay_reuses_v2_evidence_while_a_new_invocation_gets_a_new_proje
     second = await runtime.launch(InternalLaunchIntent(thread_id="thread-1", external_key="key-2"))
 
     assert first.created is True
+    await first.record.task
     assert replay.created is False
     assert replay.record is first.record
     assert replay.record.accepted_invocation.decision_evidence["constraints"] == first_evidence
     assert second.created is True
+    await second.record.task
     assert provider_calls == 2
     assert first_evidence["projection_revision"] == "policy-1"
     assert second.record.accepted_invocation.decision_evidence["constraints"]["projection_revision"] == "policy-2"

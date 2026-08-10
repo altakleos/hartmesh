@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.postgres import postgres_async_url
 
 from deerflow.persistence.base import Base
 from deerflow.persistence.run.model import RunRow
@@ -23,14 +23,6 @@ from deerflow.runtime.runs.store.base import (
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
-
-
-def _postgres_async_url(url: str) -> str:
-    if url.startswith("postgresql://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
-    parts = urlsplit(url)
-    query = urlencode((key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key not in {"sslmode", "channel_binding"})
-    return urlunsplit(parts._replace(query=query))
 
 
 @pytest.mark.anyio
@@ -428,7 +420,7 @@ async def test_sql_replacement_failure_rolls_back_rows_events_and_cursor(tmp_pat
 )
 async def test_postgres_concurrent_cas_has_one_row_event_winner() -> None:
     assert _POSTGRES_URL is not None
-    engine = create_async_engine(_postgres_async_url(_POSTGRES_URL))
+    engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -482,7 +474,7 @@ async def test_postgres_concurrent_cas_has_one_row_event_winner() -> None:
 )
 async def test_postgres_independent_runs_allocate_unique_global_cursors() -> None:
     assert _POSTGRES_URL is not None
-    engine = create_async_engine(_postgres_async_url(_POSTGRES_URL))
+    engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     left = RunRepository(session_factory)
     right = RunRepository(session_factory)

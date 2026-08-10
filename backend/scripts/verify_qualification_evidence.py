@@ -8,8 +8,10 @@ import sys
 from pathlib import Path
 
 from deerflow.qualification_evidence import (
+    ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
     MAX_QUALIFICATION_EVIDENCE_BYTES,
     QUALIFICATION_VERIFICATION_API_VERSION,
+    AcceptedSkillQualificationExpectationV2,
     QualificationEvidenceExpectation,
     QualificationVerificationError,
     verify_qualification_evidence,
@@ -22,6 +24,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--declared-digest", required=True)
     parser.add_argument("--qualification-id", required=True)
     parser.add_argument("--image-digest", required=True)
+    parser.add_argument("--provisioner-image-digest")
+    parser.add_argument("--verifier-image-digest")
+    parser.add_argument("--sandbox-image-digest")
     parser.add_argument("--chart-version", required=True)
     parser.add_argument("--chart-digest", required=True)
     parser.add_argument("--configuration-digest", required=True)
@@ -59,17 +64,43 @@ def main(argv: list[str] | None = None) -> int:
 
     args = _parser().parse_args(argv)
     try:
-        expected = QualificationEvidenceExpectation(
-            qualification_id=args.qualification_id,
-            image_digest=args.image_digest,
-            chart_version=args.chart_version,
-            chart_digest=args.chart_digest,
-            configuration_digest=args.configuration_digest,
-            migration_head=args.migration_head,
-            scope=args.scope,
-            namespace=args.namespace,
-            required_scenarios=tuple(args.required_scenarios),
-        )
+        if args.scope == ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2:
+            if not all(
+                (
+                    args.provisioner_image_digest,
+                    args.verifier_image_digest,
+                    args.sandbox_image_digest,
+                )
+            ):
+                raise ValueError(
+                    "accepted-skill verification requires every runtime image digest",
+                )
+            expected = AcceptedSkillQualificationExpectationV2(
+                qualification_id=args.qualification_id,
+                gateway_image_digest=args.image_digest,
+                provisioner_image_digest=args.provisioner_image_digest,
+                verifier_image_digest=args.verifier_image_digest,
+                sandbox_image_digest=args.sandbox_image_digest,
+                chart_version=args.chart_version,
+                chart_digest=args.chart_digest,
+                configuration_digest=args.configuration_digest,
+                migration_head=args.migration_head,
+                scope=args.scope,
+                namespace=args.namespace,
+                required_scenarios=tuple(args.required_scenarios),
+            )
+        else:
+            expected = QualificationEvidenceExpectation(
+                qualification_id=args.qualification_id,
+                image_digest=args.image_digest,
+                chart_version=args.chart_version,
+                chart_digest=args.chart_digest,
+                configuration_digest=args.configuration_digest,
+                migration_head=args.migration_head,
+                scope=args.scope,
+                namespace=args.namespace,
+                required_scenarios=tuple(args.required_scenarios),
+            )
         result = verify_qualification_evidence(
             _read_bounded(args.artifact),
             declared_digest=args.declared_digest,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.cookiejar
 import json
@@ -18,12 +19,19 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 from deerflow.qualification_evidence import (
+    ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2,
+    ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+    AcceptedSkillMaterialEvidenceV2,
+    AcceptedSkillQualificationEnvironmentV2,
+    AcceptedSkillQualificationExpectationV2,
+    AcceptedSkillScenarioEvidenceV2,
+    KubernetesAcceptedSkillQualificationEvidenceV2,
     KubernetesQualificationEvidence,
     KubernetesQualificationFailureEvidence,
     QualificationEvidenceExpectation,
@@ -38,7 +46,19 @@ _SAFE_NAMESPACE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?\Z")
 _IMAGE_REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,511}\Z")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
+_SAFE_STORAGE_CLASS = re.compile(r"[a-z0-9](?:[-.a-z0-9]{0,251}[a-z0-9])?\Z")
+_RFC3339 = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z"
+)
 KUBERNETES_OPT_IN_MESSAGE = "Kubernetes qualification is opt-in; set DEERFLOW_TEST_KUBERNETES=1 with an explicit KUBECONFIG and qualification context"
+
+_QUALIFICATION_SKILL_NAME = "qualification-skill"
+_QUALIFICATION_ACCEPTED_ATTEMPT_LEASE_SECONDS = 120
+_QUALIFICATION_SKILL_FILES = {
+    "SKILL.md": (b"---\nname: qualification-skill\ndescription: Deterministic accepted-skill qualification fixture.\nallowed-tools:\n  - read_file\n---\nRead resources/proof.txt only from the accepted immutable snapshot.\n"),
+    "resources/proof.txt": b"hartmesh accepted skill qualification v2\n",
+}
 
 
 def _expected_worker_attachments(scenario: str) -> int:
@@ -111,6 +131,27 @@ def validate_kubernetes_prerequisites(
         "DEERFLOW_TEST_GATEWAY_IMAGE_DIGEST",
         "DEERFLOW_TEST_KUBERNETES_EVIDENCE",
     )
+    scope = environment.get(
+        "DEERFLOW_TEST_KUBERNETES_SCOPE",
+        KubernetesQualificationEvidence.SCOPE,
+    )
+    if scope not in {
+        KubernetesQualificationEvidence.SCOPE,
+        ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+    }:
+        raise QualificationPrerequisiteError(
+            "enabled Kubernetes qualification has an unsupported scope",
+        )
+    if scope == ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2:
+        required_environment += (
+            "DEERFLOW_TEST_PROVISIONER_IMAGE_REPOSITORY",
+            "DEERFLOW_TEST_PROVISIONER_IMAGE_DIGEST",
+            "DEERFLOW_TEST_VERIFIER_IMAGE_REPOSITORY",
+            "DEERFLOW_TEST_VERIFIER_IMAGE_DIGEST",
+            "DEERFLOW_TEST_SANDBOX_IMAGE_REPOSITORY",
+            "DEERFLOW_TEST_SANDBOX_IMAGE_DIGEST",
+            "DEERFLOW_TEST_KUBERNETES_RWX_STORAGE_CLASS",
+        )
     missing.extend(name for name in required_environment if not environment.get(name))
     missing.extend(name for name in ("kubectl", "helm") if executable_lookup(name) is None)
     if missing:
@@ -276,6 +317,112 @@ class KubernetesQualificationConfig:
             self.namespace,
             *arguments,
         )
+
+    def token_review(self) -> tuple[str, ...]:
+        """Build the one permitted non-persistent cluster authentication call."""
+
+        return (
+            "kubectl",
+            "--kubeconfig",
+            str(self.kubeconfig),
+            "--context",
+            self.context,
+            "create",
+            "--raw",
+            "/apis/authentication.k8s.io/v1/tokenreviews",
+            "-f",
+            "-",
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class KubernetesAcceptedSkillQualificationConfigV2(KubernetesQualificationConfig):
+    """Exact artifact and RWX inputs for live nonempty skill qualification."""
+
+    provisioner_image_repository: str
+    provisioner_image_digest: str
+    verifier_image_repository: str
+    verifier_image_digest: str
+    sandbox_image_repository: str
+    sandbox_image_digest: str
+    rwx_storage_class: str
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        for name in (
+            "provisioner_image_repository",
+            "verifier_image_repository",
+            "sandbox_image_repository",
+        ):
+            if _IMAGE_REPOSITORY.fullmatch(getattr(self, name)) is None:
+                raise ValueError(f"{name} is invalid")
+        for name in (
+            "provisioner_image_digest",
+            "verifier_image_digest",
+            "sandbox_image_digest",
+        ):
+            if _IMAGE_DIGEST.fullmatch(getattr(self, name)) is None:
+                raise ValueError(f"{name} is invalid")
+        if self.verifier_image_repository != self.provisioner_image_repository or self.verifier_image_digest != self.provisioner_image_digest:
+            raise QualificationPrerequisiteError(
+                "verifier image must exactly match the deployed provisioner image",
+            )
+        if _SAFE_STORAGE_CLASS.fullmatch(self.rwx_storage_class) is None:
+            raise ValueError("qualification RWX storage class is invalid")
+
+    @classmethod
+    def from_environment(
+        cls,
+        environment: Mapping[str, str],
+    ) -> KubernetesAcceptedSkillQualificationConfigV2:
+        """Build a fail-closed v2 selection from explicit operator inputs."""
+
+        validate_kubernetes_prerequisites(environment)
+        if environment.get("DEERFLOW_TEST_KUBERNETES_SCOPE") != (ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2):
+            raise QualificationPrerequisiteError(
+                "accepted-skill qualification requires its explicit v2 scope",
+            )
+        context = environment["DEERFLOW_TEST_KUBERNETES_CONTEXT"]
+        if environment.get("DEERFLOW_TEST_KUBERNETES_CONFIRM_CONTEXT") != context:
+            raise QualificationPrerequisiteError(
+                "DEERFLOW_TEST_KUBERNETES_CONFIRM_CONTEXT must exactly match DEERFLOW_TEST_KUBERNETES_CONTEXT",
+            )
+        return cls(
+            kubeconfig=Path(environment["KUBECONFIG"]).expanduser().resolve(),
+            context=context,
+            namespace=environment["DEERFLOW_TEST_KUBERNETES_NAMESPACE"],
+            image_repository=environment["DEERFLOW_TEST_GATEWAY_IMAGE_REPOSITORY"],
+            image_digest=environment["DEERFLOW_TEST_GATEWAY_IMAGE_DIGEST"],
+            evidence_path=Path(
+                environment["DEERFLOW_TEST_KUBERNETES_EVIDENCE"],
+            )
+            .expanduser()
+            .resolve(),
+            qualification_id=environment["DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID"],
+            release_name=environment.get(
+                "DEERFLOW_TEST_KUBERNETES_RELEASE",
+                "hartmesh-qualification",
+            ),
+            provisioner_image_repository=environment["DEERFLOW_TEST_PROVISIONER_IMAGE_REPOSITORY"],
+            provisioner_image_digest=environment["DEERFLOW_TEST_PROVISIONER_IMAGE_DIGEST"],
+            verifier_image_repository=environment["DEERFLOW_TEST_VERIFIER_IMAGE_REPOSITORY"],
+            verifier_image_digest=environment["DEERFLOW_TEST_VERIFIER_IMAGE_DIGEST"],
+            sandbox_image_repository=environment["DEERFLOW_TEST_SANDBOX_IMAGE_REPOSITORY"],
+            sandbox_image_digest=environment["DEERFLOW_TEST_SANDBOX_IMAGE_DIGEST"],
+            rwx_storage_class=environment["DEERFLOW_TEST_KUBERNETES_RWX_STORAGE_CLASS"],
+        )
+
+    @property
+    def provisioner_image_reference(self) -> str:
+        return f"{self.provisioner_image_repository}@{self.provisioner_image_digest}"
+
+    @property
+    def verifier_image_reference(self) -> str:
+        return f"{self.verifier_image_repository}@{self.verifier_image_digest}"
+
+    @property
+    def sandbox_image_reference(self) -> str:
+        return f"{self.sandbox_image_repository}@{self.sandbox_image_digest}"
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -986,6 +1133,7 @@ class KubernetesQualificationRunner:
         nonowner: _RuntimeHttpSession,
         gateway_pod: tuple[str, str],
         port_forward: _PortForward,
+        barrier_probe: Callable[[str, str], None] | None = None,
     ) -> tuple[ScenarioEvidence, tuple[str, str]]:
         payload = self._ensure_payload(scenario)
         request_result: dict[str, object] = {}
@@ -1004,6 +1152,8 @@ class KubernetesQualificationRunner:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future: Future[None] = executor.submit(ensure_request)
             run_id = self._wait_for_barrier(scenario)
+            if barrier_probe is not None:
+                barrier_probe(scenario, run_id)
             if scenario == "accepted_before_client_response" and future.done():
                 raise QualificationCommandError("client response completed before the response-loss barrier")
             self._assert_visibility_and_control_isolation(
@@ -1417,4 +1567,1033 @@ class KubernetesQualificationRunner:
                 ).write(self.config.evidence_path)
             except Exception as evidence_exc:
                 raise QualificationCommandError("qualification failed and bounded failure evidence could not be written") from evidence_exc
+            raise
+
+
+@dataclass(frozen=True)
+class _AcceptedSkillAttemptObservation:
+    scenario: str
+    run_id: str
+    sandbox_id: str
+    pod_name: str
+    pod_uid: str
+    gateway_node: str
+    pod_node: str
+    lease_name: str
+    lease_uid: str
+    receipt: Mapping[str, object]
+    materialization_digest: str
+    verifier_receipt_digest: str
+    token_review_authenticated: bool
+    lease_renewals: int
+
+    def result_digest(
+        self,
+        *,
+        evidence_scenario: str,
+        cleanup_outcome: str,
+        gateway_replacement_uid: str | None = None,
+    ) -> str:
+        return _sha256_bytes(
+            _canonical_json(
+                {
+                    "fault_scenario": self.scenario,
+                    "evidence_scenario": evidence_scenario,
+                    "run_id": self.run_id,
+                    "sandbox_id": self.sandbox_id,
+                    "pod_uid": self.pod_uid,
+                    "gateway_node": self.gateway_node,
+                    "pod_node": self.pod_node,
+                    "lease_uid": self.lease_uid,
+                    "receipt": dict(self.receipt),
+                    "materialization_digest": self.materialization_digest,
+                    "verifier_receipt_digest": self.verifier_receipt_digest,
+                    "cleanup_outcome": cleanup_outcome,
+                    "gateway_replacement_uid": gateway_replacement_uid,
+                }
+            )
+        )
+
+
+class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner):
+    """Live runner for the separate cross-node nonempty-skill evidence scope."""
+
+    skill_source_claim = "hartmesh-qualification-skill-source"
+    skill_fixture_config_map = "hartmesh-qualification-skill-fixture"
+    skill_fixture_job = "hartmesh-qualification-skill-fixture"
+
+    def __init__(
+        self,
+        config: KubernetesAcceptedSkillQualificationConfigV2,
+        *,
+        repository_root: Path | None = None,
+    ) -> None:
+        super().__init__(config, repository_root=repository_root)
+        self.config = config
+
+    def values(self) -> dict[str, object]:
+        """Select the exact pinned remote-AIO and RWX projection profile."""
+
+        values = super().values()
+        local_sandbox = "sandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider"
+        remote_sandbox = "\n".join(
+            (
+                "sandbox:",
+                "  use: deerflow.community.aio_sandbox:AioSandboxProvider",
+                f"  provisioner_url: http://{self.fullname}-provisioner:8002",
+                "  accepted_skill_projection_profile: rwx_verified_copy_v2",
+                "  replicas: 1",
+                "  idle_timeout: 0",
+            )
+        )
+        config_text = str(values["config"])
+        if local_sandbox not in config_text:
+            raise QualificationCommandError(
+                "qualification base sandbox configuration changed",
+            )
+        values["config"] = config_text.replace(
+            local_sandbox,
+            remote_sandbox,
+            1,
+        )
+        values["provisioner"] = {
+            "enabled": True,
+            "image": {
+                "repository": self.config.provisioner_image_repository,
+                "digest": self.config.provisioner_image_digest,
+            },
+            "sandboxImage": self.config.sandbox_image_reference,
+            "sandboxServiceType": "ClusterIP",
+            "acceptedSkillProjectionProfile": "rwx_verified_copy_v2",
+            "acceptedAttempt": {
+                "leaseSeconds": _QUALIFICATION_ACCEPTED_ATTEMPT_LEASE_SECONDS,
+                "reconcileIntervalSeconds": 30,
+                "reconcileLimit": 100,
+            },
+        }
+        values["persistence"] = {
+            "home": {
+                "enabled": True,
+                "storageClass": self.config.rwx_storage_class,
+                "accessMode": "ReadWriteMany",
+                "size": "2Gi",
+            }
+        }
+        values["skills"] = {
+            "enabled": True,
+            "existingClaim": self.skill_source_claim,
+            "configMap": "",
+        }
+        return values
+
+    def _create_namespace_and_configuration(self) -> None:
+        super()._create_namespace_and_configuration()
+        self._apply_json(
+            {
+                "apiVersion": "v1",
+                "kind": "PersistentVolumeClaim",
+                "metadata": {"name": self.skill_source_claim},
+                "spec": {
+                    "accessModes": ["ReadWriteMany"],
+                    "storageClassName": self.config.rwx_storage_class,
+                    "resources": {"requests": {"storage": "64Mi"}},
+                },
+            }
+        )
+        self._apply_json(
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": self.skill_fixture_config_map},
+                "data": {
+                    "skill-md": _QUALIFICATION_SKILL_FILES["SKILL.md"].decode("utf-8"),
+                    "proof": _QUALIFICATION_SKILL_FILES["resources/proof.txt"].decode("utf-8"),
+                },
+            }
+        )
+        fixture_script = "\n".join(
+            (
+                "from pathlib import Path",
+                "root = Path('/skills/public/qualification-skill')",
+                "(root / 'resources').mkdir(parents=True, exist_ok=True)",
+                "(root / 'SKILL.md').write_bytes(Path('/fixture/skill-md').read_bytes())",
+                "(root / 'resources/proof.txt').write_bytes(Path('/fixture/proof').read_bytes())",
+                "for path in (root, root / 'resources'):",
+                "    path.chmod(0o755)",
+                "for path in (root / 'SKILL.md', root / 'resources/proof.txt'):",
+                "    path.chmod(0o444)",
+            )
+        )
+        self._apply_json(
+            {
+                "apiVersion": "batch/v1",
+                "kind": "Job",
+                "metadata": {"name": self.skill_fixture_job},
+                "spec": {
+                    "backoffLimit": 0,
+                    "template": {
+                        "metadata": {"labels": {"app.kubernetes.io/component": ("qualification-skill-fixture")}},
+                        "spec": {
+                            "automountServiceAccountToken": False,
+                            "restartPolicy": "Never",
+                            "containers": [
+                                {
+                                    "name": "writer",
+                                    "image": self.config.verifier_image_reference,
+                                    "command": ["python", "-c", fixture_script],
+                                    "securityContext": {
+                                        "allowPrivilegeEscalation": False,
+                                        "capabilities": {"drop": ["ALL"]},
+                                    },
+                                    "volumeMounts": [
+                                        {
+                                            "name": "skills",
+                                            "mountPath": "/skills",
+                                        },
+                                        {
+                                            "name": "fixture",
+                                            "mountPath": "/fixture",
+                                            "readOnly": True,
+                                        },
+                                    ],
+                                }
+                            ],
+                            "volumes": [
+                                {
+                                    "name": "skills",
+                                    "persistentVolumeClaim": {"claimName": self.skill_source_claim},
+                                },
+                                {
+                                    "name": "fixture",
+                                    "configMap": {"name": self.skill_fixture_config_map},
+                                },
+                            ],
+                        },
+                    },
+                },
+            }
+        )
+
+        def fixture_ready() -> bool:
+            raw = self._kubectl(
+                "get",
+                "job",
+                self.skill_fixture_job,
+                "-o",
+                "json",
+            )
+            value = json.loads(raw)
+            return value.get("status", {}).get("succeeded") == 1
+
+        wait_until(
+            fixture_ready,
+            description="deterministic accepted-skill fixture population",
+            timeout_seconds=180,
+            interval_seconds=2,
+        )
+
+    def _schedulable_nodes(self) -> tuple[str, ...]:
+        value = json.loads(self._kubectl("get", "nodes", "-o", "json", namespaced=False))
+        items = value.get("items") if isinstance(value, dict) else None
+        nodes: list[str] = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            spec = item.get("spec")
+            metadata = item.get("metadata")
+            conditions = item.get("status", {}).get("conditions", [])
+            ready = any(isinstance(condition, dict) and condition.get("type") == "Ready" and condition.get("status") == "True" for condition in conditions)
+            if isinstance(spec, dict) and not spec.get("unschedulable", False) and isinstance(metadata, dict) and isinstance(metadata.get("name"), str) and ready:
+                nodes.append(metadata["name"])
+        result = tuple(sorted(nodes))
+        if len(result) < 2:
+            raise QualificationPrerequisiteError(
+                "accepted-skill qualification requires at least two schedulable Ready nodes",
+            )
+        return result
+
+    @staticmethod
+    def _resource_for_run(
+        document: object,
+        *,
+        run_id: str,
+        annotation: str,
+        kind: str,
+    ) -> dict[str, object]:
+        items = document.get("items") if isinstance(document, dict) else None
+        matches = []
+        for item in items if isinstance(items, list) else []:
+            metadata = item.get("metadata") if isinstance(item, dict) else None
+            annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+            if isinstance(annotations, dict) and annotations.get(annotation) == run_id:
+                matches.append(item)
+        if len(matches) != 1:
+            raise QualificationCommandError(
+                f"qualification requires exactly one {kind} for the accepted run",
+            )
+        return matches[0]
+
+    def _accepted_attempt(
+        self,
+        scenario: str,
+        run_id: str,
+        *,
+        gateway_node: str,
+    ) -> _AcceptedSkillAttemptObservation:
+        pod = self._resource_for_run(
+            json.loads(
+                self._kubectl(
+                    "get",
+                    "pods",
+                    "-l",
+                    "app.kubernetes.io/component=sandbox",
+                    "-o",
+                    "json",
+                )
+            ),
+            run_id=run_id,
+            annotation="hartmesh.io/accepted-skill-run",
+            kind="accepted-skill sandbox pod",
+        )
+        lease = self._resource_for_run(
+            json.loads(self._kubectl("get", "leases", "-o", "json")),
+            run_id=run_id,
+            annotation="hartmesh.io/accepted-skill-run",
+            kind="accepted-skill Lease",
+        )
+        pod_metadata = pod.get("metadata", {})
+        pod_spec = pod.get("spec", {})
+        lease_metadata = lease.get("metadata", {})
+        annotations = lease_metadata.get("annotations", {})
+        labels = pod_metadata.get("labels", {})
+        pod_name = pod_metadata.get("name")
+        pod_uid = pod_metadata.get("uid")
+        pod_node = pod_spec.get("nodeName")
+        sandbox_id = labels.get("sandbox-id")
+        lease_name = lease_metadata.get("name")
+        lease_uid = lease_metadata.get("uid")
+        bounded_strings = (
+            pod_name,
+            pod_uid,
+            pod_node,
+            sandbox_id,
+            lease_name,
+            lease_uid,
+        )
+        if not all(isinstance(value, str) and value for value in bounded_strings):
+            raise QualificationCommandError(
+                "accepted-skill Pod or Lease identity is incomplete",
+            )
+        if labels.get("hartmesh.io/accepted-skill-profile") != ("rwx_verified_copy_v2") or annotations.get("hartmesh.io/accepted-attempt-state") != "materialized":
+            raise QualificationCommandError(
+                "accepted-skill attempt was not materialized under v2",
+            )
+        receipt_raw = self._kubectl(
+            "exec",
+            pod_name,
+            "-c",
+            "accepted-skill-gate",
+            "--",
+            "cat",
+            "/var/run/hartmesh/accepted-receipt/receipt.json",
+        )
+        receipt = json.loads(receipt_raw)
+        required_receipt = {
+            "version",
+            "profile",
+            "snapshot_id",
+            "content_digest",
+            "file_count",
+            "total_bytes",
+        }
+        if not isinstance(receipt, dict) or set(receipt) != required_receipt or receipt.get("version") != 2 or receipt.get("profile") != "rwx_verified_copy_v2" or receipt.get("snapshot_id") != receipt.get("content_digest"):
+            raise QualificationCommandError(
+                "accepted-skill verifier receipt is incomplete",
+            )
+        snapshot_id = receipt["snapshot_id"]
+        if not isinstance(snapshot_id, str) or re.fullmatch(r"[0-9a-f]{64}", snapshot_id) is None:
+            raise QualificationCommandError(
+                "accepted-skill snapshot identity is invalid",
+            )
+        for relative, expected in _QUALIFICATION_SKILL_FILES.items():
+            observed = base64.b64decode(
+                self._kubectl(
+                    "exec",
+                    pod_name,
+                    "-c",
+                    "sandbox",
+                    "--",
+                    "python",
+                    "-c",
+                    ("import base64,pathlib;print(base64.b64encode(pathlib.Path(" + repr(f"/mnt/skills/.accepted/{snapshot_id}/public/{_QUALIFICATION_SKILL_NAME}/{relative}") + ").read_bytes()).decode('ascii'))"),
+                )
+            )
+            if observed != expected:
+                raise QualificationCommandError(
+                    "accepted-skill sandbox bytes differ from the deterministic fixture",
+                )
+        expected_images = {
+            "sandbox": self.config.sandbox_image_digest,
+            "accepted-skill-gate": self.config.verifier_image_digest,
+            "accepted-skill-verifier": self.config.verifier_image_digest,
+        }
+        statuses = {item.get("name"): item.get("imageID") for item in ((pod.get("status", {}).get("containerStatuses") or []) + (pod.get("status", {}).get("initContainerStatuses") or [])) if isinstance(item, dict)}
+        if any(not isinstance(statuses.get(name), str) or digest not in statuses[name] for name, digest in expected_images.items()):
+            raise QualificationCommandError(
+                "accepted-skill runtime image identity is not exact",
+            )
+        materialization_digest = annotations.get("hartmesh.io/accepted-materialization-digest")
+        verifier_receipt_digest = annotations.get("hartmesh.io/accepted-verifier-receipt-digest")
+        if any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None for value in (materialization_digest, verifier_receipt_digest)):
+            raise QualificationCommandError(
+                "accepted-skill materialization digests are invalid",
+            )
+        execution_evidence = self._run_execution_evidence(run_id)
+        if (
+            execution_evidence.get("version") != 2
+            or execution_evidence.get("snapshot_id") != snapshot_id
+            or execution_evidence.get("pod_uid") != pod_uid
+            or execution_evidence.get("lease_uid") != lease_uid
+            or execution_evidence.get("materialization_evidence_digest") != materialization_digest
+            or execution_evidence.get("verifier_receipt_digest") != verifier_receipt_digest
+        ):
+            raise QualificationCommandError(
+                "accepted-skill ledger evidence does not match the live attempt",
+            )
+        return _AcceptedSkillAttemptObservation(
+            scenario=scenario,
+            run_id=run_id,
+            sandbox_id=sandbox_id,
+            pod_name=pod_name,
+            pod_uid=pod_uid,
+            gateway_node=gateway_node,
+            pod_node=pod_node,
+            lease_name=lease_name,
+            lease_uid=lease_uid,
+            receipt=receipt,
+            materialization_digest=materialization_digest,
+            verifier_receipt_digest=verifier_receipt_digest,
+            token_review_authenticated=False,
+            lease_renewals=0,
+        )
+
+    def _run_execution_evidence(self, run_id: str) -> dict[str, object]:
+        if re.fullmatch(r"[A-Za-z0-9-]{1,64}", run_id) is None:
+            raise QualificationCommandError("qualification run identity is invalid")
+        postgres_pod = self._component_pod_name("postgres")
+        raw = self._kubectl(
+            "exec",
+            postgres_pod,
+            "--",
+            "psql",
+            "-U",
+            "deerflow",
+            "-d",
+            "deerflow",
+            "-Atc",
+            (f"select execution_evidence_json::text from runs where run_id = '{run_id}'"),
+        )
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise QualificationCommandError(
+                "accepted-skill ledger evidence is unavailable",
+            ) from exc
+        if not isinstance(value, dict):
+            raise QualificationCommandError(
+                "accepted-skill ledger evidence is malformed",
+            )
+        return value
+
+    def _wait_for_lease_renewal(
+        self,
+        attempt: _AcceptedSkillAttemptObservation,
+    ) -> _AcceptedSkillAttemptObservation:
+        first = json.loads(
+            self._kubectl(
+                "get",
+                "lease",
+                attempt.lease_name,
+                "-o",
+                "json",
+            )
+        )
+        first_identity, first_holder, first_duration, first_renew_time = self._lease_renewal_facts(first, attempt)
+
+        def renewed() -> bool:
+            value = json.loads(
+                self._kubectl(
+                    "get",
+                    "lease",
+                    attempt.lease_name,
+                    "-o",
+                    "json",
+                )
+            )
+            identity, holder, duration, renew_time = self._lease_renewal_facts(
+                value,
+                attempt,
+            )
+            if identity != first_identity or holder != first_holder:
+                raise QualificationCommandError(
+                    "accepted-skill Lease holder identity changed during renewal",
+                )
+            if duration != first_duration:
+                raise QualificationCommandError(
+                    "accepted-skill Lease duration changed during renewal",
+                )
+            return renew_time > first_renew_time
+
+        wait_until(
+            renewed,
+            description="accepted-skill Lease renewal",
+            timeout_seconds=60,
+            interval_seconds=2,
+        )
+        return replace(attempt, lease_renewals=attempt.lease_renewals + 1)
+
+    @staticmethod
+    def _lease_renewal_facts(
+        value: object,
+        attempt: _AcceptedSkillAttemptObservation,
+    ) -> tuple[str, str, int, datetime]:
+        if not isinstance(value, dict):
+            raise QualificationCommandError(
+                "accepted-skill Lease renewal evidence is malformed",
+            )
+        metadata = value.get("metadata")
+        spec = value.get("spec")
+        if not isinstance(metadata, dict) or not isinstance(spec, dict):
+            raise QualificationCommandError(
+                "accepted-skill Lease renewal evidence is malformed",
+            )
+        if metadata.get("uid") != attempt.lease_uid:
+            raise QualificationCommandError(
+                "accepted-skill Lease was replaced during renewal",
+            )
+        annotations = metadata.get("annotations")
+        identity = annotations.get("hartmesh.io/accepted-attempt-identity") if isinstance(annotations, dict) else None
+        if not isinstance(identity, str) or re.fullmatch(r"[0-9a-f]{64}", identity) is None:
+            raise QualificationCommandError(
+                "accepted-skill Lease holder identity changed during renewal",
+            )
+        holder = spec.get("holderIdentity")
+        if holder != f"accepted:{identity}":
+            raise QualificationCommandError(
+                "accepted-skill Lease holder identity changed during renewal",
+            )
+        duration = spec.get("leaseDurationSeconds")
+        if not isinstance(duration, int) or isinstance(duration, bool) or duration != _QUALIFICATION_ACCEPTED_ATTEMPT_LEASE_SECONDS:
+            raise QualificationCommandError(
+                "accepted-skill Lease duration changed during renewal",
+            )
+        renew_time_raw = spec.get("renewTime")
+        if not isinstance(renew_time_raw, str) or len(renew_time_raw) > 64 or _RFC3339.fullmatch(renew_time_raw) is None:
+            raise QualificationCommandError(
+                "accepted-skill Lease renewTime is invalid",
+            )
+        try:
+            renew_time = datetime.fromisoformat(
+                renew_time_raw.replace("Z", "+00:00"),
+            )
+        except ValueError:
+            raise QualificationCommandError(
+                "accepted-skill Lease renewTime is invalid",
+            ) from None
+        if renew_time.tzinfo is None or renew_time.utcoffset() is None:
+            raise QualificationCommandError(
+                "accepted-skill Lease renewTime is invalid",
+            )
+        return identity, holder, duration, renew_time.astimezone(UTC)
+
+    def _verify_gateway_token_review(
+        self,
+        attempt: _AcceptedSkillAttemptObservation,
+    ) -> _AcceptedSkillAttemptObservation:
+        gateway_pod = self._component_pod_name("gateway")
+        token = self._kubectl(
+            "exec",
+            gateway_pod,
+            "-c",
+            "gateway",
+            "--",
+            "cat",
+            "/var/run/secrets/hartmesh-provisioner/token",
+            redact_diagnostics=True,
+        )
+        if not 1 <= len(token.encode("utf-8")) <= 16 * 1024:
+            raise QualificationCommandError(
+                "projected Gateway token is unavailable for TokenReview",
+            )
+        request = {
+            "apiVersion": "authentication.k8s.io/v1",
+            "kind": "TokenReview",
+            "spec": {
+                "token": token,
+                "audiences": ["hartmesh-provisioner"],
+            },
+        }
+        raw = self._run(
+            self.config.token_review(),
+            timeout_seconds=20,
+            input_text=json.dumps(request),
+            redact_diagnostics=True,
+        )
+        request["spec"]["token"] = ""
+        token = ""  # Drop the only retained bearer reference before parsing.
+        value = json.loads(raw)
+        status = value.get("status") if isinstance(value, dict) else None
+        user = status.get("user") if isinstance(status, dict) else None
+        expected_username = f"system:serviceaccount:{self.config.namespace}:{self.fullname}-gateway"
+        if not isinstance(status, dict) or status.get("authenticated") is not True or not isinstance(user, dict) or user.get("username") != expected_username or "hartmesh-provisioner" not in (status.get("audiences") or []):
+            raise QualificationCommandError(
+                "Gateway projected identity did not pass exact TokenReview",
+            )
+        return replace(attempt, token_review_authenticated=True)
+
+    def _delete_attempt_lease(
+        self,
+        attempt: _AcceptedSkillAttemptObservation,
+    ) -> None:
+        current = json.loads(
+            self._kubectl(
+                "get",
+                "lease",
+                attempt.lease_name,
+                "-o",
+                "json",
+            )
+        )
+        if current.get("metadata", {}).get("uid") != attempt.lease_uid:
+            raise QualificationCommandError(
+                "accepted-skill Lease changed before sandbox owner-loss fault",
+            )
+        self._kubectl(
+            "delete",
+            "lease",
+            attempt.lease_name,
+            "--wait=false",
+        )
+
+    def _wait_for_attempt_cleanup(
+        self,
+        attempt: _AcceptedSkillAttemptObservation,
+    ) -> None:
+        def removed() -> bool:
+            documents = (
+                json.loads(self._kubectl("get", "pods", "-o", "json")),
+                json.loads(self._kubectl("get", "leases", "-o", "json")),
+                json.loads(self._kubectl("get", "secrets", "-o", "json")),
+                json.loads(self._kubectl("get", "networkpolicies", "-o", "json")),
+            )
+            for document in documents:
+                for item in document.get("items", []):
+                    if not isinstance(item, dict):
+                        continue
+                    metadata = item.get("metadata", {})
+                    if metadata.get("uid") in {
+                        attempt.pod_uid,
+                        attempt.lease_uid,
+                    }:
+                        return False
+                    for owner in metadata.get("ownerReferences", []):
+                        if isinstance(owner, dict) and owner.get("uid") == attempt.lease_uid:
+                            return False
+            return True
+
+        wait_until(
+            removed,
+            description=f"accepted-skill attempt cleanup for {attempt.run_id}",
+            timeout_seconds=180,
+            interval_seconds=2,
+        )
+
+    @staticmethod
+    def _fixture_material(
+        attempt: _AcceptedSkillAttemptObservation,
+    ) -> AcceptedSkillMaterialEvidenceV2:
+        files = sorted(_QUALIFICATION_SKILL_FILES.items())
+        tree = hashlib.sha256()
+        for relative, data in files:
+            header = json.dumps(
+                ["public", _QUALIFICATION_SKILL_NAME, relative, "regular"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            tree.update(len(header).to_bytes(4, "big"))
+            tree.update(header)
+            tree.update(len(data).to_bytes(8, "big"))
+            tree.update(data)
+        tree_digest = tree.hexdigest()
+        total_bytes = sum(len(data) for _relative, data in files)
+        projection = {
+            "name": _QUALIFICATION_SKILL_NAME,
+            "category": "public",
+            "relative_path": _QUALIFICATION_SKILL_NAME,
+            "manifest_digest": hashlib.sha256(_QUALIFICATION_SKILL_FILES["SKILL.md"]).hexdigest(),
+            "content_digest": tree_digest,
+            "file_count": len(files),
+            "total_bytes": total_bytes,
+        }
+        snapshot_digest = hashlib.sha256(
+            json.dumps(
+                {"version": 1, "skills": [projection]},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        receipt = attempt.receipt
+        if receipt.get("snapshot_id") != snapshot_digest or receipt.get("file_count") != len(files) or receipt.get("total_bytes") != total_bytes:
+            raise QualificationCommandError(
+                "accepted-skill verifier receipt does not match fixture bytes",
+            )
+        policy_digest = _sha256_bytes(
+            _canonical_json(
+                {
+                    "version": 1,
+                    "skill": _QUALIFICATION_SKILL_NAME,
+                    "allowed_tools": ["read_file"],
+                }
+            )
+        )
+        return AcceptedSkillMaterialEvidenceV2(
+            skill_name=_QUALIFICATION_SKILL_NAME,
+            snapshot_digest="sha256:" + snapshot_digest,
+            skill_tree_digest="sha256:" + tree_digest,
+            allowed_tool_policy_digest=policy_digest,
+            file_count=len(files),
+            total_bytes=total_bytes,
+            materialization_digest="sha256:" + attempt.materialization_digest,
+            receipt_digest="sha256:" + attempt.verifier_receipt_digest,
+        )
+
+    def _gateway_node(self) -> str:
+        pod_name = self._component_pod_name("gateway")
+        value = json.loads(self._kubectl("get", "pod", pod_name, "-o", "json"))
+        node = value.get("spec", {}).get("nodeName")
+        if not isinstance(node, str) or not node:
+            raise QualificationCommandError("Gateway scheduling node is unavailable")
+        return node
+
+    def _rwx_volume_identity(self) -> str:
+        value = json.loads(
+            self._kubectl(
+                "get",
+                "persistentvolumeclaim",
+                f"{self.fullname}-home",
+                "-o",
+                "json",
+            )
+        )
+        metadata = value.get("metadata", {})
+        spec = value.get("spec", {})
+        uid = metadata.get("uid")
+        if spec.get("storageClassName") != self.config.rwx_storage_class or spec.get("accessModes") != ["ReadWriteMany"] or not isinstance(uid, str) or not uid:
+            raise QualificationCommandError(
+                "qualified home volume is not the exact RWX claim",
+            )
+        return uid
+
+    def _assert_provisioner_image(self) -> None:
+        value = self._pod_json("provisioner")
+        items = value.get("items")
+        if not isinstance(items, list) or len(items) != 1:
+            raise QualificationCommandError(
+                "qualification requires exactly one provisioner pod",
+            )
+        statuses = items[0].get("status", {}).get("containerStatuses", [])
+        provisioner = next(
+            (item for item in statuses if isinstance(item, dict) and item.get("name") == "provisioner"),
+            None,
+        )
+        image_id = provisioner.get("imageID") if isinstance(provisioner, dict) else None
+        if not isinstance(image_id, str) or self.config.provisioner_image_digest not in image_id:
+            raise QualificationCommandError(
+                "running provisioner imageID does not match the qualified digest",
+            )
+
+    def _publish_accepted_skill_qualification(
+        self,
+        values: dict[str, object],
+        evidence: KubernetesAcceptedSkillQualificationEvidenceV2,
+        client: _RuntimeHttpSession,
+    ) -> Path:
+        passing_path = self.config.evidence_path.with_suffix(
+            self.config.evidence_path.suffix + ".passing",
+        )
+        evidence.write(passing_path)
+        evidence_digest = evidence_sha256(passing_path)
+        verification = verify_qualification_evidence(
+            passing_path.read_bytes(),
+            declared_digest=evidence_digest,
+            expected=AcceptedSkillQualificationExpectationV2(
+                qualification_id=evidence.qualification_id,
+                gateway_image_digest=self.config.image_digest,
+                provisioner_image_digest=(self.config.provisioner_image_digest),
+                verifier_image_digest=self.config.verifier_image_digest,
+                sandbox_image_digest=self.config.sandbox_image_digest,
+                chart_version=self._chart_version(),
+                chart_digest=self._chart_digest(),
+                configuration_digest=_sha256_bytes(_canonical_json(values)),
+                migration_head=evidence.migration_head,
+                scope=evidence.SCOPE,
+                namespace=self.config.namespace,
+                required_scenarios=evidence.REQUIRED_SCENARIOS,
+            ),
+        )
+        if verification.artifact_digest != evidence_digest:
+            raise QualificationCommandError(
+                "offline accepted-skill verification returned the wrong digest",
+            )
+        completed_at = (
+            evidence.completed_at.astimezone(UTC)
+            .isoformat()
+            .replace(
+                "+00:00",
+                "Z",
+            )
+        )
+        published = json.loads(json.dumps(values))
+        published["deployment"]["qualificationEvidence"] = [
+            {
+                "qualificationId": evidence.qualification_id,
+                "artifactDigest": evidence_digest,
+                "completedAt": completed_at,
+                "scope": evidence.SCOPE,
+                "status": "passed",
+            }
+        ]
+        values_path = self._write_values(published, "qualified-skill-v2")
+        self._helm(
+            "upgrade",
+            self.config.release_name,
+            str(self.chart_path),
+            "--values",
+            str(values_path),
+            "--wait",
+            "--timeout",
+            "8m",
+            timeout_seconds=510,
+        )
+        self._ready_gateway()
+        with _PortForward(self.config, self.gateway_service) as forwarded:
+            client.set_base_url(f"http://127.0.0.1:{forwarded.port}")
+            status, report = client.request(
+                "GET",
+                "/api/runtime/v1/deployment",
+            )
+        qualification = report.get("qualification")
+        entries = qualification.get("evidence") if isinstance(qualification, dict) else None
+        if (
+            status != 200
+            or not isinstance(qualification, dict)
+            or qualification.get("trust") != "operator_asserted"
+            or not isinstance(entries, list)
+            or not any(
+                isinstance(entry, dict) and entry.get("qualification_id") == evidence.qualification_id and entry.get("artifact_digest") == evidence_digest and entry.get("scope") == evidence.SCOPE and entry.get("status") == "passed"
+                for entry in entries
+            )
+        ):
+            raise QualificationCommandError(
+                "administrative report did not expose accepted-skill evidence",
+            )
+        return passing_path
+
+    def qualify(self) -> KubernetesAcceptedSkillQualificationEvidenceV2:
+        """Run real faults, verify nonempty material, and publish strict v2."""
+
+        validate_kubernetes_prerequisites(os.environ)
+        self._confirm_context()
+        values = self.values()
+        attempts: dict[str, _AcceptedSkillAttemptObservation] = {}
+        cleanup: dict[str, str] = {}
+        gateway_replacements: dict[str, str] = {}
+        passing_path: Path | None = None
+        try:
+            self._create_namespace_and_configuration()
+            self._install(values)
+            gateway_pod = self._ready_gateway()
+            self._assert_provisioner_image()
+            stores = self._shared_store_evidence()
+            schedulable_nodes = self._schedulable_nodes()
+            rwx_volume_uid = self._rwx_volume_identity()
+            with _PortForward(self.config, self.gateway_service) as forwarded:
+                client = _RuntimeHttpSession(f"http://127.0.0.1:{forwarded.port}")
+                self._initialize_admin(client)
+                owner_observer = _RuntimeHttpSession(client.base_url)
+                self._login_admin(owner_observer)
+                nonowner = _RuntimeHttpSession(client.base_url)
+                self._register_nonowner(nonowner)
+
+            observed_faults = {
+                "active_execution",
+                "terminal_before_lifecycle_commit",
+                "graceful_rollout_termination",
+                "forced_kill_after_graceful_deadline",
+            }
+
+            def probe(scenario: str, run_id: str) -> None:
+                if scenario not in observed_faults:
+                    return
+                gateway_node = self._gateway_node()
+                attempt = self._accepted_attempt(
+                    scenario,
+                    run_id,
+                    gateway_node=gateway_node,
+                )
+                if gateway_node not in schedulable_nodes or attempt.pod_node not in schedulable_nodes or gateway_node == attempt.pod_node:
+                    raise QualificationCommandError(
+                        "accepted-skill qualification did not execute cross-node",
+                    )
+                if scenario == "active_execution":
+                    attempt = self._verify_gateway_token_review(attempt)
+                    attempt = self._wait_for_lease_renewal(attempt)
+                if scenario == "terminal_before_lifecycle_commit":
+                    self._delete_attempt_lease(attempt)
+                attempts[scenario] = attempt
+
+            for scenario in KubernetesQualificationEvidence.REQUIRED_SCENARIOS:
+                with _PortForward(self.config, self.gateway_service) as forwarded:
+                    base_url = f"http://127.0.0.1:{forwarded.port}"
+                    client.set_base_url(base_url)
+                    owner_observer.set_base_url(base_url)
+                    nonowner.set_base_url(base_url)
+                    _scenario_evidence, gateway_pod = self._run_scenario(
+                        scenario,
+                        client,
+                        owner_observer,
+                        nonowner,
+                        gateway_pod,
+                        forwarded,
+                        barrier_probe=probe,
+                    )
+                if scenario in {
+                    "graceful_rollout_termination",
+                    "forced_kill_after_graceful_deadline",
+                }:
+                    gateway_replacements[scenario] = gateway_pod[1]
+                attempt = attempts.get(scenario)
+                if attempt is not None:
+                    self._wait_for_attempt_cleanup(attempt)
+                    cleanup[scenario] = "deleted"
+                if self._shared_store_evidence() != stores:
+                    raise QualificationCommandError(
+                        "shared stores changed during accepted-skill faults",
+                    )
+            if set(attempts) != observed_faults:
+                raise QualificationCommandError(
+                    "accepted-skill fault coverage is incomplete",
+                )
+            active = attempts["active_execution"]
+            facts = self._environment_facts(gateway_pod[0])
+            evidence_scenarios = (
+                ("nonempty_material_execution", active),
+                ("token_review_and_lease_renewal", active),
+                (
+                    "gateway_replacement_cleanup",
+                    attempts["graceful_rollout_termination"],
+                ),
+                ("sandbox_owner_loss_cleanup", attempts["terminal_before_lifecycle_commit"]),
+                (
+                    "process_loss_cleanup",
+                    attempts["forced_kill_after_graceful_deadline"],
+                ),
+            )
+            scenario_items: list[AcceptedSkillScenarioEvidenceV2] = []
+            for name, attempt in evidence_scenarios:
+                gateway_replacement_uid = (
+                    gateway_replacements["graceful_rollout_termination"] if name == "gateway_replacement_cleanup" else gateway_replacements["forced_kill_after_graceful_deadline"] if name == "process_loss_cleanup" else None
+                )
+                scenario_items.append(
+                    AcceptedSkillScenarioEvidenceV2(
+                        name=name,
+                        run_id=attempt.run_id,
+                        result_digest=attempt.result_digest(
+                            evidence_scenario=name,
+                            cleanup_outcome=cleanup[attempt.scenario],
+                            gateway_replacement_uid=gateway_replacement_uid,
+                        ),
+                        replacement_observed=name
+                        in {
+                            "gateway_replacement_cleanup",
+                            "process_loss_cleanup",
+                        },
+                        cleanup_outcome="deleted",
+                    )
+                )
+            scenarios = tuple(scenario_items)
+            if tuple(item.name for item in scenarios) != (ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2):
+                raise QualificationCommandError(
+                    "accepted-skill evidence scenario order changed",
+                )
+            evidence = KubernetesAcceptedSkillQualificationEvidenceV2(
+                qualification_id=self.config.qualification_id,
+                gateway_image_reference=(f"{self.config.image_repository}@{self.config.image_digest}"),
+                gateway_image_digest=self.config.image_digest,
+                provisioner_image_reference=(self.config.provisioner_image_reference),
+                provisioner_image_digest=(self.config.provisioner_image_digest),
+                verifier_image_reference=self.config.verifier_image_reference,
+                verifier_image_digest=self.config.verifier_image_digest,
+                sandbox_image_reference=self.config.sandbox_image_reference,
+                sandbox_image_digest=self.config.sandbox_image_digest,
+                chart_version=self._chart_version(),
+                chart_digest=self._chart_digest(),
+                configuration_digest=_sha256_bytes(_canonical_json(values)),
+                migration_head=facts["migration_head"],
+                environment=AcceptedSkillQualificationEnvironmentV2(
+                    kubernetes_server_version=facts["kubernetes_server_version"],
+                    cluster_context=self.config.context,
+                    cluster_driver=optional_cluster_driver(os.environ),
+                    namespace=self.config.namespace,
+                    schedulable_nodes=schedulable_nodes,
+                    gateway_node=active.gateway_node,
+                    sandbox_node=active.pod_node,
+                    rwx_storage_class=self.config.rwx_storage_class,
+                    rwx_volume_uid=rwx_volume_uid,
+                    token_review_authenticated=(active.token_review_authenticated),
+                    gateway_service_account=f"{self.fullname}-gateway",
+                    lease_uid=active.lease_uid,
+                    lease_renewals=active.lease_renewals,
+                ),
+                material=self._fixture_material(active),
+                scenarios=scenarios,
+                completed_at=datetime.now(UTC),
+            )
+            passing_path = self._publish_accepted_skill_qualification(
+                values,
+                evidence,
+                client,
+            )
+            self._kubectl(
+                "delete",
+                "namespace",
+                self.config.namespace,
+                "--wait=true",
+                "--ignore-not-found=true",
+                namespaced=False,
+                timeout_seconds=180,
+            )
+            os.replace(passing_path, self.config.evidence_path)
+            return evidence
+        except Exception as exc:
+            if passing_path is not None:
+                passing_path.unlink(missing_ok=True)
+            self._collect_failure_artifacts()
+            failure = {
+                "api_version": ("deerflow.kubernetes-accepted-skill-qualification/v2"),
+                "kind": "kubernetes.qualification.evidence",
+                "status": "failed",
+                "scope": ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+                "qualification_id": self.config.qualification_id,
+                "namespace": self.config.namespace,
+                "failure_code": type(exc).__name__,
+                "completed_scenarios": sorted(cleanup),
+                "completed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            }
+            payload = _canonical_json(failure) + b"\n"
+            self.config.evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.config.evidence_path.with_suffix(self.config.evidence_path.suffix + ".failed.tmp")
+            temporary.write_bytes(payload)
+            os.replace(temporary, self.config.evidence_path)
             raise

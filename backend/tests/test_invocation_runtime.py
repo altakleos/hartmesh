@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
@@ -141,6 +142,8 @@ class _Runs:
         self.cancellations: list[InternalCancelRequest] = []
         self.observed_record: RunRecord | None = self.record
         self.cancel_outcome = CancelOutcome.cancelled
+        self.candidate_run_ids: list[str] = []
+        self.attachments = 0
 
     @asynccontextmanager
     async def admission_scope(self, _thread_id: str):
@@ -149,9 +152,27 @@ class _Runs:
     async def prepare_admission(self, _launch: PreparedLaunch) -> None:
         self.events.append("prepare")
 
-    async def admit(self, _launch: PreparedLaunch) -> RunRecord:
+    async def admit(
+        self,
+        _launch: PreparedLaunch,
+        *,
+        candidate_run_id: str,
+    ) -> RunRecord:
         self.events.append("admit")
+        self.candidate_run_ids.append(candidate_run_id)
+        self.record.run_id = candidate_run_id
         return self.record
+
+    async def attach_worker(
+        self,
+        record: RunRecord,
+        worker,
+        task_factory,
+    ):
+        assert record.task is None
+        self.attachments += 1
+        record.task = task_factory(worker)
+        return record.task
 
     async def fail_start(self, _record: RunRecord, _error: str) -> None:
         self.failures.append((_record, _error))
@@ -295,6 +316,17 @@ def test_gateway_runtime_builders_require_application_admission_fence() -> None:
             build()
 
 
+@pytest.mark.parametrize("service_id", ["s" * 65, "界" * 65])
+def test_gateway_service_runtime_builder_rejects_ids_beyond_the_persisted_owner_domain(service_id: str) -> None:
+    from app.gateway.services import build_service_invocation_runtime
+
+    with pytest.raises(ValueError, match="persisted service id"):
+        build_service_invocation_runtime(
+            SimpleNamespace(state=SimpleNamespace()),
+            authenticated_service_id=service_id,
+        )
+
+
 @pytest.mark.anyio
 async def test_launch_admits_before_attaching_worker() -> None:
     events: list[str] = []
@@ -307,6 +339,8 @@ async def test_launch_admits_before_attaching_worker() -> None:
     receipt = await runtime.launch(InternalLaunchIntent(thread_id="thread-1"))
     assert receipt.record is runs.record
     assert receipt.record.task is not None
+    assert runs.candidate_run_ids == [receipt.record.run_id]
+    assert runs.attachments == 1
     assert events == ["prepare", "admit"]
 
     await receipt.record.task
@@ -334,7 +368,7 @@ async def test_kubernetes_commit_barriers_bracket_worker_attachment(
     def attach(worker):
         events.append("attach")
         worker.close()
-        return object()
+        return asyncio.create_task(asyncio.sleep(0))
 
     monkeypatch.setattr(kubernetes_qualification, "qualification_barrier", barrier)
     monkeypatch.setattr(kubernetes_qualification, "qualification_counter", counter)
@@ -377,7 +411,43 @@ async def test_attachment_failure_closes_worker_and_preserves_failure_semantics(
 
     assert exc_info.value is failure
     assert runs.record.task is None
-    assert runs.failures == [(runs.record, "Failed to attach run worker: task factory unavailable")]
+    assert runs.failures == [(runs.record, "worker_attachment_failed")]
+
+
+@pytest.mark.anyio
+async def test_cancellation_after_commit_before_worker_attachment_terminalizes_creator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.runtime import kubernetes_qualification
+
+    events: list[str] = []
+    runs = _Runs(events)
+    reached = asyncio.Event()
+
+    async def barrier(point: str, _record: RunRecord) -> bool:
+        if point == "accepted_before_worker_start":
+            reached.set()
+            await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(kubernetes_qualification, "qualification_barrier", barrier)
+    runtime = InvocationRuntime(
+        normalizer=_Normalizer(events),
+        runs=runs,
+    )
+
+    launch = asyncio.create_task(
+        runtime.launch(InternalLaunchIntent(thread_id="thread-1")),
+    )
+    await reached.wait()
+    launch.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await launch
+
+    assert runs.attachments == 0
+    assert runs.record.task is None
+    assert runs.failures == [(runs.record, "worker_attachment_failed")]
 
 
 @pytest.mark.anyio
@@ -386,7 +456,12 @@ async def test_conflicting_admission_never_attaches_a_worker() -> None:
     conflict = ConflictError("thread is busy")
 
     class ConflictingRuns(_Runs):
-        async def admit(self, _launch: PreparedLaunch) -> RunRecord:
+        async def admit(
+            self,
+            _launch: PreparedLaunch,
+            *,
+            candidate_run_id: str,
+        ) -> RunRecord:
             self.events.append("admit")
             raise conflict
 
@@ -436,7 +511,12 @@ async def test_dependency_failures_propagate_without_runtime_translation() -> No
             raise normalize_failure
 
     class FailingRuns(_Runs):
-        async def admit(self, _launch: PreparedLaunch) -> RunRecord:
+        async def admit(
+            self,
+            _launch: PreparedLaunch,
+            *,
+            candidate_run_id: str,
+        ) -> RunRecord:
             raise admit_failure
 
         async def observe(

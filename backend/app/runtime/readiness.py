@@ -79,6 +79,7 @@ class RuntimeReadinessCoordinator:
         extension_generation: Callable[[], int],
         overall_timeout_seconds: float,
         sandbox_projection_ready: Callable[[], Awaitable[bool]] | None = None,
+        admission_compensations_ready: Callable[[], bool] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if overall_timeout_seconds <= 0:
@@ -89,6 +90,7 @@ class RuntimeReadinessCoordinator:
         self._extension_generation = extension_generation
         self._overall_timeout_seconds = overall_timeout_seconds
         self._sandbox_projection_ready = sandbox_projection_ready
+        self._admission_compensations_ready = admission_compensations_ready
         self._clock = clock or (lambda: datetime.now(UTC))
         self._last_snapshot: RuntimeReadinessSnapshot | None = None
         self._admission_condition = asyncio.Condition()
@@ -131,6 +133,18 @@ class RuntimeReadinessCoordinator:
         correlation_id: str | None = None
         if not self._persistence_ready():
             reasons.append("deployment_profile_unsatisfied")
+        if self._admission_compensations_ready is not None:
+            try:
+                compensations_ready = self._admission_compensations_ready()
+            except Exception as exc:
+                compensations_ready = False
+                correlation_id = self._log_dependency_failure(
+                    "Admission compensation readiness check failed",
+                    component="admission_compensation",
+                    error=exc,
+                )
+            if not compensations_ready:
+                reasons.append("admission_compensation_pending")
 
         expected_generation = self._extension_generation()
         store = self._store()

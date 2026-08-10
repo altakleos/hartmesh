@@ -9,11 +9,11 @@ from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.postgres import postgres_async_url
 
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
 from app.gateway.run_models import RunCreateRequest
@@ -67,14 +67,6 @@ def _caller_intent_fields(value: dict[str, object]) -> dict[str, object]:
         "caller_intent_digest": intent.digest,
         "caller_intent_digest_version": intent.digest_version,
     }
-
-
-def _postgres_async_url(url: str) -> str:
-    if url.startswith("postgresql://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
-    parts = urlsplit(url)
-    query = urlencode((key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key not in {"sslmode", "channel_binding"})
-    return urlunsplit(parts._replace(query=query))
 
 
 def test_external_key_normalization_is_unambiguous_and_utf8_bounded() -> None:
@@ -213,7 +205,7 @@ async def test_sql_store_ensure_is_idempotent_across_response_loss_and_terminal_
 )
 async def test_postgres_two_independent_sessions_race_to_one_run_row() -> None:
     assert _POSTGRES_URL is not None
-    engine = create_async_engine(_postgres_async_url(_POSTGRES_URL))
+    engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -263,7 +255,7 @@ async def test_postgres_two_independent_sessions_race_to_one_run_row() -> None:
 )
 async def test_postgres_concurrent_unequal_caller_intents_have_one_winner_and_one_conflict() -> None:
     assert _POSTGRES_URL is not None
-    engine = create_async_engine(_postgres_async_url(_POSTGRES_URL))
+    engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -462,9 +454,13 @@ class _KeyedRuns:
     async def prepare_admission(self, _launch):
         return None
 
-    async def admit(self, _launch):
+    async def admit(self, _launch, *, candidate_run_id):
         assert self.admission is not None
         return self.admission
+
+    async def attach_worker(self, record, worker, task_factory):
+        record.task = task_factory(worker)
+        return record.task
 
     async def fail_start(self, *_args):
         raise AssertionError("worker attachment must not fail")

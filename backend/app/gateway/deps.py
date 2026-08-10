@@ -142,7 +142,7 @@ def _validate_agent_storage(config: AppConfig) -> None:
         )
 
 
-async def _drain_inflight_runs(run_manager: RunManager) -> None:
+async def _drain_inflight_runs(run_manager: RunManager) -> bool:
     """Drain in-flight runs before the checkpointer is torn down (issue #3373).
 
     Shields the (internally-bounded) drain so that even if the lifespan
@@ -155,7 +155,7 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
     """
     drain = asyncio.create_task(run_manager.shutdown(timeout=_RUN_DRAIN_TIMEOUT_SECONDS))
     try:
-        await asyncio.shield(drain)
+        return await asyncio.shield(drain)
     except asyncio.CancelledError:
         # Re-shield so this second wait does not abandon the in-flight drain;
         # it is bounded, so this cannot hang. Then re-raise to honour shutdown.
@@ -166,6 +166,7 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
         raise
     except Exception:
         logger.exception("Failed to drain in-flight runs during shutdown")
+        return False
 
 
 async def _publish_recovered_run_stream_end(
@@ -253,6 +254,7 @@ async def _flush_recovered_stream_cleanups(
 
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
+    from app.gateway.auth.models import User
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
     from deerflow.runtime import RunRecord
@@ -500,6 +502,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()
 
+        # Transfer ownership out of the surrounding context manager before the
+        # application shutdown coordinator runs.  If admission or a producer
+        # cannot quiesce by the absolute deadline, closing these callbacks would
+        # race their database/checkpointer use.  In that unsafe case the
+        # coordinator deliberately leaves them for process reclamation instead
+        # of allowing ``AsyncExitStack.__aexit__`` to close them implicitly.
+        runtime_resource_stack = stack.pop_all()
         runtime_close_task: asyncio.Task[None] | None = None
 
         async def close_runtime_dependencies() -> None:
@@ -507,10 +516,6 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             nonlocal runtime_close_task
             if runtime_close_task is None:
-                # Transfer callbacks out of the surrounding AsyncExitStack
-                # before awaiting them. If the coordinator deadline cancels
-                # this task, the context manager cannot retry them unboundedly.
-                closing_stack = stack.pop_all()
 
                 async def close_owned_resources() -> None:
                     try:
@@ -521,7 +526,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                         )
                     finally:
                         try:
-                            await closing_stack.aclose()
+                            await runtime_resource_stack.aclose()
                         finally:
                             await close_engine()
 
@@ -550,8 +555,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 else:
                     # Direct context-manager users (mostly focused tests) do
                     # not construct the application coordinator.
-                    await _drain_inflight_runs(run_manager)
-                    await close_runtime_dependencies()
+                    if await _drain_inflight_runs(run_manager):
+                        await close_runtime_dependencies()
+                    else:
+                        logger.warning("Runtime dependencies retained because run drain was not proven")
 
 
 # ---------------------------------------------------------------------------
@@ -752,7 +759,7 @@ async def get_current_user_from_request(request: Request):
     return user
 
 
-async def require_admin_user(request: Request, *, detail: str) -> None:
+async def require_admin_user(request: Request, *, detail: str) -> User:
     """Require the authenticated caller to be an admin user.
 
     ``AuthMiddleware`` normally stamps ``request.state.user`` before the request
@@ -772,6 +779,7 @@ async def require_admin_user(request: Request, *, detail: str) -> None:
 
     if getattr(user, "system_role", None) != "admin":
         raise HTTPException(status_code=403, detail=detail)
+    return user
 
 
 async def get_optional_user_from_request(request: Request):

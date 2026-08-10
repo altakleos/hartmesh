@@ -199,7 +199,12 @@ digests and observed image IDs, the verifier-authored receipt digest, and the fi
 materialization digest before remote AIO advertises `immutable_read_only`. V1 receipts remain
 parseable but cannot authorize nonempty execution. The Lease is the owner root for the Pod,
 immutable Secrets, and NetworkPolicy. Response-loss replay, reuse, renewal, and the worker
-pre-stream fence re-read the complete tuple and fail closed on deletion, replacement, or drift. A bounded
+pre-stream fence re-read the complete tuple and fail closed on deletion, replacement, or drift.
+Live qualification counts a Lease renewal only when the UID, accepted-attempt holder, and
+qualified duration stay fixed while bounded RFC3339 `spec.renewTime` strictly advances;
+`resourceVersion` alone is not proof. The verifier/gate ships in this provisioner artifact, so
+v2 evidence requires their exact pinned reference and digest to equal the provisioner subject.
+A bounded
 reconciler deletes expired Lease UIDs, letting Kubernetes garbage collection remove children.
 Process restart does not adopt such a Pod because the capability is intentionally unrecoverable;
 the corresponding lost worker follows the existing orphan-terminalization contract.

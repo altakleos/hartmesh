@@ -293,6 +293,22 @@ def test_process_local_storage_cannot_enter_the_durable_production_profile() -> 
     assert reporter.persistence_ready is False
 
 
+@pytest.mark.parametrize("command_timeout", [None, float("inf")])
+def test_durable_postgres_profile_requires_a_finite_command_timeout(
+    command_timeout: float | None,
+) -> None:
+    config = SimpleNamespace(
+        deployment=SimpleNamespace(profile="durable_production"),
+        database=SimpleNamespace(
+            backend="postgres",
+            command_timeout=command_timeout,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="finite PostgreSQL command_timeout"):
+        validate_deployment_profile(config)
+
+
 def test_local_development_profile_explicitly_allows_process_local_storage() -> None:
     config = SimpleNamespace(
         deployment=SimpleNamespace(profile="local_development"),

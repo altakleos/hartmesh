@@ -555,6 +555,7 @@ async def test_poison_receipt_dead_letters_without_exposing_exception_text(
         assert row.failure_count == 1
     assert "must-never-be-logged" not in caplog.text
     assert "RuntimeError" in caplog.text
+    assert "code=inbound_receipt_dead_letter" in caplog.text
 
     await engine.dispose()
 

@@ -7,11 +7,11 @@ import base64
 import json
 import os
 import uuid
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.postgres import postgres_async_url
 
 from deerflow.persistence.base import Base
 from deerflow.persistence.run.model import RunRow
@@ -20,14 +20,6 @@ from deerflow.runtime.runs.store.base import LifecycleTransition, LifecycleType,
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
-
-
-def _postgres_async_url(url: str) -> str:
-    if url.startswith("postgresql://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
-    parts = urlsplit(url)
-    query = urlencode((key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key not in {"sslmode", "channel_binding"})
-    return urlunsplit(parts._replace(query=query))
 
 
 @pytest.mark.anyio
@@ -233,7 +225,7 @@ async def test_postgres_query_uses_one_repeatable_read_snapshot() -> None:
     from deerflow.runtime.runs.lifecycle_query import LifecycleQuery, decode_lifecycle_cursor
 
     assert _POSTGRES_URL is not None
-    engine = create_async_engine(_postgres_async_url(_POSTGRES_URL))
+    engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from collections.abc import Callable
@@ -168,6 +169,10 @@ def validate_deployment_profile(
     )
     if profile is DeploymentProfile.durable_production and persistence.tier is PersistenceTier.process_local:
         raise ValueError("durable_production cannot use process-local invocation state")
+    command_timeout = getattr(database, "command_timeout", 30)
+    finite_command_timeout = isinstance(command_timeout, (int, float)) and not isinstance(command_timeout, bool) and math.isfinite(command_timeout) and command_timeout > 0
+    if profile is DeploymentProfile.durable_production and raw_backend == "postgres" and not finite_command_timeout:
+        raise ValueError("durable_production requires a finite PostgreSQL command_timeout")
     ingress = describe_native_ingress(
         config,
         verified_sources=verified_sources,

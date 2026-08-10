@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -404,7 +405,19 @@ class DurableRuns(Protocol):
 
     async def prepare_admission(self, launch: PreparedLaunch) -> None: ...
 
-    async def admit(self, launch: PreparedLaunch) -> DurableAdmission | RunRecord: ...
+    async def admit(
+        self,
+        launch: PreparedLaunch,
+        *,
+        candidate_run_id: str,
+    ) -> DurableAdmission | RunRecord: ...
+
+    async def attach_worker(
+        self,
+        record: RunRecord,
+        worker: WorkerCoroutine,
+        task_factory: TaskFactory,
+    ) -> asyncio.Task[None]: ...
 
     async def find_by_external_identity(
         self,
@@ -625,6 +638,9 @@ class InvocationRuntime:
     ) -> InternalLaunchReceipt | NotFoundOrInvisible | InvocationAuthorizationOutcome:
         launch = await self._normalizer.normalize(intent)
         worker_owns_material = False
+        created_record: RunRecord | None = None
+        worker: WorkerCoroutine | None = None
+        candidate_run_id = str(uuid.uuid4())
         try:
             start_decision = await self._authorization.authorize_start(launch)
             if rejection := self._rejection(start_decision):
@@ -652,7 +668,10 @@ class InvocationRuntime:
                 )
             async with self._runs.admission_scope(launch.thread_id):
                 await self._runs.prepare_admission(launch)
-                admitted = await self._runs.admit(launch)
+                admitted = await self._runs.admit(
+                    launch,
+                    candidate_run_id=candidate_run_id,
+                )
                 if isinstance(admitted, DurableAdmission):
                     record = admitted.record
                     if admitted.outcome is not AdmissionOutcome.created:
@@ -673,6 +692,7 @@ class InvocationRuntime:
                         return InternalLaunchReceipt(record=visible, created=False)
                 else:
                     record = admitted
+                created_record = record
                 # Real-pod qualification barriers are inert unless the dedicated
                 # test image is started with its explicit environment gate.
                 from deerflow.runtime.kubernetes_qualification import (
@@ -683,15 +703,15 @@ class InvocationRuntime:
                 await qualification_barrier("accepted_before_worker_start", record)
                 worker = launch.worker(record)
                 try:
-                    record.task = self._task_factory(worker)
-                except Exception as exc:
+                    await self._runs.attach_worker(
+                        record,
+                        worker,
+                        self._task_factory,
+                    )
+                except Exception:
                     close = getattr(worker, "close", None)
                     if callable(close):
                         close()
-                    await self._runs.fail_start(
-                        record,
-                        f"Failed to attach run worker: {exc}",
-                    )
                     raise
                 material = launch.accepted_invocation.agent_revision.material if launch.accepted_invocation is not None else None
                 add_done_callback = getattr(record.task, "add_done_callback", None)
@@ -718,11 +738,33 @@ class InvocationRuntime:
                 await qualification_counter("worker_attachments", record)
                 await qualification_barrier("accepted_before_client_response", record)
             return InternalLaunchReceipt(record=record, created=True)
+        except (Exception, asyncio.CancelledError):
+            if created_record is not None and created_record.task is None:
+                if worker is not None:
+                    close = getattr(worker, "close", None)
+                    if callable(close):
+                        close()
+                await self._finish_unattached_compensation(created_record)
+            raise
         finally:
             if not worker_owns_material and launch.accepted_invocation is not None:
                 material = launch.accepted_invocation.agent_revision.material
                 if material is not None:
                     await asyncio.to_thread(material.release_process_material)
+
+    async def _finish_unattached_compensation(self, record: RunRecord) -> None:
+        """Resolve creator-row compensation despite repeated request cancellation."""
+
+        cleanup = asyncio.create_task(
+            self._runs.fail_start(record, "worker_attachment_failed"),
+            name=f"deerflow-fail-unattached-run-{record.run_id}",
+        )
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        cleanup.result()
 
     async def launch(
         self,
