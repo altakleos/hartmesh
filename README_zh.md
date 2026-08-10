@@ -399,7 +399,7 @@ HartMesh 保留现有 `deerflow.*` namespace、包名、`DEER_FLOW_*` 变量、D
 
 这些 hash 仅代表来源，不是维护承诺。
 
-此 checkout 的 Alembic 图为线性：`0011_mcp_tasks` → `0011_accepted_invocation` → 后续调用迁移直至 `0018_inbound_receipt_failures`。
+此 checkout 的 Alembic 图为线性：`0011_mcp_tasks` → `0011_accepted_invocation` → 后续调用迁移直至 `0019_inbound_event_identity`。
 
 PostgreSQL 运维人员应在回滚前停止写入并备份数据；迁移说明见 [backend/AGENTS.md](backend/AGENTS.md)。
 

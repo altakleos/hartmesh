@@ -154,3 +154,33 @@ async def test_explicit_none_bypasses_filter(store):
 
     row = await store.get("t-alpha", user_id=None)
     assert row is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_claim_unowned_never_transfers_an_owned_memory_row(store):
+    await store.create("legacy", user_id=None, metadata={"source": "legacy"})
+
+    assert await store.claim_unowned("legacy", "user-a") is True
+    assert await store.claim_unowned("legacy", "user-b") is False
+
+    retained = await store.get("legacy", user_id=None)
+    assert retained is not None
+    assert retained["user_id"] == "user-a"
+    assert retained["metadata"] == {"source": "legacy"}
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_create_never_overwrites_an_existing_memory_row(store):
+    from deerflow.persistence.thread_meta import ThreadMetaAlreadyExistsError
+
+    await store.create("owned", user_id="user-a", metadata={"owner": "a"})
+
+    with pytest.raises(ThreadMetaAlreadyExistsError):
+        await store.create("owned", user_id="user-b", metadata={"owner": "b"})
+
+    retained = await store.get("owned", user_id=None)
+    assert retained is not None
+    assert retained["user_id"] == "user-a"
+    assert retained["metadata"] == {"owner": "a"}

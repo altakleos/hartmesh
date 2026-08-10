@@ -252,11 +252,26 @@ async def test_agent_name_fallback_still_works_with_no_explicit_identity(base_di
 
 
 @pytest.mark.asyncio
-async def test_ping_returns_no_target(base_dir: Path) -> None:
+async def test_ping_returns_no_target_without_creating_delivery_wide_identity(
+    base_dir: Path,
+) -> None:
     bus = MessageBus()
-    result = await fanout_event(bus, "ping", "del-1", {"zen": "x"})
+    sink_calls = 0
+
+    async def sink(_messages) -> None:
+        nonlocal sink_calls
+        sink_calls += 1
+
+    result = await fanout_event(
+        bus,
+        "ping",
+        "del-1",
+        {"zen": "x"},
+        inbound_sink=sink,
+    )
     assert result["matched_agents"] == []
     assert any(r["reason"] == "no_target" for r in result["skipped"])
+    assert sink_calls == 0
     assert await _drain(bus) == []
 
 

@@ -197,6 +197,45 @@ class TestThreadMetaRepository:
         assert owner_row["metadata"] == {"source": "channel"}
         assert default_row is None
 
+    @pytest.mark.anyio
+    async def test_claim_unowned_assigns_legacy_row_once(self, repo):
+        await repo.create("legacy", user_id=None, metadata={"source": "legacy"})
+
+        assert await repo.claim_unowned("legacy", "owner-1") is True
+        assert await repo.claim_unowned("legacy", "owner-2") is False
+
+        retained = await repo.get("legacy", user_id=None)
+        assert retained is not None
+        assert retained["user_id"] == "owner-1"
+        assert retained["metadata"] == {"source": "legacy"}
+
+    @pytest.mark.anyio
+    async def test_duplicate_create_uses_the_store_conflict_contract(self, repo):
+        from deerflow.persistence.thread_meta import ThreadMetaAlreadyExistsError
+
+        await repo.create("owned", user_id="owner-1")
+
+        with pytest.raises(ThreadMetaAlreadyExistsError):
+            await repo.create("owned", user_id="owner-2")
+
+        retained = await repo.get("owned", user_id=None)
+        assert retained is not None
+        assert retained["user_id"] == "owner-1"
+
+    @pytest.mark.anyio
+    async def test_concurrent_claim_unowned_has_exactly_one_winner(self, repo):
+        await repo.create("legacy-race", user_id=None)
+
+        results = await asyncio.gather(
+            repo.claim_unowned("legacy-race", "owner-left"),
+            repo.claim_unowned("legacy-race", "owner-right"),
+        )
+
+        assert sorted(results) == [False, True]
+        retained = await repo.get("legacy-race", user_id=None)
+        assert retained is not None
+        assert retained["user_id"] in {"owner-left", "owner-right"}
+
     # --- search with metadata filter (SQL push-down) ---
 
     @pytest.mark.anyio

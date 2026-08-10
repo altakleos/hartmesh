@@ -21,6 +21,13 @@ metadata:
     app.kubernetes.io/component: gateway
 spec:
   replicas: {{ .Values.gateway.replicas }}
+  # The supported topology has one execution owner. Recreate prevents the
+  # Deployment controller from surging a second Gateway during upgrades.
+  strategy:
+    type: Recreate
+    # Explicitly clear the API-defaulted RollingUpdate settings when upgrading
+    # an existing release that previously omitted strategy.
+    rollingUpdate: null
   selector:
     matchLabels:
       {{- include "deer-flow.selectorLabels" . | nindent 6 }}

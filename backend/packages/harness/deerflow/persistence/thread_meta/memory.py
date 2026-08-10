@@ -7,11 +7,12 @@ router for thread records.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from langgraph.store.base import BaseStore
 
-from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, ThreadMetaStore
+from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, ThreadMetaAlreadyExistsError, ThreadMetaStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -22,6 +23,7 @@ SEARCH_PAGE_SIZE = 500
 class MemoryThreadMetaStore(ThreadMetaStore):
     def __init__(self, store: BaseStore) -> None:
         self._store = store
+        self._ownership_lock = asyncio.Lock()
 
     async def _get_owned_record(
         self,
@@ -49,20 +51,23 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         metadata: dict | None = None,
     ) -> dict:
         resolved_user_id = resolve_user_id(user_id, method_name="MemoryThreadMetaStore.create")
-        now = now_iso()
-        record: dict[str, Any] = {
-            "thread_id": thread_id,
-            "assistant_id": assistant_id,
-            "user_id": resolved_user_id,
-            "display_name": display_name,
-            "status": "idle",
-            "metadata": metadata or {},
-            "values": {},
-            "created_at": now,
-            "updated_at": now,
-        }
-        await self._store.aput(THREADS_NS, thread_id, record)
-        return record
+        async with self._ownership_lock:
+            if await self._store.aget(THREADS_NS, thread_id) is not None:
+                raise ThreadMetaAlreadyExistsError("thread metadata already exists")
+            now = now_iso()
+            record: dict[str, Any] = {
+                "thread_id": thread_id,
+                "assistant_id": assistant_id,
+                "user_id": resolved_user_id,
+                "display_name": display_name,
+                "status": "idle",
+                "metadata": metadata or {},
+                "values": {},
+                "created_at": now,
+                "updated_at": now,
+            }
+            await self._store.aput(THREADS_NS, thread_id, record)
+            return record
 
     async def get(self, thread_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> dict | None:
         return await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.get")
@@ -154,6 +159,18 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         record["user_id"] = owner_user_id
         record["updated_at"] = now_iso()
         await self._store.aput(THREADS_NS, thread_id, record)
+
+    async def claim_unowned(self, thread_id: str, owner_user_id: str) -> bool:
+        """Assign an owner only while the process-local row is unowned."""
+        async with self._ownership_lock:
+            item = await self._store.aget(THREADS_NS, thread_id)
+            if item is None or item.value.get("user_id") is not None:
+                return False
+            record = dict(item.value)
+            record["user_id"] = owner_user_id
+            record["updated_at"] = now_iso()
+            await self._store.aput(THREADS_NS, thread_id, record)
+            return True
 
     async def delete(self, thread_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
         record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.delete")

@@ -8,7 +8,7 @@ This document covers the **architecture** of that pipeline:
 - Webhook → atomic receipt fan-out → leased dispatch
 - HMAC/registry-derived verified route bindings for durable replay
 - Mention-handle precedence for `require_mention` triggers
-- `preferred_thread_id = UUID5(repo, number, agent_name)` thread determinism
+- Owner-scoped v2 conversation identity from the verified route binding
 - GH token lifecycle (`GITHUB_APP_ID` + `PRIVATE_KEY` → `run_context["github_token"]` → sandbox `GH_TOKEN`/`GITHUB_TOKEN`)
 - `ConflictError` (HTTP 409) thread-create race recovery
 - Why **outbound is log-only** (agents post via `gh` from their sandbox)
@@ -53,8 +53,9 @@ prompt text, or payload metadata as authority, and it leaves
 secret or token—is sealed into Origin and used with workspace/conversation to
 scope the stable delivery key. Explicit unverified development mode can still
 exercise the channel locally, but it has no verified binding and remains
-unkeyed. A signed request without `X-GitHub-Delivery` still receives the verified
-route binding but remains unkeyed because it has no provider-stable event identity.
+unkeyed. A fired signed route without `X-GitHub-Delivery` cannot construct its
+durable receipt identity and is rejected before acknowledgment; it never degrades
+to best-effort delivery.
 Historical accepted Origins without these optional references remain readable;
 connection-backed rows also replay through their original Origin digest because
 the new binding reference repeats their already-authenticated `connection_id`.
@@ -65,6 +66,16 @@ kind/reference, and provider delivery ID. Each row contains only the bounded
 normalized launch facts needed for replay. It excludes the HMAC secret, GitHub
 token, raw payload, transient attachment bytes, and credentials. SQLite/memory or
 explicit `backend: memory` is reported as `best_effort`, not durable ingress.
+The route separately records a SHA-256 digest of the exact HMAC-authenticated body
+and host-accepted `X-GitHub-Event` value. For each currently resolved binding that
+produces a durable receipt candidate, an equal redelivery reuses that binding's
+first accepted receipt envelope even if live agent policy changed in the meantime;
+it does not re-resolve or rewrite that envelope. A different body/header projection
+for the same binding-and-delivery receipt key is a permanent bounded `409` integrity
+conflict. Events or bindings that produce no receipt candidate have no delivery-wide
+retained identity; freezing fan-out membership globally is deliberately outside this
+per-binding contract. Rows created before this evidence field remain processable,
+but Hartmesh does not guess replay equality for them.
 
 ## Webhook → Fan-out → Dispatch
 
@@ -101,7 +112,7 @@ sequenceDiagram
             Disp->>Trg: event_should_fire(event, payload, trigger, default_mention_login)
             Trg-->>Disp: (fire, reason)
             opt fire
-                Disp->>Disp: build_prompt() + resolve_thread_id()<br/>UUID5(repo, number, agent)
+                Disp->>Disp: build_prompt() + resolve_conversation_identity()<br/>verified binding + repo + number + agent
                 Disp->>Disp: verify payload installation;<br/>derive webhook_route binding
                 Disp->>Disp: build bounded immutable receipt envelope
             end
@@ -126,9 +137,14 @@ sequenceDiagram
     Note over Mgr: Manager returns immediately.<br/>Agent posts to GitHub via gh CLI.
 ```
 
-## `preferred_thread_id = UUID5(...)` Thread Determinism
+## Owner-scoped v2 conversation identity
 
-`resolve_thread_id(repo, issue_or_pr_number, agent_name)` builds a deterministic LangGraph thread id so a `(repo, PR/issue number)` always lands on the same thread — even after a store wipe, even across gateway replicas (same UUID5 namespace).
+For a signed route, `resolve_conversation_identity(...)` hashes the sealed
+`webhook_route` reference with repository, issue/PR number, and canonical agent.
+It derives both the deterministic LangGraph thread ID and the `ChannelStore`
+topic from that same v2 digest. Restarts and store rebuilds therefore converge
+without allowing two owners who use the same agent name on the same repository
+item to share thread state.
 
 ```mermaid
 graph LR
@@ -136,22 +152,31 @@ graph LR
     classDef hash fill:#D7D3E8,stroke:#6B6680,color:#29263A
     classDef thread fill:#C9D7D2,stroke:#5D706A,color:#21302C
 
+    Binding["verified route binding<br/>provider/installation/owner/agent/repo"]:::input
     Repo["repo<br/>owner/name"]:::input
     Number["issue/PR number<br/>int"]:::input
-    Agent["agent_name<br/>[A-Za-z0-9-]+"]:::input
-    Seed["seed = '{repo}#{number}:{agent}'"]:::hash
-    UUID5["uuid.uuid5(<br/>  GITHUB_THREAD_NAMESPACE,<br/>  seed)"]:::hash
-    Thread["thread_id<br/>(same across replicas + restarts)"]:::thread
+    Agent["agent_name<br/>[A-Za-z0-9][A-Za-z0-9-]{0,127}"]:::input
+    Seed["canonical v2 projection<br/>binding + repo + number + agent"]:::hash
+    Digest["SHA-256 projection digest"]:::hash
+    UUID5["uuid.uuid5(<br/>  GITHUB_THREAD_NAMESPACE,<br/>  'github-conversation-v2:' + digest)"]:::hash
+    Thread["thread_id + topic_id<br/>(stable across restarts)"]:::thread
 
+    Binding --> Seed
     Repo --> Seed
     Number --> Seed
     Agent --> Seed
-    Seed --> UUID5 --> Thread
+    Seed --> Digest --> UUID5 --> Thread
 ```
 
 Different agents on the same PR (coder + reviewer) **deliberately** get different thread ids — `agent_name` is part of the seed. Sharing a thread would couple their message histories and checkpoints, and `multitask_strategy="reject"` would silently drop one run on every dual-mention. Each agent owns its own thread; cross-agent coordination flows through GitHub (PR comments, review threads), the source of truth humans see.
 
-`ChannelStore` uses `topic_id = f"{number}:{agent_name}"` as its cache key, so each agent's cached mapping is independent — a coder's mapping is invisible to a reviewer on the same PR.
+`ChannelStore` uses `topic_id = "github-conversation:v2:sha256:<digest>"`,
+so both agent and owner/binding isolation apply to the cached mapping and receipt
+FIFO. Unverified local development keeps the legacy v1 repo/number/agent mapping.
+Existing v1 signed threads are not silently aliased because their checkpoint
+history lacks the owner-bound identity. A deliberate migration may reuse one only
+after an owner-scoped durable read proves the same effective owner; otherwise the
+next signed delivery starts a fresh v2 thread and leaves legacy history untouched.
 
 ## Mention-handle Precedence
 
@@ -221,7 +246,9 @@ Why a string and not a closure: `run_context` is JSON-encoded by the `langgraph_
 
 ## Thread-create Race Recovery
 
-Two webhook deliveries for the same `(repo, number)` can land within milliseconds of each other and race on `threads.create(thread_id=preferred_thread_id)`. The recovery is narrow by design.
+Two webhook deliveries for the same verified owner/binding conversation can land
+within milliseconds of each other and race on
+`threads.create(thread_id=preferred_thread_id)`. The recovery is narrow by design.
 
 ```mermaid
 sequenceDiagram
@@ -342,7 +369,7 @@ This is also why the GitHub channel registers `ChannelRunPolicy.fire_and_forget=
 - [IM_CHANNEL_CONNECTIONS.md](IM_CHANNEL_CONNECTIONS.md) — interactive IM channels (Telegram/Slack/etc.) for the full `_handle_chat` and owner-scoped file storage flow
 - `app/gateway/github/dispatcher.py` — `fanout_event`, `_is_self_event`, mention precedence chain
 - `app/channels/manager.py` — `_buffer_followup`, `_drain_followups_for_thread`, `_watch_run_and_drain_followups` (follow-up buffering while busy, issue #4121)
-- `app/gateway/github/identity.py` — `resolve_thread_id` (UUID5), `extract_target`
+- `app/gateway/github/identity.py` — owner-scoped `resolve_conversation_identity`, legacy `resolve_thread_id`, and `extract_target`
 - `app/gateway/github/triggers.py` — `event_should_fire`, `DEFAULT_TRIGGERS`
 - `app/gateway/github/run_policy.py` — `inject_github_credentials`, `register_policy`
 - `app/gateway/routers/github_webhooks.py` — HMAC verify, route mount predicate

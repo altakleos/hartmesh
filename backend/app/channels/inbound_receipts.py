@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import unicodedata
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -43,6 +44,7 @@ _SOURCE_IDENTITY_COLUMNS = (
     "binding_reference",
     "provider_delivery_id",
 )
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _utcnow() -> datetime:
@@ -320,6 +322,42 @@ class InboundReceiptEnvelope:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class InboundReceiptCandidate:
+    """One authenticated provider event paired with proposed execution input.
+
+    The provider-event digest binds the exact request body authenticated by the
+    ingress route plus its bounded routing-event value. The envelope is the
+    mutable-configuration-dependent launch projection accepted only on the
+    first receipt for that source identity.
+    """
+
+    envelope: InboundReceiptEnvelope
+    provider_event_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.envelope, InboundReceiptEnvelope):
+            raise TypeError("receipt candidate requires an immutable envelope")
+        if not isinstance(self.provider_event_digest, str) or _SHA256_PATTERN.fullmatch(self.provider_event_digest) is None:
+            raise ValueError("provider event digest must be lowercase SHA-256")
+
+    @classmethod
+    def from_message(cls, message: InboundMessage) -> InboundReceiptCandidate:
+        """Snapshot one message after its provider event was authenticated."""
+
+        digest = message.verified_provider_event_digest
+        if digest is None:
+            raise ValueError("durable receipt requires authenticated provider event evidence")
+        return cls(
+            envelope=InboundReceiptEnvelope.from_message(message),
+            provider_event_digest=digest,
+        )
+
+
+class InboundReceiptReplayConflict(ValueError):
+    """The same verified source identity carried a different provider event."""
+
+
 class InboundReceiptState(StrEnum):
     received = "received"
     claimed = "claimed"
@@ -343,6 +381,7 @@ class InboundReceipt:
     lease_expires_at: datetime | None = None
     run_id: str | None = None
     outcome_code: str | None = None
+    provider_event_digest: str | None = None
 
 
 class InboundReceiptStore(Protocol):
@@ -352,7 +391,7 @@ class InboundReceiptStore(Protocol):
 
     async def receive_batch(
         self,
-        envelopes: Sequence[InboundReceiptEnvelope],
+        candidates: Sequence[InboundReceiptCandidate],
     ) -> tuple[InboundReceipt, ...]: ...
 
     async def list_due(self, *, limit: int) -> tuple[InboundReceipt, ...]: ...
@@ -417,9 +456,15 @@ class InboundReceiptStore(Protocol):
 
 
 def _row_to_receipt(row: InboundReceiptRow) -> InboundReceipt:
+    envelope = InboundReceiptEnvelope.from_dict(row.payload_json)
+    if envelope.digest != row.payload_digest:
+        raise ValueError("persisted inbound receipt envelope digest is inconsistent")
+    provider_event_digest = row.provider_event_digest
+    if provider_event_digest is not None and _SHA256_PATTERN.fullmatch(provider_event_digest) is None:
+        raise ValueError("persisted provider event digest is malformed")
     return InboundReceipt(
         receipt_id=row.receipt_id,
-        envelope=InboundReceiptEnvelope.from_dict(row.payload_json),
+        envelope=envelope,
         state=InboundReceiptState(row.state),
         fencing_token=row.fencing_token,
         attempt_count=row.attempt_count,
@@ -428,6 +473,7 @@ def _row_to_receipt(row: InboundReceiptRow) -> InboundReceipt:
         lease_expires_at=row.lease_expires_at,
         run_id=row.run_id,
         outcome_code=row.outcome_code,
+        provider_event_digest=provider_event_digest,
     )
 
 
@@ -447,20 +493,20 @@ class SqlInboundReceiptStore:
 
     async def receive_batch(
         self,
-        envelopes: Sequence[InboundReceiptEnvelope],
+        candidates: Sequence[InboundReceiptCandidate],
     ) -> tuple[InboundReceipt, ...]:
-        """Atomically retain every fan-out row or none of them."""
+        """Atomically retain every fan-out row or replay its first envelope."""
 
-        if not envelopes:
+        if not candidates:
             return ()
         identities = [
             (
-                envelope.provider,
-                envelope.binding.kind.value,
-                envelope.binding.reference,
-                envelope.provider_delivery_id,
+                candidate.envelope.provider,
+                candidate.envelope.binding.kind.value,
+                candidate.envelope.binding.reference,
+                candidate.envelope.provider_delivery_id,
             )
-            for envelope in envelopes
+            for candidate in candidates
         ]
         if len(identities) != len(set(identities)):
             raise ValueError("duplicate source delivery identity in receipt batch")
@@ -469,7 +515,8 @@ class SqlInboundReceiptStore:
             async with session.begin():
                 dialect = session.bind.dialect.name
                 insert = postgresql_insert if dialect == "postgresql" else sqlite_insert
-                for position, envelope in enumerate(envelopes):
+                for position, candidate in enumerate(candidates):
+                    envelope = candidate.envelope
                     received_at = now + timedelta(microseconds=position)
                     statement = (
                         insert(InboundReceiptRow)
@@ -482,6 +529,7 @@ class SqlInboundReceiptStore:
                             thread_id=envelope.thread_id,
                             payload_json=envelope.to_dict(),
                             payload_digest=envelope.digest,
+                            provider_event_digest=candidate.provider_event_digest,
                             state=InboundReceiptState.received.value,
                             fencing_token=0,
                             attempt_count=0,
@@ -494,7 +542,8 @@ class SqlInboundReceiptStore:
                     )
                     await session.execute(statement)
                 receipts: list[InboundReceipt] = []
-                for envelope in envelopes:
+                for candidate in candidates:
+                    envelope = candidate.envelope
                     row = await session.scalar(
                         select(InboundReceiptRow).where(
                             InboundReceiptRow.provider == envelope.provider,
@@ -503,8 +552,10 @@ class SqlInboundReceiptStore:
                             InboundReceiptRow.provider_delivery_id == envelope.provider_delivery_id,
                         )
                     )
-                    if row is None or row.payload_digest != envelope.digest:
-                        raise ValueError("source delivery identity has conflicting replay data")
+                    if row is None:
+                        raise RuntimeError("inbound receipt insert did not retain a row")
+                    if row.provider_event_digest != candidate.provider_event_digest:
+                        raise InboundReceiptReplayConflict("source delivery identity has a conflicting authenticated event")
                     receipts.append(_row_to_receipt(row))
         return tuple(receipts)
 
@@ -970,8 +1021,8 @@ class InboundReceiptProcessor:
     ) -> tuple[InboundReceipt, ...]:
         """Commit the entire verified fan-out before emitting lossy wake-ups."""
 
-        envelopes = tuple(InboundReceiptEnvelope.from_message(message) for message in messages)
-        receipts = await self.store.receive_batch(envelopes)
+        candidates = tuple(InboundReceiptCandidate.from_message(message) for message in messages)
+        receipts = await self.store.receive_batch(candidates)
         for receipt in receipts:
             if receipt.state not in {
                 InboundReceiptState.completed,
@@ -1134,8 +1185,10 @@ class InboundReceiptProcessor:
 
 __all__ = [
     "InboundReceipt",
+    "InboundReceiptCandidate",
     "InboundReceiptEnvelope",
     "InboundReceiptProcessor",
+    "InboundReceiptReplayConflict",
     "InboundReceiptStore",
     "InboundReceiptState",
     "InboundReceiptWakeup",

@@ -118,7 +118,7 @@ def test_qualification_evidence_is_strict_complete_and_digestible(tmp_path: Path
         chart_version="2.1.0",
         chart_digest="sha256:" + ("b" * 64),
         configuration_digest="sha256:" + ("c" * 64),
-        migration_head="0018_inbound_receipt_failures",
+        migration_head="0019_inbound_event_identity",
         stores=(
             StoreContinuityEvidence(
                 component="postgres",
@@ -292,6 +292,71 @@ def test_live_runner_discovers_the_repository_chart_from_test_support(tmp_path: 
 
     assert runner.repository_root == Path(__file__).resolve().parents[2]
     assert (runner.chart_path / "Chart.yaml").is_file()
+
+
+def test_graceful_rollout_uses_the_gateway_deployment_not_manual_pod_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = KubernetesQualificationConfig(
+        kubeconfig=(tmp_path / "kubeconfig").resolve(),
+        context="qualification-context",
+        namespace="hartmesh-qualification-a1b2c3",
+        image_repository="registry.example/hartmesh/gateway",
+        image_digest="sha256:" + ("a" * 64),
+        evidence_path=(tmp_path / "evidence.json").resolve(),
+    )
+    runner = KubernetesQualificationRunner(config)
+    commands: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(
+        runner,
+        "_kubectl",
+        lambda *arguments, **_kwargs: commands.append(arguments) or "",
+    )
+
+    runner._restart_gateway_deployment()
+
+    assert commands == [
+        (
+            "rollout",
+            "restart",
+            f"deployment/{runner.fullname}-gateway",
+        )
+    ]
+
+
+def test_recreate_handoff_rejects_overlapping_gateway_pods(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = KubernetesQualificationConfig(
+        kubeconfig=(tmp_path / "kubeconfig").resolve(),
+        context="qualification-context",
+        namespace="hartmesh-qualification-a1b2c3",
+        image_repository="registry.example/hartmesh/gateway",
+        image_digest="sha256:" + ("a" * 64),
+        evidence_path=(tmp_path / "evidence.json").resolve(),
+    )
+    runner = KubernetesQualificationRunner(config)
+
+    monkeypatch.setattr(
+        runner,
+        "_pod_json",
+        lambda _component: {
+            "items": [
+                {"metadata": {"uid": "old-gateway-uid"}},
+                {"metadata": {"uid": "replacement-gateway-uid"}},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "support.kubernetes_qualification.wait_until",
+        lambda predicate, **_kwargs: predicate(),
+    )
+
+    with pytest.raises(QualificationCommandError, match="overlapped"):
+        runner._wait_for_recreate_handoff("old-gateway-uid", started=0.0)
 
 
 def test_manual_workflow_is_opt_in_and_runs_only_the_marked_contract() -> None:

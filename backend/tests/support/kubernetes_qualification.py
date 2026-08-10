@@ -454,6 +454,7 @@ class KubernetesQualificationRunner:
         self.chart_path = self.repository_root / "deploy/helm/deer-flow"
         self.fullname = f"{config.release_name}-deer-flow"
         self.gateway_service = f"{self.fullname}-gateway"
+        self.gateway_deployment = f"{self.fullname}-gateway"
         self.store_secret = "hartmesh-qualification-stores"
         self.runtime_config_map = "hartmesh-qualification-runtime"
         self._postgres_password = secrets.token_urlsafe(32)
@@ -880,6 +881,41 @@ class KubernetesQualificationRunner:
             arguments.extend(("--grace-period=0", "--force"))
         self._kubectl(*arguments, timeout_seconds=30)
 
+    def _restart_gateway_deployment(self) -> None:
+        """Exercise the chart's real Recreate rollout path."""
+
+        self._kubectl(
+            "rollout",
+            "restart",
+            f"deployment/{self.gateway_deployment}",
+            timeout_seconds=30,
+        )
+
+    def _wait_for_recreate_handoff(
+        self,
+        pod_uid: str,
+        *,
+        started: float,
+    ) -> float:
+        """Require the old Gateway to disappear before a replacement exists."""
+
+        def old_uid_is_gone_without_overlap() -> bool:
+            items = self._pod_json("gateway").get("items")
+            if not isinstance(items, list):
+                return False
+            observed_uids = {metadata.get("uid") for item in items if isinstance(item, dict) and isinstance((metadata := item.get("metadata")), dict) and isinstance(metadata.get("uid"), str)}
+            if pod_uid in observed_uids and observed_uids - {pod_uid}:
+                raise QualificationCommandError("Gateway Recreate rollout overlapped old and replacement pods")
+            return pod_uid not in observed_uids
+
+        wait_until(
+            old_uid_is_gone_without_overlap,
+            description=f"Recreate handoff for old Gateway pod UID {pod_uid}",
+            timeout_seconds=60,
+            interval_seconds=0.25,
+        )
+        return time.monotonic() - started
+
     def _wait_for_old_gateway_termination(
         self,
         pod_name: str,
@@ -980,17 +1016,21 @@ class KubernetesQualificationRunner:
             # kill the actual serving pod. This prevents a stale port-forward
             # subprocess from extending the bounded client wait.
             port_forward.close()
-            graceful = scenario in {
-                "graceful_rollout_termination",
-                "forced_kill_after_graceful_deadline",
-            }
             started = time.monotonic()
-            self._delete_gateway(pod_name, graceful=graceful)
-            termination_elapsed = self._wait_for_old_gateway_termination(
-                pod_name,
-                pod_uid,
-                started=started,
-            )
+            if scenario == "graceful_rollout_termination":
+                self._restart_gateway_deployment()
+                termination_elapsed = self._wait_for_recreate_handoff(
+                    pod_uid,
+                    started=started,
+                )
+            else:
+                graceful = scenario == "forced_kill_after_graceful_deadline"
+                self._delete_gateway(pod_name, graceful=graceful)
+                termination_elapsed = self._wait_for_old_gateway_termination(
+                    pod_name,
+                    pod_uid,
+                    started=started,
+                )
             replacement = self._ready_gateway(previous_uid=pod_uid)
             if scenario == "graceful_rollout_termination":
                 if self._counter(scenario, "cancellation_observed") < 1:

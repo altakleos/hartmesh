@@ -230,6 +230,8 @@ class ConstraintIndeterminate:
 
 @runtime_checkable
 class InvocationConstraintsProvider(Protocol):
+    """Project the compatibility v1 subagent-only invocation ceiling."""
+
     async def project(
         self,
         request: ConstraintProjectionRequestV1,
@@ -239,6 +241,8 @@ class InvocationConstraintsProvider(Protocol):
 
 @runtime_checkable
 class InvocationConstraintsProviderV2(Protocol):
+    """Project short-lived v2 obligations bound to exact accepted material."""
+
     async def project(
         self,
         request: ConstraintProjectionRequestV2,
@@ -248,6 +252,8 @@ class InvocationConstraintsProviderV2(Protocol):
 
 @dataclass(frozen=True)
 class InvocationConstraintsProviderFactory:
+    """Describe one operator-loaded constraints provider contribution."""
+
     contribution_id: str
     capability_api_version: str
     factory: Callable[[], InvocationConstraintsProvider | InvocationConstraintsProviderV2]

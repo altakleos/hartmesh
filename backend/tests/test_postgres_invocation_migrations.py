@@ -25,7 +25,11 @@ from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 import deerflow.persistence.models  # noqa: F401
-from app.channels.inbound_receipts import InboundReceiptEnvelope, SqlInboundReceiptStore
+from app.channels.inbound_receipts import (
+    InboundReceiptCandidate,
+    InboundReceiptEnvelope,
+    SqlInboundReceiptStore,
+)
 from app.channels.message_bus import InboundMessage
 from app.runtime.idempotency import CanonicalCallerIntent, canonical_request_digest, normalize_external_key, scope_for_http
 from app.runtime.native_binding import (
@@ -55,6 +59,7 @@ _INVOCATION_REVISIONS = (
     "0016_sandbox_execution_evidence",
     "0017_lifecycle_integrity",
     "0018_inbound_receipt_failures",
+    "0019_inbound_event_identity",
 )
 _REVISION_COLUMNS = {
     "0011_accepted_invocation": {
@@ -87,6 +92,7 @@ _REVISION_COLUMNS = {
     },
     "0017_lifecycle_integrity": set(),
     "0018_inbound_receipt_failures": set(),
+    "0019_inbound_event_identity": set(),
 }
 
 _INBOUND_RECEIPT_COLUMNS = {
@@ -98,6 +104,7 @@ _INBOUND_RECEIPT_COLUMNS = {
     "thread_id": ("character varying", 64, False),
     "payload_json": ("json", None, False),
     "payload_digest": ("character varying", 64, False),
+    "provider_event_digest": ("character varying", 64, True),
     "state": ("character varying", 16, False),
     "lease_owner": ("character varying", 96, True),
     "lease_expires_at": ("timestamp with time zone", None, True),
@@ -479,6 +486,7 @@ async def _assert_inbound_receipt_ddl(engine: AsyncEngine, schema: str) -> None:
         "ck_inbound_receipts_admitted_has_run",
         "ck_inbound_receipts_identity_bounds",
         "ck_inbound_receipts_digest_format",
+        "ck_inbound_receipts_provider_event_digest_format",
     } <= constraints["inbound_receipts"]
     for name, index_columns in {
         "ix_inbound_receipts_due": (
@@ -867,8 +875,22 @@ async def test_postgres_inbound_receipt_acquisition_and_claim_are_atomic() -> No
         )
 
         first, second = await asyncio.gather(
-            store.receive_batch((envelope,)),
-            store.receive_batch((envelope,)),
+            store.receive_batch(
+                (
+                    InboundReceiptCandidate(
+                        envelope=envelope,
+                        provider_event_digest="a" * 64,
+                    ),
+                )
+            ),
+            store.receive_batch(
+                (
+                    InboundReceiptCandidate(
+                        envelope=envelope,
+                        provider_event_digest="a" * 64,
+                    ),
+                )
+            ),
         )
         assert first[0].receipt_id == second[0].receipt_id
 

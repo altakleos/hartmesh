@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0018_inbound_receipt_failures"
+HEAD = "0019_inbound_event_identity"
 BASELINE = "0001_baseline"
 
 
@@ -854,6 +854,19 @@ class TestDecideState:
 
 def test_head_revision_is_expected() -> None:
     assert _get_head_revision() == HEAD
+
+
+def test_revision_ids_fit_the_default_alembic_version_column() -> None:
+    """Every revision must fit PostgreSQL's default VARCHAR(32) ledger."""
+    from alembic.config import Config  # noqa: PLC0415
+    from alembic.script import ScriptDirectory  # noqa: PLC0415
+
+    migrations_dir = Path(__file__).resolve().parents[1] / "packages/harness/deerflow/persistence/migrations"
+    config = Config()
+    config.set_main_option("script_location", str(migrations_dir))
+    revisions = ScriptDirectory.from_config(config).walk_revisions()
+
+    assert all(len(revision.revision) <= 32 for revision in revisions)
 
 
 def test_baseline_revision_id_is_known() -> None:

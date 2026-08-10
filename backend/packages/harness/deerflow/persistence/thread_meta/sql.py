@@ -7,11 +7,17 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import case, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
 from deerflow.persistence.json_compat import json_match
-from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaStore
+from deerflow.persistence.thread_meta.base import (
+    THREAD_PINNED_METADATA_KEY,
+    InvalidMetadataFilterError,
+    ThreadMetaAlreadyExistsError,
+    ThreadMetaStore,
+)
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -59,7 +65,11 @@ class ThreadMetaRepository(ThreadMetaStore):
         )
         async with self._sf() as session:
             session.add(row)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                raise ThreadMetaAlreadyExistsError("thread metadata already exists") from None
             await session.refresh(row)
             return self._row_to_dict(row)
 
@@ -256,6 +266,23 @@ class ThreadMetaRepository(ThreadMetaStore):
                 return
             await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(user_id=owner_user_id, updated_at=datetime.now(UTC)))
             await session.commit()
+
+    async def claim_unowned(self, thread_id: str, owner_user_id: str) -> bool:
+        """Atomically assign ``owner_user_id`` only to a NULL-owned row."""
+        async with self._sf() as session:
+            result = await session.execute(
+                update(ThreadMetaRow)
+                .where(
+                    ThreadMetaRow.thread_id == thread_id,
+                    ThreadMetaRow.user_id.is_(None),
+                )
+                .values(
+                    user_id=owner_user_id,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+            return result.rowcount == 1
 
     async def delete(
         self,

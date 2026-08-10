@@ -1,6 +1,7 @@
 """Identity helpers for GitHub webhook dispatch.
 
-Two helpers live here:
+The routing helpers here provide both legacy development identity and the
+owner-scoped verified identity used by durable webhook admission:
 
 * :func:`resolve_thread_id` makes the langgraph thread id deterministic
   from ``(repo, number, agent_name)``. Same PR + same agent → same
@@ -8,6 +9,8 @@ Two helpers live here:
   (e.g. coder + reviewer) deliberately get different thread ids — see
   the function docstring for the rationale.
 
+* :func:`resolve_conversation_identity` binds verified route evidence into a
+  versioned conversation identity.
 * :func:`extract_target` extracts the ``(repo, number)`` pair from a
   webhook payload, so the dispatcher can route deliveries to the right
   thread.
@@ -15,15 +18,31 @@ Two helpers live here:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
+from app.runtime.native_binding import (
+    InternalVerifiedNativeBinding,
+    InternalVerifiedNativeBindingKind,
+)
+
 # UUID5 namespace dedicated to GitHub-driven threads. The bytes themselves
-# are arbitrary; what matters is that every gateway in the fleet uses the
-# *same* namespace so two replicas produce the same thread id for the same
-# (repo, number, agent_name) triple. Don't change this without a migration
-# plan.
+# are arbitrary; what matters is that every Gateway process uses the *same*
+# namespace so a restart reproduces the same thread id. Don't change this
+# without a migration plan.
 GITHUB_THREAD_NAMESPACE = uuid.UUID("a3f4b2c1-7e8d-4f6a-b9c0-1234567890ab")
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubConversationIdentity:
+    """Versioned routing identity for one GitHub agent conversation."""
+
+    version: int
+    thread_id: str
+    topic_id: str
 
 
 def resolve_thread_id(repo: str, issue_or_pr_number: int, agent_name: str) -> str:
@@ -42,10 +61,8 @@ def resolve_thread_id(repo: str, issue_or_pr_number: int, agent_name: str) -> st
         repo: ``"owner/name"``.
         issue_or_pr_number: Issue or PR number (they share the namespace on
             the GitHub side, so we don't need to distinguish here).
-        agent_name: The bound custom agent's name. Validated upstream
-            against ``^[A-Za-z0-9-]+$`` (see
-            ``app/gateway/routers/agents.py::AGENT_NAME_PATTERN``) so it
-            is safe to embed verbatim in the UUID5 seed.
+        agent_name: The bound custom agent's canonical ASCII identity,
+            validated upstream as ``[A-Za-z0-9][A-Za-z0-9-]{0,127}``.
 
     Returns:
         Stringified UUID5 under :data:`GITHUB_THREAD_NAMESPACE`.
@@ -57,6 +74,56 @@ def resolve_thread_id(repo: str, issue_or_pr_number: int, agent_name: str) -> st
     if not isinstance(agent_name, str) or not agent_name.strip():
         raise ValueError(f"Expected agent_name as non-empty str, got {agent_name!r}")
     return str(uuid.uuid5(GITHUB_THREAD_NAMESPACE, f"{repo}#{issue_or_pr_number}:{agent_name}"))
+
+
+def resolve_conversation_identity(
+    repo: str,
+    issue_or_pr_number: int,
+    agent_name: str,
+    *,
+    verified_binding: InternalVerifiedNativeBinding | None,
+) -> GitHubConversationIdentity:
+    """Resolve one stable, owner-scoped GitHub conversation identity.
+
+    Verified webhook traffic uses the sealed route binding in its v2 identity,
+    so equal repository/target/agent coordinates owned by different users cannot
+    share a thread, channel mapping, FIFO, or checkpoint history. Explicitly
+    unverified development traffic retains the legacy v1 identity.
+    """
+    legacy_thread_id = resolve_thread_id(repo, issue_or_pr_number, agent_name)
+    if verified_binding is None:
+        return GitHubConversationIdentity(
+            version=1,
+            thread_id=legacy_thread_id,
+            topic_id=f"{issue_or_pr_number}:{agent_name}",
+        )
+    if verified_binding.kind is not InternalVerifiedNativeBindingKind.webhook_route:
+        raise ValueError("verified GitHub conversation requires a webhook route binding")
+
+    canonical = json.dumps(
+        {
+            "domain": "deerflow-github-conversation-v2",
+            "binding_reference": verified_binding.reference,
+            "repository": repo,
+            "target_number": issue_or_pr_number,
+            "agent_id": agent_name,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    digest = hashlib.sha256(canonical).hexdigest()
+    return GitHubConversationIdentity(
+        version=2,
+        thread_id=str(
+            uuid.uuid5(
+                GITHUB_THREAD_NAMESPACE,
+                f"github-conversation-v2:{digest}",
+            )
+        ),
+        topic_id=f"github-conversation:v2:sha256:{digest}",
+    )
 
 
 def extract_target(event: str, payload: dict[str, Any]) -> tuple[str, int] | None:

@@ -65,6 +65,9 @@ exceptions on any operation return only the strict versioned `runtime.error` env
 `indeterminate` with a bounded correlation ID. Host diagnostics retain only a stable code,
 exception class, bounded operation context, and that ID; raw exception text, tracebacks, and
 deployment internals remain outside both the portable wire contract and ordinary diagnostics.
+The portable operation result itself uses the strict `runtime.failure` kind. The
+`runtime.error` name belongs only to the Gateway HTTP transport envelope that carries a
+bounded failure when an HTTP request cannot return a normal portable result.
 
 The ensure request deliberately has no property bags. It accepts a service-
 supplied external key, thread, optional agent hint, strict graph or resume input,

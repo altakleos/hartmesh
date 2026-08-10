@@ -163,6 +163,9 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `ACCEPTED_ATTEMPT_LEASE_SECONDS` | `120` | Native Lease duration for one accepted sandbox attempt (30–900 seconds). |
 | `ACCEPTED_ATTEMPT_RECONCILE_INTERVAL_SECONDS` | `30` | Bounded expiry-reconciliation cadence (5–300 seconds); keep the Lease duration at least twice this value. |
 | `ACCEPTED_ATTEMPT_RECONCILE_LIMIT` | `100` | Maximum expired attempt Leases inspected per reconciliation page (1–500). |
+| `PROVISIONER_AUTH_AUDIENCE` | empty | Required audience for projected Gateway ServiceAccount tokens. Helm supplies a release-scoped value; an empty value disables trusted management authentication. |
+| `PROVISIONER_GATEWAY_NAMESPACE` | empty | Exact namespace accepted from TokenReview for the Gateway ServiceAccount identity. Helm sets the release namespace. |
+| `PROVISIONER_GATEWAY_SERVICE_ACCOUNT` | empty | Exact Gateway ServiceAccount name accepted from TokenReview. Helm resolves the created or operator-selected account. |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
 | `SANDBOX_SERVICE_TYPE` | `NodePort` | Service type for sandbox access. Use `ClusterIP` when backend and provisioner run inside the same Kubernetes cluster |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
@@ -289,10 +292,19 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
    - Current context should point to your local cluster
 
 3. **Kubernetes Access**:
-   - The provisioner needs permissions to:
-     - Create/read/delete Pods in the `deer-flow` namespace
-     - Create/read/delete Services in the `deer-flow` namespace
-     - Read Namespaces (to create `deer-flow` if missing)
+   - Helm grants a namespaced Role for Pod/Pod-log/Service lifecycle,
+     immutable Secret lifecycle, NetworkPolicy lifecycle, Lease lifecycle, and
+     read-only access to the configured PVC, plus a ClusterRole for namespace
+     discovery/creation and TokenReview.
+   - Kubernetes RBAC applies those verbs to every resource of each named kind
+     in the release namespace; it cannot restrict them by sandbox label or
+     attempt identity. Treat the provisioner as a trusted namespace
+     control-plane component. Use a dedicated sandbox namespace or admission
+     policy if compromise isolation from unrelated namespace resources is a
+     requirement.
+   - The Docker Compose/hybrid mode instead mounts the configured kubeconfig;
+     that credential's permissions are operator-owned and are not narrowed by
+     the Helm Role.
 
 4. **Host Paths**:
    - `DEER_FLOW_HOST_BASE_DIR` and `THREADS_HOST_PATH` must be **absolute paths on the host machine**
@@ -439,8 +451,8 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 - [ ] Support for custom resource requests/limits per sandbox
 - [x] PersistentVolume support for larger data requirements
-- [ ] Automatic cleanup of stale sandboxes (timeout-based)
+- [x] Bounded cleanup of expired accepted-attempt Leases
 - [ ] Metrics and monitoring (Prometheus integration)
 - [ ] Multi-cluster support (route to different K8s clusters)
 - [ ] Pod affinity/anti-affinity rules for better placement
-- [ ] NetworkPolicy templates for sandbox isolation
+- [x] Exact per-attempt NetworkPolicy creation and drift verification

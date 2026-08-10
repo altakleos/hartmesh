@@ -447,20 +447,22 @@ the only execution path, which keeps operational mistakes off the table. See
 `backend/CLAUDE.md` (Schema Migrations) for the full design.
 
 CI qualifies the durable invocation migration tail against the real PostgreSQL
-service, not SQLite: it installs an empty schema to head, upgrades representative
-normal and auxiliary rows from `0010_run_cancel_request` through revisions
-0011–0015, checks exact constraints/indexes (including leased inbound receipts),
-and runs the existing concurrent admission/lifecycle/receipt contracts. The marked suite must not skip when
-`DEERFLOW_TEST_POSTGRES_URL` is configured and prints the PostgreSQL version and
-Alembic head in the job output.
+service, not SQLite: it installs an empty schema to head, then upgrades
+representative normal, auxiliary, and MCP-task rows from the real predecessor
+`0011_mcp_tasks` through `0019_inbound_event_identity`. It checks exact
+constraints and indexes (including lifecycle integrity and leased inbound
+receipts) and runs concurrent admission/lifecycle/receipt contracts. The marked
+suite must not skip when `DEERFLOW_TEST_POSTGRES_URL` is configured and prints
+the PostgreSQL version and Alembic head in job output.
 
-Downgrade to `0010_run_cancel_request` is structurally supported for rollback,
-but it necessarily drops data introduced by 0011–0015: accepted invocation
-evidence, external idempotency identity, caller intent, state versions, and the
-lifecycle journal, plus inbound receipt rows. The underlying normal and auxiliary `runs` rows survive, and
-re-upgrade makes them readable as legacy version-zero rows; it cannot reconstruct
-the dropped evidence or events. Stop writers and take a database backup before
-using that downgrade path.
+The supported durable-invocation rollback stops at `0011_mcp_tasks`, preserving
+unrelated MCP-task state. It necessarily drops invocation-tail facts that the
+predecessor cannot represent: accepted evidence, external idempotency identity,
+caller intent, state versions, lifecycle rows, inbound receipts, and execution
+evidence. Re-upgrade does not reconstruct them. A further technical downgrade to
+`0010_run_cancel_request` invokes the unrelated MCP-task downgrade and destroys
+MCP-task data; it is not the supported invocation rollback. Stop writers and take
+a database backup before any rollback.
 
 ### Code Style
 

@@ -32,6 +32,7 @@ def _make_start_run_request(
     run_manager,
     *,
     thread_store=None,
+    stream_bridge=None,
     auth_source=AUTH_SOURCE_AUTH_DISABLED,
 ):
     from langgraph.checkpoint.memory import InMemorySaver
@@ -46,7 +47,7 @@ def _make_start_run_request(
         app=SimpleNamespace(
             state=SimpleNamespace(
                 runtime_readiness=_ReadyAdmissionFence(),
-                stream_bridge=SimpleNamespace(),
+                stream_bridge=stream_bridge or SimpleNamespace(),
                 run_manager=run_manager,
                 checkpointer=InMemorySaver(),
                 store=store,
@@ -96,6 +97,89 @@ def test_format_sse_no_event_id():
 
     frame = format_sse("values", {"x": 1})
     assert "id:" not in frame
+
+
+@pytest.mark.asyncio
+async def test_thread_metadata_setup_never_transfers_an_owned_thread() -> None:
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import _ensure_thread_metadata
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunContext
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create(
+        "owned-thread",
+        user_id="owner-a",
+        metadata={"owner": "a"},
+    )
+    run_context = RunContext(checkpointer=None, thread_store=thread_store)
+    record = SimpleNamespace(
+        thread_id="owned-thread",
+        assistant_id="lead-agent",
+        metadata={},
+    )
+
+    with pytest.raises(RuntimeError, match="thread ownership conflict"):
+        await _ensure_thread_metadata(
+            run_context,
+            record,
+            owner_user_id="owner-b",
+        )
+
+    retained = await thread_store.get("owned-thread", user_id=None)
+    assert retained is not None
+    assert retained["user_id"] == "owner-a"
+    assert retained["metadata"] == {"owner": "a"}
+
+
+@pytest.mark.asyncio
+async def test_thread_metadata_insert_race_fails_closed_for_the_losing_owner() -> None:
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import _ensure_thread_metadata
+    from deerflow.persistence.thread_meta import ThreadMetaAlreadyExistsError
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunContext
+
+    class RacingOwnerStore(MemoryThreadMetaStore):
+        async def create(
+            self,
+            thread_id,
+            *,
+            assistant_id=None,
+            user_id=None,
+            display_name=None,
+            metadata=None,
+        ):
+            await super().create(
+                thread_id,
+                assistant_id=assistant_id,
+                user_id="owner-a",
+                display_name=display_name,
+                metadata={"owner": "a"},
+            )
+            raise ThreadMetaAlreadyExistsError("lost concurrent insert")
+
+    thread_store = RacingOwnerStore(InMemoryStore())
+    run_context = RunContext(checkpointer=None, thread_store=thread_store)
+    record = SimpleNamespace(
+        thread_id="racing-thread",
+        assistant_id="lead-agent",
+        metadata={},
+    )
+
+    with pytest.raises(RuntimeError, match="thread ownership conflict"):
+        await _ensure_thread_metadata(
+            run_context,
+            record,
+            owner_user_id="owner-b",
+        )
+
+    retained = await thread_store.get("racing-thread", user_id=None)
+    assert retained is not None
+    assert retained["user_id"] == "owner-a"
+    assert retained["metadata"] == {"owner": "a"}
 
 
 @pytest.mark.anyio
@@ -1268,7 +1352,7 @@ async def test_start_run_checkpoint_validation_failure_does_not_admit_run(_stub_
 
 
 @pytest.mark.asyncio
-async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_app_config, caplog):
+async def test_pending_cancel_bypasses_thread_metadata_and_redacts_failure(_stub_app_config, caplog):
     from unittest.mock import AsyncMock, patch
 
     from app.gateway.services import start_run
@@ -1277,12 +1361,14 @@ async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_ap
 
     metadata_started = asyncio.Event()
 
-    async def get_thread(_thread_id):
+    private_failure_marker = "thread-metadata-secret-after-cancellation"
+
+    async def get_thread(_thread_id, **_kwargs):
         metadata_started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError as exc:
-            raise RuntimeError("thread metadata store failed after cancellation") from exc
+            raise RuntimeError(private_failure_marker) from exc
 
     async def fake_run_agent(*_args, **_kwargs):
         return None
@@ -1309,31 +1395,35 @@ async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_ap
         await asyncio.wait_for(record.task, timeout=1)
         await asyncio.sleep(0)
 
-    assert "thread metadata store failed after cancellation" in caplog.text
+    assert "code=thread_metadata_detached_failure" in caplog.text
+    assert "error_class=RuntimeError" in caplog.text
+    assert "correlation_id=" in caplog.text
+    assert private_failure_marker not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_thread_metadata_timeout_logs_and_run_still_starts(_stub_app_config, caplog, monkeypatch):
+async def test_owned_thread_metadata_timeout_fails_before_graph_start(
+    _stub_app_config,
+    caplog,
+    monkeypatch,
+):
     from unittest.mock import AsyncMock, patch
 
     import app.gateway.services as services
     from app.gateway.services import start_run
     from deerflow.runtime import RunManager
-    from deerflow.runtime.runs.manager import RunStartOutcome
     from deerflow.runtime.runs.schemas import RunStatus
     from deerflow.runtime.runs.store.memory import MemoryRunStore
 
     metadata_started = asyncio.Event()
     run_agent_called = asyncio.Event()
 
-    async def get_thread(_thread_id):
+    async def get_thread(_thread_id, **_kwargs):
         metadata_started.set()
         await asyncio.Event().wait()
 
-    async def fake_run_agent(_bridge, run_manager, record, **_kwargs):
+    async def fake_run_agent(*_args, **_kwargs):
         run_agent_called.set()
-        start_outcome = await run_manager.try_start(record.run_id)
-        assert start_outcome is RunStartOutcome.started
 
     monkeypatch.setattr(services, "_THREAD_METADATA_SETUP_TIMEOUT_SECONDS", 0.01)
     run_manager = RunManager(store=MemoryRunStore())
@@ -1357,10 +1447,369 @@ async def test_thread_metadata_timeout_logs_and_run_still_starts(_stub_app_confi
         assert record.task is not None
         await asyncio.wait_for(record.task, timeout=1)
 
-    assert run_agent_called.is_set()
-    assert record.status == RunStatus.running
-    assert (await run_manager.get(record.run_id)).status == RunStatus.running
-    assert "Timed out ensuring thread_meta for thread-timeout-meta" in caplog.text
+    assert not run_agent_called.is_set()
+    assert record.status == RunStatus.error
+    stored = await run_manager.get(record.run_id)
+    assert stored is not None
+    assert stored.status == RunStatus.error
+    assert stored.stop_reason == "worker_attachment_failed"
+    assert stored.error == "Thread ownership metadata was unavailable before execution"
+    assert "code=thread_metadata_setup_timeout" in caplog.text
+    assert "error_class=TimeoutError" in caplog.text
+    assert "correlation_id=" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_owned_thread_metadata_failure_closes_attached_stream_consumers(
+    _stub_app_config,
+):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
+    from deerflow.runtime import MemoryStreamBridge, RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    metadata_started = asyncio.Event()
+    release_metadata = asyncio.Event()
+    bridge = MemoryStreamBridge()
+
+    async def get_thread(_thread_id, **_kwargs):
+        metadata_started.set()
+        await release_metadata.wait()
+        raise RuntimeError("private-thread-store-detail")
+
+    class ConnectedRequest:
+        headers = {}
+
+        async def is_disconnected(self):
+            return False
+
+    async def collect_frames(iterator):
+        return [frame async for frame in iterator]
+
+    run_manager = RunManager(store=MemoryRunStore())
+    request = _make_start_run_request(
+        run_manager,
+        stream_bridge=bridge,
+        thread_store=SimpleNamespace(
+            get=AsyncMock(side_effect=get_thread),
+            create=AsyncMock(),
+            update_owner=AsyncMock(),
+        ),
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent") as run_agent,
+    ):
+        record = await start_run(
+            _run_create_request(),
+            "thread-stream-meta-failure",
+            request,
+        )
+        await asyncio.wait_for(metadata_started.wait(), timeout=1)
+        sse_task = asyncio.create_task(
+            collect_frames(
+                sse_consumer(
+                    bridge,
+                    record,
+                    ConnectedRequest(),
+                    run_manager,
+                )
+            )
+        )
+        wait_task = asyncio.create_task(
+            wait_for_run_completion(
+                bridge,
+                record,
+                ConnectedRequest(),
+                run_manager,
+            )
+        )
+        await asyncio.sleep(0)
+        release_metadata.set()
+
+        frames, completed = await asyncio.wait_for(
+            asyncio.gather(sse_task, wait_task),
+            timeout=1,
+        )
+        assert record.task is not None
+        await asyncio.wait_for(record.task, timeout=1)
+
+    run_agent.assert_not_awaited()
+    assert completed is True
+    assert any(frame.startswith("event: error\n") for frame in frames)
+    assert frames[-1].startswith("event: end\n")
+    assert "private-thread-store-detail" not in "".join(frames)
+
+
+@pytest.mark.asyncio
+async def test_fenced_cancel_wins_metadata_failure_before_graph_start(
+    _stub_app_config,
+):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import MemoryStreamBridge, RunManager
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.store.base import CancellationRequestOutcome, LifecycleType
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class FailStartBarrierRunManager(RunManager):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.fail_start_reached = asyncio.Event()
+            self.release_fail_start = asyncio.Event()
+
+        async def fail_start_if_pending(self, run_id, *, error):
+            self.fail_start_reached.set()
+            await self.release_fail_start.wait()
+            return await super().fail_start_if_pending(run_id, error=error)
+
+    store = MemoryRunStore()
+    run_manager = FailStartBarrierRunManager(store=store)
+    bridge = MemoryStreamBridge()
+    request = _make_start_run_request(
+        run_manager,
+        stream_bridge=bridge,
+        thread_store=SimpleNamespace(
+            get=AsyncMock(side_effect=RuntimeError("metadata unavailable")),
+            create=AsyncMock(),
+            update_owner=AsyncMock(),
+        ),
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent") as run_agent,
+    ):
+        record = await start_run(
+            _run_create_request(),
+            "thread-fenced-cancel-meta-failure",
+            request,
+        )
+        await asyncio.wait_for(run_manager.fail_start_reached.wait(), timeout=1)
+        outcome = await run_manager.request_cancel_fenced(
+            record.run_id,
+            action="interrupt",
+            expected_state_version=record.state_version,
+        )
+        run_manager.release_fail_start.set()
+        assert record.task is not None
+        await asyncio.wait_for(record.task, timeout=1)
+
+    run_agent.assert_not_awaited()
+    assert outcome is CancellationRequestOutcome.requested
+    assert record.status is RunStatus.interrupted
+    assert record.stop_reason is None
+    events = await store.list_lifecycle_events(run_id=record.run_id)
+    assert [event["lifecycle_type"] for event in events] == [
+        LifecycleType.accepted,
+        LifecycleType.cancellation_requested,
+        LifecycleType.cancelled,
+    ]
+    stream_items = [
+        item
+        async for item in bridge.subscribe(
+            record.run_id,
+            heartbeat_interval=0.01,
+        )
+    ]
+    assert stream_items[-1].event == "__end__"
+    assert all(getattr(item, "event", None) != "error" for item in stream_items)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("strategy", "expected_status"),
+    [
+        ("interrupt", "interrupted"),
+        ("rollback", "error"),
+    ],
+)
+async def test_replacement_closes_pending_metadata_stream_without_graph_preflight(
+    _stub_app_config,
+    strategy,
+    expected_status,
+):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
+    from deerflow.runtime import MemoryStreamBridge, RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    first_metadata_started = asyncio.Event()
+    bridge = MemoryStreamBridge()
+    metadata_calls = 0
+    graph_run_ids = []
+
+    async def get_thread(thread_id, **kwargs):
+        nonlocal metadata_calls
+        metadata_calls += 1
+        if metadata_calls == 1:
+            first_metadata_started.set()
+            await asyncio.Event().wait()
+        return {
+            "thread_id": thread_id,
+            "user_id": kwargs.get("user_id"),
+        }
+
+    async def fake_run_agent(run_bridge, _manager, record, **_kwargs):
+        graph_run_ids.append(record.run_id)
+        await run_bridge.publish_end(record.run_id)
+
+    class ConnectedRequest:
+        headers = {}
+
+        async def is_disconnected(self):
+            return False
+
+    async def collect_frames(iterator):
+        return [frame async for frame in iterator]
+
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    request = _make_start_run_request(
+        run_manager,
+        stream_bridge=bridge,
+        thread_store=SimpleNamespace(
+            get=AsyncMock(side_effect=get_thread),
+            create=AsyncMock(),
+            update_owner=AsyncMock(),
+        ),
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        original = await start_run(
+            _run_create_request("original"),
+            "thread-replaced-during-metadata",
+            request,
+        )
+        await asyncio.wait_for(first_metadata_started.wait(), timeout=1)
+        sse_task = asyncio.create_task(
+            collect_frames(
+                sse_consumer(
+                    bridge,
+                    original,
+                    ConnectedRequest(),
+                    run_manager,
+                )
+            )
+        )
+        wait_task = asyncio.create_task(
+            wait_for_run_completion(
+                bridge,
+                original,
+                ConnectedRequest(),
+                run_manager,
+            )
+        )
+        await asyncio.sleep(0)
+
+        replacement = await start_run(
+            _run_create_request(
+                "replacement",
+                multitask_strategy=strategy,
+            ),
+            "thread-replaced-during-metadata",
+            request,
+        )
+        frames, completed = await asyncio.wait_for(
+            asyncio.gather(sse_task, wait_task),
+            timeout=1,
+        )
+        assert original.task is not None
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait_for(original.task, timeout=1)
+        assert replacement.task is not None
+        await asyncio.wait_for(replacement.task, timeout=1)
+
+    original_row = await store.get(original.run_id)
+    original_events = await store.list_lifecycle_events(run_id=original.run_id)
+    assert original_row is not None
+    assert original_row["status"] == expected_status
+    assert [event["lifecycle_type"] for event in original_events] == [
+        "accepted",
+        "interrupted",
+    ]
+    assert original.status.value == expected_status
+    assert original.finalizing is False
+    assert completed is True
+    assert frames[-1].startswith("event: end\n")
+    assert original.run_id not in graph_run_ids
+    assert graph_run_ids == [replacement.run_id]
+
+
+@pytest.mark.asyncio
+async def test_rival_owner_and_metadata_failure_cannot_reach_graph(
+    _stub_app_config,
+    caplog,
+):
+    from unittest.mock import patch
+
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    private_failure_marker = "thread-store-secret-after-rival-claim"
+    run_agent_called = asyncio.Event()
+
+    class RivalOwnerWinsThenStoreFails(MemoryThreadMetaStore):
+        def __init__(self):
+            super().__init__(InMemoryStore())
+            self._injected = False
+
+        async def get(self, thread_id, **kwargs):
+            if not self._injected:
+                self._injected = True
+                await super().create(
+                    thread_id,
+                    user_id="rival-owner",
+                    metadata={"owner": "rival"},
+                )
+                raise RuntimeError(private_failure_marker)
+            return await super().get(thread_id, **kwargs)
+
+    async def fake_run_agent(*_args, **_kwargs):
+        run_agent_called.set()
+
+    thread_store = RivalOwnerWinsThenStoreFails()
+    run_manager = RunManager(store=MemoryRunStore())
+    request = _make_start_run_request(
+        run_manager,
+        thread_store=thread_store,
+    )
+    caplog.set_level(logging.WARNING, logger="app.gateway.services")
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(
+            _run_create_request(),
+            "thread-rival-meta",
+            request,
+        )
+        assert record.task is not None
+        await asyncio.wait_for(record.task, timeout=1)
+
+    assert not run_agent_called.is_set()
+    assert record.status == RunStatus.error
+    assert record.stop_reason == "worker_attachment_failed"
+    retained = await thread_store.get("thread-rival-meta", user_id=None)
+    assert retained is not None
+    assert retained["user_id"] == "rival-owner"
+    assert retained["metadata"] == {"owner": "rival"}
+    assert "code=thread_metadata_setup_failed" in caplog.text
+    assert "error_class=RuntimeError" in caplog.text
+    assert private_failure_marker not in caplog.text
 
 
 def test_context_merges_into_configurable():
@@ -1823,7 +2272,12 @@ def test_start_run_preserves_ordinary_metadata(_stub_app_config):
             await record.task
 
         assert record.metadata == metadata
-        assert (await thread_store.get(thread_id))["metadata"] == metadata
+        persisted_thread = await thread_store.get(
+            thread_id,
+            user_id=record.user_id,
+        )
+        assert persisted_thread is not None
+        assert persisted_thread["metadata"] == metadata
         assert captured["config"]["metadata"] == metadata
 
     asyncio.run(_scenario())
@@ -1924,11 +2378,14 @@ def test_start_run_preserves_internal_original_user_content(_stub_app_config):
     assert graph_input["messages"][0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "actual user input"
 
 
-def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
+def test_start_run_rejects_internal_owner_thread_collision_without_transfer(
+    _stub_app_config,
+):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
 
+    from fastapi import HTTPException
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
@@ -1994,25 +2451,23 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
                 ),
             ),
         ):
-            record = await start_run(body, "channel-thread", request)
-            await record.task
+            with pytest.raises(HTTPException) as exc_info:
+                await start_run(body, "channel-thread", request)
 
-        owner_run = await run_store.get(record.run_id, user_id="owner-1")
-        default_run = await run_store.get(record.run_id, user_id="default")
+        runs = await run_store.list_by_thread("channel-thread", user_id=None)
         owner_thread = await thread_store.get("channel-thread", user_id="owner-1")
         default_thread = await thread_store.get("channel-thread", user_id="default")
-        return owner_run, default_run, owner_thread, default_thread, task_context
+        return exc_info.value, runs, owner_thread, default_thread, task_context
 
-    owner_run, default_run, owner_thread, default_thread, task_context = asyncio.run(_scenario())
+    error, runs, owner_thread, default_thread, task_context = asyncio.run(_scenario())
 
-    assert owner_run is not None
-    assert owner_run["user_id"] == "owner-1"
-    assert default_run is None
-    assert owner_thread is not None
-    assert owner_thread["user_id"] == "owner-1"
-    assert owner_thread["metadata"] == {"legacy": True}
-    assert default_thread is None
-    assert task_context["user_id"] == "owner-1"
+    assert error.status_code == 404
+    assert runs == []
+    assert owner_thread is None
+    assert default_thread is not None
+    assert default_thread["user_id"] == "default"
+    assert default_thread["metadata"] == {"legacy": True}
+    assert task_context == {}
 
 
 def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config):

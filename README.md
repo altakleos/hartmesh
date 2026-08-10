@@ -399,7 +399,7 @@ This repository does not yet document a HartMesh sync cadence, API/configuration
 
 Treat these hashes as provenance, not a maintenance promise.
 
-The Alembic graph is linear in this checkout: `0011_mcp_tasks` → `0011_accepted_invocation` → invocation migrations through `0018_inbound_receipt_failures`.
+The Alembic graph is linear in this checkout: `0011_mcp_tasks` → `0011_accepted_invocation` → invocation migrations through `0019_inbound_event_identity`.
 
 PostgreSQL operators should quiesce writers and back up data before rollback; use the migration guidance in [backend/AGENTS.md](backend/AGENTS.md).
 

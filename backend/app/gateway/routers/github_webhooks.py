@@ -36,6 +36,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
+from app.channels.inbound_receipts import InboundReceiptReplayConflict
 from app.gateway.github.dispatcher import (
     VerifiedGitHubWebhookRequest,
     fanout_event,
@@ -253,13 +254,20 @@ async def receive_github_webhook(
                 x_github_delivery,
             )
             raise HTTPException(status_code=401, detail="Invalid or missing X-Hub-Signature-256")
-        try:
-            verified_request = VerifiedGitHubWebhookRequest(x_github_delivery)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Invalid X-GitHub-Delivery") from exc
-
     if not x_github_event:
         raise HTTPException(status_code=400, detail="Missing X-GitHub-Event header")
+    if authentication.mode is GitHubWebhookAuthMode.hmac_sha256_verified:
+        try:
+            verified_request = VerifiedGitHubWebhookRequest.attest(
+                x_github_delivery,
+                event=x_github_event,
+                body=body,
+            )
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid verified GitHub delivery identity",
+            ) from None
 
     # Parse JSON payload after signature is verified (verify-then-parse).
     try:
@@ -366,17 +374,22 @@ async def receive_github_webhook(
                     verified_request=verified_request,
                     inbound_sink=(verified_sink if verified_request is not None and callable(verified_sink) else None),
                 )
-            except Exception as exc:  # noqa: BLE001 — re-raised as 503 below
+            except InboundReceiptReplayConflict:
+                raise HTTPException(
+                    status_code=409,
+                    detail="verified delivery identity conflicts with retained event evidence",
+                ) from None
+            except Exception as exc:  # noqa: BLE001 — translated below
                 delivery_correlation = hashlib.sha256((x_github_delivery or "missing").encode("utf-8")).hexdigest()[:16]
-                logger.exception(
-                    "github_webhook: fanout failed (delivery_correlation=%s event=%s) — returning 503 (recoverable via manual/API redelivery)",
+                logger.error(
+                    "github_webhook: fanout failed code=verified_inbound_unavailable delivery_correlation=%s exception_class=%s",
                     delivery_correlation,
-                    x_github_event,
+                    type(exc).__name__,
                 )
                 raise HTTPException(
                     status_code=503,
                     detail="fan-out failed: verified inbound receipt storage is unavailable",
-                ) from exc
+                ) from None
     else:
         logger.info(
             "github_webhook delivery=%s | unhandled event=%s action=%s repo=%s",

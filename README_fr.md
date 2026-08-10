@@ -399,7 +399,7 @@ Ce dépôt ne documente pas encore de cadence de synchronisation HartMesh, fenê
 
 Ces hashes indiquent la provenance, pas une promesse de maintenance.
 
-Le graphe Alembic est linéaire dans ce checkout : `0011_mcp_tasks` → `0011_accepted_invocation` → migrations d’invocation jusqu’à `0018_inbound_receipt_failures`.
+Le graphe Alembic est linéaire dans ce checkout : `0011_mcp_tasks` → `0011_accepted_invocation` → migrations d’invocation jusqu’à `0019_inbound_event_identity`.
 
 Les opérateurs PostgreSQL doivent arrêter les écritures et sauvegarder avant un rollback ; consultez les migrations dans [backend/AGENTS.md](backend/AGENTS.md).
 

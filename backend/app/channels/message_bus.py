@@ -57,6 +57,9 @@ class InboundMessage:
         workspace_id: Optional external workspace/guild/team id.
         verified_source_binding: Host-owned source binding. Provider payloads
             and arbitrary metadata cannot populate this field.
+        verified_provider_event_digest: Host-owned digest of the authenticated
+            request body and bounded routing event. Arbitrary metadata cannot
+            populate it.
         files: Optional list of file attachments (platform-specific dicts).
         metadata: Arbitrary extra data from the channel.
         created_at: Unix timestamp when the message was created.
@@ -73,6 +76,7 @@ class InboundMessage:
     owner_user_id: str | None = None
     workspace_id: str | None = None
     verified_source_binding: InternalVerifiedNativeBinding | None = None
+    verified_provider_event_digest: str | None = None
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)

@@ -11,8 +11,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.channels.inbound_receipts import (
     InboundProcessingDisposition,
     InboundProcessingResult,
+    InboundReceiptCandidate,
     InboundReceiptEnvelope,
     InboundReceiptProcessor,
+    InboundReceiptReplayConflict,
     SqlInboundReceiptStore,
 )
 from app.channels.message_bus import InboundMessage
@@ -63,6 +65,17 @@ def _envelope(
             },
             created_at=created_at,
         )
+    )
+
+
+def _candidate(
+    envelope: InboundReceiptEnvelope,
+    *,
+    provider_event_digest: str = "a" * 64,
+) -> InboundReceiptCandidate:
+    return InboundReceiptCandidate(
+        envelope=envelope,
+        provider_event_digest=provider_event_digest,
     )
 
 
@@ -130,7 +143,7 @@ async def test_received_payload_survives_process_loss_before_claim(tmp_path) -> 
     envelope = _envelope(delivery_id="delivery-1", created_at=now.timestamp())
 
     first_process = SqlInboundReceiptStore(sessions, clock=lambda: now)
-    (received,) = await first_process.receive_batch((envelope,))
+    (received,) = await first_process.receive_batch((_candidate(envelope),))
     assert received.state == "received"
 
     # Simulate losing the process and its MessageBus before it can claim.
@@ -163,7 +176,7 @@ async def test_reclaimed_receipt_rejects_stale_fencing_token(tmp_path) -> None:
     now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
     current = [now]
     store = SqlInboundReceiptStore(sessions, clock=lambda: current[0])
-    (received,) = await store.receive_batch((_envelope(delivery_id="delivery-2", created_at=now.timestamp()),))
+    (received,) = await store.receive_batch((_candidate(_envelope(delivery_id="delivery-2", created_at=now.timestamp())),))
 
     first = await store.claim(received.receipt_id, lease_owner="worker-1", lease_seconds=10)
     assert first is not None
@@ -212,8 +225,13 @@ async def test_same_thread_receipts_claim_in_fifo_order_and_defer_without_loss(t
     store = SqlInboundReceiptStore(sessions, clock=lambda: current[0])
     first, second = await store.receive_batch(
         (
-            _envelope(delivery_id="delivery-3", created_at=now.timestamp()),
-            _envelope(delivery_id="delivery-4", created_at=(now + timedelta(seconds=1)).timestamp()),
+            _candidate(_envelope(delivery_id="delivery-3", created_at=now.timestamp())),
+            _candidate(
+                _envelope(
+                    delivery_id="delivery-4",
+                    created_at=(now + timedelta(seconds=1)).timestamp(),
+                )
+            ),
         )
     )
 
@@ -260,10 +278,12 @@ async def test_thread_contention_outlives_poison_budget_and_preserves_fifo(tmp_p
     store = SqlInboundReceiptStore(sessions, clock=lambda: current[0])
     first, second = await store.receive_batch(
         (
-            _envelope(delivery_id="delivery-busy-k2", created_at=now.timestamp()),
-            _envelope(
-                delivery_id="delivery-busy-k3",
-                created_at=(now + timedelta(seconds=1)).timestamp(),
+            _candidate(_envelope(delivery_id="delivery-busy-k2", created_at=now.timestamp())),
+            _candidate(
+                _envelope(
+                    delivery_id="delivery-busy-k3",
+                    created_at=(now + timedelta(seconds=1)).timestamp(),
+                )
             ),
         )
     )
@@ -339,7 +359,7 @@ async def test_thread_contention_outlives_poison_budget_and_preserves_fifo(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_duplicate_receive_is_idempotent_but_changed_payload_conflicts(tmp_path) -> None:
+async def test_duplicate_receive_is_idempotent_but_changed_event_conflicts(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'receipts.db'}")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all, tables=[InboundReceiptRow.__table__])
@@ -348,12 +368,66 @@ async def test_duplicate_receive_is_idempotent_but_changed_payload_conflicts(tmp
     store = SqlInboundReceiptStore(sessions, clock=lambda: now)
     envelope = _envelope(delivery_id="delivery-5", created_at=now.timestamp())
 
-    (first,) = await store.receive_batch((envelope,))
-    (duplicate,) = await store.receive_batch((envelope,))
+    (first,) = await store.receive_batch((_candidate(envelope),))
+    (duplicate,) = await store.receive_batch((_candidate(envelope),))
     assert duplicate.receipt_id == first.receipt_id
 
-    with pytest.raises(ValueError, match="conflicting replay data"):
-        await store.receive_batch((_envelope(delivery_id="delivery-5", text="Different intent", created_at=now.timestamp()),))
+    with pytest.raises(InboundReceiptReplayConflict, match="conflicting authenticated event"):
+        await store.receive_batch(
+            (
+                _candidate(
+                    _envelope(
+                        delivery_id="delivery-5",
+                        text="Different intent",
+                        created_at=now.timestamp(),
+                    ),
+                    provider_event_digest="b" * 64,
+                ),
+            )
+        )
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_equal_provider_event_reuses_first_accepted_envelope_after_policy_change(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'receipts.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all, tables=[InboundReceiptRow.__table__])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    store = SqlInboundReceiptStore(sessions, clock=lambda: now)
+    original = _envelope(delivery_id="delivery-policy-change", created_at=now.timestamp())
+    changed_policy = InboundReceiptEnvelope.from_dict(
+        {
+            **original.to_dict(),
+            "policy_metadata": {
+                **original.to_dict()["policy_metadata"],
+                "github": {
+                    **original.to_dict()["policy_metadata"]["github"],
+                    "recursion_limit": 200,
+                },
+            },
+        }
+    )
+    event_digest = "a" * 64
+
+    (first,) = await store.receive_batch((InboundReceiptCandidate(envelope=original, provider_event_digest=event_digest),))
+    (replayed,) = await store.receive_batch((InboundReceiptCandidate(envelope=changed_policy, provider_event_digest=event_digest),))
+
+    assert replayed.receipt_id == first.receipt_id
+    assert replayed.envelope == original
+    assert replayed.envelope.policy_metadata["github"]["recursion_limit"] == 100
+
+    with pytest.raises(InboundReceiptReplayConflict, match="conflicting authenticated event"):
+        await store.receive_batch(
+            (
+                InboundReceiptCandidate(
+                    envelope=changed_policy,
+                    provider_event_digest="b" * 64,
+                ),
+            )
+        )
 
     await engine.dispose()
 
@@ -372,7 +446,16 @@ async def test_response_loss_after_admission_replays_known_run_before_binding(
     now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
     current = [now]
     store = SqlInboundReceiptStore(sessions, clock=lambda: current[0])
-    (received,) = await store.receive_batch((_envelope(delivery_id="delivery-response-loss", created_at=now.timestamp()),))
+    (received,) = await store.receive_batch(
+        (
+            _candidate(
+                _envelope(
+                    delivery_id="delivery-response-loss",
+                    created_at=now.timestamp(),
+                )
+            ),
+        )
+    )
     admitted_runs: dict[str, str] = {}
     calls = 0
     graph_starts = 0
@@ -444,7 +527,7 @@ async def test_poison_receipt_dead_letters_without_exposing_exception_text(
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
     store = SqlInboundReceiptStore(sessions, clock=lambda: now)
-    (received,) = await store.receive_batch((_envelope(delivery_id="delivery-poison", created_at=now.timestamp()),))
+    (received,) = await store.receive_batch((_candidate(_envelope(delivery_id="delivery-poison", created_at=now.timestamp())),))
 
     async def poison(_message):
         raise RuntimeError("webhook secret=must-never-be-logged")
@@ -484,7 +567,7 @@ async def test_command_or_rejection_completes_receipt_without_invented_run(tmp_p
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
     store = SqlInboundReceiptStore(sessions, clock=lambda: now)
-    (received,) = await store.receive_batch((_envelope(delivery_id="delivery-rejected", created_at=now.timestamp()),))
+    (received,) = await store.receive_batch((_candidate(_envelope(delivery_id="delivery-rejected", created_at=now.timestamp())),))
 
     async def rejected(_message):
         return InboundProcessingResult(
@@ -523,7 +606,7 @@ async def test_processor_shutdown_cancels_owned_claim_and_leaves_it_reclaimable(
     now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
     current = [now]
     store = SqlInboundReceiptStore(sessions, clock=lambda: current[0])
-    (received,) = await store.receive_batch((_envelope(delivery_id="delivery-shutdown", created_at=now.timestamp()),))
+    (received,) = await store.receive_batch((_candidate(_envelope(delivery_id="delivery-shutdown", created_at=now.timestamp())),))
     processing_started = asyncio.Event()
 
     async def hung_processing(_message):
