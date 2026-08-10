@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import sqlite3
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -12,7 +13,16 @@ from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
-from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy, RunStartOutcome
+from deerflow.runtime.runs.manager import (
+    CancelOutcome,
+    ConflictError,
+    PersistenceRetryPolicy,
+    RunStartOutcome,
+    RunStartupError,
+    _admission_compensation_retry_delay,
+    _AdmissionTerminalDisposition,
+    _UnresolvedAdmissionCandidate,
+)
 from deerflow.runtime.runs.store.base import CancellationRequestOutcome
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -233,10 +243,172 @@ class FailStartPersistenceUnavailableStore(MemoryRunStore):
             raise OSError("terminal transition unavailable")
         return await super().transition_run_atomic(*args, **kwargs)
 
+    async def transition_owned_run_atomic(self, *args, **kwargs):
+        if self.fail_terminalization:
+            raise OSError("owned terminal transition unavailable")
+        return await super().transition_owned_run_atomic(*args, **kwargs)
+
     async def get(self, *args, **kwargs):
         if self.fail_terminalization:
             raise OSError("terminal verification unavailable")
         return await super().get(*args, **kwargs)
+
+
+class CancelledAdmissionPersistenceUnavailableStore(CommitBeforeReturnRunStore):
+    """Commit an admission, then make cancellation persistence unavailable."""
+
+    durable_lifecycle = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.compensation_available = True
+
+    async def request_cancel_compat(self, *args, **kwargs):
+        if not self.compensation_available:
+            raise OSError("cancel request unavailable")
+        return await super().request_cancel_compat(*args, **kwargs)
+
+    async def request_cancel_owned(self, *args, **kwargs):
+        if not self.compensation_available:
+            raise OSError("owned cancel request unavailable")
+        return await super().request_cancel_owned(*args, **kwargs)
+
+    async def transition_run_atomic(self, *args, **kwargs):
+        if not self.compensation_available:
+            raise OSError("cancel transition unavailable")
+        return await super().transition_run_atomic(*args, **kwargs)
+
+    async def transition_owned_run_atomic(self, *args, **kwargs):
+        if not self.compensation_available:
+            raise OSError("owned cancel transition unavailable")
+        return await super().transition_owned_run_atomic(*args, **kwargs)
+
+    async def get(self, *args, **kwargs):
+        if not self.compensation_available:
+            raise OSError("cancel verification unavailable")
+        return await super().get(*args, **kwargs)
+
+    async def authoritative_get(self, run_id: str):
+        """Read the backing row without the injected availability failure."""
+
+        return await super().get(run_id)
+
+
+class PausedOwnedCompensationRunStore(MemoryRunStore):
+    """Pause exact compensation before its authoritative ownership check."""
+
+    durable_lifecycle = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.compensation_started = asyncio.Event()
+        self.release_compensation = asyncio.Event()
+
+    async def transition_owned_run_atomic(self, *args, **kwargs):
+        self.compensation_started.set()
+        await self.release_compensation.wait()
+        return await super().transition_owned_run_atomic(*args, **kwargs)
+
+
+class TasklessCancellationUnavailableStore(MemoryRunStore):
+    """Fail exact taskless cancellation until the durable store recovers."""
+
+    durable_lifecycle = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.compensation_available = False
+
+    async def request_cancel_owned(self, *args, **kwargs):
+        if not self.compensation_available:
+            raise OSError("owned cancellation unavailable")
+        return await super().request_cancel_owned(*args, **kwargs)
+
+    async def transition_owned_run_atomic(self, *args, **kwargs):
+        if not self.compensation_available:
+            raise OSError("owned terminal transition unavailable")
+        return await super().transition_owned_run_atomic(*args, **kwargs)
+
+
+class PausedOwnedCancellationRunStore(MemoryRunStore):
+    """Pause owned cancellation before or after its atomic mutation."""
+
+    durable_lifecycle = True
+
+    def __init__(self, *, pause_after_commit: bool) -> None:
+        super().__init__()
+        self.pause_after_commit = pause_after_commit
+        self.cancellation_paused = asyncio.Event()
+        self.release_cancellation = asyncio.Event()
+        self.terminal_paused = asyncio.Event()
+        self.release_terminal = asyncio.Event()
+
+    async def request_cancel_owned(self, *args, **kwargs):
+        if not self.pause_after_commit:
+            self.cancellation_paused.set()
+            await self.release_cancellation.wait()
+        result = await super().request_cancel_owned(*args, **kwargs)
+        if self.pause_after_commit:
+            self.cancellation_paused.set()
+            await self.release_cancellation.wait()
+        return result
+
+    async def transition_owned_run_atomic(self, *args, **kwargs):
+        self.terminal_paused.set()
+        await self.release_terminal.wait()
+        return await super().transition_owned_run_atomic(*args, **kwargs)
+
+
+class PausedOwnedStatusRunStore(MemoryRunStore):
+    """Pause an ownership-fenced status transition before its store check."""
+
+    durable_lifecycle = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pause_owned_transition = False
+        self.transition_paused = asyncio.Event()
+        self.release_transition = asyncio.Event()
+
+    async def transition_owned_run_atomic(self, *args, **kwargs):
+        if self.pause_owned_transition:
+            self.transition_paused.set()
+            await self.release_transition.wait()
+        return await super().transition_owned_run_atomic(*args, **kwargs)
+
+
+class CancelledAmbiguousAdmissionStore(MemoryRunStore):
+    """Commit, lose the response, and hide the candidate until recovery."""
+
+    durable_lifecycle = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.atomic_committed = asyncio.Event()
+        self.release_response_loss = asyncio.Event()
+        self.candidate_reads_available = False
+
+    async def create_thread_operation_atomic(self, run_id, **kwargs):
+        await super().create_thread_operation_atomic(run_id, **kwargs)
+        self.atomic_committed.set()
+        await self.release_response_loss.wait()
+        raise OSError("response lost after durable commit")
+
+    async def ensure_run_atomic(self, run_id, **kwargs):
+        await super().ensure_run_atomic(run_id, **kwargs)
+        self.atomic_committed.set()
+        await self.release_response_loss.wait()
+        raise OSError("response lost after durable commit")
+
+    async def get(self, run_id, *, user_id=None):
+        if not self.candidate_reads_available:
+            raise OSError("candidate lookup unavailable")
+        return await super().get(run_id, user_id=user_id)
+
+    async def authoritative_get(self, run_id: str):
+        """Read the backing row without the injected availability failure."""
+
+        return await super().get(run_id)
 
 
 class CancelledUniqueRetryRunStore(MemoryRunStore):
@@ -265,6 +437,121 @@ async def _stored_statuses(store: MemoryRunStore, *run_ids: str) -> dict[str, An
         row = await store.get(run_id)
         rows[run_id] = row["status"] if row else None
     return rows
+
+
+def test_admission_compensation_backoff_is_deterministic_and_capped() -> None:
+    assert [_admission_compensation_retry_delay(round_number) for round_number in range(1, 9)] == [
+        0.1,
+        0.2,
+        0.4,
+        0.8,
+        1.6,
+        3.2,
+        5.0,
+        5.0,
+    ]
+    with pytest.raises(ValueError, match="positive integer"):
+        _admission_compensation_retry_delay(0)
+
+
+@pytest.mark.anyio
+async def test_unresolved_candidate_registration_only_refines_identity_and_terminal_intent() -> None:
+    store = ResponseLostWithUnavailableCandidateReadStore()
+    manager = RunManager(store=store)
+    poor = _UnresolvedAdmissionCandidate(
+        run_id="00000000-0000-0000-0000-000000000101",
+        thread_id="thread-candidate-merge",
+        user_id="owner-1",
+        owner_worker_id="worker-1",
+        external_scope="scope-1",
+        external_key="delivery-1",
+        caller_intent_digest="a" * 64,
+        caller_intent_digest_version="intent-v1",
+        replacement_action="rollback",
+        predecessor_run_ids=("predecessor-1",),
+    )
+    refined = _UnresolvedAdmissionCandidate(
+        run_id=poor.run_id,
+        thread_id=poor.thread_id,
+        user_id=poor.user_id,
+        owner_worker_id=poor.owner_worker_id,
+        external_scope=poor.external_scope,
+        external_key=poor.external_key,
+        caller_intent_digest=poor.caller_intent_digest,
+        caller_intent_digest_version=poor.caller_intent_digest_version,
+        predecessor_run_ids=("predecessor-2",),
+        commit_proven=True,
+        terminal_disposition=_AdmissionTerminalDisposition.cancelled,
+        cancellation_action="interrupt",
+    )
+
+    manager._register_unresolved_admission(poor)
+    manager._register_unresolved_admission(refined)
+
+    retained = manager._unresolved_admissions[poor.run_id]
+    assert retained.commit_proven is True
+    assert retained.replacement_action == "rollback"
+    assert retained.predecessor_run_ids == ("predecessor-1", "predecessor-2")
+    assert retained.terminal_disposition is _AdmissionTerminalDisposition.cancelled
+    assert retained.cancellation_action == "interrupt"
+
+    contradictory = replace(refined, thread_id="another-thread")
+    with pytest.raises(RunStartupError, match="identity conflict"):
+        manager._register_unresolved_admission(contradictory)
+    assert manager.admission_compensations_ready() is False
+    assert manager._unresolved_admissions[poor.run_id] == retained
+
+    task = manager._admission_compensation_task
+    assert task is not None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.anyio
+async def test_unresolved_candidate_refinement_wakes_a_sleeping_compensator(
+    monkeypatch,
+) -> None:
+    manager = RunManager(store=MemoryRunStore())
+    candidate = _UnresolvedAdmissionCandidate(
+        run_id="00000000-0000-0000-0000-000000000102",
+        thread_id="thread-candidate-wakeup",
+        user_id="owner-1",
+        owner_worker_id=manager.worker_id,
+        external_scope=None,
+        external_key=None,
+        caller_intent_digest=None,
+        caller_intent_digest_version=None,
+    )
+    first_attempt = asyncio.Event()
+    second_attempt = asyncio.Event()
+    attempts = 0
+
+    async def remain_unresolved(_candidate) -> bool:
+        nonlocal attempts
+        attempts += 1
+        (first_attempt if attempts == 1 else second_attempt).set()
+        return False
+
+    monkeypatch.setattr(manager, "_resolve_unresolved_admission", remain_unresolved)
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.manager._admission_compensation_retry_delay",
+        lambda _round: 60.0,
+    )
+
+    manager._register_unresolved_admission(candidate)
+    await asyncio.wait_for(first_attempt.wait(), timeout=1)
+    await asyncio.sleep(0)
+    manager._register_unresolved_admission(
+        replace(candidate, commit_proven=True),
+    )
+    await asyncio.wait_for(second_attempt.wait(), timeout=0.2)
+
+    task = manager._admission_compensation_task
+    assert task is not None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.anyio
@@ -583,11 +870,13 @@ async def test_fail_start_persistence_uncertainty_stays_supervised_until_compens
     )
     store.fail_terminalization = True
 
-    with pytest.raises(OSError, match="terminal (?:transition|verification) unavailable"):
+    assert (
         await manager.fail_start_if_pending(
             record.run_id,
             error="worker attachment failed",
         )
+        is True
+    )
 
     assert record.status is RunStatus.pending
     assert record.attachment_supervised is True
@@ -1264,6 +1553,460 @@ async def test_cancelled_atomic_admission_reconciles_commit_before_return(
 
 
 @pytest.mark.anyio
+async def test_cancelled_admission_store_outage_remains_supervised_until_durable_terminal_proof() -> None:
+    store = CancelledAdmissionPersistenceUnavailableStore()
+    store.pause_after_commit = True
+    manager = RunManager(
+        store=store,
+        persistence_retry_policy=PersistenceRetryPolicy(max_attempts=1, initial_delay=0),
+    )
+    candidate_run_id = "37b12572-2e3e-4a75-a293-40cf28d7acee"
+    admission_task = asyncio.create_task(
+        manager.create_or_reject(
+            "thread-cancel-store-outage",
+            candidate_run_id=candidate_run_id,
+        )
+    )
+
+    await asyncio.wait_for(store.atomic_committed.wait(), timeout=1)
+    store.compensation_available = False
+    admission_task.cancel()
+    store.release_result.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(admission_task, timeout=1)
+
+    durable = await store.authoritative_get(candidate_run_id)
+    local = await manager.get(candidate_run_id)
+    assert durable is not None
+    assert local is not None
+    assert durable["status"] == RunStatus.pending.value
+    assert local.status == RunStatus.pending
+    assert local.attachment_supervised is True
+    assert local.abort_event.is_set()
+    assert manager.admission_compensations_ready() is False
+    with pytest.raises(RunStartupError, match="inactive run"):
+        await manager.attach_worker_once(candidate_run_id, None, asyncio.create_task)
+
+    store.compensation_available = True
+    assert await manager.drain_admission_compensations(timeout=1) is True
+
+    durable = await store.authoritative_get(candidate_run_id)
+    local = await manager.get(candidate_run_id)
+    assert durable is not None
+    assert local is not None
+    assert durable["status"] == RunStatus.interrupted.value
+    assert local.status == RunStatus.interrupted
+    assert local.attachment_supervised is False
+    events = await store.list_lifecycle_events(run_id=candidate_run_id)
+    assert [event["lifecycle_type"].value for event in events] == [
+        "accepted",
+        "cancellation_requested",
+        "cancelled",
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("keyed", [False, True])
+async def test_cancelled_response_lost_candidate_retains_cancellation_disposition(
+    keyed: bool,
+) -> None:
+    store = CancelledAmbiguousAdmissionStore()
+    manager = RunManager(
+        store=store,
+        persistence_retry_policy=PersistenceRetryPolicy(max_attempts=1, initial_delay=0),
+    )
+    candidate_run_id = "00000000-0000-0000-0000-000000000103"
+    if keyed:
+        admission = manager.ensure_or_reject(
+            "thread-cancelled-ambiguous",
+            candidate_run_id=candidate_run_id,
+            external_scope="scope-1",
+            external_key="delivery-1",
+            request_digest="a" * 64,
+            request_digest_version="request-v1",
+            caller_intent_json={"message": "hello"},
+            caller_intent_digest="b" * 64,
+            caller_intent_digest_version="intent-v1",
+        )
+    else:
+        admission = manager.create_or_reject(
+            "thread-cancelled-ambiguous",
+            candidate_run_id=candidate_run_id,
+        )
+    admission_task = asyncio.create_task(admission)
+
+    await asyncio.wait_for(store.atomic_committed.wait(), timeout=1)
+    admission_task.cancel()
+    store.release_response_loss.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(admission_task, timeout=1)
+
+    unresolved = manager._unresolved_admissions[candidate_run_id]
+    assert unresolved.terminal_disposition is _AdmissionTerminalDisposition.cancelled
+    assert unresolved.cancellation_action == "interrupt"
+    retained = await store.authoritative_get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.pending.value
+
+    store.candidate_reads_available = True
+    assert await manager.drain_admission_compensations(timeout=1) is True
+    retained = await store.authoritative_get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.interrupted.value
+    events = await store.list_lifecycle_events(run_id=candidate_run_id)
+    assert [event["lifecycle_type"].value for event in events] == [
+        "accepted",
+        "cancellation_requested",
+        "cancelled",
+    ]
+
+
+@pytest.mark.anyio
+async def test_taskless_attachment_lease_loss_preserves_authoritative_state_until_same_process_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.manager._admission_compensation_retry_delay",
+        lambda _round: 60.0,
+    )
+    config = RunOwnershipConfig(
+        lease_seconds=30,
+        grace_seconds=0,
+        heartbeat_enabled=True,
+    )
+    store = MemoryRunStore()
+    owner = RunManager(
+        store=store,
+        worker_id="worker-owner",
+        run_ownership_config=config,
+    )
+    candidate_run_id = "00000000-0000-0000-0000-000000000104"
+    record = await owner.create_or_reject(
+        "thread-taskless-ownership-loss",
+        candidate_run_id=candidate_run_id,
+    )
+    expired = "2000-01-01T00:00:00+00:00"
+    record.lease_expires_at = expired
+    store._runs[candidate_run_id]["lease_expires_at"] = expired
+
+    assert await owner._mark_ownership_lost(
+        record,
+        reason="lease expired before worker attachment",
+    )
+
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.pending.value
+    assert record.status == RunStatus.pending
+    assert record.ownership_lost is True
+    assert record.abort_event.is_set()
+    assert record.attachment_supervised is True
+    assert owner.admission_compensations_ready() is False
+    assert await owner.shutdown(timeout=0.01) is False
+
+    recovered = await owner.reconcile_orphaned_inflight_runs(
+        error="same-process orphan recovery",
+        stop_reason="orphan_recovered",
+    )
+    assert [recovered_record.run_id for recovered_record in recovered] == [
+        candidate_run_id,
+    ]
+    assert await owner.drain_admission_compensations(timeout=0.2) is True
+
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.error.value
+    assert record.status == RunStatus.error
+    assert record.stop_reason == "orphan_recovered"
+    assert record.attachment_supervised is False
+
+
+@pytest.mark.anyio
+async def test_unresolved_compensation_cannot_commit_after_lease_ownership_is_lost() -> None:
+    config = RunOwnershipConfig(
+        lease_seconds=30,
+        grace_seconds=0,
+        heartbeat_enabled=True,
+    )
+    store = PausedOwnedCompensationRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id="worker-owner",
+        run_ownership_config=config,
+    )
+    candidate_run_id = "00000000-0000-0000-0000-000000000105"
+    record = await manager.create_or_reject(
+        "thread-compensation-ownership-race",
+        candidate_run_id=candidate_run_id,
+    )
+    manager._register_unresolved_admission(manager._known_candidate_for_record(record))
+
+    await asyncio.wait_for(store.compensation_started.wait(), timeout=1)
+    expired = "2000-01-01T00:00:00+00:00"
+    record.lease_expires_at = expired
+    store._runs[candidate_run_id]["lease_expires_at"] = expired
+    assert await manager._mark_ownership_lost(
+        record,
+        reason="lease expired while compensation was waiting",
+    )
+    store.release_compensation.set()
+
+    await asyncio.sleep(0)
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.pending.value
+    assert manager.admission_compensations_ready() is False
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="same-process orphan recovery",
+        stop_reason="orphan_recovered",
+    )
+    assert [recovered_record.run_id for recovered_record in recovered] == [
+        candidate_run_id,
+    ]
+    assert await manager.drain_admission_compensations(timeout=0.2) is True
+
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.error.value
+    assert retained["stop_reason"] == "orphan_recovered"
+    events = await store.list_lifecycle_events(run_id=candidate_run_id)
+    assert [event["lifecycle_type"].value for event in events] == [
+        "accepted",
+        "failed",
+    ]
+
+
+@pytest.mark.anyio
+async def test_ordinary_cancel_of_taskless_creator_stays_supervised_until_durable_terminal_proof() -> None:
+    store = TasklessCancellationUnavailableStore()
+    manager = RunManager(
+        store=store,
+        persistence_retry_policy=PersistenceRetryPolicy(max_attempts=1, initial_delay=0),
+    )
+    candidate_run_id = "00000000-0000-0000-0000-000000000106"
+    record = await manager.create_or_reject(
+        "thread-taskless-ordinary-cancel",
+        candidate_run_id=candidate_run_id,
+    )
+
+    outcome = await manager.cancel(candidate_run_id)
+
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert outcome == CancelOutcome.requested
+    assert retained["status"] == RunStatus.pending.value
+    assert record.status == RunStatus.pending
+    assert record.abort_event.is_set()
+    assert record.task is None
+    assert record.attachment_supervised is True
+    assert manager.admission_compensations_ready() is False
+
+    store.compensation_available = True
+    assert await manager.drain_admission_compensations(timeout=1) is True
+
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.interrupted.value
+    assert record.status == RunStatus.interrupted
+    assert record.attachment_supervised is False
+    events = await store.list_lifecycle_events(run_id=candidate_run_id)
+    assert [event["lifecycle_type"].value for event in events] == [
+        "accepted",
+        "cancellation_requested",
+        "cancelled",
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("pause_after_commit", [False, True])
+async def test_cancelling_taskless_compensation_retains_exact_candidate_until_recovery(
+    pause_after_commit: bool,
+) -> None:
+    store = PausedOwnedCancellationRunStore(
+        pause_after_commit=pause_after_commit,
+    )
+    manager = RunManager(store=store)
+    candidate_run_id = "00000000-0000-0000-0000-000000000107" if pause_after_commit else "00000000-0000-0000-0000-000000000108"
+    record = await manager.create_or_reject(
+        "thread-cancel-compensation-cancelled",
+        candidate_run_id=candidate_run_id,
+    )
+    cancel_task = asyncio.create_task(manager.cancel(candidate_run_id))
+
+    await asyncio.wait_for(store.cancellation_paused.wait(), timeout=1)
+    cancel_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancel_task
+
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.pending.value
+    assert record.status == RunStatus.pending
+    assert record.abort_event.is_set()
+    assert record.task is None
+    assert record.attachment_supervised is True
+    assert manager.admission_compensations_ready() is False
+    with pytest.raises(RunStartupError, match="inactive run"):
+        await manager.attach_worker_once(candidate_run_id, None, asyncio.create_task)
+
+    store.release_cancellation.set()
+    store.release_terminal.set()
+    assert await manager.drain_admission_compensations(timeout=1) is True
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.interrupted.value
+    events = await store.list_lifecycle_events(run_id=candidate_run_id)
+    assert [event["lifecycle_type"].value for event in events] == [
+        "accepted",
+        "cancellation_requested",
+        "cancelled",
+    ]
+
+
+@pytest.mark.anyio
+async def test_cancel_and_worker_attachment_have_one_atomic_winner() -> None:
+    class PausedCloseManager(RunManager):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.close_entered = asyncio.Event()
+            self.release_close = asyncio.Event()
+
+        async def _close_cancelled_admission(self, record, *, action="interrupt"):
+            self.close_entered.set()
+            await self.release_close.wait()
+            return await super()._close_cancelled_admission(
+                record,
+                action=action,
+            )
+
+    store = MemoryRunStore()
+    manager = PausedCloseManager(store=store)
+    candidate_run_id = "00000000-0000-0000-0000-000000000109"
+    record = await manager.create_or_reject(
+        "thread-cancel-attach-race",
+        candidate_run_id=candidate_run_id,
+    )
+    cancel_task = asyncio.create_task(manager.cancel(candidate_run_id))
+    await asyncio.wait_for(manager.close_entered.wait(), timeout=1)
+
+    worker_started = asyncio.Event()
+    worker_release = asyncio.Event()
+
+    async def worker() -> None:
+        worker_started.set()
+        await worker_release.wait()
+
+    attached = await manager.attach_worker_once(
+        candidate_run_id,
+        worker(),
+        asyncio.create_task,
+    )
+    await asyncio.wait_for(worker_started.wait(), timeout=1)
+    manager.release_close.set()
+
+    assert await cancel_task == CancelOutcome.cancelled
+    done, _ = await asyncio.wait((attached,), timeout=0.1)
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.interrupted.value
+    assert attached in done
+    assert attached.cancelled()
+    assert record.abort_event.is_set()
+    worker_release.set()
+    if not attached.done():
+        attached.cancel()
+    await asyncio.gather(attached, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_shutdown_cannot_fail_taskless_creator_after_lease_loss() -> None:
+    config = RunOwnershipConfig(
+        lease_seconds=30,
+        grace_seconds=0,
+        heartbeat_enabled=True,
+    )
+    store = PausedOwnedCompensationRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id="worker-owner",
+        run_ownership_config=config,
+    )
+    candidate_run_id = "00000000-0000-0000-0000-000000000110"
+    record = await manager.create_or_reject(
+        "thread-shutdown-ownership-race",
+        candidate_run_id=candidate_run_id,
+    )
+    shutdown_task = asyncio.create_task(manager.shutdown(timeout=0.2))
+    await asyncio.wait_for(store.compensation_started.wait(), timeout=1)
+
+    expired = "2000-01-01T00:00:00+00:00"
+    record.lease_expires_at = expired
+    store._runs[candidate_run_id]["lease_expires_at"] = expired
+    assert await manager._mark_ownership_lost(
+        record,
+        reason="lease expired during shutdown compensation",
+    )
+    store.release_compensation.set()
+
+    assert await shutdown_task is False
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.pending.value
+    assert manager.admission_compensations_ready() is False
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="same-process orphan recovery",
+        stop_reason="orphan_recovered",
+    )
+    assert [item.run_id for item in recovered] == [candidate_run_id]
+    assert await manager.drain_admission_compensations(timeout=0.2) is True
+    retained = await store.get(candidate_run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.error.value
+    assert retained["stop_reason"] == "orphan_recovered"
+
+
+@pytest.mark.anyio
+async def test_local_terminal_status_cannot_commit_after_lease_loss() -> None:
+    config = RunOwnershipConfig(
+        lease_seconds=30,
+        grace_seconds=0,
+        heartbeat_enabled=True,
+    )
+    store = PausedOwnedStatusRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id="worker-owner",
+        run_ownership_config=config,
+    )
+    record = await manager.create("thread-terminal-ownership-race")
+    assert await manager.try_start(record.run_id) == RunStartOutcome.started
+    store.pause_owned_transition = True
+    completion = asyncio.create_task(
+        manager.set_status(record.run_id, RunStatus.success),
+    )
+    await asyncio.wait_for(store.transition_paused.wait(), timeout=1)
+
+    expired = "2000-01-01T00:00:00+00:00"
+    record.lease_expires_at = expired
+    store._runs[record.run_id]["lease_expires_at"] = expired
+    assert await manager._mark_ownership_lost(
+        record,
+        reason="lease expired during terminal persistence",
+        require_active=False,
+    )
+    store.release_transition.set()
+    await completion
+
+    retained = await store.get(record.run_id)
+    assert retained is not None
+    assert retained["status"] == RunStatus.running.value
+    assert record.ownership_lost is True
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("keyed", [False, True])
 async def test_response_lost_creator_is_reconciled_by_candidate_id(
     keyed: bool,
@@ -1686,17 +2429,22 @@ async def test_create_or_reject_repeated_cancellation_drains_replacement_cleanup
     replacement_persist_started = asyncio.Event()
     release_replacement_persist = asyncio.Event()
     original_persist_status = manager._persist_status
+    original_update_status = store.update_status
 
     async def staged_persist_status(record: Any, status: RunStatus, **kwargs: Any) -> bool:
         if record.run_id == old.run_id:
             old_persist_started.set()
             await asyncio.wait_for(release_old_persist.wait(), timeout=1)
-        else:
-            replacement_persist_started.set()
-            await asyncio.wait_for(release_replacement_persist.wait(), timeout=1)
         return await original_persist_status(record, status, **kwargs)
 
+    async def staged_update_status(run_id: str, status: str, **kwargs: Any) -> bool:
+        if run_id != old.run_id and status == RunStatus.interrupted.value:
+            replacement_persist_started.set()
+            await asyncio.wait_for(release_replacement_persist.wait(), timeout=1)
+        return await original_update_status(run_id, status, **kwargs)
+
     monkeypatch.setattr(manager, "_persist_status", staged_persist_status)
+    monkeypatch.setattr(store, "update_status", staged_update_status)
     create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy="interrupt"))
     await asyncio.wait_for(old_persist_started.wait(), timeout=1)
     replacement = next(record for record in manager._runs.values() if record.run_id != old.run_id)
@@ -1765,6 +2513,7 @@ async def test_create_or_reject_retries_replacement_when_cancel_status_cannot_pe
     with pytest.raises(asyncio.CancelledError):
         _ = await asyncio.wait_for(create_task, timeout=1)
 
+    assert await manager.drain_admission_compensations(timeout=1) is True
     stored_replacement = await store.get(replacement.run_id, user_id="owner-1")
     assert stored_replacement is not None
     assert stored_replacement["status"] == RunStatus.interrupted.value

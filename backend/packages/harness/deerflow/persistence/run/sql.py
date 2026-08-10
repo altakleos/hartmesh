@@ -393,6 +393,46 @@ class RunRepository(RunStore):
         transition: LifecycleTransition,
         user_id: str | None = None,
     ) -> LifecycleTransitionResult:
+        return await self._transition_run_atomic(
+            run_id,
+            expected_state_version=expected_state_version,
+            expected_statuses=expected_statuses,
+            transition=transition,
+            user_id=user_id,
+        )
+
+    async def transition_owned_run_atomic(
+        self,
+        run_id: str,
+        *,
+        expected_state_version: int,
+        expected_statuses: tuple[str, ...] | None,
+        transition: LifecycleTransition,
+        expected_owner_worker_id: str,
+        require_unexpired_lease: bool,
+        user_id: str | None = None,
+    ) -> LifecycleTransitionResult:
+        return await self._transition_run_atomic(
+            run_id,
+            expected_state_version=expected_state_version,
+            expected_statuses=expected_statuses,
+            transition=transition,
+            user_id=user_id,
+            expected_owner_worker_id=expected_owner_worker_id,
+            require_unexpired_lease=require_unexpired_lease,
+        )
+
+    async def _transition_run_atomic(
+        self,
+        run_id: str,
+        *,
+        expected_state_version: int,
+        expected_statuses: tuple[str, ...] | None,
+        transition: LifecycleTransition,
+        user_id: str | None,
+        expected_owner_worker_id: str | None = None,
+        require_unexpired_lease: bool = False,
+    ) -> LifecycleTransitionResult:
         payload = build_lifecycle_payload(transition)
         async with self._sf() as session:
             await self._begin_lifecycle_write(session)
@@ -405,11 +445,27 @@ class RunRepository(RunStore):
             if row is None:
                 await session.rollback()
                 return LifecycleTransitionResult(applied=False)
+            if expected_owner_worker_id is not None and not self._owned_run_fence_matches(
+                row,
+                expected_owner_worker_id=expected_owner_worker_id,
+                require_unexpired_lease=require_unexpired_lease,
+            ):
+                result_row = self._row_to_dict(row)
+                await session.rollback()
+                return LifecycleTransitionResult(applied=False, row=result_row)
             if row.state_version != expected_state_version or (expected_statuses is not None and row.status not in expected_statuses):
                 result_row = self._row_to_dict(row)
                 await session.rollback()
                 return LifecycleTransitionResult(applied=False, row=result_row)
             cursor_state = await self._lock_cursor_state(session)
+            if expected_owner_worker_id is not None and not self._owned_run_fence_matches(
+                row,
+                expected_owner_worker_id=expected_owner_worker_id,
+                require_unexpired_lease=require_unexpired_lease,
+            ):
+                result_row = self._row_to_dict(row)
+                await session.rollback()
+                return LifecycleTransitionResult(applied=False, row=result_row)
             row.status = transition.status
             row.state_version += 1
             if transition.error is not None:
@@ -451,6 +507,23 @@ class RunRepository(RunStore):
     ) -> CancellationRequestResult:
         return await self._request_cancel_atomic(run_id, action=action, user_id=user_id)
 
+    async def request_cancel_owned(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        expected_owner_worker_id: str,
+        require_unexpired_lease: bool,
+        user_id: str | None = None,
+    ) -> CancellationRequestResult:
+        return await self._request_cancel_atomic(
+            run_id,
+            action=action,
+            user_id=user_id,
+            expected_owner_worker_id=expected_owner_worker_id,
+            require_unexpired_lease=require_unexpired_lease,
+        )
+
     async def _request_cancel_atomic(
         self,
         run_id: str,
@@ -458,6 +531,8 @@ class RunRepository(RunStore):
         action: str,
         expected_state_version: int | None = None,
         user_id: str | None = None,
+        expected_owner_worker_id: str | None = None,
+        require_unexpired_lease: bool = False,
     ) -> CancellationRequestResult:
         if action not in ("interrupt", "rollback"):
             raise ValueError(f"Unsupported cancellation action: {action}")
@@ -472,6 +547,13 @@ class RunRepository(RunStore):
             if row is None:
                 await session.rollback()
                 return CancellationRequestResult(CancellationRequestOutcome.not_found_or_invisible)
+            if expected_owner_worker_id is not None and not self._owned_run_fence_matches(
+                row,
+                expected_owner_worker_id=expected_owner_worker_id,
+                require_unexpired_lease=require_unexpired_lease,
+            ):
+                await session.rollback()
+                return CancellationRequestResult(CancellationRequestOutcome.stale)
             result_row = self._row_to_dict(row)
             if row.cancel_action == action:
                 await session.rollback()
@@ -483,6 +565,13 @@ class RunRepository(RunStore):
                 await session.rollback()
                 return CancellationRequestResult(CancellationRequestOutcome.stale, row=result_row)
             cursor_state = await self._lock_cursor_state(session)
+            if expected_owner_worker_id is not None and not self._owned_run_fence_matches(
+                row,
+                expected_owner_worker_id=expected_owner_worker_id,
+                require_unexpired_lease=require_unexpired_lease,
+            ):
+                await session.rollback()
+                return CancellationRequestResult(CancellationRequestOutcome.stale)
             now = datetime.now(UTC)
             row.cancel_action = action
             row.cancel_requested_at = now
@@ -503,6 +592,26 @@ class RunRepository(RunStore):
                 row=result_row,
                 event=result_event,
             )
+
+    @staticmethod
+    def _owned_run_fence_matches(
+        row: RunRow,
+        *,
+        expected_owner_worker_id: str,
+        require_unexpired_lease: bool,
+    ) -> bool:
+        """Check an attachment owner's authority while its run row is locked."""
+
+        if row.owner_worker_id != expected_owner_worker_id:
+            return False
+        if not require_unexpired_lease:
+            return True
+        deadline = row.lease_expires_at
+        if deadline is None:
+            return False
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=UTC)
+        return deadline > datetime.now(UTC)
 
     @staticmethod
     def _normalize_model_name(model_name: str | None) -> str | None:

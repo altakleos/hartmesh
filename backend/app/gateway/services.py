@@ -79,6 +79,8 @@ from app.runtime.invocation import (
     InvocationRuntime,
     NotFoundOrInvisible,
     PreparedLaunch,
+    TaskFactory,
+    WorkerCoroutine,
     thaw_host_value,
 )
 from app.runtime.native_binding import InternalVerifiedNativeBindingKind
@@ -2842,18 +2844,28 @@ class _GatewayDurableRuns:
             coordinator = get_skill_projection_coordinator()
             if reservation is not None:
                 coordinator.abort_admission(reservation)
-            coordinator.release_unactivated_run(
-                user_id=launch.user_id or DEFAULT_USER_ID,
-                thread_id=launch.thread_id,
-                run_id=candidate_run_id,
-            )
-            await self._terminalize_unattached_candidate(
-                run_manager,
-                candidate_run_id,
-            )
+            try:
+                await self._terminalize_unattached_candidate(
+                    run_manager,
+                    candidate_run_id,
+                )
+            finally:
+                # The manager must first prove terminal state or retain the
+                # exact candidate in its compensator. Only then may this
+                # process release the accepted execution material.
+                coordinator.release_unactivated_run(
+                    user_id=launch.user_id or DEFAULT_USER_ID,
+                    thread_id=launch.thread_id,
+                    run_id=candidate_run_id,
+                )
             raise
 
-    async def attach_worker(self, record, worker, task_factory):
+    async def attach_worker(
+        self,
+        record: RunRecord,
+        worker: WorkerCoroutine,
+        task_factory: TaskFactory,
+    ) -> asyncio.Task[None]:
         return await get_run_manager(self._request).attach_worker_once(
             record.run_id,
             worker,
@@ -2863,15 +2875,33 @@ class _GatewayDurableRuns:
     async def fail_start(self, record: RunRecord, error: str) -> None:
         from deerflow.runtime.skill_projection import get_skill_projection_coordinator
 
-        get_skill_projection_coordinator().release_unactivated_run(
-            user_id=record.user_id or DEFAULT_USER_ID,
-            thread_id=record.thread_id,
-            run_id=record.run_id,
-        )
-        await get_run_manager(self._request).fail_start_if_pending(
-            record.run_id,
-            error=error,
-        )
+        try:
+            await get_run_manager(self._request).fail_start_if_pending(
+                record.run_id,
+                error=error,
+            )
+        finally:
+            get_skill_projection_coordinator().release_unactivated_run(
+                user_id=record.user_id or DEFAULT_USER_ID,
+                thread_id=record.thread_id,
+                run_id=record.run_id,
+            )
+
+    async def cancel_start(self, record: RunRecord) -> None:
+        """Cancel one admitted row that never transferred to a worker."""
+
+        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+        try:
+            await get_run_manager(self._request).cancel_start_if_pending(
+                record.run_id,
+            )
+        finally:
+            get_skill_projection_coordinator().release_unactivated_run(
+                user_id=record.user_id or DEFAULT_USER_ID,
+                thread_id=record.thread_id,
+                run_id=record.run_id,
+            )
 
     async def observe(
         self,

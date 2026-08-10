@@ -89,6 +89,150 @@ async def test_compare_and_set_failure_changes_neither_row_nor_journal() -> None
     assert len(await store.list_lifecycle_events(run_id="run-1")) == 1
 
 
+async def _assert_owned_compensation_fence(store: RunStore) -> None:
+    await store.put(
+        "run-expired",
+        thread_id="thread-expired",
+        owner_worker_id="worker-1",
+        lease_expires_at="2000-01-01T00:00:00+00:00",
+    )
+    expired_cancel = await store.request_cancel_owned(
+        "run-expired",
+        action="interrupt",
+        expected_owner_worker_id="worker-1",
+        require_unexpired_lease=True,
+    )
+    expired_transition = await store.transition_owned_run_atomic(
+        "run-expired",
+        expected_state_version=1,
+        expected_statuses=("pending",),
+        transition=LifecycleTransition(
+            lifecycle_type=LifecycleType.failed,
+            status="error",
+            error="worker_attachment_failed",
+            stop_reason="worker_attachment_failed",
+            reason="worker_attachment_failed",
+        ),
+        expected_owner_worker_id="worker-1",
+        require_unexpired_lease=True,
+    )
+
+    await store.put(
+        "run-live",
+        thread_id="thread-live",
+        owner_worker_id="worker-1",
+        lease_expires_at="2999-01-01T00:00:00+00:00",
+    )
+    wrong_owner = await store.request_cancel_owned(
+        "run-live",
+        action="interrupt",
+        expected_owner_worker_id="worker-2",
+        require_unexpired_lease=True,
+    )
+    requested = await store.request_cancel_owned(
+        "run-live",
+        action="interrupt",
+        expected_owner_worker_id="worker-1",
+        require_unexpired_lease=True,
+    )
+    terminal = await store.transition_owned_run_atomic(
+        "run-live",
+        expected_state_version=2,
+        expected_statuses=("pending",),
+        transition=LifecycleTransition(
+            lifecycle_type=LifecycleType.cancelled,
+            status="interrupted",
+        ),
+        expected_owner_worker_id="worker-1",
+        require_unexpired_lease=True,
+    )
+
+    assert expired_cancel.outcome == CancellationRequestOutcome.stale
+    assert expired_transition.applied is False
+    assert wrong_owner.outcome == CancellationRequestOutcome.stale
+    assert requested.outcome == CancellationRequestOutcome.requested
+    assert terminal.applied is True
+    expired = await store.get("run-expired")
+    live = await store.get("run-live")
+    assert expired is not None and expired["status"] == "pending"
+    assert live is not None and live["status"] == "interrupted"
+    assert [event["lifecycle_type"] for event in await store.list_lifecycle_events(run_id="run-expired")] == [
+        LifecycleType.accepted,
+    ]
+
+
+@pytest.mark.anyio
+async def test_memory_owned_compensation_requires_current_owner_and_live_lease() -> None:
+    await _assert_owned_compensation_fence(MemoryRunStore())
+
+
+@pytest.mark.anyio
+async def test_sqlite_owned_compensation_requires_current_owner_and_live_lease(
+    tmp_path,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'owned-compensation.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        await _assert_owned_compensation_fence(
+            RunRepository(async_sessionmaker(engine, expire_on_commit=False)),
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_sqlite_owned_compensation_rechecks_lease_after_cursor_lock(
+    tmp_path,
+) -> None:
+    class LeaseExpiresAtCursorLockRepository(RunRepository):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.fence_checks = 0
+
+        def _owned_run_fence_matches(self, *args, **kwargs) -> bool:
+            self.fence_checks += 1
+            return self.fence_checks == 1
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'cursor-lease-fence.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    store = LeaseExpiresAtCursorLockRepository(
+        async_sessionmaker(engine, expire_on_commit=False),
+    )
+    try:
+        await store.put(
+            "run-1",
+            thread_id="thread-1",
+            owner_worker_id="worker-1",
+            lease_expires_at="2999-01-01T00:00:00+00:00",
+        )
+        result = await store.transition_owned_run_atomic(
+            "run-1",
+            expected_state_version=1,
+            expected_statuses=("pending",),
+            transition=LifecycleTransition(
+                lifecycle_type=LifecycleType.failed,
+                status="error",
+                error="worker_attachment_failed",
+                stop_reason="worker_attachment_failed",
+                reason="worker_attachment_failed",
+            ),
+            expected_owner_worker_id="worker-1",
+            require_unexpired_lease=True,
+        )
+
+        assert store.fence_checks == 2
+        assert result.applied is False
+        row = await store.get("run-1")
+        assert row is not None and row["status"] == "pending"
+        assert [event["lifecycle_type"] for event in await store.list_lifecycle_events(run_id="run-1")] == [
+            LifecycleType.accepted,
+        ]
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.anyio
 async def test_sql_row_and_lifecycle_event_commit_together(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'lifecycle.db'}")

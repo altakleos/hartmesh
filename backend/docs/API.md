@@ -752,6 +752,28 @@ GET /api/threads/{thread_id}/artifacts/{path}
 
 ---
 
+### Durable inbound receipt operations
+
+These administrator-only routes expose bounded operations for PostgreSQL-backed
+native ingress. Browser mutations use the normal CSRF protection.
+
+| Route | Contract |
+|---|---|
+| `GET /api/channels/inbound-receipts/summary` | Capped counts by finite receipt state and indexed oldest-due age; never enumerates receipt envelopes. |
+| `GET /api/channels/inbound-receipts/{receipt_id}` | Exact unresolved dead-letter evidence with bounded digests, counters, and timestamps; never returns message text, binding reference, or provider delivery ID. |
+| `POST /api/channels/inbound-receipts/{receipt_id}/requeue` | Exact CAS from runless `dead_letter` to `deferred`, then a best-effort receipt-ID wake-up. |
+| `POST /api/channels/inbound-receipts/{receipt_id}/discard` | Exact CAS from runless `dead_letter` to `completed` with `operator_discarded`; no processing wake-up is emitted. |
+
+Both mutations require the expected fencing token, payload digest, and an
+explicit provider-event digest. A JSON `null` is accepted only to match a legacy
+row whose database event digest is SQL `NULL`; omitting the field is invalid.
+Concurrent, stale, already-bound, or otherwise ineligible mutations return a
+bounded conflict. Discard preserves the retained envelope only through the
+ordinary completed-row forensic window, after which normal bounded retention may
+remove it. There is no list, bulk-requeue, bulk-discard, or raw-payload route.
+
+---
+
 ## Durable Invocation Runtime API
 
 Base URL: `/api/runtime/v1`

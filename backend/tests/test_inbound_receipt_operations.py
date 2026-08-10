@@ -15,8 +15,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.channels.inbound_receipt_operations import (
+    InboundDeadLetterDiscardDisposition,
+    InboundDeadLetterDiscardRequest,
+    InboundDeadLetterDiscardResult,
     InboundDeadLetterInspection,
+    InboundDeadLetterRequeueDisposition,
     InboundDeadLetterRequeueRequest,
+    InboundDeadLetterRequeueResult,
     InboundReceiptOperations,
     InboundReceiptOperationsSummary,
     InboundReceiptStateSummary,
@@ -60,6 +65,94 @@ def test_requeue_request_rejects_noncanonical_receipt_identity(receipt_id: str) 
             expected_fencing_token=2,
             expected_payload_digest="a" * 64,
             expected_provider_event_digest="b" * 64,
+        )
+
+
+def test_receipt_operator_records_reject_inconsistent_or_unbounded_values() -> None:
+    now = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+    receipt_id = "00000000-0000-0000-0000-000000000002"
+
+    with pytest.raises(ValueError, match="supported inbound receipt state"):
+        InboundReceiptStateSummary(
+            state="unknown",
+            count=0,
+            capped=False,
+            oldest_due_age_seconds=None,
+        )
+    with pytest.raises(ValueError, match="non-negative integer"):
+        InboundReceiptStateSummary(
+            state="received",
+            count=True,
+            capped=False,
+            oldest_due_age_seconds=None,
+        )
+    with pytest.raises(ValueError, match="meaningful only"):
+        InboundReceiptStateSummary(
+            state="dead_letter",
+            count=1,
+            capped=False,
+            oldest_due_age_seconds=1,
+        )
+
+    state = InboundReceiptStateSummary(
+        state="dead_letter",
+        count=1,
+        capped=False,
+        oldest_due_age_seconds=None,
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        InboundReceiptOperationsSummary(
+            generated_at=now,
+            per_state_cap=2,
+            states=(state, state),
+        )
+    oversized_state = InboundReceiptStateSummary(
+        state="dead_letter",
+        count=2,
+        capped=False,
+        oldest_due_age_seconds=None,
+    )
+    with pytest.raises(ValueError, match="exceeds per_state_cap"):
+        InboundReceiptOperationsSummary(
+            generated_at=now,
+            per_state_cap=1,
+            states=(oversized_state,),
+        )
+
+    inspection_kwargs = {
+        "receipt_id": receipt_id,
+        "provider": "github",
+        "binding_kind": "webhook_route",
+        "thread_id": "thread-1",
+        "payload_digest": "a" * 64,
+        "provider_event_digest": "b" * 64,
+        "fencing_token": 2,
+        "attempt_count": 3,
+        "failure_count": 8,
+        "outcome_code": "attempts_exhausted",
+        "received_at": now,
+        "updated_at": now,
+        "completed_at": now,
+    }
+    with pytest.raises(ValueError, match="must not contain control"):
+        InboundDeadLetterInspection(**{**inspection_kwargs, "provider": "github\nsecret"})
+    with pytest.raises(ValueError, match="must be dead_letter"):
+        InboundDeadLetterInspection(**inspection_kwargs, state="completed")
+
+    with pytest.raises(ValueError, match="disposition and fencing token"):
+        InboundDeadLetterDiscardResult(
+            receipt_id=receipt_id,
+            disposition=InboundDeadLetterDiscardDisposition.discarded,
+            correlation_id="00000000-0000-0000-0000-000000000003",
+            fencing_token=None,
+        )
+    with pytest.raises(ValueError, match="failed requeue cannot publish"):
+        InboundDeadLetterRequeueResult(
+            receipt_id=receipt_id,
+            disposition=InboundDeadLetterRequeueDisposition.not_requeued,
+            correlation_id="00000000-0000-0000-0000-000000000003",
+            fencing_token=None,
+            wakeup_published=True,
         )
 
 
@@ -264,6 +357,78 @@ async def test_fenced_exact_dead_letter_requeue_preserves_identity_and_wakes_aft
 
 
 @pytest.mark.asyncio
+async def test_fenced_dead_letter_discard_completes_without_wakeup_and_uses_normal_retention(
+    tmp_path,
+    caplog,
+) -> None:
+    now = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'receipts.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all, tables=[InboundReceiptRow.__table__])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    receipt_id = "00000000-0000-0000-0000-000000000025"
+    retained_envelope = {"bounded": "operator-forensic-window"}
+    async with sessions.begin() as session:
+        row = _row(
+            receipt_id=receipt_id,
+            state="dead_letter",
+            received_at=now - timedelta(days=30),
+            completed_at=now - timedelta(days=1),
+            failure_count=8,
+            outcome_code="attempts_exhausted",
+        )
+        row.payload_json = retained_envelope
+        session.add(row)
+
+    wakeups: list[str] = []
+    store = SqlInboundReceiptStore(sessions, clock=lambda: now)
+    operations = InboundReceiptOperations(
+        store=store,
+        publish_wakeup=wakeups.append,
+        clock=lambda: now,
+    )
+    with caplog.at_level("INFO", logger="app.channels.inbound_receipt_operations"):
+        result = await operations.discard_dead_letter(
+            InboundDeadLetterDiscardRequest(
+                receipt_id=receipt_id,
+                expected_fencing_token=2,
+                expected_payload_digest="a" * 64,
+                expected_provider_event_digest="b" * 64,
+            ),
+            actor_ref="c" * 64,
+        )
+
+    assert result.disposition is InboundDeadLetterDiscardDisposition.discarded
+    assert result.fencing_token == 3
+    assert wakeups == []
+    assert "receipt_operation_discard" in caplog.text
+    assert "operator-forensic-window" not in caplog.text
+    assert await operations.inspect_dead_letter(receipt_id) is None
+    async with sessions() as session:
+        retained = await session.get(InboundReceiptRow, receipt_id)
+        assert retained is not None
+        assert retained.state == "completed"
+        assert retained.outcome_code == "operator_discarded"
+        assert retained.fencing_token == 3
+        assert retained.lease_owner is None
+        assert retained.lease_expires_at is None
+        assert retained.next_attempt_at.replace(tzinfo=UTC) == now
+        assert retained.payload_json == retained_envelope
+
+    assert (
+        await store.cleanup_completed(
+            older_than=now + timedelta(seconds=1),
+            limit=10,
+        )
+        == 1
+    )
+    async with sessions() as session:
+        assert await session.get(InboundReceiptRow, receipt_id) is None
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("state", "run_id", "expected_fencing_token", "expected_payload_digest"),
     [
@@ -390,6 +555,100 @@ async def test_requeue_requires_exact_provider_event_evidence_without_inventing_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "state",
+        "run_id",
+        "stored_event_digest",
+        "expected_fencing_token",
+        "expected_payload_digest",
+        "expected_event_digest",
+        "expected_disposition",
+    ),
+    [
+        ("completed", None, "b" * 64, 2, "a" * 64, "b" * 64, "not_discarded"),
+        ("dead_letter", "run-already-bound", "b" * 64, 2, "a" * 64, "b" * 64, "not_discarded"),
+        ("dead_letter", None, "b" * 64, 1, "a" * 64, "b" * 64, "not_discarded"),
+        ("dead_letter", None, "b" * 64, 2, "c" * 64, "b" * 64, "not_discarded"),
+        ("dead_letter", None, "b" * 64, 2, "a" * 64, None, "not_discarded"),
+        ("dead_letter", None, "b" * 64, 2, "a" * 64, "c" * 64, "not_discarded"),
+        ("dead_letter", None, None, 2, "a" * 64, "b" * 64, "not_discarded"),
+        ("dead_letter", None, None, 2, "a" * 64, None, "discarded"),
+    ],
+    ids=(
+        "not-dead-letter",
+        "run-bound",
+        "stale-fence",
+        "payload-mismatch",
+        "nonlegacy-omitted-event-proof",
+        "nonlegacy-event-mismatch",
+        "legacy-invented-event-proof",
+        "legacy-explicit-null",
+    ),
+)
+async def test_discard_requires_every_exact_row_fence_and_explicit_legacy_null(
+    tmp_path,
+    state,
+    run_id,
+    stored_event_digest,
+    expected_fencing_token,
+    expected_payload_digest,
+    expected_event_digest,
+    expected_disposition,
+) -> None:
+    now = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'receipts.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all, tables=[InboundReceiptRow.__table__])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    receipt_id = "00000000-0000-0000-0000-000000000046"
+    async with sessions.begin() as session:
+        row = _row(
+            receipt_id=receipt_id,
+            state=state,
+            received_at=now - timedelta(minutes=5),
+            completed_at=now,
+            failure_count=8,
+            outcome_code="attempts_exhausted",
+        )
+        row.run_id = run_id
+        row.provider_event_digest = stored_event_digest
+        session.add(row)
+
+    operations = InboundReceiptOperations(
+        store=SqlInboundReceiptStore(sessions, clock=lambda: now),
+        publish_wakeup=lambda _receipt_id: None,
+        clock=lambda: now,
+    )
+    result = await operations.discard_dead_letter(
+        InboundDeadLetterDiscardRequest(
+            receipt_id=receipt_id,
+            expected_fencing_token=expected_fencing_token,
+            expected_payload_digest=expected_payload_digest,
+            expected_provider_event_digest=expected_event_digest,
+        ),
+        actor_ref="c" * 64,
+    )
+
+    assert result.disposition == expected_disposition
+    async with sessions() as session:
+        retained = await session.get(InboundReceiptRow, receipt_id)
+        assert retained is not None
+        if expected_disposition == "discarded":
+            assert retained.state == "completed"
+            assert retained.fencing_token == 3
+            assert retained.outcome_code == "operator_discarded"
+        else:
+            assert retained.state == state
+            assert retained.fencing_token == 2
+            assert retained.outcome_code == "attempts_exhausted"
+        assert retained.provider_event_digest == stored_event_digest
+        assert retained.run_id == run_id
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_retention_cleanup_never_deletes_unresolved_dead_letters(tmp_path) -> None:
     now = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'receipts.db'}")
@@ -493,6 +752,55 @@ async def test_concurrent_exact_requeues_have_one_fenced_winner(tmp_path) -> Non
     await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_concurrent_exact_requeue_and_discard_have_one_fenced_winner(tmp_path) -> None:
+    now = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'receipts.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all, tables=[InboundReceiptRow.__table__])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    receipt_id = "00000000-0000-0000-0000-000000000053"
+    async with sessions.begin() as session:
+        session.add(
+            _row(
+                receipt_id=receipt_id,
+                state="dead_letter",
+                received_at=now - timedelta(days=30),
+                completed_at=now,
+                failure_count=8,
+                outcome_code="attempts_exhausted",
+            )
+        )
+
+    exact_fence = {
+        "receipt_id": receipt_id,
+        "expected_fencing_token": 2,
+        "expected_payload_digest": "a" * 64,
+        "expected_provider_event_digest": "b" * 64,
+    }
+    store = SqlInboundReceiptStore(sessions, clock=lambda: now)
+    requeue_token, discard_token = await asyncio.gather(
+        store.requeue_dead_letter(
+            InboundDeadLetterRequeueRequest(**exact_fence),
+            requeued_at=now,
+        ),
+        store.discard_dead_letter(
+            InboundDeadLetterDiscardRequest(**exact_fence),
+            discarded_at=now,
+        ),
+    )
+
+    assert sum(token is not None for token in (requeue_token, discard_token)) == 1
+    async with sessions() as session:
+        row = await session.get(InboundReceiptRow, receipt_id)
+        assert row is not None
+        assert row.fencing_token == 3
+        assert row.state in {"deferred", "completed"}
+        assert row.outcome_code in {"operator_requeued", "operator_discarded"}
+
+    await engine.dispose()
+
+
 def _row(
     *,
     receipt_id: str,
@@ -539,6 +847,7 @@ def test_receipt_operator_routes_require_an_administrator(monkeypatch) -> None:
         summary=AsyncMock(side_effect=AssertionError("must not be called")),
         inspect_dead_letter=AsyncMock(side_effect=AssertionError("must not be called")),
         requeue_dead_letter=AsyncMock(side_effect=AssertionError("must not be called")),
+        discard_dead_letter=AsyncMock(side_effect=AssertionError("must not be called")),
     )
     monkeypatch.setattr(
         "app.channels.service.get_channel_service",
@@ -555,15 +864,146 @@ def test_receipt_operator_routes_require_an_administrator(monkeypatch) -> None:
             json={
                 "expected_fencing_token": 2,
                 "expected_payload_digest": "a" * 64,
+                "expected_provider_event_digest": None,
+            },
+        )
+        discard = client.post(
+            "/api/channels/inbound-receipts/00000000-0000-0000-0000-000000000060/discard",
+            json={
+                "expected_fencing_token": 2,
+                "expected_payload_digest": "a" * 64,
+                "expected_provider_event_digest": "b" * 64,
             },
         )
 
     assert summary.status_code == 403
     assert inspection.status_code == 403
     assert requeue.status_code == 403
+    assert discard.status_code == 403
     operations.summary.assert_not_awaited()
     operations.inspect_dead_letter.assert_not_awaited()
     operations.requeue_dead_letter.assert_not_awaited()
+    operations.discard_dead_letter.assert_not_awaited()
+
+
+def test_admin_discard_route_requires_exact_nullable_event_fence_and_never_wakes(
+    monkeypatch,
+    caplog,
+) -> None:
+    now = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+
+    class Store:
+        async def discard_dead_letter(self, request, *, discarded_at):
+            assert request.expected_provider_event_digest is None
+            assert discarded_at == now
+            return 3
+
+    wakeups: list[str] = []
+    operations = InboundReceiptOperations(
+        store=Store(),
+        publish_wakeup=wakeups.append,
+        clock=lambda: now,
+    )
+    monkeypatch.setattr(
+        "app.channels.service.get_channel_service",
+        lambda: SimpleNamespace(inbound_receipt_operations=operations),
+    )
+    app = make_authed_test_app(user_factory=lambda: _user(role="admin"))
+    app.include_router(channels.router)
+    receipt_id = "00000000-0000-0000-0000-000000000062"
+    common = {
+        "expected_fencing_token": 2,
+        "expected_payload_digest": "a" * 64,
+    }
+
+    with caplog.at_level("INFO", logger="app.channels.inbound_receipt_operations"):
+        with TestClient(app) as client:
+            omitted_event_proof = client.post(
+                f"/api/channels/inbound-receipts/{receipt_id}/discard",
+                json=common,
+            )
+            explicit_legacy_null = client.post(
+                f"/api/channels/inbound-receipts/{receipt_id}/discard",
+                json={**common, "expected_provider_event_digest": None},
+            )
+            omitted_requeue_proof = client.post(
+                f"/api/channels/inbound-receipts/{receipt_id}/requeue",
+                json=common,
+            )
+            unknown_field = client.post(
+                f"/api/channels/inbound-receipts/{receipt_id}/discard",
+                json={
+                    **common,
+                    "expected_provider_event_digest": None,
+                    "payload": "must-not-be-accepted",
+                },
+            )
+
+    assert omitted_event_proof.status_code == 422
+    assert omitted_requeue_proof.status_code == 422
+    assert unknown_field.status_code == 422
+    assert explicit_legacy_null.status_code == 200
+    assert explicit_legacy_null.json()["disposition"] == "discarded"
+    assert explicit_legacy_null.json()["fencing_token"] == 3
+    assert "actor_ref" not in explicit_legacy_null.json()
+    assert wakeups == []
+    assert "receipt_operation_discard" in caplog.text
+
+
+def test_dead_letter_mutation_openapi_requires_nullable_event_proof_and_typed_responses() -> None:
+    app = make_authed_test_app(user_factory=lambda: _user(role="admin"))
+    app.include_router(channels.router)
+
+    schema = app.openapi()
+    components = schema["components"]["schemas"]
+    for request_schema in ("InboundReceiptRequeueBody", "InboundReceiptDiscardBody"):
+        assert set(components[request_schema]["required"]) == {
+            "expected_fencing_token",
+            "expected_payload_digest",
+            "expected_provider_event_digest",
+        }
+        provider_proof = components[request_schema]["properties"]["expected_provider_event_digest"]
+        assert {variant.get("type") for variant in provider_proof["anyOf"]} == {
+            "string",
+            "null",
+        }
+
+    receipt_path = "/api/channels/inbound-receipts/{receipt_id}"
+    assert schema["paths"][receipt_path]["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/InboundDeadLetterInspectionResponse"}
+    assert schema["paths"][receipt_path + "/requeue"]["post"]["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/InboundDeadLetterRequeueResponse"}
+    assert schema["paths"][receipt_path + "/discard"]["post"]["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/InboundDeadLetterDiscardResponse"}
+
+
+def test_admin_discard_route_returns_action_specific_conflict(monkeypatch) -> None:
+    class Store:
+        async def discard_dead_letter(self, _request, *, discarded_at):
+            assert discarded_at.tzinfo is not None
+            return None
+
+    operations = InboundReceiptOperations(
+        store=Store(),
+        publish_wakeup=lambda _receipt_id: None,
+    )
+    monkeypatch.setattr(
+        "app.channels.service.get_channel_service",
+        lambda: SimpleNamespace(inbound_receipt_operations=operations),
+    )
+    app = make_authed_test_app(user_factory=lambda: _user(role="admin"))
+    app.include_router(channels.router)
+    receipt_id = "00000000-0000-0000-0000-000000000063"
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/channels/inbound-receipts/{receipt_id}/discard",
+            json={
+                "expected_fencing_token": 2,
+                "expected_payload_digest": "a" * 64,
+                "expected_provider_event_digest": "b" * 64,
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Inbound receipt is not eligible for discard"}
 
 
 def test_admin_receipt_routes_are_bounded_exact_id_surfaces(monkeypatch, caplog) -> None:
@@ -706,6 +1146,16 @@ def test_admin_receipt_routes_are_bounded_exact_id_surfaces(monkeypatch, caplog)
                 "expected_provider_event_digest": "b" * 64,
             },
         ),
+        (
+            "discard",
+            "post",
+            "/api/channels/inbound-receipts/00000000-0000-0000-0000-000000000071/discard",
+            {
+                "expected_fencing_token": 2,
+                "expected_payload_digest": "a" * 64,
+                "expected_provider_event_digest": "b" * 64,
+            },
+        ),
     ],
 )
 def test_receipt_operator_routes_redact_unexpected_failures(
@@ -726,6 +1176,9 @@ def test_receipt_operator_routes_redact_unexpected_failures(
             raise RuntimeError(marker)
 
         async def requeue_dead_letter(self, _request, **_kwargs):
+            raise RuntimeError(marker)
+
+        async def discard_dead_letter(self, _request, **_kwargs):
             raise RuntimeError(marker)
 
     operations = InboundReceiptOperations(

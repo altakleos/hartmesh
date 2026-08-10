@@ -364,6 +364,21 @@ class RunStore(abc.ABC):
 
         raise NotImplementedError
 
+    async def transition_owned_run_atomic(
+        self,
+        run_id: str,
+        *,
+        expected_state_version: int,
+        expected_statuses: tuple[str, ...] | None,
+        transition: LifecycleTransition,
+        expected_owner_worker_id: str,
+        require_unexpired_lease: bool,
+        user_id: str | None = None,
+    ) -> LifecycleTransitionResult:
+        """Transition only while the expected worker still owns the run."""
+
+        raise NotImplementedError
+
     async def request_cancel_fenced(
         self,
         run_id: str,
@@ -390,6 +405,19 @@ class RunStore(abc.ABC):
             return CancellationRequestResult(CancellationRequestOutcome.already_terminal)
         outcome = CancellationRequestOutcome.requested if winning == action else CancellationRequestOutcome.stale
         return CancellationRequestResult(outcome)
+
+    async def request_cancel_owned(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        expected_owner_worker_id: str,
+        require_unexpired_lease: bool,
+        user_id: str | None = None,
+    ) -> CancellationRequestResult:
+        """Request cancellation only while the expected worker owns the run."""
+
+        raise NotImplementedError
 
     @abc.abstractmethod
     async def put(

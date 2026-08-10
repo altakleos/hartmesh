@@ -69,6 +69,7 @@ You still do not get active-active Gateway HA, scheduler HA, universal crash-res
 | [An operator asks what is durable or qualified](backend/app/runtime/deployment.py) | The report names persistence; a declared reference is operator-asserted, and only exact evidence matched by the [offline verifier](backend/scripts/verify_qualification_evidence.py) supports independent qualification. |
 | [Lifecycle history is pruned or inconsistent](backend/tests/test_invocation_lifecycle_query.py) | Bounded observation returns typed cursor or integrity outcomes instead of silently presenting invalid history. |
 | [A signed GitHub delivery is interrupted or its thread is busy](backend/tests/test_durable_inbound_receipts.py) | PostgreSQL-backed receipt recovery can reclaim an expired lease, preserve FIFO deferral, and converge on the same accepted run. |
+| [A signed GitHub delivery becomes permanently invalid](backend/tests/test_inbound_receipt_operations.py) | An administrator can inspect only bounded evidence, then exact-fence either a requeue or a logical discard into ordinary completed-row retention. |
 
 <!-- Future demo: add a 30–60 second terminal capture showing a keyed invocation, a simulated lost response, an equal retry returning the same run_id, a changed-intent conflict, and lifecycle observation. -->
 
@@ -314,6 +315,8 @@ Contract tests: [atomic lifecycle store](backend/tests/test_invocation_lifecycle
 With HMAC verification and PostgreSQL receipts, signed-GitHub ingress persists bounded source bindings before acknowledgement.
 
 Leases and fences can reclaim an expired lease after interruption, preserve busy-thread FIFO, and converge on the same accepted invocation.
+
+Administrators can inspect one dead letter without its message body, requeue an exact still-matching row, or logically discard a permanently invalid runless row into ordinary completed-row retention. Both mutations are fenced and audited; discard never wakes processing.
 
 This claim is limited to verified signed-GitHub ingress with PostgreSQL; other and local channel paths remain best-effort.
 

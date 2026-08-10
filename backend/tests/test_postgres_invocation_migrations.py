@@ -26,6 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from support.postgres import postgres_async_url
 
 import deerflow.persistence.models  # noqa: F401
+from app.channels.inbound_receipt_operations import (
+    InboundDeadLetterDiscardRequest,
+    InboundDeadLetterRequeueRequest,
+)
 from app.channels.inbound_receipts import (
     InboundReceiptCandidate,
     InboundReceiptEnvelope,
@@ -38,6 +42,7 @@ from app.runtime.native_binding import (
     InternalVerifiedNativeBindingKind,
 )
 from deerflow.persistence.bootstrap import _get_alembic_config, _get_head_revision
+from deerflow.persistence.inbound_receipt.model import InboundReceiptRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime.runs.lifecycle_query import LifecycleQuery
@@ -1052,6 +1057,226 @@ async def test_postgres_inbound_receipt_acquisition_and_claim_are_atomic() -> No
             store.claim(first[0].receipt_id, lease_owner="worker-b", lease_seconds=30),
         )
         assert sum(claim is not None for claim in claims) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for PostgreSQL receipt arbitration",
+)
+async def test_postgres_dead_letter_requeue_and_discard_have_one_fenced_winner() -> None:
+    async with _isolated_postgres_schema() as (schema, engine):
+        await _upgrade(engine, schema, "head")
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        store = SqlInboundReceiptStore(sessions)
+        envelope = InboundReceiptEnvelope.from_message(
+            InboundMessage(
+                channel_name="github",
+                chat_id="hartmesh/runtime",
+                user_id="octocat",
+                text="Review this change",
+                topic_id="17:reviewer",
+                owner_user_id="owner-1",
+                workspace_id="hartmesh/runtime",
+                verified_source_binding=InternalVerifiedNativeBinding(
+                    kind=InternalVerifiedNativeBindingKind.webhook_route,
+                    reference="route:v1:sha256:" + ("a" * 64),
+                ),
+                metadata={
+                    "message_id": "delivery-postgres-discard:owner-1:reviewer",
+                    "agent_name": "reviewer",
+                    "preferred_thread_id": "thread-postgres-discard",
+                    "github": {
+                        "repo": "hartmesh/runtime",
+                        "number": 17,
+                        "event": "pull_request",
+                        "delivery_id": "delivery-postgres-discard",
+                        "installation_id": 42,
+                        "recursion_limit": 100,
+                        "thread_id": "thread-postgres-discard",
+                    },
+                },
+            )
+        )
+        (received,) = await store.receive_batch(
+            (
+                InboundReceiptCandidate(
+                    envelope=envelope,
+                    provider_event_digest="b" * 64,
+                ),
+            )
+        )
+        claim = await store.claim(
+            received.receipt_id,
+            lease_owner="worker-a",
+            lease_seconds=30,
+        )
+        assert claim is not None
+        assert await store.dead_letter(
+            received.receipt_id,
+            lease_owner="worker-a",
+            fencing_token=claim.fencing_token,
+            outcome_code="malformed_receipt",
+        )
+
+        observed_at = datetime.now(UTC)
+        unresolved_id = str(uuid.uuid4())
+        legacy_id = str(uuid.uuid4())
+        due_id = str(uuid.uuid4())
+        async with sessions.begin() as session:
+            session.add_all(
+                [
+                    InboundReceiptRow(
+                        receipt_id=unresolved_id,
+                        provider="github",
+                        binding_kind="webhook_route",
+                        binding_reference="route:v1:sha256:" + ("c" * 64),
+                        provider_delivery_id="delivery-postgres-unresolved",
+                        thread_id="thread-postgres-unresolved",
+                        payload_json={"bounded": "unresolved"},
+                        payload_digest="c" * 64,
+                        provider_event_digest="d" * 64,
+                        state="dead_letter",
+                        fencing_token=4,
+                        attempt_count=3,
+                        failure_count=8,
+                        next_attempt_at=observed_at - timedelta(minutes=2),
+                        outcome_code="attempts_exhausted",
+                        received_at=observed_at - timedelta(days=2),
+                        updated_at=observed_at - timedelta(minutes=2),
+                        completed_at=observed_at - timedelta(minutes=2),
+                    ),
+                    InboundReceiptRow(
+                        receipt_id=legacy_id,
+                        provider="github",
+                        binding_kind="webhook_route",
+                        binding_reference="route:v1:sha256:" + ("e" * 64),
+                        provider_delivery_id="delivery-postgres-legacy",
+                        thread_id="thread-postgres-legacy",
+                        payload_json={"bounded": "legacy"},
+                        payload_digest="e" * 64,
+                        provider_event_digest=None,
+                        state="dead_letter",
+                        fencing_token=5,
+                        attempt_count=3,
+                        failure_count=8,
+                        next_attempt_at=observed_at - timedelta(minutes=1),
+                        outcome_code="attempts_exhausted",
+                        received_at=observed_at - timedelta(days=1),
+                        updated_at=observed_at - timedelta(minutes=1),
+                        completed_at=observed_at - timedelta(minutes=1),
+                    ),
+                    InboundReceiptRow(
+                        receipt_id=due_id,
+                        provider="github",
+                        binding_kind="webhook_route",
+                        binding_reference="route:v1:sha256:" + ("f" * 64),
+                        provider_delivery_id="delivery-postgres-due",
+                        thread_id="thread-postgres-due",
+                        payload_json={"bounded": "due"},
+                        payload_digest="f" * 64,
+                        provider_event_digest="0" * 64,
+                        state="received",
+                        fencing_token=0,
+                        attempt_count=0,
+                        failure_count=0,
+                        next_attempt_at=observed_at - timedelta(seconds=45),
+                        outcome_code=None,
+                        received_at=observed_at - timedelta(minutes=5),
+                        updated_at=observed_at - timedelta(minutes=5),
+                        completed_at=None,
+                    ),
+                ]
+            )
+
+        inspection = await store.inspect_dead_letter(unresolved_id)
+        assert inspection is not None
+        assert inspection.payload_digest == "c" * 64
+        assert inspection.provider_event_digest == "d" * 64
+        assert set(inspection.to_dict()) == {
+            "receipt_id",
+            "state",
+            "provider",
+            "binding_kind",
+            "thread_id",
+            "payload_digest",
+            "provider_event_digest",
+            "fencing_token",
+            "attempt_count",
+            "failure_count",
+            "outcome_code",
+            "received_at",
+            "updated_at",
+            "completed_at",
+        }
+
+        summary = await store.summarize_states(
+            per_state_cap=1,
+            observed_at=observed_at,
+        )
+        assert summary.by_state("dead_letter").count == 1
+        assert summary.by_state("dead_letter").capped is True
+        assert summary.by_state("received").count == 1
+        assert summary.by_state("received").oldest_due_age_seconds == 45
+
+        wrong_legacy_proof = await store.discard_dead_letter(
+            InboundDeadLetterDiscardRequest(
+                receipt_id=legacy_id,
+                expected_fencing_token=5,
+                expected_payload_digest="e" * 64,
+                expected_provider_event_digest="d" * 64,
+            ),
+            discarded_at=observed_at,
+        )
+        assert wrong_legacy_proof is None
+        legacy_discard_token = await store.discard_dead_letter(
+            InboundDeadLetterDiscardRequest(
+                receipt_id=legacy_id,
+                expected_fencing_token=5,
+                expected_payload_digest="e" * 64,
+                expected_provider_event_digest=None,
+            ),
+            discarded_at=observed_at,
+        )
+        assert legacy_discard_token == 6
+
+        exact_fence = {
+            "receipt_id": received.receipt_id,
+            "expected_fencing_token": claim.fencing_token,
+            "expected_payload_digest": envelope.digest,
+            "expected_provider_event_digest": "b" * 64,
+        }
+        requeue_token, discard_token = await asyncio.gather(
+            store.requeue_dead_letter(
+                InboundDeadLetterRequeueRequest(**exact_fence),
+                requeued_at=datetime.now(UTC),
+            ),
+            store.discard_dead_letter(
+                InboundDeadLetterDiscardRequest(**exact_fence),
+                discarded_at=datetime.now(UTC),
+            ),
+        )
+
+        assert sum(token is not None for token in (requeue_token, discard_token)) == 1
+        async with sessions() as session:
+            row = await session.get(InboundReceiptRow, received.receipt_id)
+            assert row is not None
+            assert row.fencing_token == claim.fencing_token + 1
+            assert row.state in {"deferred", "completed"}
+            assert row.outcome_code in {"operator_requeued", "operator_discarded"}
+
+        deleted = await store.cleanup_completed(
+            older_than=observed_at + timedelta(seconds=1),
+            limit=500,
+        )
+        assert deleted >= 1
+        async with sessions() as session:
+            assert await session.get(InboundReceiptRow, legacy_id) is None
+            unresolved = await session.get(InboundReceiptRow, unresolved_id)
+            assert unresolved is not None
+            assert unresolved.state == "dead_letter"
+            assert unresolved.payload_json == {"bounded": "unresolved"}
 
 
 @pytest.mark.anyio

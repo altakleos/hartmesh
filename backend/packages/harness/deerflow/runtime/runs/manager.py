@@ -7,9 +7,9 @@ import logging
 import socket
 import sqlite3
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -27,6 +27,7 @@ from .store.base import (
     CancellationRequestOutcome,
     EditReplayVisibility,
     LifecycleTransition,
+    LifecycleTransitionResult,
     LifecycleType,
     RunEnsureResult,
     lifecycle_type_for_status,
@@ -68,6 +69,13 @@ class _AdmissionCancellation:
     requested: bool = False
 
 
+class _AdmissionTerminalDisposition(StrEnum):
+    """Terminal result an unresolved normal-run candidate must reach."""
+
+    worker_attachment_failed = "worker_attachment_failed"
+    cancelled = "cancelled"
+
+
 @dataclass(frozen=True, slots=True)
 class _UnresolvedAdmissionCandidate:
     """Bounded identity needed to close an admission whose commit is unknown."""
@@ -83,6 +91,25 @@ class _UnresolvedAdmissionCandidate:
     replacement_action: str | None = None
     predecessor_run_ids: tuple[str, ...] = ()
     commit_proven: bool = False
+    terminal_disposition: _AdmissionTerminalDisposition = _AdmissionTerminalDisposition.worker_attachment_failed
+    cancellation_action: str | None = None
+
+
+_ADMISSION_COMPENSATION_INITIAL_DELAY = 0.1
+_ADMISSION_COMPENSATION_MAX_DELAY = 5.0
+_MAX_UNRESOLVED_PREDECESSORS = 16
+
+
+def _admission_compensation_retry_delay(stalled_rounds: int) -> float:
+    """Return deterministic capped backoff for consecutive stalled sweeps."""
+
+    if not isinstance(stalled_rounds, int) or isinstance(stalled_rounds, bool) or stalled_rounds < 1:
+        raise ValueError("stalled_rounds must be a positive integer")
+    exponent = min(stalled_rounds - 1, 16)
+    return min(
+        _ADMISSION_COMPENSATION_MAX_DELAY,
+        _ADMISSION_COMPENSATION_INITIAL_DELAY * (2**exponent),
+    )
 
 
 def _generate_worker_id() -> str:
@@ -201,7 +228,7 @@ class RunRecord:
     user_id: str | None = None
     created_at: str = ""
     updated_at: str = ""
-    task: asyncio.Task | None = field(default=None, repr=False)
+    task: asyncio.Task[None] | None = field(default=None, repr=False)
     # True only while the application admission coordinator owns the bounded
     # commit-to-worker handoff for this process-local record.
     attachment_supervised: bool = field(default=False, repr=False)
@@ -316,6 +343,8 @@ class RunManager:
         self._unresolved_admissions: dict[str, _UnresolvedAdmissionCandidate] = {}
         self._reported_unresolved_integrity: set[str] = set()
         self._admission_compensation_task: asyncio.Task[None] | None = None
+        self._admission_compensation_wakeup = asyncio.Event()
+        self._admission_compensation_generation = 0
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -427,15 +456,57 @@ class RunManager:
         self,
         candidate: _UnresolvedAdmissionCandidate,
     ) -> None:
-        """Retain one ambiguous candidate until storage proves its outcome."""
+        """Monotonically retain one candidate until storage proves its outcome."""
+
+        existing = self._unresolved_admissions.get(candidate.run_id)
+        if existing is not None:
+            immutable_fields = (
+                "run_id",
+                "thread_id",
+                "user_id",
+                "owner_worker_id",
+                "external_scope",
+                "external_key",
+                "caller_intent_digest",
+                "caller_intent_digest_version",
+            )
+            if any(getattr(existing, name) != getattr(candidate, name) for name in immutable_fields):
+                raise RunStartupError("unresolved admission candidate identity conflict")
+            if existing.replacement_action is not None and candidate.replacement_action is not None and existing.replacement_action != candidate.replacement_action:
+                raise RunStartupError("unresolved admission replacement action conflict")
+            if existing.cancellation_action is not None and candidate.cancellation_action is not None and existing.cancellation_action != candidate.cancellation_action:
+                raise RunStartupError("unresolved admission cancellation action conflict")
+            predecessor_run_ids = tuple(dict.fromkeys((*existing.predecessor_run_ids, *candidate.predecessor_run_ids)))
+            if len(predecessor_run_ids) > _MAX_UNRESOLVED_PREDECESSORS:
+                raise RunStartupError("unresolved admission predecessor evidence exceeds its bound")
+            terminal_disposition = (
+                _AdmissionTerminalDisposition.cancelled if _AdmissionTerminalDisposition.cancelled in (existing.terminal_disposition, candidate.terminal_disposition) else _AdmissionTerminalDisposition.worker_attachment_failed
+            )
+            candidate = replace(
+                existing,
+                replacement_action=existing.replacement_action or candidate.replacement_action,
+                predecessor_run_ids=predecessor_run_ids,
+                commit_proven=existing.commit_proven or candidate.commit_proven,
+                terminal_disposition=terminal_disposition,
+                cancellation_action=existing.cancellation_action or candidate.cancellation_action,
+            )
+        elif len(candidate.predecessor_run_ids) > _MAX_UNRESOLVED_PREDECESSORS:
+            raise RunStartupError("unresolved admission predecessor evidence exceeds its bound")
 
         self._unresolved_admissions[candidate.run_id] = candidate
+        self._wake_admission_compensator()
         task = self._admission_compensation_task
         if task is None or task.done():
             self._admission_compensation_task = asyncio.create_task(
                 self._reconcile_unresolved_admissions(),
                 name="deerflow-unresolved-admission-compensation",
             )
+
+    def _wake_admission_compensator(self) -> None:
+        """Interrupt compensation backoff after authoritative state changes."""
+
+        self._admission_compensation_generation += 1
+        self._admission_compensation_wakeup.set()
 
     def admission_compensations_ready(self) -> bool:
         """Return whether no commit-ambiguous admission awaits compensation."""
@@ -469,6 +540,9 @@ class RunManager:
     def _known_candidate_for_record(
         self,
         record: RunRecord,
+        *,
+        terminal_disposition: _AdmissionTerminalDisposition = _AdmissionTerminalDisposition.worker_attachment_failed,
+        cancellation_action: str | None = None,
     ) -> _UnresolvedAdmissionCandidate:
         """Capture the exact persisted identity of one known-created row."""
 
@@ -482,6 +556,8 @@ class RunManager:
             caller_intent_digest=record.caller_intent_digest,
             caller_intent_digest_version=record.caller_intent_digest_version,
             commit_proven=True,
+            terminal_disposition=terminal_disposition,
+            cancellation_action=cancellation_action,
         )
 
     def _sync_compensated_candidate_locked(
@@ -524,6 +600,24 @@ class RunManager:
 
         store = self._store
         if store is None:
+            async with self._lock:
+                record = self._runs.get(candidate.run_id)
+                if record is not None:
+                    if candidate.terminal_disposition is _AdmissionTerminalDisposition.cancelled:
+                        action = candidate.cancellation_action or "interrupt"
+                        record.status = RunStatus.error if action == "rollback" else RunStatus.interrupted
+                        record.error = "Rolled back by user" if action == "rollback" else None
+                        record.stop_reason = None
+                        record.pending_lifecycle_type = LifecycleType.cancelled
+                    else:
+                        record.status = RunStatus.error
+                        record.error = "worker_attachment_failed"
+                        record.stop_reason = "worker_attachment_failed"
+                        record.pending_lifecycle_type = LifecycleType.failed
+                    record.updated_at = _now_iso()
+                    record.attachment_supervised = False
+                    record.finalizing = False
+                    record.abort_event.set()
             return True
         try:
             row = await store.get(candidate.run_id, user_id=candidate.user_id)
@@ -550,31 +644,78 @@ class RunManager:
             async with self._lock:
                 self._sync_compensated_candidate_locked(candidate, row)
             return True
+        async with self._lock:
+            local = self._runs.get(candidate.run_id)
+            if local is not None and local.ownership_lost:
+                # This process may observe the authoritative row but can no
+                # longer mutate it. A peer/orphan reconciler owns the durable
+                # terminal transition after this worker's lease is lost.
+                return False
         try:
             if store.durable_lifecycle:
-                transition = await store.transition_run_atomic(
+                cancel_action = row.get("cancel_action")
+                if cancel_action is None and candidate.terminal_disposition is _AdmissionTerminalDisposition.cancelled:
+                    cancel_request = await store.request_cancel_owned(
+                        candidate.run_id,
+                        action=candidate.cancellation_action or "interrupt",
+                        expected_owner_worker_id=candidate.owner_worker_id,
+                        require_unexpired_lease=self.heartbeat_enabled,
+                        user_id=candidate.user_id,
+                    )
+                    row = cancel_request.row
+                    if row is None:
+                        return False
+                    if row.get("status") not in (
+                        RunStatus.pending.value,
+                        RunStatus.running.value,
+                    ):
+                        async with self._lock:
+                            self._sync_compensated_candidate_locked(candidate, row)
+                        return True
+                    cancel_action = row.get("cancel_action")
+
+                if cancel_action in ("interrupt", "rollback"):
+                    transition_value = LifecycleTransition(
+                        lifecycle_type=LifecycleType.cancelled,
+                        status=(RunStatus.error.value if cancel_action == "rollback" else RunStatus.interrupted.value),
+                        error=("Rolled back by user" if cancel_action == "rollback" else None),
+                    )
+                else:
+                    transition_value = LifecycleTransition(
+                        lifecycle_type=LifecycleType.failed,
+                        status=RunStatus.error.value,
+                        error="worker_attachment_failed",
+                        stop_reason="worker_attachment_failed",
+                        reason="worker_attachment_failed",
+                    )
+                transition = await store.transition_owned_run_atomic(
                     candidate.run_id,
                     expected_state_version=row["state_version"],
                     expected_statuses=(
                         RunStatus.pending.value,
                         RunStatus.running.value,
                     ),
-                    transition=LifecycleTransition(
-                        lifecycle_type=LifecycleType.failed,
-                        status=RunStatus.error.value,
-                        error="worker_attachment_failed",
-                        stop_reason="worker_attachment_failed",
-                        reason="worker_attachment_failed",
-                    ),
+                    transition=transition_value,
+                    expected_owner_worker_id=candidate.owner_worker_id,
+                    require_unexpired_lease=self.heartbeat_enabled,
                     user_id=candidate.user_id,
                 )
                 terminal = transition.row
             else:
+                if candidate.terminal_disposition is _AdmissionTerminalDisposition.cancelled:
+                    action = candidate.cancellation_action or "interrupt"
+                    status = RunStatus.error.value if action == "rollback" else RunStatus.interrupted.value
+                    error = "Rolled back by user" if action == "rollback" else None
+                    stop_reason = None
+                else:
+                    status = RunStatus.error.value
+                    error = "worker_attachment_failed"
+                    stop_reason = "worker_attachment_failed"
                 await store.update_status(
                     candidate.run_id,
-                    RunStatus.error.value,
-                    error="worker_attachment_failed",
-                    stop_reason="worker_attachment_failed",
+                    status,
+                    error=error,
+                    stop_reason=stop_reason,
                 )
                 terminal = await store.get(
                     candidate.run_id,
@@ -594,17 +735,32 @@ class RunManager:
         return completed
 
     async def _reconcile_unresolved_admissions(self) -> None:
-        """Retry ambiguous candidate compensation at one bounded cadence."""
+        """Retry ambiguous candidate compensation with capped deterministic backoff."""
 
+        stalled_rounds = 0
         try:
             while self._unresolved_admissions:
+                observed_generation = self._admission_compensation_generation
+                progressed = False
                 for run_id, candidate in tuple(self._unresolved_admissions.items()):
                     if await self._resolve_unresolved_admission(candidate):
                         if self._unresolved_admissions.get(run_id) is candidate:
                             self._unresolved_admissions.pop(run_id, None)
                             self._reported_unresolved_integrity.discard(run_id)
+                            progressed = True
                 if self._unresolved_admissions:
-                    await asyncio.sleep(0.1)
+                    stalled_rounds = 0 if progressed else stalled_rounds + 1
+                    delay = _admission_compensation_retry_delay(max(1, stalled_rounds))
+                    if observed_generation == self._admission_compensation_generation:
+                        self._admission_compensation_wakeup.clear()
+                        if observed_generation == self._admission_compensation_generation:
+                            try:
+                                await asyncio.wait_for(
+                                    self._admission_compensation_wakeup.wait(),
+                                    timeout=delay,
+                                )
+                            except TimeoutError:
+                                pass
         finally:
             if self._admission_compensation_task is asyncio.current_task():
                 self._admission_compensation_task = None
@@ -700,14 +856,35 @@ class RunManager:
                     stop_reason=stop_reason,
                     reason=stop_reason,
                 )
+
+                def transition_call(
+                    expected_state_version: int,
+                    expected_statuses: tuple[str, ...],
+                    transition: LifecycleTransition,
+                ) -> Awaitable[LifecycleTransitionResult]:
+                    if self.heartbeat_enabled and record.owner_worker_id == self._worker_id:
+                        return self._store.transition_owned_run_atomic(
+                            record.run_id,
+                            expected_state_version=expected_state_version,
+                            expected_statuses=expected_statuses,
+                            transition=transition,
+                            expected_owner_worker_id=self._worker_id,
+                            require_unexpired_lease=True,
+                        )
+                    return self._store.transition_run_atomic(
+                        record.run_id,
+                        expected_state_version=expected_state_version,
+                        expected_statuses=expected_statuses,
+                        transition=transition,
+                    )
+
                 transition_result = await self._call_store_with_retry(
                     "transition_run_atomic",
                     record.run_id,
-                    lambda: self._store.transition_run_atomic(
-                        record.run_id,
-                        expected_state_version=record.state_version,
-                        expected_statuses=("pending", "running", "interrupted"),
-                        transition=desired_transition,
+                    lambda: transition_call(
+                        record.state_version,
+                        ("pending", "running", "interrupted"),
+                        desired_transition,
                     ),
                 )
                 updated = transition_result.applied
@@ -726,11 +903,10 @@ class RunManager:
                     transition_result = await self._call_store_with_retry(
                         "transition_run_atomic",
                         record.run_id,
-                        lambda: self._store.transition_run_atomic(
-                            record.run_id,
-                            expected_state_version=retry_state_version,
-                            expected_statuses=("pending", "running"),
-                            transition=cancelled_transition,
+                        lambda: transition_call(
+                            retry_state_version,
+                            ("pending", "running"),
+                            cancelled_transition,
                         ),
                     )
                     updated = transition_result.applied
@@ -1365,6 +1541,32 @@ class RunManager:
             record.abort_event.set()
             record.updated_at = _now_iso()
             candidate = self._known_candidate_for_record(record)
+            owns_attachment = record.task is None and record.attachment_supervised
+
+        if owns_attachment:
+            try:
+                resolved = await self._resolve_unresolved_admission(candidate)
+            except asyncio.CancelledError:
+                self._register_unresolved_admission(candidate)
+                raise
+            except Exception:
+                self._register_unresolved_admission(candidate)
+                raise
+            if not resolved:
+                self._register_unresolved_admission(candidate)
+            async with self._lock:
+                current = self._runs.get(run_id)
+                return bool(
+                    current is record
+                    and (
+                        current.status
+                        not in (
+                            RunStatus.pending,
+                            RunStatus.running,
+                        )
+                        or run_id in self._unresolved_admissions
+                    )
+                )
 
         try:
             persisted = await self._persist_status(
@@ -1452,12 +1654,39 @@ class RunManager:
                 record.finalizing = False
             return bool(current is record and record.status == RunStatus.error and record.error == error and record.stop_reason == "worker_attachment_failed")
 
+    async def cancel_start_if_pending(self, run_id: str) -> bool:
+        """Transfer an unattached admitted run to cancelled compensation."""
+
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.status != RunStatus.pending:
+                return False
+            if record.task is not None or not record.attachment_supervised:
+                return False
+            if record.abort_event.is_set() and run_id not in self._unresolved_admissions:
+                return False
+
+        if not await self._close_cancelled_admission(record):
+            return False
+        async with self._lock:
+            current = self._runs.get(run_id)
+            if current is not record:
+                return False
+            return (
+                current.status
+                not in (
+                    RunStatus.pending,
+                    RunStatus.running,
+                )
+                or run_id in self._unresolved_admissions
+            )
+
     async def attach_worker_once(
         self,
         run_id: str,
-        worker,
-        task_factory: Callable[[Any], asyncio.Task],
-    ) -> asyncio.Task:
+        worker: Coroutine[Any, Any, None],
+        task_factory: Callable[[Coroutine[Any, Any, None]], asyncio.Task[None]],
+    ) -> asyncio.Task[None]:
         """Atomically transfer one supervised creator row to one worker task."""
 
         async with self._lock:
@@ -1904,7 +2133,7 @@ class RunManager:
             record.abort_event.set()
             task_active = record.task is not None and not record.task.done()
             record.finalizing = task_active
-            if task_active and record.status == RunStatus.running:
+            if task_active:
                 record.task.cancel()
         logger.info("Run %s cancellation signalled locally (action=%s)", run_id, action)
 
@@ -1942,7 +2171,7 @@ class RunManager:
                         local_record.abort_event.set()
                         task_active = local_record.task is not None and not local_record.task.done()
                         local_record.finalizing = task_active
-                        if task_active and local_record.status == RunStatus.running:
+                        if task_active:
                             local_record.task.cancel()
                         signalled_action = winning_action
         if signalled_action is not None:
@@ -1993,6 +2222,27 @@ class RunManager:
                     return CancelOutcome.cancelled  # idempotent
                 if record.status not in (RunStatus.pending, RunStatus.running) and (not self.heartbeat_enabled or self._store is None):
                     return CancelOutcome.not_cancellable
+                taskless_supervised = record.task is None and record.attachment_supervised
+            else:
+                taskless_supervised = False
+
+        if taskless_supervised:
+            if action not in ("interrupt", "rollback"):
+                raise ValueError(f"Unsupported cancellation action: {action}")
+            cancellation_claimed = await self._close_cancelled_admission(
+                record,
+                action=action,
+            )
+            if cancellation_claimed:
+                async with self._lock:
+                    current = self._runs.get(run_id)
+                    if current is None:
+                        return CancelOutcome.unknown
+                    if current.status not in (RunStatus.pending, RunStatus.running):
+                        return CancelOutcome.cancelled
+                    if run_id in self._unresolved_admissions:
+                        return CancelOutcome.requested
+                return CancelOutcome.unknown
 
         durable_cancel_won = False
         durable_cancel_supported = self._store is not None and (self._store.durable_lifecycle or self.heartbeat_enabled)
@@ -2023,7 +2273,7 @@ class RunManager:
                 record.abort_event.set()
                 task_active = record.task is not None and not record.task.done()
                 record.finalizing = task_active
-                if task_active and record.status == RunStatus.running:
+                if task_active:
                     record.task.cancel()
                 cancel_status = RunStatus.error if action == "rollback" else RunStatus.interrupted
                 record.status = cancel_status
@@ -2299,9 +2549,14 @@ class RunManager:
                 cancellation.requested = True
         return decision.result()
 
-    async def _close_cancelled_admission(self, record: RunRecord) -> None:
+    async def _close_cancelled_admission(
+        self,
+        record: RunRecord,
+        *,
+        action: str = "interrupt",
+        claim_manager_admission: bool = False,
+    ) -> bool:
         """Terminalize an unseen run or release an unseen reservation."""
-        record.attachment_supervised = False
         if record.operation_kind != ThreadOperationKind.run:
             try:
                 if self._store is not None:
@@ -2325,81 +2580,52 @@ class RunManager:
                     if self._runs.get(record.run_id) is record:
                         self._runs.pop(record.run_id, None)
                         self._unindex_run_locked(record.run_id, record.thread_id)
-            return
-
-        await self.cancel(record.run_id)
-        if self._store is None:
-            return
-
-        stored = await self._call_store_with_retry(
-            "verify cancelled admission",
-            record.run_id,
-            lambda: self._store.get(record.run_id, user_id=record.user_id),
-        )
-        active_statuses = (RunStatus.pending.value, RunStatus.running.value)
-        if stored is not None and stored.get("status") in active_statuses:
-            # `_persist_status` is deliberately best-effort. This compensation
-            # path needs a strict second CAS attempt because the caller never
-            # receives the record and no worker can attach after it returns.
-            # A peer terminal transition wins the CAS and is preserved below.
-            if self._store.durable_lifecycle:
-                cancel_request = await self._call_store_with_retry(
-                    "record cancelled admission request",
-                    record.run_id,
-                    lambda: self._store.request_cancel_compat(
-                        record.run_id,
-                        action="interrupt",
-                        user_id=record.user_id,
-                    ),
-                )
-                winning_row = cancel_request.row
-                if winning_row is not None and winning_row.get("status") in active_statuses:
-                    winning_action = winning_row.get("cancel_action") or "interrupt"
-                    await self._call_store_with_retry(
-                        "terminalize cancelled admission",
-                        record.run_id,
-                        lambda: self._store.transition_run_atomic(
-                            record.run_id,
-                            expected_state_version=winning_row["state_version"],
-                            expected_statuses=active_statuses,
-                            transition=LifecycleTransition(
-                                lifecycle_type=LifecycleType.cancelled,
-                                status=("error" if winning_action == "rollback" else "interrupted"),
-                                error=("Rolled back by user" if winning_action == "rollback" else None),
-                            ),
-                            user_id=record.user_id,
-                        ),
-                    )
-            else:
-                await self._call_store_with_retry(
-                    "terminalize cancelled admission",
-                    record.run_id,
-                    lambda: self._store.update_status(record.run_id, RunStatus.interrupted.value),
-                )
-            stored = await self._call_store_with_retry(
-                "verify terminal cancelled admission",
-                record.run_id,
-                lambda: self._store.get(record.run_id, user_id=record.user_id),
-            )
-            if stored is not None and stored.get("status") in active_statuses:
-                raise RuntimeError(f"Cancelled admission {record.run_id} remains active in the run store")
-
-        if stored is None:
-            async with self._lock:
-                if self._runs.get(record.run_id) is record:
-                    self._runs.pop(record.run_id, None)
-                    self._unindex_run_locked(record.run_id, record.thread_id)
-            return
+            return True
 
         async with self._lock:
-            if self._runs.get(record.run_id) is record:
-                self._sync_record_from_store_row(record, stored)
+            if self._runs.get(record.run_id) is not record:
+                return False
+            if record.task is not None:
+                return False
+            if not record.attachment_supervised:
+                if not claim_manager_admission:
+                    return False
+                # ``_admit_thread_operation`` still owns this row until it
+                # returns.  Direct RunManager callers predate the application
+                # coordinator's candidate ID, so cancellation in this narrow
+                # post-registration window must first promote the same local
+                # ownership fence used by supervised Gateway admissions.
+                record.attachment_supervised = True
+            winning_action = record.abort_action if record.abort_action in ("interrupt", "rollback") else action
+            record.abort_action = winning_action
+            record.abort_event.set()
+            record.finalizing = True
+            candidate = self._known_candidate_for_record(
+                record,
+                terminal_disposition=_AdmissionTerminalDisposition.cancelled,
+                cancellation_action=winning_action,
+            )
+
+        try:
+            resolved = await self._resolve_unresolved_admission(candidate)
+        except asyncio.CancelledError:
+            self._register_unresolved_admission(candidate)
+            raise
+        except Exception:
+            self._register_unresolved_admission(candidate)
+            raise
+        if not resolved:
+            self._register_unresolved_admission(candidate)
+        return True
 
     async def _drain_cancelled_admission_cleanup(self, record: RunRecord) -> None:
         """Finish compensation despite repeated request cancellation."""
 
         cleanup = asyncio.create_task(
-            self._close_cancelled_admission(record),
+            self._close_cancelled_admission(
+                record,
+                claim_manager_admission=True,
+            ),
             name=f"deerflow-close-cancelled-admission-{record.run_id}",
         )
         while not cleanup.done():
@@ -2579,7 +2805,19 @@ class RunManager:
                     caller_intent_digest_version=(caller_intent_digest_version if keyed else None),
                     replacement_action=(multitask_strategy if multitask_strategy in ("interrupt", "rollback") else None),
                     predecessor_run_ids=tuple(previous.run_id for previous in local_inflight),
+                    terminal_disposition=(_AdmissionTerminalDisposition.cancelled if admission_cancellation.requested else _AdmissionTerminalDisposition.worker_attachment_failed),
+                    cancellation_action=("interrupt" if admission_cancellation.requested else None),
                 )
+
+                def unresolved_for_current_request() -> _UnresolvedAdmissionCandidate:
+                    if not admission_cancellation.requested:
+                        return unresolved
+                    return replace(
+                        unresolved,
+                        terminal_disposition=_AdmissionTerminalDisposition.cancelled,
+                        cancellation_action="interrupt",
+                    )
+
                 try:
                     candidate = await self._call_store_with_retry(
                         "reconcile candidate admission",
@@ -2587,7 +2825,9 @@ class RunManager:
                         lambda: self._store.get(run_id, user_id=user_id),
                     )
                 except Exception:
-                    self._register_unresolved_admission(unresolved)
+                    self._register_unresolved_admission(
+                        unresolved_for_current_request(),
+                    )
                     raise error from None
 
                 if candidate is not None:
@@ -2607,7 +2847,9 @@ class RunManager:
                             }
                         )
                     if any(candidate.get(field) != value for field, value in expected.items()):
-                        self._register_unresolved_admission(unresolved)
+                        self._register_unresolved_admission(
+                            unresolved_for_current_request(),
+                        )
                         raise AcceptedEvidenceIntegrityError() from None
 
                     # The exact candidate proves that this attempt's atomic
@@ -2636,7 +2878,9 @@ class RunManager:
                                         previous_row,
                                     )
                     except Exception:
-                        self._register_unresolved_admission(unresolved)
+                        self._register_unresolved_admission(
+                            unresolved_for_current_request(),
+                        )
                         raise error from None
                     if keyed:
                         return RunEnsureResult(
@@ -2977,7 +3221,7 @@ class RunManager:
 
             async with self._lock:
                 live_record = self._runs.get(record.run_id)
-                if live_record is not None and live_record.status in (RunStatus.pending, RunStatus.running):
+                if live_record is not None and live_record.status in (RunStatus.pending, RunStatus.running) and not live_record.ownership_lost:
                     # Still owned by a local task — skip
                     continue
 
@@ -3025,6 +3269,7 @@ class RunManager:
 
         if recovered:
             logger.warning("Recovered %d orphaned inflight run(s) as error", len(recovered))
+            self._wake_admission_compensator()
         return recovered
 
     async def has_inflight(self, thread_id: str) -> bool:
@@ -3099,7 +3344,8 @@ class RunManager:
         expired, this worker is no longer authorized to publish a terminal
         outcome. A peer reconciler owns durable terminalization.
         """
-        task_to_cancel: asyncio.Task | None = None
+        task_to_cancel: asyncio.Task[None] | None = None
+        unresolved_candidate: _UnresolvedAdmissionCandidate | None = None
         async with self._lock:
             current = self._runs.get(record.run_id)
             if current is not record:
@@ -3113,12 +3359,22 @@ class RunManager:
                 return True
             record.ownership_lost = True
             record.abort_event.set()
-            record.status = RunStatus.error
-            record.error = reason
-            record.updated_at = _now_iso()
+            if record.task is None and record.attachment_supervised:
+                # Keep the last store-confirmed status visible locally. This
+                # worker has lost authority before attachment, so only a peer
+                # may terminalize the durable row. The exact candidate keeps
+                # readiness and shutdown fenced until that terminal row can be
+                # observed and synchronized.
+                unresolved_candidate = self._known_candidate_for_record(record)
+            else:
+                record.status = RunStatus.error
+                record.error = reason
+                record.updated_at = _now_iso()
             if record.task is not None and not record.task.done() and record.task is not asyncio.current_task():
                 task_to_cancel = record.task
 
+        if unresolved_candidate is not None:
+            self._register_unresolved_admission(unresolved_candidate)
         if task_to_cancel is not None:
             task_to_cancel.cancel()
         logger.error("Run %s lost lease ownership; local execution was fenced: %s", record.run_id, reason)
@@ -3429,21 +3685,10 @@ class RunManager:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
 
-        compensation_drain = asyncio.create_task(
-            self.drain_admission_compensations(
-                timeout=max(0.0, deadline - loop.time()),
-            ),
-            name="deerflow-drain-admission-compensations",
-        )
-
         async def finish_compensation_drain() -> bool:
-            done, _ = await asyncio.wait(
-                (compensation_drain,),
+            return await self.drain_admission_compensations(
                 timeout=max(0.0, deadline - loop.time()),
             )
-            if not done:
-                return False
-            return compensation_drain.result()
 
         async with self._lock:
             unattached = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is None and record.attachment_supervised]

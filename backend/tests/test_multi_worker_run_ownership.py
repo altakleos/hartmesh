@@ -2249,6 +2249,7 @@ async def test_cancel_returns_taken_over_when_peer_claims_during_local_cancel():
     await mgr.set_status(record.run_id, RunStatus.running)
 
     original = store.transition_run_atomic
+    original_owned = store.transition_owned_run_atomic
     injected = False
 
     async def race_transition(run_id, **kwargs):
@@ -2268,9 +2269,9 @@ async def test_cancel_returns_taken_over_when_peer_claims_during_local_cancel():
                     reason=ORPHAN_RECOVERY_STOP_REASON,
                 ),
             )
-        return await original(run_id, **kwargs)
+        return await original_owned(run_id, **kwargs)
 
-    store.transition_run_atomic = race_transition
+    store.transition_owned_run_atomic = race_transition
 
     outcome = await mgr.cancel(record.run_id)
     assert outcome == CancelOutcome.taken_over
@@ -2348,7 +2349,7 @@ async def test_unconfirmed_success_is_fenced_when_heartbeat_is_enabled():
     async def fail_status_write(*_args, **_kwargs):
         raise OSError("database unreachable")
 
-    store.transition_run_atomic = fail_status_write
+    store.transition_owned_run_atomic = fail_status_write
 
     await manager.set_status(record.run_id, RunStatus.success)
 
@@ -2375,7 +2376,7 @@ async def test_unconfirmed_staged_success_is_fenced_on_deferred_persistence():
     async def fail_status_write(*_args, **_kwargs):
         raise OSError("database unreachable")
 
-    store.transition_run_atomic = fail_status_write
+    store.transition_owned_run_atomic = fail_status_write
 
     persisted = await manager.persist_current_status(record.run_id)
 

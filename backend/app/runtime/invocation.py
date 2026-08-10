@@ -426,6 +426,8 @@ class DurableRuns(Protocol):
 
     async def fail_start(self, record: RunRecord, error: str) -> None: ...
 
+    async def cancel_start(self, record: RunRecord) -> None: ...
+
     async def observe(self, run_id: str, principal: InvocationPrincipal) -> RunRecord | None: ...
 
     async def observe_granted(
@@ -742,13 +744,21 @@ class InvocationRuntime:
                 await qualification_counter("worker_attachments", record)
                 await qualification_barrier("accepted_before_client_response", record)
             return InternalLaunchReceipt(record=record, created=True)
-        except (Exception, asyncio.CancelledError):
+        except asyncio.CancelledError:
             if created_record is not None and created_record.task is None:
                 if worker is not None:
                     close = getattr(worker, "close", None)
                     if callable(close):
                         close()
-                await self._finish_unattached_compensation(created_record)
+                await self._finish_unattached_cancellation(created_record)
+            raise
+        except Exception:
+            if created_record is not None and created_record.task is None:
+                if worker is not None:
+                    close = getattr(worker, "close", None)
+                    if callable(close):
+                        close()
+                await self._finish_unattached_failure(created_record)
             raise
         finally:
             if not worker_owns_material and launch.accepted_invocation is not None:
@@ -756,12 +766,26 @@ class InvocationRuntime:
                 if material is not None:
                     await asyncio.to_thread(material.release_process_material)
 
-    async def _finish_unattached_compensation(self, record: RunRecord) -> None:
-        """Resolve creator-row compensation despite repeated request cancellation."""
+    async def _finish_unattached_failure(self, record: RunRecord) -> None:
+        """Resolve creator-row attachment failure despite request cancellation."""
 
         cleanup = asyncio.create_task(
             self._runs.fail_start(record, "worker_attachment_failed"),
             name=f"deerflow-fail-unattached-run-{record.run_id}",
+        )
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        cleanup.result()
+
+    async def _finish_unattached_cancellation(self, record: RunRecord) -> None:
+        """Resolve creator-row cancellation despite repeated request cancellation."""
+
+        cleanup = asyncio.create_task(
+            self._runs.cancel_start(record),
+            name=f"deerflow-cancel-unattached-run-{record.run_id}",
         )
         while not cleanup.done():
             try:

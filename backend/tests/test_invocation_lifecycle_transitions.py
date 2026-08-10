@@ -274,13 +274,15 @@ async def test_cancelled_admission_compensation_preserves_cancelled_mapping() ->
             super().__init__()
             self.cancel_transition_attempts = 0
 
-        async def transition_run_atomic(
+        async def transition_owned_run_atomic(
             self,
             run_id: str,
             *,
             expected_state_version: int,
             expected_statuses: tuple[str, ...] | None,
             transition: LifecycleTransition,
+            expected_owner_worker_id: str,
+            require_unexpired_lease: bool,
             user_id: str | None = None,
         ) -> LifecycleTransitionResult:
             if transition.lifecycle_type == LifecycleType.cancelled:
@@ -290,11 +292,13 @@ async def test_cancelled_admission_compensation_preserves_cancelled_mapping() ->
                         applied=False,
                         row=await self.get(run_id),
                     )
-            return await super().transition_run_atomic(
+            return await super().transition_owned_run_atomic(
                 run_id,
                 expected_state_version=expected_state_version,
                 expected_statuses=expected_statuses,
                 transition=transition,
+                expected_owner_worker_id=expected_owner_worker_id,
+                require_unexpired_lease=require_unexpired_lease,
                 user_id=user_id,
             )
 
@@ -302,7 +306,11 @@ async def test_cancelled_admission_compensation_preserves_cancelled_mapping() ->
     manager = RunManager(store=store)
     record = await manager.create("thread-1")
 
-    await manager._close_cancelled_admission(record)
+    await manager._close_cancelled_admission(
+        record,
+        claim_manager_admission=True,
+    )
+    assert await manager.drain_admission_compensations(timeout=1) is True
 
     row = await store.get(record.run_id)
     events = await store.list_lifecycle_events(run_id=record.run_id)

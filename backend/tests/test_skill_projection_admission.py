@@ -606,3 +606,137 @@ async def test_gateway_real_manager_recovers_response_lost_creator_by_candidate_
             user_id="projection-owner",
             thread_id=thread_id,
         )
+
+
+@pytest.mark.asyncio
+async def test_fail_start_transfers_compensation_ownership_before_releasing_material(
+    monkeypatch,
+) -> None:
+    order: list[str] = []
+
+    class _Manager:
+        async def fail_start_if_pending(self, run_id, *, error):
+            assert run_id == "candidate-run"
+            assert error == "worker construction failed"
+            order.append("compensation-owned")
+            return True
+
+    coordinator = get_skill_projection_coordinator()
+
+    def release_unactivated_run(_self, *, user_id, thread_id, run_id):
+        assert (user_id, thread_id, run_id) == (
+            "projection-owner",
+            "projection-release-order",
+            "candidate-run",
+        )
+        order.append("material-released")
+        return True
+
+    monkeypatch.setattr(services, "get_run_manager", lambda _request: _Manager())
+    monkeypatch.setattr(
+        type(coordinator),
+        "release_unactivated_run",
+        release_unactivated_run,
+    )
+    adapter = services._GatewayDurableRuns(SimpleNamespace())
+    record = SimpleNamespace(
+        run_id="candidate-run",
+        user_id="projection-owner",
+        thread_id="projection-release-order",
+    )
+
+    await adapter.fail_start(record, "worker construction failed")
+
+    assert order == ["compensation-owned", "material-released"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_start_transfers_compensation_ownership_before_releasing_material(
+    monkeypatch,
+) -> None:
+    order: list[str] = []
+
+    class _Manager:
+        async def cancel_start_if_pending(self, run_id):
+            assert run_id == "candidate-run"
+            order.append("compensation-owned")
+            return True
+
+    coordinator = get_skill_projection_coordinator()
+
+    def release_unactivated_run(_self, *, user_id, thread_id, run_id):
+        assert (user_id, thread_id, run_id) == (
+            "projection-owner",
+            "projection-cancel-release-order",
+            "candidate-run",
+        )
+        order.append("material-released")
+        return True
+
+    monkeypatch.setattr(services, "get_run_manager", lambda _request: _Manager())
+    monkeypatch.setattr(
+        type(coordinator),
+        "release_unactivated_run",
+        release_unactivated_run,
+    )
+    adapter = services._GatewayDurableRuns(SimpleNamespace())
+    record = SimpleNamespace(
+        run_id="candidate-run",
+        user_id="projection-owner",
+        thread_id="projection-cancel-release-order",
+    )
+
+    await adapter.cancel_start(record)
+
+    assert order == ["compensation-owned", "material-released"]
+
+
+@pytest.mark.asyncio
+async def test_failed_admission_transfers_compensation_ownership_before_releasing_material(
+    monkeypatch,
+) -> None:
+    order: list[str] = []
+
+    class _Manager:
+        async def ensure_or_reject(self, *_args, **_kwargs):
+            raise OSError("admission response unavailable")
+
+    coordinator = get_skill_projection_coordinator()
+
+    def release_unactivated_run(_self, *, user_id, thread_id, run_id):
+        assert (user_id, thread_id, run_id) == (
+            "projection-owner",
+            "projection-admit-release-order",
+            "candidate-run",
+        )
+        order.append("material-released")
+        return True
+
+    async def terminalize(_run_manager, candidate_run_id):
+        assert candidate_run_id == "candidate-run"
+        order.append("compensation-owned")
+
+    monkeypatch.setattr(services, "get_run_manager", lambda _request: _Manager())
+    monkeypatch.setattr(
+        type(coordinator),
+        "release_unactivated_run",
+        release_unactivated_run,
+    )
+    monkeypatch.setattr(
+        services._GatewayDurableRuns,
+        "_terminalize_unattached_candidate",
+        staticmethod(terminalize),
+    )
+    adapter = services._GatewayDurableRuns(SimpleNamespace())
+    launch = _launch(
+        thread_id="projection-admit-release-order",
+        external_key="failed-admission",
+    )
+
+    with pytest.raises(OSError, match="admission response unavailable"):
+        await adapter.admit(
+            launch,
+            candidate_run_id="candidate-run",
+        )
+
+    assert order == ["compensation-owned", "material-released"]
