@@ -1,772 +1,449 @@
-# 🦌 DeerFlow - 2.0
+# HartMesh
 
-[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Français | [Русский](./README_ru.md)
+[English](README.md) | [简体中文](README_zh.md) | [日本語](README_ja.md) | Français | [Русский](README_ru.md)
 
-[![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
-[![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+## La couche d’exécution fiable pour les agents DeerFlow.
 
-<a href="https://trendshift.io/repositories/14699" target="_blank"><img src="https://trendshift.io/api/badge/repositories/14699" alt="bytedance%2Fdeer-flow | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-> Le 28 février 2026, DeerFlow a décroché la 🏆 1re place sur GitHub Trending suite au lancement de la version 2. Un immense merci à notre incroyable communauté — c'est grâce à vous ! 💪🔥
+HartMesh est une distribution DeerFlow orientée exploitation pour des invocations rejouables sans ambiguïté, des politiques applicables, des preuves de cycle de vie inspectables et des garanties de déploiement à portée explicite.
 
-DeerFlow (**D**eep **E**xploration and **E**fficient **R**esearch **Flow**) est un **super agent harness** open source qui orchestre des **sub-agents**, de la **mémoire** et des **sandboxes** pour accomplir pratiquement n'importe quelle tâche — le tout propulsé par des **skills extensibles**.
+Elle s’appuie sur le workspace, les sandboxes, la mémoire, les skills, les outils, les sous-agents, les tâches planifiées et les canaux de DeerFlow.
 
-https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
+> [!IMPORTANT]
+> **Statut : préversion.** Cette arborescence contient le runtime implémenté et ses preuves contractuelles hors ligne, mais aucun tag de version HartMesh ne les contient encore.
+>
+> La qualification exacte d’un déploiement réel reste un contrôle distinct, lié à un artefact précis.
 
-> [!NOTE]
-> **DeerFlow 2.0 est une réécriture complète.** Il ne partage aucun code avec la v1. Si vous cherchez le framework Deep Research original, il est maintenu sur la [branche `1.x`](https://github.com/bytedance/deer-flow/tree/main-1.x) — les contributions y sont toujours les bienvenues. Le développement actif a migré vers la 2.0.
+HartMesh est une distribution dérivée indépendante de [DeerFlow](https://github.com/bytedance/deer-flow) de ByteDance. Ce n’est pas une version officielle de DeerFlow et elle n’est ni affiliée ni approuvée par ByteDance.
 
-## Site officiel
+[**Évaluer la préversion**](#démarrage-rapide-du-workspace) · [**Examiner les preuves**](backend/docs/INVOCATION_RUNTIME.md) · [**Explorer le contrat runtime**](backend/packages/runtime-api/README.md)
 
-Découvrez-en plus et regardez des **démos réelles** sur notre [**site officiel**](https://deerflow.tech).
+## Pourquoi HartMesh existe
 
-## Coding Plan de ByteDance Volcengine
+Les agents sont faciles à démarrer et difficiles à exploiter.
 
-- Nous recommandons fortement d'utiliser Doubao-Seed-2.0-Code, DeepSeek v3.2 et Kimi 2.5 pour exécuter DeerFlow
-- [En savoir plus](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
-- [Développeurs en Chine continentale, cliquez ici](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+Les clients réessaient, les politiques changent, les skills évoluent, les processus échouent et plusieurs services peuvent devoir observer le même travail.
 
-## InfoQuest
+HartMesh ajoute une frontière d’invocation fiable autour de DeerFlow afin que le travail accepté puisse être retenté, gouverné, inspecté et contrôlé de façon cohérente.
 
-DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent développé par BytePlus — [InfoQuest (essai gratuit en ligne)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+Dans un même périmètre authentifié, tant que la ligne de run ordinaire est conservée, répéter la même requête stricte sous une même clé externe renvoie le `run_id` conservé.
 
-<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
-  <img
-    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="InfoQuest_banner"
-  />
-</a>
+Modifier l’intention d’exécution canonique sous cette clé provoque un conflit.
 
----
+Il s’agit d’une admission sûre en cas de répétition, pas d’une exécution exactement une fois du modèle, des outils, des fournisseurs ou d’autres effets externes.
 
-## Table des matières
+HartMesh vise d’abord :
 
-- [🦌 DeerFlow - 2.0](#-deerflow---20)
-  - [Site officiel](#site-officiel)
-  - [Coding Plan de ByteDance Volcengine](#coding-plan-de-bytedance-volcengine)
-  - [InfoQuest](#infoquest)
-  - [Table des matières](#table-des-matières)
-  - [Installation en une phrase pour un coding agent](#installation-en-une-phrase-pour-un-coding-agent)
-  - [Démarrage rapide](#démarrage-rapide)
-    - [Configuration](#configuration)
-    - [Lancer l'application](#lancer-lapplication)
-      - [Option 1 : Docker (recommandé)](#option-1--docker-recommandé)
-      - [Option 2 : Développement local](#option-2--développement-local)
-    - [Avancé](#avancé)
-      - [Mode Sandbox](#mode-sandbox)
-      - [Serveur MCP](#serveur-mcp)
-      - [Canaux de messagerie](#canaux-de-messagerie)
-      - [Traçage LangSmith](#traçage-langsmith)
-      - [Traçage Langfuse](#traçage-langfuse)
-      - [Utiliser les deux fournisseurs](#utiliser-les-deux-fournisseurs)
-  - [Du Deep Research au Super Agent Harness](#du-deep-research-au-super-agent-harness)
-  - [Fonctionnalités principales](#fonctionnalités-principales)
-    - [Skills et outils](#skills-et-outils)
-      - [Intégration Claude Code](#intégration-claude-code)
-    - [Objectifs de session (Session Goals)](#objectifs-de-session-session-goals)
-    - [Sub-Agents](#sub-agents)
-    - [Sandbox et système de fichiers](#sandbox-et-système-de-fichiers)
-    - [Context Engineering](#context-engineering)
-    - [Mémoire à long terme](#mémoire-à-long-terme)
-  - [Modèles recommandés](#modèles-recommandés)
-  - [Client Python intégré](#client-python-intégré)
-  - [Tâches planifiées (Scheduled Tasks)](#tâches-planifiées-scheduled-tasks)
-  - [Atelier terminal (TUI)](#atelier-terminal-tui)
-  - [Documentation](#documentation)
-  - [⚠️ Avertissement de sécurité](#️-avertissement-de-sécurité)
-  - [Contribuer](#contribuer)
-  - [Licence](#licence)
-  - [Remerciements](#remerciements)
-    - [Contributeurs principaux](#contributeurs-principaux)
-  - [Star History](#star-history)
+- les développeurs de plateforme qui intègrent DeerFlow dans des API, services, tâches planifiées ou canaux ;
+- les opérateurs qui évaluent une topologie gouvernée et durable à un seul Gateway ; et
+- les équipes qui automatisent des workflows planifiés ou GitHub signés à forte valeur.
 
-## Installation en une phrase pour un coding agent
+## Fondé sur DeerFlow, renforcé pour l’exploitation
 
-Si vous utilisez Claude Code, Codex, Cursor, Windsurf ou un autre coding agent, vous pouvez simplement lui envoyer cette phrase :
+DeerFlow fournit le socle agentique : workspace, harness LangGraph, sandboxes, mémoire, skills, outils, sous-agents, tâches planifiées et canaux natifs.
 
-```text
-Aide-moi à cloner DeerFlow si nécessaire, puis à initialiser son environnement de développement local en suivant https://raw.githubusercontent.com/bytedance/deer-flow/main/Install.md
-```
+HartMesh conserve cette expérience et ajoute le plan de contrôle qui accepte, gouverne, observe et contrôle les travaux longs.
 
-Ce prompt est destiné aux coding agents. Il leur demande de cloner le dépôt si nécessaire, de privilégier Docker quand il est disponible, puis de s'arrêter avec la commande exacte pour lancer DeerFlow et la liste des configurations encore manquantes.
+Cette comparaison vise un instantané fixe. Les commits exacts figurent dans [compatibilité et provenance](#compatibilité-référence-amont-et-statut-de-publication) ; elle ne décrit pas toutes les futures versions amont.
 
-## Démarrage rapide
+| Ce que vous conservez du socle | Ce que HartMesh ajoute autour |
+| --- | --- |
+| Workspace, harness, mémoire, sandboxes, skills, outils, sous-agents, tâches et canaux | Une frontière d’admission sensible à la source ; la durabilité de livraison dépend toujours du transport |
+| Cycle de vie thread/run DeerFlow, routes REST Gateway et routes compatibles LangGraph | Clés externes canoniques par source, identité d’admission conservée et conflit explicite si l’intention change |
+| Configuration des agents, extensions et sandboxes | Matériaux d’exécution acceptés et figés |
+| Surfaces d’intégration Gateway et embarquée | Enregistrements stricts `ensure`, `observe` et `control` avec fencing |
+| Exploitation locale et Helm | Preuves de cycle de vie et rapports explicites de persistance, topologie et qualification |
 
-### Configuration
+Vous conservez le socle agentique et la surface compatible de DeerFlow. Vous gagnez un plan de contrôle des invocations accompagné de preuves.
 
-1. **Cloner le dépôt DeerFlow**
+Vous n’obtenez pas de Gateway actif-actif, de haute disponibilité du scheduler, de reprise universelle après crash ni d’effets externes exactement une fois.
 
-   ```bash
-   git clone https://github.com/bytedance/deer-flow.git
-   cd deer-flow
-   ```
+## Que se passe-t-il si… ?
 
-2. **Lancer l'assistant de configuration (recommandé)**
+| Scénario | Comportement de HartMesh |
+| --- | --- |
+| [Un client réessaie après avoir perdu la réponse](backend/tests/test_invocation_idempotency.py) | Une intention canonique identique renvoie le run accepté ; une intention modifiée provoque un conflit. |
+| [Un skill change après l’admission](backend/tests/test_accepted_skill_snapshots.py) | L’invocation acceptée conserve un arbre de skills capturé commun aux consommateurs agent et sandbox ; seuls les travaux ultérieurs voient la modification. |
+| [Une sandbox distante exécute les skills acceptés](backend/tests/test_kubernetes_accepted_skill_projection.py) | La projection `rwx_verified_copy_v2` prise en charge lie et revérifie les preuves de skill admis et d’isolation avant le travail graph/model ; la qualification inter-nœuds réelle reste liée à un artefact exact. |
+| [Un service agit pour une personne ou observe un autre propriétaire](backend/tests/test_service_observation_grants.py) | Sujet humain, service agissant et preuve de source restent distincts ; l’observation inter-propriétaires exige un droit limité et l’autorisation courante. |
+| [Une capacité de politique requise est défaillante](backend/docs/INVOCATION_RUNTIME.md#capability-health-and-required-mcp-preparation) | La readiness et toute admission réellement nouvelle échouent fermées ; un rejeu identique réutilise les preuves d’acceptation scellées, tandis que l’autorisation courante régit toujours la divulgation. |
+| [Un opérateur demande ce qui est durable ou qualifié](backend/app/runtime/deployment.py) | Le rapport nomme le niveau de persistance ; une référence déclarée reste une assertion opérateur, et seule une preuve exacte validée par le [vérificateur hors ligne](backend/scripts/verify_qualification_evidence.py) permet une qualification indépendante. |
+| [L’historique est élagué ou incohérent](backend/tests/test_invocation_lifecycle_query.py) | L’observation bornée renvoie des résultats typés de curseur ou d’intégrité au lieu d’afficher silencieusement un historique invalide. |
+| [Une livraison GitHub signée est interrompue ou son thread est occupé](backend/tests/test_durable_inbound_receipts.py) | La récupération des reçus PostgreSQL peut reprendre un lease expiré, préserver le report FIFO et converger vers le même run accepté. |
 
-   Depuis le répertoire racine du projet (`deer-flow/`), exécutez :
+<!-- Démo future : ajouter une capture terminal de 30–60 s montrant une invocation avec clé, une réponse perdue, le même run_id au rejeu, un conflit d’intention et l’observation du cycle de vie. -->
 
-   ```bash
-   make setup
-   ```
+## Choisissez votre parcours
 
-   Cette commande lance un assistant interactif qui vous guide dans le choix d'un fournisseur LLM, d'une recherche web optionnelle et des préférences d'exécution/sécurité (mode sandbox, accès bash, outils d'écriture de fichiers). Il génère un `config.yaml` minimal et écrit vos clés dans `.env`. Comptez environ 2 minutes.
+| Parcours | Pour qui | Première preuve |
+| --- | --- | --- |
+| [Workspace](#démarrage-rapide-du-workspace) | Développeurs évaluant le workspace DeerFlow complet avec les contrôles HartMesh | Une réponse du modèle via le point d’entrée local unifié |
+| [Intégration runtime](#api-http-durable-invocation) | Plateformes intégrant le travail agentique dans des services, tâches ou canaux | Deux requêtes portant la même clé renvoient un seul `run_id`, puis le cycle de vie est observable |
 
-   Exécutez `make doctor` à tout moment pour vérifier votre configuration et obtenir des pistes de correction concrètes.
-   Si vous ouvrez une issue GitHub à propos d'un problème de configuration ou d'exécution en local, exécutez
-   `make support-bundle`. La commande affiche les prochaines étapes pour le rapporteur, écrit un fichier
-   `*-issue-summary.md` à coller dans l'issue, un fichier `*-issue-draft.md` destiné au dépôt d'issue
-   assisté par IA, ainsi qu'un zip de preuves optionnel sous
-   `.deer-flow/support-bundles/`. Si un assistant IA dépose l'issue, partez du brouillon et remplacez
-   chaque placeholder REQUIRED au lieu d'inventer les informations manquantes. N'attachez le zip que si
-   un mainteneur le demande, ou si le résumé seul ne suffit pas. Les mainteneurs et les outils de triage
-   IA peuvent commencer par `triage.json` ; le bundle ne contient que des diagnostics expurgés et des
-   manifestes de fichiers, et n'inclut ni `.env`, ni les messages bruts des conversations, ni le contenu
-   des fichiers de l'utilisateur.
+Les opérateurs qui évaluent un déploiement gouverné peuvent aller directement aux [limites de déploiement et de durabilité](#limites-de-déploiement-et-de-durabilité).
 
-   > **Configuration avancée / manuelle** : si vous préférez éditer `config.yaml` directement, exécutez plutôt `make config` pour copier le template complet. Voir `config.example.yaml` pour la référence complète, y compris les providers basés sur un CLI (Codex CLI, Claude Code OAuth), OpenRouter, l'API Responses, et plus encore.
+> [!CAUTION]
+> **Connaissez la limite avant de déployer.**
+>
+> - La topologie validée comporte exactement un replica Gateway.
+> - Aucune haute disponibilité active-active du Gateway ou du scheduler, ni aucun rollout sans interruption, n’est revendiqué.
+> - L’admission sûre en cas de rejeu ne garantit ni les effets externes exactement une fois ni la reprise universelle après crash.
+> - Les entrées de canaux locales en mémoire ou SQLite restent best-effort.
+> - PostgreSQL et des preuves exactes vérifiables indépendamment sont requis pour les affirmations shared-durable et de qualification ci-dessous.
 
-   <details>
-   <summary>Exemples de configuration manuelle des modèles</summary>
+## Démarrage rapide du workspace
 
-   ```yaml
-   models:
-     - name: gpt-4o
-       display_name: GPT-4o
-       use: langchain_openai:ChatOpenAI
-       model: gpt-4o
-       api_key: $OPENAI_API_KEY
+Travaillez depuis la racine du checkout HartMesh courant.
 
-     - name: openrouter-gemini-2.5-flash
-       display_name: Gemini 2.5 Flash (OpenRouter)
-       use: langchain_openai:ChatOpenAI
-       model: google/gemini-2.5-flash-preview
-       api_key: $OPENROUTER_API_KEY
-       base_url: https://openrouter.ai/api/v1
+Cette préversion nécessite Python 3.12+, Node.js 22+, pnpm ou Corepack, `uv`, GNU Make, nginx, Docker ou Apple Container, des identifiants de modèle, environ 4 cœurs CPU et 8 Go de RAM. Sous Windows, le développement local utilise Git Bash.
 
-     - name: gpt-5-responses
-       display_name: GPT-5 (Responses API)
-       use: langchain_openai:ChatOpenAI
-       model: gpt-5
-       api_key: $OPENAI_API_KEY
-       use_responses_api: true
-       output_version: responses/v1
+Quand `make setup` demande le mode d’exécution, choisissez **Container sandbox**. Avec `LocalSandboxProvider`, les invocations durables exigent un ensemble effectif de skills vide ; les skills intégrés sont activés ici par défaut.
 
-     - name: qwen3-32b-vllm
-       display_name: Qwen3 32B (vLLM)
-       use: deerflow.models.vllm_provider:VllmChatModel
-       model: Qwen/Qwen3-32B
-       api_key: $VLLM_API_KEY
-       base_url: http://localhost:8000/v1
-       supports_thinking: true
-       when_thinking_enabled:
-         extra_body:
-           chat_template_kwargs:
-             enable_thinking: true
-   ```
+> [!WARNING]
+> `make dev` vise un réseau de confiance : Gateway `8001`, frontend `3000` et nginx `2026` écoutent sur toutes les interfaces. Pendant la création du premier admin, utilisez une machine fiable ou protégée par son firewall.
 
-   OpenRouter et les passerelles compatibles OpenAI similaires doivent être configurés avec `langchain_openai:ChatOpenAI` et `base_url`. Si vous préférez utiliser un nom de variable d'environnement propre au fournisseur, pointez `api_key` vers cette variable explicitement (par exemple `api_key: $OPENROUTER_API_KEY`).
-
-   Pour router les modèles OpenAI via `/v1/responses`, continuez d'utiliser `langchain_openai:ChatOpenAI` et définissez `use_responses_api: true` avec `output_version: responses/v1`.
-
-   Pour vLLM 0.19.0, utilisez `deerflow.models.vllm_provider:VllmChatModel`. Pour les modèles de raisonnement de type Qwen, DeerFlow active le raisonnement via `extra_body.chat_template_kwargs.enable_thinking` et préserve le champ non standard `reasoning` de vLLM au fil des conversations multi-tours avec appels d'outils. Les anciennes configurations `thinking` sont normalisées automatiquement pour assurer la rétrocompatibilité. Les modèles de raisonnement peuvent aussi exiger que le serveur soit démarré avec `--reasoning-parser ...`. Si votre déploiement vLLM local accepte n'importe quelle clé API non vide, vous pouvez tout de même définir `VLLM_API_KEY` avec une valeur factice.
-
-   Exemples de providers basés sur un CLI :
-
-   ```yaml
-   models:
-     - name: gpt-5.4
-       display_name: GPT-5.4 (Codex CLI)
-       use: deerflow.models.openai_codex_provider:CodexChatModel
-       model: gpt-5.4
-       supports_thinking: true
-       supports_reasoning_effort: true
-
-     - name: claude-sonnet-4.6
-       display_name: Claude Sonnet 4.6 (Claude Code OAuth)
-       use: deerflow.models.claude_provider:ClaudeChatModel
-       model: claude-sonnet-4-6
-       max_tokens: 4096
-       supports_thinking: true
-   ```
-
-   - Codex CLI lit `~/.codex/auth.json`
-   - Claude Code accepte `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, ou `~/.claude/.credentials.json`
-   - Les entrées d'agents ACP sont distinctes des providers de modèles — si vous configurez `acp_agents.codex`, pointez-le vers un adaptateur Codex ACP tel que `npx -y @zed-industries/codex-acp`
-   - Sur macOS, exportez l'auth Claude Code explicitement si nécessaire :
-
-   ```bash
-   eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
-   ```
-
-   Les clés API peuvent aussi être définies manuellement dans `.env` (recommandé) ou exportées dans votre shell :
-
-   ```bash
-   OPENAI_API_KEY=your-openai-api-key
-   TAVILY_API_KEY=your-tavily-api-key
-   ```
-
-   </details>
-
-### Lancer l'application
-
-#### Option 1 : Docker (recommandé)
-
-**Développement** (hot-reload, montage des sources) :
+Configurez, diagnostiquez et lancez :
 
 ```bash
-make docker-init    # Pull sandbox image (only once or when image updates)
-make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
+make check
+make setup
+make doctor
+make dev
 ```
 
-`make docker-start` ne lance `provisioner` que si `config.yaml` utilise le mode provisioner (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` avec `provisioner_url`).
-Les processus backend récupèrent automatiquement les changements dans `config.yaml` au prochain accès à la configuration, donc les mises à jour de métadonnées des modèles ne nécessitent pas de redémarrage manuel en développement.
+`make setup` écrit la configuration locale ignorée par Git. `make dev` revérifie les outils, synchronise les dépendances et démarre Gateway, frontend et nginx.
 
-> [!TIP]
-> Sous Linux, si les commandes Docker échouent avec `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, ajoutez votre utilisateur au groupe `docker` et reconnectez-vous avant de réessayer. Voir [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) pour la solution complète.
+`make install` est facultatif pour les contributeurs qui souhaitent aussi installer les hooks pre-commit.
 
-**Production** (build des images en local, montage de la config et des données) :
+Ouvrez [http://localhost:2026](http://localhost:2026). Sur une nouvelle installation, terminez la création du premier admin, créez un thread et envoyez un prompt.
+
+Le succès correspond à une réponse du modèle configuré diffusée dans le workspace via le cycle de vie géré par le Gateway.
+
+Arrêtez la stack depuis un autre terminal :
 
 ```bash
-make up     # Build images and start all production services
-make down   # Stop and remove containers
+make stop
 ```
 
-> [!NOTE]
-> Le runtime d'agent s'exécute actuellement dans la Gateway. nginx réécrit `/api/langgraph/*` vers l'API compatible LangGraph servie par la Gateway.
+Ce parcours évalue le workspace hérité et la stack locale. Continuez avec le runtime pour vérifier la conservation du `run_id` ; ce succès seul ne démontre ni la durabilité PostgreSQL ni une qualification Kubernetes réelle.
 
-Accès : http://localhost:2026
+## API HTTP Durable Invocation
 
-Voir [CONTRIBUTING.md](CONTRIBUTING.md) pour le guide complet de développement avec Docker.
+Utilisez la surface de préversion `/api/runtime/v1` lorsqu’un service backend de confiance a besoin de `ensure → observe`.
 
-#### Option 2 : Développement local
+Elle utilise les enregistrements stricts du package [`deerflow-runtime-api`](backend/packages/runtime-api/README.md), limité à la bibliothèque standard.
 
-Si vous préférez lancer les services en local :
-
-Prérequis : complétez d'abord les étapes de « Configuration » ci-dessus (`make setup`). `make dev` nécessite un fichier `config.yaml` valide à la racine du projet. Définissez `DEER_FLOW_PROJECT_ROOT` pour indiquer explicitement cette racine, ou `DEER_FLOW_CONFIG_PATH` pour pointer vers un fichier de configuration précis. L'état d'exécution est écrit par défaut dans `.deer-flow` sous la racine du projet et peut être déplacé avec `DEER_FLOW_HOME` ; les skills sont lus par défaut depuis `skills/` sous la racine du projet et peuvent être déplacés avec `DEER_FLOW_SKILLS_PATH`. Exécutez `make doctor` pour vérifier votre configuration avant de démarrer.
-Sous Windows, exécutez le flux de développement local depuis Git Bash. Les shells natifs `cmd.exe` et PowerShell ne sont pas pris en charge pour les scripts de service basés sur bash, et WSL n'est pas garanti car certains scripts dépendent d'utilitaires de Git for Windows comme `cygpath`.
-
-1. **Vérifier les prérequis** :
-   ```bash
-   make check  # Verifies Node.js 22+, pnpm, uv, nginx
-   ```
-
-2. **Installer les dépendances** :
-   ```bash
-   make install  # Install backend + frontend dependencies
-   ```
-
-3. **(Optionnel) Pré-télécharger l'image sandbox** :
-   ```bash
-   # Recommended if using Docker/Container-based sandbox
-   make setup-sandbox
-   ```
-
-4. **Démarrer les services** :
-   ```bash
-   make dev
-   ```
-
-5. **Accès** : http://localhost:2026
-
-### Avancé
-#### Mode Sandbox
-
-DeerFlow supporte plusieurs modes d'exécution sandbox :
-- **Exécution locale** (exécute le code sandbox directement sur la machine hôte)
-- **Exécution Docker** (exécute le code sandbox dans des conteneurs Docker isolés)
-- **Exécution Docker avec Kubernetes** (exécute le code sandbox dans des pods Kubernetes via le service provisioner)
-
-En développement Docker, le démarrage des services suit le mode sandbox défini dans `config.yaml`. En mode Local/Docker, `provisioner` n'est pas démarré.
-
-Voir le [Guide de configuration Sandbox](backend/docs/CONFIGURATION.md#sandbox) pour configurer le mode de votre choix.
-
-#### Serveur MCP
-
-DeerFlow supporte des serveurs MCP et des skills configurables pour étendre ses capacités.
-Pour les serveurs MCP HTTP/SSE, les flux de tokens OAuth sont supportés (`client_credentials`, `refresh_token`).
-Voir le [Guide MCP Server](backend/docs/MCP_SERVER.md) pour les instructions détaillées.
-
-#### Canaux de messagerie
-
-DeerFlow peut recevoir des tâches depuis des applications de messagerie. Les canaux démarrent automatiquement une fois configurés — aucune IP publique n'est requise.
-
-DeerFlow peut aussi exposer des connexions de canaux IM appartenant à l'utilisateur dans l'UI du workspace. Quand `channel_connections` est activé, les utilisateurs connectés peuvent lier Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat ou WeCom depuis la barre latérale / Settings > Channels. Cela réutilise les transports sortants `channels.*` existants, donc aucune IP publique ni URL de callback provider n'est requise. Les messages IM entrants s'exécutent ensuite sous le compte utilisateur DeerFlow connecté. Voir [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) pour la configuration et les notes de sécurité.
-
-| Canal | Transport | Difficulté |
-|---------|-----------|------------|
-| Telegram | Bot API (long-polling) | Facile |
-| Slack | Socket Mode | Modérée |
-| Feishu / Lark | WebSocket | Modérée |
-| WeChat | Tencent iLink (long-polling) | Modérée |
-| WeCom | WebSocket | Modérée |
-| DingTalk | Stream Push (WebSocket) | Modérée |
-
-**Configuration dans `config.yaml` :**
-
-```yaml
-channels:
-  # LangGraph-compatible Gateway API base URL (default: http://localhost:8001/api)
-  langgraph_url: http://localhost:8001/api
-  # Gateway API URL (default: http://localhost:8001)
-  gateway_url: http://localhost:8001
-
-  # Optional: global session defaults for all mobile channels
-  session:
-    assistant_id: lead_agent
-    config:
-      recursion_limit: 100
-    context:
-      thinking_enabled: true
-      is_plan_mode: false
-      subagent_enabled: false
-
-  feishu:
-    enabled: true
-    app_id: $FEISHU_APP_ID
-    app_secret: $FEISHU_APP_SECRET
-    # domain: https://open.feishu.cn       # China (default)
-    # domain: https://open.larksuite.com   # International
-
-  wecom:
-    enabled: true
-    bot_id: $WECOM_BOT_ID
-    bot_secret: $WECOM_BOT_SECRET
-
-  slack:
-    enabled: true
-    bot_token: $SLACK_BOT_TOKEN     # xoxb-...
-    app_token: $SLACK_APP_TOKEN     # xapp-... (Socket Mode)
-    allowed_users: []               # empty = allow all
-
-  telegram:
-    enabled: true
-    bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # empty = allow all
-
-    # Optional: per-channel / per-user session settings
-    session:
-      assistant_id: mobile_agent
-      context:
-        thinking_enabled: false
-      users:
-        "123456789":
-          assistant_id: vip_agent
-          config:
-            recursion_limit: 150
-          context:
-            thinking_enabled: true
-            subagent_enabled: true
-
-  wechat:
-    enabled: false
-    bot_token: $WECHAT_BOT_TOKEN
-    ilink_bot_id: $WECHAT_ILINK_BOT_ID
-    qrcode_login_enabled: true      # optionnel : autorise le bootstrap QR à la première utilisation quand bot_token est absent
-    allowed_users: []               # vide = tout le monde autorisé
-    polling_timeout: 35
-    state_dir: ./.deer-flow/wechat/state
-    max_inbound_image_bytes: 20971520
-    max_outbound_image_bytes: 20971520
-    max_inbound_file_bytes: 52428800
-    max_outbound_file_bytes: 52428800
-
-  dingtalk:
-    enabled: true
-    client_id: $DINGTALK_CLIENT_ID             # ClientId depuis DingTalk Open Platform
-    client_secret: $DINGTALK_CLIENT_SECRET     # ClientSecret depuis DingTalk Open Platform
-    allowed_users: []                          # vide = tout le monde autorisé
-    card_template_id: ""                       # Optionnel : ID de modèle AI Card pour l'effet machine à écrire en streaming
-```
-
-Définissez les clés API correspondantes dans votre fichier `.env` :
+Le workspace navigateur n’est pas nécessaire, mais le checkout HartMesh doit être configuré. Depuis la racine du dépôt, un nouvel évaluateur exécute :
 
 ```bash
-# Telegram
-TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
-
-# Slack
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
-
-# Feishu / Lark
-FEISHU_APP_ID=cli_xxxx
-FEISHU_APP_SECRET=your_app_secret
-
-# WeChat iLink
-WECHAT_BOT_TOKEN=your_ilink_bot_token
-WECHAT_ILINK_BOT_ID=your_ilink_bot_id
-
-# WeCom
-WECOM_BOT_ID=your_bot_id
-WECOM_BOT_SECRET=your_bot_secret
-
-# DingTalk
-DINGTALK_CLIENT_ID=your_client_id
-DINGTALK_CLIENT_SECRET=your_client_secret
+make check
+make setup
+make doctor
 ```
 
-**Configuration Telegram**
+Configurez les identifiants du modèle choisi par `make setup`. Si le workspace est déjà configuré, ignorez ces commandes.
 
-1. Ouvrez une conversation avec [@BotFather](https://t.me/BotFather), envoyez `/newbot`, et copiez le token HTTP API.
-2. Définissez `TELEGRAM_BOT_TOKEN` dans `.env` et activez le canal dans `config.yaml`.
+Un premier essai runtime doit aussi choisir **Container sandbox**. Le provider Local exige un ensemble effectif de skills vide pour l’exécution durable.
 
-**Configuration Slack**
+Comme ci-dessus, `make dev` écoute sur toutes les interfaces de l’hôte aux ports `8001`, `3000` et `2026` ; utilisez une machine de confiance ou protégée par son firewall.
 
-1. Créez une Slack App sur [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch.
-2. Dans **OAuth & Permissions**, ajoutez les Bot Token Scopes : `app_mentions:read`, `chat:write`, `im:history`, `im:read`, `im:write`, `files:write`.
-3. Activez le **Socket Mode** → générez un App-Level Token (`xapp-…`) avec le scope `connections:write`.
-4. Dans **Event Subscriptions**, abonnez-vous aux bot events : `app_mention`, `message.im`.
-5. Définissez `SLACK_BOT_TOKEN` et `SLACK_APP_TOKEN` dans `.env` et activez le canal dans `config.yaml`.
+Si le fichier `.env` racine définit déjà une valeur non vide pour `DEER_FLOW_INTERNAL_AUTH_TOKEN`, utilisez-la dans le terminal client.
 
-**Configuration Feishu / Lark**
-
-1. Créez une application sur [Feishu Open Platform](https://open.feishu.cn/) → activez la capacité **Bot**.
-2. Ajoutez les permissions : `im:message`, `im:message.p2p_msg:readonly`, `im:resource`.
-3. Dans **Events**, abonnez-vous à `im.message.receive_v1` et sélectionnez le mode **Long Connection**.
-4. Copiez l'App ID et l'App Secret. Définissez `FEISHU_APP_ID` et `FEISHU_APP_SECRET` dans `.env` et activez le canal dans `config.yaml`.
-
-**Configuration WeChat**
-
-1. Activez le canal `wechat` dans `config.yaml`.
-2. Soit définissez `WECHAT_BOT_TOKEN` dans `.env`, soit mettez `qrcode_login_enabled: true` pour le bootstrap QR à la première utilisation.
-3. Quand `bot_token` est absent et que le bootstrap QR est activé, surveillez les logs du backend pour le contenu du QR renvoyé par iLink et complétez le flux de binding.
-4. Une fois le flux QR réussi, DeerFlow persiste le token acquis sous `state_dir` pour les redémarrages ultérieurs.
-5. Pour les déploiements Docker Compose, gardez `state_dir` sur un volume persistant afin que le curseur `get_updates_buf` et l'état d'auth sauvegardé survivent aux redémarrages.
-
-**Configuration WeCom**
-
-1. Créez un bot sur la plateforme WeCom AI Bot et obtenez le `bot_id` et le `bot_secret`.
-2. Activez `channels.wecom` dans `config.yaml` et renseignez `bot_id` / `bot_secret`.
-3. Définissez `WECOM_BOT_ID` et `WECOM_BOT_SECRET` dans `.env`.
-4. Assurez-vous que les dépendances du backend incluent `wecom-aibot-python-sdk`. Le canal utilise une connexion longue WebSocket et ne nécessite pas d'URL de callback publique.
-5. L'intégration actuelle prend en charge les messages entrants texte, image et fichier. Les images/fichiers finaux générés par l'agent sont aussi renvoyés dans la conversation WeCom.
-
-**Configuration DingTalk**
-
-1. Créez une application sur [DingTalk Open Platform](https://open.dingtalk.com/) et activez la capacité **Robot**.
-2. Dans la page de configuration du robot, définissez le mode de réception des messages sur **Stream**.
-3. Copiez le `Client ID` et le `Client Secret`. Définissez `DINGTALK_CLIENT_ID` et `DINGTALK_CLIENT_SECRET` dans `.env` et activez le canal dans `config.yaml`.
-4. *(Optionnel)* Pour activer les réponses en streaming AI Card (effet machine à écrire), créez un modèle **AI Card** sur la [plateforme de cartes DingTalk](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), puis définissez `card_template_id` dans `config.yaml` avec l'ID du modèle. Vous devez également demander les permissions `Card.Streaming.Write` et `Card.Instance.Write`.
-
-**Commandes**
-
-Une fois un canal connecté, vous pouvez interagir avec DeerFlow directement depuis le chat :
-
-| Commande | Description |
-|---------|-------------|
-| `/new` | Démarrer une nouvelle conversation |
-| `/status` | Afficher les infos du thread en cours |
-| `/models` | Lister les modèles disponibles |
-| `/memory` | Consulter la mémoire |
-| `/help` | Afficher l'aide |
-
-> Les messages sans préfixe de commande sont traités comme du chat classique — DeerFlow crée un thread et répond de manière conversationnelle.
-
-#### Traçage LangSmith
-
-DeerFlow intègre nativement [LangSmith](https://smith.langchain.com) pour l'observabilité. Une fois activé, tous les appels LLM, les exécutions d'agents et les exécutions d'outils sont tracés et visibles dans le tableau de bord LangSmith.
-
-Ajoutez les lignes suivantes à votre fichier `.env` :
+Supprimez ou commentez une affectation vide, car le chargement de `.env` remplace l’export shell ci-dessous. Sinon, générez un token avant de démarrer HartMesh :
 
 ```bash
-LANGSMITH_TRACING=true
-LANGSMITH_ENDPOINT=https://api.smith.langchain.com
-LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
-LANGSMITH_PROJECT=xxx
+export DEER_FLOW_INTERNAL_AUTH_TOKEN="$(
+  uv run --project backend python -c 'import secrets; print(secrets.token_urlsafe(32))'
+)"
+printf 'Copy this token into the trusted client terminal:\n%s\n' \
+  "$DEER_FLOW_INTERNAL_AUTH_TOKEN"
+make dev
 ```
 
-#### Traçage Langfuse
-
-DeerFlow prend également en charge l'observabilité via [Langfuse](https://langfuse.com) pour les exécutions compatibles LangChain.
-
-Ajoutez les lignes suivantes à votre fichier `.env` :
+Dans un second terminal, exportez le token affiché et exécutez ce client basé uniquement sur la bibliothèque standard :
 
 ```bash
-LANGFUSE_TRACING=true
-LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
-LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
-LANGFUSE_BASE_URL=https://cloud.langfuse.com
+export DEER_FLOW_INTERNAL_AUTH_TOKEN='<paste the generated token>'
+
+uv run --project backend python - <<'PY'
+import json
+import os
+from urllib.request import Request, urlopen
+from uuid import uuid4
+
+BASE = "http://localhost:2026/api/runtime/v1"
+HEADERS = {
+    "Content-Type": "application/json",
+    "X-DeerFlow-Internal-Token": os.environ["DEER_FLOW_INTERNAL_AUTH_TOKEN"],
+}
+
+
+def call(method, path, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    request = Request(BASE + path, data=data, headers=HEADERS, method=method)
+    with urlopen(request) as response:
+        return response.status, json.load(response)
+
+
+evaluation_id = uuid4().hex
+intent = {
+    "api_version": "deerflow.runtime/v1",
+    "kind": "invocation.ensure",
+    "external_key": f"readme-evaluation-{evaluation_id}",
+    "thread_id": f"readme-evaluation-{evaluation_id}",
+    "agent_hint": None,
+    "input": {
+        "api_version": "deerflow.runtime/v1",
+        "kind": "invocation.input.graph",
+        "value": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Explain replay-safe admission in one sentence.",
+                }
+            ]
+        },
+    },
+    "options": {
+        "api_version": "deerflow.runtime/v1",
+        "kind": "invocation.options",
+        "model_name": None,
+        "thinking_enabled": None,
+        "multitask_strategy": "reject",
+        "checkpoint_id": None,
+        "interrupt_before": None,
+        "interrupt_after": None,
+    },
+}
+
+first_status, first = call("POST", "/invocations/ensure", intent)
+replay_status, replay = call("POST", "/invocations/ensure", intent)
+assert first["run_id"] == replay["run_id"]
+print("ensure:", first_status, first["disposition"], first["run_id"])
+print("replay:", replay_status, replay["disposition"], replay["run_id"])
+
+run_id = first["run_id"]
+_, observation = call("GET", f"/invocations/{run_id}?limit=100")
+print("observe:", observation["status"], observation["state_version"])
+PY
 ```
 
-Si vous utilisez une instance Langfuse auto-hébergée, définissez `LANGFUSE_BASE_URL` sur l'URL de votre déploiement.
+Une clé neuve renvoie `201 created` ; son rejeu identique renvoie `200 known` avec le même `run_id`. Modifier le message tout en conservant la clé produit un `409 conflict` typé au lieu de lancer un travail différent sous cette clé.
 
-**Champs de corrélation des traces.** Chaque exécution d'agent est annotée avec les attributs de trace réservés de Langfuse afin que les pages Sessions et Users se remplissent automatiquement :
+Cet exemple authentifie le service intégré `gateway-internal` et omet volontairement la délégation humaine. N’exposez jamais le token interne à un navigateur ou à un client non fiable.
 
-- `session_id` = `thread_id` de LangGraph — regroupe toutes les traces d'une même conversation
-- `user_id` = utilisateur effectif issu de `get_effective_user_id()` (revient à `default` en mode sans authentification)
-- `trace_name` = assistant id (par défaut `lead-agent`)
-- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (omis lorsqu'ils ne sont pas définis)
-- `metadata.deerflow_trace_id` = id de corrélation de requête DeerFlow, identique à `X-Trace-Id` lorsque la corrélation de trace des requêtes est activée
+La délégation de propriétaire propre au runtime revérifie `X-DeerFlow-Owner-User-Id` par rapport à un utilisateur local existant.
 
-Ces champs sont injectés dans `RunnableConfig.metadata` à la racine de l'invocation du graphe, à la fois pour le chemin gateway (`runtime/runs/worker.py::run_agent`) et le chemin embarqué (`client.py::DeerFlowClient.stream`), de sorte que tout callback compatible LangChain puisse les lire. Définissez `DEER_FLOW_ENV` (ou `ENVIRONMENT`) pour étiqueter les traces par environnement de déploiement.
+Consultez la [projection du principal](backend/app/gateway/services.py) et les [tests d’identité](backend/tests/test_invocation_identity_separation.py).
 
-#### Utiliser les deux fournisseurs
+Pour les DTO, la pagination par curseur, les échecs typés et l’annulation avec fencing, consultez le [contrat runtime](backend/packages/runtime-api/README.md) et la [référence HTTP](backend/docs/API.md#durable-invocation-runtime-api).
 
-Si LangSmith et Langfuse sont tous deux activés, DeerFlow attache les deux callbacks de traçage et rapporte la même activité de modèle aux deux systèmes.
+Une réponse de clarification démarre une **nouvelle invocation sur le même thread DeerFlow**.
 
-Si un fournisseur est explicitement activé mais qu'il manque les identifiants requis, ou si son callback échoue à s'initialiser, DeerFlow échoue immédiatement (fail fast) lors de l'initialisation du traçage à la création du modèle, et le message d'erreur indique le fournisseur à l'origine de l'échec.
-
-Pour les déploiements Docker, le traçage est désactivé par défaut. Définissez `LANGSMITH_TRACING=true` et `LANGSMITH_API_KEY` dans votre `.env` pour l'activer.
-
-## Du Deep Research au Super Agent Harness
-
-DeerFlow a démarré comme un framework de Deep Research — et la communauté s'en est emparée. Depuis le lancement, les développeurs l'ont poussé bien au-delà de la recherche : construction de pipelines de données, génération de présentations, mise en place de dashboards, automatisation de workflows de contenu. Des usages qu'on n'avait jamais anticipés.
-
-Ça nous a révélé quelque chose d'important : DeerFlow n'était pas qu'un simple outil de recherche. C'était un **harness** — un runtime qui donne aux agents l'infrastructure nécessaire pour vraiment accomplir du travail.
-
-On l'a donc reconstruit de zéro.
-
-DeerFlow 2.0 n'est plus un framework à assembler soi-même. C'est un super agent harness — clé en main et entièrement extensible. Construit sur LangGraph et LangChain, il embarque tout ce dont un agent a besoin out of the box : un système de fichiers, de la mémoire, des skills, une exécution sandboxée, et la capacité de planifier et de lancer des sub-agents pour les tâches complexes et multi-étapes.
-
-Utilisez-le tel quel. Ou démontez-le et faites-en le vôtre.
-
-## Fonctionnalités principales
-
-### Skills et outils
-
-Les skills sont ce qui permet à DeerFlow de faire *pratiquement n'importe quoi*.
-
-Un Agent Skill standard est un module de capacité structuré — un fichier Markdown qui définit un workflow, des bonnes pratiques et des références vers des ressources associées. DeerFlow est livré avec des skills intégrés pour la recherche, la génération de rapports, la création de présentations, les pages web, la génération d'images et de vidéos, et bien plus. Mais la vraie force réside dans l'extensibilité : ajoutez vos propres skills, remplacez ceux fournis, ou combinez-les en workflows composites.
-
-Les skills sont chargés progressivement — uniquement quand la tâche le nécessite, pas tous en même temps. Ça permet de garder la fenêtre de contexte légère et de bien fonctionner même avec des modèles sensibles au nombre de tokens.
-
-Quand vous installez des archives `.skill` via le Gateway, DeerFlow accepte les métadonnées frontmatter optionnelles standard comme `version`, `author` et `compatibility`, plutôt que de rejeter des skills externes par ailleurs valides.
-
-Les outils suivent la même philosophie. DeerFlow est livré avec un ensemble d'outils de base — recherche web, fetch de pages web, opérations sur les fichiers, exécution bash — et supporte les outils custom via des serveurs MCP et des fonctions Python. Remplacez n'importe quoi. Ajoutez n'importe quoi.
-
-Les suggestions de suivi générées par le Gateway normalisent désormais aussi bien la sortie texte brut du modèle que le contenu riche au format bloc/liste avant de parser la réponse en tableau JSON, de sorte que les wrappers de contenu propres à chaque provider ne suppriment plus silencieusement les suggestions.
-
-```
-# Paths inside the sandbox container
-/mnt/skills/public
-├── research/SKILL.md
-├── report-generation/SKILL.md
-├── slide-creation/SKILL.md
-├── web-page/SKILL.md
-└── image-generation/SKILL.md
-
-/mnt/skills/custom
-└── your-custom-skill/SKILL.md      ← yours
-```
-
-#### Intégration Claude Code
-
-Le skill `claude-to-deerflow` vous permet d'interagir avec une instance DeerFlow en cours d'exécution directement depuis [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Envoyez des tâches de recherche, vérifiez le statut, gérez les threads — le tout sans quitter le terminal.
-
-**Installer le skill** :
+À la fin de l’évaluation, arrêtez HartMesh depuis la racine :
 
 ```bash
-npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
+make stop
 ```
 
-Assurez-vous ensuite que DeerFlow tourne (par défaut sur `http://localhost:2026`) et utilisez la commande `/claude-to-deerflow` dans Claude Code.
+## Valeur opérationnelle
 
-**Ce que vous pouvez faire** :
-- Envoyer des messages à DeerFlow et recevoir des réponses en streaming
-- Choisir le mode d'exécution : flash (rapide), standard, pro (planification), ultra (sub-agents)
-- Vérifier la santé de DeerFlow, lister les modèles/skills/agents
-- Gérer les threads et l'historique des conversations
-- Upload des fichiers pour analyse
+### Admission sûre en cas de rejeu
 
-**Variables d'environnement** (optionnel, pour des endpoints custom) :
+Une clé externe stable et l’intention canonique complète convergent vers une invocation conservée. L’intention identique renvoie cette ligne dans tout état ; une modification provoque un conflit, et seul le créateur attache un worker.
 
-```bash
-DEERFLOW_URL=http://localhost:2026            # Unified proxy base URL
-DEERFLOW_GATEWAY_URL=http://localhost:2026    # Gateway API
-DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
-```
+La garantie dure tant que la ligne de run ordinaire est conservée. Elle ne déduplique pas les effets externes arbitraires.
 
-Voir [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) pour la référence API complète.
+Preuves : [`idempotency.py`](backend/app/runtime/idempotency.py) et [`test_invocation_idempotency.py`](backend/tests/test_invocation_idempotency.py).
 
-### Objectifs de session (Session Goals)
+### Une frontière d’admission
 
-Utilisez `/goal <condition de complétion>` pour attacher une condition de complétion active au thread courant. Le goal est un état de portée thread, pas une activation de skill — il reste actif entre les tours jusqu'à ce que DeerFlow détermine qu'il a été satisfait, ou jusqu'à ce que vous le supprimiez.
+Les routes HTTP create, stream et wait, les tâches, les canaux natifs authentifiés et les services embarqués entrent dans le même `InvocationRuntime`. Authentification, acquittement et durabilité restent propres à la source.
 
-Commandes prises en charge :
+Preuves : [`invocation.py`](backend/app/runtime/invocation.py) et [matrice de clôture](backend/docs/INVOCATION_RUNTIME.md#concern-to-evidence-closure-matrix).
 
-```text
-/goal finish the implementation and make all tests pass
-/goal              # afficher le goal actif
-/goal clear        # le supprimer
-```
+### Matériaux d’exécution acceptés et figés
 
-Après chaque exécution menée par la Gateway, DeerFlow évalue la conversation visible par rapport au goal actif à l'aide d'un modèle évaluateur non-thinking. L'évaluateur doit renvoyer un blocker typé (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait` ou `goal_not_met_yet`) accompagné de preuves visibles. DeerFlow n'injecte une hidden continuation que si le dernier tour assistant est durablement checkpointé, que le blocker est `goal_not_met_yet`, que le thread n'a pas changé durant l'évaluation et que le disjoncteur de non-progression n'a pas déclenché. Le plafond de sécurité est de 8 hidden continuations par défaut, et les évaluations identiques de non-progression s'arrêtent après 2 tentatives répétées. `/goal clear` ainsi que toute nouvelle saisie utilisateur ont priorité sur les continuations en file d'attente. Lorsque le goal est satisfait, DeerFlow le supprime automatiquement et publie l'état mis à jour du thread.
+L’admission fige la révision de l’agent, la génération d’extensions, le contexte fiable, les preuves de contraintes, les packages de skills effectifs et le profil d’exécution/projection.
 
-Le Web UI affiche le goal actif au-dessus de la zone de saisie. La même commande est disponible depuis le TUI et les canaux IM pris en charge. Dans le Web UI et les canaux IM pris en charge, définir `/goal <condition de complétion>` lance aussi une exécution avec la condition comme tâche ; les commandes de statut et de suppression ne gèrent que l'état du goal lui-même.
+Un même arbre immuable de skills acceptés alimente les prompts lead et subagent, l’activation, la politique et les lectures sandbox.
 
-### Sub-Agents
+Les skills acceptés non vides utilisent un profil accepted-only pris en charge : AIO local adossé à un conteneur ou Kubernetes avec projection `rwx_verified_copy_v2` protégée par fencing.
 
-Les tâches complexes tiennent rarement en une seule passe. DeerFlow les décompose.
+`LocalSandboxProvider`, E2B, les providers custom et autres profils distants restent empty-only. Les preuves de projection hors ligne n’établissent pas une qualification inter-nœuds réelle.
 
-L'agent principal peut lancer des sub-agents à la volée — chacun avec son propre contexte délimité, ses outils et ses conditions d'arrêt. Les sub-agents s'exécutent en parallèle quand c'est possible, remontent des résultats structurés, et l'agent principal synthétise le tout en une sortie cohérente.
+Preuves : sources d’exécution acceptée dans [`runtime/`](backend/packages/harness/deerflow/runtime/) — `accepted_invocation.py`, `agent_revision.py` et `skill_snapshot.py`.
 
-C'est comme ça que DeerFlow gère les tâches qui prennent de quelques minutes à plusieurs heures : une tâche de recherche peut se déployer en une dizaine de sub-agents, chacun explorant un angle différent, puis converger vers un seul rapport — ou un site web — ou un jeu de slides avec des visuels générés. Un seul harness, de nombreuses mains.
+Preuves distantes : [`skill_projection.py`](backend/packages/harness/deerflow/runtime/skill_projection.py) et [tests de projection](backend/tests/test_kubernetes_accepted_skill_projection.py).
 
-### Sandbox et système de fichiers
+### Une politique qui suit l’exécution
 
-DeerFlow ne se contente pas de *parler* de faire les choses. Il dispose de son propre ordinateur.
+HartMesh maintient distincts le sujet effectif, le service agissant et les preuves de source.
 
-Chaque tâche s'exécute dans un conteneur Docker isolé avec un système de fichiers complet — skills, workspace, uploads, outputs. L'agent lit, écrit et édite des fichiers. Il exécute des commandes bash et du code. Il visualise des images. Le tout sandboxé, le tout auditable, zéro contamination entre les sessions.
+Les services authentifiés restent limités au propriétaire, sauf droit d’observation fini. Ce droit borne la découverte ; l’autorisation courante décide toujours des données retournées et l’annulation n’en hérite pas.
 
-C'est la différence entre un chatbot avec accès à des outils et un agent doté d'un véritable environnement d'exécution.
+Quand un opérateur active l’autorisation des opérations d’invocation ou configure des contraintes v2 faisant autorité, ces opérations nommées échouent fermées. Les capacités requises et la préparation MCP suivent la même règle.
 
-```
-# Paths inside the sandbox container
-/mnt/user-data/
-├── uploads/          ← your files
-├── workspace/        ← agents' working directory
-└── outputs/          ← final deliverables
-```
+L’autorisation et le contrôle des opérations d’invocation sont désactivés par défaut, et `required_capabilities` vaut une liste vide.
 
-### Context Engineering
+Le middleware d’observation optionnel et l’ancien intercepteur MCP modifiable par API restent fail-open ou avertissent puis ignorent.
 
-**Contexte isolé des Sub-Agents** : chaque sub-agent s'exécute dans son propre contexte isolé. Il ne peut voir ni le contexte de l'agent principal, ni celui des autres sub-agents. L'objectif est de garantir que chaque sub-agent reste concentré sur sa tâche sans être parasité par des informations non pertinentes.
+Les contrôles de propriétaire et de route restent actifs, mais HartMesh ne fournit pas une politique d’organisation universelle et ne garantit pas les outils tiers arbitraires.
 
-**Résumé** : au sein d'une session, DeerFlow gère le contexte de manière agressive — en résumant les sous-tâches terminées, en déchargeant les résultats intermédiaires vers le système de fichiers, en compressant ce qui n'est plus immédiatement pertinent. Ça lui permet de rester efficace sur des tâches longues et multi-étapes sans faire exploser la fenêtre de contexte.
+Preuves : [contrat d’extension](backend/packages/extension-api/README.md), [autorisation](backend/app/runtime/authorization.py), [contraintes](backend/app/runtime/constraints.py) et [visibilité](backend/app/runtime/visibility.py).
 
-### Mémoire à long terme
+### Intégration runtime portable
 
-La plupart des agents oublient tout dès qu'une conversation se termine. DeerFlow, lui, se souvient.
+`deerflow-runtime-api`, limité à la bibliothèque standard, définit des enregistrements stricts et immuables et un `DurableInvocationPort` : `ensure`, `observe` pour invocation/contexte, `control` avec fencing et `capabilities`.
 
-D'une session à l'autre, DeerFlow construit une mémoire persistante de votre profil, de vos préférences et de vos connaissances accumulées. Plus vous l'utilisez, mieux il vous connaît — votre style d'écriture, votre stack technique, vos workflows récurrents. La mémoire est stockée localement et reste sous votre contrôle.
+HTTP authentifié et l’adapter embarqué dans l’application partagent ces enregistrements et une suite de conformité. Le `DeerFlowClient` synchrone n’est pas un adapter durable ; v1 n’offre ni broker push, ni export, ni retrait de contexte.
 
-Les mises à jour de la mémoire ignorent désormais les entrées de faits en double au moment de l'application, de sorte que les préférences et le contexte répétés ne s'accumulent plus indéfiniment entre les sessions.
+Preuves : [package runtime](backend/packages/runtime-api/README.md) et [conformité des transports](backend/tests/test_runtime_api_conformance.py).
 
-## Modèles recommandés
+### Intégrité transactionnelle du cycle de vie
 
-DeerFlow est agnostique en termes de modèle — il fonctionne avec n'importe quel LLM implémentant l'API compatible OpenAI. Cela dit, il offre de meilleures performances avec des modèles qui supportent :
+Avec le store SQL, changement d’état et événement sûr sont validés atomiquement sous une version. L’observation bornée utilise un snapshot faisant autorité et renvoie des résultats typés pour un historique élagué, futur ou incohérent.
 
-- **De longues fenêtres de contexte** (100k+ tokens) pour la recherche approfondie et les tâches multi-étapes
-- **Des capacités de raisonnement** pour la planification adaptative et la décomposition de tâches complexes
-- **Des entrées multimodales** pour la compréhension d'images et de vidéos
-- **Un usage fiable des outils (tool use)** pour des appels de fonctions et des sorties structurées fiables
+Le repeatable-read PostgreSQL et le comportement inter-sessions ne deviennent des affirmations de version que si le contrôle PostgreSQL externe réussit.
 
-## Client Python intégré
+Preuves : [`sql.py`](backend/packages/harness/deerflow/persistence/run/sql.py) et [`0017_lifecycle_integrity.py`](backend/packages/harness/deerflow/persistence/migrations/versions/0017_lifecycle_integrity.py).
 
-DeerFlow peut être utilisé comme bibliothèque Python intégrée sans lancer l'ensemble des services HTTP. Le `DeerFlowClient` fournit un accès direct in-process à toutes les capacités d'agent et de Gateway, en retournant les mêmes schémas de réponse que l'API HTTP Gateway. Le HTTP Gateway expose également `DELETE /api/threads/{thread_id}` pour supprimer les données de thread locales gérées par DeerFlow après la suppression du thread LangGraph :
+Tests contractuels : [store atomique](backend/tests/test_invocation_lifecycle_store.py) et [requêtes de cycle de vie typées](backend/tests/test_invocation_lifecycle_query.py).
 
-```python
-from deerflow.client import DeerFlowClient
+### Entrée GitHub signée et durable
 
-client = DeerFlowClient()
+Avec vérification HMAC et reçus PostgreSQL, l’entrée GitHub signée persiste des liaisons de source bornées avant acquittement.
 
-# Chat
-response = client.chat("Analyze this paper for me", thread_id="my-thread")
+Les leases et fences peuvent récupérer un lease expiré après interruption, préserver le FIFO d’un thread occupé et converger vers la même invocation acceptée.
 
-# Streaming (LangGraph SSE protocol: values, messages-tuple, end)
-for event in client.stream("hello"):
-    if event.type == "messages-tuple" and event.data.get("type") == "ai":
-        print(event.data["content"])
+Cette affirmation se limite à l’entrée GitHub signée vérifiée avec PostgreSQL ; les autres canaux et chemins locaux restent best-effort.
 
-# Configuration & management — returns Gateway-aligned dicts
-models = client.list_models()        # {"models": [...]}
-skills = client.list_skills()        # {"skills": [...]}
-client.update_skill("web-search", enabled=True)
-client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
-client.set_goal("thread-1", "finish the implementation and make all tests pass")
-client.get_goal("thread-1")       # {"goal": {...}} or {"goal": None}
-client.clear_goal("thread-1")
-```
+Preuves : [store de reçus](backend/app/channels/inbound_receipts.py) et [tests des reçus](backend/tests/test_durable_inbound_receipts.py).
 
-Toutes les méthodes retournant des dicts sont validées en CI contre les modèles de réponse Pydantic du Gateway (`TestGatewayConformance`), garantissant que le client intégré reste synchronisé avec les schémas de l'API HTTP. Voir `backend/packages/harness/deerflow/client.py` pour la documentation API complète.
+## Limites de déploiement et de durabilité
 
-## Tâches planifiées (Scheduled Tasks)
+Lisez ces limites avant de suivre un guide de déploiement :
 
-DeerFlow inclut désormais un MVP de tâches planifiées (scheduled-task) de premier niveau dans le workspace.
+- La topologie validée comporte exactement un replica Gateway.
+- Aucune HA active-active du Gateway ou du scheduler, ni aucun rollout sans interruption, n’est revendiqué.
+- L’admission sûre en cas de rejeu n’est pas l’exécution universelle exactement une fois des effets externes.
+- Avec un stockage d’invocations durable, la récupération après perte de processus conserve les preuves terminales faisant autorité ; elle ne reprend pas chaque appel graph ou outil.
+- Memory est process-local, SQLite rend l’état d’invocation durable sur un nœud, PostgreSQL est le store shared-durable.
+- L’entrée des canaux natifs avec Memory ou SQLite reste best-effort.
+- L’entrée native durable désigne actuellement la livraison GitHub signée vérifiée avec PostgreSQL.
+- Les skills acceptés non vides nécessitent un chemin sandbox accepted-only pris en charge.
+- La qualification Kubernetes/PostgreSQL exige une preuve exacte et réussie pour l’image, le chart, la configuration, le schéma, la topologie, le périmètre et les scénarios nommés.
+- Un contrôle optionnel collecté ou ignoré ne constitue pas une réussite.
 
-Capacités actuelles du MVP :
+Pour le snapshot audité, les contrôles externes PostgreSQL et Kubernetes n’étaient pas configurés et aucun artefact exact de qualification réussie n’était présent.
 
-- Gérer les tâches depuis `/workspace/scheduled-tasks`
-- Choisir si chaque tâche planifiée réutilise un thread ou crée un nouveau thread à chaque exécution
-- Prendre en charge les planifications `once` et `cron`
-- Exécuter les tâches planifiées en arrière-plan comme des exécutions DeerFlow non interactives (`ask_clarification` n'y est pas exposé)
-- Utiliser le comportement de chevauchement `skip` pour les exécutions cron dues qui entrent en collision avec une exécution active sur le même thread réutilisé
-- Mettre en pause, reprendre, déclencher, inspecter l'historique et supprimer les tâches
-- Exécuter le travail planifié via le cycle de vie d'exécution normal de DeerFlow
+Ce sont des contrôles de publication non franchis, pas la preuve d’une absence d’implémentation.
 
-Limites actuelles du MVP :
+| Mode | Limite rapportée |
+| --- | --- |
+| `local_development` | Autorise l’état process-local sans prétention de durabilité. |
+| `durable_production` | Refuse l’état d’invocation process-local au démarrage et à la readiness. |
+| Helm `local_evaluation` | Valeurs d’évaluation à un Gateway ; explicitement non qualifié. |
+| Helm `durable_one_replica` | Exige des images épinglées par digest, PostgreSQL/état partagé, des probes et délais d’arrêt sûrs ; reste non qualifié sans preuve exacte réussie. |
 
-- Pas encore d'outil `schedule_task` créable depuis la conversation
-- Pas de tâches de notification en texte seul
-- Pas de cibles de dispatch canal ou GitHub
-- Pas de type de planification `interval` dans cette première version
+Le rapport administrateur sépare niveau de persistance, santé, provenance et qualification.
 
-Activez le polling en arrière-plan avec `config.yaml -> scheduler.enabled`. Le déclenchement manuel utilise la même ressource scheduled-task et le même chemin d'exécution.
+Une référence fournie reste `operator_asserted` ; seul le vérificateur hors ligne peut établir `external_evidence_verified` pour une preuve exacte. Les capabilities portables ne contiennent aucune affirmation de déploiement.
 
-## Atelier terminal (TUI)
+`GET /health` indique la vie du processus. `GET /ready` donne un signal borné ready/not-ready. Les administrateurs consultent persistance et qualification via `GET /api/runtime/v1/deployment`.
 
-`deerflow` est un atelier natif terminal pour ceux qui vivent dans le shell. Il s'exécute de manière **intégrée** sur `DeerFlowClient` — pas besoin de Gateway, de frontend, de nginx ou de Docker — tout en honorant les mêmes `config.yaml`, checkpointer, skills, mémoire, MCP et sandbox que le reste de DeerFlow.
+Preuves : [rapport de déploiement](backend/app/runtime/deployment.py), [vérification de qualification](backend/scripts/verify_qualification_evidence.py) et [contrat Helm](deploy/helm/deer-flow/README.md).
 
-![DeerFlow TUI](docs/tui/tui-preview.svg)
+Avec un stockage d’invocations durable, si une invocation active disparaît avec son processus, la récupération enregistre une preuve terminale faisant autorité comme `stop_reason=orphan_recovered`.
 
-```bash
-uv pip install 'deerflow-harness[tui]'        # dépendance optionnelle 'textual'
+Un rejeu identique renvoie ce run terminal conservé. Poursuivre l’intention produit exige une nouvelle invocation sous la nouvelle génération du processus.
 
-deerflow                                      # lancer l'UI terminal (TTY requis)
-deerflow --continue                           # reprendre le thread le plus récent
-deerflow --resume THREAD                      # reprendre un thread par id
-deerflow --print "summarize this repo"        # réponse one-shot headless vers stdout
-deerflow --json  "hello"                       # StreamEvents séparés par saut de ligne en mode headless
-```
+Consultez [cycle de vie faisant autorité et récupération](backend/docs/INVOCATION_RUNTIME.md#authoritative-lifecycle-and-failure-recovery).
 
-Une surface de chat pilotée au clavier avec un transcript en streaming (réponses rendues en Markdown), des cartes d'activité d'outils compactes, une palette de commandes slash `/`, la gestion des goal via `/goal`, des sélecteurs `/model` et `/threads`, l'historique de saisie, et l'interruption via `Esc` / `Ctrl+C`. Les sessions ouvertes dans le TUI apparaissent aussi dans la barre latérale du Web UI — elles écrivent dans le magasin de threads partagé sous l'utilisateur local par défaut, donc le terminal et le web restent synchronisés **sans lancer la Gateway**.
+### Limite de sécurité
 
-Voir [backend/docs/TUI.md](backend/docs/TUI.md) pour le guide complet.
+Les stacks Compose ne publient que nginx et le lient par défaut à `127.0.0.1:2026`. En local, `make dev` écoute au contraire sur toutes les interfaces pour `8001`, `3000` et `2026` ; ne lui attribuez pas la même protection de ports publiés.
+
+Les agents HartMesh exécutent des commandes et accèdent aux fichiers permis par les outils. L’isolation dépend du provider : `LocalSandboxProvider` partage l’identité hôte du Gateway et n’est pas une frontière système.
+
+La classification des commandes et la réécriture des chemins sont une défense en profondeur. Utilisez un provider isolé pris en charge pour du travail non fiable.
+
+Terminez la création du premier admin avant de rendre le service accessible au-delà du loopback.
+
+Les administrateurs peuvent configurer des processus MCP stdio et des plugins Python de confiance ; leur accès équivaut donc à l’exécution de code.
+
+Consultez le [guide Helm](deploy/helm/deer-flow/README.md) pour le contrat à un Gateway, la projection des skills acceptés, les secrets et la procédure de qualification exacte.
+
+## Modèle d’extension
+
+HartMesh préserve le modèle DeerFlow de skills, outils, serveurs MCP, agents personnalisés et middlewares.
+
+Le package indépendant de l’hôte [`deerflow-extension-api`](backend/packages/extension-api/README.md) ajoute des contrats typés pour l’autorisation, l’identité et la contribution au contexte fiable.
+
+Il couvre aussi les contraintes restrictives, la santé des capacités et la préparation MCP requise.
+
+Les plugins Python sont du code opérateur fiable, chargé au démarrage depuis `plugins:` dans `config.yaml`. Cette liste reste hors de `extensions_config.json`, modifiable par API et responsable des MCP et skills.
+
+Une invocation acceptée fige une génération d’extensions au démarrage. Les changements de skills affectent les admissions futures ; ceux des plugins exigent un redémarrage Gateway. Aucun ne modifie le travail déjà accepté.
+
+## Compatibilité, référence amont et statut de publication
+
+HartMesh préserve les namespaces `deerflow.*`, noms de packages, variables `DEER_FLOW_*`, identifiants Docker/Helm, chemins et surfaces compatibles du Gateway.
+
+La comparaison produit est la plage locale fixe `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`.
+
+Lors de l’audit du 2026-08-09, le snapshot `deerflow/main` examiné séparément était `e401ae2d7b8e4fc73fc82a1143c989c54f3f4de6`, avec un commit amont uniquement au-delà de la base partagée.
+
+Il s’agit de contexte, pas de la référence ci-dessus, et HartMesh ne revendique pas une supériorité permanente sur l’amont.
+
+Ce dépôt ne documente pas encore de cadence de synchronisation HartMesh, fenêtre de compatibilité API/configuration/base, durée de support, politique d’intégration des correctifs de sécurité ou politique de contribution amont.
+
+Ces hashes indiquent la provenance, pas une promesse de maintenance.
+
+Le graphe Alembic est linéaire dans ce checkout : `0011_mcp_tasks` → `0011_accepted_invocation` → migrations d’invocation jusqu’à `0018_inbound_receipt_failures`.
+
+Les opérateurs PostgreSQL doivent arrêter les écritures et sauvegarder avant un rollback ; consultez les migrations dans [backend/AGENTS.md](backend/AGENTS.md).
+
+Les sources de version indiquent `2.1.0`, mais aucun tag ne contient l’implémentation HartMesh auditée ; cette chaîne n’établit pas une version HartMesh.
+
+[RELEASING.md](RELEASING.md) décrit les mécanismes de tags DeerFlow hérités, pas un canal de publication HartMesh.
 
 ## Documentation
 
-- [Guide de contribution](CONTRIBUTING.md) - Mise en place de l'environnement de développement et workflow
-- [Guide de configuration](backend/docs/CONFIGURATION.md) - Instructions d'installation et de configuration
-- [Vue d'ensemble de l'architecture](backend/CLAUDE.md) - Détails de l'architecture technique
-- [Architecture backend](backend/README.md) - Architecture backend et référence API
+- [Runtime d’invocation durable](backend/docs/INVOCATION_RUNTIME.md) — garanties, preuves, récupération et périmètre différé
+- [API runtime](backend/packages/runtime-api/README.md) — DTO et `DurableInvocationPort`
+- [API Gateway](backend/docs/API.md) — comportement HTTP authentifié
+- [API d’extension](backend/packages/extension-api/README.md) — politiques et limites de confiance
+- [Déploiement Helm](deploy/helm/deer-flow/README.md) — modes à un Gateway et qualification
+- [Configuration](config.example.yaml) — paramètres opérateur
+- [Guide backend](backend/AGENTS.md) et [guide frontend](frontend/AGENTS.md) — architecture et tests
 
-## ⚠️ Avertissement de sécurité
+## Support et sécurité
 
-### Un déploiement inapproprié peut introduire des risques de sécurité
+Lancez les diagnostics locaux depuis la racine :
 
-DeerFlow dispose de capacités clés à hauts privilèges, notamment **l'exécution de commandes système, les opérations sur les ressources et l'invocation de logique métier**. Il est conçu par défaut pour être **déployé dans un environnement local de confiance (accessible uniquement via l'interface de loopback 127.0.0.1)**. Si vous déployez l'agent dans des environnements non fiables — tels que des réseaux LAN, des serveurs cloud publics ou d'autres environnements accessibles depuis plusieurs terminaux — sans mesures de sécurité strictes, cela peut introduire des risques, notamment :
+```bash
+make doctor
+make support-bundle
+```
 
-- **Invocation non autorisée** : les fonctionnalités de l'agent pourraient être découvertes par des tiers non autorisés ou des scanners malveillants, déclenchant des requêtes non autorisées en masse qui exécutent des opérations à haut risque (commandes système, lecture/écriture de fichiers), pouvant causer de graves conséquences.
-- **Risques juridiques et de conformité** : si l'agent est utilisé illégalement pour mener des cyberattaques, du vol de données ou d'autres activités illicites, cela peut entraîner des responsabilités juridiques et des risques de conformité.
+Relisez les éléments générés avant de les partager.
 
-### Recommandations de sécurité
+Ce dépôt ne documente pas encore de tracker, canal de publication ou voie privée de signalement de vulnérabilité propres à HartMesh.
 
-**Note : nous recommandons fortement de déployer DeerFlow dans un environnement réseau local de confiance.** Si vous avez besoin d'un déploiement multi-appareils ou multi-réseaux, vous devez mettre en place des mesures de sécurité strictes, par exemple :
+[CONTRIBUTING.md](CONTRIBUTING.md) et [SECURITY.md](SECURITY.md) conservent les destinations amont de ByteDance DeerFlow ; elles ne constituent pas un support HartMesh.
 
-- **Liste blanche d'IP** : utilisez `iptables`, ou déployez des pare-feux matériels / commutateurs avec ACL, pour **configurer des règles de liste blanche d'IP** et refuser l'accès à toutes les autres adresses IP.
-- **Passerelle d'authentification** : configurez un proxy inverse (ex. nginx) et **activez une authentification forte en amont**, bloquant tout accès non authentifié.
-- **Isolation réseau** : si possible, placez l'agent et les appareils de confiance dans le **même VLAN dédié**, isolé des autres équipements réseau.
-- **Restez informé** : continuez à suivre les mises à jour de sécurité du projet DeerFlow.
+Ne publiez pas d’identifiants, tokens, prompts privés, données client ou détails de vulnérabilité. Traitez tokens internes, secrets webhook, clés fournisseur et identifiants de base comme des secrets.
 
 ## Contribuer
 
-Les contributions sont les bienvenues ! Consultez [CONTRIBUTING.md](CONTRIBUTING.md) pour la mise en place de l'environnement de développement, le workflow et les conventions.
-
-La couverture de tests de régression inclut la détection du mode sandbox Docker et les tests de gestion du kubeconfig-path du provisioner dans `backend/tests/`.
+Pour le travail local, suivez les conventions héritées dans [CONTRIBUTING.md](CONTRIBUTING.md) et le fichier [AGENTS.md](AGENTS.md) le plus proche pour les commandes et la responsabilité des modules.
 
 ## Licence
 
-Ce projet est open source et disponible sous la [Licence MIT](./LICENSE).
+HartMesh conserve la [licence MIT](LICENSE) de DeerFlow et les mentions existantes.
 
 ## Remerciements
 
-DeerFlow est construit sur le travail remarquable de la communauté open source. Nous sommes profondément reconnaissants envers tous les projets et contributeurs dont les efforts ont rendu DeerFlow possible. Nous nous tenons véritablement sur les épaules de géants.
+HartMesh existe grâce à ByteDance et aux contributeurs DeerFlow qui ont publié le socle agentique qu’il étend. Merci aussi aux écosystèmes LangChain, LangGraph et agents open source.
 
-Nous tenons à exprimer notre sincère gratitude aux projets suivants pour leurs contributions inestimables :
-
-- **[LangChain](https://github.com/langchain-ai/langchain)** : leur excellent framework propulse nos interactions LLM et nos chaînes, permettant une intégration et des fonctionnalités fluides.
-- **[LangGraph](https://github.com/langchain-ai/langgraph)** : leur approche innovante de l'orchestration multi-agents a été déterminante pour les workflows sophistiqués de DeerFlow.
-
-Ces projets illustrent le pouvoir transformateur de la collaboration open source, et nous sommes fiers de bâtir sur leurs fondations.
-
-### Contributeurs principaux
-
-Un grand merci aux auteurs principaux de `DeerFlow`, dont la vision, la passion et le dévouement ont donné vie à ce projet :
-
-- **[Daniel Walnut](https://github.com/hetaoBackend/)**
-- **[Henry Li](https://github.com/magiccube/)**
-
-Votre engagement sans faille et votre expertise sont le moteur du succès de DeerFlow. Nous sommes honorés de vous avoir à la barre de cette aventure.
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.com/#bytedance/deer-flow&Date)
+Les affirmations opérationnelles, le statut de publication, la qualification et les limites de support de HartMesh relèvent de HartMesh.
