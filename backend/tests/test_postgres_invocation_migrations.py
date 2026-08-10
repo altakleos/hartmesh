@@ -213,6 +213,9 @@ _LEGACY_COLUMNS = (
 )
 
 _LEGACY_TOKEN_USAGE_BY_MODEL = '{"legacy-model":{"input_tokens":11,"output_tokens":13}}'
+_LEGACY_MCP_RESULT = '{"progress":25}'
+_LEGACY_MCP_INPUT_REQUIRED = '{"question":"continue?"}'
+_LEGACY_MCP_DRIVER_DATA = '{"cursor":"opaque"}'
 
 
 def _legacy_run_insert_statement() -> sa.TextClause:
@@ -243,13 +246,42 @@ def _legacy_run_insert_statement() -> sa.TextClause:
     )
 
 
-def test_legacy_run_fixture_binds_json_as_one_value() -> None:
+def _legacy_mcp_task_insert_statement() -> sa.TextClause:
+    return sa.text(
+        """
+        INSERT INTO mcp_tasks (
+            id, user_id, thread_id, run_id, tool_call_id,
+            server_name, driver_name, remote_task_id, task_name,
+            status, result, error, input_required, driver_data,
+            notification_status, next_poll_at, last_polled_at,
+            last_poll_error, poll_attempt_count,
+            consecutive_poll_error_count, lease_owner,
+            lease_expires_at, cancel_requested_at, completed_at,
+            created_at, updated_at
+        ) VALUES (
+            'legacy-mcp-task', 'legacy-owner', 'legacy-mcp-thread',
+            NULL, 'legacy-tool-call', 'legacy-server', 'legacy-driver',
+            'legacy-remote-task', 'Legacy MCP task', 'running',
+            CAST(:result AS json), NULL,
+            CAST(:input_required AS json),
+            CAST(:driver_data AS json), 'pending',
+            :next_poll_at, :last_polled_at, NULL, 3, 1,
+            'legacy-mcp-worker', :lease_expires_at, NULL, NULL,
+            :created_at, :created_at
+        )
+        """
+    )
+
+
+def test_legacy_json_fixtures_bind_documents_as_single_values() -> None:
     """JSON punctuation must not be parsed as SQLAlchemy bind names."""
 
-    parameters = _legacy_run_insert_statement().compile().params
-    assert "token_usage_by_model" in parameters
-    assert "11" not in parameters
-    assert "13" not in parameters
+    run_parameters = _legacy_run_insert_statement().compile().params
+    mcp_parameters = _legacy_mcp_task_insert_statement().compile().params
+    assert "token_usage_by_model" in run_parameters
+    assert {"result", "input_required", "driver_data"} <= mcp_parameters.keys()
+    assert {"11", "13", "25"}.isdisjoint(run_parameters)
+    assert {"11", "13", "25"}.isdisjoint(mcp_parameters)
 
 
 def _revision_at_least(revision: str, introduced_at: str) -> bool:
@@ -1042,31 +1074,11 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
                     },
                 )
             await connection.execute(
-                sa.text(
-                    """
-                    INSERT INTO mcp_tasks (
-                        id, user_id, thread_id, run_id, tool_call_id,
-                        server_name, driver_name, remote_task_id, task_name,
-                        status, result, error, input_required, driver_data,
-                        notification_status, next_poll_at, last_polled_at,
-                        last_poll_error, poll_attempt_count,
-                        consecutive_poll_error_count, lease_owner,
-                        lease_expires_at, cancel_requested_at, completed_at,
-                        created_at, updated_at
-                    ) VALUES (
-                        'legacy-mcp-task', 'legacy-owner', 'legacy-mcp-thread',
-                        NULL, 'legacy-tool-call', 'legacy-server', 'legacy-driver',
-                        'legacy-remote-task', 'Legacy MCP task', 'running',
-                        CAST('{"progress":25}' AS json), NULL,
-                        CAST('{"question":"continue?"}' AS json),
-                        CAST('{"cursor":"opaque"}' AS json), 'pending',
-                        :next_poll_at, :last_polled_at, NULL, 3, 1,
-                        'legacy-mcp-worker', :lease_expires_at, NULL, NULL,
-                        :created_at, :created_at
-                    )
-                    """
-                ),
+                _legacy_mcp_task_insert_statement(),
                 {
+                    "result": _LEGACY_MCP_RESULT,
+                    "input_required": _LEGACY_MCP_INPUT_REQUIRED,
+                    "driver_data": _LEGACY_MCP_DRIVER_DATA,
                     "next_poll_at": legacy_created_at + timedelta(minutes=1),
                     "last_polled_at": legacy_created_at,
                     "lease_expires_at": legacy_lease_expires_at,
