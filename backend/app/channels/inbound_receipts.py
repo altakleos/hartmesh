@@ -19,7 +19,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from sqlalchemy import and_, exists, or_, select, update
+from sqlalchemy import and_, case, exists, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import aliased
@@ -338,6 +338,7 @@ class InboundReceipt:
     state: InboundReceiptState
     fencing_token: int
     attempt_count: int
+    failure_count: int
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
     run_id: str | None = None
@@ -382,7 +383,7 @@ class InboundReceiptStore(Protocol):
         outcome_code: str,
     ) -> bool: ...
 
-    async def defer(
+    async def defer_contention(
         self,
         receipt_id: str,
         *,
@@ -391,6 +392,17 @@ class InboundReceiptStore(Protocol):
         delay_seconds: int,
         outcome_code: str,
     ) -> bool: ...
+
+    async def defer_failure(
+        self,
+        receipt_id: str,
+        *,
+        lease_owner: str,
+        fencing_token: int,
+        delay_seconds: int,
+        outcome_code: str,
+        max_failures: int,
+    ) -> InboundReceiptState | None: ...
 
     async def dead_letter(
         self,
@@ -411,6 +423,7 @@ def _row_to_receipt(row: InboundReceiptRow) -> InboundReceipt:
         state=InboundReceiptState(row.state),
         fencing_token=row.fencing_token,
         attempt_count=row.attempt_count,
+        failure_count=row.failure_count,
         lease_owner=row.lease_owner,
         lease_expires_at=row.lease_expires_at,
         run_id=row.run_id,
@@ -472,6 +485,7 @@ class SqlInboundReceiptStore:
                             state=InboundReceiptState.received.value,
                             fencing_token=0,
                             attempt_count=0,
+                            failure_count=0,
                             next_attempt_at=received_at,
                             received_at=received_at,
                             updated_at=now,
@@ -711,7 +725,7 @@ class SqlInboundReceiptStore:
                 )
                 return result.scalar_one_or_none() is not None
 
-    async def defer(
+    async def defer_contention(
         self,
         receipt_id: str,
         *,
@@ -720,7 +734,7 @@ class SqlInboundReceiptStore:
         delay_seconds: int,
         outcome_code: str,
     ) -> bool:
-        """Fence-release a busy/transient claim for bounded later recovery."""
+        """Fence-release schedulable contention without spending failure budget."""
 
         _bounded_text(receipt_id, field_name="receipt_id", max_bytes=36)
         _bounded_text(lease_owner, field_name="lease_owner", max_bytes=96)
@@ -751,6 +765,60 @@ class SqlInboundReceiptStore:
                     .returning(InboundReceiptRow.receipt_id)
                 )
                 return result.scalar_one_or_none() is not None
+
+    async def defer_failure(
+        self,
+        receipt_id: str,
+        *,
+        lease_owner: str,
+        fencing_token: int,
+        delay_seconds: int,
+        outcome_code: str,
+        max_failures: int,
+    ) -> InboundReceiptState | None:
+        """Atomically count a poison failure and defer or terminalize it."""
+
+        _bounded_text(receipt_id, field_name="receipt_id", max_bytes=36)
+        _bounded_text(lease_owner, field_name="lease_owner", max_bytes=96)
+        _bounded_text(outcome_code, field_name="outcome_code", max_bytes=64)
+        if not isinstance(fencing_token, int) or isinstance(fencing_token, bool) or fencing_token < 1:
+            raise ValueError("fencing_token must be a positive integer")
+        if not isinstance(delay_seconds, int) or isinstance(delay_seconds, bool) or not 1 <= delay_seconds <= 3600:
+            raise ValueError("delay_seconds must be between 1 and 3600")
+        if not isinstance(max_failures, int) or isinstance(max_failures, bool) or not 1 <= max_failures <= 100:
+            raise ValueError("max_failures must be between 1 and 100")
+        now = self._clock()
+        exhausted = InboundReceiptRow.failure_count + 1 >= max_failures
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    update(InboundReceiptRow)
+                    .where(
+                        InboundReceiptRow.receipt_id == receipt_id,
+                        InboundReceiptRow.state == InboundReceiptState.claimed.value,
+                        InboundReceiptRow.lease_owner == lease_owner,
+                        InboundReceiptRow.fencing_token == fencing_token,
+                    )
+                    .values(
+                        state=case(
+                            (exhausted, InboundReceiptState.dead_letter.value),
+                            else_=InboundReceiptState.deferred.value,
+                        ),
+                        failure_count=InboundReceiptRow.failure_count + 1,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        next_attempt_at=now + timedelta(seconds=delay_seconds),
+                        outcome_code=case(
+                            (exhausted, "attempts_exhausted"),
+                            else_=outcome_code,
+                        ),
+                        completed_at=case((exhausted, now), else_=None),
+                        updated_at=now,
+                    )
+                    .returning(InboundReceiptRow.state)
+                )
+                state = result.scalar_one_or_none()
+        return None if state is None else InboundReceiptState(state)
 
     async def dead_letter(
         self,
@@ -869,6 +937,7 @@ class InboundReceiptProcessor:
         lease_owner: str | None = None,
         lease_seconds: int = 30,
         retry_delay_seconds: int = 2,
+        contention_delay_seconds: int = 15,
         max_attempts: int = 8,
         recovery_page_size: int = 100,
         recovery_interval_seconds: float = 1.0,
@@ -881,6 +950,7 @@ class InboundReceiptProcessor:
         self._lease_owner = lease_owner or f"gateway-{uuid.uuid4()}"
         self._lease_seconds = lease_seconds
         self._retry_delay_seconds = retry_delay_seconds
+        self._contention_delay_seconds = contention_delay_seconds
         self._max_attempts = max_attempts
         self._recovery_page_size = recovery_page_size
         self._recovery_interval_seconds = recovery_interval_seconds
@@ -1006,7 +1076,13 @@ class InboundReceiptProcessor:
             await self._retry_or_dead_letter(claim, "processing_error")
             return
         if result.disposition is InboundProcessingDisposition.deferred:
-            await self._retry_or_dead_letter(claim, result.outcome_code)
+            await self.store.defer_contention(
+                claim.receipt_id,
+                lease_owner=self._lease_owner,
+                fencing_token=claim.fencing_token,
+                delay_seconds=self._contention_delay_seconds,
+                outcome_code=result.outcome_code,
+            )
             return
         if result.disposition is InboundProcessingDisposition.admitted:
             bound = await self.store.bind_admitted(
@@ -1029,24 +1105,17 @@ class InboundReceiptProcessor:
         claim: InboundReceipt,
         outcome_code: str,
     ) -> None:
-        if claim.attempt_count >= self._max_attempts:
-            await self.store.dead_letter(
-                claim.receipt_id,
-                lease_owner=self._lease_owner,
-                fencing_token=claim.fencing_token,
-                outcome_code="attempts_exhausted",
-            )
-            return
         delay = min(
-            self._retry_delay_seconds * (2 ** max(0, claim.attempt_count - 1)),
+            self._retry_delay_seconds * (2 ** max(0, claim.failure_count)),
             60,
         )
-        await self.store.defer(
+        await self.store.defer_failure(
             claim.receipt_id,
             lease_owner=self._lease_owner,
             fencing_token=claim.fencing_token,
             delay_seconds=delay,
             outcome_code=outcome_code,
+            max_failures=self._max_attempts,
         )
 
     async def _recovery_loop(self) -> None:

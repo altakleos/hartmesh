@@ -65,23 +65,27 @@ class TestValidProvider:
 
 
 class TestInvalidClassPath:
-    """Invalid class paths must raise with the path in the error."""
+    """Invalid class paths fail with bounded, correlated diagnostics."""
 
     def test_nonexistent_module_raises_with_path(self):
         config = AuthorizationConfig(
             enabled=True,
             provider=AuthorizationProviderConfig(use="nonexistent.module:FakeProvider"),
         )
-        with pytest.raises(ValueError, match="nonexistent.module"):
+        with pytest.raises(ValueError, match="authorization_provider_resolution_failed") as exc_info:
             resolve_authorization_provider(config)
+        assert "nonexistent.module" not in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
 
     def test_nonexistent_attribute_raises_with_path(self):
         config = AuthorizationConfig(
             enabled=True,
             provider=AuthorizationProviderConfig(use="deerflow.authz.rbac:NonexistentProvider"),
         )
-        with pytest.raises(ValueError, match="NonexistentProvider"):
+        with pytest.raises(ValueError, match="authorization_provider_resolution_failed") as exc_info:
             resolve_authorization_provider(config)
+        assert "NonexistentProvider" not in str(exc_info.value)
+        assert "correlation_id=" in str(exc_info.value)
 
 
 class TestProtocolConformance:
@@ -99,7 +103,7 @@ class TestProtocolConformance:
                 config={},
             ),
         )
-        with pytest.raises(ValueError, match="AuthorizationProvider Protocol"):
+        with pytest.raises(ValueError, match="authorization_provider_contract_invalid"):
             resolve_authorization_provider(config)
 
     def test_non_class_target_raises(self):
@@ -112,12 +116,12 @@ class TestProtocolConformance:
                 config={},
             ),
         )
-        with pytest.raises(ValueError, match="Failed to resolve"):
+        with pytest.raises(ValueError, match="authorization_provider_resolution_failed"):
             resolve_authorization_provider(config)
 
 
-class TestRbacErrorPropagation:
-    """Factory must surface RBAC construction errors with class path and __cause__."""
+class TestRbacErrorRedaction:
+    """Factory failures remain attributable without retaining provider details."""
 
     def test_unknown_provider_config_key_surfaces_through_factory(self):
         config = AuthorizationConfig(
@@ -127,13 +131,14 @@ class TestRbacErrorPropagation:
                 config={"roles": {"user": {}}, "bogus": True},
             ),
         )
-        with pytest.raises(ValueError, match="RbacAuthorizationProvider.*bogus") as exc_info:
+        with pytest.raises(ValueError, match="authorization_provider_initialization_failed") as exc_info:
             resolve_authorization_provider(config)
-        assert isinstance(exc_info.value.__cause__, ValueError)
+        assert "RbacAuthorizationProvider" not in str(exc_info.value)
+        assert "bogus" not in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
 
     def test_invalid_rbac_config_surfaces_class_path(self):
-        """RBAC construction failure (e.g. bad roles) must produce a ValueError
-        containing the class path."""
+        """RBAC construction failure never includes configuration values."""
         config = AuthorizationConfig(
             enabled=True,
             provider=AuthorizationProviderConfig(
@@ -141,11 +146,13 @@ class TestRbacErrorPropagation:
                 config={"roles": "not a dict"},
             ),
         )
-        with pytest.raises(ValueError, match="RbacAuthorizationProvider"):
+        with pytest.raises(ValueError, match="authorization_provider_initialization_failed") as exc_info:
             resolve_authorization_provider(config)
+        assert "not a dict" not in str(exc_info.value)
+        assert "correlation_id=" in str(exc_info.value)
 
-    def test_invalid_rbac_config_preserves_cause(self):
-        """The original construction error must be chained as __cause__."""
+    def test_invalid_rbac_config_discards_provider_cause(self):
+        """The original construction error must not remain reachable."""
         config = AuthorizationConfig(
             enabled=True,
             provider=AuthorizationProviderConfig(
@@ -156,8 +163,8 @@ class TestRbacErrorPropagation:
         try:
             resolve_authorization_provider(config)
         except ValueError as err:
-            assert err.__cause__ is not None
-            assert isinstance(err.__cause__, ValueError)
+            assert err.__cause__ is None
+            assert "allow" not in str(err)
         else:
             pytest.fail("Expected ValueError for invalid RBAC config")
 
@@ -171,8 +178,34 @@ class TestRbacErrorPropagation:
             ),
         )
 
-        with pytest.raises(ValueError, match="default_role.*missing.*known roles"):
+        with pytest.raises(ValueError, match="authorization_default_role_invalid") as exc_info:
             resolve_authorization_provider(config)
+        assert "missing" not in str(exc_info.value)
+        assert "known roles" not in str(exc_info.value)
+
+    def test_malicious_constructor_text_is_not_logged_or_chained(self, monkeypatch, caplog):
+        marker = "credential=never-log-provider-constructor"
+
+        class MaliciousProvider:
+            def __init__(self, **_kwargs):
+                raise RuntimeError(marker)
+
+        monkeypatch.setattr("deerflow.authz.runtime.resolve_variable", lambda *_args, **_kwargs: MaliciousProvider)
+        config = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(use="example.invalid:MaliciousProvider"),
+        )
+
+        with caplog.at_level("ERROR", logger="deerflow.authz.runtime"):
+            with pytest.raises(ValueError, match="authorization_provider_initialization_failed") as exc_info:
+                resolve_authorization_provider(config)
+
+        assert marker not in str(exc_info.value)
+        assert marker not in caplog.text
+        assert exc_info.value.__cause__ is None
+        record = next(item for item in caplog.records if getattr(item, "diagnostic_code", None) == "authorization_provider_initialization_failed")
+        assert record.capability_id == "authorization_provider:legacy"
+        assert record.correlation_id in str(exc_info.value)
 
 
 class TestNoFactoryInjection:

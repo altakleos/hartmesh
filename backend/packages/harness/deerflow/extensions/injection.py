@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from deerflow_extension_api import AgentBuildContext, AgentScope, MiddlewarePlacement, Placement
 from langchain.agents.middleware import AgentMiddleware
 
+from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 from deerflow.extensions.anchors import PlacementAnchor
 from deerflow.extensions.isolation import IsolatedMiddleware, graph_safe_middleware_name
 from deerflow.extensions.loader import Diagnostic
@@ -43,9 +44,14 @@ def inject_middlewares(
         try:
             contributions = tuple(contributor.contribute_middlewares(extensions.app_store, ctx) or ())
         except Exception as exc:
-            message = f"contribute_middlewares() failed: {exc}"
-            diagnostics.append(Diagnostic.error(source, message))
-            logger.exception("Extension %s: contribute_middlewares() failed", source)
+            diagnostic = bounded_diagnostic(
+                code="middleware_contribution_failed",
+                operation="contribute_middlewares",
+                error=exc,
+                contribution_id=source,
+            )
+            diagnostics.append(Diagnostic.from_bounded(source, diagnostic))
+            log_bounded_failure(logger, diagnostic, level=logging.ERROR)
             continue
         for index, placement in enumerate(contributions):
             if not isinstance(placement, MiddlewarePlacement):
@@ -128,9 +134,14 @@ def inject_middlewares(
                 name=name,
             )
         except Exception as exc:
-            message = f"middleware construction failed: {exc}"
-            diagnostics.append(Diagnostic.error(source, message))
-            logger.exception("Extension %s: %s", source, message)
+            diagnostic = bounded_diagnostic(
+                code="middleware_construction_failed",
+                operation="construct_middleware",
+                error=exc,
+                contribution_id=source,
+            )
+            diagnostics.append(Diagnostic.from_bounded(source, diagnostic))
+            log_bounded_failure(logger, diagnostic, level=logging.ERROR)
             continue
         used_names.add(name)
         result.insert(index, wrapped)

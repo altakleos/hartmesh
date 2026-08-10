@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from deerflow_extension_api.health import CapabilityHealthProbe
@@ -14,6 +15,38 @@ if TYPE_CHECKING:
 
 AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION = "1.0"
 AUTHORIZATION_PROVIDER_KIND = "authorization_provider"
+
+
+def _freeze_authorization_value(value: Any) -> Any:
+    """Snapshot supported JSON values and already-immutable public records."""
+
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("authorization mappings require string keys")
+        return MappingProxyType({key: _freeze_authorization_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_authorization_value(item) for item in value)
+    from deerflow_extension_api.contributors import SealedOriginV1, TrustedRunContextV1
+
+    if isinstance(value, (SealedOriginV1, TrustedRunContextV1)):
+        return value
+    raise TypeError(f"authorization values cannot retain {type(value).__name__}")
+
+
+def _thaw_authorization_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_authorization_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_authorization_value(item) for item in value]
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _thaw_authorization_value(to_dict())
+    to_json = getattr(value, "to_json", None)
+    if callable(to_json):
+        return _thaw_authorization_value(to_json())
+    return value
 
 
 @dataclass(frozen=True)
@@ -65,35 +98,83 @@ class Principal:
     def identity_json(self) -> dict[str, Any] | None:
         return None if self.identity is None else self.identity.to_json()
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return a fresh mutable compatibility projection."""
 
-@dataclass
+        return {
+            "user_id": self.user_id,
+            "role": self.role,
+            "oauth_provider": self.oauth_provider,
+            "oauth_id": self.oauth_id,
+            "channel_user_id": self.channel_user_id,
+            "is_internal": self.is_internal,
+            "attributes": _thaw_authorization_value(self.attributes),
+            "identity": self.identity_json(),
+        }
+
+
+@dataclass(frozen=True)
 class AuthzRequest:
-    """Context supplied for one authorization decision."""
+    """Immutable context supplied for one authorization decision."""
 
     principal: Principal
     resource: str
     action: str
     target: str
-    context: dict[str, Any] = field(default_factory=dict)
+    context: Mapping[str, Any] = field(default_factory=dict)
     trusted_context: TrustedRunContextV1 | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.principal, Principal):
+            raise TypeError("authorization principal must be Principal")
+        object.__setattr__(self, "context", _freeze_authorization_value(self.context))
 
-@dataclass
+    def to_dict(self) -> dict[str, Any]:
+        """Return a fresh mutable provider-neutral copy."""
+
+        return {
+            "principal": self.principal.to_dict(),
+            "resource": self.resource,
+            "action": self.action,
+            "target": self.target,
+            "context": _thaw_authorization_value(self.context),
+            "trusted_context": _thaw_authorization_value(self.trusted_context),
+        }
+
+
+@dataclass(frozen=True)
 class AuthzReason:
     """Structured reason for an allow or deny decision."""
 
     code: str
     message: str = ""
 
+    def to_dict(self) -> dict[str, str]:
+        return {"code": self.code, "message": self.message}
 
-@dataclass
+
+@dataclass(frozen=True)
 class AuthzDecision:
-    """Provider allow or deny verdict."""
+    """Immutable provider allow or deny verdict."""
 
     allow: bool
-    reasons: list[AuthzReason] = field(default_factory=list)
+    reasons: Sequence[AuthzReason] = field(default_factory=tuple)
     policy_id: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reasons", tuple(self.reasons))
+        object.__setattr__(self, "metadata", _freeze_authorization_value(self.metadata))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a fresh mutable wire-safe decision copy."""
+
+        return {
+            "allow": self.allow,
+            "reasons": [reason.to_dict() for reason in self.reasons],
+            "policy_id": self.policy_id,
+            "metadata": _thaw_authorization_value(self.metadata),
+        }
 
 
 @runtime_checkable

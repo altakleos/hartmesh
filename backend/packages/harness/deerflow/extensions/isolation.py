@@ -36,6 +36,7 @@ from typing import Any
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 from deerflow.extensions.loader import Diagnostic
 
 logger = logging.getLogger(__name__)
@@ -204,12 +205,23 @@ class IsolatedMiddleware(AgentMiddleware):
         return self._source
 
     def _report(self, hook: str, exc: Exception) -> None:
-        message = f"{type(self._inner).__name__}.{hook} failed and was skipped: {exc}"
-        logger.exception("Extension %s: %s", self._source, message)
+        diagnostic = bounded_diagnostic(
+            code="middleware_hook_failed",
+            operation=hook,
+            error=exc,
+            contribution_id=self._source,
+        )
+        log_bounded_failure(logger, diagnostic, level=logging.WARNING)
         try:
-            self._on_error(Diagnostic.error(self._source, message))
-        except Exception:  # pragma: no cover - reporting must never raise
-            logger.exception("Extension %s: diagnostic reporting failed", self._source)
+            self._on_error(Diagnostic.from_bounded(self._source, diagnostic))
+        except Exception as reporting_error:  # pragma: no cover - reporting must never raise
+            reporting_diagnostic = bounded_diagnostic(
+                code="middleware_diagnostic_reporting_failed",
+                operation="report_middleware_failure",
+                error=reporting_error,
+                contribution_id=self._source,
+            )
+            log_bounded_failure(logger, reporting_diagnostic, level=logging.ERROR)
 
     def _invoke_sync(
         self,

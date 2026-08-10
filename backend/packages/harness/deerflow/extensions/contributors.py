@@ -22,6 +22,11 @@ from deerflow_extension_api import (
     SafeContextReferenceV1,
 )
 
+from deerflow.diagnostics import (
+    bounded_diagnostic,
+    log_bounded_failure,
+    require_async_authoritative_operation,
+)
 from deerflow.extensions.registry import LoadedExtensions
 
 logger = logging.getLogger(__name__)
@@ -201,16 +206,25 @@ class ContributorHost:
                 protocol = OriginContributor if kind == "origin_contributor" else RunContextContributor
                 if not isinstance(contributor, protocol):
                     raise TypeError(f"factory returned an object that does not implement {protocol.__name__}")
+                require_async_authoritative_operation(contributor, "contribute")
             except Exception as exc:
-                diagnostic = _diagnostic(
+                safe = bounded_diagnostic(
+                    code=("authoritative_operation_not_async" if isinstance(exc, TypeError) and str(exc) == "authoritative_operation_not_async" else "initialization_failed"),
+                    operation="contribute",
+                    error=exc,
                     capability_id=capability_id,
                     contribution_id=registration.contribution_id,
-                    diagnostic_code="initialization_failed",
-                    failure=exc,
+                )
+                diagnostic = ContributorDiagnostic(
+                    capability_id=capability_id,
+                    contribution_id=registration.contribution_id,
+                    diagnostic_code=safe.code,
+                    error_class=safe.error_class,
+                    correlation_id=safe.correlation_id,
                 )
                 if is_required:
-                    _log_required_diagnostic(diagnostic)
-                    raise RequiredCapabilityError(f"required capability {capability_id} failed to initialize: {_bounded_message(exc)}") from None
+                    log_bounded_failure(logger, safe, level=logging.ERROR)
+                    raise RequiredCapabilityError(f"required capability {capability_id} failed to initialize: {safe.code} error_class={safe.error_class} correlation_id={safe.correlation_id}") from None
                 diagnostics.append(diagnostic)
                 continue
             initialized.append(

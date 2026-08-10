@@ -313,10 +313,12 @@ def test_no_contributors_returns_the_stack_untouched():
     assert diagnostics == []
 
 
-def test_contributor_failure_is_isolated_to_that_extension():
+def test_contributor_failure_is_isolated_to_that_extension(caplog):
+    marker = "credential=contributor-secret-marker"
+
     class _Boom:
         def contribute_middlewares(self, app_store, ctx):
-            raise ValueError("contributor exploded")
+            raise ValueError(marker)
 
     registry = ExtensionRegistry()
     with registry.attributed_to("bad:install"):
@@ -324,15 +326,26 @@ def test_contributor_failure_is_isolated_to_that_extension():
     with registry.attributed_to("good:install"):
         registry.middlewares(_contributor(MiddlewarePlacement(_Probe("ok"), Placement.TOOL_VISIBLE)))
 
-    result, _, diagnostics = inject_middlewares(_stack(), _ANCHORS, AgentScope.LEAD, _ctx(), registry.build())
+    with caplog.at_level("ERROR", logger="deerflow.extensions.injection"):
+        result, _, diagnostics = inject_middlewares(
+            _stack(),
+            _ANCHORS,
+            AgentScope.LEAD,
+            _ctx(),
+            registry.build(),
+        )
     assert "ok" in _tags(result)
     assert any(d.level == "error" and d.source == "bad:install" for d in diagnostics)
+    assert marker not in repr(diagnostics)
+    assert marker not in caplog.text
 
 
-def test_contributor_iterable_failure_is_isolated_to_that_extension():
+def test_contributor_iterable_failure_is_isolated_to_that_extension(caplog):
+    marker = "credential=iterable-secret-marker"
+
     class _ExplodingIterable:
         def __iter__(self):
-            raise ValueError("iteration exploded")
+            raise ValueError(marker)
 
     class _Boom:
         def contribute_middlewares(self, app_store, ctx):
@@ -344,10 +357,19 @@ def test_contributor_iterable_failure_is_isolated_to_that_extension():
     with registry.attributed_to("good:install"):
         registry.middlewares(_contributor(MiddlewarePlacement(_Probe("ok"), Placement.TOOL_VISIBLE)))
 
-    result, _, diagnostics = inject_middlewares(_stack(), _ANCHORS, AgentScope.LEAD, _ctx(), registry.build())
+    with caplog.at_level("ERROR", logger="deerflow.extensions.injection"):
+        result, _, diagnostics = inject_middlewares(
+            _stack(),
+            _ANCHORS,
+            AgentScope.LEAD,
+            _ctx(),
+            registry.build(),
+        )
 
     assert "ok" in _tags(result)
-    assert any(d.source == "bad:install" and "iteration exploded" in d.message for d in diagnostics)
+    assert any(d.source == "bad:install" and d.code == "middleware_contribution_failed" for d in diagnostics)
+    assert marker not in repr(diagnostics)
+    assert marker not in caplog.text
 
 
 def test_malformed_placement_is_skipped_without_losing_other_extensions():
@@ -380,22 +402,27 @@ def test_non_middleware_contribution_is_skipped():
     assert any("AgentMiddleware" in diagnostic.message for diagnostic in diagnostics)
 
 
-def test_wrapper_construction_failure_is_isolated_to_one_contribution():
+def test_wrapper_construction_failure_is_isolated_to_one_contribution(caplog):
+    marker = "credential=middleware-construction-secret-marker"
+
     class _BadName(AgentMiddleware):
         @property
         def name(self):
-            raise ValueError("name exploded")
+            raise ValueError(marker)
 
-    result, _, diagnostics = inject_middlewares(
-        _stack(),
-        _ANCHORS,
-        AgentScope.LEAD,
-        _ctx(),
-        _extensions(
-            MiddlewarePlacement(_BadName(), Placement.TOOL_VISIBLE),
-            MiddlewarePlacement(_Probe("ok"), Placement.TOOL_VISIBLE),
-        ),
-    )
+    with caplog.at_level("ERROR", logger="deerflow.extensions.injection"):
+        result, _, diagnostics = inject_middlewares(
+            _stack(),
+            _ANCHORS,
+            AgentScope.LEAD,
+            _ctx(),
+            _extensions(
+                MiddlewarePlacement(_BadName(), Placement.TOOL_VISIBLE),
+                MiddlewarePlacement(_Probe("ok"), Placement.TOOL_VISIBLE),
+            ),
+        )
 
     assert "ok" in _tags(result)
-    assert any("name exploded" in diagnostic.message for diagnostic in diagnostics)
+    assert any(diagnostic.code == "middleware_construction_failed" for diagnostic in diagnostics)
+    assert marker not in repr(diagnostics)
+    assert marker not in caplog.text

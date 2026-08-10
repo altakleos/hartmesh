@@ -7,7 +7,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 from deerflow_extension_api import (
@@ -24,6 +24,7 @@ from app.runtime.invocation import (
     PreparedLaunch,
 )
 from deerflow.config.authorization_config import AuthorizationConfig, InvocationOperationsAuthorizationConfig
+from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 from deerflow.runtime import RunRecord
 from deerflow.runtime.accepted_invocation import AcceptedInvocation, PrincipalProjection, canonical_digest
 
@@ -98,9 +99,9 @@ def _validate_json_value(value: Any, *, depth: int = 0) -> Any:
         if not math.isfinite(value):
             raise ValueError("authorization metadata contains a non-finite number")
         return value
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_validate_json_value(item, depth=depth + 1) for item in value]
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         if not all(isinstance(key, str) for key in value):
             raise ValueError("authorization metadata keys must be strings")
         return {key: _validate_json_value(item, depth=depth + 1) for key, item in value.items()}
@@ -112,7 +113,7 @@ def _validate_decision(decision: Any) -> AuthzDecision:
         raise TypeError("AuthorizationProvider.aauthorize must return AuthzDecision")
     if type(decision.allow) is not bool:
         raise TypeError("authorization decision allow must be a boolean")
-    if not isinstance(decision.reasons, list) or len(decision.reasons) > _MAX_REASON_CODES:
+    if not isinstance(decision.reasons, tuple) or len(decision.reasons) > _MAX_REASON_CODES:
         raise ValueError("authorization decision has invalid reasons")
     for reason in decision.reasons:
         if not isinstance(reason, AuthzReason):
@@ -122,7 +123,7 @@ def _validate_decision(decision: Any) -> AuthzDecision:
             raise ValueError("authorization reason message is too large")
     if decision.policy_id is not None:
         _validate_identifier(decision.policy_id, field_name="policy ID", max_bytes=_MAX_POLICY_ID_BYTES)
-    if not isinstance(decision.metadata, dict):
+    if not isinstance(decision.metadata, Mapping):
         raise TypeError("authorization decision metadata must be an object")
     safe_metadata = _validate_json_value(decision.metadata)
     encoded = json.dumps(
@@ -134,7 +135,12 @@ def _validate_decision(decision: Any) -> AuthzDecision:
     ).encode("utf-8")
     if len(encoded) > _MAX_METADATA_BYTES:
         raise ValueError("authorization decision metadata is too large")
-    return decision
+    return AuthzDecision(
+        allow=decision.allow,
+        reasons=decision.reasons,
+        policy_id=decision.policy_id,
+        metadata=safe_metadata,
+    )
 
 
 def _decision_evidence(decision: AuthzDecision, *, generation: int) -> dict[str, Any]:
@@ -145,7 +151,7 @@ def _decision_evidence(decision: AuthzDecision, *, generation: int) -> dict[str,
             "allow": decision.allow,
             "policy_id": decision.policy_id,
             "reasons": [{"code": reason.code, "message": reason.message} for reason in decision.reasons],
-            "metadata": decision.metadata,
+            "metadata": decision.to_dict()["metadata"],
         }
     )
     return {
@@ -213,13 +219,14 @@ class ProviderInvocationAuthorization:
                 decision = _validate_decision(await provider.aauthorize(request))
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.warning(
-                "Invocation authorization was indeterminate for %s %s",
-                request.action,
-                request.target,
-                exc_info=True,
+        except Exception as exc:
+            diagnostic = bounded_diagnostic(
+                code="authorization_indeterminate",
+                operation=f"invocation_{request.action}",
+                error=exc,
+                capability_id="authorization_provider",
             )
+            log_bounded_failure(logger, diagnostic)
             return InternalAuthorizationDecision.indeterminate()
 
         if decision.allow is not True:

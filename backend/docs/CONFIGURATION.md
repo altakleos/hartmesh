@@ -435,12 +435,17 @@ and makes newly uploaded files unavailable inside the sandbox.
 See [Provisioner Setup Guide](../../docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
 
 Durable invocations with nonempty skills require the provisioner's
-`rwx_verified_copy_v1` profile. The Gateway's accepted snapshot must live on the same
+`rwx_verified_copy_v2` profile. The Gateway's accepted snapshot must live on the same
 cross-node `ReadWriteMany` home claim mounted by the provisioner. Both the AIO sandbox image and
 the provisioner verifier/gate image must be pinned by SHA-256 digest. The verifier copies the
 content-addressed source into a private per-Pod `emptyDir`, validates the existing canonical
 snapshot digest, and exposes only that copy read-only. The sandbox never mounts the RWX source or
-the mutable live skill trees. Without this profile—or when its readiness checks fail—remote AIO
+the mutable live skill trees. V2 binds the admitted Pod isolation digest, Lease and Pod UIDs,
+exact NetworkPolicy UID/spec, immutable evidence/capability Secret UIDs/digests, pinned image
+digests, verifier receipt, and final materialization digest. Provisioner replay and renewal plus
+the worker's pre-execution fences re-read that complete tuple. A parsed v1 receipt is
+compatibility evidence only and remains `empty_only`. Without the v2 profile—or when its
+readiness checks fail—remote AIO
 remains `empty_only` and a nonempty durable invocation fails before model execution. The profile
 does not require same-node placement. It uses only a soft preference for a different Gateway node
 when capacity permits and is intended to work across nodes. A native Kubernetes Lease owns each
@@ -449,7 +454,9 @@ reconciliation prevent a replacement Pod from inheriting stale materialization a
 Gateway reads a rotating, audience-bound projected ServiceAccount token for every provisioner
 management request; the provisioner validates the exact namespace, ServiceAccount, and audience
 through Kubernetes TokenReview. Readiness performs that authenticated profile check before
-admission. The same management authentication remains enabled when the projection profile is
+admission. Repository fake-Kubernetes and Helm-render tests prove contract construction and
+drift rejection; they do not qualify live cross-node CNI/RWX behavior, which remains an
+artifact-bound opt-in release gate. The same management authentication remains enabled when the projection profile is
 disabled so legacy remote AIO calls do not become anonymous.
 
 **E2B Cloud Sandbox** (runs sandbox code in [E2B](https://e2b.dev) cloud micro-VMs):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import time
 from collections.abc import Mapping
@@ -55,6 +57,97 @@ class AcceptedSkillMaterialReceiptV1:
         if type(self.generation) is not int or self.generation < 0:
             raise ValueError("accepted skill generation is invalid")
 
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            **{name: getattr(self, name) for name in self.__dataclass_fields__},
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedSkillMaterialReceiptV2:
+    """Complete v2 proof of one isolated Kubernetes materialization."""
+
+    profile: str
+    attempt_id: str
+    snapshot_id: str
+    content_digest: str
+    run_id: str
+    generation: int
+    pod_uid: str
+    pod_isolation_digest: str
+    lease_uid: str
+    network_policy_uid: str
+    network_policy_spec_digest: str
+    evidence_secret_uid: str
+    evidence_secret_digest: str
+    capability_secret_uid: str
+    capability_secret_digest: str
+    sandbox_image_digest: str
+    accepted_skill_runtime_image_digest: str
+    runtime_image_ids_digest: str
+    verifier_receipt_digest: str
+    materialization_evidence_digest: str
+
+    def __post_init__(self) -> None:
+        if self.profile != "rwx_verified_copy_v2":
+            raise ValueError("accepted skill profile is invalid")
+        for value, field_name, maximum in (
+            (self.attempt_id, "attempt_id", 128),
+            (self.run_id, "run_id", 512),
+            (self.pod_uid, "pod_uid", 128),
+            (self.lease_uid, "lease_uid", 128),
+            (self.network_policy_uid, "network_policy_uid", 128),
+            (self.evidence_secret_uid, "evidence_secret_uid", 128),
+            (self.capability_secret_uid, "capability_secret_uid", 128),
+        ):
+            if not isinstance(value, str) or not value or len(value.encode("utf-8")) > maximum or any(ord(character) < 32 for character in value):
+                raise ValueError(f"accepted skill {field_name} is invalid")
+        for field_name in (
+            "snapshot_id",
+            "content_digest",
+            "pod_isolation_digest",
+            "network_policy_spec_digest",
+            "evidence_secret_digest",
+            "capability_secret_digest",
+            "sandbox_image_digest",
+            "accepted_skill_runtime_image_digest",
+            "runtime_image_ids_digest",
+            "verifier_receipt_digest",
+            "materialization_evidence_digest",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+                raise ValueError(f"accepted skill {field_name} is invalid")
+        if self.content_digest != self.snapshot_id:
+            raise ValueError("accepted skill content digest is invalid")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("accepted skill generation is invalid")
+        materialization_wire = {
+            "version": 2,
+            **{name: getattr(self, name) for name in self.__dataclass_fields__ if name != "materialization_evidence_digest"},
+        }
+        expected_materialization_digest = hashlib.sha256(
+            json.dumps(
+                materialization_wire,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+        if self.materialization_evidence_digest != expected_materialization_digest:
+            raise ValueError(
+                "accepted skill materialization evidence digest is invalid",
+            )
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "version": 2,
+            **{name: getattr(self, name) for name in self.__dataclass_fields__},
+        }
+
+
+AcceptedSkillMaterialReceipt = AcceptedSkillMaterialReceiptV1 | AcceptedSkillMaterialReceiptV2
+
 
 @dataclass
 class SandboxInfo:
@@ -75,7 +168,7 @@ class SandboxInfo:
         repr=False,
         compare=False,
     )
-    accepted_skill_material: AcceptedSkillMaterialReceiptV1 | None = field(
+    accepted_skill_material: AcceptedSkillMaterialReceipt | None = field(
         default=None,
         repr=False,
         compare=False,

@@ -121,21 +121,30 @@ def test_create_app_retains_structured_redacted_contributor_startup_diagnostic(m
     assert "resolved-secret-value" not in repr(diagnostic)
 
 
-def test_create_app_fails_open_when_extension_loading_raises_unexpectedly(monkeypatch):
+def test_create_app_fails_open_when_extension_loading_raises_unexpectedly(
+    monkeypatch,
+    caplog,
+):
     import deerflow.extensions as extensions_module
 
+    marker = "credential=extension-loader-secret-marker"
+
     def _raise_unexpectedly(plugins):
-        raise RuntimeError("malformed plugins configuration")
+        raise RuntimeError(marker)
 
     monkeypatch.setattr(extensions_module, "load_extensions", _raise_unexpectedly)
 
     from app.gateway.app import create_app
 
-    app = create_app()
+    with caplog.at_level("ERROR", logger="app.gateway.app"):
+        app = create_app()
 
     assert app.state.extensions is extensions_module.EMPTY_EXTENSIONS
     assert extensions_module.get_loaded_extensions() is extensions_module.EMPTY_EXTENSIONS
-    assert app.state.extension_diagnostics == []
+    assert len(app.state.extension_diagnostics) == 1
+    assert app.state.extension_diagnostics[0].code == "extension_loading_failed"
+    assert marker not in repr(app.state.extension_diagnostics)
+    assert marker not in caplog.text
 
 
 def test_create_app_fails_closed_when_a_required_extension_cannot_load(monkeypatch):
@@ -509,6 +518,78 @@ async def test_create_app_routes_required_invocation_contributors_to_their_owner
     assert readiness.status == "ready"
 
 
+def test_full_gateway_rejects_synchronous_required_contributor(
+    monkeypatch,
+    stub_app_config,
+):
+    from deerflow_extension_api import (
+        ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION,
+        ORIGIN_CONTRIBUTOR_KIND,
+        OriginContributorFactory,
+    )
+
+    from deerflow.extensions.contributors import RequiredCapabilityError
+
+    class SynchronousContributor:
+        def contribute(self, _request):
+            return None
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("fixture:sync-contributor"):
+        registry.origin_contributor(
+            OriginContributorFactory(
+                contribution_id="fixture.sync",
+                capability_api_version=ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION,
+                factory=SynchronousContributor,
+                kind=ORIGIN_CONTRIBUTOR_KIND,
+            )
+        )
+
+    with pytest.raises(RequiredCapabilityError, match="authoritative_operation_not_async"):
+        _create_gateway(
+            monkeypatch,
+            stub_app_config,
+            registry.build(generation=7),
+            ["origin_contributor:fixture.sync"],
+        )
+
+
+def test_full_gateway_rejects_synchronous_required_mcp_interceptor(
+    monkeypatch,
+    stub_app_config,
+):
+    from deerflow_extension_api import (
+        MCP_INTERCEPTOR_CAPABILITY_API_VERSION,
+        MCP_INTERCEPTOR_KIND,
+        McpInterceptorDescriptor,
+    )
+
+    from deerflow.extensions.mcp import McpInterceptorStartupError
+
+    class SynchronousInterceptor:
+        def prepare_call(self, _request):
+            return None
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("fixture:sync-mcp"):
+        registry.mcp_interceptor(
+            McpInterceptorDescriptor(
+                contribution_id="fixture.sync",
+                capability_api_version=MCP_INTERCEPTOR_CAPABILITY_API_VERSION,
+                factory=SynchronousInterceptor,
+                kind=MCP_INTERCEPTOR_KIND,
+            )
+        )
+
+    with pytest.raises(McpInterceptorStartupError, match="authoritative_operation_not_async"):
+        _create_gateway(
+            monkeypatch,
+            stub_app_config,
+            registry.build(generation=7),
+            ["mcp_interceptor:fixture.sync"],
+        )
+
+
 @pytest.mark.asyncio
 async def test_create_app_routes_required_v2_constraints_to_its_owning_host(
     monkeypatch,
@@ -569,7 +650,36 @@ def test_create_app_fails_closed_for_malformed_required_v2_constraints_provider(
             [INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2],
         )
 
-    assert str(captured.value).endswith("failed to initialize: TypeError")
+    assert "initialization_failed error_class=TypeError correlation_id=" in str(captured.value)
+
+
+def test_create_app_rejects_synchronous_required_v2_authoritative_operation(
+    monkeypatch,
+    stub_app_config,
+    caplog,
+):
+    from deerflow_extension_api import INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2
+
+    from deerflow.extensions.constraints import ConstraintStartupError
+
+    marker = "constraint-provider-secret-marker"
+
+    class SynchronousProjection:
+        def project(self, _request):
+            raise RuntimeError(marker)
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(ConstraintStartupError) as captured:
+            _create_gateway(
+                monkeypatch,
+                stub_app_config,
+                _constraints_extensions(factory=SynchronousProjection),
+                [INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2],
+            )
+
+    assert "authoritative_operation_not_async" in str(captured.value)
+    assert marker not in str(captured.value)
+    assert marker not in caplog.text
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,77 @@ def test_admin_can_read_exact_runtime_capabilities() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("operation", "method", "path", "payload"),
+    [
+        ("capabilities", "get", "/api/runtime/v1/capabilities", None),
+        ("ensure", "post", "/api/runtime/v1/invocations/ensure", "ensure"),
+        ("observe", "get", "/api/runtime/v1/invocations/run-1", None),
+        ("observe", "get", "/api/runtime/v1/contexts/thread-1/invocations", None),
+        (
+            "control",
+            "post",
+            "/api/runtime/v1/invocations/run-1/control",
+            "control",
+        ),
+    ],
+)
+def test_every_runtime_port_operation_uses_one_redacted_failure_envelope(
+    operation,
+    method,
+    path,
+    payload,
+    caplog,
+) -> None:
+    marker = "provider-secret-runtime-http-marker"
+
+    class ThrowingPort:
+        def capabilities(self):
+            if operation == "capabilities":
+                raise RuntimeError(marker)
+            return RuntimeCapabilities()
+
+        async def ensure(self, _request):
+            if operation == "ensure":
+                raise RuntimeError(marker)
+            raise AssertionError("unexpected ensure call")
+
+        async def observe(self, _request):
+            if operation == "observe":
+                raise RuntimeError(marker)
+            raise AssertionError("unexpected observe call")
+
+        async def control(self, _request):
+            if operation == "control":
+                raise RuntimeError(marker)
+            raise AssertionError("unexpected control call")
+
+    app = _app_with_adapter(ThrowingPort(), user_factory=_admin_user)
+    with caplog.at_level("ERROR", logger="app.runtime.api"):
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.request(
+                method,
+                path,
+                json=(None if payload is None else (_ensure_payload() if payload == "ensure" else _cancel_payload())),
+            )
+
+    assert response.status_code == 503
+    assert response.headers["content-type"].startswith("application/json")
+    body = response.json()
+    assert body == {
+        "api_version": "deerflow.runtime/v1",
+        "kind": "runtime.error",
+        "code": "indeterminate",
+        "details": {"correlation_id": body["details"]["correlation_id"]},
+    }
+    assert len(body["details"]["correlation_id"]) == 32
+    assert marker not in response.text
+    assert marker not in caplog.text
+    record = next(record for record in caplog.records if getattr(record, "runtime_operation", None) == operation)
+    assert record.correlation_id == body["details"]["correlation_id"]
+    assert record.exception_class == "RuntimeError"
+
+
 class _CapabilitiesAdapter:
     def capabilities(self) -> RuntimeCapabilities:
         return RuntimeCapabilities()

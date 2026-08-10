@@ -127,7 +127,7 @@ def test_custom_interceptor_builder_returning_none_is_skipped():
         assert len(_get_interceptors(mock_cls)) == 0
 
 
-def test_custom_interceptor_resolve_error_logs_warning_and_continues():
+def test_custom_interceptor_resolve_error_logs_warning_and_continues(caplog):
     """A broken interceptor path logs a warning and does not block tool loading."""
     p = _make_patches(interceptor_paths=["broken.path:does_not_exist"])
 
@@ -138,20 +138,22 @@ def test_custom_interceptor_resolve_error_logs_warning_and_continues():
         p["oauth_headers"],
         p["oauth_interceptor"],
         patch("deerflow.mcp.tools.resolve_variable", side_effect=ImportError("no such module")),
-        patch("deerflow.mcp.tools.logger.warning") as mock_warn,
     ):
-        tools = asyncio.run(get_mcp_tools())
+        with caplog.at_level("WARNING", logger="deerflow.mcp.tools"):
+            tools = asyncio.run(get_mcp_tools())
 
         assert tools == []
-        mock_warn.assert_called_once()
-        assert "broken.path:does_not_exist" in mock_warn.call_args[0][0]
+        assert "legacy_mcp_interceptor_load_failed" in caplog.text
+        assert "broken.path:does_not_exist" in caplog.text
 
 
-def test_custom_interceptor_builder_exception_logs_warning_and_continues():
+def test_custom_interceptor_builder_exception_logs_warning_and_continues(caplog):
     """If the builder function itself raises, the error is caught and logged."""
 
+    marker = "credential=legacy-interceptor-secret-marker"
+
     def exploding_builder():
-        raise RuntimeError("builder exploded")
+        raise RuntimeError(marker)
 
     p = _make_patches(interceptor_paths=["pkg.bad:exploding_builder"])
 
@@ -162,13 +164,14 @@ def test_custom_interceptor_builder_exception_logs_warning_and_continues():
         p["oauth_headers"],
         p["oauth_interceptor"],
         patch("deerflow.mcp.tools.resolve_variable", return_value=exploding_builder),
-        patch("deerflow.mcp.tools.logger.warning") as mock_warn,
     ):
-        tools = asyncio.run(get_mcp_tools())
+        with caplog.at_level("WARNING", logger="deerflow.mcp.tools"):
+            tools = asyncio.run(get_mcp_tools())
 
         assert tools == []
-        mock_warn.assert_called_once()
-        assert "pkg.bad:exploding_builder" in mock_warn.call_args[0][0]
+        assert marker not in caplog.text
+        assert "legacy_mcp_interceptor_load_failed" in caplog.text
+        assert "pkg.bad:exploding_builder" in caplog.text
 
 
 def test_no_mcp_interceptors_field_is_safe():

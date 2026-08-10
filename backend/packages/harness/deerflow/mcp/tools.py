@@ -18,6 +18,7 @@ from langgraph.config import get_config
 from deerflow.config.extensions_config import ExtensionsConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
+from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 from deerflow.extensions.mcp import get_required_mcp_tool_interceptor
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
@@ -691,11 +692,14 @@ async def get_mcp_tools() -> list[BaseTool]:
                     logger.info(f"Loaded MCP interceptor: {interceptor_path}")
                 elif interceptor is not None:
                     logger.warning(f"Builder {interceptor_path} returned non-callable {type(interceptor).__name__}; skipping")
-            except Exception as e:
-                logger.warning(
-                    f"Failed to load MCP interceptor {interceptor_path}: {e}",
-                    exc_info=True,
+            except Exception as exc:
+                diagnostic = bounded_diagnostic(
+                    code="legacy_mcp_interceptor_load_failed",
+                    operation="load_legacy_mcp_interceptor",
+                    error=exc,
+                    contribution_id=interceptor_path,
                 )
+                log_bounded_failure(logger, diagnostic)
 
         # Required preparation owns the complete authorization-to-network
         # boundary. Compatibility hooks run inside it, while trusted
@@ -759,11 +763,14 @@ async def get_mcp_tools() -> list[BaseTool]:
                         )
                         return []
                 return await discovery
-            except Exception as e:
-                logger.warning(
-                    f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
-                    exc_info=True,
+            except Exception as exc:
+                diagnostic = bounded_diagnostic(
+                    code="mcp_tool_discovery_failed",
+                    operation="discover_mcp_tools",
+                    error=exc,
+                    contribution_id=server_name,
                 )
+                log_bounded_failure(logger, diagnostic)
                 return []
 
         # Get tools from each server independently so one broken MCP server does
@@ -832,6 +839,11 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         return wrapped_tools
 
-    except Exception as e:
-        logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
+    except Exception as exc:
+        diagnostic = bounded_diagnostic(
+            code="mcp_tool_loading_failed",
+            operation="load_mcp_tools",
+            error=exc,
+        )
+        log_bounded_failure(logger, diagnostic, level=logging.ERROR)
         return []

@@ -779,12 +779,16 @@ that was already accepted. Snapshot bodies remain process-local and are removed 
 worker terminates; the durable ledger stores only stable identities, digests, and bounded
 metadata. Local Docker-backed AIO mounts nonempty accepted material read-only while retaining
 sandbox commands. Kubernetes/provisioner AIO supports the same contract only with the
-`rwx_verified_copy_v1` profile: a verifier copies the exact content-addressed snapshot from an
+`rwx_verified_copy_v2` profile: a verifier copies the exact content-addressed snapshot from an
 RWX claim into a private per-Pod `emptyDir`, verifies the canonical digest, and the sandbox sees
-only that private copy through a read-only mount. Gateway management calls use a short-lived,
+only that private copy through a read-only mount. The v2 receipt also binds the admitted Pod
+isolation projection, Lease, exact NetworkPolicy, immutable evidence/capability Secrets, and
+pinned runtime images; the complete tuple is re-read before execution and on renewal or reuse.
+Gateway management calls use a short-lived,
 audience-bound projected ServiceAccount token that the provisioner validates with TokenReview;
 Gateway readiness authenticates to the provisioner and requires the exact profile before new
-admission. Local, E2B, unqualified remote AIO, and custom
+admission. A legacy v1 receipt remains parseable but is `empty_only` and cannot authorize
+nonempty durable skills. Local, E2B, unqualified remote AIO, and custom
 providers accept only an explicitly empty skill set and fail before model work when effective
 skills are present. A
 worker lost with its process follows normal orphan terminalization rather than
@@ -798,7 +802,7 @@ An enabled skill's `allowed-tools` policy applies only after that skill is expli
 
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
-Disabling a skill also removes it from the live sandbox filesystem view, so later work follows the updated enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Durable runs use an accepted-only acquisition profile that excludes mutable `/mnt/skills/{public,custom,legacy,integrations}` trees. Local Docker AIO exposes the selected `/mnt/skills/.accepted` digest through an OS-enforced read-only mount. Remote Kubernetes AIO does so only when `rwx_verified_copy_v1` is configured with a real RWX claim and digest-pinned sandbox and verifier/gate images; the provisioner readiness check validates those prerequisites and each created Pod must return an exact materialization receipt before the provider advertises `immutable_read_only`. The design uses cross-node RWX storage and direct Pod networking. A soft scheduling preference places accepted sandboxes away from Gateway Pods when capacity permits, but there is no required same-node or different-node affinity. All other remote profiles, Local, E2B, and custom providers are empty-only until they prove the same hard boundary. Legacy non-durable execution retains the live projections.
+Disabling a skill also removes it from the live sandbox filesystem view, so later work follows the updated enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Durable runs use an accepted-only acquisition profile that excludes mutable `/mnt/skills/{public,custom,legacy,integrations}` trees. Local Docker AIO exposes the selected `/mnt/skills/.accepted` digest through an OS-enforced read-only mount. Remote Kubernetes AIO does so only when `rwx_verified_copy_v2` is configured with a real RWX claim and digest-pinned sandbox and verifier/gate images; the provisioner readiness check validates those prerequisites and each created Pod must return and retain an exact v2 materialization receipt before the provider advertises `immutable_read_only`. Response-loss replay, renewal, reuse, and the worker pre-stream fence re-read the Pod/Lease/NetworkPolicy/Secret/image tuple and fail closed on deletion, replacement, or drift. The design uses cross-node RWX storage and direct Pod networking. A soft scheduling preference places accepted sandboxes away from Gateway Pods when capacity permits, but there is no required same-node or different-node affinity. These deterministic and rendered-manifest tests do not qualify live cross-node storage or networking; that remains an artifact-bound opt-in Kubernetes release gate. All other remote profiles, legacy v1 receipts, Local, E2B, and custom providers are empty-only until they prove the same hard boundary. Legacy non-durable execution retains the live projections.
 
 Managed integrations install shared read-only skill packs without mixing them
 into custom skills. The Lark/Feishu CLI integration is available under
@@ -1228,6 +1232,11 @@ and pinned facts are retained separately as accepted effective execution and reu
 replay does not rerun contributors, authorization, constraints, default resolution,
 agent/profile routing, or model execution. This refers to start/admission authorization;
 current observe authorization still applies before a retained run is revealed.
+Persisted acceptance is revalidated on reconstruction: derivable principal, Origin, revision,
+caller/effective request, context, and runtime-identity digests must agree before replay,
+authorization, cancellation, recovery, or execution. Contradictory retained facts fail closed
+with the bounded `accepted_evidence_invalid` code; wholly absent legacy evidence is readable only
+through the non-privileged compatibility path.
 Invocation/context reads apply owner/admin visibility by default. Operators can give a specifically authenticated integration service a
 bounded `run_ids`, `thread_ids`, `owner_ids`, or `source_kinds` search grant under
 `authorization.service_observation_grants`; this requires enabled observe authorization, never
@@ -1256,7 +1265,9 @@ requested cancellation, `200` for known/observed/already-finished outcomes,
 resources, `409` for conflict/thread-busy/stale state, `410` for a pruned cursor,
 `422` for invalid/ahead input, and `503` for indeterminate policy/runtime
 failures. Every non-2xx response is a bounded `runtime.error` record rather than
-a free-form `detail`. Context export, context retirement, and controls other than
+a free-form `detail`; unexpected failures use 503 `indeterminate` plus a correlation ID, and
+internal diagnostics retain only stable codes/classes and bounded operation context, never raw
+exception text or tracebacks. Context export, context retirement, and controls other than
 fenced cancellation are not supported. See
 [the API reference](backend/docs/API.md#durable-invocation-runtime-api) for DTO
 and paging details.
@@ -1272,7 +1283,9 @@ In a PostgreSQL-backed deployment, the signed GitHub route atomically stores one
 bounded leased receipt per matched binding before returning success. Receipt recovery
 can reclaim an expired worker, defer a busy thread in FIFO order, and resolve a run
 accepted before a crash with the same stable key. The in-memory message bus only wakes
-receipt processing. Local memory/SQLite channel delivery remains explicitly
+receipt processing. Busy-thread deferral preserves the exact row on a fixed non-tight cadence
+without consuming the poison failure budget; malformed processing has its own bounded retry and
+dead-letter counter. Local memory/SQLite channel delivery remains explicitly
 `best_effort`; the administrator deployment report, not portable capabilities, reports
 that per-source ingress guarantee. GitHub is reported `durable` only while HMAC
 authentication and PostgreSQL receipt storage are both active. The explicit unverified
@@ -1293,7 +1306,7 @@ invocation under the new startup-frozen process generation.
 `GET /health` is process liveness and remains healthy during a recoverable authority or
 database outage. `GET /ready` reports only ready/not-ready and proves fresh current-generation
 health for operator-required authorization, contributors, constraints, and MCP preparation,
-plus bounded lifecycle cursor/pruning/event-edge integrity and the configured durability
+plus bounded lifecycle cursor/pruning/retained-cardinality/event-edge integrity and the configured durability
 promise. The exact same proof fences new admission; accepted replay remains available under
 its stored evidence.
 Administrators obtain the immutable capability manifest, separate live-health
@@ -1308,7 +1321,10 @@ It receives only sealed identity, source, thread, revision, and manifest referen
 only narrow the exact per-invocation total-subagent ceiling (including zero). Unknown
 mandatory obligations and unhealthy required providers fail closed, accepted evidence is
 fenced again by the worker, and keyed replay reuses that evidence without consulting live
-health or the provider again. The separate v1 contract remains a positive-only
+health or the provider again. The ceiling is enforced by one run-scoped dispatch ledger:
+equal canonical dispatch retries reuse one in-flight/completed result and start one executor;
+changed intent conflicts, and a new dispatch beyond the ceiling is rejected. Required
+authoritative operations are validated as async during startup. The separate v1 contract remains a positive-only
 subagent-ceiling compatibility path.
 
 This surface does not promise context export/retirement, dynamic outbound governance,

@@ -181,7 +181,7 @@ def build_lifecycle_payload(transition: LifecycleTransition) -> dict[str, Any]:
         if transition.lifecycle_type is not LifecycleType.started:
             raise ValueError("execution evidence is supported only for started")
         evidence = transition.execution_evidence_json
-        if not isinstance(evidence, dict) or set(evidence) != {
+        v1_fields = {
             "version",
             "profile",
             "attempt_id",
@@ -193,7 +193,19 @@ def build_lifecycle_payload(transition: LifecycleTransition) -> dict[str, Any]:
             "runtime_image_ids_digest",
             "verifier_receipt_digest",
             "materialization_evidence_digest",
-        }:
+        }
+        v2_fields = v1_fields | {
+            "pod_isolation_digest",
+            "network_policy_uid",
+            "network_policy_spec_digest",
+            "evidence_secret_uid",
+            "evidence_secret_digest",
+            "capability_secret_uid",
+            "capability_secret_digest",
+            "sandbox_image_digest",
+            "accepted_skill_runtime_image_digest",
+        }
+        if not isinstance(evidence, dict) or (evidence.get("version") == 1 and set(evidence) != v1_fields or evidence.get("version") == 2 and set(evidence) != v2_fields or evidence.get("version") not in {1, 2}):
             raise ValueError("execution evidence has invalid fields")
         encoded_evidence = json.dumps(
             evidence,
@@ -273,6 +285,7 @@ class LifecycleReadiness:
             "ready",
             "lifecycle_cursor_missing",
             "lifecycle_pruning_invalid",
+            "lifecycle_event_cardinality_invalid",
             "lifecycle_event_bounds_invalid",
             "lifecycle_event_sequence_invalid",
             "lifecycle_store_unavailable",

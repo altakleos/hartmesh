@@ -25,6 +25,25 @@ class _Boom(AgentMiddleware):
         raise ValueError("observation exploded")
 
 
+def test_extension_runtime_failure_diagnostic_redacts_exception_text(caplog):
+    marker = "credential=middleware-runtime-secret-marker"
+
+    class _Malicious(AgentMiddleware):
+        def wrap_model_call(self, request, handler):
+            raise RuntimeError(marker)
+
+    diagnostics = []
+    wrapped = IsolatedMiddleware(_Malicious(), "malicious:install", diagnostics.append)
+
+    with caplog.at_level("WARNING", logger="deerflow.extensions.isolation"):
+        assert wrapped.wrap_model_call("request", lambda request: "result") == "result"
+
+    assert len(diagnostics) == 1
+    assert diagnostics[0].code == "middleware_hook_failed"
+    assert marker not in repr(diagnostics)
+    assert marker not in caplog.text
+
+
 class _Bubble(AgentMiddleware):
     def wrap_tool_call(self, request, handler):
         raise GraphBubbleUp()
@@ -439,7 +458,8 @@ def test_middleware_cannot_call_a_side_effecting_handler_twice():
     assert wrapped.wrap_tool_call("req", side_effecting_handler) == "core-result"
     assert calls == ["req"]
     assert len(errors) == 1
-    assert "more than once" in errors[0].message
+    assert errors[0].code == "middleware_hook_failed"
+    assert errors[0].operation == "wrap_tool_call"
 
 
 def test_middleware_cannot_skip_the_handler_or_replace_its_result():
@@ -459,7 +479,8 @@ def test_middleware_cannot_skip_the_handler_or_replace_its_result():
     assert wrapped.wrap_model_call("req", handler) == "core-result"
     assert calls == ["req"]
     assert len(errors) == 1
-    assert "did not call" in errors[0].message
+    assert errors[0].code == "middleware_hook_failed"
+    assert errors[0].operation == "wrap_model_call"
 
 
 def test_async_middleware_cannot_swallow_or_repeat_handler_calls():
@@ -495,7 +516,7 @@ def test_error_message_identifies_the_hook():
     errors = []
     wrapped = IsolatedMiddleware(_Boom(), "bad:install", errors.append)
     wrapped.wrap_tool_call("req", _handler)
-    assert "wrap_tool_call" in errors[0].message
+    assert errors[0].operation == "wrap_tool_call"
 
 
 # --- interface preservation -------------------------------------------------
@@ -658,8 +679,8 @@ def test_failing_lifecycle_hook_degrades_to_none_with_a_diagnostic():
     assert wrapped.before_model("state", "runtime") is None
     assert asyncio.run(wrapped.aafter_model("state", "runtime")) is None
     assert [d.level for d in errors] == ["error", "error"]
-    assert "before_model" in errors[0].message
-    assert "aafter_model" in errors[1].message
+    assert errors[0].operation == "before_model"
+    assert errors[1].operation == "aafter_model"
 
 
 def test_graph_bubble_up_propagates_from_lifecycle_hooks():

@@ -671,6 +671,15 @@ async def test_required_missing_initialization_and_health_fail_readiness(failure
             )
 
         extensions = _registered_extensions(_descriptor("required_one", _Prepared(), health_probe=unhealthy))
+    if failure == "initialization":
+        from deerflow.extensions.mcp import McpInterceptorStartupError
+
+        with pytest.raises(McpInterceptorStartupError) as captured:
+            McpInterceptorHost(extensions, required_capabilities=required)
+        assert "initialization_failed" in str(captured.value)
+        assert "secret startup detail" not in str(captured.value)
+        return
+
     host = McpInterceptorHost(extensions, required_capabilities=required)
     manifest = build_capability_manifest(
         extensions,
@@ -918,6 +927,7 @@ async def test_authorization_stops_before_preparation(failure: str) -> None:
 async def test_preparation_failures_never_call_handler(
     result_kind: str,
     expected_code: str,
+    caplog,
 ) -> None:
     from deerflow_extension_api import McpCallIndeterminateV1, McpCallRejectedV1
 
@@ -949,19 +959,24 @@ async def test_preparation_failures_never_call_handler(
         del request
         handler_calls += 1
 
-    with pytest.raises(McpCallPreparationError) as exc_info:
-        provider = _AuthorizationProvider()
-        request = _request(provider)
-        await _call_with_authorization(
-            host.build_tool_interceptor(health_monitor=monitor),
-            request,
-            handler,
-            provider,
-        )
+    with caplog.at_level("WARNING", logger="deerflow.extensions.mcp"):
+        with pytest.raises(McpCallPreparationError) as exc_info:
+            provider = _AuthorizationProvider()
+            request = _request(provider)
+            await _call_with_authorization(
+                host.build_tool_interceptor(health_monitor=monitor),
+                request,
+                handler,
+                provider,
+            )
     assert exc_info.value.code == expected_code
     assert handler_calls == 0
     assert "secret" not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
+    assert "credential=secret" not in caplog.text
+    if result_kind == "exception":
+        record = next(item for item in caplog.records if getattr(item, "diagnostic_code", None) == "preparation_indeterminate")
+        assert record.exception_class == "RuntimeError"
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from dataclasses import dataclass
 from typing import Literal
@@ -11,10 +12,17 @@ from deerflow_extension_api import AuthorizationProvider
 
 from deerflow.authz.runtime import resolve_authorization_provider
 from deerflow.config.authorization_config import AuthorizationConfig
+from deerflow.diagnostics import (
+    bounded_diagnostic,
+    log_bounded_failure,
+    require_async_authoritative_operation,
+)
 from deerflow.extensions.registry import (
     LoadedExtensions,
     RegisteredAuthorizationProviderFactory,
 )
+
+logger = logging.getLogger(__name__)
 
 AuthorizationSourceKind = Literal["disabled", "legacy", "extension"]
 
@@ -75,9 +83,29 @@ class AuthorizationProviderResolver:
         try:
             provider = registration.factory()
         except Exception as exc:
-            raise ValueError(f"Failed to construct extension authorization provider {registration.contribution_id!r} from {registration.source}: {exc}") from exc
+            diagnostic = bounded_diagnostic(
+                code="authorization_initialization_failed",
+                operation="aauthorize",
+                error=exc,
+                capability_id=f"authorization_provider:{registration.contribution_id}",
+                contribution_id=registration.contribution_id,
+            )
+            log_bounded_failure(logger, diagnostic, level=logging.ERROR)
+            raise ValueError(f"authorization provider {registration.contribution_id!r} failed to initialize: {diagnostic.code} error_class={diagnostic.error_class} correlation_id={diagnostic.correlation_id}") from None
         if not isinstance(provider, AuthorizationProvider):
             raise ValueError(f"Extension authorization provider factory {registration.contribution_id!r} did not return an AuthorizationProvider")
+        try:
+            require_async_authoritative_operation(provider, "aauthorize")
+        except Exception as exc:
+            diagnostic = bounded_diagnostic(
+                code="authoritative_operation_not_async",
+                operation="aauthorize",
+                error=exc,
+                capability_id=f"authorization_provider:{registration.contribution_id}",
+                contribution_id=registration.contribution_id,
+            )
+            log_bounded_failure(logger, diagnostic, level=logging.ERROR)
+            raise ValueError(f"authorization provider {registration.contribution_id!r} failed to initialize: {diagnostic.code} error_class={diagnostic.error_class} correlation_id={diagnostic.correlation_id}") from None
         return provider
 
     def snapshot(self) -> AuthorizationResolutionSnapshot:

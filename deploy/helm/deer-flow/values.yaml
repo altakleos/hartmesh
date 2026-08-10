@@ -185,11 +185,11 @@ provisioner:
   # -- Sandbox container port (must match the sandboxImage's listening port).
   sandboxPort: 8080
   # -- Durable accepted-skill projection. `disabled` keeps remote AIO
-  # empty-only. `rwx_verified_copy_v1` copies an exact content-addressed
+  # empty-only. `rwx_verified_copy_v2` copies an exact content-addressed
   # snapshot from an actual RWX shared home PVC into a private per-Pod emptyDir,
   # verifies it, and exposes it read-only through a capability gate. It adds no
   # same-node affinity; sandbox and provisioner images must be digest-pinned.
-  acceptedSkillProjectionProfile: "disabled" # disabled | rwx_verified_copy_v1
+  acceptedSkillProjectionProfile: "disabled" # disabled | rwx_verified_copy_v2
   acceptedAttempt:
     # -- Native Lease TTL for one accepted-skill sandbox attempt.
     leaseSeconds: 120

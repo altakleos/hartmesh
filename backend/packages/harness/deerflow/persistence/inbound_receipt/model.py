@@ -39,6 +39,7 @@ class InboundReceiptRow(Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     outcome_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -59,7 +60,7 @@ class InboundReceiptRow(Base):
             name="ck_inbound_receipts_state",
         ),
         CheckConstraint(
-            "fencing_token >= 0 AND attempt_count >= 0",
+            "fencing_token >= 0 AND attempt_count >= 0 AND failure_count >= 0",
             name="ck_inbound_receipts_counters_nonnegative",
         ),
         CheckConstraint(

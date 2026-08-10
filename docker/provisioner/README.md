@@ -158,8 +158,8 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty | Optional `subPath` template for `SKILLS_PVC_NAME`. Supports `{user_id}` and `{thread_id}`. When empty, the skills PVC root is mounted unchanged |
 | `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
-| `ACCEPTED_SKILL_PROJECTION_PROFILE` | disabled | Set to `rwx_verified_copy_v1` to enable verified nonempty durable skill snapshots. The configured home claim must report `ReadWriteMany`. |
-| `ACCEPTED_SKILL_RUNTIME_IMAGE` | empty | Digest-pinned provisioner image containing `accepted_skills.py`; used for the verifier init container and capability gate. Required by `rwx_verified_copy_v1`. |
+| `ACCEPTED_SKILL_PROJECTION_PROFILE` | disabled | Set to `rwx_verified_copy_v2` to enable verified nonempty durable skill snapshots. The configured home claim must report `ReadWriteMany`. V1 is parse-only compatibility evidence and remains empty-only. |
+| `ACCEPTED_SKILL_RUNTIME_IMAGE` | empty | Digest-pinned provisioner image containing `accepted_skills.py`; used for the verifier init container and capability gate. Required by `rwx_verified_copy_v2`. |
 | `ACCEPTED_ATTEMPT_LEASE_SECONDS` | `120` | Native Lease duration for one accepted sandbox attempt (30–900 seconds). |
 | `ACCEPTED_ATTEMPT_RECONCILE_INTERVAL_SECONDS` | `30` | Bounded expiry-reconciliation cadence (5–300 seconds); keep the Lease duration at least twice this value. |
 | `ACCEPTED_ATTEMPT_RECONCILE_LIMIT` | `100` | Maximum expired attempt Leases inspected per reconciliation page (1–500). |
@@ -178,7 +178,7 @@ See [Building a Custom AIO Sandbox Image](../../backend/docs/CONFIGURATION.md#bu
 
 ### Durable accepted skills on Kubernetes
 
-`rwx_verified_copy_v1` supports nonempty immutable skill snapshots without placing the Gateway
+`rwx_verified_copy_v2` supports nonempty immutable skill snapshots without placing the Gateway
 and sandbox on the same node. The Gateway publishes the accepted content-addressed snapshot
 beneath the shared home claim. The provisioner mounts only that exact snapshot subpath read-only
 into a verifier init container. The verifier performs bounded symlink-safe traversal, copies the
@@ -189,11 +189,14 @@ the mutable live skill projections.
 
 The accepted Pod is reached directly through an in-Pod capability gate. The high-entropy
 capability exists only in process memory and an immutable Pod Secret; it is not serialized into
-run rows, lifecycle events, checkpoints, or logs. A receipt must match snapshot digest, run,
-generation, Pod UID, Lease UID, the verifier-authored receipt digest, and the digest-pinned
-verifier/gate and sandbox image IDs before
-remote AIO advertises `immutable_read_only`. The Lease is the owner root for the Pod, immutable
-Secrets, and NetworkPolicy. The owning Gateway renews the exact materialization tuple; a bounded
+run rows, lifecycle events, checkpoints, or logs. A v2 receipt must match snapshot digest, run,
+generation, Pod UID and canonical admitted-isolation digest, Lease UID, exact NetworkPolicy UID
+and spec digest, immutable evidence/capability Secret UIDs and payload/spec digests, pinned image
+digests and observed image IDs, the verifier-authored receipt digest, and the final
+materialization digest before remote AIO advertises `immutable_read_only`. V1 receipts remain
+parseable but cannot authorize nonempty execution. The Lease is the owner root for the Pod,
+immutable Secrets, and NetworkPolicy. Response-loss replay, reuse, renewal, and the worker
+pre-stream fence re-read the complete tuple and fail closed on deletion, replacement, or drift. A bounded
 reconciler deletes expired Lease UIDs, letting Kubernetes garbage collection remove children.
 Process restart does not adopt such a Pod because the capability is intentionally unrecoverable;
 the corresponding lost worker follows the existing orphan-terminalization contract.
@@ -208,10 +211,10 @@ Both `SANDBOX_IMAGE` and `ACCEPTED_SKILL_RUNTIME_IMAGE` must be SHA-256 digest r
 provisioner's `/ready` endpoint also reads the configured PVC and rejects a non-Bound or non-RWX
 claim. Helm rejects RWO rather than adding a same-node requirement. Accepted Pods have only a
 soft preference for a different Gateway node. Cross-node CNI/PVC behavior remains a live
-qualification concern; this profile adds no same-node fallback and does not turn chart rendering
-into live-cluster evidence. The repository's ordinary and process-loss suites do not qualify this
-cross-node path; an artifact-bound live cluster run with a real RWX implementation remains an
-explicit release gate.
+qualification concern; this profile adds no same-node fallback and does not turn fake-Kubernetes
+or chart-render evidence into live-cluster evidence. The repository's ordinary and process-loss
+suites do not qualify this cross-node path; an artifact-bound live cluster run with a real RWX
+implementation remains an explicit release gate.
 
 ### Lark CLI sandbox runtime (Pattern A)
 

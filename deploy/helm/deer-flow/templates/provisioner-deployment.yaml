@@ -91,7 +91,7 @@ spec:
               value: {{ .Values.provisioner.sandboxPort | quote }}
             - name: ACCEPTED_SKILL_PROJECTION_PROFILE
               value: {{ .Values.provisioner.acceptedSkillProjectionProfile | default "disabled" | quote }}
-            {{- if eq (default "disabled" .Values.provisioner.acceptedSkillProjectionProfile) "rwx_verified_copy_v1" }}
+            {{- if eq (default "disabled" .Values.provisioner.acceptedSkillProjectionProfile) "rwx_verified_copy_v2" }}
             # The digest-pinned provisioner image contains both the verifier and
             # the per-attempt data-plane gate.
             - name: ACCEPTED_SKILL_RUNTIME_IMAGE

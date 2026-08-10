@@ -36,7 +36,11 @@ from deerflow.runtime.accepted_invocation import (
     ResolvedAgentRevision,
     canonical_digest,
 )
-from deerflow.runtime.constraints import InvocationSubagentReservation
+from deerflow.runtime.constraints import (
+    InvocationSubagentDispatchLedger,
+    InvocationSubagentReservation,
+    SubagentDispatchOutcome,
+)
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
@@ -290,6 +294,55 @@ async def test_reservation_is_concurrency_safe_nested_and_retry_idempotent() -> 
     assert reservation.reserved == 2
 
 
+@pytest.mark.asyncio
+async def test_dispatch_ledger_converges_equal_calls_and_freezes_terminal_result() -> None:
+    ledger = InvocationSubagentDispatchLedger(1)
+    digest = "a" * 64
+    tickets = await asyncio.gather(*(asyncio.to_thread(ledger.acquire, "dispatch-1", digest) for _ in range(8)))
+    winners = [ticket for ticket in tickets if ticket.outcome is SubagentDispatchOutcome.new]
+    replays = [ticket for ticket in tickets if ticket.outcome is SubagentDispatchOutcome.replay]
+    assert len(winners) == 1
+    assert len(replays) == 7
+    assert ledger.reserved == 1
+
+    mutable = {"messages": [{"content": "accepted"}]}
+    ledger.complete(winners[0], mutable)
+    mutable["messages"][0]["content"] = "mutated"
+    first = await ledger.replay_result(replays[0])
+    second = await ledger.replay_result(replays[1])
+    first["messages"][0]["content"] = "caller-mutated"
+    assert second == {"messages": [{"content": "accepted"}]}
+
+
+def test_dispatch_ledger_rejects_conflicts_exhaustion_and_zero_ceiling() -> None:
+    ledger = InvocationSubagentDispatchLedger(1)
+    assert ledger.acquire("dispatch-1", "a" * 64).outcome is SubagentDispatchOutcome.new
+    assert ledger.acquire("dispatch-1", "b" * 64).outcome is SubagentDispatchOutcome.conflict
+    assert ledger.acquire("dispatch-2", "c" * 64).outcome is SubagentDispatchOutcome.exhausted
+    assert (
+        InvocationSubagentDispatchLedger(0)
+        .acquire(
+            "dispatch-1",
+            "a" * 64,
+        )
+        .outcome
+        is SubagentDispatchOutcome.exhausted
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_ledger_cleanup_cancels_inflight_replay_idempotently() -> None:
+    ledger = InvocationSubagentDispatchLedger(1)
+    ledger.acquire("dispatch-1", "a" * 64)
+    replay = ledger.acquire("dispatch-1", "a" * 64)
+
+    ledger.close()
+    ledger.close()
+
+    with pytest.raises(asyncio.CancelledError):
+        await ledger.replay_result(replay)
+
+
 def test_caller_cannot_forge_constraint_projection_or_reservation() -> None:
     from deerflow.runtime.constraints import (
         INVOCATION_CONSTRAINTS_CONTEXT_KEY,
@@ -430,15 +483,134 @@ async def test_task_dispatch_reserves_exactly_once_and_rejects_the_excess(
         subagent_type="general-purpose",
         tool_call_id="dispatch-1",
     )
+    conflict = await coroutine(
+        runtime=runtime,
+        description="changed",
+        prompt="different work",
+        subagent_type="general-purpose",
+        tool_call_id="dispatch-1",
+    )
 
     assert first.update["messages"][0].content == "Task Succeeded. Result: done"
     assert "limit (1) reached" in excess.update["messages"][0].content
     assert retry.update["messages"][0].content == "Task Succeeded. Result: done"
-    assert starts == ["dispatch-1", "dispatch-1"]
+    assert "different intent" in conflict.update["messages"][0].content
+    assert starts == ["dispatch-1"]
     assert reservation.reserved == 1
     assert captured[0]["invocation_constraints"] is projection
     assert captured[0]["subagent_reservation"] is reservation
     assert captured[0]["accepted_extension_generation"] == 4
+
+
+@pytest.mark.asyncio
+async def test_task_dispatch_inflight_equal_replay_waits_for_one_physical_start(
+    monkeypatch,
+) -> None:
+    from deerflow.runtime.constraints import SUBAGENT_RESERVATION_CONTEXT_KEY
+    from deerflow.subagents.config import SubagentConfig
+
+    module = importlib.import_module("deerflow.tools.builtins.task_tool")
+    ledger = InvocationSubagentDispatchLedger(1)
+    runtime = SimpleNamespace(
+        state={},
+        context={
+            "thread_id": "thread-1",
+            SUBAGENT_RESERVATION_CONTEXT_KEY: ledger,
+        },
+        config={"metadata": {"model_name": "fixed-model"}},
+    )
+    starts: list[str] = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _Executor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def execute_async(self, _prompt, task_id=None):
+            starts.append(task_id)
+            started.set()
+            return task_id
+
+    class _Status(Enum):
+        RUNNING = "running"
+        COMPLETED = "completed"
+        FAILED = "failed"
+        CANCELLED = "cancelled"
+        TIMED_OUT = "timed_out"
+
+    result = SimpleNamespace(
+        status=_Status.RUNNING,
+        ai_messages=[],
+        result="done",
+        error=None,
+        stop_reason=None,
+        token_usage_records=[],
+        usage_reported=False,
+    )
+
+    async def _emit(*_args, **_kwargs):
+        return None
+
+    async def _wait_for_release(_seconds):
+        await release.wait()
+        result.status = _Status.COMPLETED
+
+    monkeypatch.setattr(module, "SubagentExecutor", _Executor)
+    monkeypatch.setattr(module, "SubagentStatus", _Status)
+    monkeypatch.setattr(
+        module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="helper",
+            model="fixed-model",
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_available_subagent_names",
+        lambda: ["general-purpose"],
+    )
+    monkeypatch.setattr(
+        module,
+        "get_background_task_result",
+        lambda _task_id: result,
+    )
+    monkeypatch.setattr(module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(module, "aemit_custom_event", _emit)
+    monkeypatch.setattr(module, "_report_subagent_usage", lambda *_args: None)
+    monkeypatch.setattr(module.asyncio, "sleep", _wait_for_release)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+
+    coroutine = module.task_tool.coroutine
+    first = asyncio.create_task(
+        coroutine(
+            runtime=runtime,
+            description="first",
+            prompt="same work",
+            subagent_type="general-purpose",
+            tool_call_id="dispatch-1",
+        )
+    )
+    await started.wait()
+    replay = asyncio.create_task(
+        coroutine(
+            runtime=runtime,
+            description="redelivery",
+            prompt="same work",
+            subagent_type="general-purpose",
+            tool_call_id="dispatch-1",
+        )
+    )
+    await asyncio.tasks.sleep(0)
+    assert starts == ["dispatch-1"]
+    assert replay.done() is False
+
+    release.set()
+    first_result, replay_result = await asyncio.gather(first, replay)
+    assert starts == ["dispatch-1"]
+    assert first_result == replay_result
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@
 {{- if .Values.provisioner.enabled -}}
 {{- $_ := set $sandboxConfig "provisioner_service_account_token_file" "/var/run/secrets/hartmesh-provisioner/token" -}}
 {{- end -}}
-{{- if eq (.Values.provisioner.acceptedSkillProjectionProfile | default "disabled") "rwx_verified_copy_v1" -}}
+{{- if eq (.Values.provisioner.acceptedSkillProjectionProfile | default "disabled") "rwx_verified_copy_v2" -}}
 {{- $runOwnership := (index $renderedConfig "run_ownership") | default dict -}}
 {{- $_ := set $runOwnership "heartbeat_enabled" true -}}
 {{- $_ := set $renderedConfig "run_ownership" $runOwnership -}}

@@ -30,7 +30,14 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .backend import SandboxBackend
-from .sandbox_info import AcceptedSkillMaterialReceiptV1, SandboxInfo
+from .sandbox_info import (
+    AcceptedSkillMaterialReceipt,
+    AcceptedSkillMaterialReceiptV1,
+    AcceptedSkillMaterialReceiptV2,
+    SandboxInfo,
+)
+
+_ACCEPTED_SKILL_PROFILE = "rwx_verified_copy_v2"
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +53,64 @@ _PROVISIONER_EXTRA_MOUNT_PATHS = {
 _LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
 _LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
 _LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
+
+_RECEIPT_V1_FIELDS = {
+    "version",
+    "profile",
+    "attempt_id",
+    "snapshot_id",
+    "content_digest",
+    "run_id",
+    "generation",
+    "pod_uid",
+    "lease_uid",
+    "runtime_image_ids_digest",
+    "verifier_receipt_digest",
+    "materialization_evidence_digest",
+}
+_RECEIPT_V2_FIELDS = _RECEIPT_V1_FIELDS | {
+    "pod_isolation_digest",
+    "network_policy_uid",
+    "network_policy_spec_digest",
+    "evidence_secret_uid",
+    "evidence_secret_digest",
+    "capability_secret_uid",
+    "capability_secret_digest",
+    "sandbox_image_digest",
+    "accepted_skill_runtime_image_digest",
+}
+
+
+def _parse_accepted_skill_material_receipt(
+    raw: object,
+    *,
+    require_v2: bool = False,
+) -> AcceptedSkillMaterialReceipt:
+    """Strictly parse v1 compatibility or complete v2 material evidence."""
+
+    if not isinstance(raw, dict):
+        raise RuntimeError("accepted_skill_snapshot_receipt_invalid")
+    version = raw.get("version")
+    fields = _RECEIPT_V2_FIELDS if version == 2 else _RECEIPT_V1_FIELDS
+    if version not in {1, 2} or set(raw) != fields or (require_v2 and version != 2):
+        raise RuntimeError("accepted_skill_snapshot_receipt_invalid")
+    materialization_wire = {key: raw[key] for key in fields if key != "materialization_evidence_digest"}
+    materialization_digest = hashlib.sha256(
+        json.dumps(
+            materialization_wire,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    ).hexdigest()
+    if materialization_digest != raw["materialization_evidence_digest"]:
+        raise RuntimeError("accepted_skill_snapshot_receipt_invalid")
+    try:
+        values = {key: raw[key] for key in fields if key != "version"}
+        if version == 1:
+            return AcceptedSkillMaterialReceiptV1(**values)
+        return AcceptedSkillMaterialReceiptV2(**values)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("accepted_skill_snapshot_receipt_invalid") from exc
 
 
 def _provisioner_extra_mounts_payload(
@@ -172,7 +237,9 @@ class RemoteSandboxBackend(SandboxBackend):
             payload = response.json()
         except (requests.RequestException, RuntimeError, ValueError):
             return False
-        return isinstance(payload, dict) and payload.get("accepted_skill_projection_profiles") == ["rwx_verified_copy_v1"]
+        return isinstance(payload, dict) and payload.get(
+            "accepted_skill_projection_profiles",
+        ) == [_ACCEPTED_SKILL_PROFILE]
 
     # ── SandboxBackend interface ──────────────────────────────────────────
 
@@ -323,7 +390,7 @@ class RemoteSandboxBackend(SandboxBackend):
                     )
                 payload["attempt_capability"] = attempt_capability
                 payload["accepted_skill_projection"] = {
-                    "profile": "rwx_verified_copy_v1",
+                    "profile": _ACCEPTED_SKILL_PROFILE,
                     "snapshot_id": evidence.snapshot_id,
                     "content_digest": evidence.content_digest,
                     "run_id": accepted_skill_binding.run_id,
@@ -366,50 +433,13 @@ class RemoteSandboxBackend(SandboxBackend):
                 raw_receipt = data.get("accepted_skill_material")
                 if not isinstance(raw_receipt, dict):
                     raise RuntimeError("accepted_skill_snapshot_receipt_missing")
-                receipt_fields = {
-                    "version",
-                    "profile",
-                    "attempt_id",
-                    "snapshot_id",
-                    "content_digest",
-                    "run_id",
-                    "generation",
-                    "pod_uid",
-                    "lease_uid",
-                    "runtime_image_ids_digest",
-                    "verifier_receipt_digest",
-                    "materialization_evidence_digest",
-                }
-                if set(raw_receipt) != receipt_fields or raw_receipt.get("version") != 1:
-                    raise RuntimeError("accepted_skill_snapshot_receipt_invalid")
-                materialization_wire = {key: raw_receipt[key] for key in receipt_fields if key != "materialization_evidence_digest"}
-                materialization_digest = hashlib.sha256(
-                    json.dumps(
-                        materialization_wire,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8"),
-                ).hexdigest()
-                if materialization_digest != raw_receipt["materialization_evidence_digest"]:
-                    raise RuntimeError("accepted_skill_snapshot_receipt_invalid")
-                try:
-                    receipt = AcceptedSkillMaterialReceiptV1(
-                        profile=raw_receipt["profile"],
-                        attempt_id=raw_receipt["attempt_id"],
-                        snapshot_id=raw_receipt["snapshot_id"],
-                        content_digest=raw_receipt["content_digest"],
-                        run_id=raw_receipt["run_id"],
-                        generation=raw_receipt["generation"],
-                        pod_uid=raw_receipt["pod_uid"],
-                        lease_uid=raw_receipt["lease_uid"],
-                        runtime_image_ids_digest=raw_receipt["runtime_image_ids_digest"],
-                        verifier_receipt_digest=raw_receipt["verifier_receipt_digest"],
-                        materialization_evidence_digest=raw_receipt["materialization_evidence_digest"],
-                    )
-                except (KeyError, TypeError, ValueError) as exc:
-                    raise RuntimeError("accepted_skill_snapshot_receipt_invalid") from exc
+                receipt = _parse_accepted_skill_material_receipt(
+                    raw_receipt,
+                    require_v2=True,
+                )
                 if (
-                    receipt.profile != "rwx_verified_copy_v1"
+                    not isinstance(receipt, AcceptedSkillMaterialReceiptV2)
+                    or receipt.profile != _ACCEPTED_SKILL_PROFILE
                     or receipt.snapshot_id != accepted_skill_binding.snapshot_id
                     or receipt.content_digest != accepted_skill_binding.snapshot_id
                     or receipt.run_id != accepted_skill_binding.run_id
@@ -417,9 +447,6 @@ class RemoteSandboxBackend(SandboxBackend):
                     or not receipt.pod_uid
                     or not receipt.attempt_id
                     or not receipt.lease_uid
-                    or len(receipt.runtime_image_ids_digest) != 64
-                    or len(receipt.verifier_receipt_digest) != 64
-                    or len(receipt.materialization_evidence_digest) != 64
                 ):
                     raise RuntimeError("accepted_skill_snapshot_receipt_mismatch")
             return SandboxInfo(
@@ -442,7 +469,7 @@ class RemoteSandboxBackend(SandboxBackend):
     def _provisioner_destroy(
         self,
         sandbox_id: str,
-        receipt: AcceptedSkillMaterialReceiptV1 | None = None,
+        receipt: AcceptedSkillMaterialReceipt | None = None,
     ) -> None:
         """DELETE /api/sandboxes/{sandbox_id} → destroy Pod + Service."""
         request_kwargs: dict[str, object] = {
@@ -471,7 +498,7 @@ class RemoteSandboxBackend(SandboxBackend):
     def _provisioner_is_alive(
         self,
         sandbox_id: str,
-        receipt: AcceptedSkillMaterialReceiptV1 | None = None,
+        receipt: AcceptedSkillMaterialReceipt | None = None,
     ) -> bool:
         """GET /api/sandboxes/{sandbox_id} → check Pod phase."""
         try:
@@ -491,30 +518,7 @@ class RemoteSandboxBackend(SandboxBackend):
         data = resp.json()
         if receipt is not None:
             current = data.get("accepted_skill_material")
-            if not isinstance(current, dict) or any(
-                current.get(key) != expected
-                for key, expected in (
-                    ("profile", receipt.profile),
-                    ("attempt_id", receipt.attempt_id),
-                    ("snapshot_id", receipt.snapshot_id),
-                    ("run_id", receipt.run_id),
-                    ("generation", receipt.generation),
-                    ("pod_uid", receipt.pod_uid),
-                    ("lease_uid", receipt.lease_uid),
-                    (
-                        "runtime_image_ids_digest",
-                        receipt.runtime_image_ids_digest,
-                    ),
-                    (
-                        "verifier_receipt_digest",
-                        receipt.verifier_receipt_digest,
-                    ),
-                    (
-                        "materialization_evidence_digest",
-                        receipt.materialization_evidence_digest,
-                    ),
-                )
-            ):
+            if current != receipt.to_wire():
                 raise RuntimeError("accepted_skill_snapshot_pod_replaced")
         return data.get("status") == "Running"
 

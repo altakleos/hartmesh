@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from langchain_core.tools import BaseTool
 
 from deerflow.authz.provider import AuthorizationProvider, Principal
+from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,14 @@ def filter_tools_by_authorization(
         allowed = provider.filter_resources(principal, "tool", candidates)
         if not isinstance(allowed, list) or any(not isinstance(name, str) for name in allowed):
             raise TypeError("AuthorizationProvider.filter_resources must return list[str]")
-    except Exception:
-        logger.exception("Authorization provider failed while filtering tools")
+    except Exception as exc:
+        diagnostic = bounded_diagnostic(
+            code="authorization_resource_filter_failed",
+            operation="filter_authorized_tools",
+            error=exc,
+            capability_id="authorization_provider",
+        )
+        log_bounded_failure(logger, diagnostic)
         return [] if fail_closed else original_tools
 
     allowed_names = set(allowed)

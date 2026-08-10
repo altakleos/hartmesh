@@ -42,7 +42,7 @@ MAX_GATE_BODY_BYTES = 110 * 1024 * 1024
 MAX_TREE_ENTRIES_PER_SKILL = 1_024
 MAX_GATE_CONCURRENCY = 32
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_PROFILE = "rwx_verified_copy_v1"
+_PROFILE = "rwx_verified_copy_v2"
 _CATEGORIES = frozenset({"public", "custom", "integrations", "legacy"})
 _HOP_HEADERS = {
     "connection",
@@ -471,7 +471,7 @@ def materialize_verified_snapshot(*, source: Path, destination: Path, evidence: 
         _make_read_only(stage)
         os.replace(stage, final)
         return {
-            "version": 1,
+            "version": 2,
             "profile": _PROFILE,
             "snapshot_id": normalized["snapshot_id"],
             "content_digest": digest,
@@ -522,7 +522,7 @@ def _read_json(path: Path) -> object:
 
 class _GateHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "HartmeshAcceptedSkillGate/1"
+    server_version = "HartmeshAcceptedSkillGate/2"
 
     def log_message(self, format: str, *args: object) -> None:
         return None
@@ -534,7 +534,7 @@ class _GateHandler(http.server.BaseHTTPRequestHandler):
         if not supplied or not hmac.compare_digest(supplied, expected):
             self.send_error(403, "Forbidden")
             return
-        if self.path == "/__hartmesh/accepted-material/v1":
+        if self.path == "/__hartmesh/accepted-material/v2":
             if self.command != "GET":
                 self.send_error(405, "Method Not Allowed")
                 return

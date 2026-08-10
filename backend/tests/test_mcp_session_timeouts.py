@@ -201,7 +201,7 @@ async def test_discovery_timeout_from_sdk_with_opt_out_is_reported_without_loggi
     assert tools == []
     # getMessage() on every captured record must not raise: pre-fix, the only
     # record for this server was the broken "timed out (%.1fs)" % None format.
-    assert any("tool discovery failed" in record.getMessage() for record in caplog.records)
+    assert any("mcp_tool_discovery_failed" in record.getMessage() for record in caplog.records)
     assert not any("timed out" in record.getMessage() for record in caplog.records)
 
 

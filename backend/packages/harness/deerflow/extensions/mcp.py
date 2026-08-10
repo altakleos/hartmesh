@@ -29,6 +29,11 @@ from deerflow.authz.runtime import (
     AuthorizedToolCallReceipt,
     authorization_provider_from_context,
 )
+from deerflow.diagnostics import (
+    bounded_diagnostic,
+    log_bounded_failure,
+    require_async_authoritative_operation,
+)
 from deerflow.extensions.capabilities import CapabilityHealthMonitor
 from deerflow.extensions.registry import LoadedExtensions
 from deerflow.guardrails.provider import current_guardrail_provider_receipt
@@ -102,6 +107,12 @@ class McpInvocationFacts:
 class McpInterceptorDiagnostic:
     capability_id: str
     diagnostic_code: str
+    error_class: str | None = None
+    correlation_id: str | None = None
+
+
+class McpInterceptorStartupError(RuntimeError):
+    """A required MCP authoritative operation is malformed at startup."""
 
 
 @dataclass(frozen=True)
@@ -167,8 +178,15 @@ def build_mcp_preparation_audit_sink(
 
 
 def _canonical_arguments_digest(arguments: object) -> str:
+    def mutable_json(value: object) -> object:
+        if isinstance(value, Mapping):
+            return {str(key): mutable_json(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return [mutable_json(item) for item in value]
+        return value
+
     canonical = json.dumps(
-        {"version": 1, "arguments": arguments},
+        {"version": 1, "arguments": mutable_json(arguments)},
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -230,11 +248,24 @@ class McpInterceptorHost:
                 interceptor = registration.factory()
                 if not isinstance(interceptor, McpInterceptor):
                     raise TypeError("factory returned an object that does not implement McpInterceptor")
-            except Exception:
+                require_async_authoritative_operation(interceptor, "prepare_call")
+            except Exception as exc:
+                safe = bounded_diagnostic(
+                    code=("authoritative_operation_not_async" if isinstance(exc, TypeError) and str(exc) == "authoritative_operation_not_async" else "initialization_failed"),
+                    operation="prepare_call",
+                    error=exc,
+                    capability_id=capability_id,
+                    contribution_id=registration.contribution_id,
+                )
+                if capability_id in self._required:
+                    log_bounded_failure(logger, safe, level=logging.ERROR)
+                    raise McpInterceptorStartupError(f"required capability {capability_id} failed to initialize: {safe.code} error_class={safe.error_class} correlation_id={safe.correlation_id}") from None
                 diagnostics.append(
                     McpInterceptorDiagnostic(
                         capability_id=capability_id,
-                        diagnostic_code="initialization_failed",
+                        diagnostic_code=safe.code,
+                        error_class=safe.error_class,
+                        correlation_id=safe.correlation_id,
                     )
                 )
                 continue
@@ -364,7 +395,15 @@ class McpInterceptorHost:
                             result = await item.interceptor.prepare_call(projection)
                     except asyncio.CancelledError:
                         raise
-                    except Exception:
+                    except Exception as exc:
+                        diagnostic = bounded_diagnostic(
+                            code="preparation_indeterminate",
+                            operation="prepare_call",
+                            error=exc,
+                            capability_id=item.capability_id,
+                            contribution_id=item.contribution_id,
+                        )
+                        log_bounded_failure(logger, diagnostic)
                         raise McpCallPreparationError("preparation_indeterminate") from None
                     if type(result) is McpCallRejectedV1:
                         raise McpCallPreparationError("preparation_rejected")
@@ -485,8 +524,14 @@ def _record_audit(
                 "contributions": evidence,
             },
         )
-    except Exception:
-        logger.warning("Failed to record MCP preparation evidence", exc_info=True)
+    except Exception as exc:
+        diagnostic = bounded_diagnostic(
+            code="preparation_audit_failed",
+            operation="record_mcp_preparation_evidence",
+            error=exc,
+            capability_id="mcp_interceptor",
+        )
+        log_bounded_failure(logger, diagnostic)
 
 
 __all__ = [
@@ -494,6 +539,7 @@ __all__ = [
     "MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY",
     "McpCallPreparationError",
     "McpInterceptorDiagnostic",
+    "McpInterceptorStartupError",
     "McpInterceptorHost",
     "McpInterceptorRuntime",
     "McpInvocationFacts",

@@ -46,7 +46,7 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
         "Keyed native ingress receipts",
         "Canonical keyed replay",
         "Split identity and sealed Origin",
-        "Trusted contributor context",
+        "Trusted contributor and hydrated evidence",
         "Restrictive authorization and constraints",
         "Pinned agent and extension material",
         "Transactional lifecycle evidence",
@@ -77,8 +77,27 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
     required_row_evidence = {
         "Keyed native ingress receipts": {
             "test_received_payload_survives_process_loss_before_claim",
+            "test_thread_contention_outlives_poison_budget_and_preserves_fifo",
+            "test_poison_receipt_dead_letters_without_exposing_exception_text",
             "test_response_loss_after_admission_replays_known_run_before_binding",
             "test_signed_route_reaches_real_runtime_and_redelivery_replays",
+        },
+        "Trusted contributor and hydrated evidence": {
+            "test_hydration_recomputes_bound_effective_and_trusted_evidence",
+            "test_store_reconstruction_rejects_corrupt_accepted_evidence_before_recovery",
+            "test_external_replay_lookup_rejects_corrupt_accepted_evidence_with_stable_error",
+        },
+        "Restrictive authorization and constraints": {
+            "test_task_dispatch_inflight_equal_replay_waits_for_one_physical_start",
+            "test_create_app_fails_closed_for_malformed_required_v2_constraints_provider",
+        },
+        "Pinned agent and extension material": {
+            "test_remote_v1_material_receipt_is_compatibility_only",
+            "test_accepted_pod_isolation_digest_binds_every_pod_security_field",
+            "test_v2_execution_fence_rereads_every_supporting_resource",
+        },
+        "Transactional lifecycle evidence": {
+            "test_lifecycle_readiness_rejects_deleted_interior_event_without_scanning",
         },
         "All durable launch sources": {
             "test_gateway_create_stream_wait_routes_share_durable_admission",

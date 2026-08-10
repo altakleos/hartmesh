@@ -851,6 +851,7 @@ async def run_agent(
     materialization_sandbox_id: str | None = None
     materialization_evidence = None
     materialization_provider = None
+    dispatch_ledger = None
 
     async def _finish_cancellation(
         action: str,
@@ -1195,7 +1196,7 @@ async def run_agent(
             from deerflow.runtime.constraints import (
                 INVOCATION_CONSTRAINTS_CONTEXT_KEY,
                 SUBAGENT_RESERVATION_CONTEXT_KEY,
-                InvocationSubagentReservation,
+                InvocationSubagentDispatchLedger,
                 validate_constraint_fence,
             )
 
@@ -1209,7 +1210,8 @@ async def run_agent(
                 limit = accepted_constraints.max_total_subagents
                 if limit is not None:
                     runtime_ctx["max_total_subagents"] = limit
-                    runtime_ctx[SUBAGENT_RESERVATION_CONTEXT_KEY] = InvocationSubagentReservation(limit)
+                    dispatch_ledger = InvocationSubagentDispatchLedger(limit)
+                    runtime_ctx[SUBAGENT_RESERVATION_CONTEXT_KEY] = dispatch_ledger
             _install_runtime_context(config, runtime_ctx)
             _install_pinned_agent_facts(config["context"], pinned_material)
             if accepted_constraints is not None:
@@ -1841,6 +1843,8 @@ async def run_agent(
                     run_id,
                     exc_info=True,
                 )
+        if dispatch_ledger is not None:
+            dispatch_ledger.close()
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
 

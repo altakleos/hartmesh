@@ -19,15 +19,18 @@ from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvid
 from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
 from deerflow.community.aio_sandbox.sandbox_info import (
     AcceptedSkillMaterialReceiptV1,
+    AcceptedSkillMaterialReceiptV2,
     SandboxInfo,
 )
 from deerflow.config.run_ownership_config import RunOwnershipConfig
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.runtime.runs.manager import RunManager, RunStartOutcome, RunStartupError
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.skill_projection import SkillProjectionEvidence
 from deerflow.runtime.skill_snapshot import SkillSnapshotProjection
 from deerflow.sandbox.sandbox_provider import (
     AcceptedSkillExecutionEvidenceV1,
+    AcceptedSkillExecutionEvidenceV2,
     AcceptedSkillMaterialCapability,
     AcceptedSkillSandboxBindingError,
     AcceptedSkillSandboxBindingV1,
@@ -69,6 +72,174 @@ def _projection_evidence(*, content: bytes = b"# accepted\n") -> SkillProjection
         file_count=1,
         total_bytes=len(content),
     )
+
+
+def _v2_receipt_wire(
+    evidence: SkillProjectionEvidence,
+    *,
+    run_id: str = "run-1",
+    generation: int = 7,
+) -> dict[str, object]:
+    receipt: dict[str, object] = {
+        "version": 2,
+        "profile": "rwx_verified_copy_v2",
+        "attempt_id": "sandbox-sandbox-1-accepted-attempt",
+        "snapshot_id": evidence.snapshot_id,
+        "content_digest": evidence.content_digest,
+        "run_id": run_id,
+        "generation": generation,
+        "pod_uid": "pod-uid-1",
+        "pod_isolation_digest": "1" * 64,
+        "lease_uid": "lease-uid-1",
+        "network_policy_uid": "network-policy-uid-1",
+        "network_policy_spec_digest": "2" * 64,
+        "evidence_secret_uid": "evidence-secret-uid-1",
+        "evidence_secret_digest": "3" * 64,
+        "capability_secret_uid": "capability-secret-uid-1",
+        "capability_secret_digest": "4" * 64,
+        "sandbox_image_digest": "5" * 64,
+        "accepted_skill_runtime_image_digest": "6" * 64,
+        "runtime_image_ids_digest": "7" * 64,
+        "verifier_receipt_digest": "8" * 64,
+    }
+    receipt["materialization_evidence_digest"] = hashlib.sha256(
+        json.dumps(
+            receipt,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    ).hexdigest()
+    return receipt
+
+
+def _install_exact_supporting_resources(
+    provisioner_module,
+    *,
+    sandbox_id: str,
+    projection,
+    capability: str,
+    lease,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Install the exact fake resources read by the v2 execution fence."""
+
+    secrets: dict[str, object] = {}
+    policies: dict[str, object] = {}
+
+    class Core:
+        def create_namespaced_secret(self, _namespace: str, secret):
+            secret.metadata.uid = f"{secret.metadata.name}-uid"
+            secrets[secret.metadata.name] = secret
+            return secret
+
+        def read_namespaced_secret(self, name: str, _namespace: str):
+            if name not in secrets:
+                raise provisioner_module.ApiException(status=404)
+            return secrets[name]
+
+    class Networking:
+        def create_namespaced_network_policy(self, _namespace: str, policy):
+            policy.metadata.uid = f"{policy.metadata.name}-uid"
+            policies[policy.metadata.name] = policy
+            return policy
+
+        def read_namespaced_network_policy(self, name: str, _namespace: str):
+            if name not in policies:
+                raise provisioner_module.ApiException(status=404)
+            return policies[name]
+
+    provisioner_module.core_v1 = Core()
+    provisioner_module.networking_v1 = Networking()
+    owner = provisioner_module._accepted_attempt_owner_reference(lease)
+    provisioner_module._create_accepted_secrets(
+        sandbox_id,
+        projection,
+        capability,
+        accepted_attempt_owner=owner,
+    )
+    provisioner_module._create_accepted_network_policy_exact(
+        sandbox_id,
+        accepted_attempt_owner=owner,
+    )
+    return secrets, policies
+
+
+def _ready_v2_attempt(provisioner_module):
+    evidence = _projection_evidence()
+    capability = "A" * 43
+    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v2"
+    provisioner_module.USERDATA_PVC_NAME = "shared-rwx"
+    provisioner_module.ACCEPTED_SKILL_RUNTIME_IMAGE = "registry.example/provisioner@sha256:" + ("a" * 64)
+    provisioner_module.SANDBOX_IMAGE = "registry.example/aio@sha256:" + ("b" * 64)
+    projection = provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
+        snapshot_id=evidence.snapshot_id,
+        content_digest=evidence.content_digest,
+        run_id="run-1",
+        generation=7,
+        projections=[item.to_json() for item in evidence.projections],
+        file_count=evidence.file_count,
+        total_bytes=evidence.total_bytes,
+    )
+    lease = provisioner_module._build_accepted_attempt_lease(
+        "sandbox-1",
+        projection,
+        capability,
+    )
+    lease.metadata.uid = "lease-uid-1"
+    owner = provisioner_module._accepted_attempt_owner_reference(lease)
+    pod = provisioner_module._build_pod(
+        "sandbox-1",
+        "thread-1",
+        user_id="owner-1",
+        accepted_skill_projection=projection,
+        attempt_capability=capability,
+        accepted_attempt_owner=owner,
+    )
+    lease.metadata.annotations["hartmesh.io/accepted-isolation-digest"] = pod.metadata.annotations["hartmesh.io/accepted-isolation-digest"]
+    lease.metadata.annotations["hartmesh.io/accepted-attempt-state"] = "pod_creation_started"
+    lease.metadata.annotations["hartmesh.io/accepted-pod-uid"] = "pod-uid-1"
+    pod.metadata.uid = "pod-uid-1"
+    pod.status = SimpleNamespace(
+        phase="Running",
+        pod_ip="10.0.0.8",
+        container_statuses=[
+            SimpleNamespace(
+                name="sandbox",
+                image_id="containerd://registry.example/aio@sha256:" + ("b" * 64),
+                ready=True,
+            ),
+            SimpleNamespace(
+                name="accepted-skill-gate",
+                image_id="containerd://registry.example/provisioner@sha256:" + ("a" * 64),
+                ready=True,
+            ),
+        ],
+        init_container_statuses=[
+            SimpleNamespace(
+                name="accepted-skill-verifier",
+                image_id="containerd://registry.example/provisioner@sha256:" + ("a" * 64),
+                state=SimpleNamespace(
+                    terminated=SimpleNamespace(exit_code=0),
+                ),
+            )
+        ],
+    )
+    secrets, policies = _install_exact_supporting_resources(
+        provisioner_module,
+        sandbox_id="sandbox-1",
+        projection=projection,
+        capability=capability,
+        lease=lease,
+    )
+    verifier_receipt = {
+        "version": 2,
+        "profile": "rwx_verified_copy_v2",
+        "snapshot_id": evidence.snapshot_id,
+        "content_digest": evidence.content_digest,
+        "file_count": evidence.file_count,
+        "total_bytes": evidence.total_bytes,
+    }
+    return projection, capability, lease, pod, verifier_receipt, secrets, policies
 
 
 def _load_verifier_module():
@@ -126,6 +297,55 @@ def test_materialization_receipt_rejects_unbounded_or_malformed_identity() -> No
             materialization_evidence_digest="b" * 64,
         )
 
+    wire = _v2_receipt_wire(_projection_evidence())
+    wire["materialization_evidence_digest"] = "f" * 64
+    with pytest.raises(ValueError, match="materialization evidence digest"):
+        AcceptedSkillMaterialReceiptV2(**{key: value for key, value in wire.items() if key != "version"})
+
+    evidence_wire = {key: value for key, value in _v2_receipt_wire(_projection_evidence()).items() if key not in {"version", "content_digest"}}
+    evidence_wire["materialization_evidence_digest"] = "f" * 64
+    with pytest.raises(ValueError, match="materialization evidence digest"):
+        AcceptedSkillExecutionEvidenceV2(**evidence_wire)
+
+
+def test_remote_v1_material_receipt_is_compatibility_only() -> None:
+    """An old receipt may be parsed, but it cannot prove the v2 isolation tuple."""
+
+    provider = AioSandboxProvider.__new__(AioSandboxProvider)
+    provider._backend = RemoteSandboxBackend("http://provisioner:8002")
+    provider._lock = threading.Lock()
+    provider._accepted_only_sandbox_ids = {"sandbox-legacy"}
+    provider._sandbox_infos = {
+        "sandbox-legacy": SandboxInfo(
+            sandbox_id="sandbox-legacy",
+            sandbox_url="http://10.0.0.8:8081",
+            accepted_skill_material=AcceptedSkillMaterialReceiptV1(
+                profile="rwx_verified_copy_v1",
+                attempt_id="sandbox-legacy-accepted-attempt",
+                snapshot_id="a" * 64,
+                content_digest="a" * 64,
+                run_id="run-legacy",
+                generation=1,
+                pod_uid="pod-uid-legacy",
+                lease_uid="lease-uid-legacy",
+                runtime_image_ids_digest="b" * 64,
+                verifier_receipt_digest="c" * 64,
+                materialization_evidence_digest="d" * 64,
+            ),
+        )
+    }
+
+    assert provider.accepted_skill_material_capability("sandbox-legacy") is AcceptedSkillMaterialCapability.EMPTY_ONLY
+
+
+def test_v1_remote_profile_configuration_fails_with_migration_guidance() -> None:
+    with pytest.raises(ValueError, match="compatibility-only.*rwx_verified_copy_v2"):
+        SandboxConfig(
+            use="deerflow.community.aio_sandbox:AioSandboxProvider",
+            provisioner_url="http://provisioner:8002",
+            accepted_skill_projection_profile="rwx_verified_copy_v1",
+        )
+
 
 @pytest.mark.asyncio
 async def test_remote_execution_fence_reduces_provisioner_failures_to_false(
@@ -133,27 +353,30 @@ async def test_remote_execution_fence_reduces_provisioner_failures_to_false(
 ) -> None:
     """A data-plane fence must never carry raw provisioner text into run state."""
 
-    receipt = AcceptedSkillMaterialReceiptV1(
-        profile="rwx_verified_copy_v1",
-        attempt_id="sandbox-attempt",
-        snapshot_id="a" * 64,
-        content_digest="a" * 64,
-        run_id="run-1",
+    receipt_wire = _v2_receipt_wire(
+        _projection_evidence(),
         generation=1,
-        pod_uid="pod-uid",
-        lease_uid="lease-uid",
-        runtime_image_ids_digest="b" * 64,
-        verifier_receipt_digest="c" * 64,
-        materialization_evidence_digest="d" * 64,
     )
-    evidence = AcceptedSkillExecutionEvidenceV1(
+    receipt = AcceptedSkillMaterialReceiptV2(
+        **{key: value for key, value in receipt_wire.items() if key != "version"},
+    )
+    evidence = AcceptedSkillExecutionEvidenceV2(
         profile=receipt.profile,
         attempt_id=receipt.attempt_id,
         snapshot_id=receipt.snapshot_id,
         run_id=receipt.run_id,
         generation=receipt.generation,
         pod_uid=receipt.pod_uid,
+        pod_isolation_digest=receipt.pod_isolation_digest,
         lease_uid=receipt.lease_uid,
+        network_policy_uid=receipt.network_policy_uid,
+        network_policy_spec_digest=receipt.network_policy_spec_digest,
+        evidence_secret_uid=receipt.evidence_secret_uid,
+        evidence_secret_digest=receipt.evidence_secret_digest,
+        capability_secret_uid=receipt.capability_secret_uid,
+        capability_secret_digest=receipt.capability_secret_digest,
+        sandbox_image_digest=receipt.sandbox_image_digest,
+        accepted_skill_runtime_image_digest=(receipt.accepted_skill_runtime_image_digest),
         runtime_image_ids_digest=receipt.runtime_image_ids_digest,
         verifier_receipt_digest=receipt.verifier_receipt_digest,
         materialization_evidence_digest=receipt.materialization_evidence_digest,
@@ -204,31 +427,11 @@ def test_remote_request_carries_exact_accepted_projection_and_private_capability
             return None
 
         def json(self) -> dict[str, object]:
-            receipt: dict[str, object] = {
-                "version": 1,
-                "profile": "rwx_verified_copy_v1",
-                "attempt_id": "sandbox-sandbox-1-accepted-attempt",
-                "snapshot_id": evidence.snapshot_id,
-                "content_digest": evidence.content_digest,
-                "run_id": "run-1",
-                "generation": 7,
-                "pod_uid": "pod-uid-1",
-                "lease_uid": "lease-uid-1",
-                "runtime_image_ids_digest": "d" * 64,
-                "verifier_receipt_digest": "e" * 64,
-            }
-            receipt["materialization_evidence_digest"] = hashlib.sha256(
-                json.dumps(
-                    receipt,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8"),
-            ).hexdigest()
             return {
                 "sandbox_id": "sandbox-1",
                 "sandbox_url": "http://10.0.0.8:8081",
                 "status": "Pending",
-                "accepted_skill_material": receipt,
+                "accepted_skill_material": _v2_receipt_wire(evidence),
             }
 
     def post(_url: str, *, json: dict[str, object], **_kwargs):
@@ -251,7 +454,7 @@ def test_remote_request_carries_exact_accepted_projection_and_private_capability
 
     projection = captured["accepted_skill_projection"]
     assert isinstance(projection, dict)
-    assert projection["profile"] == "rwx_verified_copy_v1"
+    assert projection["profile"] == "rwx_verified_copy_v2"
     assert projection["snapshot_id"] == evidence.snapshot_id
     assert projection["content_digest"] == evidence.content_digest
     assert projection["run_id"] == "run-1"
@@ -284,31 +487,11 @@ def test_remote_retries_response_loss_with_the_same_attempt_identity(
             return None
 
         def json(self) -> dict[str, object]:
-            receipt: dict[str, object] = {
-                "version": 1,
-                "profile": "rwx_verified_copy_v1",
-                "attempt_id": "sandbox-sandbox-1-accepted-attempt",
-                "snapshot_id": evidence.snapshot_id,
-                "content_digest": evidence.content_digest,
-                "run_id": "run-1",
-                "generation": 7,
-                "pod_uid": "pod-uid-1",
-                "lease_uid": "lease-uid-1",
-                "runtime_image_ids_digest": "d" * 64,
-                "verifier_receipt_digest": "e" * 64,
-            }
-            receipt["materialization_evidence_digest"] = hashlib.sha256(
-                json.dumps(
-                    receipt,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8"),
-            ).hexdigest()
             return {
                 "sandbox_id": "sandbox-1",
                 "sandbox_url": "http://10.0.0.8:8081",
                 "status": "Running",
-                "accepted_skill_material": receipt,
+                "accepted_skill_material": _v2_receipt_wire(evidence),
             }
 
     def post(_url: str, *, json: dict[str, object], **_kwargs):
@@ -362,7 +545,7 @@ def test_remote_preflight_uses_and_rereads_projected_service_account_token(
         return Response(
             {
                 "accepted_skill_projection_profiles": [
-                    "rwx_verified_copy_v1",
+                    "rwx_verified_copy_v2",
                 ],
             },
         )
@@ -531,13 +714,13 @@ def test_provisioner_accepted_pod_uses_exact_rwx_source_and_private_read_only_co
 ) -> None:
     evidence = _projection_evidence()
     provisioner_module.USERDATA_PVC_NAME = "home-rwx"
-    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v1"
+    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v2"
     provisioner_module.ACCEPTED_SKILL_RUNTIME_IMAGE = "registry.example/provisioner@sha256:" + ("a" * 64)
     provisioner_module.SANDBOX_IMAGE = "registry.example/aio@sha256:" + ("b" * 64)
-    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v1"
+    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v2"
     provisioner_module.USERDATA_PVC_NAME = "home-rwx"
-    projection = provisioner_module.AcceptedSkillProjectionV1(
-        profile="rwx_verified_copy_v1",
+    projection = provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
         snapshot_id=evidence.snapshot_id,
         content_digest=evidence.content_digest,
         run_id="run-1",
@@ -613,11 +796,11 @@ def test_provisioner_rejects_an_extra_mount_alias_to_snapshot_storage(
 ) -> None:
     evidence = _projection_evidence()
     provisioner_module.USERDATA_PVC_NAME = "home-rwx"
-    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v1"
+    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v2"
     provisioner_module.ACCEPTED_SKILL_RUNTIME_IMAGE = "registry.example/provisioner@sha256:" + ("a" * 64)
     provisioner_module.SANDBOX_IMAGE = "registry.example/aio@sha256:" + ("b" * 64)
-    projection = provisioner_module.AcceptedSkillProjectionV1(
-        profile="rwx_verified_copy_v1",
+    projection = provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
         snapshot_id=evidence.snapshot_id,
         content_digest=evidence.content_digest,
         run_id="run-1",
@@ -651,8 +834,8 @@ def test_provisioner_rejects_verified_copy_without_rwx_source_or_pinned_runtime(
     provisioner_module,
 ) -> None:
     evidence = _projection_evidence()
-    projection = provisioner_module.AcceptedSkillProjectionV1(
-        profile="rwx_verified_copy_v1",
+    projection = provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
         snapshot_id=evidence.snapshot_id,
         content_digest=evidence.content_digest,
         run_id="run-1",
@@ -661,7 +844,7 @@ def test_provisioner_rejects_verified_copy_without_rwx_source_or_pinned_runtime(
         file_count=1,
         total_bytes=evidence.total_bytes,
     )
-    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v1"
+    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v2"
     provisioner_module.USERDATA_PVC_NAME = ""
     provisioner_module.ACCEPTED_SKILL_RUNTIME_IMAGE = "registry.example/provisioner@sha256:" + ("a" * 64)
     with pytest.raises(provisioner_module.HTTPException, match="RWX home PVC"):
@@ -710,7 +893,7 @@ def test_provisioner_readiness_requires_the_configured_claim_to_be_rwx(
                 },
             )()
 
-    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v1"
+    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v2"
     provisioner_module.ACCEPTED_SKILL_RUNTIME_IMAGE = "registry.example/provisioner@sha256:" + ("a" * 64)
     provisioner_module.SANDBOX_IMAGE = "registry.example/aio@sha256:" + ("b" * 64)
     provisioner_module.USERDATA_PVC_NAME = "home-rwx"
@@ -768,19 +951,8 @@ def test_remote_aio_advertises_immutable_only_for_an_exact_verified_receipt() ->
 
     assert provider.accepted_skill_material_capability("sandbox-1") is AcceptedSkillMaterialCapability.EMPTY_ONLY
 
-    provider._sandbox_infos["sandbox-1"].accepted_skill_material = AcceptedSkillMaterialReceiptV1(
-        profile="rwx_verified_copy_v1",
-        attempt_id="sandbox-sandbox-1-accepted-attempt",
-        snapshot_id=evidence.snapshot_id,
-        content_digest=evidence.content_digest,
-        run_id="run-1",
-        generation=7,
-        pod_uid="pod-uid-1",
-        lease_uid="lease-uid-1",
-        runtime_image_ids_digest="d" * 64,
-        verifier_receipt_digest="e" * 64,
-        materialization_evidence_digest="c" * 64,
-    )
+    receipt_wire = _v2_receipt_wire(evidence)
+    provider._sandbox_infos["sandbox-1"].accepted_skill_material = AcceptedSkillMaterialReceiptV2(**{key: value for key, value in receipt_wire.items() if key != "version"})
     binding = AcceptedSkillSandboxBindingV1(
         snapshot_id=evidence.snapshot_id,
         run_id="run-1",
@@ -817,8 +989,8 @@ def test_accepted_attempt_lease_is_the_owner_root_and_is_idempotent(
     provisioner_module,
 ) -> None:
     evidence = _projection_evidence()
-    projection = provisioner_module.AcceptedSkillProjectionV1(
-        profile="rwx_verified_copy_v1",
+    projection = provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
         snapshot_id=evidence.snapshot_id,
         content_digest=evidence.content_digest,
         run_id="run-1",
@@ -828,7 +1000,7 @@ def test_accepted_attempt_lease_is_the_owner_root_and_is_idempotent(
         total_bytes=evidence.total_bytes,
     )
     provisioner_module.USERDATA_PVC_NAME = "home-rwx"
-    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v1"
+    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v2"
     provisioner_module.ACCEPTED_SKILL_RUNTIME_IMAGE = "registry.example/provisioner@sha256:" + ("a" * 64)
     provisioner_module.SANDBOX_IMAGE = "registry.example/aio@sha256:" + ("b" * 64)
     created: list[object] = []
@@ -984,7 +1156,7 @@ def test_unready_accepted_attempt_cannot_bypass_destroy_fence(
         metadata=SimpleNamespace(
             uid="pod-uid-1",
             labels={
-                "hartmesh.io/accepted-skill-profile": "rwx_verified_copy_v1",
+                "hartmesh.io/accepted-skill-profile": "rwx_verified_copy_v2",
             },
             annotations={},
             owner_references=[
@@ -1031,11 +1203,11 @@ def test_unready_accepted_attempt_cannot_bypass_destroy_fence(
 def test_accepted_pod_receipt_binds_pod_lease_and_runtime_image_ids(
     provisioner_module,
 ) -> None:
-    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v1"
+    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v2"
     provisioner_module.USERDATA_PVC_NAME = "shared-rwx"
     evidence = _projection_evidence()
-    projection = provisioner_module.AcceptedSkillProjectionV1(
-        profile="rwx_verified_copy_v1",
+    projection = provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
         snapshot_id=evidence.snapshot_id,
         content_digest=evidence.content_digest,
         run_id="run-1",
@@ -1052,6 +1224,7 @@ def test_accepted_pod_receipt_binds_pod_lease_and_runtime_image_ids(
         "A" * 43,
     )
     lease.metadata.uid = "lease-uid-1"
+    lease.metadata.annotations["hartmesh.io/accepted-capability-digest"] = provisioner_module._capability_digest("A" * 43)
     owner = provisioner_module._accepted_attempt_owner_reference(lease)
     pod = provisioner_module._build_pod(
         "sandbox-1",
@@ -1096,6 +1269,13 @@ def test_accepted_pod_receipt_binds_pod_lease_and_runtime_image_ids(
             )
         ],
     )
+    _install_exact_supporting_resources(
+        provisioner_module,
+        sandbox_id="sandbox-1",
+        projection=projection,
+        capability="A" * 43,
+        lease=lease,
+    )
     response = provisioner_module._accepted_pod_response(
         "sandbox-1",
         expected=projection,
@@ -1104,8 +1284,8 @@ def test_accepted_pod_receipt_binds_pod_lease_and_runtime_image_ids(
         attempt_lease=lease,
         pod=pod,
         verifier_receipt={
-            "version": 1,
-            "profile": "rwx_verified_copy_v1",
+            "version": 2,
+            "profile": "rwx_verified_copy_v2",
             "snapshot_id": evidence.snapshot_id,
             "content_digest": evidence.content_digest,
             "file_count": evidence.file_count,
@@ -1123,8 +1303,8 @@ def test_accepted_pod_receipt_binds_pod_lease_and_runtime_image_ids(
         == hashlib.sha256(
             json.dumps(
                 {
-                    "version": 1,
-                    "profile": "rwx_verified_copy_v1",
+                    "version": 2,
+                    "profile": "rwx_verified_copy_v2",
                     "snapshot_id": evidence.snapshot_id,
                     "content_digest": evidence.content_digest,
                     "file_count": evidence.file_count,
@@ -1161,6 +1341,12 @@ def test_accepted_pod_receipt_binds_pod_lease_and_runtime_image_ids(
             ).encode("utf-8")
         ).hexdigest()
     )
+    assert receipt["pod_isolation_digest"] == pod.metadata.annotations["hartmesh.io/accepted-isolation-digest"]
+    assert receipt["network_policy_uid"].endswith("-uid")
+    assert receipt["evidence_secret_uid"].endswith("-uid")
+    assert receipt["capability_secret_uid"].endswith("-uid")
+    assert receipt["sandbox_image_digest"] == "b" * 64
+    assert receipt["accepted_skill_runtime_image_digest"] == "a" * 64
 
     pod.status.container_statuses[0].image_id += "-untrusted-suffix"
     with pytest.raises(provisioner_module.HTTPException) as rejected:
@@ -1172,8 +1358,8 @@ def test_accepted_pod_receipt_binds_pod_lease_and_runtime_image_ids(
             attempt_lease=lease,
             pod=pod,
             verifier_receipt={
-                "version": 1,
-                "profile": "rwx_verified_copy_v1",
+                "version": 2,
+                "profile": "rwx_verified_copy_v2",
                 "snapshot_id": evidence.snapshot_id,
                 "content_digest": evidence.content_digest,
                 "file_count": evidence.file_count,
@@ -1186,13 +1372,13 @@ def test_accepted_pod_receipt_binds_pod_lease_and_runtime_image_ids(
 def test_accepted_pod_response_rejects_mutated_isolation_spec(
     provisioner_module,
 ) -> None:
-    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v1"
+    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v2"
     provisioner_module.USERDATA_PVC_NAME = "shared-rwx"
     provisioner_module.ACCEPTED_SKILL_RUNTIME_IMAGE = "registry.example/provisioner@sha256:" + ("a" * 64)
     provisioner_module.SANDBOX_IMAGE = "registry.example/aio@sha256:" + ("b" * 64)
     evidence = _projection_evidence()
-    projection = provisioner_module.AcceptedSkillProjectionV1(
-        profile="rwx_verified_copy_v1",
+    projection = provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
         snapshot_id=evidence.snapshot_id,
         content_digest=evidence.content_digest,
         run_id="run-1",
@@ -1243,6 +1429,266 @@ def test_accepted_pod_response_rejects_mutated_isolation_spec(
     assert rejected.value.detail == "accepted_attempt_pod_spec_mismatch"
 
 
+@pytest.mark.parametrize(
+    ("field", "mutated"),
+    [
+        ("host_network", True),
+        ("host_pid", True),
+        ("host_ipc", True),
+        ("share_process_namespace", True),
+        ("service_account_name", "another-service-account"),
+        ("automount_service_account_token", True),
+        ("runtime_class_name", "another-runtime"),
+        ("dns_policy", "Default"),
+        ("dns_config", SimpleNamespace(nameservers=["203.0.113.8"])),
+        (
+            "ephemeral_containers",
+            [SimpleNamespace(name="debug", image="registry.example/debug@sha256:" + ("f" * 64))],
+        ),
+        ("security_context", SimpleNamespace(run_as_user=0)),
+    ],
+)
+def test_accepted_pod_isolation_digest_binds_every_pod_security_field(
+    provisioner_module,
+    field: str,
+    mutated: object,
+) -> None:
+    evidence = _projection_evidence()
+    provisioner_module.ACCEPTED_SKILL_PROJECTION_PROFILE = "rwx_verified_copy_v2"
+    provisioner_module.USERDATA_PVC_NAME = "shared-rwx"
+    provisioner_module.ACCEPTED_SKILL_RUNTIME_IMAGE = "registry.example/provisioner@sha256:" + ("a" * 64)
+    provisioner_module.SANDBOX_IMAGE = "registry.example/aio@sha256:" + ("b" * 64)
+    projection = provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
+        snapshot_id=evidence.snapshot_id,
+        content_digest=evidence.content_digest,
+        run_id="run-1",
+        generation=7,
+        projections=[item.to_json() for item in evidence.projections],
+        file_count=evidence.file_count,
+        total_bytes=evidence.total_bytes,
+    )
+    pod = provisioner_module._build_pod(
+        "sandbox-1",
+        "thread-1",
+        user_id="owner-1",
+        accepted_skill_projection=projection,
+        attempt_capability="A" * 43,
+    )
+    before = provisioner_module._accepted_pod_isolation_digest(pod)
+
+    setattr(pod.spec, field, mutated)
+
+    assert provisioner_module._accepted_pod_isolation_digest(pod) != before
+
+
+def test_accepted_network_policy_already_exists_requires_exact_spec(
+    provisioner_module,
+) -> None:
+    owner = provisioner_module.k8s_client.V1OwnerReference(
+        api_version="coordination.k8s.io/v1",
+        kind="Lease",
+        name="sandbox-sandbox-1-accepted-attempt",
+        uid="lease-uid-1",
+    )
+    existing = provisioner_module._build_accepted_network_policy(
+        "sandbox-1",
+        accepted_attempt_owner=owner,
+    )
+    existing.metadata.uid = "network-policy-uid-1"
+    existing.spec.ingress[0].ports[0].port = 9000
+
+    class Networking:
+        def create_namespaced_network_policy(self, _namespace: str, _policy):
+            raise provisioner_module.ApiException(status=409)
+
+        def read_namespaced_network_policy(self, _name: str, _namespace: str):
+            return existing
+
+    provisioner_module.networking_v1 = Networking()
+
+    with pytest.raises(provisioner_module.HTTPException) as rejected:
+        provisioner_module._create_accepted_network_policy_exact(
+            "sandbox-1",
+            accepted_attempt_owner=owner,
+        )
+
+    assert rejected.value.status_code == 409
+    assert rejected.value.detail == "accepted_attempt_network_policy_conflict"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "network_policy_deleted",
+        "network_policy_replaced",
+        "network_policy_spec",
+        "evidence_secret_replaced",
+        "evidence_secret_payload",
+        "capability_secret_replaced",
+        "capability_secret_payload",
+    ],
+)
+def test_v2_execution_fence_rereads_every_supporting_resource(
+    provisioner_module,
+    mutation: str,
+) -> None:
+    (
+        projection,
+        capability,
+        lease,
+        pod,
+        verifier_receipt,
+        secrets,
+        policies,
+    ) = _ready_v2_attempt(provisioner_module)
+
+    class Coordination:
+        def replace_namespaced_lease(self, _name: str, _namespace: str, candidate):
+            return candidate
+
+    provisioner_module.coordination_v1 = Coordination()
+    response = provisioner_module._accepted_pod_response(
+        "sandbox-1",
+        expected=projection,
+        expected_capability=capability,
+        expected_lease_uid="lease-uid-1",
+        attempt_lease=lease,
+        pod=pod,
+        verifier_receipt=verifier_receipt,
+    )
+    assert response is not None and response.accepted_skill_material is not None
+    bound_lease = provisioner_module._bind_accepted_attempt_materialization(
+        lease,
+        response.accepted_skill_material,
+    )
+
+    policy_name = "sandbox-sandbox-1-accepted-gate"
+    evidence_name = provisioner_module._accepted_evidence_secret_name("sandbox-1")
+    capability_name = provisioner_module._accepted_capability_secret_name("sandbox-1")
+    if mutation == "network_policy_deleted":
+        del policies[policy_name]
+    elif mutation == "network_policy_replaced":
+        policies[policy_name].metadata.uid = "replacement-policy-uid"
+    elif mutation == "network_policy_spec":
+        policies[policy_name].spec.ingress[0].ports[0].port = 9000
+    elif mutation == "evidence_secret_replaced":
+        secrets[evidence_name].metadata.uid = "replacement-evidence-secret-uid"
+    elif mutation == "evidence_secret_payload":
+        secrets[evidence_name].string_data["evidence.json"] = "{}"
+    elif mutation == "capability_secret_replaced":
+        secrets[capability_name].metadata.uid = "replacement-capability-secret-uid"
+    else:
+        secrets[capability_name].string_data["capability"] = "B" * 43
+
+    with pytest.raises(provisioner_module.HTTPException) as rejected:
+        provisioner_module._accepted_pod_response(
+            "sandbox-1",
+            expected_lease_uid="lease-uid-1",
+            attempt_lease=bound_lease,
+            pod=pod,
+        )
+
+    assert rejected.value.status_code == 409
+    assert rejected.value.detail in {
+        "accepted_attempt_materialization_mismatch",
+        "accepted_attempt_network_policy_missing",
+        "accepted_attempt_network_policy_conflict",
+        "accepted_attempt_secret_conflict",
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "host_network",
+        "host_pid",
+        "host_ipc",
+        "share_process_namespace",
+        "service_account",
+        "automount",
+        "runtime_class",
+        "dns",
+        "ephemeral_container",
+        "pod_security",
+        "container_command",
+        "init_command",
+        "container_port",
+        "container_mount",
+        "volume",
+    ],
+)
+def test_v2_execution_fence_rejects_admitted_podspec_drift(
+    provisioner_module,
+    mutation: str,
+) -> None:
+    (
+        projection,
+        capability,
+        lease,
+        pod,
+        verifier_receipt,
+        _secrets,
+        _policies,
+    ) = _ready_v2_attempt(provisioner_module)
+
+    class Coordination:
+        def replace_namespaced_lease(self, _name: str, _namespace: str, candidate):
+            return candidate
+
+    provisioner_module.coordination_v1 = Coordination()
+    response = provisioner_module._accepted_pod_response(
+        "sandbox-1",
+        expected=projection,
+        expected_capability=capability,
+        expected_lease_uid="lease-uid-1",
+        attempt_lease=lease,
+        pod=pod,
+        verifier_receipt=verifier_receipt,
+    )
+    assert response is not None and response.accepted_skill_material is not None
+    bound_lease = provisioner_module._bind_accepted_attempt_materialization(
+        lease,
+        response.accepted_skill_material,
+    )
+
+    if mutation in {"host_network", "host_pid", "host_ipc", "share_process_namespace"}:
+        setattr(pod.spec, mutation, True)
+    elif mutation == "service_account":
+        pod.spec.service_account_name = "replacement"
+    elif mutation == "automount":
+        pod.spec.automount_service_account_token = True
+    elif mutation == "runtime_class":
+        pod.spec.runtime_class_name = "replacement"
+    elif mutation == "dns":
+        pod.spec.dns_policy = "Default"
+    elif mutation == "ephemeral_container":
+        pod.spec.ephemeral_containers = [SimpleNamespace(name="debug", image="debug@sha256:" + ("9" * 64))]
+    elif mutation == "pod_security":
+        pod.spec.security_context = SimpleNamespace(run_as_user=0)
+    elif mutation == "container_command":
+        pod.spec.containers[0].command = ["/bin/replacement"]
+    elif mutation == "init_command":
+        pod.spec.init_containers[0].command = ["/bin/replacement"]
+    elif mutation == "container_port":
+        pod.spec.containers[0].ports[0].container_port = 9999
+    elif mutation == "container_mount":
+        next(mount for mount in pod.spec.containers[0].volume_mounts if mount.mount_path == "/mnt/skills/.accepted").read_only = False
+    else:
+        pod.spec.volumes[0].name = "replacement-volume"
+
+    with pytest.raises(provisioner_module.HTTPException) as rejected:
+        provisioner_module._accepted_pod_response(
+            "sandbox-1",
+            expected_lease_uid="lease-uid-1",
+            attempt_lease=bound_lease,
+            pod=pod,
+        )
+
+    assert rejected.value.status_code == 409
+    assert rejected.value.detail == "accepted_attempt_pod_spec_mismatch"
+
+
 def test_accepted_pod_url_brackets_ipv6(provisioner_module) -> None:
     assert provisioner_module._accepted_pod_url("2001:db8::8") == "http://[2001:db8::8]:8081"
 
@@ -1251,8 +1697,8 @@ def test_accepted_attempt_replay_with_another_capability_fails_closed(
     provisioner_module,
 ) -> None:
     evidence = _projection_evidence()
-    projection = provisioner_module.AcceptedSkillProjectionV1(
-        profile="rwx_verified_copy_v1",
+    projection = provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
         snapshot_id=evidence.snapshot_id,
         content_digest=evidence.content_digest,
         run_id="run-1",
@@ -1293,8 +1739,8 @@ def test_accepted_attempt_allows_exactly_one_pod_creation_transition(
     provisioner_module,
 ) -> None:
     evidence = _projection_evidence()
-    projection = provisioner_module.AcceptedSkillProjectionV1(
-        profile="rwx_verified_copy_v1",
+    projection = provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
         snapshot_id=evidence.snapshot_id,
         content_digest=evidence.content_digest,
         run_id="run-1",
@@ -1405,6 +1851,62 @@ def test_accepted_attempt_renewal_is_fenced_by_exact_materialization(
     assert stale.value.detail == "accepted_attempt_fence_mismatch"
 
 
+def test_accepted_attempt_renewal_rejects_supporting_resource_drift(
+    provisioner_module,
+) -> None:
+    (
+        projection,
+        capability,
+        lease,
+        pod,
+        verifier_receipt,
+        _secrets,
+        policies,
+    ) = _ready_v2_attempt(provisioner_module)
+    replacements: list[object] = []
+
+    class Coordination:
+        def read_namespaced_lease(self, _name: str, _namespace: str):
+            return bound_lease
+
+        def replace_namespaced_lease(self, _name: str, _namespace: str, candidate):
+            replacements.append(candidate)
+            return candidate
+
+    provisioner_module.coordination_v1 = Coordination()
+    response = provisioner_module._accepted_pod_response(
+        "sandbox-1",
+        expected=projection,
+        expected_capability=capability,
+        expected_lease_uid="lease-uid-1",
+        attempt_lease=lease,
+        pod=pod,
+        verifier_receipt=verifier_receipt,
+    )
+    assert response is not None and response.accepted_skill_material is not None
+    bound_lease = provisioner_module._bind_accepted_attempt_materialization(
+        lease,
+        response.accepted_skill_material,
+    )
+    replacements.clear()
+    provisioner_module.core_v1.read_namespaced_pod = lambda _name, _namespace: pod
+    policies["sandbox-sandbox-1-accepted-gate"].metadata.uid = "replacement-network-policy-uid"
+    receipt = response.accepted_skill_material
+
+    with pytest.raises(provisioner_module.HTTPException) as rejected:
+        provisioner_module._renew_accepted_attempt(
+            "sandbox-1",
+            provisioner_module.RenewAcceptedAttemptRequest(
+                pod_uid=str(receipt["pod_uid"]),
+                lease_uid=str(receipt["lease_uid"]),
+                materialization_evidence_digest=str(receipt["materialization_evidence_digest"]),
+            ),
+        )
+
+    assert rejected.value.status_code == 409
+    assert replacements == []
+
+
 def test_accepted_secret_cleanup_never_deletes_another_lease_owner(
     provisioner_module,
 ) -> None:
@@ -1482,8 +1984,8 @@ def test_capability_gate_rejects_wrong_identity_and_proxies_once(
     capability_file.write_text("A" * 43, encoding="utf-8")
     receipt_file = tmp_path / "receipt.json"
     receipt = {
-        "version": 1,
-        "profile": "rwx_verified_copy_v1",
+        "version": 2,
+        "profile": "rwx_verified_copy_v2",
         "snapshot_id": "a" * 64,
         "content_digest": "a" * 64,
         "file_count": 1,
@@ -1527,7 +2029,7 @@ def test_capability_gate_rejects_wrong_identity_and_proxies_once(
     with urllib.request.urlopen(allowed, timeout=2) as response:
         assert response.read() == b'{"ok":true}'
     receipt_request = urllib.request.Request(
-        f"http://127.0.0.1:{gate_port}/__hartmesh/accepted-material/v1",
+        f"http://127.0.0.1:{gate_port}/__hartmesh/accepted-material/v2",
         headers={"Authorization": "Bearer " + ("A" * 43)},
         method="GET",
     )
@@ -1564,6 +2066,26 @@ async def test_started_transition_atomically_binds_materialization_evidence() ->
     assert row["execution_evidence_digest"] == evidence.digest
     assert events[-1]["lifecycle_type"] == "started"
     assert events[-1]["payload"]["execution_evidence_digest"] == evidence.digest
+
+
+@pytest.mark.asyncio
+async def test_started_transition_persists_complete_v2_execution_tuple() -> None:
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("thread-evidence-v2")
+    wire = _v2_receipt_wire(
+        _projection_evidence(),
+        run_id=record.run_id,
+        generation=4,
+    )
+    evidence = AcceptedSkillExecutionEvidenceV2(
+        **{key: value for key, value in wire.items() if key not in {"version", "content_digest"}},
+    )
+
+    assert await manager.try_start(record.run_id, execution_evidence=evidence) is RunStartOutcome.started
+    row = await store.get(record.run_id)
+    assert row["execution_evidence_json"] == evidence.to_persisted()
+    assert row["execution_evidence_digest"] == evidence.digest
 
 
 @pytest.mark.asyncio

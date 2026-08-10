@@ -61,7 +61,7 @@ def test_mcp_tool_sync_wrapper_generation():
         assert result == "result: 42"
 
 
-def test_mcp_tool_loading_skips_failed_server():
+def test_mcp_tool_loading_skips_failed_server(caplog):
     """A broken MCP server should not drop tools from healthy servers."""
 
     async def mock_coro(x: int):
@@ -85,20 +85,22 @@ def test_mcp_tool_loading_skips_failed_server():
     mock_client_instance = MagicMock()
     mock_client_instance.get_tools = AsyncMock(side_effect=get_tools_for_server)
 
-    with (
-        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
-        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=MagicMock(model_extra={})),
-        patch("deerflow.mcp.tools.build_servers_config", return_value={"good-server": {}, "bad-server": {}}),
-        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
-        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
-        patch("deerflow.mcp.tools.logger.warning") as mock_warning,
-    ):
-        tools = asyncio.run(get_mcp_tools())
+    with caplog.at_level("WARNING", logger="deerflow.mcp.tools"):
+        with (
+            patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
+            patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=MagicMock(model_extra={})),
+            patch("deerflow.mcp.tools.build_servers_config", return_value={"good-server": {}, "bad-server": {}}),
+            patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+            patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        ):
+            tools = asyncio.run(get_mcp_tools())
 
     assert [tool.name for tool in tools] == ["good-server_search"]
     assert tools[0].func is not None
-    mock_warning.assert_called_once()
-    assert "bad-server" in mock_warning.call_args[0][0]
+    assert "SSE endpoint returned text/html" not in caplog.text
+    record = next(item for item in caplog.records if getattr(item, "diagnostic_code", None) == "mcp_tool_discovery_failed")
+    assert record.contribution_id == "bad-server"
+    assert record.exception_class == "RuntimeError"
 
 
 def test_mcp_tool_sync_wrapper_in_running_loop():

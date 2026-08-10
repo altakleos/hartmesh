@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -21,7 +22,14 @@ from deerflow_extension_api import (
     ConstraintRejected,
 )
 
+from deerflow.diagnostics import (
+    bounded_diagnostic,
+    log_bounded_failure,
+    require_async_authoritative_operation,
+)
 from deerflow.extensions.registry import LoadedExtensions
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_SECONDS = 2.0
 _MAX_FUTURE_SKEW = timedelta(seconds=30)
@@ -79,14 +87,21 @@ class InvocationConstraintsHost:
                 raise ConstraintStartupError(f"required capability {required_id} is not registered; found {capability_id}")
             try:
                 provider = registration.factory()
-                if not callable(getattr(provider, "project", None)):
-                    raise TypeError("factory returned an object without an async project operation")
+                require_async_authoritative_operation(provider, "project")
                 self._provider = provider
                 self._capability_api_version = registration.capability_api_version
             except Exception as exc:
+                diagnostic = bounded_diagnostic(
+                    code=("authoritative_operation_not_async" if isinstance(exc, TypeError) and str(exc) == "authoritative_operation_not_async" else "initialization_failed"),
+                    operation="project",
+                    error=exc,
+                    capability_id=capability_id,
+                    contribution_id=registration.contribution_id,
+                )
                 if capability_id in required_constraints:
-                    raise ConstraintStartupError(f"required capability {capability_id} failed to initialize: {_bounded_failure(exc)}") from exc
-                diagnostics.append(_bounded_failure(exc))
+                    log_bounded_failure(logger, diagnostic, level=logging.ERROR)
+                    raise ConstraintStartupError(f"required capability {capability_id} failed to initialize: {diagnostic.code} error_class={diagnostic.error_class} correlation_id={diagnostic.correlation_id}") from None
+                diagnostics.append(diagnostic.code if diagnostic.code == "authoritative_operation_not_async" else diagnostic.error_class)
         self.startup_diagnostics = tuple(diagnostics)
 
     @property
@@ -202,7 +217,14 @@ class InvocationConstraintsHost:
             return projection
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            diagnostic = bounded_diagnostic(
+                code="constraint_projection_indeterminate",
+                operation="project",
+                error=exc,
+                capability_id=self._required_capability_id or "invocation_constraints.optional",
+            )
+            log_bounded_failure(logger, diagnostic)
             return ConstraintIndeterminate()
 
 

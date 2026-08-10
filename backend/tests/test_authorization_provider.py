@@ -165,7 +165,7 @@ class TestDataclasses:
     def test_authz_decision_defaults(self):
         d = AuthzDecision(allow=True)
         assert d.allow is True
-        assert d.reasons == []
+        assert d.reasons == ()
         assert d.policy_id is None
         assert d.metadata == {}
 
@@ -176,6 +176,42 @@ class TestDataclasses:
         assert d.reasons[0].code == "denied"
         assert d.reasons[0].message == "no access"
         assert d.policy_id == "p1"
+
+    def test_authorization_records_defensively_freeze_nested_provider_data(self):
+        context = {"nested": {"roles": ["reader"]}}
+        metadata = {"evidence": [{"id": "rule-1"}]}
+        reasons = [AuthzReason(code="allowed")]
+        request = AuthzRequest(
+            principal=Principal(user_id="u1"),
+            resource="invocation",
+            action="observe",
+            target="run:run-1",
+            context=context,
+        )
+        decision = AuthzDecision(
+            allow=True,
+            reasons=reasons,
+            metadata=metadata,
+        )
+
+        context["nested"]["roles"].append("admin")
+        metadata["evidence"][0]["id"] = "mutated"
+        reasons.append(AuthzReason(code="late"))
+
+        assert request.context["nested"]["roles"] == ("reader",)
+        assert decision.metadata["evidence"][0]["id"] == "rule-1"
+        assert tuple(reason.code for reason in decision.reasons) == ("allowed",)
+        with pytest.raises(TypeError):
+            request.context["new"] = "value"
+        with pytest.raises(TypeError):
+            decision.metadata["new"] = "value"
+        with pytest.raises(AttributeError):
+            decision.reasons.append(AuthzReason(code="later"))
+
+        first = decision.to_dict()
+        second = decision.to_dict()
+        first["metadata"]["evidence"][0]["id"] = "wire-mutation"
+        assert second["metadata"]["evidence"][0]["id"] == "rule-1"
 
 
 # --- filter_resources ---

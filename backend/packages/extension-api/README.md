@@ -72,7 +72,8 @@ generation inside the configured admission window. That health observation is on
 pre-fence: the subsequent `authorize`, `contribute`, `project`, or MCP `prepare_call` remains
 authoritative and independently fail-closed. Accepted keyed replay reuses sealed evidence and
 does not call a provider again. Health failures expose only bounded codes and correlation IDs;
-raw provider exceptions remain in correlated internal diagnostics.
+diagnostics/logs retain only the stable code, exception class, contribution ID, operation, and
+correlation ID—not the provider message or traceback.
 
 ## Authorization provider contribution
 
@@ -105,6 +106,11 @@ returns an `AuthorizationProvider`. A plugin does not declare its package name o
 the Capability Host derives and stamps installed-distribution provenance while loading.
 Only one provider factory may be registered. It cannot be combined with the legacy
 `authorization.provider.use` class-path configuration.
+
+`AuthzRequest`, `AuthzDecision`, and `AuthzReason` defensively snapshot and recursively freeze
+nested provider/caller mappings and sequences. A later mutation of an input or provider-owned
+result cannot change authorization evidence; host adapters thaw a fresh mutable wire copy only
+where serialization requires one.
 
 The extension snapshot and its generation are immutable after Gateway construction. The
 Gateway-owned authorization resolver constructs an extension provider once at startup and
@@ -221,6 +227,10 @@ permission and future dynamic effects.
 
 The Capability Host calls the provider directly, outside observational fail-open
 middleware, under a host-owned two-second timeout and an injected timezone-aware clock.
+At startup it verifies that `project` is declared async; a synchronous method is malformed even
+if it happens to return an awaitable. This same authoritative-operation check applies to required
+authorization, contributor, and MCP preparation providers, while health-probe compatibility is
+validated separately.
 When the selected version is operator-required, admission first requires one fresh healthy
 snapshot for that exact capability ID; unhealthy, unknown, stale, or unavailable health is
 indeterminate and the provider is not called.
@@ -233,9 +243,11 @@ extension config cannot activate or require trusted constraint code.
 
 The accepted run persists only the normalized projection and safe evidence ID/digest.
 Workers validate the accepted binding and freshness before graph construction and again
-immediately before the first graph stream. One invocation-scoped, concurrency-safe
-reservation counter is shared by lead and delegated subagents and reserves before every
-dispatch; retries with the same dispatch ID do not consume the ceiling twice. Token
+immediately before the first graph stream. One invocation-scoped, concurrency-safe dispatch
+ledger is shared by lead and delegated subagents. A new canonical dispatch-ID/intent pair
+consumes one physical-start slot; an equal in-flight or completed retry reuses its result without
+starting again. Changed intent under that ID conflicts, and a new ID beyond the ceiling is
+exhausted. The ledger snapshots only the digest and bounded result, not mutable caller input. Token
 budgets remain post-response guards and are not advertised as exact constraints.
 
 Version 1 remains a deliberate compatibility contract with its original request and

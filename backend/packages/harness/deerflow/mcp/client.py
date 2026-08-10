@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
+from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,13 @@ def build_servers_config(extensions_config: ExtensionsConfig) -> dict[str, dict[
         try:
             servers_config[server_name] = build_server_params(server_name, server_config)
             logger.info(f"Configured MCP server: {server_name}")
-        except Exception as e:
-            logger.error(f"Failed to configure MCP server '{server_name}': {e}")
+        except Exception as exc:
+            diagnostic = bounded_diagnostic(
+                code="mcp_server_configuration_failed",
+                operation="build_mcp_server_configuration",
+                error=exc,
+                contribution_id=server_name,
+            )
+            log_bounded_failure(logger, diagnostic, level=logging.ERROR)
 
     return servers_config

@@ -61,8 +61,10 @@ deployment facts and therefore never appear in this package. Gateway exposes an
 operator-asserted reference separately through an authenticated administrative Interface;
 exact artifact verification is an offline deployment concern, not a portable runtime
 capability. Unexpected host Adapter
-exceptions may return only an `indeterminate` failure with a bounded correlation ID;
-raw exception text and deployment internals remain outside the portable wire contract.
+exceptions on any operation return only the strict versioned `runtime.error` envelope as
+`indeterminate` with a bounded correlation ID. Host diagnostics retain only a stable code,
+exception class, bounded operation context, and that ID; raw exception text, tracebacks, and
+deployment internals remain outside both the portable wire contract and ordinary diagnostics.
 
 The ensure request deliberately has no property bags. It accepts a service-
 supplied external key, thread, optional agent hint, strict graph or resume input,

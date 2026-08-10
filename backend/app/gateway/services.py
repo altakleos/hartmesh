@@ -1517,6 +1517,7 @@ def _effective_execution_projection(
     input_projection = {"resume": canonical_request_value(intent.command["resume"])} if intent.command and intent.command.get("resume") is not None else canonical_request_value(graph_input)
     return EffectiveExecutionProjection(
         {
+            "accepted_digest_semantics": "canonical_execution_v2",
             "thread_id": accepted.thread_id,
             "agent_selector": _requested_agent_id(intent),
             "agent_revision_digest": accepted.agent_revision.digest,
@@ -1957,7 +1958,7 @@ async def _seal_accepted_invocation(
         thread_id=intent.thread_id,
         context_references=context_references,
         agent_revision=revision,
-        normalized_input=graph_input,
+        normalized_input=({"resume": canonical_request_value(intent.command["resume"])} if intent.command and intent.command.get("resume") is not None else canonical_request_value(graph_input)),
         execution_options={
             "multitask_strategy": intent.multitask_strategy,
             "interrupt_before": intent.interrupt_before,

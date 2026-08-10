@@ -11,7 +11,6 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Literal
-from uuid import uuid4
 
 from deerflow_extension_api import (
     API_VERSION,
@@ -24,6 +23,7 @@ from deerflow_extension_api import (
     CapabilityHealthResult,
 )
 
+from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 from deerflow.extensions.registry import LoadedExtensions
 
 logger = logging.getLogger(__name__)
@@ -483,29 +483,30 @@ class CapabilityHealthMonitor:
                         raise TypeError("health probe returned an invalid result")
                 except asyncio.CancelledError:
                     raise
-                except TimeoutError:
-                    correlation_id = uuid4().hex
-                    logger.warning(
-                        "Authoritative capability health probe timed out",
-                        extra={
-                            "capability_id": entry.capability_id,
-                            "correlation_id": correlation_id,
-                        },
+                except TimeoutError as exc:
+                    diagnostic = bounded_diagnostic(
+                        code="probe_timeout",
+                        operation="health_probe",
+                        error=exc,
+                        capability_id=entry.capability_id,
+                        contribution_id=entry.contribution_id,
                     )
+                    correlation_id = diagnostic.correlation_id
+                    log_bounded_failure(logger, diagnostic)
                     result = CapabilityHealthResult(
                         status="unhealthy",
                         diagnostic_code="probe_timeout",
                     )
-                except Exception:
-                    correlation_id = uuid4().hex
-                    logger.warning(
-                        "Authoritative capability health probe failed",
-                        exc_info=True,
-                        extra={
-                            "capability_id": entry.capability_id,
-                            "correlation_id": correlation_id,
-                        },
+                except Exception as exc:
+                    diagnostic = bounded_diagnostic(
+                        code="probe_failed",
+                        operation="health_probe",
+                        error=exc,
+                        capability_id=entry.capability_id,
+                        contribution_id=entry.contribution_id,
                     )
+                    correlation_id = diagnostic.correlation_id
+                    log_bounded_failure(logger, diagnostic)
                     result = CapabilityHealthResult(
                         status="unhealthy",
                         diagnostic_code="probe_failed",

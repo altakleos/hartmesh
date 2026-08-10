@@ -30,8 +30,10 @@ Architecture (docker-compose-dev):
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -112,6 +114,7 @@ ACCEPTED_SKILL_EVIDENCE_MOUNT = "/var/run/hartmesh/accepted-evidence"
 ACCEPTED_SKILL_CAPABILITY_MOUNT = "/var/run/hartmesh/accepted-capability"
 ACCEPTED_SKILL_RECEIPT_MOUNT = "/var/run/hartmesh/accepted-receipt"
 ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1 = "rwx_verified_copy_v1"
+ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2 = "rwx_verified_copy_v2"
 
 
 def _bounded_int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -584,6 +587,15 @@ class AcceptedSkillProjectionV1(BaseModel):
         }
 
 
+class AcceptedSkillProjectionV2(AcceptedSkillProjectionV1):
+    """Projection requiring the complete v2 Kubernetes isolation receipt."""
+
+    profile: str = Field(pattern=r"^rwx_verified_copy_v2$")
+
+
+AcceptedSkillProjection = AcceptedSkillProjectionV1 | AcceptedSkillProjectionV2
+
+
 class CreateSandboxRequest(BaseModel):
     sandbox_id: str
     thread_id: str | None = Field(default=None, pattern=SAFE_THREAD_ID_PATTERN)
@@ -601,7 +613,7 @@ class CreateSandboxRequest(BaseModel):
     # binary + credential mounts when enabled.
     provision_lark_cli_broker: bool = False
     accepted_skills_only: bool = False
-    accepted_skill_projection: AcceptedSkillProjectionV1 | None = None
+    accepted_skill_projection: AcceptedSkillProjection | None = None
     attempt_capability: str | None = Field(
         default=None,
         pattern=r"^[A-Za-z0-9_-]{43,128}$",
@@ -645,7 +657,7 @@ def _accepted_attempt_lease_name(sandbox_id: str) -> str:
 
 
 def _accepted_attempt_identity(
-    projection: AcceptedSkillProjectionV1,
+    projection: AcceptedSkillProjection,
 ) -> str:
     payload = json.dumps(
         {
@@ -666,7 +678,7 @@ def _capability_digest(capability: str) -> str:
 
 def _build_accepted_attempt_lease(
     sandbox_id: str,
-    projection: AcceptedSkillProjectionV1,
+    projection: AcceptedSkillProjection,
     capability: str,
     *,
     isolation_digest: str = "0" * 64,
@@ -749,7 +761,7 @@ def _accepted_attempt_owner_reference(
 
 def _lease_matches_attempt(
     lease: object,
-    projection: AcceptedSkillProjectionV1,
+    projection: AcceptedSkillProjection,
     capability: str,
     *,
     isolation_digest: str = "0" * 64,
@@ -770,7 +782,7 @@ def _lease_matches_attempt(
 
 def _claim_accepted_attempt(
     sandbox_id: str,
-    projection: AcceptedSkillProjectionV1,
+    projection: AcceptedSkillProjection,
     capability: str,
     *,
     isolation_digest: str = "0" * 64,
@@ -896,6 +908,33 @@ def _bind_accepted_attempt_materialization(
             detail="accepted_attempt_pod_replaced",
         )
     fields = {
+        "hartmesh.io/accepted-pod-isolation-digest": receipt.get(
+            "pod_isolation_digest",
+        ),
+        "hartmesh.io/accepted-network-policy-uid": receipt.get(
+            "network_policy_uid",
+        ),
+        "hartmesh.io/accepted-network-policy-spec-digest": receipt.get(
+            "network_policy_spec_digest",
+        ),
+        "hartmesh.io/accepted-evidence-secret-uid": receipt.get(
+            "evidence_secret_uid",
+        ),
+        "hartmesh.io/accepted-evidence-secret-digest": receipt.get(
+            "evidence_secret_digest",
+        ),
+        "hartmesh.io/accepted-capability-secret-uid": receipt.get(
+            "capability_secret_uid",
+        ),
+        "hartmesh.io/accepted-capability-secret-digest": receipt.get(
+            "capability_secret_digest",
+        ),
+        "hartmesh.io/accepted-sandbox-image-digest": receipt.get(
+            "sandbox_image_digest",
+        ),
+        "hartmesh.io/accepted-skill-runtime-image-digest": receipt.get(
+            "accepted_skill_runtime_image_digest",
+        ),
         "hartmesh.io/accepted-verifier-receipt-digest": receipt.get(
             "verifier_receipt_digest",
         ),
@@ -906,7 +945,21 @@ def _bind_accepted_attempt_materialization(
             "materialization_evidence_digest",
         ),
     }
-    if any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None for value in fields.values()):
+    identity_fields = {
+        "hartmesh.io/accepted-network-policy-uid",
+        "hartmesh.io/accepted-evidence-secret-uid",
+        "hartmesh.io/accepted-capability-secret-uid",
+    }
+    if any(
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > 128
+        or any(ord(character) < 32 for character in value)
+        if key in identity_fields
+        else not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        for key, value in fields.items()
+    ):
         raise HTTPException(
             status_code=409,
             detail="accepted_attempt_materialization_invalid",
@@ -1017,7 +1070,7 @@ def _accepted_subject_scope(user_id: str) -> str:
 
 def _accepted_snapshot_sub_path(
     user_id: str,
-    projection: AcceptedSkillProjectionV1,
+    projection: AcceptedSkillProjection,
 ) -> str:
     return posixpath.join(
         "deer-flow",
@@ -1029,25 +1082,25 @@ def _accepted_snapshot_sub_path(
 
 
 def _require_accepted_projection_runtime() -> None:
-    if ACCEPTED_SKILL_PROJECTION_PROFILE != ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1:
+    if ACCEPTED_SKILL_PROJECTION_PROFILE != ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2:
         raise HTTPException(
             status_code=503,
-            detail="rwx_verified_copy_v1 accepted skill projection is not enabled",
+            detail="rwx_verified_copy_v2 accepted skill projection is not enabled",
         )
     if not USERDATA_PVC_NAME:
         raise HTTPException(
             status_code=503,
-            detail="rwx_verified_copy_v1 requires an RWX home PVC",
+            detail="rwx_verified_copy_v2 requires an RWX home PVC",
         )
     if re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", ACCEPTED_SKILL_RUNTIME_IMAGE) is None:
         raise HTTPException(
             status_code=503,
-            detail="rwx_verified_copy_v1 requires a digest-pinned accepted skill runtime image",
+            detail="rwx_verified_copy_v2 requires a digest-pinned accepted skill runtime image",
         )
     if re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", SANDBOX_IMAGE) is None:
         raise HTTPException(
             status_code=503,
-            detail="rwx_verified_copy_v1 requires a digest-pinned sandbox image",
+            detail="rwx_verified_copy_v2 requires a digest-pinned sandbox image",
         )
 
 
@@ -1056,7 +1109,7 @@ def _accepted_skill_volumes(
     thread_id: str,
     user_id: str,
     *,
-    projection: AcceptedSkillProjectionV1 | None,
+    projection: AcceptedSkillProjection | None,
     extra_mounts: list[ExtraMount] | None,
     provision_lark_cli_runtime: bool,
     provision_lark_cli_broker: bool,
@@ -1140,7 +1193,7 @@ def _accepted_sandbox_mounts(
 
 def _accepted_verifier_container(
     user_id: str,
-    projection: AcceptedSkillProjectionV1,
+    projection: AcceptedSkillProjection,
 ) -> k8s_client.V1Container:
     return k8s_client.V1Container(
         name="accepted-skill-verifier",
@@ -1633,27 +1686,38 @@ def _accepted_mount_projection(mount: object) -> dict[str, object]:
     }
 
 
-def _accepted_security_projection(context: object | None) -> dict[str, object]:
-    capabilities = getattr(context, "capabilities", None)
-    return {
-        "privileged": bool(getattr(context, "privileged", False)),
-        "allow_privilege_escalation": getattr(
-            context,
-            "allow_privilege_escalation",
-            None,
-        ),
-        "read_only_root_filesystem": bool(
-            getattr(context, "read_only_root_filesystem", False),
-        ),
-        "run_as_non_root": getattr(context, "run_as_non_root", None),
-        "run_as_user": getattr(context, "run_as_user", None),
-        "capabilities_drop": sorted(
-            getattr(capabilities, "drop", None) or [],
-        ),
-        "capabilities_add": sorted(
-            getattr(capabilities, "add", None) or [],
-        ),
-    }
+def _canonical_k8s_value(value: object) -> object:
+    """Return a deterministic JSON value for a bounded host-built K8s field."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_k8s_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_k8s_value(item) for item in value]
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _canonical_k8s_value(to_dict())
+    attributes = getattr(value, "__dict__", None)
+    if isinstance(attributes, dict):
+        return _canonical_k8s_value(
+            {
+                key: item
+                for key, item in attributes.items()
+                if not key.startswith("_")
+            }
+        )
+    raise HTTPException(
+        status_code=409,
+        detail="accepted_attempt_resource_spec_invalid",
+    )
+
+
+def _accepted_security_projection(context: object | None) -> object:
+    return _canonical_k8s_value(context)
 
 
 def _accepted_container_projection(container: object) -> dict[str, object]:
@@ -1663,6 +1727,11 @@ def _accepted_container_projection(container: object) -> dict[str, object]:
         "image_pull_policy": getattr(container, "image_pull_policy", None),
         "command": list(getattr(container, "command", None) or []),
         "args": list(getattr(container, "args", None) or []),
+        "env": _canonical_k8s_value(getattr(container, "env", None) or []),
+        "env_from": _canonical_k8s_value(
+            getattr(container, "env_from", None) or [],
+        ),
+        "working_dir": getattr(container, "working_dir", None),
         "ports": sorted(
             (
                 getattr(port, "name", None),
@@ -1681,6 +1750,23 @@ def _accepted_container_projection(container: object) -> dict[str, object]:
         "security": _accepted_security_projection(
             getattr(container, "security_context", None),
         ),
+        "resources": _canonical_k8s_value(
+            getattr(container, "resources", None),
+        ),
+        "readiness_probe": _canonical_k8s_value(
+            getattr(container, "readiness_probe", None),
+        ),
+        "liveness_probe": _canonical_k8s_value(
+            getattr(container, "liveness_probe", None),
+        ),
+        "startup_probe": _canonical_k8s_value(
+            getattr(container, "startup_probe", None),
+        ),
+        "lifecycle": _canonical_k8s_value(
+            getattr(container, "lifecycle", None),
+        ),
+        "stdin": bool(getattr(container, "stdin", False)),
+        "tty": bool(getattr(container, "tty", False)),
     }
 
 
@@ -1692,7 +1778,9 @@ def _accepted_volume_projection(volume: object) -> dict[str, object]:
     projected = getattr(volume, "projected", None)
     return {
         "name": getattr(volume, "name", None),
-        "empty_dir": getattr(volume, "empty_dir", None) is not None,
+        "empty_dir": _canonical_k8s_value(
+            getattr(volume, "empty_dir", None),
+        ),
         "pvc": (
             None
             if pvc is None
@@ -1725,7 +1813,14 @@ def _accepted_volume_projection(volume: object) -> dict[str, object]:
                 "default_mode": getattr(config_map, "default_mode", None),
             }
         ),
-        "projected": projected is not None,
+        "projected": _canonical_k8s_value(projected),
+        "csi": _canonical_k8s_value(getattr(volume, "csi", None)),
+        "downward_api": _canonical_k8s_value(
+            getattr(volume, "downward_api", None),
+        ),
+        "ephemeral": _canonical_k8s_value(
+            getattr(volume, "ephemeral", None),
+        ),
     }
 
 
@@ -1739,15 +1834,37 @@ def _accepted_pod_isolation_digest(pod: object) -> str:
             detail="accepted_attempt_pod_spec_mismatch",
         )
     projection = {
-        "version": 1,
+        "version": 2,
+        "namespace": getattr(getattr(pod, "metadata", None), "namespace", None),
+        "labels": _canonical_k8s_value(
+            getattr(getattr(pod, "metadata", None), "labels", None) or {},
+        ),
+        "host_network": bool(getattr(spec, "host_network", False)),
+        "host_pid": bool(getattr(spec, "host_pid", False)),
+        "host_ipc": bool(getattr(spec, "host_ipc", False)),
+        "share_process_namespace": bool(
+            getattr(spec, "share_process_namespace", False),
+        ),
+        "service_account_name": getattr(spec, "service_account_name", None),
         "automount_service_account_token": getattr(
             spec,
             "automount_service_account_token",
             None,
         ),
+        "runtime_class_name": getattr(spec, "runtime_class_name", None),
+        "dns_policy": getattr(spec, "dns_policy", None),
+        "dns_config": _canonical_k8s_value(getattr(spec, "dns_config", None)),
         "restart_policy": getattr(spec, "restart_policy", None),
+        "security_context": _accepted_security_projection(
+            getattr(spec, "security_context", None),
+        ),
+        "image_pull_secrets": _canonical_k8s_value(
+            getattr(spec, "image_pull_secrets", None) or [],
+        ),
+        "affinity": _canonical_k8s_value(getattr(spec, "affinity", None)),
         "containers": [_accepted_container_projection(container) for container in (getattr(spec, "containers", None) or [])],
         "init_containers": [_accepted_container_projection(container) for container in (getattr(spec, "init_containers", None) or [])],
+        "ephemeral_containers": [_accepted_container_projection(container) for container in (getattr(spec, "ephemeral_containers", None) or [])],
         "volumes": sorted(
             (_accepted_volume_projection(volume) for volume in (getattr(spec, "volumes", None) or [])),
             key=lambda item: str(item["name"]),
@@ -1772,7 +1889,7 @@ def _build_pod(
     provision_lark_cli_runtime: bool = False,
     provision_lark_cli_broker: bool = False,
     accepted_skills_only: bool = False,
-    accepted_skill_projection: AcceptedSkillProjectionV1 | None = None,
+    accepted_skill_projection: AcceptedSkillProjection | None = None,
     attempt_capability: str | None = None,
     accepted_attempt_owner: k8s_client.V1OwnerReference | None = None,
 ) -> k8s_client.V1Pod:
@@ -1789,6 +1906,11 @@ def _build_pod(
     if accepted_material:
         _require_accepted_projection_runtime()
         assert accepted_skill_projection is not None
+        if not isinstance(accepted_skill_projection, AcceptedSkillProjectionV2):
+            raise HTTPException(
+                status_code=409,
+                detail="accepted_skill_projection_version_unsupported",
+            )
         init_container_items = [
             _accepted_verifier_container(user_id, accepted_skill_projection),
             *_build_lark_cli_init_containers(
@@ -1962,7 +2084,13 @@ def _build_pod(
                 if accepted_material
                 else None
             ),
+            host_network=False,
+            host_pid=False,
+            host_ipc=False,
+            share_process_namespace=False,
+            service_account_name="default",
             automount_service_account_token=False,
+            dns_policy="ClusterFirst",
             restart_policy="Always",
         ),
     )
@@ -2109,7 +2237,7 @@ def _accepted_pod_url(pod_ip: str) -> str:
 def _fetch_verifier_receipt(
     pod_ip: str,
     capability: str,
-    expected: AcceptedSkillProjectionV1,
+    expected: AcceptedSkillProjection,
 ) -> dict[str, object]:
     """Read the verifier-authored receipt through the per-attempt gate."""
 
@@ -2117,7 +2245,7 @@ def _fetch_verifier_receipt(
     try:
         response = urllib3.PoolManager(retries=False).request(
             "GET",
-            _accepted_pod_url(pod_ip) + "/__hartmesh/accepted-material/v1",
+            _accepted_pod_url(pod_ip) + "/__hartmesh/accepted-material/v2",
             headers={"Authorization": f"Bearer {capability}"},
             timeout=urllib3.Timeout(connect=2.0, read=2.0),
             preload_content=False,
@@ -2145,8 +2273,8 @@ def _fetch_verifier_receipt(
             detail="accepted_attempt_verifier_receipt_invalid",
         ) from None
     expected_receipt = {
-        "version": 1,
-        "profile": ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1,
+        "version": 2,
+        "profile": ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2,
         "snapshot_id": expected.snapshot_id,
         "content_digest": expected.content_digest,
         "file_count": expected.file_count,
@@ -2163,7 +2291,7 @@ def _fetch_verifier_receipt(
 def _accepted_pod_response(
     sandbox_id: str,
     *,
-    expected: AcceptedSkillProjectionV1 | None = None,
+    expected: AcceptedSkillProjection | None = None,
     expected_capability: str | None = None,
     expected_lease_uid: str | None = None,
     attempt_lease: object | None = None,
@@ -2185,8 +2313,13 @@ def _accepted_pod_response(
     if not hasattr(pod, "metadata"):
         return None
     labels = pod.metadata.labels or {}
-    if labels.get("hartmesh.io/accepted-skill-profile") != ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1:
+    if labels.get("hartmesh.io/accepted-skill-profile") != ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2:
         return None
+    if expected is not None and not isinstance(expected, AcceptedSkillProjectionV2):
+        raise HTTPException(
+            status_code=409,
+            detail="accepted_skill_projection_version_unsupported",
+        )
     annotations = pod.metadata.annotations or {}
     if expected is not None and (
         annotations.get("hartmesh.io/accepted-skill-digest") != expected.content_digest
@@ -2323,16 +2456,53 @@ def _accepted_pod_response(
             status_code=409,
             detail="accepted_attempt_verifier_receipt_invalid",
         )
+    capability_digest = lease_annotations.get(
+        "hartmesh.io/accepted-capability-digest",
+    )
+    if not isinstance(capability_digest, str) or re.fullmatch(r"[0-9a-f]{64}", capability_digest) is None:
+        raise HTTPException(
+            status_code=409,
+            detail="accepted_attempt_capability_invalid",
+        )
+    resources = _accepted_supporting_resource_evidence(
+        sandbox_id,
+        lease_uid=lease_owner.uid,
+        projection=(expected if isinstance(expected, AcceptedSkillProjectionV2) else None),
+        capability=expected_capability,
+        capability_digest=capability_digest,
+    )
+    sandbox_image_digest = SANDBOX_IMAGE.rsplit("@sha256:", 1)[-1]
+    accepted_skill_runtime_image_digest = ACCEPTED_SKILL_RUNTIME_IMAGE.rsplit(
+        "@sha256:",
+        1,
+    )[-1]
+    if any(
+        re.fullmatch(r"[0-9a-f]{64}", value) is None
+        for value in (
+            sandbox_image_digest,
+            accepted_skill_runtime_image_digest,
+        )
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="accepted_attempt_image_identity_mismatch",
+        )
     materialization_evidence = {
-        "version": 1,
-        "profile": ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1,
+        "version": 2,
+        "profile": ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2,
         "attempt_id": lease_owner.name,
         "snapshot_id": digest,
         "content_digest": digest,
         "run_id": run_id,
         "generation": generation,
         "pod_uid": pod_uid,
+        "pod_isolation_digest": isolation_digest,
         "lease_uid": lease_owner.uid,
+        **resources,
+        "sandbox_image_digest": sandbox_image_digest,
+        "accepted_skill_runtime_image_digest": (
+            accepted_skill_runtime_image_digest
+        ),
         "runtime_image_ids_digest": runtime_image_ids_digest,
         "verifier_receipt_digest": verifier_receipt_digest,
     }
@@ -2343,17 +2513,42 @@ def _accepted_pod_response(
             separators=(",", ":"),
         ).encode("utf-8"),
     ).hexdigest()
-    if lease_annotations.get("hartmesh.io/accepted-attempt-state") == ("materialized") and (
-        lease_annotations.get("hartmesh.io/accepted-runtime-images-digest") != runtime_image_ids_digest
-        or lease_annotations.get(
-            "hartmesh.io/accepted-materialization-digest",
-        )
-        != materialization_digest
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="accepted_attempt_materialization_mismatch",
-        )
+    if lease_annotations.get("hartmesh.io/accepted-attempt-state") == ("materialized"):
+        bound_fields = {
+            "hartmesh.io/accepted-pod-isolation-digest": isolation_digest,
+            "hartmesh.io/accepted-network-policy-uid": resources[
+                "network_policy_uid"
+            ],
+            "hartmesh.io/accepted-network-policy-spec-digest": resources[
+                "network_policy_spec_digest"
+            ],
+            "hartmesh.io/accepted-evidence-secret-uid": resources[
+                "evidence_secret_uid"
+            ],
+            "hartmesh.io/accepted-evidence-secret-digest": resources[
+                "evidence_secret_digest"
+            ],
+            "hartmesh.io/accepted-capability-secret-uid": resources[
+                "capability_secret_uid"
+            ],
+            "hartmesh.io/accepted-capability-secret-digest": resources[
+                "capability_secret_digest"
+            ],
+            "hartmesh.io/accepted-sandbox-image-digest": sandbox_image_digest,
+            "hartmesh.io/accepted-skill-runtime-image-digest": (
+                accepted_skill_runtime_image_digest
+            ),
+            "hartmesh.io/accepted-runtime-images-digest": runtime_image_ids_digest,
+            "hartmesh.io/accepted-materialization-digest": materialization_digest,
+        }
+        if any(
+            lease_annotations.get(key) != value
+            for key, value in bound_fields.items()
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="accepted_attempt_materialization_mismatch",
+            )
     return SandboxResponse(
         sandbox_id=sandbox_id,
         sandbox_url=_accepted_pod_url(pod_ip),
@@ -2368,6 +2563,75 @@ def _accepted_pod_response(
 def _resource_has_owner_uid(resource: object, uid: str) -> bool:
     owners = getattr(getattr(resource, "metadata", None), "owner_references", None)
     return any(getattr(owner, "kind", None) == "Lease" and getattr(owner, "uid", None) == uid for owner in (owners or []))
+
+
+def _resource_uid(resource: object, *, code: str) -> str:
+    uid = getattr(getattr(resource, "metadata", None), "uid", None)
+    if not isinstance(uid, str) or not uid or len(uid.encode("utf-8")) > 128:
+        raise HTTPException(status_code=409, detail=code)
+    return uid
+
+
+def _resource_spec_digest(resource: object) -> str:
+    metadata = getattr(resource, "metadata", None)
+    payload = {
+        "labels": _canonical_k8s_value(
+            getattr(metadata, "labels", None) or {},
+        ),
+        "spec": _canonical_k8s_value(getattr(resource, "spec", None)),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8",
+        )
+    ).hexdigest()
+
+
+def _secret_payload(secret: object, key: str) -> bytes:
+    string_data = getattr(secret, "string_data", None) or {}
+    if isinstance(string_data, dict) and isinstance(string_data.get(key), str):
+        return string_data[key].encode("utf-8")
+    data = getattr(secret, "data", None) or {}
+    encoded = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(encoded, str):
+        raise HTTPException(
+            status_code=409,
+            detail="accepted_attempt_secret_conflict",
+        )
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=409,
+            detail="accepted_attempt_secret_conflict",
+        ) from None
+
+
+def _secret_matches_exact(existing: object, candidate: object, *, owner_uid: str) -> bool:
+    if not _resource_has_owner_uid(existing, owner_uid):
+        return False
+    for attribute in ("immutable", "type"):
+        if getattr(existing, attribute, None) != getattr(candidate, attribute, None):
+            return False
+    existing_metadata = getattr(existing, "metadata", None)
+    candidate_metadata = getattr(candidate, "metadata", None)
+    if (getattr(existing_metadata, "labels", None) or {}) != (getattr(candidate_metadata, "labels", None) or {}):
+        return False
+    if (getattr(existing_metadata, "annotations", None) or {}) != (getattr(candidate_metadata, "annotations", None) or {}):
+        return False
+    candidate_string_data = getattr(candidate, "string_data", None) or {}
+    if not isinstance(candidate_string_data, dict) or len(candidate_string_data) != 1:
+        return False
+    key, expected_value = next(iter(candidate_string_data.items()))
+    if not isinstance(key, str) or not isinstance(expected_value, str):
+        return False
+    try:
+        return hmac.compare_digest(
+            _secret_payload(existing, key),
+            expected_value.encode("utf-8"),
+        )
+    except HTTPException:
+        return False
 
 
 def _create_secret_exact(
@@ -2390,7 +2654,7 @@ def _create_secret_exact(
                 status_code=503,
                 detail="accepted_attempt_secret_unavailable",
             ) from read_exc
-        if not _resource_has_owner_uid(existing, owner_uid) or (getattr(existing.metadata, "annotations", None) or {}) != (secret.metadata.annotations or {}):
+        if not _secret_matches_exact(existing, secret, owner_uid=owner_uid):
             raise HTTPException(
                 status_code=409,
                 detail="accepted_attempt_secret_conflict",
@@ -2436,7 +2700,7 @@ def _delete_accepted_secrets(
 
 def _create_accepted_secrets(
     sandbox_id: str,
-    projection: AcceptedSkillProjectionV1,
+    projection: AcceptedSkillProjection,
     capability: str,
     *,
     accepted_attempt_owner: k8s_client.V1OwnerReference,
@@ -2529,11 +2793,131 @@ def _create_accepted_network_policy_exact(
                 status_code=503,
                 detail="accepted_attempt_network_policy_unavailable",
             ) from read_exc
-        if not _resource_has_owner_uid(existing, accepted_attempt_owner.uid):
+        if not _resource_has_owner_uid(existing, accepted_attempt_owner.uid) or _resource_spec_digest(existing) != _resource_spec_digest(policy):
             raise HTTPException(
                 status_code=409,
                 detail="accepted_attempt_network_policy_conflict",
             ) from exc
+
+
+def _accepted_supporting_resource_evidence(
+    sandbox_id: str,
+    *,
+    lease_uid: str,
+    projection: AcceptedSkillProjectionV2 | None,
+    capability: str | None,
+    capability_digest: str,
+) -> dict[str, str]:
+    """Re-read and prove the exact NetworkPolicy and immutable Secrets."""
+
+    if networking_v1 is None or core_v1 is None:
+        raise HTTPException(
+            status_code=503,
+            detail="accepted_attempt_supporting_resources_unavailable",
+        )
+    owner = k8s_client.V1OwnerReference(
+        api_version="coordination.k8s.io/v1",
+        kind="Lease",
+        name=_accepted_attempt_lease_name(sandbox_id),
+        uid=lease_uid,
+    )
+    expected_policy = _build_accepted_network_policy(
+        sandbox_id,
+        accepted_attempt_owner=owner,
+    )
+    try:
+        policy = networking_v1.read_namespaced_network_policy(
+            expected_policy.metadata.name,
+            K8S_NAMESPACE,
+        )
+    except ApiException as exc:
+        raise HTTPException(
+            status_code=(409 if exc.status == 404 else 503),
+            detail=("accepted_attempt_network_policy_missing" if exc.status == 404 else "accepted_attempt_network_policy_unavailable"),
+        ) from None
+    expected_policy_digest = _resource_spec_digest(expected_policy)
+    if not _resource_has_owner_uid(policy, lease_uid) or _resource_spec_digest(policy) != expected_policy_digest:
+        raise HTTPException(
+            status_code=409,
+            detail="accepted_attempt_network_policy_conflict",
+        )
+
+    result = {
+        "network_policy_uid": _resource_uid(
+            policy,
+            code="accepted_attempt_network_policy_identity_invalid",
+        ),
+        "network_policy_spec_digest": expected_policy_digest,
+    }
+    for kind in ("evidence", "capability"):
+        name = (
+            _accepted_evidence_secret_name(sandbox_id)
+            if kind == "evidence"
+            else _accepted_capability_secret_name(sandbox_id)
+        )
+        try:
+            secret = core_v1.read_namespaced_secret(name, K8S_NAMESPACE)
+        except ApiException as exc:
+            raise HTTPException(
+                status_code=(409 if exc.status == 404 else 503),
+                detail=("accepted_attempt_secret_missing" if exc.status == 404 else "accepted_attempt_secret_unavailable"),
+            ) from None
+        payload_key = "evidence.json" if kind == "evidence" else "capability"
+        payload = _secret_payload(secret, payload_key)
+        payload_digest = hashlib.sha256(payload).hexdigest()
+        metadata = getattr(secret, "metadata", None)
+        expected_labels = {
+            "app": "deer-flow-sandbox",
+            "sandbox-id": sandbox_id,
+        }
+        expected_annotation_key = "hartmesh.io/accepted-capability-digest"
+        expected_payload_digest = capability_digest
+        if kind == "evidence":
+            expected_labels["hartmesh.io/accepted-skill-profile"] = (
+                ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2
+            )
+            expected_annotation_key = "hartmesh.io/accepted-evidence-digest"
+            expected_payload_digest = payload_digest
+            if projection is not None:
+                expected_payload = json.dumps(
+                    projection.evidence_wire(),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                if not hmac.compare_digest(payload, expected_payload):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="accepted_attempt_secret_conflict",
+                    )
+                expected_payload_digest = hashlib.sha256(expected_payload).hexdigest()
+        elif capability is not None and not hmac.compare_digest(
+            payload,
+            capability.encode("utf-8"),
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="accepted_attempt_secret_conflict",
+            )
+        if (
+            not _resource_has_owner_uid(secret, lease_uid)
+            or getattr(secret, "immutable", None) is not True
+            or getattr(secret, "type", None) != "Opaque"
+            or (getattr(metadata, "labels", None) or {}) != expected_labels
+            or (getattr(metadata, "annotations", None) or {})
+            != {expected_annotation_key: expected_payload_digest}
+            or payload_digest != expected_payload_digest
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="accepted_attempt_secret_conflict",
+            )
+        result[f"{kind}_secret_uid"] = _resource_uid(
+            secret,
+            code="accepted_attempt_secret_identity_invalid",
+        )
+        result[f"{kind}_secret_digest"] = payload_digest
+    return result
 
 
 def _delete_accepted_network_policy(
@@ -2667,12 +3051,18 @@ def readiness():
         "",
         "disabled",
         ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1,
+        ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2,
     }:
         raise HTTPException(
             status_code=503,
             detail="accepted_skill_profile_invalid",
         )
     if ACCEPTED_SKILL_PROJECTION_PROFILE == ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1:
+        raise HTTPException(
+            status_code=503,
+            detail="accepted_skill_profile_v1_compatibility_only",
+        )
+    if ACCEPTED_SKILL_PROJECTION_PROFILE == ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2:
         _require_accepted_projection_runtime()
         try:
             claim = core_v1.read_namespaced_persistent_volume_claim(
@@ -2715,8 +3105,8 @@ async def capabilities():
         "lark_cli_init_image": bool(LARK_CLI_INIT_IMAGE),
         "lark_cli_broker_image": bool(LARK_CLI_BROKER_IMAGE),
         "accepted_skill_projection_profiles": (
-            [ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1]
-            if ACCEPTED_SKILL_PROJECTION_PROFILE == ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1
+            [ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2]
+            if ACCEPTED_SKILL_PROJECTION_PROFILE == ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2
             and bool(USERDATA_PVC_NAME)
             and re.fullmatch(
                 r"[^\s@]+@sha256:[0-9a-f]{64}",
@@ -2981,7 +3371,10 @@ def destroy_sandbox(
             raise
         current_pod = None
     current_labels = getattr(getattr(current_pod, "metadata", None), "labels", None) or {}
-    is_accepted_attempt = current_labels.get("hartmesh.io/accepted-skill-profile") == ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1
+    is_accepted_attempt = current_labels.get("hartmesh.io/accepted-skill-profile") in {
+        ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1,
+        ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2,
+    }
     accepted = _accepted_pod_response(sandbox_id, pod=current_pod) if is_accepted_attempt else None
     if is_accepted_attempt:
         owners = (
