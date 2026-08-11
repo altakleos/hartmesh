@@ -16,11 +16,14 @@ import tempfile
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import get_paths
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory
+
+if TYPE_CHECKING:
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
 
 SNAPSHOT_CONTAINER_NAMESPACE = ".accepted"
 
@@ -430,7 +433,7 @@ def _digest_published_snapshot(
 
 def _capture_verified_projection(
     root: Path,
-    evidence,
+    evidence: SkillProjectionEvidence,
     limits: SkillSnapshotLimits,
 ) -> tuple[tuple[tuple[SkillSnapshotProjection, tuple[_CapturedFile, ...]], ...], str, int, int]:
     """Stable-capture every accepted file and prove the immutable manifest."""
@@ -503,7 +506,7 @@ def load_skill_projection_evidence(
     user_id: str | None,
     snapshot_id: str | None,
     limits: SkillSnapshotLimits = DEFAULT_SKILL_SNAPSHOT_LIMITS,
-):
+) -> SkillProjectionEvidence:
     """Reconstruct and verify legacy process-local snapshot evidence."""
     from deerflow.runtime.skill_projection import SkillProjectionEvidence
 

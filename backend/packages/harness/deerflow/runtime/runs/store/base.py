@@ -77,6 +77,13 @@ class AdmissionOutcome(StrEnum):
     key_conflict = "key_conflict"
 
 
+class DuplicateRunIdentityError(RuntimeError):
+    """Raised when a candidate reuses an existing durable run identity."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"duplicate durable run identity: {run_id}")
+
+
 class ThreadOperationReleaseOutcome(StrEnum):
     """Finite result of an exact, owner-fenced auxiliary release."""
 
@@ -483,6 +490,17 @@ class RunStore(abc.ABC):
         user_id: str | None = None,
     ) -> dict[str, Any] | None:
         pass
+
+    async def authoritative_get(self, run_id: str) -> dict[str, Any] | None:
+        """Return global primary-key truth for trusted integrity recovery.
+
+        This privileged lookup deliberately bypasses owner visibility. Normal
+        request, observation, and authorization paths must use :meth:`get`.
+        Stores that cannot provide global primary-key truth fail closed by
+        leaving post-commit integrity quarantine unresolved.
+        """
+
+        raise NotImplementedError
 
     async def get_by_external_identity(
         self,

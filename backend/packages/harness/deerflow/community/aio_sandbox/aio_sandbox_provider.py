@@ -22,6 +22,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 try:
     import fcntl
@@ -67,6 +68,9 @@ from .ownership import (
 )
 from .remote_backend import RemoteSandboxBackend
 from .sandbox_info import AcceptedSkillMaterialReceiptV2, SandboxInfo
+
+if TYPE_CHECKING:
+    from deerflow.runtime.skill_projection import SkillProjectionClear
 
 logger = logging.getLogger(__name__)
 
@@ -2579,7 +2583,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def clear_accepted_skill_snapshot(
         self,
-        clear,
+        clear: "SkillProjectionClear",
     ) -> bool:
         from deerflow.runtime.skill_projection import SkillProjectionClear
         from deerflow.runtime.skill_snapshot import clear_skill_snapshot_active_view
@@ -2608,7 +2612,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             generation=clear.generation,
         )
 
-    def ensure_accepted_skill_snapshot_absent(self, clear) -> bool:
+    def ensure_accepted_skill_snapshot_absent(self, clear: "SkillProjectionClear") -> bool:
         from deerflow.runtime.skill_projection import SkillProjectionClear
         from deerflow.runtime.skill_snapshot import prove_skill_snapshot_active_view_absent
 

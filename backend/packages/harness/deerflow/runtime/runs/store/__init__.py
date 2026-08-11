@@ -1,4 +1,5 @@
 from deerflow.runtime.runs.store.base import (
+    DuplicateRunIdentityError,
     LeaseRenewal,
     RunStore,
     ThreadOperationReleaseOutcome,
@@ -7,6 +8,7 @@ from deerflow.runtime.runs.store.base import (
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 __all__ = [
+    "DuplicateRunIdentityError",
     "LeaseRenewal",
     "MemoryRunStore",
     "RunStore",

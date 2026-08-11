@@ -8,6 +8,7 @@ minutes -- we don't hold connections across long execution.
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -36,6 +37,7 @@ from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
     CancellationRequestOutcome,
     CancellationRequestResult,
+    DuplicateRunIdentityError,
     LeaseRenewal,
     LifecycleReadiness,
     LifecycleTransition,
@@ -69,6 +71,40 @@ def _release_wall_clock_expression(dialect_name: str) -> Any:
         # be checked against wall time observed after that lock is acquired.
         return func.clock_timestamp()
     return func.current_timestamp()
+
+
+def _is_run_primary_key_violation(exc: IntegrityError) -> bool:
+    """Return whether *exc* is exactly a duplicate ``runs.run_id``."""
+
+    original = exc.orig
+    pending: list[BaseException] = [original] if isinstance(original, BaseException) else []
+    seen: set[int] = set()
+    # SQLAlchemy's asyncpg adapter retains the native UniqueViolation as its
+    # cause, while psycopg exposes ``diag`` directly. Traverse only this small,
+    # bounded exception chain and compare the exact schema constraint name;
+    # neither SQLSTATE alone nor provider text identifies the violated key.
+    for _depth in range(4):
+        if not pending:
+            break
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        diagnostic = getattr(current, "diag", None)
+        constraint_name = getattr(
+            diagnostic,
+            "constraint_name",
+            None,
+        ) or getattr(current, "constraint_name", None)
+        if constraint_name == "runs_pkey":
+            return True
+        for linked in (
+            getattr(current, "__cause__", None),
+            getattr(current, "__context__", None),
+        ):
+            if isinstance(linked, BaseException) and id(linked) not in seen:
+                pending.append(linked)
+    return isinstance(original, sqlite3.IntegrityError) and "unique constraint failed: runs.run_id" in str(original).lower()
 
 
 class RunRepository(RunStore):
@@ -677,21 +713,21 @@ class RunRepository(RunStore):
 
     async def put(
         self,
-        run_id,
+        run_id: str,
         *,
-        thread_id,
-        assistant_id=None,
+        thread_id: str,
+        assistant_id: str | None = None,
         user_id: str | None | _AutoSentinel = AUTO,
         model_name: str | None = None,
-        status="pending",
+        status: str = "pending",
         operation_kind: str = "run",
-        multitask_strategy="reject",
-        metadata=None,
-        kwargs=None,
-        error=None,
+        multitask_strategy: str = "reject",
+        metadata: dict[str, Any] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        error: str | None = None,
         stop_reason: str | None = None,
-        created_at=None,
-        follow_up_to_run_id=None,
+        created_at: str | None = None,
+        follow_up_to_run_id: str | None = None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
         origin_json: dict[str, Any] | None = None,
@@ -710,7 +746,7 @@ class RunRepository(RunStore):
         caller_intent_json: dict[str, Any] | None = None,
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
-    ):
+    ) -> None:
         """Insert or update a run row.
 
         ``RunManager`` retries ``put`` after transient SQLite failures.  Making
@@ -819,10 +855,10 @@ class RunRepository(RunStore):
 
     async def get(
         self,
-        run_id,
+        run_id: str,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
-    ):
+    ) -> dict[str, Any] | None:
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get")
         async with self._sf() as session:
             row = await session.get(RunRow, run_id)
@@ -832,7 +868,18 @@ class RunRepository(RunStore):
                 return None
             return self._row_to_dict(row)
 
-    async def get_by_external_identity(self, external_scope: str, external_key: str):
+    async def authoritative_get(self, run_id: str) -> dict[str, Any] | None:
+        """Return one row by primary identity without applying owner scope."""
+
+        async with self._sf() as session:
+            row = await session.get(RunRow, run_id)
+            return self._row_to_dict(row) if row is not None else None
+
+    async def get_by_external_identity(
+        self,
+        external_scope: str,
+        external_key: str,
+    ) -> dict[str, Any] | None:
         async with self._sf() as session:
             result = await session.execute(
                 select(RunRow).where(
@@ -1563,6 +1610,8 @@ class RunRepository(RunStore):
 
         async with self._sf() as session:
             await self._begin_lifecycle_write(session)
+            if await session.get(RunRow, run_id) is not None:
+                raise DuplicateRunIdentityError(run_id)
             claimed: list[dict[str, Any]] = []
             cursor_state: RunLifecycleCursorStateRow | None = None
 
@@ -1626,17 +1675,23 @@ class RunRepository(RunStore):
 
             new_run = RunRow(run_id=run_id, **values)
             session.add(new_run)
-            if operation_kind == "run":
-                await session.flush()
-                if cursor_state is None:
-                    cursor_state = await self._lock_cursor_state(session)
-                await self._append_lifecycle_event(
-                    session,
-                    cursor_state,
-                    new_run,
-                    LifecycleTransition(lifecycle_type=LifecycleType.accepted, status="pending"),
-                )
-            await session.commit()
+            try:
+                if operation_kind == "run":
+                    await session.flush()
+                    if cursor_state is None:
+                        cursor_state = await self._lock_cursor_state(session)
+                    await self._append_lifecycle_event(
+                        session,
+                        cursor_state,
+                        new_run,
+                        LifecycleTransition(lifecycle_type=LifecycleType.accepted, status="pending"),
+                    )
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                if _is_run_primary_key_violation(exc):
+                    raise DuplicateRunIdentityError(run_id) from None
+                raise
 
             new_row = await session.get(RunRow, run_id)
             return self._row_to_dict(new_row), claimed
@@ -1673,6 +1728,8 @@ class RunRepository(RunStore):
                 caller_intent_digest_version=caller_intent_digest_version,
                 **kwargs,
             )
+        except DuplicateRunIdentityError:
+            raise
         except IntegrityError:
             # The external-identity partial index is the race arbiter. If it
             # did not win the conflict, preserve the independent thread-busy

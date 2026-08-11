@@ -32,6 +32,7 @@ from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
     CancellationRequestOutcome,
     CancellationRequestResult,
+    DuplicateRunIdentityError,
     LeaseRenewal,
     LifecycleTransition,
     LifecycleTransitionResult,
@@ -423,39 +424,39 @@ class MemoryRunStore(RunStore):
     @_atomic_memory_mutation
     async def put(
         self,
-        run_id,
+        run_id: str,
         *,
-        thread_id,
-        assistant_id=None,
-        user_id=None,
-        model_name=None,
-        status="pending",
-        operation_kind="run",
-        multitask_strategy="reject",
-        metadata=None,
-        kwargs=None,
-        error=None,
-        stop_reason=None,
-        created_at=None,
-        owner_worker_id=None,
-        lease_expires_at=None,
-        origin_json=None,
-        principal_projection_json=None,
-        principal_projection_digest=None,
-        base_origin_digest=None,
-        accepted_context_digest=None,
-        agent_revision_json=None,
-        agent_revision_digest=None,
-        extension_generation=None,
-        decision_evidence_json=None,
-        external_scope=None,
-        external_key=None,
-        request_digest=None,
-        request_digest_version=None,
-        caller_intent_json=None,
-        caller_intent_digest=None,
-        caller_intent_digest_version=None,
-    ):
+        thread_id: str,
+        assistant_id: str | None = None,
+        user_id: str | None = None,
+        model_name: str | None = None,
+        status: str = "pending",
+        operation_kind: str = "run",
+        multitask_strategy: str = "reject",
+        metadata: dict[str, Any] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        error: str | None = None,
+        stop_reason: str | None = None,
+        created_at: str | None = None,
+        owner_worker_id: str | None = None,
+        lease_expires_at: str | None = None,
+        origin_json: dict[str, Any] | None = None,
+        principal_projection_json: dict[str, Any] | None = None,
+        principal_projection_digest: str | None = None,
+        base_origin_digest: str | None = None,
+        accepted_context_digest: str | None = None,
+        agent_revision_json: dict[str, Any] | None = None,
+        agent_revision_digest: str | None = None,
+        extension_generation: int | None = None,
+        decision_evidence_json: dict[str, Any] | None = None,
+        external_scope: str | None = None,
+        external_key: str | None = None,
+        request_digest: str | None = None,
+        request_digest_version: str | None = None,
+        caller_intent_json: dict[str, Any] | None = None,
+        caller_intent_digest: str | None = None,
+        caller_intent_digest_version: str | None = None,
+    ) -> None:
         thread_id = validate_thread_identifier(thread_id)
         if model_name is not None:
             model_name = validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
@@ -545,7 +546,16 @@ class MemoryRunStore(RunStore):
             return None
         return run
 
-    async def get_by_external_identity(self, external_scope: str, external_key: str):
+    async def authoritative_get(self, run_id: str) -> dict[str, Any] | None:
+        """Return one row by primary identity without applying owner scope."""
+
+        return self._runs.get(run_id)
+
+    async def get_by_external_identity(
+        self,
+        external_scope: str,
+        external_key: str,
+    ) -> dict[str, Any] | None:
         run_id = self._runs_by_external_identity.get((external_scope, external_key))
         return self._runs.get(run_id) if run_id is not None else None
 
@@ -627,10 +637,10 @@ class MemoryRunStore(RunStore):
 
     async def start_run(
         self,
-        run_id,
+        run_id: str,
         *,
-        execution_evidence_json=None,
-        execution_evidence_digest=None,
+        execution_evidence_json: dict[str, Any] | None = None,
+        execution_evidence_digest: str | None = None,
     ) -> bool:
         validate_execution_evidence_run(run_id, execution_evidence_json)
         run = self._runs.get(run_id)
@@ -962,6 +972,9 @@ class MemoryRunStore(RunStore):
         caller_intent_digest_version: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
+
+        if run_id in self._runs:
+            raise DuplicateRunIdentityError(run_id)
 
         thread_id = validate_thread_identifier(thread_id)
         if model_name is not None:

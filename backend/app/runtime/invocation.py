@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -32,6 +32,10 @@ from deerflow.runtime.runs.store.base import (
 WorkerCoroutine = Coroutine[Any, Any, None]
 WorkerFactory = Callable[[RunRecord], WorkerCoroutine]
 TaskFactory = Callable[[WorkerCoroutine], asyncio.Task[None]]
+ReplayValidator = Callable[
+    ["InternalLaunchIntent", "InternalAdmissionIdentity", RunRecord],
+    Awaitable[None],
+]
 
 
 def _freeze_host_value(value: Any) -> Any:
@@ -619,7 +623,7 @@ class InvocationRuntime:
         return decision.outcome
 
     @asynccontextmanager
-    async def _admission_permit(self):
+    async def _admission_permit(self) -> AsyncIterator[bool]:
         fence = self._admission_fence
         if fence is None:
             yield True
@@ -636,7 +640,7 @@ class InvocationRuntime:
         self,
         intent: InternalLaunchIntent,
         identity: InternalAdmissionIdentity | None,
-        validate_replay,
+        validate_replay: ReplayValidator | None,
     ) -> InternalLaunchReceipt | NotFoundOrInvisible | InvocationAuthorizationOutcome:
         launch = await self._normalizer.normalize(intent)
         worker_owns_material = False
@@ -721,7 +725,9 @@ class InvocationRuntime:
                     # A task cancelled before its coroutine runs never enters
                     # the worker's finally block. The idempotent completion
                     # callback closes that narrow process-local lease gap.
-                    def release_process_material(_completed_task) -> None:
+                    def release_process_material(
+                        _completed_task: asyncio.Task[None],
+                    ) -> None:
                         from deerflow.runtime.skill_projection import get_skill_projection_coordinator
                         from deerflow.runtime.user_context import DEFAULT_USER_ID
 

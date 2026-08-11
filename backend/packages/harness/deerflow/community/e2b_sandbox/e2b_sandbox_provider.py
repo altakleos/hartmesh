@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from e2b import SandboxQuery
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
@@ -75,6 +75,9 @@ from .capacity import (
     make_e2b_capacity_store,
 )
 from .e2b_sandbox import DEFAULT_E2B_HOME_DIR, E2BSandbox, _is_sandbox_gone_error
+
+if TYPE_CHECKING:
+    from deerflow.runtime.skill_projection import SkillProjectionClear
 
 logger = logging.getLogger(__name__)
 
@@ -512,7 +515,7 @@ class E2BSandboxProvider(SandboxProvider):
             raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_failed") from exc
 
     @staticmethod
-    def _run_accepted_projection_command(client, command: str) -> None:
+    def _run_accepted_projection_command(client: E2BClientSandbox, command: str) -> None:
         result = client.commands.run(command)
         if type(getattr(result, "exit_code", None)) is not int or result.exit_code != 0:
             raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_remote_command_failed")
@@ -617,7 +620,7 @@ class E2BSandboxProvider(SandboxProvider):
             quarantines.pop(sandbox_id, None)
             return True
 
-    def ensure_accepted_skill_snapshot_absent(self, clear) -> bool:
+    def ensure_accepted_skill_snapshot_absent(self, clear: SkillProjectionClear) -> bool:
         from deerflow.runtime.skill_projection import SkillProjectionClear
 
         if not isinstance(clear, SkillProjectionClear):
@@ -667,7 +670,7 @@ class E2BSandboxProvider(SandboxProvider):
 
     def clear_accepted_skill_snapshot(
         self,
-        clear,
+        clear: SkillProjectionClear,
     ) -> bool:
         from deerflow.runtime.skill_projection import SkillProjectionClear
 

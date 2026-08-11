@@ -13,7 +13,7 @@ import logging
 import re
 import threading
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -39,6 +39,7 @@ from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL
+from app.gateway.authorization import AuthorizationResolutionSnapshot
 from app.gateway.deps import (
     get_checkpointer,
     get_local_provider,
@@ -55,6 +56,7 @@ from app.gateway.internal_auth import (
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
 from app.runtime.authorization import ProviderInvocationAuthorization
+from app.runtime.constraints import ProviderInvocationConstraints
 from app.runtime.idempotency import (
     SYSTEM_TASK_OWNER,
     CanonicalCallerIntent,
@@ -2182,7 +2184,7 @@ class _GatewayLaunchNormalizer:
         return metadata
 
     @contextmanager
-    def scope(self, intent: InternalLaunchIntent):
+    def scope(self, intent: InternalLaunchIntent) -> Iterator[None]:
         owner_user_id = self._owner_user_id(intent)
         token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
         try:
@@ -2644,7 +2646,7 @@ class _GatewayDurableRuns:
         self._projection_supersessions: dict[int, object] = {}
 
     @asynccontextmanager
-    async def admission_scope(self, thread_id: str):
+    async def admission_scope(self, thread_id: str) -> AsyncIterator[None]:
         async with goal_thread_lock(thread_id):
             yield
 
@@ -2727,7 +2729,7 @@ class _GatewayDurableRuns:
 
     @staticmethod
     async def _terminalize_unattached_candidate(
-        run_manager,
+        run_manager: RunManager,
         candidate_run_id: str,
     ) -> None:
         fail_start = getattr(run_manager, "fail_start_if_pending", None)
@@ -3004,7 +3006,7 @@ def _build_invocation_authorization(request: Any) -> ProviderInvocationAuthoriza
         settings = InvocationOperationsAuthorizationConfig()
     resolver = getattr(app_state, "authorization_provider_resolver", None)
 
-    def resolve():
+    def resolve() -> AuthorizationResolutionSnapshot:
         if resolver is None:
             raise RuntimeError("Gateway authorization provider resolver is unavailable")
         return resolver.resolve(get_app_config().authorization)
@@ -3012,9 +3014,9 @@ def _build_invocation_authorization(request: Any) -> ProviderInvocationAuthoriza
     return ProviderInvocationAuthorization(settings, resolve)
 
 
-def _build_invocation_constraints(request: Any):
-    from app.runtime.constraints import ProviderInvocationConstraints
-
+def _build_invocation_constraints(
+    request: Any,
+) -> ProviderInvocationConstraints:
     app_state = getattr(getattr(request, "app", None), "state", None)
     return ProviderInvocationConstraints(
         getattr(app_state, "invocation_constraints_host", None),

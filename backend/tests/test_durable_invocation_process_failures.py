@@ -54,9 +54,15 @@ from deerflow.runtime.accepted_invocation import (
     canonical_digest,
 )
 from deerflow.runtime.runs.lifecycle_query import LifecycleQuery
-from deerflow.runtime.runs.manager import ORPHAN_RECOVERY_STOP_REASON, ConflictError
+from deerflow.runtime.runs.manager import (
+    ORPHAN_RECOVERY_STOP_REASON,
+    ConflictError,
+    _UnresolvedAdmissionCandidate,
+    _UnresolvedThreadOperationRelease,
+)
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
+    DuplicateRunIdentityError,
     LifecycleType,
     ThreadOperationReleaseOutcome,
     lifecycle_owner_scope,
@@ -862,6 +868,302 @@ async def test_postgres_auxiliary_release_rechecks_wall_clock_after_row_lock() -
         if blocker.in_transaction():
             await blocker.rollback()
         await blocker.close()
+        async with factory() as session:
+            await session.execute(delete(RunRow).where(RunRow.run_id == run_id))
+            await session.commit()
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for PostgreSQL integrity-quarantine qualification",
+)
+@pytest.mark.parametrize(
+    "operation_kind",
+    [
+        pytest.param(ThreadOperationKind.run, id="invocation"),
+        pytest.param(ThreadOperationKind.checkpoint_write, id="checkpoint-write"),
+        pytest.param(ThreadOperationKind.artifact_write, id="artifact-write"),
+    ],
+)
+async def test_postgres_integrity_quarantine_uses_authoritative_cross_owner_truth(
+    operation_kind: ThreadOperationKind,
+) -> None:
+    """Owner invisibility cannot clear quarantine around an active primary key."""
+
+    assert _POSTGRES_URL is not None
+    engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    store = RunRepository(factory)
+    unique = uuid.uuid4().hex
+    run_id = str(uuid.uuid4())
+    thread_id = f"thread-quarantine-{unique}"
+    retained_user = f"retained-{unique}"
+    durable_user = f"durable-{unique}"
+    worker_id = f"worker-{unique}"
+    manager = RunManager(store=store, worker_id=worker_id)
+    try:
+        await store.create_thread_operation_atomic(
+            run_id,
+            thread_id=thread_id,
+            owner_worker_id=worker_id,
+            lease_expires_at=None,
+            operation_kind=operation_kind.value,
+            user_id=durable_user,
+        )
+
+        # Request-scoped reads preserve owner isolation. Integrity recovery has
+        # a separate, trusted primary-key read and must not mistake invisible
+        # for globally absent.
+        assert await store.get(run_id, user_id=retained_user) is None
+        authoritative = await store.authoritative_get(run_id)
+        assert authoritative is not None
+        assert authoritative["user_id"] == durable_user
+        assert authoritative["status"] == RunStatus.pending.value
+
+        if operation_kind is ThreadOperationKind.run:
+            obligation = _UnresolvedAdmissionCandidate(
+                run_id=run_id,
+                thread_id=thread_id,
+                user_id=retained_user,
+                owner_worker_id=worker_id,
+                external_scope=None,
+                external_key=None,
+                caller_intent_digest=None,
+                caller_intent_digest_version=None,
+                commit_proven=True,
+            )
+            manager._unresolved_admissions[run_id] = obligation
+            manager._quarantined_post_commit_obligations.add(run_id)
+            resolved = await manager._resolve_unresolved_admission(obligation)
+        else:
+            release = _UnresolvedThreadOperationRelease(
+                run_id=run_id,
+                thread_id=thread_id,
+                operation_kind=operation_kind,
+                user_id=retained_user,
+                owner_worker_id=worker_id,
+                require_unexpired_lease=False,
+            )
+            manager._unresolved_thread_operation_releases[run_id] = release
+            manager._quarantined_post_commit_obligations.add(run_id)
+            resolved = await manager._resolve_unresolved_thread_operation_release(
+                release,
+            )
+
+        assert resolved is False
+        assert manager.post_commit_obligations_ready() is False
+        retained = await store.authoritative_get(run_id)
+        assert retained is not None
+        assert retained["user_id"] == durable_user
+        assert retained["status"] == RunStatus.pending.value
+    finally:
+        manager._unresolved_admissions.clear()
+        manager._unresolved_thread_operation_releases.clear()
+        manager._quarantined_post_commit_obligations.clear()
+        await manager.shutdown(timeout=1)
+        async with factory() as session:
+            await session.execute(delete(RunRow).where(RunRow.run_id == run_id))
+            await session.commit()
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for PostgreSQL duplicate-identity qualification",
+)
+@pytest.mark.parametrize("keyed", [False, True], ids=["unkeyed", "keyed"])
+async def test_postgres_duplicate_run_identity_is_rejected_before_any_mutation(
+    keyed: bool,
+) -> None:
+    """A duplicate primary key cannot replace a row or mutate its predecessor."""
+
+    assert _POSTGRES_URL is not None
+    engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    store = RunRepository(factory)
+    unique = uuid.uuid4().hex
+    run_id = str(uuid.uuid4())
+    predecessor_id = str(uuid.uuid4())
+    original_thread = f"thread-original-{unique}"
+    target_thread = f"thread-target-{unique}"
+    original_scope = f"scope-original-{unique}"
+    original_key = f"key-original-{unique}"
+    new_scope = f"scope-new-{unique}"
+    new_key = f"key-new-{unique}"
+    created_ids = (run_id, predecessor_id)
+    try:
+        common = {
+            "thread_id": original_thread,
+            "owner_worker_id": f"worker-original-{unique}",
+            "lease_expires_at": None,
+            "user_id": f"owner-original-{unique}",
+        }
+        if keyed:
+            first = await store.ensure_run_atomic(
+                run_id,
+                external_scope=original_scope,
+                external_key=original_key,
+                request_digest="a" * 64,
+                request_digest_version=REQUEST_DIGEST_VERSION,
+                caller_intent_json={"version": 1, "input": "original"},
+                caller_intent_digest="b" * 64,
+                caller_intent_digest_version="caller-intent-canonical-json-v1",
+                **common,
+            )
+            assert first.outcome is AdmissionOutcome.created
+        else:
+            await store.create_thread_operation_atomic(run_id, **common)
+
+        await store.create_thread_operation_atomic(
+            predecessor_id,
+            thread_id=target_thread,
+            owner_worker_id=f"worker-predecessor-{unique}",
+            lease_expires_at=None,
+            user_id=f"owner-target-{unique}",
+        )
+        original_before = await store.authoritative_get(run_id)
+        predecessor_before = await store.authoritative_get(predecessor_id)
+        events_before = await store.list_lifecycle_events()
+
+        duplicate_kwargs = {
+            "thread_id": target_thread,
+            "owner_worker_id": f"worker-new-{unique}",
+            "lease_expires_at": None,
+            "user_id": f"owner-new-{unique}",
+            "multitask_strategy": "interrupt",
+        }
+        with pytest.raises(DuplicateRunIdentityError, match=run_id):
+            if keyed:
+                await store.ensure_run_atomic(
+                    run_id,
+                    external_scope=new_scope,
+                    external_key=new_key,
+                    request_digest="c" * 64,
+                    request_digest_version=REQUEST_DIGEST_VERSION,
+                    caller_intent_json={"version": 1, "input": "replacement"},
+                    caller_intent_digest="d" * 64,
+                    caller_intent_digest_version="caller-intent-canonical-json-v1",
+                    **duplicate_kwargs,
+                )
+            else:
+                await store.create_thread_operation_atomic(
+                    run_id,
+                    **duplicate_kwargs,
+                )
+
+        assert await store.authoritative_get(run_id) == original_before
+        assert await store.authoritative_get(predecessor_id) == predecessor_before
+        assert await store.list_lifecycle_events() == events_before
+        assert await store.get_by_external_identity(new_scope, new_key) is None
+        if keyed:
+            retained_key = await store.get_by_external_identity(
+                original_scope,
+                original_key,
+            )
+            assert retained_key is not None
+            assert retained_key["run_id"] == run_id
+    finally:
+        async with factory() as session:
+            await session.execute(delete(RunRow).where(RunRow.run_id.in_(created_ids)))
+            await session.commit()
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for PostgreSQL duplicate-identity qualification",
+)
+@pytest.mark.parametrize("keyed", [False, True], ids=["unkeyed", "keyed"])
+async def test_postgres_concurrent_duplicate_run_identity_has_one_exact_winner(
+    keyed: bool,
+) -> None:
+    """Two sessions that both observe absence still classify ``runs_pkey``."""
+
+    assert _POSTGRES_URL is not None
+    engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    run_id = str(uuid.uuid4())
+    barrier = asyncio.Barrier(2)
+
+    class _BarrierSession(AsyncSession):
+        async def get(self, entity, ident, **kwargs):
+            row = await super().get(entity, ident, **kwargs)
+            if entity is RunRow and ident == run_id and row is None:
+                await asyncio.wait_for(barrier.wait(), timeout=10)
+            return row
+
+    factory = async_sessionmaker(
+        engine,
+        class_=_BarrierSession,
+        expire_on_commit=False,
+    )
+    stores = (RunRepository(factory), RunRepository(factory))
+    unique = uuid.uuid4().hex
+    scopes = (f"scope-a-{unique}", f"scope-b-{unique}")
+    keys = (f"key-a-{unique}", f"key-b-{unique}")
+
+    async def admit(index: int):
+        common = {
+            "thread_id": f"thread-{index}-{unique}",
+            "owner_worker_id": f"worker-{index}-{unique}",
+            "lease_expires_at": None,
+            "user_id": f"owner-{index}-{unique}",
+        }
+        if keyed:
+            return await stores[index].ensure_run_atomic(
+                run_id,
+                external_scope=scopes[index],
+                external_key=keys[index],
+                request_digest=str(index) * 64,
+                request_digest_version=REQUEST_DIGEST_VERSION,
+                caller_intent_json={"version": 1, "input": f"candidate-{index}"},
+                caller_intent_digest=str(index + 2) * 64,
+                caller_intent_digest_version="caller-intent-canonical-json-v1",
+                **common,
+            )
+        return await stores[index].create_thread_operation_atomic(
+            run_id,
+            **common,
+        )
+
+    try:
+        results = await asyncio.gather(
+            admit(0),
+            admit(1),
+            return_exceptions=True,
+        )
+        assert sum(isinstance(item, DuplicateRunIdentityError) for item in results) == 1
+        assert sum(not isinstance(item, BaseException) for item in results) == 1
+
+        retained = await stores[0].authoritative_get(run_id)
+        assert retained is not None
+        winning_index = 0 if retained["user_id"] == f"owner-0-{unique}" else 1
+        losing_index = 1 - winning_index
+        assert retained["thread_id"] == f"thread-{winning_index}-{unique}"
+        events = await stores[0].list_lifecycle_events()
+        accepted = [event for event in events if event["run_id"] == run_id and event["lifecycle_type"] == LifecycleType.accepted.value]
+        assert len(accepted) == 1
+        if keyed:
+            assert (
+                await stores[0].get_by_external_identity(
+                    scopes[losing_index],
+                    keys[losing_index],
+                )
+                is None
+            )
+    finally:
         async with factory() as session:
             await session.execute(delete(RunRow).where(RunRow.run_id == run_id))
             await session.commit()

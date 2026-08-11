@@ -138,6 +138,8 @@ async def runtime_capabilities(
     request: Request,
     runtime: Annotated[DurableInvocationPort, Depends(get_runtime_api)],
 ) -> JSONResponse:
+    """Return portable runtime capabilities to an administrator."""
+
     try:
         await require_admin_user(
             request,
@@ -183,6 +185,8 @@ async def ensure_invocation(
     request: Request,
     runtime: Annotated[DurableInvocationPort, Depends(get_runtime_api)],
 ) -> JSONResponse:
+    """Ensure one invocation through the portable durable runtime contract."""
+
     if error := _permission_error(request, "runs", "create"):
         return error
     parsed = await _read_record(request, InvocationEnsureRequest)
@@ -218,6 +222,8 @@ async def observe_invocation(
     request: Request,
     runtime: Annotated[DurableInvocationPort, Depends(get_runtime_api)],
 ) -> JSONResponse:
+    """Observe one authorized invocation and its lifecycle page."""
+
     if error := _permission_error(request, "runs", "read"):
         return error
     paging = _paging_values(request)
@@ -242,6 +248,8 @@ async def observe_context_invocations(
     request: Request,
     runtime: Annotated[DurableInvocationPort, Depends(get_runtime_api)],
 ) -> JSONResponse:
+    """Observe an authorized bounded invocation page for one context."""
+
     if error := _permission_error(request, "runs", "read"):
         return error
     paging = _paging_values(request, allow_source_kind=True)
@@ -271,6 +279,8 @@ async def control_invocation(
     request: Request,
     runtime: Annotated[DurableInvocationPort, Depends(get_runtime_api)],
 ) -> JSONResponse:
+    """Apply one authorized version-fenced invocation control request."""
+
     if error := _permission_error(request, "runs", "cancel"):
         return error
     parsed = await _read_record(request, CancelInvocationRequest)

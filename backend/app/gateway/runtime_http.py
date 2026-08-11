@@ -14,6 +14,8 @@ RUNTIME_API_PREFIX = "/api/runtime/v1"
 
 
 def is_runtime_api_path(path: str) -> bool:
+    """Return whether *path* belongs to the versioned runtime namespace."""
+
     return path == RUNTIME_API_PREFIX or path.startswith(f"{RUNTIME_API_PREFIX}/")
 
 
@@ -23,6 +25,8 @@ def runtime_error_response(
     *,
     details: dict[str, Any] | None = None,
 ) -> JSONResponse:
+    """Build the strict versioned runtime failure envelope."""
+
     content: dict[str, Any] = {
         "api_version": API_VERSION,
         "kind": "runtime.error",
@@ -36,7 +40,7 @@ def runtime_error_response(
 async def _runtime_request_validation_error(
     request: Request,
     exc: RequestValidationError,
-):
+) -> JSONResponse:
     if is_runtime_api_path(request.url.path):
         return runtime_error_response(422, FailureCode.invalid_request)
     return await request_validation_exception_handler(request, exc)

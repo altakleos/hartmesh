@@ -821,6 +821,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         DeploymentProvenance,
         DeploymentQualification,
         GatewayDeploymentReporter,
+        NativeIngressReport,
         describe_native_ingress,
     )
 
@@ -831,7 +832,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     composition_verified_sources = frozenset({"github"}) if composition_webhook_auth.mode is GitHubWebhookAuthMode.hmac_sha256_verified else frozenset()
     app.state.verified_native_sources_at_composition = composition_verified_sources
 
-    def current_native_ingress():
+    def current_native_ingress() -> NativeIngressReport:
         webhook_auth = resolve_github_webhook_auth(
             deployment_profile=construction_deployment.profile,
         )

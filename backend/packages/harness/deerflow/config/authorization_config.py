@@ -8,7 +8,9 @@ via an adapter). Default ``enabled: false`` preserves today's behavior where
 every authenticated user has access to all tools, models, skills, and sandbox.
 """
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 _MAX_OBSERVATION_GRANT_SELECTORS = 128
 _MAX_OBSERVATION_IDENTIFIER_BYTES = 256
@@ -50,11 +52,11 @@ class ServiceObservationGrantConfig(BaseModel):
 
     @field_validator("run_ids", "thread_ids", "owner_ids", "source_kinds")
     @classmethod
-    def _validate_selectors(cls, values: tuple[str, ...], info) -> tuple[str, ...]:
+    def _validate_selectors(cls, values: tuple[str, ...], info: ValidationInfo) -> tuple[str, ...]:
         return _validate_observation_identifiers(values, field_name=info.field_name)
 
     @model_validator(mode="after")
-    def _validate_scope(self):
+    def _validate_scope(self) -> Self:
         if any(value not in _INVOCATION_SOURCE_KINDS for value in self.source_kinds):
             raise ValueError("source_kinds contains an unsupported invocation source kind")
         total = len(self.run_ids) + len(self.thread_ids) + len(self.owner_ids) + len(self.source_kinds)
@@ -103,7 +105,7 @@ class AuthorizationConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validate_unique_observer_services(self):
+    def _validate_unique_observer_services(self) -> Self:
         service_ids = tuple(item.service_id for item in self.service_observation_grants)
         if len(service_ids) != len(set(service_ids)):
             raise ValueError("service_observation_grants contains a duplicate service_id")
