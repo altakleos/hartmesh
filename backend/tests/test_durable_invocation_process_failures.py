@@ -834,7 +834,8 @@ async def test_postgres_auxiliary_release_rechecks_wall_clock_after_row_lock() -
         database_now = await blocker.scalar(select(func.clock_timestamp()))
         assert database_now is not None
         expires_during_wait = database_now + timedelta(milliseconds=500)
-        locked.lease_expires_at = expires_during_wait.isoformat()
+        assert expires_during_wait.tzinfo is not None
+        locked.lease_expires_at = expires_during_wait
 
         release_task = asyncio.create_task(
             release_store.release_thread_operation_owned(
