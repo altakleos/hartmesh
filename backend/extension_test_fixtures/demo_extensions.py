@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Never
 
 from deerflow_extension_api import (
     AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION,
@@ -13,10 +13,14 @@ from deerflow_extension_api import (
     MCP_INTERCEPTOR_KIND,
     AuthorizationProviderFactory,
     AuthzDecision,
+    AuthzRequest,
+    ConstraintProjectionRequestV2,
     ExtensionRegistry,
     InvocationConstraintsProviderFactory,
+    McpCallProjectionV1,
     McpInterceptorDescriptor,
     PreparedMcpCallV1,
+    Principal,
     extension,
 )
 
@@ -93,13 +97,18 @@ class CountingAuthorizationProvider:
         self.label = label
         PROVIDER_INSTANCES.append(self)
 
-    def authorize(self, request):
+    def authorize(self, request: AuthzRequest) -> AuthzDecision:
         return AuthzDecision(allow=True)
 
-    async def aauthorize(self, request):
+    async def aauthorize(self, request: AuthzRequest) -> AuthzDecision:
         return self.authorize(request)
 
-    def filter_resources(self, principal, resource_type, candidates):
+    def filter_resources(
+        self,
+        principal: Principal,
+        resource_type: str,
+        candidates: list[str],
+    ) -> list[str]:
         return list(candidates)
 
 
@@ -125,7 +134,10 @@ def install_authorization_then_raise(registry: ExtensionRegistry, config: Mappin
 
 
 class _PreparedMcpInterceptor:
-    async def prepare_call(self, request):
+    async def prepare_call(
+        self,
+        request: McpCallProjectionV1,
+    ) -> PreparedMcpCallV1:
         del request
         return PreparedMcpCallV1()
 
@@ -153,7 +165,7 @@ def install_mcp_then_raise(registry: ExtensionRegistry, config: Mapping[str, Any
 
 
 class _ConstraintsProviderV2:
-    async def project(self, request):
+    async def project(self, request: ConstraintProjectionRequestV2) -> Never:
         raise AssertionError("the loader fixture must not project constraints")
 
 

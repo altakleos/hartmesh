@@ -84,6 +84,8 @@ APP_CONFIG_FACTORY_EXCLUDED_FIELDS = frozenset(
 
 
 def assert_agent_config_projection_complete() -> None:
+    """Assert every agent-config field has an explicit revision classification."""
+
     classified = AGENT_CONFIG_FACTORY_INCLUDED_FIELDS | AGENT_CONFIG_FACTORY_EXCLUDED_FIELDS
     actual = frozenset(AgentConfig.model_fields)
     if classified != actual:
@@ -93,6 +95,8 @@ def assert_agent_config_projection_complete() -> None:
 
 
 def assert_app_config_projection_complete() -> None:
+    """Assert every app-config field has an explicit revision classification."""
+
     classified = APP_CONFIG_FACTORY_INCLUDED_FIELDS | APP_CONFIG_FACTORY_EXCLUDED_FIELDS
     actual = frozenset(AppConfig.model_fields)
     if classified != actual:

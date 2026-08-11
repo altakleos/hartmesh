@@ -20,6 +20,7 @@ from deerflow.extensions.capabilities import (
     capability_health_to_dict,
     capability_manifest_to_dict,
 )
+from deerflow.runtime.runs.manager import PostCommitObligationStatus
 
 DEPLOYMENT_API_VERSION = "deerflow.deployment/v1"
 _SHA256_RE = re.compile(r"(?:sha256:)?[0-9a-f]{64}\Z")
@@ -29,6 +30,14 @@ _IMAGE_REFERENCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}\Z")
 _RFC3339_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
     r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z"
+)
+_MAX_POST_COMMIT_OBLIGATION_COUNT = 2_147_483_647
+_POST_COMMIT_OBLIGATION_COUNT_FIELDS = (
+    "pending_admission",
+    "pending_thread_operation_release",
+    "pending_quarantine",
+    "resolved_admission_since_start",
+    "resolved_thread_operation_release_since_start",
 )
 
 
@@ -72,6 +81,65 @@ class NativeIngressReport:
         return {
             "version": 1,
             "sources": {source: guarantee.value for source, guarantee in self.sources},
+        }
+
+
+@dataclass(frozen=True)
+class PostCommitObligationReport:
+    """Bounded process-local status for the post-commit ownership supervisor."""
+
+    pending_admission: int = 0
+    pending_thread_operation_release: int = 0
+    pending_quarantine: int = 0
+    resolved_admission_since_start: int = 0
+    resolved_thread_operation_release_since_start: int = 0
+
+    def __post_init__(self) -> None:
+        for field_name in _POST_COMMIT_OBLIGATION_COUNT_FIELDS:
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError("post-commit obligation count must be a non-negative integer")
+            object.__setattr__(
+                self,
+                field_name,
+                min(value, _MAX_POST_COMMIT_OBLIGATION_COUNT),
+            )
+
+    @classmethod
+    def from_status(
+        cls,
+        status: PostCommitObligationStatus,
+    ) -> PostCommitObligationReport:
+        """Validate a fresh RunManager count projection for the administrator report."""
+
+        if not isinstance(status, PostCommitObligationStatus):
+            raise TypeError("post-commit obligation status has an invalid type")
+        return cls(
+            pending_admission=status.pending_admissions,
+            pending_thread_operation_release=(status.pending_thread_operation_releases),
+            pending_quarantine=status.pending_quarantines,
+            resolved_admission_since_start=(status.resolved_admissions_since_start),
+            resolved_thread_operation_release_since_start=(status.resolved_thread_operation_releases_since_start),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a fresh versioned wire copy with explicit process-local scope."""
+
+        return {
+            "version": 1,
+            "scope": "process_local",
+            "window": "since_start",
+            "pending_by_type": {
+                "admission": self.pending_admission,
+                "thread_operation_release": self.pending_thread_operation_release,
+            },
+            # Quarantine overlaps the two obligation types and must not be added
+            # to pending_by_type when calculating the total pending workload.
+            "quarantined_identities": self.pending_quarantine,
+            "resolved_since_start_by_type": {
+                "admission": self.resolved_admission_since_start,
+                "thread_operation_release": (self.resolved_thread_operation_release_since_start),
+            },
         }
 
 
@@ -373,6 +441,7 @@ class DeploymentReport:
     provenance: DeploymentProvenance = field(default_factory=DeploymentProvenance)
     qualification: DeploymentQualification = field(default_factory=DeploymentQualification)
     native_ingress: NativeIngressReport = field(default_factory=NativeIngressReport)
+    post_commit_obligations: PostCommitObligationReport | None = None
     api_version: Literal["deerflow.deployment/v1"] = field(
         default=DEPLOYMENT_API_VERSION,
         init=False,
@@ -384,11 +453,16 @@ class DeploymentReport:
         if not all(isinstance(item, CapabilityHealthSnapshot) for item in health):
             raise TypeError("capability_health must contain health snapshots")
         object.__setattr__(self, "capability_health", health)
+        if self.post_commit_obligations is not None and not isinstance(
+            self.post_commit_obligations,
+            PostCommitObligationReport,
+        ):
+            raise TypeError("post_commit_obligations must use PostCommitObligationReport")
 
     def to_dict(self) -> dict[str, object]:
         """Return a fresh safe wire projection; no plugin configuration is included."""
 
-        return {
+        payload: dict[str, object] = {
             "api_version": self.api_version,
             "kind": self.kind,
             "profile": self.profile.value,
@@ -410,6 +484,9 @@ class DeploymentReport:
             "native_ingress": self.native_ingress.to_dict(),
             "qualification": self.qualification.to_dict(),
         }
+        if self.post_commit_obligations is not None:
+            payload["post_commit_obligations"] = self.post_commit_obligations.to_dict()
+        return payload
 
 
 @runtime_checkable
@@ -438,6 +515,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         qualification: DeploymentQualification | None = None,
         native_ingress: NativeIngressReport | None = None,
         native_ingress_supplier: Callable[[], NativeIngressReport] | None = None,
+        post_commit_obligations_supplier: (Callable[[], PostCommitObligationReport | None] | None) = None,
     ) -> None:
         self._profile = DeploymentProfile(profile)
         self._persistence = describe_persistence(
@@ -453,6 +531,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             raise ValueError("native_ingress and native_ingress_supplier are mutually exclusive")
         static_native_ingress = native_ingress or NativeIngressReport()
         self._native_ingress_supplier = native_ingress_supplier or (lambda: static_native_ingress)
+        self._post_commit_obligations_supplier = post_commit_obligations_supplier or (lambda: None)
 
     @property
     def persistence_ready(self) -> bool:
@@ -491,6 +570,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             provenance=self._provenance,
             qualification=self._qualification,
             native_ingress_supplier=self._native_ingress_supplier,
+            post_commit_obligations_supplier=(self._post_commit_obligations_supplier),
         )
 
     async def deployment_report(self) -> DeploymentReport:
@@ -503,6 +583,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             provenance=self._provenance,
             qualification=self._qualification,
             native_ingress=self._native_ingress_supplier(),
+            post_commit_obligations=self._post_commit_obligations_supplier(),
         )
 
 
@@ -518,6 +599,7 @@ __all__ = [
     "NativeIngressReport",
     "PersistenceReport",
     "PersistenceTier",
+    "PostCommitObligationReport",
     "QualificationEvidence",
     "describe_persistence",
     "describe_native_ingress",

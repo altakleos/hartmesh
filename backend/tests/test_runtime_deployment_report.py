@@ -22,6 +22,7 @@ from app.runtime.deployment import (
     IngressDeliveryGuarantee,
     NativeIngressReport,
     PersistenceTier,
+    PostCommitObligationReport,
     describe_native_ingress,
     describe_persistence,
     validate_deployment_profile,
@@ -32,6 +33,7 @@ from deerflow.extensions.capabilities import (
     build_capability_manifest,
 )
 from deerflow.extensions.registry import ExtensionRegistry
+from deerflow.runtime import PostCommitObligationStatus
 
 
 def _admin_user() -> User:
@@ -165,6 +167,7 @@ def test_admin_deployment_report_is_versioned_truthful_and_redacted() -> None:
         "checked_at": "2026-08-07T00:00:00Z",
         "correlation_id": "a" * 32,
     }
+    assert "post_commit_obligations" not in payload
     assert payload["provenance"]["image_digest"] == "sha256:" + ("a" * 64)
     serialized = str(payload).lower()
     assert "secret" not in serialized
@@ -172,6 +175,69 @@ def test_admin_deployment_report_is_versioned_truthful_and_redacted() -> None:
 
     with pytest.raises(ValueError, match="credential"):
         DeploymentProvenance(image_reference="registry.example/user:secret@private/image:latest")
+
+
+@pytest.mark.asyncio
+async def test_admin_report_exposes_bounded_process_local_post_commit_counts() -> None:
+    reporter = GatewayDeploymentReporter(
+        profile=DeploymentProfile.durable_production,
+        database_backend="postgres",
+        atomic_lifecycle=True,
+        manifest=build_capability_manifest(ExtensionRegistry().build(generation=7)),
+        health_monitor=_HealthMonitor(),
+        post_commit_obligations_supplier=lambda: PostCommitObligationReport.from_status(
+            PostCommitObligationStatus(
+                pending_admissions=2,
+                pending_thread_operation_releases=3,
+                pending_quarantines=1,
+                resolved_admissions_since_start=5,
+                resolved_thread_operation_releases_since_start=7,
+            )
+        ),
+    )
+
+    payload = (await reporter.deployment_report()).to_dict()
+
+    assert payload["post_commit_obligations"] == {
+        "version": 1,
+        "scope": "process_local",
+        "window": "since_start",
+        "pending_by_type": {
+            "admission": 2,
+            "thread_operation_release": 3,
+        },
+        "quarantined_identities": 1,
+        "resolved_since_start_by_type": {
+            "admission": 5,
+            "thread_operation_release": 7,
+        },
+    }
+
+
+def test_post_commit_report_saturates_counts_and_rejects_malformed_values() -> None:
+    maximum = 2_147_483_647
+    report = PostCommitObligationReport.from_status(
+        PostCommitObligationStatus(
+            pending_admissions=maximum + 1,
+            pending_thread_operation_releases=0,
+            pending_quarantines=0,
+            resolved_admissions_since_start=0,
+            resolved_thread_operation_releases_since_start=maximum + 1,
+        )
+    )
+
+    assert report.pending_admission == maximum
+    assert report.resolved_thread_operation_release_since_start == maximum
+    with pytest.raises(ValueError, match="post-commit obligation count"):
+        PostCommitObligationReport.from_status(
+            PostCommitObligationStatus(
+                pending_admissions=-1,
+                pending_thread_operation_releases=0,
+                pending_quarantines=0,
+                resolved_admissions_since_start=0,
+                resolved_thread_operation_releases_since_start=0,
+            )
+        )
 
 
 def test_deployment_qualification_reads_bounded_trusted_environment(

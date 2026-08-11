@@ -81,6 +81,8 @@ def _canonical_value(value: Any) -> Any:
 
 
 def canonical_digest(value: Any) -> str:
+    """Return the lowercase SHA-256 digest of one canonical JSON projection."""
+
     canonical = json.dumps(
         _canonical_value(value),
         ensure_ascii=False,
@@ -147,6 +149,8 @@ def _deep_thaw(value: Any) -> Any:
 
 @dataclass(frozen=True)
 class PrincipalProjection:
+    """Immutable effective-principal facts accepted for one invocation."""
+
     user_id: str | None = None
     role: str | None = None
     oauth_provider: str | None = None
@@ -187,6 +191,8 @@ class PrincipalProjection:
 
 @dataclass(frozen=True)
 class InvocationOrigin:
+    """Immutable source kind and bounded correlation evidence for an invocation."""
+
     source_kind: str
     references: Mapping[str, Any] = field(default_factory=dict)
     contributor_references: tuple[dict[str, Any], ...] = ()
@@ -320,6 +326,8 @@ class ResolvedAgentMaterialV1:
 
 @dataclass(frozen=True)
 class ResolvedAgentRevision:
+    """Stable revision identity with optional process-local captured material."""
+
     agent_id: str
     digest: str
     storage_source: str
@@ -348,6 +356,8 @@ class ResolvedAgentRevision:
 
 @dataclass(frozen=True)
 class AcceptedInvocation:
+    """Sealed immutable execution facts retained from durable admission."""
+
     principal: PrincipalProjection
     origin: InvocationOrigin
     thread_id: str

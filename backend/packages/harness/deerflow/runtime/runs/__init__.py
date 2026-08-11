@@ -1,6 +1,6 @@
 """Run lifecycle management for LangGraph Platform API compatibility."""
 
-from .manager import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, CancelOutcome, ConflictError, RunManager, RunRecord, UnsupportedStrategyError
+from .manager import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, CancelOutcome, ConflictError, PostCommitObligationStatus, RunManager, RunRecord, UnsupportedStrategyError
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .worker import RunContext, run_agent
 
@@ -9,6 +9,7 @@ __all__ = [
     "ConflictError",
     "DisconnectMode",
     "ORPHAN_RECOVERY_STOP_REASON",
+    "PostCommitObligationStatus",
     "RunContext",
     "RunManager",
     "RunRecord",

@@ -934,7 +934,15 @@ Portable capabilities are transport-identical: HTTP emits the exact strict recor
 that the in-process Adapter returns. Deployment facts never appear in that record.
 The separate `GET /deployment` report exposes the host-owned immutable capability
 manifest/digest, separately labelled mutable health, optional bounded build/image
-identifiers, and persistence/qualification truth. `process_local` survives neither
+identifiers, and persistence/qualification truth. When the Gateway runtime supplies
+it, the optional versioned `post_commit_obligations` object reports process-local
+pending admission and auxiliary-release counts plus compensator-proven
+resolved-since-start counts.
+`quarantined_identities` overlaps those pending types and is not additive. Every
+counter is saturated, resets on process restart, and is operational state rather than
+durable lifecycle or multi-replica evidence. The v1 readiness reason
+`admission_compensation_pending` is retained for compatibility and covers every
+post-commit ownership obligation. `process_local` survives neither
 restart nor pod loss; `node_durable` survives process restart on its node; and
 `shared_durable` uses the configured shared PostgreSQL store. `atomic_lifecycle` is
 reported independently because an in-memory store can be atomic without being

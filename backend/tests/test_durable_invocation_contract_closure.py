@@ -247,6 +247,16 @@ def test_storage_and_qualification_claims_name_their_evidence_boundary() -> None
     assert "external_evidence_verified" in helm_guide
 
 
+def test_post_commit_obligation_telemetry_names_its_process_boundary() -> None:
+    guide = " ".join(_runtime_guide().split())
+
+    assert "optional `post_commit_obligations` field" in guide
+    assert "Quarantine is not a third workload bucket" in guide
+    assert "These counters reset on restart" in guide
+    assert "neither durable lifecycle evidence nor a cross-replica total" in guide
+    assert "serialized v1 readiness reason `admission_compensation_pending` remains" in guide
+
+
 def test_durable_examples_and_fixtures_use_generic_provider_names() -> None:
     expected_generic_fragments = {
         _REPO_ROOT / "config.example.yaml": ("mcp_interceptor:example.credential_broker", "example_request_observer"),

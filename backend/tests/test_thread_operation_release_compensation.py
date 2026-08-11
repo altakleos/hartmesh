@@ -10,7 +10,10 @@ import pytest
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import RunManager, ThreadOperationKind
-from deerflow.runtime.runs.manager import PersistenceRetryPolicy
+from deerflow.runtime.runs.manager import (
+    PersistenceRetryPolicy,
+    _UnresolvedThreadOperationRelease,
+)
 from deerflow.runtime.runs.store import base as run_store_contract
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -401,6 +404,102 @@ async def _cleanup_release_test(
             row["run_id"],
             user_id=row.get("user_id"),
         )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "kind",
+    [
+        ThreadOperationKind.checkpoint_write,
+        ThreadOperationKind.artifact_write,
+    ],
+)
+async def test_conflicting_auxiliary_release_hands_off_the_exact_reservation_task(
+    kind: ThreadOperationKind,
+) -> None:
+    """A contradictory release cannot leave the completed caller as owner."""
+
+    store = _ReleaseUnavailableMemoryRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id=_OWNER,
+        persistence_retry_policy=PersistenceRetryPolicy(
+            max_attempts=1,
+            initial_delay=0,
+        ),
+    )
+    caller = asyncio.current_task()
+    assert caller is not None
+    record = None
+    try:
+        async with manager.reserve_thread_operation(
+            "thread-conflicting-release-handoff",
+            kind=kind,
+            user_id=_USER,
+        ):
+            record = next(iter(manager._runs.values()))
+            manager._unresolved_thread_operation_releases[record.run_id] = _UnresolvedThreadOperationRelease(
+                run_id=record.run_id,
+                thread_id="thread-conflicting-release-evidence",
+                operation_kind=kind,
+                user_id=_USER,
+                owner_worker_id=_OWNER,
+                require_unexpired_lease=False,
+            )
+
+        assert record is not None
+        assert record.task is None
+        assert caller.cancelling() == 0
+        assert manager.post_commit_obligations_ready() is False
+        assert await manager.shutdown(timeout=0.01) is False
+        assert caller.cancelling() == 0
+    finally:
+        if caller.cancelling():
+            caller.uncancel()
+        await _cleanup_release_test(manager, store)
+
+
+@pytest.mark.anyio
+async def test_conflicting_auxiliary_release_never_detaches_an_unrelated_task() -> None:
+    """A corrupt local handoff fences, but never steals, another task identity."""
+
+    store = _ReleaseUnavailableMemoryRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id=_OWNER,
+        persistence_retry_policy=PersistenceRetryPolicy(
+            max_attempts=1,
+            initial_delay=0,
+        ),
+    )
+    blocker = asyncio.Event()
+    unrelated = asyncio.create_task(blocker.wait())
+    record = None
+    try:
+        async with manager.reserve_thread_operation(
+            "thread-conflicting-release-unrelated",
+            kind=ThreadOperationKind.checkpoint_write,
+            user_id=_USER,
+        ):
+            record = next(iter(manager._runs.values()))
+            record.task = unrelated
+            manager._unresolved_thread_operation_releases[record.run_id] = _UnresolvedThreadOperationRelease(
+                run_id=record.run_id,
+                thread_id="thread-conflicting-release-evidence",
+                operation_kind=ThreadOperationKind.checkpoint_write,
+                user_id=_USER,
+                owner_worker_id=_OWNER,
+                require_unexpired_lease=False,
+            )
+
+        assert record is not None
+        assert record.task is unrelated
+        assert unrelated.done() is False
+        assert manager.post_commit_obligations_ready() is False
+    finally:
+        unrelated.cancel()
+        await asyncio.gather(unrelated, return_exceptions=True)
+        await _cleanup_release_test(manager, store)
 
 
 @pytest.mark.anyio

@@ -183,7 +183,7 @@ async def test_process_local_persistence_blocks_durable_admission() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unresolved_admission_compensation_blocks_readiness() -> None:
+async def test_unresolved_post_commit_obligation_blocks_readiness() -> None:
     coordinator = RuntimeReadinessCoordinator(
         health_monitor=_Health(
             [CapabilityReadinessSnapshot(status="ready", health=())],
@@ -191,7 +191,7 @@ async def test_unresolved_admission_compensation_blocks_readiness() -> None:
         lifecycle_store=lambda: _Lifecycle([LifecycleReadiness(True)]),
         persistence_ready=lambda: True,
         extension_generation=lambda: 7,
-        admission_compensations_ready=lambda: False,
+        post_commit_obligations_ready=lambda: False,
         clock=lambda: datetime(2026, 8, 8, tzinfo=UTC),
         overall_timeout_seconds=1,
     )

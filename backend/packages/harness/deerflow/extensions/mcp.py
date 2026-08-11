@@ -105,6 +105,8 @@ class McpInvocationFacts:
 
 @dataclass(frozen=True)
 class McpInterceptorDiagnostic:
+    """Bounded diagnostic evidence for one required MCP interceptor."""
+
     capability_id: str
     diagnostic_code: str
     error_class: str | None = None
@@ -196,6 +198,8 @@ def _canonical_arguments_digest(arguments: object) -> str:
 
 
 def mcp_invocation_facts_from_context(context: object) -> McpInvocationFacts | None:
+    """Return host-sealed MCP invocation facts from a trusted runtime context."""
+
     if not isinstance(context, Mapping):
         return None
     facts = context.get(MCP_INVOCATION_FACTS_CONTEXT_KEY)
@@ -459,6 +463,8 @@ class McpInterceptorHost:
 
 @dataclass(frozen=True)
 class McpInterceptorRuntime:
+    """One startup-frozen MCP interceptor host and its health monitor."""
+
     host: McpInterceptorHost
     health_monitor: CapabilityHealthMonitor
 
@@ -480,6 +486,8 @@ def configure_mcp_interceptor_runtime(
 
 
 def reset_mcp_interceptor_runtime() -> None:
+    """Clear the process-local MCP interceptor runtime during host teardown."""
+
     global _runtime
     _runtime = None
 

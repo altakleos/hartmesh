@@ -83,6 +83,8 @@ class LifecycleVisibilityScope:
 
 
 def encode_lifecycle_cursor(cursor: int) -> str:
+    """Encode a non-negative lifecycle position as an opaque v1 cursor."""
+
     if type(cursor) is not int or cursor < 0:
         raise ValueError("lifecycle cursor must be a non-negative integer")
     payload = json.dumps(
@@ -95,6 +97,8 @@ def encode_lifecycle_cursor(cursor: int) -> str:
 
 
 def decode_lifecycle_cursor(token: str) -> int:
+    """Decode and strictly validate an opaque v1 lifecycle cursor."""
+
     if not isinstance(token, str) or not token.startswith("lc1."):
         raise InvalidLifecycleCursor("invalid lifecycle cursor")
     encoded = token[4:]
@@ -147,6 +151,8 @@ class LifecycleQuery:
 
 @dataclass(frozen=True)
 class LifecyclePage:
+    """One bounded, consistently fenced lifecycle observation page."""
+
     snapshots: tuple[dict[str, Any], ...]
     events: tuple[dict[str, Any], ...]
     next_cursor: str
@@ -156,6 +162,8 @@ class LifecyclePage:
 
 
 def invocation_source_kind(row: Mapping[str, Any]) -> str | None:
+    """Return a supported source kind from a persisted invocation row."""
+
     origin = row.get("origin_json")
     source_kind = origin.get("source_kind") if isinstance(origin, Mapping) else None
     return source_kind if isinstance(source_kind, str) and source_kind in INVOCATION_SOURCE_KINDS else None
@@ -262,6 +270,8 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 def validate_cursor_window(cursor: str | None, *, pruned_through: int, last_cursor: int) -> int:
+    """Validate a requested cursor against the retained lifecycle interval."""
+
     requested = pruned_through if cursor is None else decode_lifecycle_cursor(cursor)
     if requested < pruned_through:
         raise CursorGap(encode_lifecycle_cursor(pruned_through))
