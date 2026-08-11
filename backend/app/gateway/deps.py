@@ -27,9 +27,11 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
+from app.mcp_tasks.service import McpTaskService
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
+from deerflow.persistence.mcp_tasks import McpTaskRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
@@ -621,14 +623,18 @@ def get_scheduled_task_service(request: Request):
     return val
 
 
-def get_mcp_task_repo(request: Request):
+def get_mcp_task_repo(request: Request) -> McpTaskRepository:
+    """Return the configured MCP task repository or fail as unavailable."""
+
     val = getattr(request.app.state, "mcp_task_repo", None)
     if val is None:
         raise HTTPException(status_code=503, detail="MCP task repo not available")
     return val
 
 
-def get_mcp_task_service(request: Request):
+def get_mcp_task_service(request: Request) -> McpTaskService:
+    """Return the configured MCP task service or fail as unavailable."""
+
     val = getattr(request.app.state, "mcp_task_service", None)
     if val is None:
         raise HTTPException(status_code=503, detail="MCP task service not available")

@@ -8,11 +8,11 @@ import logging
 import mimetypes
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote
 
 import httpx
@@ -65,6 +65,40 @@ from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+
+class _LangGraphRunsApi(Protocol):
+    async def create(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def join(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def wait(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any] | list[dict[str, Any]]: ...
+
+    def join_stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]: ...
+
+    def stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]: ...
+
+
+class _LangGraphThreadsApi(Protocol):
+    async def create(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def get(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def update(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any] | None: ...
+
+
+class _LangGraphClient(Protocol):
+    runs: _LangGraphRunsApi
+    threads: _LangGraphThreadsApi
+
 
 logger = logging.getLogger(__name__)
 
@@ -1797,7 +1831,7 @@ class ChannelManager:
 
     # -- LangGraph SDK client (lazy) ----------------------------------------
 
-    def _get_client(self):
+    def _get_client(self) -> _LangGraphClient:
         """Return the ``langgraph_sdk`` async client, creating it on first use."""
         if self._client is None:
             from langgraph_sdk import get_client
@@ -2409,7 +2443,7 @@ class ChannelManager:
 
     async def _handle_chat_on_thread(
         self,
-        client,
+        client: _LangGraphClient,
         msg: InboundMessage,
         thread_id: str,
         *,

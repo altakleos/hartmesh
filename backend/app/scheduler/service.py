@@ -10,7 +10,8 @@ from typing import Any, Literal
 from fastapi import HTTPException
 
 from app.runtime.invocation import InternalLaunchIntent, InternalLaunchReceipt, InternalSourceKind, InvocationRuntime
-from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict
+from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskRunRepository
+from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.schedules import next_run_at
 from deerflow.utils.thread_id import validate_thread_id
@@ -27,8 +28,8 @@ class ScheduledTaskService:
     def __init__(
         self,
         *,
-        task_repo,
-        task_run_repo,
+        task_repo: ScheduledTaskRepository,
+        task_run_repo: ScheduledTaskRunRepository,
         invocation_runtime: InvocationRuntime,
         poll_interval_seconds: int,
         lease_seconds: int,

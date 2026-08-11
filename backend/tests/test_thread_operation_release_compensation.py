@@ -294,6 +294,34 @@ class _ReleaseUnavailableMemoryRunStore(MemoryRunStore):
         await super().delete_thread_operation(run_id, user_id=user_id)
 
 
+class _RenewalObservedReleaseUnavailableStore(_ReleaseUnavailableMemoryRunStore):
+    """Unavailable release store that records or pauses lease renewal."""
+
+    def __init__(self, *, block_renewal: bool = False) -> None:
+        super().__init__()
+        self.renewal_started = asyncio.Event()
+        self.allow_renewal = asyncio.Event()
+        self.renewal_calls = 0
+        if not block_renewal:
+            self.allow_renewal.set()
+
+    async def renew_lease(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_expires_at: str,
+    ) -> Any:
+        self.renewal_calls += 1
+        self.renewal_started.set()
+        await self.allow_renewal.wait()
+        return await super().renew_lease(
+            run_id,
+            owner_worker_id=owner_worker_id,
+            lease_expires_at=lease_expires_at,
+        )
+
+
 class _ReleaseResponseLostMemoryRunStore(MemoryRunStore):
     """Delete one exact row, then lose the response once."""
 
@@ -462,6 +490,193 @@ async def test_manager_release_outage_blocks_shutdown_then_recovers_exact_row() 
         assert set(store.release_calls) == {expected_call}
         assert store.legacy_release_calls == []
     finally:
+        await _cleanup_release_test(manager, store)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "kind",
+    [
+        ThreadOperationKind.checkpoint_write,
+        ThreadOperationKind.artifact_write,
+    ],
+)
+async def test_unresolved_release_handoff_detaches_the_completed_body_task(
+    kind: ThreadOperationKind,
+) -> None:
+    """The shared supervisor, not an unrelated caller continuation, owns release."""
+
+    store = _ReleaseUnavailableMemoryRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id=_OWNER,
+        persistence_retry_policy=PersistenceRetryPolicy(
+            max_attempts=1,
+            initial_delay=0,
+        ),
+    )
+    body_exited = asyncio.Event()
+    finish_caller = asyncio.Event()
+
+    async def operation() -> None:
+        async with manager.reserve_thread_operation(
+            f"thread-detached-{kind.value}",
+            kind=kind,
+            user_id=_USER,
+        ):
+            pass
+        body_exited.set()
+        await finish_caller.wait()
+
+    task = asyncio.create_task(operation())
+    try:
+        await asyncio.wait_for(body_exited.wait(), timeout=1)
+        rows = await store.list_inflight()
+        assert len(rows) == 1
+        local = await manager.get(rows[0]["run_id"], user_id=_USER)
+        assert local is not None
+        assert local.task is None
+        assert not task.done()
+        assert manager.admission_compensations_ready() is False
+    finally:
+        finish_caller.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await _cleanup_release_test(manager, store)
+
+
+@pytest.mark.anyio
+async def test_unresolved_release_does_not_renew_after_the_body_handoff() -> None:
+    store = _RenewalObservedReleaseUnavailableStore()
+    manager = RunManager(
+        store=store,
+        worker_id=_OWNER,
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=0,
+            heartbeat_enabled=True,
+        ),
+        persistence_retry_policy=PersistenceRetryPolicy(
+            max_attempts=1,
+            initial_delay=0,
+        ),
+    )
+    body_exited = asyncio.Event()
+    finish_caller = asyncio.Event()
+
+    async def operation() -> None:
+        async with manager.reserve_thread_operation(
+            "thread-no-post-body-renewal",
+            kind=ThreadOperationKind.checkpoint_write,
+            user_id=_USER,
+        ):
+            pass
+        body_exited.set()
+        await finish_caller.wait()
+
+    task = asyncio.create_task(operation())
+    try:
+        await asyncio.wait_for(body_exited.wait(), timeout=1)
+        await manager._renew_leases()
+        assert store.renewal_calls == 0
+    finally:
+        finish_caller.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await _cleanup_release_test(manager, store)
+
+
+@pytest.mark.anyio
+async def test_reservation_caller_can_request_shutdown_after_release_handoff() -> None:
+    """Shutdown must not cancel or await the task whose reservation body ended."""
+
+    store = _ReleaseUnavailableMemoryRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id=_OWNER,
+        persistence_retry_policy=PersistenceRetryPolicy(
+            max_attempts=1,
+            initial_delay=0,
+        ),
+    )
+
+    async def operation() -> bool:
+        async with manager.reserve_thread_operation(
+            "thread-same-task-shutdown",
+            kind=ThreadOperationKind.artifact_write,
+            user_id=_USER,
+        ):
+            pass
+        return await manager.shutdown(timeout=0.01)
+
+    task = asyncio.create_task(operation())
+    try:
+        assert await task is False
+        assert not task.cancelled()
+    finally:
+        await _cleanup_release_test(manager, store)
+
+
+@pytest.mark.anyio
+async def test_renewal_response_after_release_handoff_does_not_refresh_local_lease() -> None:
+    """A renewal started by the body task loses local authority at handoff."""
+
+    store = _RenewalObservedReleaseUnavailableStore(block_renewal=True)
+    manager = RunManager(
+        store=store,
+        worker_id=_OWNER,
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=0,
+            heartbeat_enabled=True,
+        ),
+        persistence_retry_policy=PersistenceRetryPolicy(
+            max_attempts=1,
+            initial_delay=0,
+        ),
+    )
+    body_entered = asyncio.Event()
+    leave_body = asyncio.Event()
+    body_exited = asyncio.Event()
+    finish_caller = asyncio.Event()
+
+    async def operation() -> None:
+        async with manager.reserve_thread_operation(
+            "thread-renewal-handoff-race",
+            kind=ThreadOperationKind.checkpoint_write,
+            user_id=_USER,
+        ):
+            body_entered.set()
+            await leave_body.wait()
+        body_exited.set()
+        await finish_caller.wait()
+
+    task = asyncio.create_task(operation())
+    renewal_task: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(body_entered.wait(), timeout=1)
+        rows = await store.list_inflight()
+        assert len(rows) == 1
+        run_id = rows[0]["run_id"]
+        local = await manager.get(run_id, user_id=_USER)
+        assert local is not None
+        original_expiry = local.lease_expires_at
+
+        renewal_task = asyncio.create_task(manager._renew_leases())
+        await asyncio.wait_for(store.renewal_started.wait(), timeout=1)
+        leave_body.set()
+        await asyncio.wait_for(body_exited.wait(), timeout=1)
+        store.allow_renewal.set()
+        await renewal_task
+
+        assert local.task is None
+        assert local.lease_expires_at == original_expiry
+        assert manager.admission_compensations_ready() is False
+    finally:
+        store.allow_renewal.set()
+        leave_body.set()
+        finish_caller.set()
+        if renewal_task is not None:
+            await asyncio.gather(renewal_task, return_exceptions=True)
+        await asyncio.gather(task, return_exceptions=True)
         await _cleanup_release_test(manager, store)
 
 

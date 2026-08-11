@@ -457,7 +457,12 @@ exactly-once claim:
   worker/shutdown fences but are not copied into every later ambiguity record. More than one
   actionable predecessor is an integrity failure rejected before the store mutation. Registrations
   merge monotonically; a contradiction after a possible commit enters read-only integrity
-  quarantine instead of throwing away the retained candidate. The supervisor uses independent
+  quarantine instead of throwing away the retained candidate. Quarantine consults only the
+  store's explicit privileged primary-key lookup: an active row remains quarantined regardless
+  of owner visibility, global absence evicts a fenced local phantom, and conflicting terminal
+  truth never copies cross-owner fields. Candidate UUID reuse is a bounded integrity failure that
+  loses before predecessor, index, or lifecycle mutation; it is never reported as thread
+  contention. The supervisor uses independent
   capped backoff per obligation rather than a tight poll or allowing new work to reset a poisoned
   item. Once the exact candidate proves a replacement committed, compensation fences the named
   actionable predecessor and terminalizes the unattached candidate; it never starts model work. A known-created
@@ -469,6 +474,11 @@ exactly-once claim:
   cancelled bodies all preserve their caller-visible result while exact release is attempted.
   PostgreSQL checks lease freshness against statement wall time after its row lock, and malformed
   custom-store release results remain supervised rather than escaping cleanup or masking the body.
+  At body exit the immutable release obligation is retained and the exact caller task is detached
+  synchronously before cleanup can await. A detached auxiliary row is not selected for another
+  lease renewal; a renewal already in flight may finish durably, but cannot restore local
+  authority or create further renewals. The post-commit supervisor alone owns any remaining
+  readiness and shutdown fence.
   Release uncertainty is a post-commit obligation, not best-effort cleanup: same-process recovery
   retries it, lease takeover may terminalize the row without invocation lifecycle evidence, and
   later thread work remains fail closed until ownership is durably settled.

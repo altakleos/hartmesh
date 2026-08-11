@@ -2,6 +2,7 @@ import logging
 import threading
 from collections import OrderedDict
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
@@ -11,6 +12,10 @@ from deerflow.sandbox.sandbox_provider import (
     AcceptedSkillSandboxBindingV1,
     SandboxProvider,
 )
+
+if TYPE_CHECKING:
+    from deerflow.runtime.skill_projection import SkillProjectionClear
+    from deerflow.skills.projection import SkillProjectionPaths
 
 logger = logging.getLogger(__name__)
 
@@ -286,7 +291,7 @@ class LocalSandboxProvider(SandboxProvider):
         thread_id: str,
         *,
         user_id: str | None = None,
-        skill_projection=None,
+        skill_projection: "SkillProjectionPaths | None" = None,
         accepted_skills_only: bool = False,
     ) -> list[PathMapping]:
         """Build per-thread path mappings for /mnt/user-data, /mnt/acp-workspace,
@@ -579,7 +584,7 @@ class LocalSandboxProvider(SandboxProvider):
 
     def clear_accepted_skill_snapshot(
         self,
-        clear,
+        clear: "SkillProjectionClear",
     ) -> bool:
         from deerflow.runtime.skill_projection import SkillProjectionClear
         from deerflow.runtime.skill_snapshot import clear_skill_snapshot_active_view
@@ -593,7 +598,7 @@ class LocalSandboxProvider(SandboxProvider):
             generation=clear.generation,
         )
 
-    def ensure_accepted_skill_snapshot_absent(self, clear) -> bool:
+    def ensure_accepted_skill_snapshot_absent(self, clear: "SkillProjectionClear") -> bool:
         from deerflow.runtime.skill_projection import SkillProjectionClear
         from deerflow.runtime.skill_snapshot import prove_skill_snapshot_active_view_absent
 

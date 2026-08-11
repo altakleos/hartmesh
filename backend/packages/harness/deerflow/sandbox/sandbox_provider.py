@@ -7,10 +7,17 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
 from deerflow.sandbox.sandbox import Sandbox
+
+if TYPE_CHECKING:
+    from deerflow.runtime.skill_projection import (
+        SkillProjectionClear,
+        SkillProjectionConsumerToken,
+    )
 
 _SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -245,7 +252,10 @@ class AcceptedSkillSandboxBindingV1:
             raise ValueError("accepted skill generation must be a non-negative integer")
 
     @classmethod
-    def from_consumer_token(cls, token) -> "AcceptedSkillSandboxBindingV1":
+    def from_consumer_token(
+        cls,
+        token: "SkillProjectionConsumerToken",
+    ) -> "AcceptedSkillSandboxBindingV1":
         from deerflow.runtime.skill_projection import SkillProjectionConsumerToken
 
         if not isinstance(token, SkillProjectionConsumerToken):
@@ -727,13 +737,13 @@ class SandboxProvider(ABC):
 
     def clear_accepted_skill_snapshot(
         self,
-        clear,
+        clear: "SkillProjectionClear",
     ) -> bool:
         """Compare-and-clear only an exact last-consumer ownership proof."""
         del clear
         raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_unsupported")
 
-    def ensure_accepted_skill_snapshot_absent(self, clear) -> bool:
+    def ensure_accepted_skill_snapshot_absent(self, clear: "SkillProjectionClear") -> bool:
         """Prove an exact failed/unpublished projection cannot be reached.
 
         This is intentionally separate from compare-and-clear: providers may
@@ -746,8 +756,9 @@ class SandboxProvider(ABC):
 
     async def clear_accepted_skill_snapshot_async(
         self,
-        clear,
+        clear: "SkillProjectionClear",
     ) -> bool:
+        """Run exact accepted-snapshot cleanup without blocking the event loop."""
         return await asyncio.to_thread(
             self.clear_accepted_skill_snapshot,
             clear,

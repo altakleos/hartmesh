@@ -25,6 +25,7 @@ from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .store.base import (
     AdmissionOutcome,
     CancellationRequestOutcome,
+    DuplicateRunIdentityError,
     EditReplayVisibility,
     LifecycleTransition,
     LifecycleTransitionResult,
@@ -32,7 +33,9 @@ from .store.base import (
     RunEnsureResult,
     ThreadOperationReleaseOutcome,
     ThreadOperationReleaseResult,
+    build_lifecycle_payload,
     lifecycle_type_for_status,
+    validate_execution_evidence_run,
 )
 
 if TYPE_CHECKING:
@@ -41,6 +44,8 @@ if TYPE_CHECKING:
     from deerflow.runtime.runs.store.base import RunStore
 
 logger = logging.getLogger(__name__)
+
+_MAX_QUARANTINE_TEXT_BYTES = 4096
 
 ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
@@ -576,6 +581,19 @@ class RunManager:
 
         return not (self._unresolved_admissions or self._unresolved_thread_operation_releases or self._quarantined_post_commit_obligations)
 
+    def post_commit_obligations_ready(self) -> bool:
+        """Return whether every post-commit ownership obligation is resolved."""
+
+        return self.admission_compensations_ready()
+
+    def _discard_resolved_post_commit_integrity(self, run_id: str) -> None:
+        """Clear shared integrity state only after every same-ID owner resolves."""
+
+        if run_id in self._unresolved_admissions or run_id in self._unresolved_thread_operation_releases:
+            return
+        self._reported_unresolved_integrity.discard(run_id)
+        self._quarantined_post_commit_obligations.discard(run_id)
+
     def _fence_replacement_predecessors_locked(
         self,
         candidate: _UnresolvedAdmissionCandidate,
@@ -640,6 +658,125 @@ class RunManager:
         record.finalizing = False
         record.abort_event.set()
 
+    async def _authoritative_post_commit_row(
+        self,
+        run_id: str,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Read and validate privileged primary-key truth for quarantine."""
+
+        store = self._store
+        if store is None:
+            return False, None
+        try:
+            row = await store.authoritative_get(run_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False, None
+        if row is None:
+            return True, None
+        if not isinstance(row, dict) or row.get("run_id") != run_id:
+            return False, None
+        try:
+            RunStatus(row.get("status"))
+            ThreadOperationKind(row.get("operation_kind", ThreadOperationKind.run.value))
+        except (TypeError, ValueError):
+            return False, None
+        if not isinstance(row.get("thread_id"), str) or not row["thread_id"]:
+            return False, None
+        if row.get("user_id") is not None and not isinstance(row.get("user_id"), str):
+            return False, None
+        if row.get("owner_worker_id") is not None and not isinstance(
+            row.get("owner_worker_id"),
+            str,
+        ):
+            return False, None
+        state_version = row.get("state_version")
+        if type(state_version) is not int or state_version < 0:
+            return False, None
+        for field_name in (
+            "thread_id",
+            "user_id",
+            "owner_worker_id",
+            "error",
+            "stop_reason",
+            "lease_expires_at",
+            "updated_at",
+        ):
+            value = row.get(field_name)
+            if value is not None and (not isinstance(value, str) or len(value.encode("utf-8")) > _MAX_QUARANTINE_TEXT_BYTES):
+                return False, None
+        evidence = row.get("execution_evidence_json")
+        evidence_digest = row.get("execution_evidence_digest")
+        if evidence is None:
+            if evidence_digest is not None:
+                return False, None
+        else:
+            if not isinstance(evidence, dict) or not isinstance(
+                evidence_digest,
+                str,
+            ):
+                return False, None
+            try:
+                validate_execution_evidence_run(run_id, evidence)
+                build_lifecycle_payload(
+                    LifecycleTransition(
+                        lifecycle_type=LifecycleType.started,
+                        status=RunStatus.running.value,
+                        execution_evidence_json=evidence,
+                        execution_evidence_digest=evidence_digest,
+                    )
+                )
+            except (TypeError, ValueError):
+                return False, None
+        return True, row
+
+    def _fence_and_evict_quarantined_local_locked(self, run_id: str) -> bool:
+        """Fence a local phantom and evict it once no task can still execute."""
+
+        record = self._runs.get(run_id)
+        if record is None:
+            return True
+        self._fence_quarantined_local_locked(run_id)
+        task = record.task
+        if task is not None and not task.done():
+            return False
+        self._runs.pop(run_id, None)
+        self._unindex_run_locked(run_id, record.thread_id)
+        return True
+
+    def _fence_quarantined_local_locked(self, run_id: str) -> None:
+        """Prevent a quarantined local phantom from continuing execution."""
+
+        record = self._runs.get(run_id)
+        if record is None:
+            return
+        record.abort_event.set()
+        task = record.task
+        if task is not None and not task.done():
+            record.finalizing = True
+            if task is not asyncio.current_task():
+                task.cancel()
+
+    def _finish_matching_quarantined_candidate_locked(
+        self,
+        candidate: _UnresolvedAdmissionCandidate,
+        row: dict[str, Any],
+    ) -> bool:
+        """Synchronize matching terminal truth after fencing local execution."""
+
+        self._sync_compensated_candidate_locked(candidate, row)
+        record = self._runs.get(candidate.run_id)
+        if record is None:
+            return True
+        task = record.task
+        if task is not None and not task.done():
+            record.finalizing = True
+            if task is not asyncio.current_task():
+                task.cancel()
+            return False
+        return True
+
     @staticmethod
     def _unresolved_candidate_matches(
         candidate: _UnresolvedAdmissionCandidate,
@@ -650,10 +787,27 @@ class RunManager:
             "thread_id": candidate.thread_id,
             "user_id": candidate.user_id,
             "owner_worker_id": candidate.owner_worker_id,
+            "operation_kind": ThreadOperationKind.run.value,
             "external_scope": candidate.external_scope,
             "external_key": candidate.external_key,
             "caller_intent_digest": candidate.caller_intent_digest,
             "caller_intent_digest_version": candidate.caller_intent_digest_version,
+        }
+        return all(row.get(field) == value for field, value in expected.items())
+
+    @staticmethod
+    def _thread_operation_release_matches(
+        obligation: _UnresolvedThreadOperationRelease,
+        row: dict[str, Any],
+    ) -> bool:
+        """Return whether authoritative truth matches one retained release."""
+
+        expected = {
+            "run_id": obligation.run_id,
+            "thread_id": obligation.thread_id,
+            "user_id": obligation.user_id,
+            "owner_worker_id": obligation.owner_worker_id,
+            "operation_kind": obligation.operation_kind.value,
         }
         return all(row.get(field) == value for field, value in expected.items())
 
@@ -684,6 +838,41 @@ class RunManager:
                     record.finalizing = False
                     record.abort_event.set()
             return True
+        if candidate.run_id in self._quarantined_post_commit_obligations:
+            async with self._lock:
+                self._fence_quarantined_local_locked(candidate.run_id)
+            determinate, row = await self._authoritative_post_commit_row(
+                candidate.run_id,
+            )
+            if not determinate:
+                return False
+            if row is None:
+                async with self._lock:
+                    return self._fence_and_evict_quarantined_local_locked(
+                        candidate.run_id,
+                    )
+            if row.get("status") in (
+                RunStatus.pending.value,
+                RunStatus.running.value,
+            ):
+                async with self._lock:
+                    self._fence_quarantined_local_locked(candidate.run_id)
+                return False
+            async with self._lock:
+                if self._unresolved_candidate_matches(candidate, row):
+                    return self._finish_matching_quarantined_candidate_locked(
+                        candidate,
+                        row,
+                    )
+                if candidate.run_id not in self._reported_unresolved_integrity:
+                    self._reported_unresolved_integrity.add(candidate.run_id)
+                    logger.error(
+                        "Post-commit terminal identity mismatch code=admission_candidate_terminal_identity_mismatch run_id=%s",
+                        candidate.run_id,
+                    )
+                return self._fence_and_evict_quarantined_local_locked(
+                    candidate.run_id,
+                )
         try:
             row = await store.get(candidate.run_id, user_id=candidate.user_id)
         except asyncio.CancelledError:
@@ -692,17 +881,6 @@ class RunManager:
             return False
         if row is None:
             return not candidate.commit_proven
-        if candidate.run_id in self._quarantined_post_commit_obligations:
-            if not self._unresolved_candidate_matches(candidate, row):
-                return False
-            if row.get("status") in (
-                RunStatus.pending.value,
-                RunStatus.running.value,
-            ):
-                return False
-            async with self._lock:
-                self._sync_compensated_candidate_locked(candidate, row)
-            return True
         if not self._unresolved_candidate_matches(candidate, row):
             if candidate.run_id not in self._reported_unresolved_integrity:
                 self._reported_unresolved_integrity.add(candidate.run_id)
@@ -828,24 +1006,36 @@ class RunManager:
                     )
             return True
         if obligation.run_id in self._quarantined_post_commit_obligations:
-            try:
-                row = await store.get(
-                    obligation.run_id,
-                    user_id=obligation.user_id,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
+            async with self._lock:
+                self._fence_quarantined_local_locked(obligation.run_id)
+            determinate, row = await self._authoritative_post_commit_row(
+                obligation.run_id,
+            )
+            if not determinate:
                 return False
             if row is None:
-                return True
-            if row.get("thread_id") != obligation.thread_id or row.get("operation_kind", "run") != obligation.operation_kind.value or row.get("user_id") != obligation.user_id or row.get("status") in {"pending", "running"}:
+                async with self._lock:
+                    return self._fence_and_evict_quarantined_local_locked(
+                        obligation.run_id,
+                    )
+            if row.get("status") in {
+                RunStatus.pending.value,
+                RunStatus.running.value,
+            }:
+                async with self._lock:
+                    self._fence_quarantined_local_locked(obligation.run_id)
                 return False
             async with self._lock:
-                record = self._runs.pop(obligation.run_id, None)
-                if record is not None:
-                    self._unindex_run_locked(record.run_id, record.thread_id)
-            return True
+                if not self._thread_operation_release_matches(obligation, row):
+                    if obligation.run_id not in self._reported_unresolved_integrity:
+                        self._reported_unresolved_integrity.add(obligation.run_id)
+                        logger.error(
+                            "Post-commit terminal identity mismatch code=thread_operation_release_terminal_identity_mismatch run_id=%s",
+                            obligation.run_id,
+                        )
+                return self._fence_and_evict_quarantined_local_locked(
+                    obligation.run_id,
+                )
         try:
             result = await store.release_thread_operation_owned(
                 obligation.run_id,
@@ -915,8 +1105,7 @@ class RunManager:
                     if await self._resolve_unresolved_admission(candidate):
                         if self._unresolved_admissions.get(run_id) is candidate:
                             self._unresolved_admissions.pop(run_id, None)
-                            self._reported_unresolved_integrity.discard(run_id)
-                            self._quarantined_post_commit_obligations.discard(run_id)
+                            self._discard_resolved_post_commit_integrity(run_id)
                             self._post_commit_retry_rounds.pop(retry_key, None)
                             self._post_commit_retry_not_before.pop(retry_key, None)
                     else:
@@ -935,8 +1124,7 @@ class RunManager:
                                 run_id,
                                 None,
                             )
-                            self._reported_unresolved_integrity.discard(run_id)
-                            self._quarantined_post_commit_obligations.discard(run_id)
+                            self._discard_resolved_post_commit_integrity(run_id)
                             self._post_commit_retry_rounds.pop(retry_key, None)
                             self._post_commit_retry_not_before.pop(retry_key, None)
                     else:
@@ -2782,6 +2970,8 @@ class RunManager:
     async def _release_thread_operation_or_supervise(
         self,
         record: RunRecord,
+        *,
+        reservation_task: asyncio.Task[Any] | None = None,
     ) -> bool:
         """Release an auxiliary row or transfer it to the shared compensator."""
 
@@ -2791,9 +2981,22 @@ class RunManager:
             self._register_unresolved_thread_operation_release(obligation)
             return False
         # Retain ownership synchronously before the first fallible await.  The
-        # direct attempt keeps ordinary cleanup fast; any cancellation or
-        # uncertainty starts the same supervisor used by ambiguous admission.
+        # event loop cannot interleave between this assignment and the exact
+        # task handoff below. The direct attempt keeps ordinary cleanup fast;
+        # any cancellation or uncertainty starts the shared supervisor.
         self._unresolved_thread_operation_releases[record.run_id] = obligation
+        local = self._runs.get(record.run_id)
+        if local is not record or record.task not in (None, reservation_task):
+            self._quarantined_post_commit_obligations.add(record.run_id)
+            if record.run_id not in self._reported_unresolved_integrity:
+                self._reported_unresolved_integrity.add(record.run_id)
+                logger.error(
+                    "Auxiliary release handoff mismatch code=thread_operation_release_handoff_invalid run_id=%s",
+                    record.run_id,
+                )
+            self._register_unresolved_thread_operation_release(obligation)
+            return False
+        record.task = None
         try:
             resolved = await self._resolve_unresolved_thread_operation_release(
                 obligation,
@@ -3181,6 +3384,10 @@ class RunManager:
                         if admission_cancellation.requested:
                             raise asyncio.CancelledError() from None
                         raise
+                    except DuplicateRunIdentityError:
+                        if admission_cancellation.requested:
+                            raise asyncio.CancelledError() from None
+                        raise AcceptedEvidenceIntegrityError() from None
                     except Exception as exc:
                         if admission_cancellation.requested:
                             raise asyncio.CancelledError() from None
@@ -3226,6 +3433,10 @@ class RunManager:
                         if admission_cancellation.requested:
                             raise asyncio.CancelledError() from None
                         raise
+                    except DuplicateRunIdentityError:
+                        if admission_cancellation.requested:
+                            raise asyncio.CancelledError() from None
+                        raise AcceptedEvidenceIntegrityError() from None
                     except Exception as exc:
                         if admission_cancellation.requested:
                             raise asyncio.CancelledError() from None
@@ -3267,6 +3478,8 @@ class RunManager:
                         except Exception as exc:
                             if admission_cancellation.requested:
                                 raise asyncio.CancelledError() from None
+                            if isinstance(exc, DuplicateRunIdentityError):
+                                raise AcceptedEvidenceIntegrityError() from None
                             is_unique = _is_unique_violation(exc)
                             if is_unique and attempt + 1 < max_retries:
                                 continue
@@ -3358,10 +3571,10 @@ class RunManager:
             user_id=user_id,
         )
         record = admission.record
+        reservation_task = asyncio.current_task()
+        if reservation_task is None:
+            raise RuntimeError("Thread operation reservation requires an active asyncio task")
         try:
-            reservation_task = asyncio.current_task()
-            if reservation_task is None:
-                raise RuntimeError("Thread operation reservation requires an active asyncio task")
             lease_lost = True
             async with self._lock:
                 if self._runs.get(record.run_id) is record:
@@ -3375,7 +3588,10 @@ class RunManager:
                 raise ConflictError(f"Thread {thread_id} reservation lease was lost") from None
             raise
         finally:
-            await self._release_thread_operation_or_supervise(record)
+            await self._release_thread_operation_or_supervise(
+                record,
+                reservation_task=reservation_task,
+            )
 
     async def reconcile_orphaned_inflight_runs(
         self,
@@ -3686,15 +3902,21 @@ class RunManager:
         lease_seconds = self._run_ownership_config.lease_seconds
         cancellations: list[tuple[str, str]] = []
 
+        def has_live_execution_owner(run_id: str, record: RunRecord) -> bool:
+            return (
+                self._runs.get(run_id) is record
+                and run_id not in self._quarantined_post_commit_obligations
+                and record.status in (RunStatus.pending, RunStatus.running)
+                and record.owner_worker_id == self._worker_id
+                and not record.ownership_lost
+                and ((record.task is None and record.attachment_supervised) or (record.task is not None and not record.task.done()))
+            )
+
         async with self._lock:
             # A taskless pending row is live only while the application
             # admission coordinator explicitly owns its commit-to-worker
             # handoff. Arbitrary ``task is None`` rows are never renewed.
-            active_runs = [
-                (rid, record)
-                for rid, record in self._runs.items()
-                if record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and ((record.task is None and record.attachment_supervised) or (record.task is not None and not record.task.done()))
-            ]
+            active_runs = [(rid, record) for rid, record in self._runs.items() if has_live_execution_owner(rid, record)]
 
         for run_id, record in active_runs:
             confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
@@ -3725,6 +3947,9 @@ class RunManager:
                             reason="Lease renewal completed after the last confirmed lease had already expired.",
                         )
                         continue
+                    async with self._lock:
+                        if not has_live_execution_owner(run_id, record):
+                            continue
                     if record.execution_lease_renewal is not None:
                         external_remaining = (confirmed_deadline - datetime.now(UTC)).total_seconds()
                         try:
@@ -3741,23 +3966,20 @@ class RunManager:
                                 reason=("The accepted sandbox attempt could not be renewed after durable run ownership renewal."),
                             )
                             continue
-                    # Unsynced write is benign: ``lease_expires_at`` is the
-                    # only field on an existing record this path mutates, so
-                    # there is no concurrent writer to race against
-                    # (``set_status`` / ``_persist_status`` touch other
-                    # fields). Re-acquiring ``self._lock`` here would
-                    # serialise against unrelated run mutations for no gain.
-                    record.lease_expires_at = new_expiry
-                    if renewal.cancel_action is not None:
-                        action = renewal.cancel_action
-                        if action not in ("interrupt", "rollback"):
-                            logger.warning(
-                                "Run %s has invalid durable cancel action %r; using interrupt",
-                                run_id,
-                                action,
-                            )
-                            action = "interrupt"
-                        cancellations.append((run_id, action))
+                    async with self._lock:
+                        if not has_live_execution_owner(run_id, record):
+                            continue
+                        record.lease_expires_at = new_expiry
+                        if renewal.cancel_action is not None:
+                            action = renewal.cancel_action
+                            if action not in ("interrupt", "rollback"):
+                                logger.warning(
+                                    "Run %s has invalid durable cancel action %r; using interrupt",
+                                    run_id,
+                                    action,
+                                )
+                                action = "interrupt"
+                            cancellations.append((run_id, action))
                 else:
                     # ``renew_lease`` returned False — the row was claimed
                     # by another worker (status is no longer pending/running,
@@ -3765,7 +3987,7 @@ class RunManager:
                     # we don't waste CPU or overwrite the takeover status on
                     # finalisation.
                     async with self._lock:
-                        still_active = self._runs.get(run_id) is record and record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())
+                        still_active = has_live_execution_owner(run_id, record)
                     if still_active:
                         logger.warning(
                             "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",

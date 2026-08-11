@@ -8,7 +8,10 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from deerflow.mcp.tasks import McpTaskDriverRegistry, TaskReference, TaskSnapshot, TaskSubmitRequest
-from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
+from deerflow.persistence.mcp_tasks import (
+    DuplicateMcpRemoteTaskError,
+    McpTaskRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +24,7 @@ class McpTaskService:
     def __init__(
         self,
         *,
-        repository,
+        repository: McpTaskRepository,
         drivers: McpTaskDriverRegistry,
         poll_interval_seconds: int,
         lease_seconds: int,

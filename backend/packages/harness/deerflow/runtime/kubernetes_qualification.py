@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import Any, ClassVar
 
@@ -144,7 +145,9 @@ def _runtime_configuration() -> tuple[str, str, float] | None:
     return qualification_id, redis_url, timeout_seconds
 
 
-async def _with_async_hooks(operation) -> bool:
+async def _with_async_hooks(
+    operation: Callable[[KubernetesQualificationHooks], Awaitable[bool]],
+) -> bool:
     configuration = _runtime_configuration()
     if configuration is None:
         return False

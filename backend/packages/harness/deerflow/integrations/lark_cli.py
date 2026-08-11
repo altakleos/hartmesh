@@ -59,6 +59,7 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -479,7 +480,7 @@ def _lark_credential_thread_lock(user_id: str) -> threading.Lock:
 
 
 @contextmanager
-def _lark_credential_lock(user_id: str):
+def _lark_credential_lock(user_id: str) -> Iterator[None]:
     """Serialize credential replacement for one user across threads/processes."""
     root = _lark_cli_credential_root(user_id)
     root.parent.mkdir(parents=True, exist_ok=True)
@@ -1501,7 +1502,7 @@ def _clear_directory_contents(directory: Path) -> None:
 
 
 @contextmanager
-def _lark_credential_transaction(user_id: str, root: Path):
+def _lark_credential_transaction(user_id: str, root: Path) -> Iterator[Path]:
     """Restore the active credential tree if a switch step fails."""
     with tempfile.TemporaryDirectory(prefix=".switching-lark-app-", dir=str(root.parent)) as temp_dir:
         snapshot = Path(temp_dir) / "credentials"
