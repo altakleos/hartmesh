@@ -21,8 +21,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from deerflow_extension_api import ConstraintProjectionV1
-from sqlalchemy import delete
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from support.postgres import postgres_async_url
 
 from app.runtime.idempotency import REQUEST_DIGEST_VERSION, CanonicalCallerIntent, canonical_request_digest, normalize_external_key, scope_for_http
@@ -39,7 +39,12 @@ from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.persistence.base import Base
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.run.sql import RunRepository
-from deerflow.runtime import DisconnectMode, RunManager, RunStatus
+from deerflow.runtime import (
+    DisconnectMode,
+    RunManager,
+    RunStatus,
+    ThreadOperationKind,
+)
 from deerflow.runtime.accepted_invocation import (
     AcceptedInvocation,
     InvocationOrigin,
@@ -50,7 +55,12 @@ from deerflow.runtime.accepted_invocation import (
 )
 from deerflow.runtime.runs.lifecycle_query import LifecycleQuery
 from deerflow.runtime.runs.manager import ORPHAN_RECOVERY_STOP_REASON, ConflictError
-from deerflow.runtime.runs.store.base import AdmissionOutcome, LifecycleType, lifecycle_owner_scope
+from deerflow.runtime.runs.store.base import (
+    AdmissionOutcome,
+    LifecycleType,
+    ThreadOperationReleaseOutcome,
+    lifecycle_owner_scope,
+)
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
 
@@ -715,5 +725,143 @@ async def test_postgres_cancelled_unattached_candidate_stays_supervised_through_
         await manager.shutdown(timeout=1)
         async with factory() as session:
             await session.execute(delete(RunRow).where(RunRow.run_id == candidate_run_id))
+            await session.commit()
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for PostgreSQL auxiliary release qualification",
+)
+async def test_postgres_auxiliary_release_and_takeover_have_one_fenced_winner() -> None:
+    """Independent PostgreSQL sessions cannot both release and reclaim one row."""
+
+    assert _POSTGRES_URL is not None
+    engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    release_store = RunRepository(factory)
+    takeover_store = RunRepository(factory)
+    unique = uuid.uuid4().hex
+    run_id = str(uuid.uuid4())
+    thread_id = f"thread-aux-release-{unique}"
+    user_id = f"owner-{unique}"
+    try:
+        await release_store.create_thread_operation_atomic(
+            run_id,
+            thread_id=thread_id,
+            owner_worker_id="worker-release",
+            lease_expires_at=(datetime.now(UTC) - timedelta(seconds=30)).isoformat(),
+            operation_kind=ThreadOperationKind.artifact_write.value,
+            user_id=user_id,
+        )
+
+        release, claimed = await asyncio.gather(
+            release_store.release_thread_operation_owned(
+                run_id,
+                thread_id=thread_id,
+                operation_kind=ThreadOperationKind.artifact_write.value,
+                user_id=user_id,
+                expected_owner_worker_id="worker-release",
+                require_unexpired_lease=False,
+            ),
+            takeover_store.claim_for_takeover(
+                run_id,
+                grace_seconds=0,
+                error="auxiliary owner lost",
+                stop_reason="orphan_recovered",
+            ),
+        )
+
+        if claimed:
+            assert release.outcome is ThreadOperationReleaseOutcome.inactive
+            row = await release_store.get(run_id, user_id=user_id)
+            assert row is not None
+            assert row["status"] == RunStatus.error.value
+        else:
+            assert release.outcome is ThreadOperationReleaseOutcome.released
+            assert await release_store.get(run_id, user_id=user_id) is None
+        assert await release_store.list_lifecycle_events(run_id=run_id) == []
+    finally:
+        async with factory() as session:
+            await session.execute(delete(RunRow).where(RunRow.run_id == run_id))
+            await session.commit()
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for PostgreSQL post-lock lease qualification",
+)
+async def test_postgres_auxiliary_release_rechecks_wall_clock_after_row_lock() -> None:
+    """A lock wait crossing lease expiry removes stale release authority."""
+
+    assert _POSTGRES_URL is not None
+    engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    setup_store = RunRepository(factory)
+    release_started = asyncio.Event()
+
+    class _ReleaseStartedRepository(RunRepository):
+        async def _begin_lifecycle_write(self, session: AsyncSession) -> None:
+            await super()._begin_lifecycle_write(session)
+            release_started.set()
+
+    release_store = _ReleaseStartedRepository(factory)
+    run_id = str(uuid.uuid4())
+    thread_id = f"thread-post-lock-lease-{uuid.uuid4().hex}"
+    user_id = f"owner-{uuid.uuid4().hex}"
+    blocker = factory()
+    try:
+        await setup_store.create_thread_operation_atomic(
+            run_id,
+            thread_id=thread_id,
+            owner_worker_id="worker-release",
+            lease_expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+            operation_kind=ThreadOperationKind.checkpoint_write.value,
+            user_id=user_id,
+        )
+
+        await blocker.begin()
+        locked = (await blocker.execute(select(RunRow).where(RunRow.run_id == run_id).with_for_update())).scalar_one()
+        database_now = await blocker.scalar(select(func.clock_timestamp()))
+        assert database_now is not None
+        expires_during_wait = database_now + timedelta(milliseconds=500)
+        locked.lease_expires_at = expires_during_wait.isoformat()
+
+        release_task = asyncio.create_task(
+            release_store.release_thread_operation_owned(
+                run_id,
+                thread_id=thread_id,
+                operation_kind=ThreadOperationKind.checkpoint_write.value,
+                user_id=user_id,
+                expected_owner_worker_id="worker-release",
+                require_unexpired_lease=True,
+            )
+        )
+        await asyncio.wait_for(release_started.wait(), timeout=1)
+        assert release_task.done() is False
+        await blocker.execute(select(func.pg_sleep(0.75)))
+        await blocker.commit()
+
+        release = await asyncio.wait_for(release_task, timeout=2)
+        assert release.outcome is ThreadOperationReleaseOutcome.ownership_lost
+        retained = await setup_store.get(run_id, user_id=user_id)
+        assert retained is not None
+        assert retained["status"] == RunStatus.pending.value
+        assert await setup_store.list_lifecycle_events(run_id=run_id) == []
+    finally:
+        if blocker.in_transaction():
+            await blocker.rollback()
+        await blocker.close()
+        async with factory() as session:
+            await session.execute(delete(RunRow).where(RunRow.run_id == run_id))
             await session.commit()
         await engine.dispose()

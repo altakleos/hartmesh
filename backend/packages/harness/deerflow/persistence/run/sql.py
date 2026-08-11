@@ -44,6 +44,8 @@ from deerflow.runtime.runs.store.base import (
     RunEnsureResult,
     RunStore,
     StatusFinalization,
+    ThreadOperationReleaseOutcome,
+    ThreadOperationReleaseResult,
     build_lifecycle_payload,
     lifecycle_owner_scope,
     lifecycle_type_for_status,
@@ -56,6 +58,17 @@ from deerflow.utils.time import coerce_iso
 def _lease_expired_or_null(lease_col, cutoff: datetime):
     """SQLAlchemy filter: True when the lease is NULL or has expired past *cutoff*."""
     return or_(lease_col.is_(None), lease_col < cutoff)
+
+
+def _release_wall_clock_expression(dialect_name: str) -> Any:
+    """Return a statement-time database clock for post-lock lease fencing."""
+
+    if dialect_name == "postgresql":
+        # ``now()`` is fixed at transaction start on PostgreSQL. Release may
+        # wait on ``FOR UPDATE`` across the lease deadline, so ownership must
+        # be checked against wall time observed after that lock is acquired.
+        return func.clock_timestamp()
+    return func.current_timestamp()
 
 
 class RunRepository(RunStore):
@@ -997,6 +1010,70 @@ class RunRepository(RunStore):
     async def delete_thread_operation(self, run_id: str, *, user_id: str | None) -> None:
         """Release a reservation using its captured owner, not request context."""
         await self.delete(run_id, user_id=user_id)
+
+    async def release_thread_operation_owned(
+        self,
+        run_id: str,
+        *,
+        thread_id: str,
+        operation_kind: str,
+        user_id: str | None,
+        expected_owner_worker_id: str,
+        require_unexpired_lease: bool,
+    ) -> ThreadOperationReleaseResult:
+        """Release one exact auxiliary reservation under a row lock."""
+
+        async with self._sf() as session:
+            await self._begin_lifecycle_write(session)
+            statement = select(RunRow).where(RunRow.run_id == run_id)
+            if session.get_bind().dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            row = (await session.execute(statement)).scalar_one_or_none()
+            if row is None:
+                await session.commit()
+                return ThreadOperationReleaseResult(
+                    outcome=ThreadOperationReleaseOutcome.absent,
+                )
+            if row.operation_kind == "run" or row.operation_kind != operation_kind or row.thread_id != thread_id or row.user_id != user_id:
+                await session.commit()
+                return ThreadOperationReleaseResult(
+                    outcome=ThreadOperationReleaseOutcome.identity_mismatch,
+                )
+            if row.status not in {"pending", "running"}:
+                await session.commit()
+                return ThreadOperationReleaseResult(
+                    outcome=ThreadOperationReleaseOutcome.inactive,
+                )
+            if row.owner_worker_id != expected_owner_worker_id:
+                await session.commit()
+                return ThreadOperationReleaseResult(
+                    outcome=ThreadOperationReleaseOutcome.ownership_lost,
+                )
+            if require_unexpired_lease:
+                lease = coerce_iso(row.lease_expires_at)
+                try:
+                    lease_datetime = datetime.fromisoformat(lease)
+                    if lease_datetime.tzinfo is None:
+                        lease_datetime = lease_datetime.replace(tzinfo=UTC)
+                except (TypeError, ValueError):
+                    lease_datetime = datetime.min.replace(tzinfo=UTC)
+                dialect_name = session.get_bind().dialect.name
+                database_now = await session.scalar(select(_release_wall_clock_expression(dialect_name)))
+                if database_now is None:
+                    await session.rollback()
+                    raise RuntimeError("database clock is unavailable")
+                if database_now.tzinfo is None:
+                    database_now = database_now.replace(tzinfo=UTC)
+                if lease_datetime < database_now:
+                    await session.commit()
+                    return ThreadOperationReleaseResult(
+                        outcome=ThreadOperationReleaseOutcome.ownership_lost,
+                    )
+            await session.delete(row)
+            await session.commit()
+            return ThreadOperationReleaseResult(
+                outcome=ThreadOperationReleaseOutcome.released,
+            )
 
     async def list_pending(self, *, before=None):
         if before is None:

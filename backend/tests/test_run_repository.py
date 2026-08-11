@@ -6,12 +6,17 @@ Uses a temp SQLite DB to test ORM-backed CRUD operations.
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy.dialects import postgresql
+from sqlalchemy import select
+from sqlalchemy.dialects import postgresql, sqlite
 
 from deerflow.persistence.run import RunRepository
+from deerflow.persistence.run import sql as run_sql
 from deerflow.runtime import CancelOutcome, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import ConflictError
-from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.runs.store.base import (
+    RunStore,
+    ThreadOperationReleaseOutcome,
+)
 
 
 async def _make_repo(tmp_path):
@@ -26,6 +31,27 @@ async def _cleanup():
     from deerflow.persistence.engine import close_engine
 
     await close_engine()
+
+
+def test_auxiliary_release_uses_statement_time_after_lock_acquisition() -> None:
+    """Lease fencing cannot use PostgreSQL's transaction-start timestamp."""
+
+    wall_clock = getattr(run_sql, "_release_wall_clock_expression", None)
+    assert wall_clock is not None
+    postgres_sql = str(
+        select(wall_clock("postgresql")).compile(
+            dialect=postgresql.dialect(),
+        )
+    ).lower()
+    sqlite_sql = str(
+        select(wall_clock("sqlite")).compile(
+            dialect=sqlite.dialect(),
+        )
+    ).lower()
+
+    assert "clock_timestamp" in postgres_sql
+    assert "now()" not in postgres_sql
+    assert "current_timestamp" in sqlite_sql
 
 
 class _CustomRunStoreWithoutProgress(RunStore):
@@ -811,6 +837,58 @@ class TestRunRepository:
             assert inflight[0]["user_id"] == "reservation-owner"
 
         assert await repo.list_inflight() == []
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_exact_auxiliary_release_is_owner_fenced_and_idempotent(
+        self,
+        tmp_path,
+    ):
+        """SQL release cannot delete a differently owned reservation or a run."""
+
+        repo = await _make_repo(tmp_path)
+        run_id = "checkpoint-exact-release"
+        thread_id = "thread-exact-release"
+        await repo.create_thread_operation_atomic(
+            run_id,
+            thread_id=thread_id,
+            owner_worker_id="worker-owner",
+            lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+            operation_kind=ThreadOperationKind.checkpoint_write.value,
+            user_id="reservation-owner",
+        )
+
+        stale = await repo.release_thread_operation_owned(
+            run_id,
+            thread_id=thread_id,
+            operation_kind=ThreadOperationKind.checkpoint_write.value,
+            user_id="reservation-owner",
+            expected_owner_worker_id="worker-stale",
+            require_unexpired_lease=True,
+        )
+        assert stale.outcome is ThreadOperationReleaseOutcome.ownership_lost
+        assert await repo.get(run_id, user_id="reservation-owner") is not None
+
+        released = await repo.release_thread_operation_owned(
+            run_id,
+            thread_id=thread_id,
+            operation_kind=ThreadOperationKind.checkpoint_write.value,
+            user_id="reservation-owner",
+            expected_owner_worker_id="worker-owner",
+            require_unexpired_lease=True,
+        )
+        assert released.outcome is ThreadOperationReleaseOutcome.released
+        assert await repo.list_lifecycle_events(run_id=run_id) == []
+
+        repeated = await repo.release_thread_operation_owned(
+            run_id,
+            thread_id=thread_id,
+            operation_kind=ThreadOperationKind.checkpoint_write.value,
+            user_id="reservation-owner",
+            expected_owner_worker_id="worker-owner",
+            require_unexpired_lease=True,
+        )
+        assert repeated.outcome is ThreadOperationReleaseOutcome.absent
         await _cleanup()
 
     @pytest.mark.anyio
