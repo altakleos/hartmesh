@@ -40,6 +40,7 @@ from deerflow.persistence.run.model import (
     RunLifecycleEventRow,
 )
 from deerflow.persistence.run.sql import RunRepository
+from deerflow.runtime import PostCommitObligationStatus
 
 
 class _OriginContributor:
@@ -646,6 +647,55 @@ async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
     assert readiness.json() == {"status": "not_ready"}
     assert recovered.status_code == 200
     assert recovered.json() == {"status": "ready"}
+
+
+@pytest.mark.asyncio
+async def test_gateway_deployment_report_reads_live_post_commit_status(
+    monkeypatch,
+) -> None:
+    import app.gateway.app as app_module
+    import deerflow.extensions as extensions_module
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    config = AppConfig(sandbox=SandboxConfig(use="test"))
+    monkeypatch.setattr(app_module, "get_app_config", lambda: config)
+    monkeypatch.setattr(
+        extensions_module,
+        "load_extensions",
+        lambda _plugins: (ExtensionRegistry().build(), []),
+    )
+    app = app_module.create_app()
+
+    class StatusManager:
+        @staticmethod
+        def post_commit_obligation_status() -> PostCommitObligationStatus:
+            return PostCommitObligationStatus(
+                pending_admissions=1,
+                pending_thread_operation_releases=2,
+                pending_quarantines=1,
+                resolved_admissions_since_start=3,
+                resolved_thread_operation_releases_since_start=4,
+            )
+
+    app.state.run_manager = StatusManager()
+
+    report = await app.state.deployment_reporter.deployment_report()
+
+    assert report.to_dict()["post_commit_obligations"] == {
+        "version": 1,
+        "scope": "process_local",
+        "window": "since_start",
+        "pending_by_type": {
+            "admission": 1,
+            "thread_operation_release": 2,
+        },
+        "quarantined_identities": 1,
+        "resolved_since_start_by_type": {
+            "admission": 3,
+            "thread_operation_release": 4,
+        },
+    }
 
 
 @pytest.mark.asyncio

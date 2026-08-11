@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_QUARANTINE_TEXT_BYTES = 4096
+_MAX_POST_COMMIT_OBLIGATION_COUNT = 2_147_483_647
 
 ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
@@ -321,6 +322,17 @@ class AcceptedEvidenceIntegrityError(RuntimeError):
         super().__init__("accepted_evidence_invalid")
 
 
+@dataclass(frozen=True, slots=True)
+class PostCommitObligationStatus:
+    """Bounded process-local post-commit supervisor counters."""
+
+    pending_admissions: int
+    pending_thread_operation_releases: int
+    pending_quarantines: int
+    resolved_admissions_since_start: int
+    resolved_thread_operation_releases_since_start: int
+
+
 OrphanRecoveryCallback = Callable[[list[RunRecord]], Awaitable[None]]
 
 
@@ -364,7 +376,12 @@ class RunManager:
             _UnresolvedThreadOperationRelease,
         ] = {}
         self._reported_unresolved_integrity: set[str] = set()
+        self._reported_post_commit_type_collisions: set[str] = set()
         self._quarantined_post_commit_obligations: set[str] = set()
+        self._post_commit_obligation_tokens: dict[str, object] = {}
+        self._resolved_admissions_since_start = 0
+        self._resolved_thread_operation_releases_since_start = 0
+        self._post_commit_pending_logged = False
         self._admission_compensation_task: asyncio.Task[None] | None = None
         self._admission_compensation_wakeup = asyncio.Event()
         self._admission_compensation_generation = 0
@@ -528,6 +545,8 @@ class RunManager:
                     cancellation_action=existing.cancellation_action or candidate.cancellation_action,
                 )
         self._unresolved_admissions[candidate.run_id] = candidate
+        self._advance_post_commit_obligation_token(candidate.run_id)
+        self._quarantine_cross_type_post_commit_obligation(candidate.run_id)
         retry_key = ("admission", candidate.run_id)
         self._post_commit_retry_rounds.pop(retry_key, None)
         self._post_commit_retry_not_before.pop(retry_key, None)
@@ -538,6 +557,7 @@ class RunManager:
                 self._reconcile_unresolved_admissions(),
                 name="deerflow-unresolved-admission-compensation",
             )
+        self._log_post_commit_pending_transition()
 
     def _register_unresolved_thread_operation_release(
         self,
@@ -556,6 +576,8 @@ class RunManager:
             )
             obligation = existing
         self._unresolved_thread_operation_releases[obligation.run_id] = obligation
+        self._advance_post_commit_obligation_token(obligation.run_id)
+        self._quarantine_cross_type_post_commit_obligation(obligation.run_id)
         retry_key = ("thread_operation_release", obligation.run_id)
         self._post_commit_retry_rounds.pop(retry_key, None)
         self._post_commit_retry_not_before.pop(retry_key, None)
@@ -566,6 +588,62 @@ class RunManager:
                 self._reconcile_unresolved_admissions(),
                 name="deerflow-post-commit-obligation-compensation",
             )
+        self._log_post_commit_pending_transition()
+
+    def _quarantine_cross_type_post_commit_obligation(self, run_id: str) -> None:
+        """Retain contradictory obligation kinds for read-only reconciliation."""
+
+        if run_id not in self._unresolved_admissions or run_id not in self._unresolved_thread_operation_releases:
+            return
+        self._quarantined_post_commit_obligations.add(run_id)
+        if run_id in self._reported_post_commit_type_collisions:
+            return
+        self._reported_post_commit_type_collisions.add(run_id)
+        for retry_key in (
+            ("admission", run_id),
+            ("thread_operation_release", run_id),
+        ):
+            self._post_commit_retry_rounds.pop(retry_key, None)
+            self._post_commit_retry_not_before.pop(retry_key, None)
+        logger.error("Post-commit obligation type collision code=post_commit_obligation_type_collision")
+
+    def _advance_post_commit_obligation_token(self, run_id: str) -> object:
+        """Invalidate every resolver that captured earlier registry state."""
+
+        token = object()
+        self._post_commit_obligation_tokens[run_id] = token
+        return token
+
+    def _post_commit_obligation_is_current(
+        self,
+        run_id: str,
+        *,
+        kind: Literal["admission", "thread_operation_release"],
+        obligation: object,
+        expected_token: object | None,
+    ) -> bool:
+        """Fence ordinary mutation against later or cross-type registration."""
+
+        if self._post_commit_obligation_tokens.get(run_id) is not expected_token:
+            return False
+        if run_id in self._quarantined_post_commit_obligations:
+            return False
+        if kind == "admission":
+            current = self._unresolved_admissions.get(run_id)
+            opposite_present = run_id in self._unresolved_thread_operation_releases
+        else:
+            current = self._unresolved_thread_operation_releases.get(run_id)
+            opposite_present = run_id in self._unresolved_admissions
+        return not opposite_present and (current is None or current is obligation)
+
+    def _post_commit_token_is_current(
+        self,
+        run_id: str,
+        expected_token: object | None,
+    ) -> bool:
+        """Return whether no registration changed while a resolver awaited."""
+
+        return self._post_commit_obligation_tokens.get(run_id) is expected_token
 
     def _wake_admission_compensator(self, *, reset_backoff: bool = False) -> None:
         """Interrupt compensation backoff after authoritative state changes."""
@@ -576,15 +654,68 @@ class RunManager:
         self._admission_compensation_generation += 1
         self._admission_compensation_wakeup.set()
 
-    def admission_compensations_ready(self) -> bool:
-        """Return whether no unresolved post-commit obligation remains."""
-
-        return not (self._unresolved_admissions or self._unresolved_thread_operation_releases or self._quarantined_post_commit_obligations)
-
     def post_commit_obligations_ready(self) -> bool:
         """Return whether every post-commit ownership obligation is resolved."""
 
-        return self.admission_compensations_ready()
+        return not (self._unresolved_admissions or self._unresolved_thread_operation_releases or self._quarantined_post_commit_obligations)
+
+    def admission_compensations_ready(self) -> bool:
+        """Compatibility alias for :meth:`post_commit_obligations_ready`."""
+
+        return self.post_commit_obligations_ready()
+
+    def post_commit_obligation_status(self) -> PostCommitObligationStatus:
+        """Return a fresh bounded process-local supervisor snapshot."""
+
+        def bounded(value: int) -> int:
+            return min(_MAX_POST_COMMIT_OBLIGATION_COUNT, max(0, value))
+
+        return PostCommitObligationStatus(
+            pending_admissions=bounded(len(self._unresolved_admissions)),
+            pending_thread_operation_releases=bounded(len(self._unresolved_thread_operation_releases)),
+            pending_quarantines=bounded(len(self._quarantined_post_commit_obligations)),
+            resolved_admissions_since_start=bounded(self._resolved_admissions_since_start),
+            resolved_thread_operation_releases_since_start=bounded(self._resolved_thread_operation_releases_since_start),
+        )
+
+    def _log_post_commit_pending_transition(self) -> None:
+        """Log only the process transition from clear to pending."""
+
+        if self._post_commit_pending_logged or self.post_commit_obligations_ready():
+            return
+        self._post_commit_pending_logged = True
+        status = self.post_commit_obligation_status()
+        logger.warning(
+            "Post-commit obligations pending code=post_commit_obligations_pending admissions=%d auxiliary_releases=%d quarantines=%d",
+            status.pending_admissions,
+            status.pending_thread_operation_releases,
+            status.pending_quarantines,
+        )
+
+    def _record_post_commit_resolution(self, *, kind: str) -> None:
+        """Count a proven supervisor resolution and log only final recovery."""
+
+        if kind == "admission":
+            self._resolved_admissions_since_start = min(
+                _MAX_POST_COMMIT_OBLIGATION_COUNT,
+                self._resolved_admissions_since_start + 1,
+            )
+        elif kind == "thread_operation_release":
+            self._resolved_thread_operation_releases_since_start = min(
+                _MAX_POST_COMMIT_OBLIGATION_COUNT,
+                self._resolved_thread_operation_releases_since_start + 1,
+            )
+        else:
+            raise ValueError("unsupported post-commit obligation kind")
+        if not self._post_commit_pending_logged or not self.post_commit_obligations_ready():
+            return
+        self._post_commit_pending_logged = False
+        status = self.post_commit_obligation_status()
+        logger.info(
+            "Post-commit obligations cleared code=post_commit_obligations_cleared resolved_admissions_since_start=%d resolved_auxiliary_releases_since_start=%d",
+            status.resolved_admissions_since_start,
+            status.resolved_thread_operation_releases_since_start,
+        )
 
     def _discard_resolved_post_commit_integrity(self, run_id: str) -> None:
         """Clear shared integrity state only after every same-ID owner resolves."""
@@ -592,7 +723,9 @@ class RunManager:
         if run_id in self._unresolved_admissions or run_id in self._unresolved_thread_operation_releases:
             return
         self._reported_unresolved_integrity.discard(run_id)
+        self._reported_post_commit_type_collisions.discard(run_id)
         self._quarantined_post_commit_obligations.discard(run_id)
+        self._post_commit_obligation_tokens.pop(run_id, None)
 
     def _fence_replacement_predecessors_locked(
         self,
@@ -818,8 +951,73 @@ class RunManager:
         """Prove absence or terminalize one exact candidate without execution."""
 
         store = self._store
+        expected_token = self._post_commit_obligation_tokens.get(candidate.run_id)
+        if candidate.run_id in self._quarantined_post_commit_obligations:
+            async with self._lock:
+                if not self._post_commit_token_is_current(
+                    candidate.run_id,
+                    expected_token,
+                ):
+                    return False
+                self._fence_quarantined_local_locked(candidate.run_id)
+            determinate, row = await self._authoritative_post_commit_row(
+                candidate.run_id,
+            )
+            if self._post_commit_obligation_tokens.get(candidate.run_id) is not expected_token:
+                return False
+            if not determinate:
+                return False
+            if row is None:
+                async with self._lock:
+                    if not self._post_commit_token_is_current(
+                        candidate.run_id,
+                        expected_token,
+                    ):
+                        return False
+                    return self._fence_and_evict_quarantined_local_locked(
+                        candidate.run_id,
+                    )
+            if row.get("status") in (
+                RunStatus.pending.value,
+                RunStatus.running.value,
+            ):
+                async with self._lock:
+                    if not self._post_commit_token_is_current(
+                        candidate.run_id,
+                        expected_token,
+                    ):
+                        return False
+                    self._fence_quarantined_local_locked(candidate.run_id)
+                return False
+            async with self._lock:
+                if not self._post_commit_token_is_current(
+                    candidate.run_id,
+                    expected_token,
+                ):
+                    return False
+                if self._unresolved_candidate_matches(candidate, row):
+                    return self._finish_matching_quarantined_candidate_locked(
+                        candidate,
+                        row,
+                    )
+                if candidate.run_id not in self._reported_unresolved_integrity:
+                    self._reported_unresolved_integrity.add(candidate.run_id)
+                    logger.error(
+                        "Post-commit terminal identity mismatch code=admission_candidate_terminal_identity_mismatch run_id=%s",
+                        candidate.run_id,
+                    )
+                return self._fence_and_evict_quarantined_local_locked(
+                    candidate.run_id,
+                )
         if store is None:
             async with self._lock:
+                if not self._post_commit_obligation_is_current(
+                    candidate.run_id,
+                    kind="admission",
+                    obligation=candidate,
+                    expected_token=expected_token,
+                ):
+                    return False
                 record = self._runs.get(candidate.run_id)
                 if record is not None:
                     if candidate.terminal_disposition is _AdmissionTerminalDisposition.cancelled:
@@ -838,46 +1036,18 @@ class RunManager:
                     record.finalizing = False
                     record.abort_event.set()
             return True
-        if candidate.run_id in self._quarantined_post_commit_obligations:
-            async with self._lock:
-                self._fence_quarantined_local_locked(candidate.run_id)
-            determinate, row = await self._authoritative_post_commit_row(
-                candidate.run_id,
-            )
-            if not determinate:
-                return False
-            if row is None:
-                async with self._lock:
-                    return self._fence_and_evict_quarantined_local_locked(
-                        candidate.run_id,
-                    )
-            if row.get("status") in (
-                RunStatus.pending.value,
-                RunStatus.running.value,
-            ):
-                async with self._lock:
-                    self._fence_quarantined_local_locked(candidate.run_id)
-                return False
-            async with self._lock:
-                if self._unresolved_candidate_matches(candidate, row):
-                    return self._finish_matching_quarantined_candidate_locked(
-                        candidate,
-                        row,
-                    )
-                if candidate.run_id not in self._reported_unresolved_integrity:
-                    self._reported_unresolved_integrity.add(candidate.run_id)
-                    logger.error(
-                        "Post-commit terminal identity mismatch code=admission_candidate_terminal_identity_mismatch run_id=%s",
-                        candidate.run_id,
-                    )
-                return self._fence_and_evict_quarantined_local_locked(
-                    candidate.run_id,
-                )
         try:
             row = await store.get(candidate.run_id, user_id=candidate.user_id)
         except asyncio.CancelledError:
             raise
         except Exception:
+            return False
+        if not self._post_commit_obligation_is_current(
+            candidate.run_id,
+            kind="admission",
+            obligation=candidate,
+            expected_token=expected_token,
+        ):
             return False
         if row is None:
             return not candidate.commit_proven
@@ -890,15 +1060,36 @@ class RunManager:
                 )
             return False
         async with self._lock:
+            if not self._post_commit_obligation_is_current(
+                candidate.run_id,
+                kind="admission",
+                obligation=candidate,
+                expected_token=expected_token,
+            ):
+                return False
             self._fence_replacement_predecessors_locked(candidate)
         if row.get("status") not in (
             RunStatus.pending.value,
             RunStatus.running.value,
         ):
             async with self._lock:
+                if not self._post_commit_obligation_is_current(
+                    candidate.run_id,
+                    kind="admission",
+                    obligation=candidate,
+                    expected_token=expected_token,
+                ):
+                    return False
                 self._sync_compensated_candidate_locked(candidate, row)
             return True
         async with self._lock:
+            if not self._post_commit_obligation_is_current(
+                candidate.run_id,
+                kind="admission",
+                obligation=candidate,
+                expected_token=expected_token,
+            ):
+                return False
             local = self._runs.get(candidate.run_id)
             if local is not None and local.ownership_lost:
                 # This process may observe the authoritative row but can no
@@ -909,6 +1100,13 @@ class RunManager:
             if store.durable_lifecycle:
                 cancel_action = row.get("cancel_action")
                 if cancel_action is None and candidate.terminal_disposition is _AdmissionTerminalDisposition.cancelled:
+                    if not self._post_commit_obligation_is_current(
+                        candidate.run_id,
+                        kind="admission",
+                        obligation=candidate,
+                        expected_token=expected_token,
+                    ):
+                        return False
                     cancel_request = await store.request_cancel_owned(
                         candidate.run_id,
                         action=candidate.cancellation_action or "interrupt",
@@ -916,6 +1114,13 @@ class RunManager:
                         require_unexpired_lease=self.heartbeat_enabled,
                         user_id=candidate.user_id,
                     )
+                    if not self._post_commit_obligation_is_current(
+                        candidate.run_id,
+                        kind="admission",
+                        obligation=candidate,
+                        expected_token=expected_token,
+                    ):
+                        return False
                     row = cancel_request.row
                     if row is None:
                         return False
@@ -924,6 +1129,13 @@ class RunManager:
                         RunStatus.running.value,
                     ):
                         async with self._lock:
+                            if not self._post_commit_obligation_is_current(
+                                candidate.run_id,
+                                kind="admission",
+                                obligation=candidate,
+                                expected_token=expected_token,
+                            ):
+                                return False
                             self._sync_compensated_candidate_locked(candidate, row)
                         return True
                     cancel_action = row.get("cancel_action")
@@ -942,6 +1154,13 @@ class RunManager:
                         stop_reason="worker_attachment_failed",
                         reason="worker_attachment_failed",
                     )
+                if not self._post_commit_obligation_is_current(
+                    candidate.run_id,
+                    kind="admission",
+                    obligation=candidate,
+                    expected_token=expected_token,
+                ):
+                    return False
                 transition = await store.transition_owned_run_atomic(
                     candidate.run_id,
                     expected_state_version=row["state_version"],
@@ -954,6 +1173,13 @@ class RunManager:
                     require_unexpired_lease=self.heartbeat_enabled,
                     user_id=candidate.user_id,
                 )
+                if not self._post_commit_obligation_is_current(
+                    candidate.run_id,
+                    kind="admission",
+                    obligation=candidate,
+                    expected_token=expected_token,
+                ):
+                    return False
                 terminal = transition.row
             else:
                 if candidate.terminal_disposition is _AdmissionTerminalDisposition.cancelled:
@@ -965,16 +1191,37 @@ class RunManager:
                     status = RunStatus.error.value
                     error = "worker_attachment_failed"
                     stop_reason = "worker_attachment_failed"
+                if not self._post_commit_obligation_is_current(
+                    candidate.run_id,
+                    kind="admission",
+                    obligation=candidate,
+                    expected_token=expected_token,
+                ):
+                    return False
                 await store.update_status(
                     candidate.run_id,
                     status,
                     error=error,
                     stop_reason=stop_reason,
                 )
+                if not self._post_commit_obligation_is_current(
+                    candidate.run_id,
+                    kind="admission",
+                    obligation=candidate,
+                    expected_token=expected_token,
+                ):
+                    return False
                 terminal = await store.get(
                     candidate.run_id,
                     user_id=candidate.user_id,
                 )
+                if not self._post_commit_obligation_is_current(
+                    candidate.run_id,
+                    kind="admission",
+                    obligation=candidate,
+                    expected_token=expected_token,
+                ):
+                    return False
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -985,6 +1232,13 @@ class RunManager:
         )
         if completed:
             async with self._lock:
+                if not self._post_commit_obligation_is_current(
+                    candidate.run_id,
+                    kind="admission",
+                    obligation=candidate,
+                    expected_token=expected_token,
+                ):
+                    return False
                 self._sync_compensated_candidate_locked(candidate, terminal)
         return completed
 
@@ -995,26 +1249,29 @@ class RunManager:
         """Prove the exact auxiliary row released, absent, or inactive."""
 
         store = self._store
-        if store is None:
-            async with self._lock:
-                record = self._runs.get(obligation.run_id)
-                if record is not None:
-                    self._runs.pop(obligation.run_id, None)
-                    self._unindex_run_locked(
-                        obligation.run_id,
-                        record.thread_id,
-                    )
-            return True
+        expected_token = self._post_commit_obligation_tokens.get(obligation.run_id)
         if obligation.run_id in self._quarantined_post_commit_obligations:
             async with self._lock:
+                if not self._post_commit_token_is_current(
+                    obligation.run_id,
+                    expected_token,
+                ):
+                    return False
                 self._fence_quarantined_local_locked(obligation.run_id)
             determinate, row = await self._authoritative_post_commit_row(
                 obligation.run_id,
             )
+            if self._post_commit_obligation_tokens.get(obligation.run_id) is not expected_token:
+                return False
             if not determinate:
                 return False
             if row is None:
                 async with self._lock:
+                    if not self._post_commit_token_is_current(
+                        obligation.run_id,
+                        expected_token,
+                    ):
+                        return False
                     return self._fence_and_evict_quarantined_local_locked(
                         obligation.run_id,
                     )
@@ -1023,9 +1280,19 @@ class RunManager:
                 RunStatus.running.value,
             }:
                 async with self._lock:
+                    if not self._post_commit_token_is_current(
+                        obligation.run_id,
+                        expected_token,
+                    ):
+                        return False
                     self._fence_quarantined_local_locked(obligation.run_id)
                 return False
             async with self._lock:
+                if not self._post_commit_token_is_current(
+                    obligation.run_id,
+                    expected_token,
+                ):
+                    return False
                 if not self._thread_operation_release_matches(obligation, row):
                     if obligation.run_id not in self._reported_unresolved_integrity:
                         self._reported_unresolved_integrity.add(obligation.run_id)
@@ -1036,6 +1303,30 @@ class RunManager:
                 return self._fence_and_evict_quarantined_local_locked(
                     obligation.run_id,
                 )
+        if store is None:
+            async with self._lock:
+                if not self._post_commit_obligation_is_current(
+                    obligation.run_id,
+                    kind="thread_operation_release",
+                    obligation=obligation,
+                    expected_token=expected_token,
+                ):
+                    return False
+                record = self._runs.get(obligation.run_id)
+                if record is not None:
+                    self._runs.pop(obligation.run_id, None)
+                    self._unindex_run_locked(
+                        obligation.run_id,
+                        record.thread_id,
+                    )
+            return True
+        if not self._post_commit_obligation_is_current(
+            obligation.run_id,
+            kind="thread_operation_release",
+            obligation=obligation,
+            expected_token=expected_token,
+        ):
+            return False
         try:
             result = await store.release_thread_operation_owned(
                 obligation.run_id,
@@ -1048,6 +1339,13 @@ class RunManager:
         except asyncio.CancelledError:
             raise
         except Exception:
+            return False
+        if not self._post_commit_obligation_is_current(
+            obligation.run_id,
+            kind="thread_operation_release",
+            obligation=obligation,
+            expected_token=expected_token,
+        ):
             return False
         if not isinstance(result, ThreadOperationReleaseResult) or not isinstance(
             result.outcome,
@@ -1066,6 +1364,13 @@ class RunManager:
             ThreadOperationReleaseOutcome.inactive,
         }:
             async with self._lock:
+                if not self._post_commit_obligation_is_current(
+                    obligation.run_id,
+                    kind="thread_operation_release",
+                    obligation=obligation,
+                    expected_token=expected_token,
+                ):
+                    return False
                 record = self._runs.get(obligation.run_id)
                 if record is not None:
                     self._runs.pop(obligation.run_id, None)
@@ -1076,6 +1381,13 @@ class RunManager:
             return True
         if result.outcome is ThreadOperationReleaseOutcome.ownership_lost:
             async with self._lock:
+                if not self._post_commit_obligation_is_current(
+                    obligation.run_id,
+                    kind="thread_operation_release",
+                    obligation=obligation,
+                    expected_token=expected_token,
+                ):
+                    return False
                 record = self._runs.get(obligation.run_id)
                 if record is not None:
                     record.ownership_lost = True
@@ -1102,13 +1414,18 @@ class RunManager:
                     retry_key = ("admission", run_id)
                     if self._post_commit_retry_not_before.get(retry_key, 0) > now:
                         continue
+                    expected_token = self._post_commit_obligation_tokens.get(run_id)
                     if await self._resolve_unresolved_admission(candidate):
-                        if self._unresolved_admissions.get(run_id) is candidate:
+                        if self._unresolved_admissions.get(run_id) is candidate and self._post_commit_obligation_tokens.get(run_id) is expected_token:
                             self._unresolved_admissions.pop(run_id, None)
+                            self._advance_post_commit_obligation_token(run_id)
                             self._discard_resolved_post_commit_integrity(run_id)
                             self._post_commit_retry_rounds.pop(retry_key, None)
                             self._post_commit_retry_not_before.pop(retry_key, None)
+                            self._record_post_commit_resolution(kind="admission")
                     else:
+                        if self._unresolved_admissions.get(run_id) is not candidate or self._post_commit_obligation_tokens.get(run_id) is not expected_token:
+                            continue
                         stalled_rounds = self._post_commit_retry_rounds.get(retry_key, 0) + 1
                         self._post_commit_retry_rounds[retry_key] = stalled_rounds
                         self._post_commit_retry_not_before[retry_key] = now + _admission_compensation_retry_delay(stalled_rounds)
@@ -1116,18 +1433,23 @@ class RunManager:
                     retry_key = ("thread_operation_release", run_id)
                     if self._post_commit_retry_not_before.get(retry_key, 0) > now:
                         continue
+                    expected_token = self._post_commit_obligation_tokens.get(run_id)
                     if await self._resolve_unresolved_thread_operation_release(
                         obligation,
                     ):
-                        if self._unresolved_thread_operation_releases.get(run_id) is obligation:
+                        if self._unresolved_thread_operation_releases.get(run_id) is obligation and self._post_commit_obligation_tokens.get(run_id) is expected_token:
                             self._unresolved_thread_operation_releases.pop(
                                 run_id,
                                 None,
                             )
+                            self._advance_post_commit_obligation_token(run_id)
                             self._discard_resolved_post_commit_integrity(run_id)
                             self._post_commit_retry_rounds.pop(retry_key, None)
                             self._post_commit_retry_not_before.pop(retry_key, None)
+                            self._record_post_commit_resolution(kind="thread_operation_release")
                     else:
+                        if self._unresolved_thread_operation_releases.get(run_id) is not obligation or self._post_commit_obligation_tokens.get(run_id) is not expected_token:
+                            continue
                         stalled_rounds = self._post_commit_retry_rounds.get(retry_key, 0) + 1
                         self._post_commit_retry_rounds[retry_key] = stalled_rounds
                         self._post_commit_retry_not_before[retry_key] = now + _admission_compensation_retry_delay(stalled_rounds)
@@ -1156,12 +1478,12 @@ class RunManager:
             if self._admission_compensation_task is asyncio.current_task():
                 self._admission_compensation_task = None
 
-    async def drain_admission_compensations(self, *, timeout: float) -> bool:
+    async def drain_post_commit_obligations(self, *, timeout: float) -> bool:
         """Boundedly wait for every unresolved post-commit obligation."""
 
         if timeout < 0:
             raise ValueError("admission compensation timeout must be non-negative")
-        if self.admission_compensations_ready():
+        if self.post_commit_obligations_ready():
             return True
         task = self._admission_compensation_task
         if task is None or task.done():
@@ -1180,11 +1502,16 @@ class RunManager:
                 return False
             task = self._admission_compensation_task
         if task is None:
-            return self.admission_compensations_ready()
+            return self.post_commit_obligations_ready()
         done, _ = await asyncio.wait((task,), timeout=timeout)
         if done:
             task.result()
-        return self.admission_compensations_ready()
+        return self.post_commit_obligations_ready()
+
+    async def drain_admission_compensations(self, *, timeout: float) -> bool:
+        """Compatibility alias for :meth:`drain_post_commit_obligations`."""
+
+        return await self.drain_post_commit_obligations(timeout=timeout)
 
     async def _persist_snapshot_to_store(self, run_id: str, payload: dict[str, Any]) -> bool:
         """Best-effort persist a previously captured run snapshot."""
@@ -2976,8 +3303,18 @@ class RunManager:
         """Release an auxiliary row or transfer it to the shared compensator."""
 
         obligation = self._thread_operation_release_obligation(record)
+        local = self._runs.get(record.run_id)
+
+        def detach_exact_reservation_task() -> bool:
+            if local is record and reservation_task is not None and record.task is reservation_task:
+                record.task = None
+            return local is record and record.task is None
+
         existing = self._unresolved_thread_operation_releases.get(record.run_id)
         if existing is not None and existing != obligation:
+            handoff_valid = detach_exact_reservation_task()
+            if not handoff_valid:
+                self._quarantined_post_commit_obligations.add(record.run_id)
             self._register_unresolved_thread_operation_release(obligation)
             return False
         # Retain ownership synchronously before the first fallible await.  The
@@ -2985,8 +3322,8 @@ class RunManager:
         # task handoff below. The direct attempt keeps ordinary cleanup fast;
         # any cancellation or uncertainty starts the shared supervisor.
         self._unresolved_thread_operation_releases[record.run_id] = obligation
-        local = self._runs.get(record.run_id)
-        if local is not record or record.task not in (None, reservation_task):
+        expected_token = self._advance_post_commit_obligation_token(record.run_id)
+        if not detach_exact_reservation_task():
             self._quarantined_post_commit_obligations.add(record.run_id)
             if record.run_id not in self._reported_unresolved_integrity:
                 self._reported_unresolved_integrity.add(record.run_id)
@@ -2996,7 +3333,6 @@ class RunManager:
                 )
             self._register_unresolved_thread_operation_release(obligation)
             return False
-        record.task = None
         try:
             resolved = await self._resolve_unresolved_thread_operation_release(
                 obligation,
@@ -3005,11 +3341,14 @@ class RunManager:
             self._register_unresolved_thread_operation_release(obligation)
             raise
         if resolved:
-            if self._unresolved_thread_operation_releases.get(record.run_id) is obligation:
-                self._unresolved_thread_operation_releases.pop(
-                    record.run_id,
-                    None,
-                )
+            if self._unresolved_thread_operation_releases.get(record.run_id) is not obligation or self._post_commit_obligation_tokens.get(record.run_id) is not expected_token:
+                return False
+            self._unresolved_thread_operation_releases.pop(
+                record.run_id,
+                None,
+            )
+            self._advance_post_commit_obligation_token(record.run_id)
+            self._discard_resolved_post_commit_integrity(record.run_id)
             return True
         self._register_unresolved_thread_operation_release(obligation)
         return False
@@ -4126,7 +4465,7 @@ class RunManager:
         deadline = loop.time() + timeout
 
         async def finish_compensation_drain() -> bool:
-            return await self.drain_admission_compensations(
+            return await self.drain_post_commit_obligations(
                 timeout=max(0.0, deadline - loop.time()),
             )
 

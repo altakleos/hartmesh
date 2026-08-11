@@ -112,6 +112,8 @@ def route_required_capabilities(
 
 @dataclass(frozen=True)
 class CapabilityPluginManifestEntry:
+    """Bounded package identity for one plugin in a capability manifest."""
+
     package_name: str | None
     package_version: str | None
     load_required: bool
@@ -119,6 +121,8 @@ class CapabilityPluginManifestEntry:
 
 @dataclass(frozen=True)
 class CapabilityManifestEntry:
+    """Immutable initialization evidence for one contributed capability."""
+
     contribution_id: str
     capability_id: str
     capability_type: str
@@ -132,6 +136,8 @@ class CapabilityManifestEntry:
 
 @dataclass(frozen=True)
 class CapabilityManifest:
+    """Canonical startup-frozen capability generation and its digest."""
+
     extension_api_version: str
     extension_generation: int
     plugins: tuple[CapabilityPluginManifestEntry, ...]
@@ -141,6 +147,8 @@ class CapabilityManifest:
 
 @dataclass(frozen=True)
 class CapabilityHealthSnapshot:
+    """One time-bounded health result for a contributed capability."""
+
     contribution_id: str
     capability_id: str
     status: Literal["healthy", "unhealthy", "unknown"]
@@ -154,6 +162,8 @@ class CapabilityHealthSnapshot:
 
 @dataclass(frozen=True)
 class CapabilityReadinessSnapshot:
+    """Aggregate readiness and bounded capability-health evidence."""
+
     status: Literal["ready", "not_ready"]
     health: tuple[CapabilityHealthSnapshot, ...]
 

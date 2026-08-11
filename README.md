@@ -354,6 +354,7 @@ The administrator deployment report separates persistence tier, health, provenan
 A supplied qualification reference remains `operator_asserted`; only the offline verifier can establish `external_evidence_verified` for exact evidence. Portable capabilities do not carry deployment claims.
 
 `GET /health` reports process liveness. `GET /ready` is a bounded ready/not-ready signal. Administrators inspect persistence and qualification at `GET /api/runtime/v1/deployment`.
+When present, that deployment report also includes a versioned process-local snapshot of pending and resolved post-commit ownership obligations; the counters reset on restart and are operational telemetry, not durable or multi-replica evidence.
 
 Evidence: [deployment reporting](backend/app/runtime/deployment.py), [qualification verification](backend/scripts/verify_qualification_evidence.py), and the [Helm deployment contract](deploy/helm/deer-flow/README.md).
 

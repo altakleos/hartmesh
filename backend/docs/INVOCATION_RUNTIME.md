@@ -482,6 +482,13 @@ exactly-once claim:
   Release uncertainty is a post-commit obligation, not best-effort cleanup: same-process recovery
   retries it, lease takeover may terminalize the row without invocation lifecycle evidence, and
   later thread work remains fail closed until ownership is durably settled.
+  A per-UUID registration token fences contradictory admission/release evidence across store
+  awaits. A collision observed before mutation dispatch prevents the write. A store mutation
+  already dispatched linearizes first, but its response cannot clear local supervision after a
+  later collision; authoritative primary-key truth must settle both retained obligations. An
+  active contradictory row remains quarantined even when an intermediate cancellation request
+  committed first; that event does not authorize another terminal mutation. Readiness and
+  shutdown remain closed until external/orphan recovery establishes terminal truth.
 - **Execution boundary** — only the admission creator attaches a worker, and accepted agent,
   constraint, trusted-context, and extension material is pinned for that worker. Hartmesh does
   not promise exactly-once model execution, resumable model execution after process loss, or
@@ -552,7 +559,19 @@ The `durable_production` deployment profile fails startup/readiness with
 process-local state or an unbounded PostgreSQL command timeout; `local_development`
 remains an explicit convenience profile where disabling that timeout is permitted.
 The report also carries the latest safe admission-readiness status, reason codes,
-and correlation identifier. Provider/database/Adapter messages and tracebacks are neither
+and correlation identifier. Its optional `post_commit_obligations` field is a
+versioned, process-local operational snapshot: it reports saturated pending counts
+for admission and auxiliary-release obligations, the overlapping count of quarantined
+identities, and compensator-proven resolved-since-process-start counts by obligation
+type. Quarantine is
+not a third workload bucket and must not be added to the two pending type counts.
+These counters reset on restart and are neither durable lifecycle evidence nor a
+cross-replica total. Backlog transition logs contain only stable codes, type, and
+count; bounded integrity diagnostics may retain an opaque run ID but never owner,
+thread, prompt, envelope, or retry content. The serialized v1 readiness reason
+`admission_compensation_pending` remains
+for compatibility and now means that any post-commit ownership obligation is pending.
+Provider/database/Adapter messages and tracebacks are neither
 public nor retained in ordinary diagnostics or logs. Every portable HTTP operation uses one
 failure wrapper: an unexpected exception becomes the strict versioned `runtime.error`
 envelope with HTTP 503 `indeterminate`, while the matching internal diagnostic contains only

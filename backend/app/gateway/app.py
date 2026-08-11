@@ -822,6 +822,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         DeploymentQualification,
         GatewayDeploymentReporter,
         NativeIngressReport,
+        PostCommitObligationReport,
         describe_native_ingress,
     )
 
@@ -842,6 +843,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             construction_config,
             verified_sources=verified_sources,
         )
+
+    def current_post_commit_obligations() -> PostCommitObligationReport | None:
+        run_manager = getattr(app.state, "run_manager", None)
+        if run_manager is None:
+            return None
+        return PostCommitObligationReport.from_status(run_manager.post_commit_obligation_status())
 
     try:
         deployment_provenance = DeploymentProvenance.from_environment()
@@ -867,6 +874,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         provenance=deployment_provenance,
         qualification=deployment_qualification,
         native_ingress_supplier=current_native_ingress,
+        post_commit_obligations_supplier=current_post_commit_obligations,
     )
     from app.runtime.readiness import RuntimeReadinessCoordinator
 
@@ -908,7 +916,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         extension_generation=lambda: int(getattr(app.state.capability_manifest, "extension_generation")),
         overall_timeout_seconds=(construction_deployment.readiness.overall_timeout_seconds),
         sandbox_projection_ready=sandbox_projection_ready,
-        admission_compensations_ready=lambda: bool(getattr(app.state, "run_manager", None) is None or app.state.run_manager.admission_compensations_ready()),
+        post_commit_obligations_ready=lambda: bool(getattr(app.state, "run_manager", None) is None or app.state.run_manager.post_commit_obligations_ready()),
     )
 
     # Include routers
