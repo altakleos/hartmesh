@@ -39,6 +39,8 @@ from deerflow.runtime.runs.store.base import (
     RunEnsureResult,
     RunStore,
     StatusFinalization,
+    ThreadOperationReleaseOutcome,
+    ThreadOperationReleaseResult,
     build_lifecycle_payload,
     lifecycle_owner_scope,
     lifecycle_type_for_status,
@@ -1081,6 +1083,53 @@ class MemoryRunStore(RunStore):
                 LifecycleTransition(lifecycle_type=LifecycleType.accepted, status="pending"),
             )
         return new_row, claimed
+
+    @_atomic_memory_mutation
+    async def release_thread_operation_owned(
+        self,
+        run_id: str,
+        *,
+        thread_id: str,
+        operation_kind: str,
+        user_id: str | None,
+        expected_owner_worker_id: str,
+        require_unexpired_lease: bool,
+    ) -> ThreadOperationReleaseResult:
+        """Release one exact auxiliary row under its captured ownership fence."""
+
+        row = self._runs.get(run_id)
+        if row is None:
+            return ThreadOperationReleaseResult(
+                outcome=ThreadOperationReleaseOutcome.absent,
+            )
+        actual_kind = row.get("operation_kind", "run")
+        if actual_kind == "run" or actual_kind != operation_kind or row.get("thread_id") != thread_id or row.get("user_id") != user_id:
+            return ThreadOperationReleaseResult(
+                outcome=ThreadOperationReleaseOutcome.identity_mismatch,
+            )
+        if row.get("status") not in {"pending", "running"}:
+            return ThreadOperationReleaseResult(
+                outcome=ThreadOperationReleaseOutcome.inactive,
+            )
+        if row.get("owner_worker_id") != expected_owner_worker_id:
+            return ThreadOperationReleaseResult(
+                outcome=ThreadOperationReleaseOutcome.ownership_lost,
+            )
+        if require_unexpired_lease:
+            from deerflow.utils.time import is_lease_expired
+
+            if is_lease_expired(
+                row.get("lease_expires_at"),
+                grace_seconds=0,
+            ):
+                return ThreadOperationReleaseResult(
+                    outcome=ThreadOperationReleaseOutcome.ownership_lost,
+                )
+        self._runs.pop(run_id, None)
+        self._unindex_run(run_id, thread_id)
+        return ThreadOperationReleaseResult(
+            outcome=ThreadOperationReleaseOutcome.released,
+        )
 
     async def ensure_run_atomic(
         self,

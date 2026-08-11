@@ -30,6 +30,8 @@ from .store.base import (
     LifecycleTransitionResult,
     LifecycleType,
     RunEnsureResult,
+    ThreadOperationReleaseOutcome,
+    ThreadOperationReleaseResult,
     lifecycle_type_for_status,
 )
 
@@ -89,15 +91,26 @@ class _UnresolvedAdmissionCandidate:
     caller_intent_digest: str | None
     caller_intent_digest_version: str | None
     replacement_action: str | None = None
-    predecessor_run_ids: tuple[str, ...] = ()
+    actionable_predecessor_run_id: str | None = None
     commit_proven: bool = False
     terminal_disposition: _AdmissionTerminalDisposition = _AdmissionTerminalDisposition.worker_attachment_failed
     cancellation_action: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _UnresolvedThreadOperationRelease:
+    """Exact auxiliary reservation whose durable release is not yet proven."""
+
+    run_id: str
+    thread_id: str
+    operation_kind: ThreadOperationKind
+    user_id: str | None
+    owner_worker_id: str
+    require_unexpired_lease: bool
+
+
 _ADMISSION_COMPENSATION_INITIAL_DELAY = 0.1
 _ADMISSION_COMPENSATION_MAX_DELAY = 5.0
-_MAX_UNRESOLVED_PREDECESSORS = 16
 
 
 def _admission_compensation_retry_delay(stalled_rounds: int) -> float:
@@ -341,10 +354,17 @@ class RunManager:
         self._heartbeat_stop: asyncio.Event | None = None
         self._orphan_recovery_task: asyncio.Task[None] | None = None
         self._unresolved_admissions: dict[str, _UnresolvedAdmissionCandidate] = {}
+        self._unresolved_thread_operation_releases: dict[
+            str,
+            _UnresolvedThreadOperationRelease,
+        ] = {}
         self._reported_unresolved_integrity: set[str] = set()
+        self._quarantined_post_commit_obligations: set[str] = set()
         self._admission_compensation_task: asyncio.Task[None] | None = None
         self._admission_compensation_wakeup = asyncio.Event()
         self._admission_compensation_generation = 0
+        self._post_commit_retry_rounds: dict[tuple[str, str], int] = {}
+        self._post_commit_retry_not_before: dict[tuple[str, str], float] = {}
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -360,6 +380,7 @@ class RunManager:
 
     @staticmethod
     def _sync_record_from_store_row(record: RunRecord, row: dict[str, Any]) -> None:
+        record.user_id = row.get("user_id")
         record.status = RunStatus(row.get("status") or RunStatus.pending.value)
         record.state_version = row.get("state_version") or 0
         record.error = row.get("error")
@@ -470,30 +491,41 @@ class RunManager:
                 "caller_intent_digest",
                 "caller_intent_digest_version",
             )
-            if any(getattr(existing, name) != getattr(candidate, name) for name in immutable_fields):
-                raise RunStartupError("unresolved admission candidate identity conflict")
-            if existing.replacement_action is not None and candidate.replacement_action is not None and existing.replacement_action != candidate.replacement_action:
-                raise RunStartupError("unresolved admission replacement action conflict")
-            if existing.cancellation_action is not None and candidate.cancellation_action is not None and existing.cancellation_action != candidate.cancellation_action:
-                raise RunStartupError("unresolved admission cancellation action conflict")
-            predecessor_run_ids = tuple(dict.fromkeys((*existing.predecessor_run_ids, *candidate.predecessor_run_ids)))
-            if len(predecessor_run_ids) > _MAX_UNRESOLVED_PREDECESSORS:
-                raise RunStartupError("unresolved admission predecessor evidence exceeds its bound")
-            terminal_disposition = (
-                _AdmissionTerminalDisposition.cancelled if _AdmissionTerminalDisposition.cancelled in (existing.terminal_disposition, candidate.terminal_disposition) else _AdmissionTerminalDisposition.worker_attachment_failed
+            conflict = (
+                any(getattr(existing, name) != getattr(candidate, name) for name in immutable_fields)
+                or (existing.replacement_action is not None and candidate.replacement_action is not None and existing.replacement_action != candidate.replacement_action)
+                or (existing.cancellation_action is not None and candidate.cancellation_action is not None and existing.cancellation_action != candidate.cancellation_action)
+                or (existing.actionable_predecessor_run_id is not None and candidate.actionable_predecessor_run_id is not None and existing.actionable_predecessor_run_id != candidate.actionable_predecessor_run_id)
             )
-            candidate = replace(
-                existing,
-                replacement_action=existing.replacement_action or candidate.replacement_action,
-                predecessor_run_ids=predecessor_run_ids,
-                commit_proven=existing.commit_proven or candidate.commit_proven,
-                terminal_disposition=terminal_disposition,
-                cancellation_action=existing.cancellation_action or candidate.cancellation_action,
-            )
-        elif len(candidate.predecessor_run_ids) > _MAX_UNRESOLVED_PREDECESSORS:
-            raise RunStartupError("unresolved admission predecessor evidence exceeds its bound")
-
+            if conflict:
+                # Registration occurs after a store operation may have
+                # committed. Never throw away the already-retained identity;
+                # quarantine the contradiction and permit only read-only
+                # authoritative reconciliation below.
+                self._quarantined_post_commit_obligations.add(candidate.run_id)
+                if candidate.run_id not in self._reported_unresolved_integrity:
+                    self._reported_unresolved_integrity.add(candidate.run_id)
+                    logger.error(
+                        "Post-commit obligation identity mismatch code=admission_candidate_integrity_failed run_id=%s",
+                        candidate.run_id,
+                    )
+                candidate = existing
+            else:
+                terminal_disposition = (
+                    _AdmissionTerminalDisposition.cancelled if _AdmissionTerminalDisposition.cancelled in (existing.terminal_disposition, candidate.terminal_disposition) else _AdmissionTerminalDisposition.worker_attachment_failed
+                )
+                candidate = replace(
+                    existing,
+                    replacement_action=existing.replacement_action or candidate.replacement_action,
+                    actionable_predecessor_run_id=(existing.actionable_predecessor_run_id or candidate.actionable_predecessor_run_id),
+                    commit_proven=existing.commit_proven or candidate.commit_proven,
+                    terminal_disposition=terminal_disposition,
+                    cancellation_action=existing.cancellation_action or candidate.cancellation_action,
+                )
         self._unresolved_admissions[candidate.run_id] = candidate
+        retry_key = ("admission", candidate.run_id)
+        self._post_commit_retry_rounds.pop(retry_key, None)
+        self._post_commit_retry_not_before.pop(retry_key, None)
         self._wake_admission_compensator()
         task = self._admission_compensation_task
         if task is None or task.done():
@@ -502,16 +534,47 @@ class RunManager:
                 name="deerflow-unresolved-admission-compensation",
             )
 
-    def _wake_admission_compensator(self) -> None:
+    def _register_unresolved_thread_operation_release(
+        self,
+        obligation: _UnresolvedThreadOperationRelease,
+    ) -> None:
+        """Retain one exact auxiliary release until storage proves its outcome."""
+
+        existing = self._unresolved_thread_operation_releases.get(
+            obligation.run_id,
+        )
+        if existing is not None and existing != obligation:
+            self._quarantined_post_commit_obligations.add(obligation.run_id)
+            logger.error(
+                "Post-commit obligation identity mismatch code=thread_operation_release_integrity_failed run_id=%s",
+                obligation.run_id,
+            )
+            obligation = existing
+        self._unresolved_thread_operation_releases[obligation.run_id] = obligation
+        retry_key = ("thread_operation_release", obligation.run_id)
+        self._post_commit_retry_rounds.pop(retry_key, None)
+        self._post_commit_retry_not_before.pop(retry_key, None)
+        self._wake_admission_compensator()
+        task = self._admission_compensation_task
+        if task is None or task.done():
+            self._admission_compensation_task = asyncio.create_task(
+                self._reconcile_unresolved_admissions(),
+                name="deerflow-post-commit-obligation-compensation",
+            )
+
+    def _wake_admission_compensator(self, *, reset_backoff: bool = False) -> None:
         """Interrupt compensation backoff after authoritative state changes."""
 
+        if reset_backoff:
+            self._post_commit_retry_rounds.clear()
+            self._post_commit_retry_not_before.clear()
         self._admission_compensation_generation += 1
         self._admission_compensation_wakeup.set()
 
     def admission_compensations_ready(self) -> bool:
-        """Return whether no commit-ambiguous admission awaits compensation."""
+        """Return whether no unresolved post-commit obligation remains."""
 
-        return not self._unresolved_admissions
+        return not (self._unresolved_admissions or self._unresolved_thread_operation_releases or self._quarantined_post_commit_obligations)
 
     def _fence_replacement_predecessors_locked(
         self,
@@ -523,19 +586,21 @@ class RunManager:
         if action not in ("interrupt", "rollback"):
             return
         updated_at = _now_iso()
-        for run_id in candidate.predecessor_run_ids:
-            previous = self._runs.get(run_id)
-            if previous is None or previous.finalizing:
-                continue
-            previous.abort_action = action
-            previous.abort_event.set()
-            task_active = previous.task is not None and not previous.task.done()
-            previous.finalizing = task_active
-            if task_active:
-                previous.task.cancel()
-            previous.status = RunStatus.error if action == "rollback" else RunStatus.interrupted
-            previous.error = "Rolled back by user" if action == "rollback" else "Cancelled by newer run"
-            previous.updated_at = updated_at
+        run_id = candidate.actionable_predecessor_run_id
+        if run_id is None:
+            return
+        previous = self._runs.get(run_id)
+        if previous is None or previous.finalizing:
+            return
+        previous.abort_action = action
+        previous.abort_event.set()
+        task_active = previous.task is not None and not previous.task.done()
+        previous.finalizing = task_active
+        if task_active:
+            previous.task.cancel()
+        previous.status = RunStatus.error if action == "rollback" else RunStatus.interrupted
+        previous.error = "Rolled back by user" if action == "rollback" else "Cancelled by newer run"
+        previous.updated_at = updated_at
 
     def _known_candidate_for_record(
         self,
@@ -627,6 +692,17 @@ class RunManager:
             return False
         if row is None:
             return not candidate.commit_proven
+        if candidate.run_id in self._quarantined_post_commit_obligations:
+            if not self._unresolved_candidate_matches(candidate, row):
+                return False
+            if row.get("status") in (
+                RunStatus.pending.value,
+                RunStatus.running.value,
+            ):
+                return False
+            async with self._lock:
+                self._sync_compensated_candidate_locked(candidate, row)
+            return True
         if not self._unresolved_candidate_matches(candidate, row):
             if candidate.run_id not in self._reported_unresolved_integrity:
                 self._reported_unresolved_integrity.add(candidate.run_id)
@@ -734,23 +810,150 @@ class RunManager:
                 self._sync_compensated_candidate_locked(candidate, terminal)
         return completed
 
-    async def _reconcile_unresolved_admissions(self) -> None:
-        """Retry ambiguous candidate compensation with capped deterministic backoff."""
+    async def _resolve_unresolved_thread_operation_release(
+        self,
+        obligation: _UnresolvedThreadOperationRelease,
+    ) -> bool:
+        """Prove the exact auxiliary row released, absent, or inactive."""
 
-        stalled_rounds = 0
+        store = self._store
+        if store is None:
+            async with self._lock:
+                record = self._runs.get(obligation.run_id)
+                if record is not None:
+                    self._runs.pop(obligation.run_id, None)
+                    self._unindex_run_locked(
+                        obligation.run_id,
+                        record.thread_id,
+                    )
+            return True
+        if obligation.run_id in self._quarantined_post_commit_obligations:
+            try:
+                row = await store.get(
+                    obligation.run_id,
+                    user_id=obligation.user_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return False
+            if row is None:
+                return True
+            if row.get("thread_id") != obligation.thread_id or row.get("operation_kind", "run") != obligation.operation_kind.value or row.get("user_id") != obligation.user_id or row.get("status") in {"pending", "running"}:
+                return False
+            async with self._lock:
+                record = self._runs.pop(obligation.run_id, None)
+                if record is not None:
+                    self._unindex_run_locked(record.run_id, record.thread_id)
+            return True
         try:
-            while self._unresolved_admissions:
+            result = await store.release_thread_operation_owned(
+                obligation.run_id,
+                thread_id=obligation.thread_id,
+                operation_kind=obligation.operation_kind.value,
+                user_id=obligation.user_id,
+                expected_owner_worker_id=obligation.owner_worker_id,
+                require_unexpired_lease=obligation.require_unexpired_lease,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        if not isinstance(result, ThreadOperationReleaseResult) or not isinstance(
+            result.outcome,
+            ThreadOperationReleaseOutcome,
+        ):
+            if obligation.run_id not in self._reported_unresolved_integrity:
+                self._reported_unresolved_integrity.add(obligation.run_id)
+                logger.error(
+                    "Auxiliary release returned malformed evidence code=thread_operation_release_result_invalid run_id=%s",
+                    obligation.run_id,
+                )
+            return False
+        if result.outcome in {
+            ThreadOperationReleaseOutcome.released,
+            ThreadOperationReleaseOutcome.absent,
+            ThreadOperationReleaseOutcome.inactive,
+        }:
+            async with self._lock:
+                record = self._runs.get(obligation.run_id)
+                if record is not None:
+                    self._runs.pop(obligation.run_id, None)
+                    self._unindex_run_locked(
+                        obligation.run_id,
+                        record.thread_id,
+                    )
+            return True
+        if result.outcome is ThreadOperationReleaseOutcome.ownership_lost:
+            async with self._lock:
+                record = self._runs.get(obligation.run_id)
+                if record is not None:
+                    record.ownership_lost = True
+                    record.abort_event.set()
+            return False
+        if obligation.run_id not in self._reported_unresolved_integrity:
+            self._reported_unresolved_integrity.add(obligation.run_id)
+            logger.error(
+                "Auxiliary release cannot be reconciled code=thread_operation_release_integrity_failed run_id=%s outcome=%s",
+                obligation.run_id,
+                result.outcome.value,
+            )
+        return False
+
+    async def _reconcile_unresolved_admissions(self) -> None:
+        """Retry unresolved post-commit obligations with capped backoff."""
+
+        try:
+            while self._unresolved_admissions or self._unresolved_thread_operation_releases:
                 observed_generation = self._admission_compensation_generation
-                progressed = False
+                loop = asyncio.get_running_loop()
+                now = loop.time()
                 for run_id, candidate in tuple(self._unresolved_admissions.items()):
+                    retry_key = ("admission", run_id)
+                    if self._post_commit_retry_not_before.get(retry_key, 0) > now:
+                        continue
                     if await self._resolve_unresolved_admission(candidate):
                         if self._unresolved_admissions.get(run_id) is candidate:
                             self._unresolved_admissions.pop(run_id, None)
                             self._reported_unresolved_integrity.discard(run_id)
-                            progressed = True
-                if self._unresolved_admissions:
-                    stalled_rounds = 0 if progressed else stalled_rounds + 1
-                    delay = _admission_compensation_retry_delay(max(1, stalled_rounds))
+                            self._quarantined_post_commit_obligations.discard(run_id)
+                            self._post_commit_retry_rounds.pop(retry_key, None)
+                            self._post_commit_retry_not_before.pop(retry_key, None)
+                    else:
+                        stalled_rounds = self._post_commit_retry_rounds.get(retry_key, 0) + 1
+                        self._post_commit_retry_rounds[retry_key] = stalled_rounds
+                        self._post_commit_retry_not_before[retry_key] = now + _admission_compensation_retry_delay(stalled_rounds)
+                for run_id, obligation in tuple(self._unresolved_thread_operation_releases.items()):
+                    retry_key = ("thread_operation_release", run_id)
+                    if self._post_commit_retry_not_before.get(retry_key, 0) > now:
+                        continue
+                    if await self._resolve_unresolved_thread_operation_release(
+                        obligation,
+                    ):
+                        if self._unresolved_thread_operation_releases.get(run_id) is obligation:
+                            self._unresolved_thread_operation_releases.pop(
+                                run_id,
+                                None,
+                            )
+                            self._reported_unresolved_integrity.discard(run_id)
+                            self._quarantined_post_commit_obligations.discard(run_id)
+                            self._post_commit_retry_rounds.pop(retry_key, None)
+                            self._post_commit_retry_not_before.pop(retry_key, None)
+                    else:
+                        stalled_rounds = self._post_commit_retry_rounds.get(retry_key, 0) + 1
+                        self._post_commit_retry_rounds[retry_key] = stalled_rounds
+                        self._post_commit_retry_not_before[retry_key] = now + _admission_compensation_retry_delay(stalled_rounds)
+                if self._unresolved_admissions or self._unresolved_thread_operation_releases:
+                    active_retry_keys = {
+                        *(("admission", run_id) for run_id in self._unresolved_admissions),
+                        *(("thread_operation_release", run_id) for run_id in self._unresolved_thread_operation_releases),
+                    }
+                    for retry_key in tuple(self._post_commit_retry_rounds):
+                        if retry_key not in active_retry_keys:
+                            self._post_commit_retry_rounds.pop(retry_key, None)
+                            self._post_commit_retry_not_before.pop(retry_key, None)
+                    deadlines = [self._post_commit_retry_not_before.get(retry_key, loop.time()) for retry_key in active_retry_keys]
+                    delay = max(0, min(deadlines) - loop.time())
                     if observed_generation == self._admission_compensation_generation:
                         self._admission_compensation_wakeup.clear()
                         if observed_generation == self._admission_compensation_generation:
@@ -766,22 +969,34 @@ class RunManager:
                 self._admission_compensation_task = None
 
     async def drain_admission_compensations(self, *, timeout: float) -> bool:
-        """Boundedly wait for every unresolved candidate to become terminal."""
+        """Boundedly wait for every unresolved post-commit obligation."""
 
         if timeout < 0:
             raise ValueError("admission compensation timeout must be non-negative")
-        if not self._unresolved_admissions:
+        if self.admission_compensations_ready():
             return True
         task = self._admission_compensation_task
         if task is None or task.done():
-            self._register_unresolved_admission(next(iter(self._unresolved_admissions.values())))
+            if self._unresolved_admissions:
+                self._register_unresolved_admission(
+                    next(iter(self._unresolved_admissions.values())),
+                )
+            elif self._unresolved_thread_operation_releases:
+                self._register_unresolved_thread_operation_release(
+                    next(iter(self._unresolved_thread_operation_releases.values())),
+                )
+            else:
+                # Quarantine without its owning obligation is itself an
+                # integrity failure. Keep readiness closed without guessing
+                # which durable row may be safe to mutate.
+                return False
             task = self._admission_compensation_task
         if task is None:
-            return not self._unresolved_admissions
+            return self.admission_compensations_ready()
         done, _ = await asyncio.wait((task,), timeout=timeout)
         if done:
             task.result()
-        return not self._unresolved_admissions
+        return self.admission_compensations_ready()
 
     async def _persist_snapshot_to_store(self, run_id: str, payload: dict[str, Any]) -> bool:
         """Best-effort persist a previously captured run snapshot."""
@@ -2549,6 +2764,53 @@ class RunManager:
                 cancellation.requested = True
         return decision.result()
 
+    def _thread_operation_release_obligation(
+        self,
+        record: RunRecord,
+    ) -> _UnresolvedThreadOperationRelease:
+        """Capture every identity and ownership fence for one auxiliary row."""
+
+        return _UnresolvedThreadOperationRelease(
+            run_id=record.run_id,
+            thread_id=record.thread_id,
+            operation_kind=record.operation_kind,
+            user_id=record.user_id,
+            owner_worker_id=record.owner_worker_id or self._worker_id,
+            require_unexpired_lease=self.heartbeat_enabled,
+        )
+
+    async def _release_thread_operation_or_supervise(
+        self,
+        record: RunRecord,
+    ) -> bool:
+        """Release an auxiliary row or transfer it to the shared compensator."""
+
+        obligation = self._thread_operation_release_obligation(record)
+        existing = self._unresolved_thread_operation_releases.get(record.run_id)
+        if existing is not None and existing != obligation:
+            self._register_unresolved_thread_operation_release(obligation)
+            return False
+        # Retain ownership synchronously before the first fallible await.  The
+        # direct attempt keeps ordinary cleanup fast; any cancellation or
+        # uncertainty starts the same supervisor used by ambiguous admission.
+        self._unresolved_thread_operation_releases[record.run_id] = obligation
+        try:
+            resolved = await self._resolve_unresolved_thread_operation_release(
+                obligation,
+            )
+        except asyncio.CancelledError:
+            self._register_unresolved_thread_operation_release(obligation)
+            raise
+        if resolved:
+            if self._unresolved_thread_operation_releases.get(record.run_id) is obligation:
+                self._unresolved_thread_operation_releases.pop(
+                    record.run_id,
+                    None,
+                )
+            return True
+        self._register_unresolved_thread_operation_release(obligation)
+        return False
+
     async def _close_cancelled_admission(
         self,
         record: RunRecord,
@@ -2558,28 +2820,7 @@ class RunManager:
     ) -> bool:
         """Terminalize an unseen run or release an unseen reservation."""
         if record.operation_kind != ThreadOperationKind.run:
-            try:
-                if self._store is not None:
-                    await self._call_store_with_retry(
-                        "release cancelled thread operation",
-                        record.run_id,
-                        lambda: self._store.delete_thread_operation(
-                            record.run_id,
-                            user_id=record.user_id,
-                        ),
-                    )
-                    stored = await self._call_store_with_retry(
-                        "verify cancelled thread operation release",
-                        record.run_id,
-                        lambda: self._store.get(record.run_id, user_id=record.user_id),
-                    )
-                    if stored is not None:
-                        raise RuntimeError("cancelled thread operation remains active")
-            finally:
-                async with self._lock:
-                    if self._runs.get(record.run_id) is record:
-                        self._runs.pop(record.run_id, None)
-                        self._unindex_run_locked(record.run_id, record.thread_id)
+            await self._release_thread_operation_or_supervise(record)
             return True
 
         async with self._lock:
@@ -2764,6 +3005,16 @@ class RunManager:
             #    store's partial unique index below).
             local_inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing]
 
+            actionable_predecessors = [current for current in local_inflight if current.operation_kind == ThreadOperationKind.run and not current.finalizing]
+            if multitask_strategy in ("interrupt", "rollback") and len(actionable_predecessors) > 1:
+                # The durable active-thread uniqueness constraint permits one
+                # active normal run. Seeing more locally is an integrity
+                # failure, and must be rejected before an atomic store call can
+                # commit a replacement whose process-local predecessor fence
+                # would be ambiguous.
+                raise RunStartupError("multiple actionable replacement predecessors")
+            actionable_predecessor_run_id = actionable_predecessors[0].run_id if actionable_predecessors else None
+
             if multitask_strategy in ("interrupt", "rollback") and any(record.operation_kind != ThreadOperationKind.run for record in local_inflight):
                 raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
 
@@ -2804,7 +3055,7 @@ class RunManager:
                     caller_intent_digest=(caller_intent_digest if keyed else None),
                     caller_intent_digest_version=(caller_intent_digest_version if keyed else None),
                     replacement_action=(multitask_strategy if multitask_strategy in ("interrupt", "rollback") else None),
-                    predecessor_run_ids=tuple(previous.run_id for previous in local_inflight),
+                    actionable_predecessor_run_id=actionable_predecessor_run_id,
                     terminal_disposition=(_AdmissionTerminalDisposition.cancelled if admission_cancellation.requested else _AdmissionTerminalDisposition.worker_attachment_failed),
                     cancellation_action=("interrupt" if admission_cancellation.requested else None),
                 )
@@ -2852,43 +3103,22 @@ class RunManager:
                         )
                         raise AcceptedEvidenceIntegrityError() from None
 
+                    unresolved = replace(unresolved, commit_proven=True)
                     # The exact candidate proves that this attempt's atomic
                     # replacement committed. Fence locally executing
-                    # predecessors before any further store read can fail;
-                    # their durable terminal transitions were part of that
-                    # same transaction.
+                    # predecessor. Historical finalizers were fenced by prior
+                    # replacements, and their durable terminal transitions
+                    # were part of those transactions. Re-reading them here
+                    # would make creator ownership depend on unrelated cleanup
+                    # history after this candidate is already authoritative.
                     self._fence_replacement_predecessors_locked(unresolved)
 
-                    claimed: list[dict[str, Any]] = []
-                    try:
-                        for previous in local_inflight:
-                            previous_row = await self._call_store_with_retry(
-                                "reconcile replaced admission",
-                                previous.run_id,
-                                lambda previous_id=previous.run_id, previous_user=previous.user_id: self._store.get(
-                                    previous_id,
-                                    user_id=previous_user,
-                                ),
-                            )
-                            if previous_row is not None:
-                                claimed.append(previous_row)
-                                if self._store.durable_lifecycle:
-                                    self._sync_record_from_store_row(
-                                        previous,
-                                        previous_row,
-                                    )
-                    except Exception:
-                        self._register_unresolved_admission(
-                            unresolved_for_current_request(),
-                        )
-                        raise error from None
                     if keyed:
                         return RunEnsureResult(
                             outcome=AdmissionOutcome.created,
                             row=candidate,
-                            claimed=tuple(claimed),
                         )
-                    return candidate, tuple(claimed)
+                    return candidate, ()
 
                 if keyed and external_scope is not None and external_key is not None:
                     try:
@@ -3145,25 +3375,7 @@ class RunManager:
                 raise ConflictError(f"Thread {thread_id} reservation lease was lost") from None
             raise
         finally:
-            try:
-                if self._store is not None:
-                    try:
-                        await self._call_store_with_retry(
-                            "release thread operation",
-                            record.run_id,
-                            lambda: self._store.delete_thread_operation(record.run_id, user_id=record.user_id),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Failed to release persisted thread operation %s; leaving it for orphan reconciliation",
-                            record.run_id,
-                            exc_info=True,
-                        )
-            finally:
-                async with self._lock:
-                    removed = self._runs.pop(record.run_id, None)
-                    if removed is not None:
-                        self._unindex_run_locked(record.run_id, removed.thread_id)
+            await self._release_thread_operation_or_supervise(record)
 
     async def reconcile_orphaned_inflight_runs(
         self,
@@ -3201,6 +3413,7 @@ class RunManager:
             return []
 
         recovered: list[RunRecord] = []
+        claimed_any = False
         now = _now_iso()
         for row in rows:
             try:
@@ -3250,6 +3463,7 @@ class RunManager:
                     record.run_id,
                 )
                 continue
+            claimed_any = True
             record.status = RunStatus.error
             record.error = error
             record.stop_reason = effective_stop_reason
@@ -3269,7 +3483,11 @@ class RunManager:
 
         if recovered:
             logger.warning("Recovered %d orphaned inflight run(s) as error", len(recovered))
-            self._wake_admission_compensator()
+        if claimed_any:
+            # Auxiliary release obligations resolve against the now-inactive
+            # row even though auxiliary reservations deliberately emit no
+            # invocation lifecycle event and are absent from ``recovered``.
+            self._wake_admission_compensator(reset_backoff=True)
         return recovered
 
     async def has_inflight(self, thread_id: str) -> bool:
@@ -3692,7 +3910,13 @@ class RunManager:
 
         async with self._lock:
             unattached = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is None and record.attachment_supervised]
-            inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
+            inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and not record.finalizing and record.task is not None and not record.task.done()]
+            # Terminal-status tasks may still be flushing checkpoints, memory,
+            # journals, or delivery evidence. ``finalizing`` is set before the
+            # corresponding terminal store write, so it also owns quiescence
+            # while local status is still pending/running. Neither form may be
+            # cancelled or terminalized again.
+            finalizers = [record for record in self._runs.values() if (record.finalizing or record.status not in (RunStatus.pending, RunStatus.running)) and record.task is not None and not record.task.done()]
             for record in inflight:
                 record.abort_action = "interrupt"
                 record.abort_event.set()
@@ -3729,11 +3953,12 @@ class RunManager:
 
         await self.stop_heartbeat(timeout=max(0.0, deadline - loop.time()))
 
-        if not inflight:
+        if not inflight and not finalizers:
             await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
             return attachment_complete and await finish_compensation_drain()
 
-        tasks = [record.task for record in inflight]
+        task_records = (*inflight, *finalizers)
+        tasks = [record.task for record in task_records]
         _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
 
         # Only mark/persist ``interrupted`` for runs that did not settle on their
@@ -3789,7 +4014,12 @@ class RunManager:
 
         if pending:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
-        logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
+        logger.info(
+            "Drained %d run task(s) on shutdown (%d settled within %.1fs)",
+            len(task_records),
+            len(task_records) - len(pending),
+            timeout,
+        )
         await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
         compensation_complete = await finish_compensation_drain()
         return not pending and persistence_complete and attachment_complete and compensation_complete

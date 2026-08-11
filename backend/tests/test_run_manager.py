@@ -115,8 +115,17 @@ class AlwaysMissingCompletionRunStore(MemoryRunStore):
 class FailingDeleteRunStore(MemoryRunStore):
     """Run store that cannot release a persisted thread-operation row."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_available = False
+
     async def delete(self, run_id, *, user_id=None):
         raise RuntimeError("delete failed")
+
+    async def release_thread_operation_owned(self, *args, **kwargs):
+        if not self.release_available:
+            raise RuntimeError("release failed")
+        return await super().release_thread_operation_owned(*args, **kwargs)
 
 
 class LostLeaseRunStore(MemoryRunStore):
@@ -468,7 +477,7 @@ async def test_unresolved_candidate_registration_only_refines_identity_and_termi
         caller_intent_digest="a" * 64,
         caller_intent_digest_version="intent-v1",
         replacement_action="rollback",
-        predecessor_run_ids=("predecessor-1",),
+        actionable_predecessor_run_id="predecessor-1",
     )
     refined = _UnresolvedAdmissionCandidate(
         run_id=poor.run_id,
@@ -479,7 +488,7 @@ async def test_unresolved_candidate_registration_only_refines_identity_and_termi
         external_key=poor.external_key,
         caller_intent_digest=poor.caller_intent_digest,
         caller_intent_digest_version=poor.caller_intent_digest_version,
-        predecessor_run_ids=("predecessor-2",),
+        actionable_predecessor_run_id="predecessor-1",
         commit_proven=True,
         terminal_disposition=_AdmissionTerminalDisposition.cancelled,
         cancellation_action="interrupt",
@@ -491,15 +500,15 @@ async def test_unresolved_candidate_registration_only_refines_identity_and_termi
     retained = manager._unresolved_admissions[poor.run_id]
     assert retained.commit_proven is True
     assert retained.replacement_action == "rollback"
-    assert retained.predecessor_run_ids == ("predecessor-1", "predecessor-2")
+    assert retained.actionable_predecessor_run_id == "predecessor-1"
     assert retained.terminal_disposition is _AdmissionTerminalDisposition.cancelled
     assert retained.cancellation_action == "interrupt"
 
     contradictory = replace(refined, thread_id="another-thread")
-    with pytest.raises(RunStartupError, match="identity conflict"):
-        manager._register_unresolved_admission(contradictory)
+    manager._register_unresolved_admission(contradictory)
     assert manager.admission_compensations_ready() is False
     assert manager._unresolved_admissions[poor.run_id] == retained
+    assert poor.run_id in manager._quarantined_post_commit_obligations
 
     task = manager._admission_compensation_task
     assert task is not None
@@ -555,14 +564,14 @@ async def test_unresolved_candidate_refinement_wakes_a_sleeping_compensator(
 
 
 @pytest.mark.anyio
-async def test_reservation_delete_failure_preserves_body_error_and_clears_local_record(caplog):
+async def test_reservation_release_failure_preserves_body_error_and_supervises_row():
     store = FailingDeleteRunStore()
     manager = RunManager(
         store=store,
         persistence_retry_policy=PersistenceRetryPolicy(max_attempts=1, initial_delay=0),
     )
 
-    with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match="body failed"):
+    with pytest.raises(ValueError, match="body failed"):
         async with manager.reserve_thread_operation(
             "thread-1",
             kind=ThreadOperationKind.checkpoint_write,
@@ -570,10 +579,16 @@ async def test_reservation_delete_failure_preserves_body_error_and_clears_local_
             raise ValueError("body failed")
 
     assert not await manager.has_inflight("thread-1")
+    assert len(manager._runs) == 1
+    assert manager._runs_by_thread
+    assert len(await store.list_inflight()) == 1
+    assert manager.admission_compensations_ready() is False
+
+    store.release_available = True
+    assert await manager.drain_admission_compensations(timeout=1) is True
     assert manager._runs == {}
     assert manager._runs_by_thread == {}
-    assert len(await store.list_inflight()) == 1
-    assert "leaving it for orphan reconciliation" in caplog.text
+    assert await store.list_inflight() == []
 
 
 @pytest.mark.anyio
@@ -2074,7 +2089,7 @@ async def test_unresolved_candidate_is_terminalized_after_store_recovery() -> No
 @pytest.mark.anyio
 @pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
 @pytest.mark.parametrize("keyed", [False, True])
-async def test_response_lost_replacement_remains_compensated_when_predecessor_read_fails(
+async def test_response_lost_replacement_ignores_unrelated_predecessor_read_failure(
     strategy: str,
     keyed: bool,
 ) -> None:
@@ -2092,46 +2107,44 @@ async def test_response_lost_replacement_remains_compensated_when_predecessor_re
     store.lose_ensure_response = keyed
     store.lose_create_response = not keyed
 
-    with pytest.raises(OSError, match="response lost after durable commit"):
-        if keyed:
-            await manager.ensure_or_reject(
-                "thread-replacement-response-loss",
-                candidate_run_id=candidate_run_id,
-                external_scope="scope-1",
-                external_key="delivery-1",
-                request_digest="a" * 64,
-                request_digest_version="request-v1",
-                caller_intent_json={"message": "replacement"},
-                caller_intent_digest="b" * 64,
-                caller_intent_digest_version="intent-v1",
-                multitask_strategy=strategy,
-            )
-        else:
-            await manager.create_or_reject(
-                "thread-replacement-response-loss",
-                candidate_run_id=candidate_run_id,
-                multitask_strategy=strategy,
-            )
+    if keyed:
+        admission = await manager.ensure_or_reject(
+            "thread-replacement-response-loss",
+            candidate_run_id=candidate_run_id,
+            external_scope="scope-1",
+            external_key="delivery-1",
+            request_digest="a" * 64,
+            request_digest_version="request-v1",
+            caller_intent_json={"message": "replacement"},
+            caller_intent_digest="b" * 64,
+            caller_intent_digest_version="intent-v1",
+            multitask_strategy=strategy,
+        )
+        candidate = admission.record
+    else:
+        candidate = await manager.create_or_reject(
+            "thread-replacement-response-loss",
+            candidate_run_id=candidate_run_id,
+            multitask_strategy=strategy,
+        )
 
-    assert manager.admission_compensations_ready() is False
-    assert candidate_run_id not in manager._runs
+    assert manager.admission_compensations_ready() is True
+    assert manager._runs[candidate_run_id] is candidate
+    assert store.fail_predecessor_read is True
     await asyncio.sleep(0)
     assert predecessor.abort_event.is_set()
     assert predecessor_task.cancelled()
     assert predecessor.status is (RunStatus.error if strategy == "rollback" else RunStatus.interrupted)
-    store.candidate_reads_available = True
-    assert await manager.drain_admission_compensations(timeout=1) is True
 
     retained = await store.get(candidate_run_id)
     assert retained is not None
-    assert retained["status"] == RunStatus.error.value
-    assert retained["stop_reason"] == "worker_attachment_failed"
+    assert retained["status"] == RunStatus.pending.value
     events = await store.list_lifecycle_events(run_id=candidate_run_id)
-    assert [event["lifecycle_type"].value for event in events] == [
-        "accepted",
-        "failed",
-    ]
-    retained_predecessor = await store.get(predecessor.run_id)
+    assert [event["lifecycle_type"].value for event in events] == ["accepted"]
+    retained_predecessor = await MemoryRunStore.get(
+        store,
+        predecessor.run_id,
+    )
     assert retained_predecessor is not None
     assert retained_predecessor["status"] == (RunStatus.error.value if strategy == "rollback" else RunStatus.interrupted.value)
 

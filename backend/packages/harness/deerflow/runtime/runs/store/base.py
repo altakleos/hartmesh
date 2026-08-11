@@ -77,6 +77,24 @@ class AdmissionOutcome(StrEnum):
     key_conflict = "key_conflict"
 
 
+class ThreadOperationReleaseOutcome(StrEnum):
+    """Finite result of an exact, owner-fenced auxiliary release."""
+
+    released = "released"
+    absent = "absent"
+    inactive = "inactive"
+    ownership_lost = "ownership_lost"
+    identity_mismatch = "identity_mismatch"
+    unsupported = "unsupported"
+
+
+@dataclass(frozen=True)
+class ThreadOperationReleaseResult:
+    """Result of releasing one non-invocation thread reservation."""
+
+    outcome: ThreadOperationReleaseOutcome
+
+
 class LifecycleType(StrEnum):
     """The complete v1 authoritative invocation lifecycle vocabulary."""
 
@@ -559,6 +577,36 @@ class RunStore(abc.ABC):
         cleanup never depends on ambient request context.
         """
         await self.delete(run_id)
+
+    async def release_thread_operation_owned(
+        self,
+        run_id: str,
+        *,
+        thread_id: str,
+        operation_kind: str,
+        user_id: str | None,
+        expected_owner_worker_id: str,
+        require_unexpired_lease: bool,
+    ) -> ThreadOperationReleaseResult:
+        """Release one exact auxiliary reservation without a legacy delete fallback.
+
+        Stores that cannot enforce every supplied identity and ownership fence fail
+        closed with ``unsupported``.  In particular, this default never delegates to
+        :meth:`delete_thread_operation`, whose legacy contract is too weak for
+        post-commit compensation.
+        """
+
+        del (
+            run_id,
+            thread_id,
+            operation_kind,
+            user_id,
+            expected_owner_worker_id,
+            require_unexpired_lease,
+        )
+        return ThreadOperationReleaseResult(
+            outcome=ThreadOperationReleaseOutcome.unsupported,
+        )
 
     @abc.abstractmethod
     async def update_model_name(
