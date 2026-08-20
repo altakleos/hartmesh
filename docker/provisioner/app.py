@@ -68,6 +68,7 @@ SANDBOX_IMAGE = os.environ.get(
     "SANDBOX_IMAGE",
     "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest",
 )
+SANDBOX_RUNTIME_CLASS = os.environ.get("SANDBOX_RUNTIME_CLASS", "").strip()
 # Optional "lark-cli init" image (Pattern A). When set, sandbox Pods get an init
 # container + shared emptyDir that provisions the lark-cli runtime binary, instead
 # of a hostPath/PVC runtime mount fed by a Gateway-side GitHub download. Empty ⇒
@@ -462,6 +463,10 @@ def _ensure_namespace() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global authentication_v1, coordination_v1, core_v1, networking_v1
+    logger.info(
+        "Sandbox runtime class: %s",
+        SANDBOX_RUNTIME_CLASS or "default runtime",
+    )
     _wait_for_kubeconfig()
     core_v1 = _init_k8s_client()
     networking_v1 = k8s_client.NetworkingV1Api(core_v1.api_client)
@@ -1115,6 +1120,21 @@ def _require_accepted_projection_runtime() -> None:
         )
 
 
+def _restricted_container_security_context(
+    *,
+    read_only_root_filesystem: bool | None = None,
+) -> k8s_client.V1SecurityContext:
+    """Return the baseline security profile for every sandbox Pod container."""
+
+    return k8s_client.V1SecurityContext(
+        privileged=False,
+        allow_privilege_escalation=False,
+        read_only_root_filesystem=read_only_root_filesystem,
+        capabilities=k8s_client.V1Capabilities(drop=["ALL"]),
+        seccomp_profile=k8s_client.V1SeccompProfile(type="RuntimeDefault"),
+    )
+
+
 def _accepted_skill_volumes(
     sandbox_id: str,
     thread_id: str,
@@ -1245,11 +1265,8 @@ def _accepted_verifier_container(
                 read_only=False,
             ),
         ],
-        security_context=k8s_client.V1SecurityContext(
-            privileged=False,
-            allow_privilege_escalation=False,
+        security_context=_restricted_container_security_context(
             read_only_root_filesystem=True,
-            capabilities=k8s_client.V1Capabilities(drop=["ALL"]),
         ),
     )
 
@@ -1299,11 +1316,8 @@ def _accepted_gate_container() -> k8s_client.V1Container:
                 read_only=True,
             ),
         ],
-        security_context=k8s_client.V1SecurityContext(
-            privileged=False,
-            allow_privilege_escalation=False,
+        security_context=_restricted_container_security_context(
             read_only_root_filesystem=True,
-            capabilities=k8s_client.V1Capabilities(drop=["ALL"]),
         ),
     )
 
@@ -1599,7 +1613,7 @@ def _build_lark_cli_init_containers(
         mount_path=LARK_CLI_RUNTIME_CONTAINER_PATH,
         read_only=False,
     )
-    secure = k8s_client.V1SecurityContext(privileged=False, allow_privilege_escalation=False)
+    secure = _restricted_container_security_context()
     if _lark_cli_broker_enabled(provision_lark_cli_broker):
         return [
             k8s_client.V1Container(
@@ -1683,10 +1697,7 @@ def _build_lark_cli_broker_sidecars(
             args=["serve"],
             env=broker_env,
             volume_mounts=volume_mounts,
-            security_context=k8s_client.V1SecurityContext(
-                privileged=False,
-                allow_privilege_escalation=False,
-            ),
+            security_context=_restricted_container_security_context(),
         )
     ]
 
@@ -2066,11 +2077,7 @@ def _build_pod(
                         },
                     ),
                     volume_mounts=sandbox_mounts,
-                    security_context=k8s_client.V1SecurityContext(
-                        privileged=False,
-                        allow_privilege_escalation=not accepted_skills_only,
-                        capabilities=(k8s_client.V1Capabilities(drop=["ALL"]) if accepted_skills_only else None),
-                    ),
+                    security_context=_restricted_container_security_context(),
                 ),
                 *([_accepted_gate_container()] if accepted_material else []),
                 *_build_lark_cli_broker_sidecars(provision_lark_cli_broker, extra_mounts),
@@ -2106,6 +2113,7 @@ def _build_pod(
             automount_service_account_token=False,
             dns_policy="ClusterFirst",
             restart_policy="Always",
+            runtime_class_name=SANDBOX_RUNTIME_CLASS or None,
         ),
     )
     if accepted_material:
@@ -3152,13 +3160,14 @@ def create_sandbox(req: CreateSandboxRequest):
     accepted = accepted_projection is not None
 
     logger.info(
-        "Received request to create sandbox '%s' for thread '%s' user '%s' include_legacy_skills=%s provision_lark_cli_runtime=%s provision_lark_cli_broker=%s",
+        "Received request to create sandbox '%s' for thread '%s' user '%s' include_legacy_skills=%s provision_lark_cli_runtime=%s provision_lark_cli_broker=%s runtime_class=%s",
         sandbox_id,
         thread_id,
         user_id,
         include_legacy_skills,
         _lark_cli_runtime_enabled(provision_lark_cli_runtime),
         _lark_cli_broker_enabled(provision_lark_cli_broker),
+        SANDBOX_RUNTIME_CLASS or "default runtime",
     )
 
     # ── Fast path: sandbox already exists ────────────────────────────

@@ -55,6 +55,8 @@ spec:
               value: {{ include "deer-flow.serviceAccountName" . | quote }}
             - name: SANDBOX_IMAGE
               value: {{ .Values.provisioner.sandboxImage | quote }}
+            - name: SANDBOX_RUNTIME_CLASS
+              value: {{ .Values.sandbox.runtimeClassName | default "" | quote }}
             # In-cluster API access via the mounted ServiceAccount token.
             # K8S_API_SERVER is intentionally unset (do NOT use host.docker.internal).
             # Service type for per-sandbox Services. ClusterIP (default) routes the

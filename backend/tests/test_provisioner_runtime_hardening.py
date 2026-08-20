@@ -1,0 +1,239 @@
+"""Pod runtime and restricted-profile contracts for the K8s provisioner."""
+
+from __future__ import annotations
+
+import logging
+
+import pytest
+import yaml
+
+
+def _accepted_projection(provisioner_module):
+    return provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
+        snapshot_id="a" * 64,
+        content_digest="a" * 64,
+        run_id="run-1",
+        generation=1,
+        projections=[
+            {
+                "name": "example",
+                "category": "public",
+                "relative_path": "example",
+                "manifest_digest": "b" * 64,
+                "content_digest": "c" * 64,
+                "file_count": 1,
+                "total_bytes": 1,
+            }
+        ],
+        file_count=1,
+        total_bytes=1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("runtime_class", "expected"),
+    [("", None), ("gvisor", "gvisor")],
+    ids=["cluster-default", "configured-runtime-class"],
+)
+def test_sandbox_pod_runtime_class_follows_configuration(
+    provisioner_module,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_class: str,
+    expected: str | None,
+) -> None:
+    monkeypatch.setattr(
+        provisioner_module,
+        "SANDBOX_RUNTIME_CLASS",
+        runtime_class,
+        raising=False,
+    )
+
+    pod = provisioner_module._build_pod("runtime-class", "thread-1")
+
+    assert pod.spec.runtime_class_name == expected
+    manifest = provisioner_module.k8s_client.ApiClient().sanitize_for_serialization(
+        pod,
+    )
+    if expected is None:
+        assert "runtimeClassName" not in manifest["spec"]
+    else:
+        assert manifest["spec"]["runtimeClassName"] == expected
+
+
+@pytest.mark.parametrize(
+    ("runtime_class", "expected_label"),
+    [("", "default runtime"), ("gvisor", "gvisor")],
+    ids=["cluster-default", "gvisor"],
+)
+def test_sandbox_create_log_records_effective_runtime_class(
+    provisioner_module,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    runtime_class: str,
+    expected_label: str,
+) -> None:
+    monkeypatch.setattr(provisioner_module, "SANDBOX_RUNTIME_CLASS", runtime_class)
+    monkeypatch.setattr(
+        provisioner_module,
+        "_sandbox_access_url",
+        lambda *_args, **_kwargs: "http://sandbox.example",
+    )
+    monkeypatch.setattr(provisioner_module, "_get_pod_phase", lambda _sandbox_id: "Running")
+    caplog.set_level(logging.INFO, logger=provisioner_module.__name__)
+
+    provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="audit-log",
+            thread_id="thread-1",
+        )
+    )
+
+    assert f"runtime_class={expected_label}" in caplog.text
+
+
+def test_default_sandbox_container_uses_restricted_security_context(
+    provisioner_module,
+) -> None:
+    pod = provisioner_module._build_pod("restricted", "thread-1")
+
+    security = pod.spec.containers[0].security_context
+    assert security.allow_privilege_escalation is False
+    assert security.capabilities.drop == ["ALL"]
+    assert security.capabilities.add is None
+    assert security.seccomp_profile.type == "RuntimeDefault"
+    assert security.run_as_non_root is None
+    assert security.run_as_user is None
+
+
+def test_every_container_in_an_initialized_sandbox_is_hardened(
+    provisioner_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provisioner_module, "USERDATA_PVC_NAME", "home-rwx")
+    monkeypatch.setattr(
+        provisioner_module,
+        "ACCEPTED_SKILL_PROJECTION_PROFILE",
+        "rwx_verified_copy_v2",
+    )
+    monkeypatch.setattr(
+        provisioner_module,
+        "ACCEPTED_SKILL_RUNTIME_IMAGE",
+        "registry.example/provisioner@sha256:" + ("d" * 64),
+    )
+    monkeypatch.setattr(
+        provisioner_module,
+        "SANDBOX_IMAGE",
+        "registry.example/sandbox@sha256:" + ("e" * 64),
+    )
+    monkeypatch.setattr(
+        provisioner_module,
+        "LARK_CLI_BROKER_IMAGE",
+        "registry.example/lark-broker:v1",
+    )
+
+    pod = provisioner_module._build_pod(
+        "initialized",
+        "thread-1",
+        accepted_skill_projection=_accepted_projection(provisioner_module),
+        attempt_capability="A" * 43,
+        provision_lark_cli_broker=True,
+    )
+
+    containers = [*pod.spec.containers, *pod.spec.init_containers]
+    assert {container.name for container in containers} == {
+        "sandbox",
+        "accepted-skill-gate",
+        "lark-cli-broker",
+        "accepted-skill-verifier",
+        "lark-cli-shim-init",
+    }
+    for container in containers:
+        security = container.security_context
+        assert security.allow_privilege_escalation is False, container.name
+        assert security.capabilities.drop == ["ALL"], container.name
+        assert security.capabilities.add is None, container.name
+        assert security.seccomp_profile.type == "RuntimeDefault", container.name
+        assert security.run_as_non_root is None, container.name
+        assert security.run_as_user is None, container.name
+
+
+def test_rendered_sandbox_pod_satisfies_restricted_except_run_as_non_root(
+    provisioner_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provisioner_module, "SKILLS_PVC_NAME", "skills-rwx")
+    monkeypatch.setattr(provisioner_module, "USERDATA_PVC_NAME", "home-rwx")
+    monkeypatch.setattr(
+        provisioner_module,
+        "ACCEPTED_SKILL_PROJECTION_PROFILE",
+        "rwx_verified_copy_v2",
+    )
+    monkeypatch.setattr(
+        provisioner_module,
+        "ACCEPTED_SKILL_RUNTIME_IMAGE",
+        "registry.example/provisioner@sha256:" + ("d" * 64),
+    )
+    monkeypatch.setattr(
+        provisioner_module,
+        "SANDBOX_IMAGE",
+        "registry.example/sandbox@sha256:" + ("e" * 64),
+    )
+    monkeypatch.setattr(
+        provisioner_module,
+        "LARK_CLI_BROKER_IMAGE",
+        "registry.example/lark-broker:v1",
+    )
+
+    pod = provisioner_module._build_pod(
+        "restricted-sample",
+        "thread-1",
+        accepted_skill_projection=_accepted_projection(provisioner_module),
+        attempt_capability="A" * 43,
+        provision_lark_cli_broker=True,
+    )
+    manifest = provisioner_module.k8s_client.ApiClient().sanitize_for_serialization(
+        pod,
+    )
+    rendered_yaml = yaml.safe_dump(manifest, sort_keys=False)
+    rendered = yaml.safe_load(rendered_yaml)
+    spec = rendered["spec"]
+
+    assert spec["hostNetwork"] is False
+    assert spec["hostPID"] is False
+    assert spec["hostIPC"] is False
+    assert spec["shareProcessNamespace"] is False
+    assert spec["automountServiceAccountToken"] is False
+    assert "securityContext" not in spec
+    assert "sysctls" not in spec
+
+    allowed_volume_types = {
+        "configMap",
+        "csi",
+        "downwardAPI",
+        "emptyDir",
+        "ephemeral",
+        "persistentVolumeClaim",
+        "projected",
+        "secret",
+    }
+    for volume in spec["volumes"]:
+        volume_types = set(volume) - {"name"}
+        assert len(volume_types) == 1, volume["name"]
+        assert volume_types <= allowed_volume_types, volume["name"]
+        assert "hostPath" not in volume
+
+    for container in [*spec["containers"], *spec["initContainers"]]:
+        security = container["securityContext"]
+        assert security["privileged"] is False, container["name"]
+        assert security["allowPrivilegeEscalation"] is False, container["name"]
+        assert security["capabilities"] == {"drop": ["ALL"]}, container["name"]
+        assert security["seccompProfile"] == {"type": "RuntimeDefault"}, container["name"]
+        assert "runAsNonRoot" not in security, container["name"]
+        assert "runAsUser" not in security, container["name"]
+        assert "procMount" not in security, container["name"]
+        assert "seLinuxOptions" not in security, container["name"]
+        assert "appArmorProfile" not in security, container["name"]
+        assert "windowsOptions" not in security, container["name"]
+        for port in container.get("ports", []):
+            assert "hostPort" not in port, container["name"]

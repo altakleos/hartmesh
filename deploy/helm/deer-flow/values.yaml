@@ -144,6 +144,12 @@ nginx:
     loadBalancerIP: ""
     nodePort: ""
 
+# -- Runtime settings for provisioner-created sandbox Pods.
+sandbox:
+  # -- Set to `gvisor` (or another RuntimeClass) to sandbox under it; leave
+  #    empty to use the cluster default runtime.
+  runtimeClassName: ""
+
 # -- Sandbox provisioner (K8s-native code execution). Creates sandbox Pods in
 #    this namespace via a ServiceAccount + RBAC.
 provisioner:
