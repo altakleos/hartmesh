@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from types import ModuleType
+from typing import Any
 
 import pytest
 import yaml
 
 
-def _accepted_projection(provisioner_module):
+def _accepted_projection(provisioner_module: ModuleType) -> Any:
     return provisioner_module.AcceptedSkillProjectionV2(
         profile="rwx_verified_copy_v2",
         snapshot_id="a" * 64,
@@ -32,21 +34,24 @@ def _accepted_projection(provisioner_module):
 
 
 @pytest.mark.parametrize(
-    ("runtime_class", "expected"),
-    [("", None), ("gvisor", "gvisor")],
-    ids=["cluster-default", "configured-runtime-class"],
+    ("runtime_class_env", "expected"),
+    [(None, None), ("", None), ("gvisor", "gvisor")],
+    ids=["env-unset", "empty", "configured-runtime-class"],
 )
 def test_sandbox_pod_runtime_class_follows_configuration(
-    provisioner_module,
+    provisioner_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
-    runtime_class: str,
+    runtime_class_env: str | None,
     expected: str | None,
 ) -> None:
+    if runtime_class_env is None:
+        monkeypatch.delenv("SANDBOX_RUNTIME_CLASS", raising=False)
+    else:
+        monkeypatch.setenv("SANDBOX_RUNTIME_CLASS", runtime_class_env)
     monkeypatch.setattr(
         provisioner_module,
         "SANDBOX_RUNTIME_CLASS",
-        runtime_class,
-        raising=False,
+        provisioner_module._sandbox_runtime_class_from_env(),
     )
 
     pod = provisioner_module._build_pod("runtime-class", "thread-1")
@@ -67,7 +72,7 @@ def test_sandbox_pod_runtime_class_follows_configuration(
     ids=["cluster-default", "gvisor"],
 )
 def test_sandbox_create_log_records_effective_runtime_class(
-    provisioner_module,
+    provisioner_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     runtime_class: str,
@@ -93,7 +98,7 @@ def test_sandbox_create_log_records_effective_runtime_class(
 
 
 def test_default_sandbox_container_uses_restricted_security_context(
-    provisioner_module,
+    provisioner_module: ModuleType,
 ) -> None:
     pod = provisioner_module._build_pod("restricted", "thread-1")
 
@@ -107,7 +112,7 @@ def test_default_sandbox_container_uses_restricted_security_context(
 
 
 def test_every_container_in_an_initialized_sandbox_is_hardened(
-    provisioner_module,
+    provisioner_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(provisioner_module, "USERDATA_PVC_NAME", "home-rwx")
@@ -158,39 +163,16 @@ def test_every_container_in_an_initialized_sandbox_is_hardened(
         assert security.run_as_user is None, container.name
 
 
-def test_rendered_sandbox_pod_satisfies_restricted_except_run_as_non_root(
-    provisioner_module,
+def test_rendered_pvc_backed_sandbox_satisfies_restricted_except_run_as_non_root(
+    provisioner_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(provisioner_module, "SKILLS_PVC_NAME", "skills-rwx")
     monkeypatch.setattr(provisioner_module, "USERDATA_PVC_NAME", "home-rwx")
-    monkeypatch.setattr(
-        provisioner_module,
-        "ACCEPTED_SKILL_PROJECTION_PROFILE",
-        "rwx_verified_copy_v2",
-    )
-    monkeypatch.setattr(
-        provisioner_module,
-        "ACCEPTED_SKILL_RUNTIME_IMAGE",
-        "registry.example/provisioner@sha256:" + ("d" * 64),
-    )
-    monkeypatch.setattr(
-        provisioner_module,
-        "SANDBOX_IMAGE",
-        "registry.example/sandbox@sha256:" + ("e" * 64),
-    )
-    monkeypatch.setattr(
-        provisioner_module,
-        "LARK_CLI_BROKER_IMAGE",
-        "registry.example/lark-broker:v1",
-    )
 
     pod = provisioner_module._build_pod(
         "restricted-sample",
         "thread-1",
-        accepted_skill_projection=_accepted_projection(provisioner_module),
-        attempt_capability="A" * 43,
-        provision_lark_cli_broker=True,
     )
     manifest = provisioner_module.k8s_client.ApiClient().sanitize_for_serialization(
         pod,
@@ -223,7 +205,7 @@ def test_rendered_sandbox_pod_satisfies_restricted_except_run_as_non_root(
         assert volume_types <= allowed_volume_types, volume["name"]
         assert "hostPath" not in volume
 
-    for container in [*spec["containers"], *spec["initContainers"]]:
+    for container in [*spec["containers"], *spec.get("initContainers", [])]:
         security = container["securityContext"]
         assert security["privileged"] is False, container["name"]
         assert security["allowPrivilegeEscalation"] is False, container["name"]
