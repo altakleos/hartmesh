@@ -4,7 +4,7 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
-Version 0.10.0 owns the authorization contracts `Principal`, `AuthzRequest`,
+Version 0.11.0 owns the authorization contracts `Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthzReason`, and `AuthorizationProvider`. Existing host code may keep
 using `deerflow.authz.provider`; those names are compatibility re-exports of the same
 objects. It also owns the versioned Origin and run-context contributor contracts described

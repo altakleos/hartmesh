@@ -797,7 +797,7 @@ def _wire_accepted_skill_qualify_fake(
         runner,
         "_environment_facts",
         lambda _gateway: {
-            "migration_head": "0019_inbound_event_identity",
+            "migration_head": "0020_merge_mcp_task_results",
             "kubernetes_server_version": "v1.33.1",
         },
     )
@@ -933,7 +933,7 @@ def test_qualification_evidence_is_strict_complete_and_digestible(tmp_path: Path
         chart_version="2.1.0",
         chart_digest="sha256:" + ("b" * 64),
         configuration_digest="sha256:" + ("c" * 64),
-        migration_head="0019_inbound_event_identity",
+        migration_head="0020_merge_mcp_task_results",
         stores=(
             StoreContinuityEvidence(
                 component="postgres",

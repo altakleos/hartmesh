@@ -616,7 +616,7 @@ class KubernetesQualificationRunner:
         shutdown = dict(self._SHUTDOWN_PHASES)
         app_config = "\n".join(
             (
-                "config_version: 39",
+                "config_version: 40",
                 "log_level: info",
                 "models:",
                 "  - name: kubernetes-qualification",

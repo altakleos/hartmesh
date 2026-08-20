@@ -391,7 +391,7 @@ HartMesh préserve les namespaces `deerflow.*`, noms de packages, variables `DEE
 
 La comparaison produit est la plage locale fixe `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`.
 
-Lors de l’audit du 2026-08-09, le snapshot `deerflow/main` examiné séparément était `e401ae2d7b8e4fc73fc82a1143c989c54f3f4de6`, avec un commit amont uniquement au-delà de la base partagée.
+HartMesh `main` intègre l’amont `deerflow/main` jusqu’à `a5acc25de6742b2166b3f41c97bd895822277b94` (2026-08-20).
 
 Il s’agit de contexte, pas de la référence ci-dessus, et HartMesh ne revendique pas une supériorité permanente sur l’amont.
 
@@ -399,7 +399,7 @@ Ce dépôt ne documente pas encore de cadence de synchronisation HartMesh, fenê
 
 Ces hashes indiquent la provenance, pas une promesse de maintenance.
 
-Le graphe Alembic est linéaire dans ce checkout : `0011_mcp_tasks` → `0011_accepted_invocation` → migrations d’invocation jusqu’à `0019_inbound_event_identity`.
+Le graphe Alembic a une seule tête : `0011_mcp_tasks` bifurque vers les migrations HartMesh jusqu’à `0019_inbound_event_identity` et vers `0012_mcp_task_results` en amont ; `0020_merge_mcp_task_results` les réunit.
 
 Les opérateurs PostgreSQL doivent arrêter les écritures et sauvegarder avant un rollback ; consultez les migrations dans [backend/AGENTS.md](backend/AGENTS.md).
 

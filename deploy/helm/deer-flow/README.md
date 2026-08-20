@@ -165,7 +165,7 @@ they resolve from the selected Secret):
 
 ```yaml
 config: |
-  config_version: 39
+  config_version: 40
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -468,6 +468,14 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   rolling-zero-downtime policy because those controls would imply coordination
   the runtime does not yet provide. They remain deferred until a real
   multi-replica ownership and scheduler design exists.
+- **Scheduled task recovery.** If a deployment explicitly enables
+  `scheduler.multi_instance: true`, it must use shared Postgres,
+  `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`.
+  Scheduler startup then preserves live scheduled runs owned by another Pod,
+  atomically takes over only expired leases, and fences stale post-launch
+  bookkeeping. `max_concurrent_runs` is a shared global cap across Pods,
+  including pre-launch dispatch reservations. These startup-only controls do
+  not qualify scheduler HA or relax this chart's exactly-one-Gateway contract.
 - **Redis stream bridge.** A bundled single-instance redis StatefulSet
   (`redis.enabled: true`, `redis:7-alpine`) runs in the namespace and the
   gateway connects via the in-cluster Service. Per-run SSE events are stored in

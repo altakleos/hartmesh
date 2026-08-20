@@ -7,7 +7,7 @@ runtime projection.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -17,6 +17,7 @@ from deerflow_extension_api import (
     AuthorizationProviderFactory,
     CapabilityHealthProbe,
     ExtensionData,
+    ExtensionService,
     InvocationConstraintsProvider,
     InvocationConstraintsProviderFactory,
     InvocationConstraintsProviderV2,
@@ -27,6 +28,8 @@ from deerflow_extension_api import (
     OriginContributorFactory,
     RunContextContributor,
     RunContextContributorFactory,
+    SystemModelCallObserver,
+    TaskLifecycleContributor,
 )
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
 
@@ -121,6 +124,10 @@ class _RegistryMark:
     run_context_contributor_count: int
     invocation_constraints_provider_count: int
     mcp_interceptor_count: int
+    task_lifecycle_count: int
+    system_model_observer_count: int
+    service_count: int
+    router_count: int
 
 
 @dataclass(frozen=True)
@@ -142,10 +149,16 @@ class LoadedExtensions:
     invocation_constraints_provider_conflict: bool = False
     mcp_interceptor_descriptors: tuple[RegisteredMcpInterceptorDescriptor, ...] = ()
     mcp_interceptor_conflicts: frozenset[str] = frozenset()
+    task_lifecycle: tuple[tuple[str, TaskLifecycleContributor], ...] = ()
+    system_model_observers: tuple[tuple[str, SystemModelCallObserver], ...] = ()
+    services: tuple[tuple[str, ExtensionService], ...] = ()
+    routers: tuple[tuple[str, Any], ...] = ()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
     # short-circuit, so the zero-extension path constructs nothing.
     has_middleware_contributors: bool = False
+    has_task_lifecycle: bool = False
+    has_system_model_observers: bool = False
     needs_task_store: bool = False
 
     @property
@@ -176,6 +189,10 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._invocation_constraints_provider_conflict = False
         self._mcp_interceptors: list[RegisteredMcpInterceptorDescriptor] = []
         self._mcp_interceptor_conflicts: set[str] = set()
+        self._task_lifecycle: list[_Entry] = []
+        self._system_model_observers: list[_Entry] = []
+        self._services: list[_Entry] = []
+        self._routers: list[_Entry] = []
         self._current_source: str | None = None
         self._current_package_name: str | None = None
         self._current_package_version: str | None = None
@@ -325,6 +342,19 @@ class ExtensionRegistry(ExtensionRegistryContract):
             )
         )
 
+    def task_lifecycle(self, contributor: TaskLifecycleContributor) -> None:
+        self._task_lifecycle.append((self._source(), contributor))
+
+    def system_model_observer(self, observer: SystemModelCallObserver) -> None:
+        self._system_model_observers.append((self._source(), observer))
+
+    def service(self, service: ExtensionService) -> None:
+        self._services.append((self._source(), service))
+
+    def routers(self, routers: Sequence[Any]) -> None:
+        source = self._source()
+        self._routers.extend((source, router) for router in routers)
+
     def discard(self, source: str) -> None:
         """Remove every entry registered by ``source``.
 
@@ -344,6 +374,13 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._run_context_contributors[:] = [entry for entry in self._run_context_contributors if entry.source != source]
         self._invocation_constraints_providers[:] = [entry for entry in self._invocation_constraints_providers if entry.source != source]
         self._mcp_interceptors[:] = [entry for entry in self._mcp_interceptors if entry.source != source]
+        for bucket in (
+            self._task_lifecycle,
+            self._system_model_observers,
+            self._services,
+            self._routers,
+        ):
+            bucket[:] = [entry for entry in bucket if entry[0] != source]
 
     def mark(self) -> _RegistryMark:
         """Snapshot bucket lengths so one install() can be undone positionally."""
@@ -355,6 +392,10 @@ class ExtensionRegistry(ExtensionRegistryContract):
             len(self._run_context_contributors),
             len(self._invocation_constraints_providers),
             len(self._mcp_interceptors),
+            len(self._task_lifecycle),
+            len(self._system_model_observers),
+            len(self._services),
+            len(self._routers),
         )
 
     def rollback_to(self, mark: _RegistryMark) -> None:
@@ -371,6 +412,10 @@ class ExtensionRegistry(ExtensionRegistryContract):
         del self._run_context_contributors[mark.run_context_contributor_count :]
         del self._invocation_constraints_providers[mark.invocation_constraints_provider_count :]
         del self._mcp_interceptors[mark.mcp_interceptor_count :]
+        del self._task_lifecycle[mark.task_lifecycle_count :]
+        del self._system_model_observers[mark.system_model_observer_count :]
+        del self._services[mark.service_count :]
+        del self._routers[mark.router_count :]
 
     def build(self, *, generation: int = 0) -> LoadedExtensions:
         return LoadedExtensions(
@@ -385,8 +430,14 @@ class ExtensionRegistry(ExtensionRegistryContract):
             invocation_constraints_provider_conflict=self._invocation_constraints_provider_conflict,
             mcp_interceptor_descriptors=tuple(self._mcp_interceptors),
             mcp_interceptor_conflicts=frozenset(self._mcp_interceptor_conflicts),
+            task_lifecycle=tuple(self._task_lifecycle),
+            system_model_observers=tuple(self._system_model_observers),
+            services=tuple(self._services),
+            routers=tuple(self._routers),
             has_middleware_contributors=bool(self._middlewares),
-            needs_task_store=bool(self._middlewares),
+            has_task_lifecycle=bool(self._task_lifecycle),
+            has_system_model_observers=bool(self._system_model_observers),
+            needs_task_store=bool(self._middlewares or self._task_lifecycle or self._system_model_observers),
         )
 
 

@@ -246,7 +246,6 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
     monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
-
     async with gateway_deps.langgraph_runtime(app, config):
         pass
     await anyio.sleep(0)
@@ -259,6 +258,40 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     assert thread_store.status_updates == [("thread-1", "error", None)]
     assert stream_bridge.publish_end_calls == ["run-1"]
     assert stream_bridge.cleanup_calls == [("run-1", 60.0)]
+
+
+@pytest.mark.anyio
+async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
+    app = FastAPI()
+    config = SimpleNamespace(
+        database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)),
+        run_events=SimpleNamespace(backend="memory"),
+        stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
+    )
+    session_factory = object()
+    _FakeRunManager.instances.clear()
+    _FakeRunManager.recovered_runs = []
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(engine_module, "init_engine_from_config", noop)
+    monkeypatch.setattr(engine_module, "get_session_factory", lambda: session_factory)
+    monkeypatch.setattr(engine_module, "close_engine", noop)
+    monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config: _fake_context(_FakeStreamBridge()))
+    monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
+    monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
+    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: _FakeThreadStore())
+    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
+    monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
+    monkeypatch.setattr(
+        "deerflow.persistence.run.sql.RunRepository.initialize_lifecycle",
+        noop,
+    )
+
+    async with gateway_deps.langgraph_runtime(app, config):
+        assert app.state.scheduled_task_repo._run_repository is app.state.run_store
+        assert app.state.scheduled_task_run_repo._run_repository is app.state.run_store
 
 
 @pytest.mark.anyio

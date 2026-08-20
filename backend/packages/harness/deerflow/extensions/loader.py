@@ -33,6 +33,18 @@ class ExtensionSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    enabled: bool = Field(
+        default=True,
+        description="When false, skip the extension without resolving or importing it",
+    )
+    name: str | None = Field(
+        default=None,
+        description="Stable operator-facing name recorded by the extension manager",
+    )
+    package: str | None = Field(
+        default=None,
+        description="Installed Python distribution recorded by the extension manager",
+    )
     use: str = Field(description="Entry point path, e.g. 'my_extension:install'")
     config: dict[str, Any] = Field(
         default_factory=dict,
@@ -214,6 +226,9 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
         return diagnostic
 
     for spec in specs:
+        if not spec.enabled:
+            continue
+
         try:
             install = resolve_variable(spec.use)
         except Exception as exc:

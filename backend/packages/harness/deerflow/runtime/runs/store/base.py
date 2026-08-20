@@ -37,6 +37,7 @@ _LIFECYCLE_SAFE_REASONS = {
     "replacement",
     "rollback",
     "safety_capped",
+    "scheduled_task_orphan_recovered",
     "subagent_limit_capped",
     "token_capped",
     "worker_attachment_failed",

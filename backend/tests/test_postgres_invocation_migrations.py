@@ -56,6 +56,9 @@ from deerflow.runtime.runs.store.base import (
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
 _PRE_FEATURE_REVISION = "0011_mcp_tasks"
+_MCP_RESULTS_REVISION = "0012_mcp_task_results"
+_INVOCATION_HEAD_REVISION = "0019_inbound_event_identity"
+_MERGE_HEAD_REVISION = "0020_merge_mcp_task_results"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
     "0012_invocation_idempotency",
@@ -632,6 +635,11 @@ async def _assert_postgres_head_contract(engine: AsyncEngine, schema: str) -> No
     await _assert_lifecycle_ddl(engine, schema)
     await _assert_inbound_receipt_ddl(engine, schema)
 
+    mcp_task_columns = await _column_contract(engine, schema, "mcp_tasks")
+    assert mcp_task_columns["result_preview"][:3] == ("text", None, True)
+    assert mcp_task_columns["result_truncated"][:3] == ("boolean", None, False)
+    assert mcp_task_columns["result_artifact"][:3] == ("json", None, True)
+
 
 async def _assert_postgres_checks_reject_invalid_rows(engine: AsyncEngine) -> None:
     required_columns = (
@@ -919,8 +927,19 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     assert accepted.down_revision == "0011_mcp_tasks"
     assert _PRE_FEATURE_REVISION == accepted.down_revision
     assert _INVOCATION_REVISIONS[0] == accepted.revision
-    actual_tail = tuple(revision.revision for revision in reversed(list(script.iterate_revisions("head", _PRE_FEATURE_REVISION))))
+    actual_tail = tuple(revision.revision for revision in reversed(list(script.iterate_revisions(_INVOCATION_HEAD_REVISION, _PRE_FEATURE_REVISION))))
     assert actual_tail == _INVOCATION_REVISIONS
+
+    mcp_results = script.get_revision(_MCP_RESULTS_REVISION)
+    merge_head = script.get_revision(_MERGE_HEAD_REVISION)
+    assert mcp_results is not None
+    assert mcp_results.down_revision == _PRE_FEATURE_REVISION
+    assert merge_head is not None
+    assert set(merge_head.down_revision) == {
+        _INVOCATION_HEAD_REVISION,
+        _MCP_RESULTS_REVISION,
+    }
+    assert script.get_current_head() == _MERGE_HEAD_REVISION
 
 
 def test_intermediate_revision_contracts_exclude_future_schema() -> None:
@@ -985,7 +1004,7 @@ async def test_fresh_postgres_migration_chain_reaches_exact_head_schema() -> Non
             revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
         print(f"PostgreSQL qualification: server_version={server_version} migration_head={revision}")
 
-        assert revision == _get_head_revision() == _INVOCATION_REVISIONS[-1]
+        assert revision == _get_head_revision() == _MERGE_HEAD_REVISION
         await _assert_postgres_head_contract(engine, schema)
         await _assert_postgres_checks_reject_invalid_rows(engine)
         await _assert_lifecycle_constraints_reject_invalid_rows(engine)
@@ -1355,6 +1374,9 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
             if revision == "0012_invocation_idempotency":
                 await _assert_idempotency_ddl(engine, schema)
 
+        await _upgrade(engine, schema, "head")
+        async with engine.connect() as connection:
+            assert await connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == _MERGE_HEAD_REVISION
         await _assert_postgres_head_contract(engine, schema)
 
         async with engine.connect() as connection:

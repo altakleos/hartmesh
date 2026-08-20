@@ -391,7 +391,7 @@ HartMesh 保留现有 `deerflow.*` namespace、包名、`DEER_FLOW_*` 变量、D
 
 产品比较使用固定本地范围 `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`。
 
-在 2026-08-09 仓库审计时，单独检查的 `deerflow/main` 快照为 `e401ae2d7b8e4fc73fc82a1143c989c54f3f4de6`，比共享基线多一个仅上游提交。
+HartMesh `main` 已同步 upstream `deerflow/main` 至 `a5acc25de6742b2166b3f41c97bd895822277b94`（2026-08-20）。
 
 这是背景信息，不是上述基线；HartMesh 不作持续优于上游的声明。
 
@@ -399,7 +399,7 @@ HartMesh 保留现有 `deerflow.*` namespace、包名、`DEER_FLOW_*` 变量、D
 
 这些 hash 仅代表来源，不是维护承诺。
 
-此 checkout 的 Alembic 图为线性：`0011_mcp_tasks` → `0011_accepted_invocation` → 后续调用迁移直至 `0019_inbound_event_identity`。
+Alembic 图只有一个 head：`0011_mcp_tasks` 分支为 HartMesh 迁移（直至 `0019_inbound_event_identity`）与 upstream 的 `0012_mcp_task_results`，再由 `0020_merge_mcp_task_results` 合并。
 
 PostgreSQL 运维人员应在回滚前停止写入并备份数据；迁移说明见 [backend/AGENTS.md](backend/AGENTS.md)。
 

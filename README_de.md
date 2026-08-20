@@ -393,7 +393,7 @@ HartMesh bewahrt bestehende `deerflow.*`-Namespaces, Paketnamen, `DEER_FLOW_*`-V
 
 Der Produktvergleich verwendet den festen lokalen Bereich `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`.
 
-HartMesh `main` enthält Upstream `deerflow/main` bis `17531d7c118d6111b863f945ff910a7889a235b0` (2026-08-10).
+HartMesh `main` enthält Upstream `deerflow/main` bis `a5acc25de6742b2166b3f41c97bd895822277b94` (2026-08-20).
 
 Dieser Synchronisierungspunkt ist Kontext, nicht die obige Vergleichsbasis, und HartMesh behauptet keine dauerhafte Überlegenheit.
 
@@ -401,7 +401,7 @@ Dieses Repository dokumentiert noch keinen HartMesh-Synchronisierungsrhythmus, k
 
 Behandle diese Hashes als Herkunftsnachweis, nicht als Wartungsversprechen.
 
-Der Alembic-Graph ist in diesem Checkout linear: `0011_mcp_tasks` → `0011_accepted_invocation` → Aufrufmigrationen bis `0019_inbound_event_identity`.
+Der Alembic-Graph hat einen Head: Von `0011_mcp_tasks` zweigen HartMesh-Migrationen bis `0019_inbound_event_identity` und Upstreams `0012_mcp_task_results` ab; `0020_merge_mcp_task_results` führt sie zusammen.
 
 PostgreSQL-Betreiber sollten vor einem Rollback Schreibzugriffe stoppen und Daten sichern; nutze die Migrationshinweise in [backend/AGENTS.md](backend/AGENTS.md).
 

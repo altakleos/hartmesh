@@ -391,7 +391,7 @@ HartMesh は既存の `deerflow.*` namespace、package 名、`DEER_FLOW_*` 変�
 
 製品比較は固定ローカル範囲 `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0` です。
 
-2026-08-09 のリポジトリ監査時、別に確認した `deerflow/main` snapshot は `e401ae2d7b8e4fc73fc82a1143c989c54f3f4de6` で、共有 base より upstream-only commit が一つありました。
+HartMesh `main` は upstream `deerflow/main` の `a5acc25de6742b2166b3f41c97bd895822277b94`（2026-08-20）までを取り込んでいます。
 
 これは背景情報で、上記 baseline ではありません。HartMesh は将来も上流より優れるという主張をしません。
 
@@ -399,7 +399,7 @@ HartMesh は既存の `deerflow.*` namespace、package 名、`DEER_FLOW_*` 変�
 
 これらの hash は provenance であり、maintenance promise ではありません。
 
-この checkout の Alembic graph は線形です：`0011_mcp_tasks` → `0011_accepted_invocation` → `0019_inbound_event_identity` までの invocation migration。
+Alembic graph の head は一つです。`0011_mcp_tasks` から HartMesh の `0019_inbound_event_identity` までの migration と upstream の `0012_mcp_task_results` に分岐し、`0020_merge_mcp_task_results` で統合されます。
 
 PostgreSQL operator は rollback 前に writer を停止し data を backup してください。migration guidance は [backend/AGENTS.md](backend/AGENTS.md) にあります。
 

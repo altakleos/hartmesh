@@ -393,7 +393,7 @@ HartMesh preserva namespaces `deerflow.*`, nomes de pacotes, variáveis `DEER_FL
 
 A comparação do produto usa o intervalo local fixo `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`.
 
-O `main` do HartMesh incorpora o upstream `deerflow/main` até `17531d7c118d6111b863f945ff910a7889a235b0` (2026-08-10).
+O `main` do HartMesh incorpora o upstream `deerflow/main` até `a5acc25de6742b2166b3f41c97bd895822277b94` (2026-08-20).
 
 Esse ponto de sincronização é contexto, não o baseline de comparação acima, e o HartMesh não faz alegação permanente de superioridade.
 
@@ -401,7 +401,7 @@ Este repositório ainda não documenta cadência de sincronização do HartMesh,
 
 Trate esses hashes como proveniência, não como promessa de manutenção.
 
-O grafo Alembic é linear neste checkout: `0011_mcp_tasks` → `0011_accepted_invocation` → migrações de invocação até `0019_inbound_event_identity`.
+O grafo Alembic tem um único head: `0011_mcp_tasks` se ramifica nas migrações HartMesh até `0019_inbound_event_identity` e em `0012_mcp_task_results` do upstream; `0020_merge_mcp_task_results` as reúne.
 
 Operadores PostgreSQL devem interromper escritores e fazer backup dos dados antes de reverter; use as orientações de migração em [backend/AGENTS.md](backend/AGENTS.md).
 

@@ -34,6 +34,9 @@ class _TaskRunRepository:
     async def has_active_runs(self, _task_id: str) -> bool:
         return self.active
 
+    async def count_active_runs(self) -> int:
+        return int(self.active)
+
     async def create(self, **row) -> dict:
         self.created.append(row)
         return row

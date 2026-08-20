@@ -405,7 +405,7 @@ HartMesh preserves existing `deerflow.*` namespaces, package names, `DEER_FLOW_*
 The product comparison is the fixed local range `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`.
 
 HartMesh `main` incorporates upstream `deerflow/main` through
-`17531d7c118d6111b863f945ff910a7889a235b0` (2026-08-10).
+`a5acc25de6742b2166b3f41c97bd895822277b94` (2026-08-20).
 
 That synchronization point is context, not the comparison baseline above, and
 HartMesh makes no evergreen superiority claim.
@@ -414,7 +414,7 @@ This repository does not yet document a HartMesh sync cadence, API/configuration
 
 Treat these hashes as provenance, not a maintenance promise.
 
-The Alembic graph is linear in this checkout: `0011_mcp_tasks` → `0011_accepted_invocation` → invocation migrations through `0019_inbound_event_identity`.
+The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's `0012_mcp_task_results`; `0020_merge_mcp_task_results` joins them.
 
 PostgreSQL operators should quiesce writers and back up data before rollback; use the migration guidance in [backend/AGENTS.md](backend/AGENTS.md).
 

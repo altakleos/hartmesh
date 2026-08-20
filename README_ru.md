@@ -391,7 +391,7 @@ HartMesh сохраняет существующие namespaces `deerflow.*`, и
 
 Продукт сравнивается по фиксированному локальному диапазону `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`.
 
-При аудите репозитория 2026-08-09 отдельно проверенный snapshot `deerflow/main` был `e401ae2d7b8e4fc73fc82a1143c989c54f3f4de6`, на один upstream-only commit дальше общей базы.
+HartMesh `main` включает upstream `deerflow/main` по `a5acc25de6742b2166b3f41c97bd895822277b94` (2026-08-20).
 
 Это контекст, а не указанная выше базовая версия; HartMesh не заявляет постоянное превосходство над upstream.
 
@@ -399,7 +399,7 @@ HartMesh сохраняет существующие namespaces `deerflow.*`, и
 
 Эти hashes подтверждают происхождение, а не обещание сопровождения.
 
-Граф Alembic в этом checkout линеен: `0011_mcp_tasks` → `0011_accepted_invocation` → миграции вызовов до `0019_inbound_event_identity`.
+У графа Alembic один head: от `0011_mcp_tasks` отходят миграции HartMesh до `0019_inbound_event_identity` и upstream-миграция `0012_mcp_task_results`; `0020_merge_mcp_task_results` объединяет их.
 
 Операторам PostgreSQL следует остановить writers и сделать backup перед rollback; руководство по миграциям находится в [backend/AGENTS.md](backend/AGENTS.md).
 
