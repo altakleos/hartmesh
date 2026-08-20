@@ -145,7 +145,7 @@ List all sandboxes currently managed.
 
 ## Configuration
 
-The provisioner is configured via environment variables (set in [docker-compose-dev.yaml](../docker-compose-dev.yaml)):
+The provisioner is configured via environment variables. Docker Compose sets local/hybrid defaults in [docker-compose-dev.yaml](../docker-compose-dev.yaml), while Helm injects chart-managed values through the [provisioner Deployment template](../../deploy/helm/deer-flow/templates/provisioner-deployment.yaml):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -172,7 +172,7 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
 
-Every provisioner-created sandbox container, init container, and sidecar uses the restricted baseline `allowPrivilegeEscalation: false`, drops all Linux capabilities, and selects the `RuntimeDefault` seccomp profile. The provisioner deliberately leaves `runAsNonRoot` and `runAsUser` unset because those depend on the configured image; set `SANDBOX_RUNTIME_CLASS` to select an isolation runtime such as gVisor, or leave it empty to omit `runtimeClassName` and use the cluster default runtime.
+Every provisioner-created sandbox container, init container, and sidecar uses the restricted baseline `allowPrivilegeEscalation: false`, drops all Linux capabilities, and selects the `RuntimeDefault` seccomp profile. The provisioner deliberately leaves `runAsNonRoot` and `runAsUser` unset because those depend on the configured image; set `SANDBOX_RUNTIME_CLASS` to select an isolation runtime such as gVisor, or leave it empty to omit `runtimeClassName` and use the cluster default runtime. A PSA `restricted` namespace must also use allowed volume sources: configure `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME` for PVC-backed mounts instead of the local/hybrid hostPath mode.
 
 ### Custom sandbox image
 
