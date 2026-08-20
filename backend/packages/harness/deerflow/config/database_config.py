@@ -25,8 +25,8 @@ to reference environment variables from .env:
       postgres_url: $DATABASE_URL
 
 The $VAR resolution is handled by AppConfig.resolve_env_variables()
-before this config is instantiated -- DatabaseConfig itself does not
-need to do any environment variable processing.
+before this config is instantiated. DATABASE_POOL_MAX_OVERFLOW is also
+accepted as a deployment-level override for the app engine pool cap.
 """
 
 from __future__ import annotations
@@ -186,6 +186,11 @@ class DatabaseConfig(BaseModel):
         default=5,
         description="Connection pool size for the app ORM engine (postgres only).",
     )
+    pool_max_overflow: int = Field(
+        default=10,
+        ge=0,
+        description="Maximum overflow connections for the app ORM engine (postgres only).",
+    )
     pool_recycle: int = Field(
         default=300,
         gt=0,
@@ -213,6 +218,14 @@ class DatabaseConfig(BaseModel):
     @classmethod
     def _validate_postgres_schema(cls, value: str) -> str:
         return validate_postgres_schema(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_pool_max_overflow_env(cls, data: Any) -> Any:
+        value = os.getenv("DATABASE_POOL_MAX_OVERFLOW")
+        if value is None or not isinstance(data, dict):
+            return data
+        return {**data, "pool_max_overflow": value}
 
     # -- Legacy key migration (not user-configured) --
 
