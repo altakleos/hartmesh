@@ -25,6 +25,9 @@ Configuration priority:
 4. `config.yaml` in parent directory (project root - **recommended location**)
 
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
+`database.pool_max_overflow` additionally accepts the direct deployment override
+`DATABASE_POOL_MAX_OVERFLOW`; when set, it takes precedence over the YAML field,
+and when absent the YAML value or default 10 applies.
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
 **Extensions Configuration** (`extensions_config.json`):

@@ -17,6 +17,25 @@ Run `make config-upgrade` to merge new fields into your config.
 
 ## Configuration Sections
 
+### Database
+
+The `database` section configures the application ORM engine as well as the
+shared persistence backend:
+
+```yaml
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+  pool_size: 5
+  pool_max_overflow: 10
+```
+
+`pool_max_overflow` is a non-negative cap on temporary app ORM connections
+above `pool_size`; its default of 10 matches SQLAlchemy. The
+`DATABASE_POOL_MAX_OVERFLOW` environment variable directly overrides the field
+for deployment systems such as Helm. When the variable is absent, the YAML
+value or the default applies.
+
 ### Extensions
 
 MCP servers and skill enabled states live in `extensions_config.json`, separate
