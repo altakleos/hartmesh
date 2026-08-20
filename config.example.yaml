@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 40
+config_version: 41
 
 # ============================================================================
 # Logging
@@ -2015,6 +2015,9 @@ database:
 # dedupe_storage:
 #   backend: auto
 
+  # Maximum temporary app ORM connections above pool_size. The
+  # DATABASE_POOL_MAX_OVERFLOW environment variable overrides this value.
+  pool_max_overflow: 10
   # Recycle app ORM PostgreSQL connections before the environment's idle cutoff.
   pool_recycle: 300
   # App ORM PostgreSQL command timeout. Set to null to disable it or raise it
