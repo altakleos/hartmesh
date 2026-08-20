@@ -981,7 +981,13 @@ def _bind_accepted_attempt_materialization(
         "hartmesh.io/accepted-capability-secret-uid",
     }
     if any(
-        not isinstance(value, str) or not value or len(value.encode("utf-8")) > 128 or any(ord(character) < 32 for character in value) if key in identity_fields else not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > 128
+        or any(ord(character) < 32 for character in value)
+        if key in identity_fields
+        else not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{64}", value) is None
         for key, value in fields.items()
     ):
         raise HTTPException(
@@ -1725,7 +1731,10 @@ def _canonical_k8s_value(value: object) -> object:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {str(key): _canonical_k8s_value(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
+        return {
+            str(key): _canonical_k8s_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
     if isinstance(value, (list, tuple)):
         return [_canonical_k8s_value(item) for item in value]
     to_dict = getattr(value, "to_dict", None)
@@ -1733,7 +1742,13 @@ def _canonical_k8s_value(value: object) -> object:
         return _canonical_k8s_value(to_dict())
     attributes = getattr(value, "__dict__", None)
     if isinstance(attributes, dict):
-        return _canonical_k8s_value({key: item for key, item in attributes.items() if not key.startswith("_")})
+        return _canonical_k8s_value(
+            {
+                key: item
+                for key, item in attributes.items()
+                if not key.startswith("_")
+            }
+        )
     raise HTTPException(
         status_code=409,
         detail="accepted_attempt_resource_spec_invalid",
@@ -2521,7 +2536,9 @@ def _accepted_pod_response(
         "lease_uid": lease_owner.uid,
         **resources,
         "sandbox_image_digest": sandbox_image_digest,
-        "accepted_skill_runtime_image_digest": (accepted_skill_runtime_image_digest),
+        "accepted_skill_runtime_image_digest": (
+            accepted_skill_runtime_image_digest
+        ),
         "runtime_image_ids_digest": runtime_image_ids_digest,
         "verifier_receipt_digest": verifier_receipt_digest,
     }
@@ -2535,18 +2552,35 @@ def _accepted_pod_response(
     if lease_annotations.get("hartmesh.io/accepted-attempt-state") == ("materialized"):
         bound_fields = {
             "hartmesh.io/accepted-pod-isolation-digest": isolation_digest,
-            "hartmesh.io/accepted-network-policy-uid": resources["network_policy_uid"],
-            "hartmesh.io/accepted-network-policy-spec-digest": resources["network_policy_spec_digest"],
-            "hartmesh.io/accepted-evidence-secret-uid": resources["evidence_secret_uid"],
-            "hartmesh.io/accepted-evidence-secret-digest": resources["evidence_secret_digest"],
-            "hartmesh.io/accepted-capability-secret-uid": resources["capability_secret_uid"],
-            "hartmesh.io/accepted-capability-secret-digest": resources["capability_secret_digest"],
+            "hartmesh.io/accepted-network-policy-uid": resources[
+                "network_policy_uid"
+            ],
+            "hartmesh.io/accepted-network-policy-spec-digest": resources[
+                "network_policy_spec_digest"
+            ],
+            "hartmesh.io/accepted-evidence-secret-uid": resources[
+                "evidence_secret_uid"
+            ],
+            "hartmesh.io/accepted-evidence-secret-digest": resources[
+                "evidence_secret_digest"
+            ],
+            "hartmesh.io/accepted-capability-secret-uid": resources[
+                "capability_secret_uid"
+            ],
+            "hartmesh.io/accepted-capability-secret-digest": resources[
+                "capability_secret_digest"
+            ],
             "hartmesh.io/accepted-sandbox-image-digest": sandbox_image_digest,
-            "hartmesh.io/accepted-skill-runtime-image-digest": (accepted_skill_runtime_image_digest),
+            "hartmesh.io/accepted-skill-runtime-image-digest": (
+                accepted_skill_runtime_image_digest
+            ),
             "hartmesh.io/accepted-runtime-images-digest": runtime_image_ids_digest,
             "hartmesh.io/accepted-materialization-digest": materialization_digest,
         }
-        if any(lease_annotations.get(key) != value for key, value in bound_fields.items()):
+        if any(
+            lease_annotations.get(key) != value
+            for key, value in bound_fields.items()
+        ):
             raise HTTPException(
                 status_code=409,
                 detail="accepted_attempt_materialization_mismatch",
@@ -2852,7 +2886,11 @@ def _accepted_supporting_resource_evidence(
         "network_policy_spec_digest": expected_policy_digest,
     }
     for kind in ("evidence", "capability"):
-        name = _accepted_evidence_secret_name(sandbox_id) if kind == "evidence" else _accepted_capability_secret_name(sandbox_id)
+        name = (
+            _accepted_evidence_secret_name(sandbox_id)
+            if kind == "evidence"
+            else _accepted_capability_secret_name(sandbox_id)
+        )
         try:
             secret = core_v1.read_namespaced_secret(name, K8S_NAMESPACE)
         except ApiException as exc:
@@ -2871,7 +2909,9 @@ def _accepted_supporting_resource_evidence(
         expected_annotation_key = "hartmesh.io/accepted-capability-digest"
         expected_payload_digest = capability_digest
         if kind == "evidence":
-            expected_labels["hartmesh.io/accepted-skill-profile"] = ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2
+            expected_labels["hartmesh.io/accepted-skill-profile"] = (
+                ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2
+            )
             expected_annotation_key = "hartmesh.io/accepted-evidence-digest"
             expected_payload_digest = payload_digest
             if projection is not None:
@@ -2900,7 +2940,8 @@ def _accepted_supporting_resource_evidence(
             or getattr(secret, "immutable", None) is not True
             or getattr(secret, "type", None) != "Opaque"
             or (getattr(metadata, "labels", None) or {}) != expected_labels
-            or (getattr(metadata, "annotations", None) or {}) != {expected_annotation_key: expected_payload_digest}
+            or (getattr(metadata, "annotations", None) or {})
+            != {expected_annotation_key: expected_payload_digest}
             or payload_digest != expected_payload_digest
         ):
             raise HTTPException(
