@@ -203,6 +203,11 @@ provisioner:
     reconcileIntervalSeconds: 30
     reconcileLimit: 100
 
+# -- Application database engine settings.
+database:
+  # -- Cap temporary ORM overflow connections on a shared PostgreSQL server; unset keeps SQLAlchemy's default.
+  poolMaxOverflow: null
+
 # -- PostgreSQL database. Bundled mode (default) deploys a single-instance
 #    postgres StatefulSet; set `enabled: false` to use an external managed DB.
 #    The gateway reads DATABASE_URL from the resolved Secret and config.yaml

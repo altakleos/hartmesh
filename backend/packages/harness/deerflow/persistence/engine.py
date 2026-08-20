@@ -31,6 +31,7 @@ def _postgres_engine_kwargs(
     *,
     echo: bool,
     pool_size: int,
+    pool_max_overflow: int = 10,
     pool_recycle: int = POSTGRES_POOL_RECYCLE_SECONDS,
     command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS,
     connect_args: dict[str, object] | None = None,
@@ -42,6 +43,7 @@ def _postgres_engine_kwargs(
     return {
         "echo": echo,
         "pool_size": pool_size,
+        "max_overflow": pool_max_overflow,
         "pool_pre_ping": True,
         "pool_recycle": pool_recycle,
         "connect_args": merged_connect_args,
@@ -88,6 +90,7 @@ async def init_engine(
     url: str = "",
     echo: bool = False,
     pool_size: int = 5,
+    pool_max_overflow: int = 10,
     pool_recycle: int = POSTGRES_POOL_RECYCLE_SECONDS,
     command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS,
     sqlite_dir: str = "",
@@ -100,6 +103,7 @@ async def init_engine(
         url: SQLAlchemy async URL (for sqlite/postgres).
         echo: Echo SQL to log.
         pool_size: Postgres connection pool size.
+        pool_max_overflow: Maximum Postgres overflow connections.
         pool_recycle: Seconds before Postgres connections are recycled.
         command_timeout: Timeout in seconds for app ORM Postgres commands, or None to disable.
         sqlite_dir: Directory to create for SQLite (ensured to exist).
@@ -175,6 +179,7 @@ async def init_engine(
             **_postgres_engine_kwargs(
                 echo=echo,
                 pool_size=pool_size,
+                pool_max_overflow=pool_max_overflow,
                 pool_recycle=pool_recycle,
                 command_timeout=command_timeout,
                 connect_args=pg_connect_args,
@@ -224,6 +229,7 @@ async def init_engine(
                 **_postgres_engine_kwargs(
                     echo=echo,
                     pool_size=pool_size,
+                    pool_max_overflow=pool_max_overflow,
                     pool_recycle=pool_recycle,
                     command_timeout=command_timeout,
                     connect_args=pg_connect_args,
@@ -248,6 +254,7 @@ async def init_engine_from_config(config) -> None:
         url=config.app_sqlalchemy_url,
         echo=config.echo_sql,
         pool_size=config.pool_size,
+        pool_max_overflow=config.pool_max_overflow,
         pool_recycle=config.pool_recycle,
         command_timeout=config.command_timeout,
         sqlite_dir=config.sqlite_dir if config.backend == "sqlite" else "",

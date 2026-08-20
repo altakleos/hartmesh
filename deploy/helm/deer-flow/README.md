@@ -218,6 +218,9 @@ config: |
 `$DATABASE_URL` is injected from the postgres Secret (see below). The
 `checkpointer:` section keeps LangGraph checkpoints and Store data on the same
 restart-durable backend; the Store does not fall back to `database:`.
+Set `database.poolMaxOverflow: 2` to inject `DATABASE_POOL_MAX_OVERFLOW` and cap
+temporary app ORM connections on a shared PostgreSQL server. Leaving the value
+unset omits the environment variable and keeps SQLAlchemy's default of 10.
 `stream_bridge.type: redis` supplies bounded reconnect replay through the
 bundled Redis StatefulSet (or `redis.external`).
 Because `config:` is a single override blob, a partial `config:` replaces the

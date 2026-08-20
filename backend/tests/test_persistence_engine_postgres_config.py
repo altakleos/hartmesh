@@ -25,6 +25,18 @@ def test_postgres_engine_kwargs_include_connection_hardening() -> None:
     assert kwargs["json_serializer"] is engine_mod._json_serializer
 
 
+def test_postgres_engine_kwargs_include_configured_pool_max_overflow() -> None:
+    config = DatabaseConfig(pool_max_overflow=2)
+
+    kwargs = engine_mod._postgres_engine_kwargs(
+        echo=False,
+        pool_size=5,
+        pool_max_overflow=config.pool_max_overflow,
+    )
+
+    assert kwargs["max_overflow"] == 2
+
+
 def test_database_command_timeout_defaults_to_30_seconds() -> None:
     config = DatabaseConfig()
 
@@ -43,6 +55,31 @@ def test_database_pool_recycle_defaults_to_300_seconds() -> None:
     config = DatabaseConfig()
 
     assert config.pool_recycle == 300
+
+
+def test_database_pool_max_overflow_defaults_to_sqlalchemy_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DATABASE_POOL_MAX_OVERFLOW", raising=False)
+
+    config = DatabaseConfig()
+
+    assert config.pool_max_overflow == 10
+
+
+def test_database_pool_max_overflow_rejects_negative_values() -> None:
+    with pytest.raises(ValueError):
+        DatabaseConfig(pool_max_overflow=-1)
+
+
+def test_database_pool_max_overflow_honors_environment_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_POOL_MAX_OVERFLOW", "2")
+
+    config = DatabaseConfig()
+
+    assert config.pool_max_overflow == 2
 
 
 def test_postgres_engine_kwargs_preserve_caller_values() -> None:
@@ -109,10 +146,12 @@ async def test_configured_command_timeout_ends_stalled_command() -> None:
 
 
 @pytest.mark.asyncio
-async def test_init_engine_from_config_preserves_longer_command_timeout_override() -> None:
+async def test_init_engine_from_config_preserves_postgres_pool_overrides() -> None:
     config = DatabaseConfig(
         backend="postgres",
         postgres_url="postgresql://user:password@localhost/deerflow",
+        pool_size=6,
+        pool_max_overflow=2,
         pool_recycle=120,
         command_timeout=90,
     )
@@ -130,6 +169,8 @@ async def test_init_engine_from_config_preserves_longer_command_timeout_override
             await engine_mod.init_engine_from_config(config)
 
             kwargs = create_engine.call_args.kwargs
+            assert kwargs["pool_size"] == 6
+            assert kwargs["max_overflow"] == 2
             assert kwargs["connect_args"]["command_timeout"] == 90
             assert kwargs["pool_recycle"] == 120
         finally:
@@ -219,6 +260,9 @@ async def test_init_engine_sqlite_omits_postgres_kwargs_and_keeps_wal_listener(t
             await engine_mod.init_engine(backend="sqlite", url=url, echo=True, sqlite_dir=str(tmp_path))
 
             create_engine.assert_called_once_with(url, echo=True, json_serializer=engine_mod._json_serializer)
+            kwargs = create_engine.call_args.kwargs
+            assert "pool_size" not in kwargs
+            assert "max_overflow" not in kwargs
 
             cursor = MagicMock()
             dbapi_connection = MagicMock()
