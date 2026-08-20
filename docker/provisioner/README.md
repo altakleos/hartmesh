@@ -151,6 +151,7 @@ The provisioner is configured via environment variables (set in [docker-compose-
 |----------|---------|-------------|
 | `K8S_NAMESPACE` | `deer-flow` | Kubernetes namespace for sandbox resources |
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
+| `SANDBOX_RUNTIME_CLASS` | empty (cluster default) | Optional Kubernetes RuntimeClass for sandbox Pods, such as `gvisor`; an empty value omits `runtimeClassName` and uses the cluster default runtime |
 | `LARK_CLI_INIT_IMAGE` | empty (feature off) | Optional lark-cli init image (Pattern A). When set, sandbox Pods requesting the lark-cli runtime get an init container + shared `emptyDir` that provisions `lark-cli`, instead of a hostPath/PVC runtime mount. See [`docker/lark-cli-init`](../lark-cli-init/README.md) |
 | `LARK_CLI_BROKER_IMAGE` | empty (feature off) | Optional lark-cli broker image (Pattern B, issue #4338). When set, sandbox Pods requesting the broker get a shim init container + a `lark-cli-broker` sidecar that holds the credentials; the plaintext `config`/`data` are mounted into the **sidecar only**, never the sandbox. Supersedes `LARK_CLI_INIT_IMAGE` when both are set. See [`docker/lark-cli-broker`](../lark-cli-broker/README.md) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
@@ -170,6 +171,8 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `SANDBOX_SERVICE_TYPE` | `NodePort` | Service type for sandbox access. Use `ClusterIP` when backend and provisioner run inside the same Kubernetes cluster |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
+
+Every provisioner-created sandbox container, init container, and sidecar uses the restricted baseline `allowPrivilegeEscalation: false`, drops all Linux capabilities, and selects the `RuntimeDefault` seccomp profile. The provisioner deliberately leaves `runAsNonRoot` and `runAsUser` unset because those depend on the configured image; set `SANDBOX_RUNTIME_CLASS` to select an isolation runtime such as gVisor, or leave it empty to omit `runtimeClassName` and use the cluster default runtime.
 
 ### Custom sandbox image
 
