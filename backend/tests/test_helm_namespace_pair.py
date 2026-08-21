@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from support.helm import container_env, find_rendered_object, render_chart
+from support.helm import container_env, find_rendered_object
+from support.helm import render_pvc_chart as render_chart
 
 
 def test_split_namespace_routes_sandboxes_without_moving_gateway_identity() -> None:

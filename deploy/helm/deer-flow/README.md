@@ -144,6 +144,7 @@ kubectl create secret docker-registry regcred \
 
 Copy and edit `values.yaml` → `my-values.yaml`. At minimum set:
 
+<!-- recommended-kubernetes-values:start -->
 ```yaml
 image:
   registry: ghcr.io/yourorg
@@ -171,6 +172,7 @@ ingress:
 # ordinary values files. It may contain OPENAI_API_KEY and other provider vars.
 existingSecret: deer-flow-provider
 ```
+<!-- recommended-kubernetes-values:end -->
 
 The provisioner resolves its volume mode once at startup. `sandbox.volumeMode:
 pvc` requires both the home and skills claim names; the chart supplies the home
