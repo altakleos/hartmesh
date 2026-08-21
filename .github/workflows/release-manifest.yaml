@@ -147,6 +147,10 @@ jobs:
             echo "::error::helm pull did not produce $CHART_PACKAGE"
             exit 1
           fi
+          if ! tar -xzOf "$CHART_PACKAGE" deer-flow/Chart.yaml | grep -Fx "version: ${VERSION}" >/dev/null; then
+            echo "::error::pulled chart $CHART_PACKAGE does not declare requested version $VERSION"
+            exit 1
+          fi
           PACKAGE_SHA256="$(sha256sum "$CHART_PACKAGE" | awk '{print $1}')"
           printf 'chart_repository=%s\n' "$CHART_REPOSITORY" >> "$GITHUB_OUTPUT"
           printf 'chart_manifest_digest=%s\n' "$CHART_MANIFEST_DIGEST" >> "$GITHUB_OUTPUT"
