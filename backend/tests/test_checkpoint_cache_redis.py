@@ -243,3 +243,15 @@ def test_key_prefix_override_wins():
     assert checkpoint_cache_key_prefix(app_config) == "custom:"
     default = checkpoint_cache_key_prefix(_app_config({"backend": "sqlite"}))
     assert default.startswith("ckpt-hist:v1:")
+
+
+def test_key_prefix_env_override_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX", "from-env")
+    app_config = _app_config(
+        {
+            "backend": "sqlite",
+            "checkpoint_cache": {"key_prefix": "from-config"},
+        }
+    )
+
+    assert checkpoint_cache_key_prefix(app_config) == "from-env"

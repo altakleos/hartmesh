@@ -28,6 +28,13 @@ Config values starting with `$` are resolved as environment variables (e.g., `$O
 `database.pool_max_overflow` additionally accepts the direct deployment override
 `DATABASE_POOL_MAX_OVERFLOW`; when set, it takes precedence over the YAML field,
 and when absent the YAML value or default 10 applies.
+Redis tenant namespaces follow the same direct-override rule:
+`DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX`,
+`DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX`, and
+`DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX` take precedence over their respective
+YAML fields when present. A shared multi-tenant Redis deployment must set all
+three to the same tenant prefix so every emitted name fits one `<tenant>:*` ACL
+boundary.
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
 **Extensions Configuration** (`extensions_config.json`):

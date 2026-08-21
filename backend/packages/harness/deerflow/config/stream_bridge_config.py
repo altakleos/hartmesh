@@ -18,6 +18,10 @@ class StreamBridgeConfig(BaseModel):
         default=None,
         description="Redis URL for the redis stream bridge type. If omitted, DEER_FLOW_STREAM_BRIDGE_REDIS_URL, REDIS_URL, or redis://localhost:6379/0 is used.",
     )
+    key_prefix: str = Field(
+        default="",
+        description="Optional outer Redis key prefix. DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX overrides this value; empty preserves legacy stream names.",
+    )
     queue_maxsize: int = Field(
         default=256,
         description="Maximum number of events retained per run (memory bridge queue size / redis stream MAXLEN).",

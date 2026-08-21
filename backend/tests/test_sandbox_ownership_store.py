@@ -412,6 +412,32 @@ def test_no_env_defaults_to_memory(monkeypatch):
     assert resolve_ownership_config(None).type == "memory"
 
 
+def test_ownership_key_prefix_env_overrides_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.community.aio_sandbox.ownership.redis as redis_module
+
+    captured: dict[str, object] = {}
+
+    def fake_store(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(redis_module, "RedisOwnershipStore", fake_store)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX", "from-env")
+
+    make_sandbox_ownership_store(
+        SandboxOwnershipConfig(
+            type="redis",
+            redis_url="redis://fake",
+            key_prefix="from-config",
+        ),
+        owner_id="owner",
+    )
+
+    assert captured["key_prefix"] == "from-env"
+
+
 # ── Redis-specific: failure surfaces as OwnershipBackendError ───────────────
 
 

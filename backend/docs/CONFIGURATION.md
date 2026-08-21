@@ -36,6 +36,33 @@ above `pool_size`; its default of 10 matches SQLAlchemy. The
 for deployment systems such as Helm. When the variable is absent, the YAML
 value or the default applies.
 
+### Redis subsystem namespaces
+
+The stream bridge accepts an optional outer Redis namespace:
+
+```yaml
+stream_bridge:
+  type: redis
+  key_prefix: ""
+```
+
+`DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX` directly overrides `key_prefix`. Empty or
+unset values preserve the legacy stream name
+`deerflow:stream_bridge:<run_id>`; a value such as `acme` produces
+`acme:deerflow:stream_bridge:<run_id>`. Adding or changing the prefix starts
+fresh per-run streams. Existing retained streams are not migrated.
+
+Multi-tenant deployments that share Redis must use the same tenant prefix for
+all three Redis-backed subsystems:
+
+- `DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX`
+- `DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX`
+- `DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX`
+
+For tenant `acme`, configure all three as `acme` and restrict the Redis user to
+key and stream-channel ACL patterns `~acme:* &acme:*`. Configuring only a subset
+leaves the remaining subsystem names outside the tenant boundary.
+
 ### Extensions
 
 MCP servers and skill enabled states live in `extensions_config.json`, separate
@@ -733,6 +760,9 @@ models:
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
+- `DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX` - Optional outer Redis namespace for retained run streams
+- `DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX` - Direct Redis namespace override for checkpoint history cache entries
+- `DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX` - Direct Redis namespace override for sandbox ownership leases
 - `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)

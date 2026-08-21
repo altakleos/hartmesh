@@ -168,6 +168,18 @@ spec:
                   name: {{ include "deer-flow.redisUrlSecret" . }}
                   key: redis-url
             {{- end }}
+            {{- with .Values.redis.keyPrefixes.streamBridge }}
+            - name: DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.redis.keyPrefixes.checkpointCache }}
+            - name: DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.redis.keyPrefixes.sandboxOwnership }}
+            - name: DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX
+              value: {{ . | quote }}
+            {{- end }}
             - name: NO_PROXY
               value: localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner
             - name: no_proxy

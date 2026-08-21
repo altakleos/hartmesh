@@ -21,6 +21,7 @@ from .base import SandboxOwnershipStore
 logger = logging.getLogger(__name__)
 
 _ENV_OWNERSHIP_REDIS_URL = "DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL"
+_ENV_OWNERSHIP_KEY_PREFIX = "DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX"
 _ENV_STREAM_BRIDGE_REDIS_URL = "DEER_FLOW_STREAM_BRIDGE_REDIS_URL"
 
 
@@ -68,6 +69,12 @@ def resolve_ownership_redis_url(
     return config.redis_url or os.getenv(_ENV_OWNERSHIP_REDIS_URL) or os.getenv(_ENV_STREAM_BRIDGE_REDIS_URL) or os.getenv("REDIS_URL") or "redis://localhost:6379/0"
 
 
+def resolve_ownership_key_prefix(config: SandboxOwnershipConfig) -> str:
+    """Resolve the Redis namespace shared by ownership-adjacent stores."""
+    env_prefix = os.getenv(_ENV_OWNERSHIP_KEY_PREFIX)
+    return config.key_prefix if env_prefix is None else env_prefix
+
+
 def compute_lease_ttl(config: SandboxOwnershipConfig) -> float:
     """Lease TTL in seconds.
 
@@ -105,7 +112,7 @@ def make_sandbox_ownership_store(config: SandboxOwnershipConfig | None, *, owner
             owner_id=effective_owner_id,
             redis_url=redis_url,
             ttl_seconds=ttl,
-            key_prefix=resolved.key_prefix,
+            key_prefix=resolve_ownership_key_prefix(resolved),
         )
 
     raise ValueError(f"Unknown sandbox ownership type: {resolved.type!r}")

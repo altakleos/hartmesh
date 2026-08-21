@@ -165,7 +165,7 @@ they resolve from the selected Secret):
 
 ```yaml
 config: |
-  config_version: 41
+  config_version: 42
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -223,6 +223,23 @@ temporary app ORM connections on a shared PostgreSQL server. Leaving the value
 unset omits the environment variable and keeps SQLAlchemy's default of 10.
 `stream_bridge.type: redis` supplies bounded reconnect replay through the
 bundled Redis StatefulSet (or `redis.external`).
+
+For a shared multi-tenant Redis, give each Helm release one tenant prefix and
+apply it to all three Gateway Redis subsystems:
+
+```yaml
+redis:
+  keyPrefixes:
+    streamBridge: acme
+    checkpointCache: acme
+    sandboxOwnership: acme
+```
+
+The Gateway then emits only keys matching `acme:*`, so an ACL user can be
+limited with key and stream-channel patterns `~acme:* &acme:*`. Keep all three
+values identical: setting only one prefix leaves the other Redis-backed
+subsystems outside that tenant boundary. Adding or changing the stream-bridge
+prefix starts fresh per-run streams; retained legacy names are not migrated.
 Because `config:` is a single override blob, a partial `config:` replaces the
 chart default entirely - keep the `tools:`/`tool_groups:` block (or the agent
 will have no tools) and the `sandbox:`/`database:`/`checkpointer:`/`stream_bridge:`
@@ -530,7 +547,12 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`; `config.yaml` sets `stream_bridge.type:
   redis` by default. Production validation rejects inline passwords and URLs;
   set `redis.existingSecret` for bundled Redis or
-  `redis.external.existingSecret` for managed Redis (key `redis-url`).
+  `redis.external.existingSecret` for managed Redis (key `redis-url`). For a
+  Redis shared by tenant releases, set all three `redis.keyPrefixes` values to
+  the release's tenant prefix and restrict that release's Redis user to
+  `~<tenant>:* &<tenant>:*`. These environment variables are injected only
+  into the Gateway; the provisioner does not run any of the three Redis-backed
+  subsystems.
 - **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`
   (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC

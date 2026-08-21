@@ -16,6 +16,7 @@ from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCach
 logger = logging.getLogger(__name__)
 
 _ENV_REDIS_URL = "DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL"
+_ENV_KEY_PREFIX = "DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX"
 
 
 def _resolve_redis_url(config: Any) -> str:
@@ -54,6 +55,9 @@ def checkpoint_cache_db_hash(db_config: Any) -> str:
 
 
 def checkpoint_cache_key_prefix(app_config: AppConfig) -> str:
+    env_prefix = os.getenv(_ENV_KEY_PREFIX)
+    if env_prefix is not None:
+        return env_prefix
     cache_config = app_config.database.checkpoint_cache
     if cache_config.key_prefix:
         return cache_config.key_prefix

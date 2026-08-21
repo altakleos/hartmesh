@@ -265,6 +265,12 @@ postgresql:
 redis:
   # -- Deploy a bundled redis StatefulSet. Disable to use an external Redis.
   enabled: true
+  # -- Redis ACL namespace for each Gateway subsystem. Multi-tenant deployments
+  #    must set all three to the same tenant prefix; empty omits the env vars.
+  keyPrefixes:
+    streamBridge: ""
+    checkpointCache: ""
+    sandboxOwnership: ""
   image:
     repository: redis
     tag: "7-alpine"
@@ -346,7 +352,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 41
+  config_version: 42
   log_level: info
 
   models: []
