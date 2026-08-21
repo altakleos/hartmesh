@@ -90,15 +90,15 @@ def test_release_manifest_records_revision_check_without_requiring_sha_tag() -> 
     assert 'if grep -Fxq "sha-${SHORT_SHA}" "$TAG_LIST_FILE"; then' in workflow
     assert 'echo "::error::${SHA_REFERENCE} is listed but its digest could not be resolved"' in workflow
     assert 'REVISION_CHECK="tag-not-found"' in workflow
-    assert "printf '%s_digest=%s\\n' \"$COMPONENT\" \"$TAG_DIGEST\"" in workflow
-    assert "printf '%s_revision_check=%s\\n' \"$COMPONENT\" \"$REVISION_CHECK\"" in workflow
+    assert 'printf \'%s_digest=%s\\n\' "$COMPONENT" "$TAG_DIGEST"' in workflow
+    assert 'printf \'%s_revision_check=%s\\n\' "$COMPONENT" "$REVISION_CHECK"' in workflow
     assert '"revision_check": os.environ[f"{name.upper()}_REVISION_CHECK"]' in workflow
     for component in ("backend", "frontend", "provisioner"):
         assert f"{component}_revision_check" in workflow
 
 
 def test_release_workflows_pass_registry_tokens_over_stdin() -> None:
-    expected_login = "printf '%s' \"$GH_TOKEN\" | crane auth login ghcr.io -u \"$GITHUB_ACTOR\" --password-stdin"
+    expected_login = 'printf \'%s\' "$GH_TOKEN" | crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin'
 
     for workflow_path in (_MANIFEST, _MIRROR):
         workflow = workflow_path.read_text(encoding="utf-8")
@@ -121,6 +121,15 @@ def test_release_manifest_validates_and_records_an_optional_sandbox() -> None:
     assert '"digest": os.environ["SANDBOX_DIGEST"]' in workflow
     assert '"sandbox": {' not in workflow
     assert '"schema": 1' in workflow
+
+
+def test_release_manifest_verifies_the_pulled_chart_version() -> None:
+    workflow = _MANIFEST.read_text(encoding="utf-8")
+
+    extraction = workflow.index('tar -xzOf "$CHART_PACKAGE" deer-flow/Chart.yaml')
+    assert 'grep -Fx "version: ${VERSION}"' in workflow
+    assert 'echo "::error::pulled chart $CHART_PACKAGE does not declare requested version $VERSION"' in workflow
+    assert extraction < workflow.index('PACKAGE_SHA256="$(sha256sum "$CHART_PACKAGE"')
 
 
 def test_sandbox_mirror_dispatch_contract_is_manual_and_minimal() -> None:
