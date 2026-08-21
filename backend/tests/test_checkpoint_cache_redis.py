@@ -93,6 +93,13 @@ class _PermissionDeniedRedis(_FakeRedis):
         raise NoPermissionError("NOPERM this user has no permissions to run the 'scan' command")
 
 
+class _UnlinkPermissionDeniedRedis(_FakeRedis):
+    async def unlink(self, *keys: str) -> int:
+        from redis.exceptions import NoPermissionError
+
+        raise NoPermissionError("NOPERM this user has no permissions to run the 'unlink' command")
+
+
 def _make_cache(monkeypatch: pytest.MonkeyPatch, fake: _FakeRedis, ttl_seconds: int = 60, **kwargs: Any):
     import deerflow.runtime.checkpoint_cache.redis as redis_mod
 
@@ -199,7 +206,7 @@ async def test_adelete_thread_outage_degrades_without_raising(monkeypatch: pytes
 
 
 @pytest.mark.anyio
-async def test_adelete_thread_disables_purge_after_scan_permission_denial(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+async def test_adelete_thread_disables_purge_after_scan_permission_denial(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     fake = _PermissionDeniedRedis()
     cache = _make_cache(monkeypatch, fake, ttl_seconds=60)
 
@@ -208,11 +215,25 @@ async def test_adelete_thread_disables_purge_after_scan_permission_denial(monkey
 
     assert cache._purge_disabled is True
     assert fake.scan_calls == 1
-    assert "ACL denies SCAN; checkpoint history cache will not purge on thread delete; entries expire via TTL (60s)" in caplog.text
+    assert "ACL denies checkpoint-cache purge (SCAN or UNLINK); entries expire via TTL (60s)" in caplog.text
 
 
 @pytest.mark.anyio
-async def test_adelete_thread_skips_redis_after_permission_denial(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+async def test_adelete_thread_disables_purge_after_unlink_permission_denial(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    fake = _UnlinkPermissionDeniedRedis()
+    fake.store["p:t1:entry"] = b"payload"
+    cache = _make_cache(monkeypatch, fake, ttl_seconds=60)
+
+    with caplog.at_level("WARNING"):
+        await cache.adelete_thread("p", "t1")
+
+    assert cache._purge_disabled is True
+    assert fake.scan_calls == 1
+    assert "ACL denies checkpoint-cache purge (SCAN or UNLINK); entries expire via TTL (60s)" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_adelete_thread_skips_redis_after_permission_denial(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     fake = _PermissionDeniedRedis()
     cache = _make_cache(monkeypatch, fake)
     await cache.adelete_thread("p", "t1")
@@ -223,11 +244,11 @@ async def test_adelete_thread_skips_redis_after_permission_denial(monkeypatch: p
 
     assert fake.scan_calls == 1
     assert all(record.levelname != "WARNING" for record in caplog.records)
-    assert "thread purge skipped because ACL denies SCAN" in caplog.text
+    assert "thread purge skipped because ACL denies checkpoint-cache purge" in caplog.text
 
 
 @pytest.mark.anyio
-async def test_adelete_thread_non_permission_errors_keep_warning_per_call(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+async def test_adelete_thread_non_permission_errors_keep_warning_per_call(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     cache = _make_cache(monkeypatch, _FailingRedis())
 
     with caplog.at_level("WARNING"):
