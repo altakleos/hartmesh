@@ -6,6 +6,7 @@
 #
 # Updates:
 #   backend/pyproject.toml              (version = "...")
+#   backend/uv.lock                     (deer-flow root package via uv lock)
 #   frontend/package.json               ("version": "...")
 #   deploy/helm/deer-flow/Chart.yaml    (version: + appVersion:)
 #
@@ -27,12 +28,18 @@ if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([0-9A-Za-z.+-]+)
   exit 1
 fi
 
+if ! command -v uv >/dev/null 2>&1; then
+  echo "error: uv is required to update backend/uv.lock; install uv and retry." >&2
+  exit 1
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYPROJECT="$ROOT/backend/pyproject.toml"
 PACKAGE="$ROOT/frontend/package.json"
 CHART="$ROOT/deploy/helm/deer-flow/Chart.yaml"
+UV_LOCK="$ROOT/backend/uv.lock"
 
-for f in "$PYPROJECT" "$PACKAGE" "$CHART"; do
+for f in "$PYPROJECT" "$UV_LOCK" "$PACKAGE" "$CHART"; do
   if [ ! -f "$f" ]; then
     echo "error: expected version file not found: $f" >&2
     exit 1
@@ -79,8 +86,14 @@ with open(chart, "w") as f:
     f.write(new)
 PY
 
+if ! (cd "$ROOT/backend" && uv lock); then
+  echo "error: uv lock failed while updating backend/uv.lock." >&2
+  exit 1
+fi
+
 echo "Bumped version to $VERSION in:"
 echo "  backend/pyproject.toml"
+echo "  backend/uv.lock"
 echo "  frontend/package.json"
 echo "  deploy/helm/deer-flow/Chart.yaml (version + appVersion)"
 echo

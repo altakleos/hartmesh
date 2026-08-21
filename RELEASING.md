@@ -8,11 +8,12 @@ gates the release on them agreeing with the tag.
 
 ## Version sources
 
-A release version must appear, identically, in four places:
+A release version must appear, identically, in five fields:
 
 | File                                   | Field                |
 | -------------------------------------- | -------------------- |
 | `backend/pyproject.toml`               | `version = "X.Y.Z"`  |
+| `backend/uv.lock`                      | root `deer-flow` package `version = "X.Y.Z"` |
 | `frontend/package.json`                | `"version": "X.Y.Z"` |
 | `deploy/helm/deer-flow/Chart.yaml`     | `version: X.Y.Z`     |
 | `deploy/helm/deer-flow/Chart.yaml`     | `appVersion: "X.Y.Z"`|
@@ -32,8 +33,9 @@ distinguishes it from a release.
 
 ## Helper scripts
 
-- `scripts/bump_version.sh <version>` — set all four fields at once, then
-  self-verify. Tolerates a leading `v` (e.g. `v2.1.0`).
+- `scripts/bump_version.sh <version>` — set all five fields at once, running
+  `uv lock` to update the root package entry before self-verification. The
+  helper requires `uv` and tolerates a leading `v` (e.g. `v2.1.0`).
   ```bash
   scripts/bump_version.sh 2.1.0
   ```
