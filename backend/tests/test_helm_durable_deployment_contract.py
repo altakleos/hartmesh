@@ -723,7 +723,7 @@ def test_verified_accepted_skill_projection_renders_pinned_cross_node_profile(
         "delete",
         "update",
     ]
-    cluster_role = next(document for document in documents if document.get("kind") == "ClusterRole" and document.get("metadata", {}).get("name") == "deer-flow-deer-flow-provisioner-ns")
+    cluster_role = next(document for document in documents if document.get("kind") == "ClusterRole" and document.get("metadata", {}).get("name") == "deer-flow-deer-flow-provisioner-ns-deer-flow")
     token_review_rule = next(rule for rule in cluster_role["rules"] if "tokenreviews" in rule["resources"])
     assert token_review_rule == {
         "apiGroups": ["authentication.k8s.io"],
