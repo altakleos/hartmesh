@@ -5,9 +5,13 @@ LangGraph runtime), **frontend** (Next.js), **nginx** (internal reverse proxy
 preserving the compose routing), and the **provisioner** (K8s-native sandbox
 that spawns code-execution Pods on demand).
 
-The default values are an explicitly unqualified local evaluation profile. The
-validated production mode is still exactly one Gateway replica; it does not
-claim high availability, rolling zero downtime, or live pod-loss qualification.
+The default values describe an explicitly unqualified local evaluation profile,
+but a bare install is intentionally refused: home persistence is enabled while
+no skills claim is named, which would crashloop the provisioner. Supply the
+recommended PVC values below or explicitly select the legacy local/hybrid
+hostPath mode. The validated production mode is still exactly one Gateway
+replica; it does not claim high availability, rolling zero downtime, or live
+pod-loss qualification.
 
 ## Prerequisites
 
@@ -171,12 +175,13 @@ existingSecret: deer-flow-provider
 The provisioner resolves its volume mode once at startup. `sandbox.volumeMode:
 pvc` requires both the home and skills claim names; the chart supplies the home
 claim name while `persistence.home.enabled: true`, but operators must configure
-`skills.existingClaim`. A missing name stops the provisioner with an error that
-identifies the missing environment variable. The empty default infers `pvc`
-only when both names are present and `hostpath` only when neither is present;
-exactly one name is also an error. Use explicit `hostpath` only for local or
-hybrid deployments that intentionally mount node filesystem paths—the claim
-values, if present, are ignored in that mode.
+`skills.existingClaim`. Helm refuses an enabled provisioner with exactly one
+claim before install or upgrade; the provisioner's startup guard still protects
+non-Helm deployments and identifies a missing environment variable. The empty
+mode infers `pvc` only when both names are present and `hostpath` only when
+neither is present. Use explicit `hostpath` only for local or hybrid deployments
+that intentionally mount node filesystem paths—the claim values, if present,
+are ignored in that mode.
 
 Provide your model config under `config` (keep secrets as `$VAR` references —
 they resolve from the selected Secret):
@@ -588,8 +593,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `persistence.home.existingClaim` to consume a pre-created claim instead;
   leave `persistence.home.enabled: true` so the provisioner receives the same
   claim name. Kubernetes deployments should set `sandbox.volumeMode: pvc` and
-  also configure `skills.existingClaim`; either missing claim name then fails
-  provisioner startup instead of selecting a hostPath fallback.
+  also configure `skills.existingClaim`; Helm rejects a half-configured claim
+  pair instead of installing a crashlooping provisioner.
 - **Provisioner RBAC.** The provisioner gets a ServiceAccount with a namespaced
   Role in the sandbox namespace (the exact Pod, Service, Secret,
   NetworkPolicy, Lease, and PVC-read verbs used by the provisioner) and a
@@ -626,6 +631,12 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
 
 ## Upgrading existing values
 
+**Sandbox volume render guard:** a bare default install is now refused at render
+time instead of creating a crashlooping provisioner. Existing estate values
+must either configure `skills.existingClaim` alongside enabled home persistence,
+disable both claim sources, or explicitly set `sandbox.volumeMode: hostpath` for
+the legacy local/hybrid layout before `helm upgrade`.
+
 **Namespace default change:** `namespace` now defaults to `""`, so Helm's
 `-n/--namespace` selects the release namespace. Existing installations that
 relied on the old implicit `deer-flow` value must install with `-n deer-flow`
@@ -648,9 +659,9 @@ deployment reproducibility, not evidence that live Kubernetes
 termination/recovery has been qualified.
 - **Sandbox volumes.** Set `sandbox.volumeMode: pvc` and provide
   `skills.existingClaim`; the enabled home persistence supplies the other claim
-  name. An empty mode now rejects exactly-one-claim configurations at
-  provisioner startup. Select `hostpath` explicitly only to preserve the
-  legacy local/hybrid layout.
+  name. Empty or `pvc` mode now rejects exactly-one-claim configurations during
+  Helm rendering. Select `hostpath` explicitly only to preserve the legacy
+  local/hybrid layout.
 - **Skills.** Disabled by default (emptyDir at `/app/skills`). Populate via
   `skills.existingClaim` or `skills.configMap`, or bake skills into a custom
   gateway image.
