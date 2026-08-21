@@ -32,9 +32,13 @@ Redis tenant namespaces follow the same direct-override rule:
 `DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX`,
 `DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX`, and
 `DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX` take precedence over their respective
-YAML fields when present. A shared multi-tenant Redis deployment must set all
-three to the same tenant prefix so every emitted name fits one `<tenant>:*` ACL
-boundary.
+YAML fields when present. The stream-bridge value adds an outer namespace, but
+the checkpoint-cache and ownership values replace their subsystem prefixes. A
+shared multi-tenant Helm deployment should set `redis.tenantPrefix`; the chart
+derives `<tenant>`, `<tenant>:ckpt-hist:v1`, and
+`<tenant>:deerflow:sandbox:owner` so every emitted name fits one `<tenant>:*`
+ACL boundary without flattening the replace-style keyspaces. Non-empty
+`redis.keyPrefixes.*` values are explicit per-subsystem replacements.
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
 **Extensions Configuration** (`extensions_config.json`):

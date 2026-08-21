@@ -242,22 +242,26 @@ unset omits the environment variable and keeps SQLAlchemy's default of 10.
 `stream_bridge.type: redis` supplies bounded reconnect replay through the
 bundled Redis StatefulSet (or `redis.external`).
 
-For a shared multi-tenant Redis, give each Helm release one tenant prefix and
-apply it to all three Gateway Redis subsystems:
+For a shared multi-tenant Redis, give each Helm release one tenant prefix:
 
 ```yaml
 redis:
-  keyPrefixes:
-    streamBridge: acme
-    checkpointCache: acme
-    sandboxOwnership: acme
+  tenantPrefix: acme
 ```
 
-The Gateway then emits only keys matching `acme:*`, so an ACL user can be
-limited with key and stream-channel patterns `~acme:* &acme:*`. Keep all three
-values identical: setting only one prefix leaves the other Redis-backed
-subsystems outside that tenant boundary. Adding or changing the stream-bridge
-prefix starts fresh per-run streams; retained legacy names are not migrated.
+The chart derives `acme`, `acme:ckpt-hist:v1`, and
+`acme:deerflow:sandbox:owner` for the stream bridge, checkpoint cache, and
+sandbox ownership overrides respectively. The replace-style cache and
+ownership overrides retain their subsystem namespaces instead of flattening all
+three stores under the bare tenant string. Every emitted name still matches
+`acme:*`, so an ACL user can be limited with key and stream-channel patterns
+`~acme:* &acme:*`.
+
+`redis.keyPrefixes.streamBridge`, `checkpointCache`, and `sandboxOwnership` are
+advanced per-subsystem overrides. A non-empty value wins over the derived value
+for that subsystem and must include any desired subsystem namespace for the two
+replace-style overrides. Adding or changing the stream-bridge prefix starts
+fresh per-run streams; retained legacy names are not migrated.
 Because `config:` is a single override blob, a partial `config:` replaces the
 chart default entirely - keep the `tools:`/`tool_groups:` block (or the agent
 will have no tools) and the `sandbox:`/`database:`/`checkpointer:`/`stream_bridge:`
@@ -569,11 +573,13 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   redis` by default. Production validation rejects inline passwords and URLs;
   set `redis.existingSecret` for bundled Redis or
   `redis.external.existingSecret` for managed Redis (key `redis-url`). For a
-  Redis shared by tenant releases, set all three `redis.keyPrefixes` values to
-  the release's tenant prefix and restrict that release's Redis user to
-  `~<tenant>:* &<tenant>:*`. These environment variables are injected only
-  into the Gateway; the provisioner does not run any of the three Redis-backed
-  subsystems.
+  Redis shared by tenant releases, set `redis.tenantPrefix` to the release's
+  tenant prefix and restrict that release's Redis user to
+  `~<tenant>:* &<tenant>:*`. The chart preserves the cache and ownership
+  subsystem namespaces when deriving their replace-style overrides. Use
+  `redis.keyPrefixes.*` only for explicit per-subsystem replacements. These
+  environment variables are injected only into the Gateway; the provisioner
+  does not run any of the three Redis-backed subsystems.
 - **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`
   (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC

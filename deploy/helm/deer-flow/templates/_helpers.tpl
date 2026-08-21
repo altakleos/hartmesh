@@ -167,6 +167,29 @@ imagePullSecrets:
 {{- or .Values.redis.enabled .Values.redis.external.redisUrl .Values.redis.external.existingSecret .Values.redis.existingSecret -}}
 {{- end -}}
 
+{{/* Gateway Redis prefixes. Explicit subsystem values win; the one-knob tenant
+     form preserves replace-style ownership and checkpoint-cache namespaces. */}}
+{{- define "deer-flow.redisKeyPrefixEnv" -}}
+{{- $tenant := .Values.redis.tenantPrefix | default "" -}}
+{{- $streamBridge := .Values.redis.keyPrefixes.streamBridge | default $tenant -}}
+{{- $checkpointCache := .Values.redis.keyPrefixes.checkpointCache -}}
+{{- if and (not $checkpointCache) $tenant -}}{{- $checkpointCache = printf "%s:ckpt-hist:v1" $tenant -}}{{- end -}}
+{{- $sandboxOwnership := .Values.redis.keyPrefixes.sandboxOwnership -}}
+{{- if and (not $sandboxOwnership) $tenant -}}{{- $sandboxOwnership = printf "%s:deerflow:sandbox:owner" $tenant -}}{{- end -}}
+{{- with $streamBridge }}
+- name: DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX
+  value: {{ . | quote }}
+{{- end }}
+{{- with $checkpointCache }}
+- name: DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX
+  value: {{ . | quote }}
+{{- end }}
+{{- with $sandboxOwnership }}
+- name: DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX
+  value: {{ . | quote }}
+{{- end }}
+{{- end -}}
+
 {{/* SHA256 checksums of the ConfigMaps. Mount these as pod-template
      annotations: ConfigMaps mounted via subPath do NOT receive live updates,
      so a `helm upgrade` that only changes a ConfigMap would leave pods on stale
