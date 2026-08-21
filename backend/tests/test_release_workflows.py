@@ -1,0 +1,117 @@
+"""Static contracts for manually dispatched release identity workflows."""
+
+from __future__ import annotations
+
+import re
+import subprocess
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[2]
+_MANIFEST = _ROOT / ".github/workflows/release-manifest.yaml"
+_MIRROR = _ROOT / ".github/workflows/sandbox-image-mirror.yaml"
+_SPELLINGS = _ROOT / "scripts/release_tag_spellings.sh"
+_PINNED_ACTION = re.compile(r"uses: [^\s]+@[0-9a-f]{40} # v\d+(?:\.\d+)*")
+
+
+def _top_level_block(workflow: str, start: str, end: str) -> str:
+    return workflow.split(f"{start}:\n", 1)[1].split(f"\n{end}:", 1)[0]
+
+
+def _input_names(workflow: str) -> set[str]:
+    trigger = _top_level_block(workflow, "on", "permissions")
+    inputs = trigger.split("    inputs:\n", 1)[1]
+    return set(re.findall(r"^      ([a-z_]+):$", inputs, flags=re.MULTILINE))
+
+
+def _input_body(workflow: str, name: str) -> str:
+    trigger = _top_level_block(workflow, "on", "permissions")
+    match = re.search(rf"^      {name}:\n(?P<body>(?:        .*\n)+)", trigger, flags=re.MULTILINE)
+    assert match is not None
+    return match.group("body")
+
+
+def _assert_actions_are_pinned(workflow: str) -> None:
+    action_lines = [line.strip() for line in workflow.splitlines() if "uses:" in line]
+    assert action_lines
+    assert all(_PINNED_ACTION.fullmatch(line) for line in action_lines)
+
+
+def test_release_manifest_dispatch_contract_is_manual_and_minimal() -> None:
+    workflow = _MANIFEST.read_text(encoding="utf-8")
+
+    trigger = _top_level_block(workflow, "on", "permissions")
+    assert _input_names(workflow) == {"version"}
+    assert "        required: true\n" in _input_body(workflow, "version")
+    assert "        type: string\n" in _input_body(workflow, "version")
+    assert trigger.count("workflow_dispatch:") == 1
+    assert all(event not in trigger for event in ("push:", "pull_request:", "schedule:", "workflow_call:"))
+    assert _top_level_block(workflow, "permissions", "jobs").strip().splitlines() == ["contents: write", "  packages: read"]
+    _assert_actions_are_pinned(workflow)
+
+
+def test_release_manifest_resolves_and_records_every_published_identity() -> None:
+    workflow = _MANIFEST.read_text(encoding="utf-8")
+
+    assert "ref: refs/tags/v${{ inputs.version }}" in workflow
+    assert 'SHORT_SHA="${COMMIT:0:7}"' in workflow
+    assert '"${IMAGE_REPOSITORY}:sha-${SHORT_SHA}"' in workflow
+    assert "TAG_DIGEST" in workflow and "SHA_DIGEST" in workflow
+    assert 'if [ "$TAG_DIGEST" != "$SHA_DIGEST" ]; then' in workflow
+    assert "helm pull" in workflow and '--version "$VERSION"' in workflow
+    assert "release-manifest.json" in workflow
+    for field in ("schema", "version", "tag", "commit", "images", "chart", "repository", "digest", "oci_tag", "manifest_digest", "package_sha256"):
+        assert f'"{field}"' in workflow
+    for component in ("backend", "frontend", "provisioner"):
+        assert f'"{component}"' in workflow
+    assert "actions/upload-artifact@" in workflow
+    assert "gh release create" in workflow
+    assert "gh release upload" in workflow and "--clobber" in workflow
+    assert "scripts/release_tag_spellings.sh" in workflow
+    assert "ghcr.io/${{ github.repository }}" in workflow
+    assert 'OWNER="${REPOSITORY_PATH%%/*}"' in workflow
+    assert "github.repository_owner" not in workflow
+    assert "GITHUB_REPOSITORY_OWNER" not in workflow
+
+
+def test_sandbox_mirror_dispatch_contract_is_manual_and_minimal() -> None:
+    workflow = _MIRROR.read_text(encoding="utf-8")
+
+    trigger = _top_level_block(workflow, "on", "permissions")
+    assert _input_names(workflow) == {"source", "version"}
+    for name in ("source", "version"):
+        assert "        required: true\n" in _input_body(workflow, name)
+        assert "        type: string\n" in _input_body(workflow, name)
+    assert trigger.count("workflow_dispatch:") == 1
+    assert all(event not in trigger for event in ("push:", "pull_request:", "schedule:", "workflow_call:"))
+    assert _top_level_block(workflow, "permissions", "jobs").strip().splitlines() == ["packages: write"]
+    _assert_actions_are_pinned(workflow)
+
+
+def test_sandbox_mirror_rejects_floating_sources_before_network_and_verifies_copy() -> None:
+    workflow = _MIRROR.read_text(encoding="utf-8")
+
+    validation = workflow.index('if ! [[ "$SOURCE" =~ ^[^[:space:]@]+@sha256:')
+    assert validation < workflow.index("actions/checkout@")
+    assert validation < workflow.index("imjasonh/setup-crane@")
+    assert "crane copy" in workflow
+    assert 'if [ "$MIRROR_DIGEST" != "$SOURCE_DIGEST" ]; then' in workflow
+    assert "scripts/release_tag_spellings.sh" in workflow
+    assert ":latest" not in workflow
+    assert "value=latest" not in workflow
+
+
+def test_shared_release_spelling_script_is_the_only_substitution_implementation() -> None:
+    result = subprocess.run(["bash", str(_SPELLINGS), "2.1.0+hartmesh.7"], capture_output=True, text=True, check=False)
+    injected = subprocess.run(
+        ["bash", str(_SPELLINGS), "2.1.0+hartmesh.7\nimage_tag=untrusted"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["image_tag=v2.1.0-hartmesh.7", "chart_oci_tag=2.1.0_hartmesh.7"]
+    assert injected.returncode == 1
+    for workflow_path in (_MANIFEST, _MIRROR):
+        workflow = workflow_path.read_text(encoding="utf-8")
+        assert "//+" not in workflow
