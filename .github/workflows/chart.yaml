@@ -41,7 +41,14 @@ jobs:
       - name: Lint chart
         run: helm lint deploy/helm/deer-flow
       - name: Validate templates render
-        run: helm template deer-flow deploy/helm/deer-flow --include-crds >/dev/null
+        run: helm template deer-flow deploy/helm/deer-flow --include-crds --set-string sandbox.volumeMode=pvc --set-string skills.existingClaim=deer-flow-skills >/dev/null
+      - name: Bare default values are refused with an actionable message
+        run: |
+          if helm template deer-flow deploy/helm/deer-flow >/dev/null 2>render.err; then
+            echo "::error::bare default values must be refused (half-configured sandbox PVC claims)"
+            exit 1
+          fi
+          grep -q 'skills.existingClaim' render.err
 
       # Assert the sandbox Service-type gating: default emits
       # SANDBOX_SERVICE_TYPE=ClusterIP and no NODE_HOST; the NodePort opt-in
