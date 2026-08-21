@@ -11,6 +11,26 @@ on:
         description: Exact Gateway sha256 digest
         required: true
         type: string
+      provisioner_image_repository:
+        description: Provisioner OCI repository without tag or digest
+        required: true
+        type: string
+      provisioner_image_digest:
+        description: Exact Provisioner sha256 digest
+        required: true
+        type: string
+      sandbox_image_repository:
+        description: AIO sandbox OCI repository without tag or digest
+        required: true
+        type: string
+      sandbox_image_digest:
+        description: Exact AIO sandbox sha256 digest
+        required: true
+        type: string
+      rwx_storage_class:
+        description: StorageClass providing ReadWriteMany volumes
+        required: true
+        type: string
       kube_context:
         description: Explicit disposable-cluster context to confirm
         required: true
@@ -42,8 +62,16 @@ jobs:
       DEERFLOW_TEST_KUBERNETES_NAMESPACE: ${{ inputs.namespace }}
       DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID: ${{ inputs.qualification_id }}
       DEERFLOW_TEST_KUBERNETES_DRIVER: ${{ inputs.cluster_driver }}
+      DEERFLOW_TEST_KUBERNETES_SCOPE: "durable_one_replica_rwx_verified_copy_v2_nonempty_skill"
       DEERFLOW_TEST_GATEWAY_IMAGE_REPOSITORY: ${{ inputs.image_repository }}
       DEERFLOW_TEST_GATEWAY_IMAGE_DIGEST: ${{ inputs.image_digest }}
+      DEERFLOW_TEST_PROVISIONER_IMAGE_REPOSITORY: ${{ inputs.provisioner_image_repository }}
+      DEERFLOW_TEST_PROVISIONER_IMAGE_DIGEST: ${{ inputs.provisioner_image_digest }}
+      DEERFLOW_TEST_VERIFIER_IMAGE_REPOSITORY: ${{ inputs.provisioner_image_repository }}
+      DEERFLOW_TEST_VERIFIER_IMAGE_DIGEST: ${{ inputs.provisioner_image_digest }}
+      DEERFLOW_TEST_SANDBOX_IMAGE_REPOSITORY: ${{ inputs.sandbox_image_repository }}
+      DEERFLOW_TEST_SANDBOX_IMAGE_DIGEST: ${{ inputs.sandbox_image_digest }}
+      DEERFLOW_TEST_KUBERNETES_RWX_STORAGE_CLASS: ${{ inputs.rwx_storage_class }}
       DEERFLOW_TEST_KUBERNETES_EVIDENCE: ${{ github.workspace }}/artifacts/kubernetes-qualification.json
 
     steps:
