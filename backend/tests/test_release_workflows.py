@@ -114,7 +114,7 @@ def test_sandbox_mirror_dispatch_contract_is_manual_and_minimal() -> None:
         assert "        type: string\n" in _input_body(workflow, name)
     assert trigger.count("workflow_dispatch:") == 1
     assert all(event not in trigger for event in ("push:", "pull_request:", "schedule:", "workflow_call:"))
-    assert _top_level_block(workflow, "permissions", "jobs").strip().splitlines() == ["packages: write"]
+    assert _top_level_block(workflow, "permissions", "jobs").strip().splitlines() == ["contents: read", "  packages: write"]
     _assert_actions_are_pinned(workflow)
 
 
