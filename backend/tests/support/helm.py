@@ -17,12 +17,21 @@ _HELM = shutil.which("helm")
 _TEST_SKILLS_CLAIM = "deer-flow-test-skills"
 
 
-def _require_helm() -> str:
+def helm_executable(*, allow_local_fallback: bool = False) -> str | None:
+    """Resolve Helm, failing in CI and optionally allowing a local fallback."""
     if _HELM is None:
         if os.environ.get("CI"):
             pytest.fail("helm is required in CI to verify rendered chart values")
+        if allow_local_fallback:
+            return None
         pytest.skip("helm is required to verify rendered chart values")
     return _HELM
+
+
+def _require_helm() -> str:
+    helm = helm_executable()
+    assert helm is not None
+    return helm
 
 
 def render_chart(

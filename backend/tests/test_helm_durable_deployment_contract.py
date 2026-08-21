@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import copy
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
+from support.helm import helm_executable
 from support.kubernetes_qualification import (
     KubernetesQualificationConfig,
     KubernetesQualificationRunner,
@@ -19,12 +19,6 @@ _CHART = _REPO_ROOT / "deploy" / "helm" / "deer-flow"
 _VALUES = yaml.safe_load((_CHART / "values.yaml").read_text(encoding="utf-8"))
 _VALUES["sandbox"]["volumeMode"] = "pvc"
 _VALUES["skills"]["existingClaim"] = "deer-flow-test-skills"
-_HELM = shutil.which("helm")
-
-pytestmark = pytest.mark.skipif(
-    _HELM is None,
-    reason="Helm semantic rendering requires the optional helm executable",
-)
 
 
 def _write_values(tmp_path: Path, values: dict[str, object]) -> Path:
@@ -39,8 +33,10 @@ def _render(
     *,
     expect_success: bool = True,
 ) -> subprocess.CompletedProcess[str]:
+    helm = helm_executable()
+    assert helm is not None
     command = [
-        str(_HELM),
+        helm,
         "template",
         "deer-flow",
         str(_CHART),
