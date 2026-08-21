@@ -527,7 +527,9 @@ def _ensure_namespace() -> None:
         if exc.status == 404:
             if not PROVISIONER_CREATE_NAMESPACE:
                 raise RuntimeError(
-                    f"sandbox namespace {K8S_NAMESPACE!r} does not exist; it must be pre-created (set K8S_NAMESPACE)",
+                    f"sandbox namespace {K8S_NAMESPACE!r} does not exist. Pre-create it (Helm: the namespace named by "
+                    "sandboxNamespace, or the release namespace), or set PROVISIONER_CREATE_NAMESPACE=true for "
+                    "single-namespace local/Compose installs.",
                 ) from None
             ns = k8s_client.V1Namespace(
                 metadata=k8s_client.V1ObjectMeta(

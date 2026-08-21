@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -56,9 +57,10 @@ def test_missing_sandbox_namespace_fails_closed_by_default(
     provisioner_module.core_v1 = api
 
     assert provisioner_module.PROVISIONER_CREATE_NAMESPACE is False
+    expected = "sandbox namespace 'acme-sbx' does not exist. Pre-create it (Helm: the namespace named by sandboxNamespace, or the release namespace), or set PROVISIONER_CREATE_NAMESPACE=true for single-namespace local/Compose installs."
     with pytest.raises(
         RuntimeError,
-        match=r"sandbox namespace 'acme-sbx' does not exist; it must be pre-created .*K8S_NAMESPACE",
+        match=re.escape(expected),
     ):
         provisioner_module._ensure_namespace()
 
