@@ -236,6 +236,15 @@ imagePullSecrets:
 {{- end -}}
 {{- end -}}
 
+{{- define "deer-flow.validateSandboxVolumeMode" -}}
+{{- $mode := .Values.sandbox.volumeMode | default "" -}}
+{{- $homeClaim := .Values.persistence.home.enabled -}}
+{{- $skillsClaim := ne (.Values.skills.existingClaim | default "") "" -}}
+{{- if and (has $mode (list "" "pvc")) (ne $homeClaim $skillsClaim) -}}
+{{- fail "persistence.home.enabled and skills.existingClaim must be configured together when sandbox.volumeMode is empty or pvc; set skills.existingClaim (PVC mode needs both claims), disable persistence.home.enabled with no skills claim, or set sandbox.volumeMode: hostpath for legacy local/hybrid installs" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "deer-flow.validate" -}}
 {{- include "deer-flow.validateDigest" (dict "name" "gateway" "digest" .Values.gateway.image.digest) -}}
 {{- include "deer-flow.validateDigest" (dict "name" "frontend" "digest" .Values.frontend.image.digest) -}}
