@@ -1,3 +1,16 @@
+## Release Tooling Contracts
+
+`bump_version.sh` owns coordinated version updates, including regenerating the
+root `deer-flow` entry in `backend/uv.lock` with `uv lock`;
+`verify_versions.sh` validates all five fields without requiring `uv` in the CI
+gate. `release_tag_spellings.sh <version>` is the sole implementation of the
+registry-safe release spellings and emits `image_tag=...` plus
+`chart_oci_tag=...` lines suitable for `GITHUB_OUTPUT`. Both manual-only release
+workflows consume that helper: `release-manifest.yaml` resolves and records a
+completed tag publish, while `sandbox-image-mirror.yaml` copies and verifies an
+operator-selected digest. Keep publishing out of these local scripts and keep
+the workflows dispatch-only.
+
 ## Service Startup Contracts
 
 The root `PORT` value configures Docker's published nginx ingress only; local
