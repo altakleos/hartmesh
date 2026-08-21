@@ -64,6 +64,16 @@ logging.basicConfig(
 # ── Configuration (all tuneable via environment variables) ───────────────
 
 K8S_NAMESPACE = os.environ.get("K8S_NAMESPACE", "deer-flow")
+
+
+def _provisioner_create_namespace_from_env() -> bool:
+    return os.environ.get(
+        "PROVISIONER_CREATE_NAMESPACE",
+        "false",
+    ).strip().lower() == "true"
+
+
+PROVISIONER_CREATE_NAMESPACE = _provisioner_create_namespace_from_env()
 SANDBOX_IMAGE = os.environ.get(
     "SANDBOX_IMAGE",
     "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest",
@@ -450,12 +460,16 @@ def _wait_for_kubeconfig(timeout: int = 30) -> None:
 
 
 def _ensure_namespace() -> None:
-    """Create the K8s namespace if it does not yet exist."""
+    """Require the sandbox namespace, creating it only by explicit opt-in."""
     try:
         core_v1.read_namespace(K8S_NAMESPACE)
         logger.info(f"Namespace '{K8S_NAMESPACE}' already exists")
     except ApiException as exc:
         if exc.status == 404:
+            if not PROVISIONER_CREATE_NAMESPACE:
+                raise RuntimeError(
+                    f"sandbox namespace {K8S_NAMESPACE!r} does not exist; it must be pre-created (set K8S_NAMESPACE)",
+                ) from None
             ns = k8s_client.V1Namespace(
                 metadata=k8s_client.V1ObjectMeta(
                     name=K8S_NAMESPACE,
@@ -480,6 +494,15 @@ async def lifespan(_app: FastAPI):
     logger.info(
         "Sandbox runtime class: %s",
         _sandbox_runtime_label(),
+    )
+    logger.info(
+        "Sandbox namespace mode: %s (K8S_NAMESPACE=%s)",
+        (
+            "create-if-missing"
+            if PROVISIONER_CREATE_NAMESPACE
+            else "pre-created-required"
+        ),
+        K8S_NAMESPACE,
     )
     _wait_for_kubeconfig()
     core_v1 = _init_k8s_client()
@@ -2171,7 +2194,13 @@ def _build_accepted_network_policy(
     *,
     accepted_attempt_owner: k8s_client.V1OwnerReference | None = None,
 ) -> k8s_client.V1NetworkPolicy:
-    """Expose only the capability gate to Gateway Pods in this namespace."""
+    """Expose the capability gate only to Gateway control-plane Pods."""
+
+    gateway_namespace_selector = k8s_client.V1LabelSelector(
+        match_labels={
+            "kubernetes.io/metadata.name": PROVISIONER_GATEWAY_NAMESPACE,
+        },
+    )
 
     return k8s_client.V1NetworkPolicy(
         metadata=k8s_client.V1ObjectMeta(
@@ -2192,6 +2221,7 @@ def _build_accepted_network_policy(
                 k8s_client.V1NetworkPolicyIngressRule(
                     _from=[
                         k8s_client.V1NetworkPolicyPeer(
+                            namespace_selector=gateway_namespace_selector,
                             pod_selector=k8s_client.V1LabelSelector(
                                 match_labels={
                                     "app.kubernetes.io/component": "gateway",
@@ -2199,6 +2229,7 @@ def _build_accepted_network_policy(
                             )
                         ),
                         k8s_client.V1NetworkPolicyPeer(
+                            namespace_selector=gateway_namespace_selector,
                             pod_selector=k8s_client.V1LabelSelector(
                                 match_labels={
                                     "app.kubernetes.io/component": ("provisioner"),

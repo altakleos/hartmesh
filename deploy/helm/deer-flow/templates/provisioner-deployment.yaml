@@ -45,8 +45,10 @@ spec:
             # Running as non-root uid 1000: suppress .pyc writes under root-owned /app.
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
+            # Sandbox resources can live in a separate pre-created namespace,
+            # while TokenReview must keep validating the Gateway's release identity.
             - name: K8S_NAMESPACE
-              value: {{ include "deer-flow.namespace" . | quote }}
+              value: {{ include "deer-flow.sandboxNamespace" . | quote }}
             - name: PROVISIONER_AUTH_AUDIENCE
               value: {{ .Values.provisioner.gatewayTokenAudience | quote }}
             - name: PROVISIONER_GATEWAY_NAMESPACE

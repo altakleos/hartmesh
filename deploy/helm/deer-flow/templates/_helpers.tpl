@@ -30,6 +30,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- default .Release.Namespace .Values.namespace -}}
 {{- end -}}
 
+{{- define "deer-flow.sandboxNamespace" -}}
+{{- default (include "deer-flow.namespace" .) .Values.sandboxNamespace -}}
+{{- end -}}
+
 {{- define "deer-flow.imagePullSecrets" -}}
 {{- with .Values.image.pullSecrets }}
 imagePullSecrets:
@@ -102,7 +106,7 @@ imagePullSecrets:
 
 {{/* PVC name for the .deer-flow home directory. */}}
 {{- define "deer-flow.homePVC" -}}
-{{- printf "%s-home" (include "deer-flow.fullname" .) -}}
+{{- default (printf "%s-home" (include "deer-flow.fullname" .)) .Values.persistence.home.existingClaim -}}
 {{- end -}}
 
 {{/* Name of the Secret holding provider/channel keys. */}}

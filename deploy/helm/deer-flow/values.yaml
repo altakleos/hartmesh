@@ -3,8 +3,12 @@
 # Copy to my-values.yaml, edit, and install with:
 #   helm install deer-flow deploy/helm/deer-flow -n deer-flow --create-namespace -f my-values.yaml
 
-# -- Target namespace (also used as the K8s sandbox namespace for provisioner-spawned Pods).
-namespace: deer-flow
+# -- Optional release namespace override. Empty uses Helm's `--namespace` value.
+namespace: ""
+
+# -- Namespace for provisioner-created sandbox resources. Empty uses the
+#    resolved release namespace. A non-empty namespace must already exist.
+sandboxNamespace: ""
 
 # -- Legacy shared image settings. Existing values files using registry/tag and
 #    the three image-name keys remain supported. New deployments should use the
@@ -303,7 +307,12 @@ redis:
 #    provisioner-spawned sandbox Pods.
 persistence:
   home:
+    # -- Keep enabled=true when using an existing claim: enabled=false also
+    #    suppresses the provisioner's USERDATA_PVC_NAME environment variable.
     enabled: true
+    # -- Existing home PVC name. When set, the chart does not create a PVC;
+    #    the Gateway mount and provisioner sandbox user-data both use this claim.
+    existingClaim: ""
     storageClass: ""         # "" = cluster default
     accessMode: ReadWriteOnce  # Use ReadWriteMany (NFS/etc.) for multi-node
     size: 10Gi
