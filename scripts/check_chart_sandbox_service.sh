@@ -35,18 +35,24 @@ fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-if ! helm template deer-flow "$CHART" --include-crds >"$TMP/default.yaml"; then
+if ! helm template deer-flow "$CHART" --include-crds \
+  --set-string sandbox.volumeMode=pvc \
+  --set-string skills.existingClaim=deer-flow-skills >"$TMP/default.yaml"; then
   echo "::error::default chart render failed" >&2
   exit 1
 fi
 if ! helm template deer-flow "$CHART" --include-crds \
-  --set provisioner.sandboxServiceType=NodePort >"$TMP/nodeport.yaml"; then
+  --set provisioner.sandboxServiceType=NodePort \
+  --set-string sandbox.volumeMode=pvc \
+  --set-string skills.existingClaim=deer-flow-skills >"$TMP/nodeport.yaml"; then
   echo "::error::NodePort chart render failed" >&2
   exit 1
 fi
 if ! helm template deer-flow "$CHART" --include-crds \
   --set provisioner.sandboxServiceType=NodePort \
-  --set provisioner.nodeHost=192.168.1.10 >"$TMP/nodeport-host.yaml"; then
+  --set provisioner.nodeHost=192.168.1.10 \
+  --set-string sandbox.volumeMode=pvc \
+  --set-string skills.existingClaim=deer-flow-skills >"$TMP/nodeport-host.yaml"; then
   echo "::error::NodePort+nodeHost chart render failed" >&2
   exit 1
 fi
