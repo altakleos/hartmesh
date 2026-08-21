@@ -108,7 +108,7 @@ class RedisCheckpointHistoryCache:
         TTL-bounded residual retention; the source-of-truth delete already
         happened, so this never raises."""
         if self._purge_disabled:
-            logger.debug("checkpoint history cache thread purge skipped because ACL denies SCAN")
+            logger.debug("checkpoint history cache thread purge skipped because ACL denies checkpoint-cache purge")
             return
         stem = thread_key_stem(key_prefix, thread_id)
         try:
@@ -124,7 +124,7 @@ class RedisCheckpointHistoryCache:
                 self._purge_disabled = True
                 ttl_consequence = f"entries expire via TTL ({self._ttl}s)" if self._ttl is not None else "TTL is disabled, so residual entries do not expire"
                 logger.warning(
-                    "ACL denies SCAN; checkpoint history cache will not purge on thread delete; %s",
+                    "ACL denies checkpoint-cache purge (SCAN or UNLINK); %s",
                     ttl_consequence,
                 )
                 return
