@@ -17,6 +17,8 @@ from support.kubernetes_qualification import (
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CHART = _REPO_ROOT / "deploy" / "helm" / "deer-flow"
 _VALUES = yaml.safe_load((_CHART / "values.yaml").read_text(encoding="utf-8"))
+_VALUES["sandbox"]["volumeMode"] = "pvc"
+_VALUES["skills"]["existingClaim"] = "deer-flow-test-skills"
 _HELM = shutil.which("helm")
 
 pytestmark = pytest.mark.skipif(
@@ -618,7 +620,7 @@ def test_kubernetes_qualification_scope_and_status_are_strict(
 
 
 def test_default_profile_is_explicitly_local_and_unqualified(tmp_path: Path) -> None:
-    result = _render(tmp_path)
+    result = _render(tmp_path, _VALUES)
     config_map = next(document for document in _documents(result.stdout) if document.get("kind") == "ConfigMap" and document.get("metadata", {}).get("name") == "deer-flow-deer-flow-config")
     config = yaml.safe_load(config_map["data"]["config.yaml"])
 

@@ -28,7 +28,15 @@ def test_explicit_hostpath_renders_with_default_claim_shape() -> None:
 
 
 def test_no_claims_render_for_inferred_hostpath_mode() -> None:
-    env = deployment_env("provisioner", "--set", "persistence.home.enabled=false")
+    env = deployment_env(
+        "provisioner",
+        "--set",
+        "persistence.home.enabled=false",
+        "--set-string",
+        "skills.existingClaim=",
+        "--set-string",
+        "sandbox.volumeMode=",
+    )
 
     assert "SANDBOX_VOLUME_MODE" not in env
 
