@@ -148,7 +148,8 @@ the canonical artifact SHA-256 plus exact subject and complete passing-scenario 
 
 After selecting an exact upstream sandbox digest, dispatch the mirror workflow.
 It rejects floating sources, copies by digest, verifies the destination digest,
-and prints the reference to use for `sandbox.sandboxImage`:
+and prints the reference to use for `sandbox.sandboxImage` and the release
+manifest:
 
 ```bash
 gh workflow run sandbox-image-mirror.yaml \
@@ -156,20 +157,30 @@ gh workflow run sandbox-image-mirror.yaml \
   -f version=2.1.0+hartmesh.1
 ```
 
-After the tag-triggered chart and all three image jobs succeed, dispatch the
-manifest workflow. It checks out that exact tag, requires each release image tag
-to match its `sha-` tag, resolves the chart, creates the GitHub Release if
-needed, and attaches `release-manifest.json` as both a workflow artifact and a
-release asset:
+Copy the verified `ghcr.io/<owner>/<repo>-sandbox@sha256:...` reference from the
+mirror summary. After the tag-triggered chart and all three image jobs succeed,
+dispatch the manifest workflow and pass that reference through its optional
+`sandbox` input:
 
 ```bash
-gh workflow run release-manifest.yaml -f version=2.1.0+hartmesh.1
+gh workflow run release-manifest.yaml \
+  -f version=2.1.0+hartmesh.1 \
+  -f 'sandbox=ghcr.io/<owner>/<repo>-sandbox@sha256:<64-lowercase-hex>'
 ```
+
+The manifest workflow checks out the exact tag, cross-checks each release image
+against its `sha-` tag when present, resolves the chart, creates the GitHub
+Release if needed, and attaches `release-manifest.json` as both a workflow
+artifact and a release asset. A missing `sha-` tag is recorded as
+`revision_check: tag-not-found`; a resolved digest mismatch remains fatal. When
+`sandbox` is supplied, the workflow verifies its digest and adds
+`"sandbox": {"repository": "...", "digest": "sha256:..."}`. Omitting the input
+omits that key from the schema-1 manifest.
 
 Do not dispatch the manifest while a publish job is pending or failed: a
 missing image or a tag/digest mismatch intentionally fails the workflow. The
-sandbox mirror is recorded separately in its workflow summary because it is
-operator-selected rather than built by the tag workflow.
+sandbox must be mirrored first so its verified reference can be included in the
+manifest.
 
 ### First-publish GHCR visibility
 

@@ -40,9 +40,11 @@ def test_release_manifest_dispatch_contract_is_manual_and_minimal() -> None:
     workflow = _MANIFEST.read_text(encoding="utf-8")
 
     trigger = _top_level_block(workflow, "on", "permissions")
-    assert _input_names(workflow) == {"version"}
+    assert _input_names(workflow) == {"sandbox", "version"}
     assert "        required: true\n" in _input_body(workflow, "version")
     assert "        type: string\n" in _input_body(workflow, "version")
+    assert "        required: false\n" in _input_body(workflow, "sandbox")
+    assert "        type: string\n" in _input_body(workflow, "sandbox")
     assert trigger.count("workflow_dispatch:") == 1
     assert all(event not in trigger for event in ("push:", "pull_request:", "schedule:", "workflow_call:"))
     assert _top_level_block(workflow, "permissions", "jobs").strip().splitlines() == ["contents: write", "  packages: read"]
@@ -102,6 +104,23 @@ def test_release_workflows_pass_registry_tokens_over_stdin() -> None:
         workflow = workflow_path.read_text(encoding="utf-8")
         assert " -p " not in workflow
         assert expected_login in workflow
+
+
+def test_release_manifest_validates_and_records_an_optional_sandbox() -> None:
+    workflow = _MANIFEST.read_text(encoding="utf-8")
+
+    validation = workflow.index('if ! [[ "$SANDBOX" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]')
+    assert validation < workflow.index("actions/checkout@")
+    assert validation < workflow.index("imjasonh/setup-crane@")
+    assert 'SANDBOX_DIGEST="$(crane digest "$SANDBOX")"' in workflow
+    assert 'assert_digest "sandbox image" "$SANDBOX_DIGEST"' in workflow
+    assert 'if [ "$SANDBOX_DIGEST" != "$SANDBOX_EXPECTED_DIGEST" ]; then' in workflow
+    assert 'if os.environ["SANDBOX_PRESENT"] == "true":' in workflow
+    assert 'manifest["sandbox"] = {' in workflow
+    assert '"repository": os.environ["SANDBOX_REPOSITORY"]' in workflow
+    assert '"digest": os.environ["SANDBOX_DIGEST"]' in workflow
+    assert '"sandbox": {' not in workflow
+    assert '"schema": 1' in workflow
 
 
 def test_sandbox_mirror_dispatch_contract_is_manual_and_minimal() -> None:

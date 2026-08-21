@@ -7,6 +7,11 @@ on:
         description: Release version without the leading v (for example, 2.1.0+hartmesh.1)
         required: true
         type: string
+      sandbox:
+        description: Optional digest-pinned sandbox image reference to include in the manifest
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -16,6 +21,24 @@ jobs:
   release-manifest:
     runs-on: ubuntu-latest
     steps:
+      - name: Validate the optional sandbox reference
+        id: sandbox
+        env:
+          SANDBOX: ${{ inputs.sandbox }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SANDBOX" ]; then
+            printf 'present=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! [[ "$SANDBOX" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::sandbox must end with @sha256:<64 lowercase hex characters>"
+            exit 1
+          fi
+          printf 'present=true\n' >> "$GITHUB_OUTPUT"
+          printf 'repository=%s\n' "${SANDBOX%@*}" >> "$GITHUB_OUTPUT"
+          printf 'expected_digest=%s\n' "${SANDBOX##*@}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout the exact release tag
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -53,6 +76,10 @@ jobs:
           IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
           SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
           CHART_OCI_TAG: ${{ steps.identity.outputs.chart_oci_tag }}
+          SANDBOX: ${{ inputs.sandbox }}
+          SANDBOX_PRESENT: ${{ steps.sandbox.outputs.present }}
+          SANDBOX_EXPECTED_DIGEST: ${{ steps.sandbox.outputs.expected_digest }}
+          SANDBOX_REPOSITORY: ${{ steps.sandbox.outputs.repository }}
         run: |
           set -euo pipefail
 
@@ -99,6 +126,17 @@ jobs:
             printf '%s_revision_check=%s\n' "$COMPONENT" "$REVISION_CHECK" >> "$GITHUB_OUTPUT"
           done
 
+          if [ "$SANDBOX_PRESENT" = "true" ]; then
+            SANDBOX_DIGEST="$(crane digest "$SANDBOX")"
+            assert_digest "sandbox image" "$SANDBOX_DIGEST"
+            if [ "$SANDBOX_DIGEST" != "$SANDBOX_EXPECTED_DIGEST" ]; then
+              echo "::error::sandbox reference resolved to ${SANDBOX_DIGEST}, expected ${SANDBOX_EXPECTED_DIGEST}"
+              exit 1
+            fi
+            printf 'sandbox_repository=%s\n' "$SANDBOX_REPOSITORY" >> "$GITHUB_OUTPUT"
+            printf 'sandbox_digest=%s\n' "$SANDBOX_DIGEST" >> "$GITHUB_OUTPUT"
+          fi
+
           CHART_MANIFEST_DIGEST="$(crane digest "ghcr.io/${OWNER}/charts/deer-flow:${CHART_OCI_TAG}")"
           assert_digest "chart OCI tag" "$CHART_MANIFEST_DIGEST"
           CHART_DIRECTORY="$RUNNER_TEMP/release-chart"
@@ -132,6 +170,9 @@ jobs:
           CHART_REPOSITORY: ${{ steps.resolve.outputs.chart_repository }}
           CHART_MANIFEST_DIGEST: ${{ steps.resolve.outputs.chart_manifest_digest }}
           PACKAGE_SHA256: ${{ steps.resolve.outputs.package_sha256 }}
+          SANDBOX_PRESENT: ${{ steps.sandbox.outputs.present }}
+          SANDBOX_REPOSITORY: ${{ steps.resolve.outputs.sandbox_repository }}
+          SANDBOX_DIGEST: ${{ steps.resolve.outputs.sandbox_digest }}
         run: |
           python3 - <<'PY'
           import json
@@ -160,6 +201,11 @@ jobs:
                   "package_sha256": os.environ["PACKAGE_SHA256"],
               },
           }
+          if os.environ["SANDBOX_PRESENT"] == "true":
+              manifest["sandbox"] = {
+                  "repository": os.environ["SANDBOX_REPOSITORY"],
+                  "digest": os.environ["SANDBOX_DIGEST"],
+              }
           with open("release-manifest.json", "w", encoding="utf-8") as output:
               json.dump(manifest, output, indent=2)
               output.write("\n")
@@ -193,6 +239,9 @@ jobs:
             echo '| backend | `${{ steps.resolve.outputs.backend_repository }}@${{ steps.resolve.outputs.backend_digest }}` | `${{ steps.resolve.outputs.backend_revision_check }}` |'
             echo '| frontend | `${{ steps.resolve.outputs.frontend_repository }}@${{ steps.resolve.outputs.frontend_digest }}` | `${{ steps.resolve.outputs.frontend_revision_check }}` |'
             echo '| provisioner | `${{ steps.resolve.outputs.provisioner_repository }}@${{ steps.resolve.outputs.provisioner_digest }}` | `${{ steps.resolve.outputs.provisioner_revision_check }}` |'
+            if [ '${{ steps.sandbox.outputs.present }}' = 'true' ]; then
+              echo '| sandbox | `${{ steps.resolve.outputs.sandbox_repository }}@${{ steps.resolve.outputs.sandbox_digest }}` | provided digest verified |'
+            fi
             echo '| chart manifest | `${{ steps.resolve.outputs.chart_manifest_digest }}` | n/a |'
             echo '| chart package SHA-256 | `${{ steps.resolve.outputs.package_sha256 }}` | n/a |'
           } >> "$GITHUB_STEP_SUMMARY"
