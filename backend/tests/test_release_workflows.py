@@ -73,6 +73,28 @@ def test_release_manifest_resolves_and_records_every_published_identity() -> Non
     assert "GITHUB_REPOSITORY_OWNER" not in workflow
 
 
+def test_release_manifest_records_revision_check_without_requiring_sha_tag() -> None:
+    workflow = _MANIFEST.read_text(encoding="utf-8")
+
+    assert 'TAG_DIGEST="$(crane digest "$TAG_REFERENCE")"' in workflow
+    assert 'if SHA_DIGEST="$(crane digest "$SHA_REFERENCE" 2>/dev/null)"; then' in workflow
+    assert 'if [ "$TAG_DIGEST" != "$SHA_DIGEST" ]; then' in workflow
+    assert 'REVISION_CHECK="verified"' in workflow
+    assert 'echo "::warning::${SHA_REFERENCE} was not found' in workflow
+    assert 'TAG_LIST_FILE="${RUNNER_TEMP}/${COMPONENT}-tags.txt"' in workflow
+    assert 'if ! crane ls "$IMAGE_REPOSITORY" > "$TAG_LIST_FILE"; then' in workflow
+    assert 'echo "::error::Unable to confirm whether ${SHA_REFERENCE} exists' in workflow
+    assert 'head -50 "$TAG_LIST_FILE"' in workflow
+    assert 'if grep -Fxq "sha-${SHORT_SHA}" "$TAG_LIST_FILE"; then' in workflow
+    assert 'echo "::error::${SHA_REFERENCE} is listed but its digest could not be resolved"' in workflow
+    assert 'REVISION_CHECK="tag-not-found"' in workflow
+    assert "printf '%s_digest=%s\\n' \"$COMPONENT\" \"$TAG_DIGEST\"" in workflow
+    assert "printf '%s_revision_check=%s\\n' \"$COMPONENT\" \"$REVISION_CHECK\"" in workflow
+    assert '"revision_check": os.environ[f"{name.upper()}_REVISION_CHECK"]' in workflow
+    for component in ("backend", "frontend", "provisioner"):
+        assert f"{component}_revision_check" in workflow
+
+
 def test_sandbox_mirror_dispatch_contract_is_manual_and_minimal() -> None:
     workflow = _MIRROR.read_text(encoding="utf-8")
 
