@@ -5,6 +5,16 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.1] — 2026-08-21
+
+- feat: harden Kubernetes sandbox runtime (#7)
+- feat: configure database pool overflow (#8)
+- feat: support split sandbox namespaces (#9)
+- feat: scope Redis bridge keys by tenant (#10)
+- fix: fail closed on incomplete sandbox PVC configuration (#11)
+- P-n: harden Helm contracts and tenant deployment follow-ups (#12)
+- R-1: add fork release tooling (#13)
+
 ## [Unreleased]
 
 This section accumulates work toward the **2.1.0** milestone
@@ -915,6 +925,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 - **ci:** Consolidate PR/issue labeling and fix the reviewing-job crash and
   label thrash. ([#3455])
 
+[2.1.0+hartmesh.1]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.1
 [2.0.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.0.0
 
 [#2329]: https://github.com/bytedance/deer-flow/pull/2329
