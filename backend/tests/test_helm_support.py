@@ -31,3 +31,18 @@ def test_missing_helm_skips_outside_ci(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(SkipCalled, match="helm is required to verify rendered chart values"):
         helm.render_chart()
+
+
+def test_missing_helm_can_use_local_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(helm, "_HELM", None)
+    monkeypatch.delenv("CI", raising=False)
+
+    assert helm.helm_executable(allow_local_fallback=True) is None
+
+
+def test_missing_helm_local_fallback_still_fails_in_ci(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(helm, "_HELM", None)
+    monkeypatch.setenv("CI", "true")
+
+    with pytest.raises(pytest.fail.Exception, match="helm is required in CI to verify rendered chart values"):
+        helm.helm_executable(allow_local_fallback=True)

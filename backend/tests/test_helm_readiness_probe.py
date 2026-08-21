@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import yaml
+from support.helm import helm_executable
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GATEWAY_DEPLOYMENT = _REPO_ROOT / "deploy" / "helm" / "deer-flow" / "templates" / "gateway-deployment.yaml"
@@ -24,7 +24,7 @@ def _probe_path(template: str, probe_name: str) -> str:
 
 
 def test_gateway_template_renders_distinct_readiness_and_liveness_paths() -> None:
-    helm = shutil.which("helm")
+    helm = helm_executable(allow_local_fallback=True)
     if helm is None:
         rendered = _GATEWAY_DEPLOYMENT.read_text(encoding="utf-8")
     else:
@@ -84,7 +84,7 @@ def test_gateway_probe_timeouts_bound_internal_readiness_work() -> None:
 
 
 def test_gateway_termination_budget_is_derived_from_all_shutdown_phases() -> None:
-    helm = shutil.which("helm")
+    helm = helm_executable(allow_local_fallback=True)
     values = yaml.safe_load(_HELM_VALUES.read_text(encoding="utf-8"))
     rendered_config = yaml.safe_load(values["config"])
     shutdown = rendered_config["deployment"]["shutdown"]

@@ -1,5 +1,6 @@
 """Redis backend and provider factory for the checkpoint history cache."""
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -98,6 +99,21 @@ class _UnlinkPermissionDeniedRedis(_FakeRedis):
         from redis.exceptions import NoPermissionError
 
         raise NoPermissionError("NOPERM this user has no permissions to run the 'unlink' command")
+
+
+class _ConcurrentPermissionDeniedRedis(_FakeRedis):
+    def __init__(self) -> None:
+        super().__init__()
+        self._both_scans_started = asyncio.Event()
+
+    async def scan(self, cursor: int = 0, match: str | None = None, count: int = 500) -> tuple[int, list[str]]:
+        from redis.exceptions import NoPermissionError
+
+        self.scan_calls += 1
+        if self.scan_calls == 2:
+            self._both_scans_started.set()
+        await self._both_scans_started.wait()
+        raise NoPermissionError("NOPERM this user has no permissions to run the 'scan' command")
 
 
 def _make_cache(monkeypatch: pytest.MonkeyPatch, fake: _FakeRedis, ttl_seconds: int = 60, **kwargs: Any):
@@ -230,6 +246,22 @@ async def test_adelete_thread_disables_purge_after_unlink_permission_denial(monk
     assert cache._purge_disabled is True
     assert fake.scan_calls == 1
     assert "ACL denies checkpoint-cache purge (SCAN or UNLINK); entries expire via TTL (60s)" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_adelete_thread_warns_once_for_concurrent_permission_denials(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    fake = _ConcurrentPermissionDeniedRedis()
+    cache = _make_cache(monkeypatch, fake, ttl_seconds=60)
+
+    with caplog.at_level("DEBUG", logger="deerflow.runtime.checkpoint_cache.redis"):
+        await asyncio.gather(
+            cache.adelete_thread("p", "t1"),
+            cache.adelete_thread("p", "t2"),
+        )
+
+    assert fake.scan_calls == 2
+    assert caplog.text.count("ACL denies checkpoint-cache purge (SCAN or UNLINK)") == 1
+    assert "thread purge skipped because ACL denies checkpoint-cache purge" in caplog.text
 
 
 @pytest.mark.anyio

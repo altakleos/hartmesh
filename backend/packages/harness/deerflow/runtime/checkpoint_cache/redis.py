@@ -121,6 +121,9 @@ class RedisCheckpointHistoryCache:
                     break
         except _redis_error() as exc:
             if _is_permission_error(exc):
+                if self._purge_disabled:
+                    logger.debug("checkpoint history cache thread purge skipped because ACL denies checkpoint-cache purge")
+                    return
                 self._purge_disabled = True
                 ttl_consequence = f"entries expire via TTL ({self._ttl}s)" if self._ttl is not None else "TTL is disabled, so residual entries do not expire"
                 logger.warning(
