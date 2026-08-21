@@ -1,0 +1,175 @@
+name: Record Release Manifest
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the leading v (for example, 2.1.0+hartmesh.1)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  release-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the exact release tag
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/tags/v${{ inputs.version }}
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+
+      - name: Compute immutable release references
+        id: identity
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/release_tag_spellings.sh "$VERSION" >> "$GITHUB_OUTPUT"
+          COMMIT="$(git rev-parse HEAD)"
+          SHORT_SHA="${COMMIT:0:7}"
+          printf 'commit=%s\n' "$COMMIT" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate registry clients
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          crane auth login ghcr.io -u "$GITHUB_ACTOR" -p "$GH_TOKEN"
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Resolve and cross-check published artifacts
+        id: resolve
+        env:
+          VERSION: ${{ inputs.version }}
+          REPOSITORY_PATH: ${{ github.repository }}
+          IMAGE_BASE: ghcr.io/${{ github.repository }}
+          IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
+          SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
+          CHART_OCI_TAG: ${{ steps.identity.outputs.chart_oci_tag }}
+        run: |
+          set -euo pipefail
+
+          OWNER="${REPOSITORY_PATH%%/*}"
+          CHART_REPOSITORY="oci://ghcr.io/${OWNER}/charts/deer-flow"
+
+          assert_digest() {
+            if ! printf '%s' "$2" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+              echo "::error::$1 did not resolve to a sha256 digest"
+              exit 1
+            fi
+          }
+
+          for COMPONENT in backend frontend provisioner; do
+            IMAGE_REPOSITORY="${IMAGE_BASE}-${COMPONENT}"
+            SHA_DIGEST="$(crane digest "${IMAGE_REPOSITORY}:sha-${SHORT_SHA}")"
+            TAG_DIGEST="$(crane digest "${IMAGE_REPOSITORY}:${IMAGE_TAG}")"
+            assert_digest "${COMPONENT} sha tag" "$SHA_DIGEST"
+            assert_digest "${COMPONENT} release tag" "$TAG_DIGEST"
+            if [ "$TAG_DIGEST" != "$SHA_DIGEST" ]; then
+              echo "::error::${IMAGE_REPOSITORY}:${IMAGE_TAG} does not match :sha-${SHORT_SHA}"
+              exit 1
+            fi
+            printf '%s_repository=%s\n' "$COMPONENT" "$IMAGE_REPOSITORY" >> "$GITHUB_OUTPUT"
+            printf '%s_digest=%s\n' "$COMPONENT" "$SHA_DIGEST" >> "$GITHUB_OUTPUT"
+          done
+
+          CHART_MANIFEST_DIGEST="$(crane digest "ghcr.io/${OWNER}/charts/deer-flow:${CHART_OCI_TAG}")"
+          assert_digest "chart OCI tag" "$CHART_MANIFEST_DIGEST"
+          CHART_DIRECTORY="$RUNNER_TEMP/release-chart"
+          mkdir -p "$CHART_DIRECTORY"
+          helm pull "$CHART_REPOSITORY" --version "$VERSION" --destination "$CHART_DIRECTORY"
+          CHART_PACKAGE="$CHART_DIRECTORY/deer-flow-${VERSION}.tgz"
+          if [ ! -f "$CHART_PACKAGE" ]; then
+            echo "::error::helm pull did not produce $CHART_PACKAGE"
+            exit 1
+          fi
+          PACKAGE_SHA256="$(sha256sum "$CHART_PACKAGE" | awk '{print $1}')"
+          printf 'chart_repository=%s\n' "$CHART_REPOSITORY" >> "$GITHUB_OUTPUT"
+          printf 'chart_manifest_digest=%s\n' "$CHART_MANIFEST_DIGEST" >> "$GITHUB_OUTPUT"
+          printf 'package_sha256=%s\n' "$PACKAGE_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Write release-manifest.json
+        env:
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ steps.identity.outputs.commit }}
+          IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
+          CHART_OCI_TAG: ${{ steps.identity.outputs.chart_oci_tag }}
+          BACKEND_REPOSITORY: ${{ steps.resolve.outputs.backend_repository }}
+          BACKEND_DIGEST: ${{ steps.resolve.outputs.backend_digest }}
+          FRONTEND_REPOSITORY: ${{ steps.resolve.outputs.frontend_repository }}
+          FRONTEND_DIGEST: ${{ steps.resolve.outputs.frontend_digest }}
+          PROVISIONER_REPOSITORY: ${{ steps.resolve.outputs.provisioner_repository }}
+          PROVISIONER_DIGEST: ${{ steps.resolve.outputs.provisioner_digest }}
+          CHART_REPOSITORY: ${{ steps.resolve.outputs.chart_repository }}
+          CHART_MANIFEST_DIGEST: ${{ steps.resolve.outputs.chart_manifest_digest }}
+          PACKAGE_SHA256: ${{ steps.resolve.outputs.package_sha256 }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          image_tag = os.environ["IMAGE_TAG"]
+          manifest = {
+              "schema": 1,
+              "version": os.environ["VERSION"],
+              "tag": f"v{os.environ['VERSION']}",
+              "commit": os.environ["COMMIT"],
+              "images": {
+                  name: {
+                      "repository": os.environ[f"{name.upper()}_REPOSITORY"],
+                      "tag": image_tag,
+                      "digest": os.environ[f"{name.upper()}_DIGEST"],
+                  }
+                  for name in ("backend", "frontend", "provisioner")
+              },
+              "chart": {
+                  "repository": os.environ["CHART_REPOSITORY"],
+                  "version": os.environ["VERSION"],
+                  "oci_tag": os.environ["CHART_OCI_TAG"],
+                  "manifest_digest": os.environ["CHART_MANIFEST_DIGEST"],
+                  "package_sha256": os.environ["PACKAGE_SHA256"],
+              },
+          }
+          with open("release-manifest.json", "w", encoding="utf-8") as output:
+              json.dump(manifest, output, indent=2)
+              output.write("\n")
+          PY
+
+      - name: Upload manifest workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-manifest-${{ inputs.version }}
+          path: release-manifest.json
+          if-no-files-found: error
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --notes "see CHANGELOG.md"
+          fi
+          gh release upload "$TAG" release-manifest.json --clobber
+
+      - name: Summarize resolved digests
+        run: |
+          {
+            echo "### Release artifact digests"
+            echo "| Artifact | Pinned identity |"
+            echo "| --- | --- |"
+            echo '| backend | `${{ steps.resolve.outputs.backend_repository }}@${{ steps.resolve.outputs.backend_digest }}` |'
+            echo '| frontend | `${{ steps.resolve.outputs.frontend_repository }}@${{ steps.resolve.outputs.frontend_digest }}` |'
+            echo '| provisioner | `${{ steps.resolve.outputs.provisioner_repository }}@${{ steps.resolve.outputs.provisioner_digest }}` |'
+            echo '| chart manifest | `${{ steps.resolve.outputs.chart_manifest_digest }}` |'
+            echo '| chart package SHA-256 | `${{ steps.resolve.outputs.package_sha256 }}` |'
+          } >> "$GITHUB_STEP_SUMMARY"
