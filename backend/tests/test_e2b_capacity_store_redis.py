@@ -83,6 +83,24 @@ def test_factory_is_lazy_and_backend_errors_fail_closed() -> None:
         store.close()
 
 
+def test_factory_key_prefix_env_overrides_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX", "from-env")
+
+    store = make_e2b_capacity_store(
+        SandboxOwnershipConfig(
+            type="redis",
+            redis_url="redis://127.0.0.1:1/0",
+            key_prefix="from-config",
+        ),
+        hard_limit=3,
+    )
+
+    assert store is not None and store.key == "from-env:e2b-capacity"
+    store.close()
+
+
 def test_two_gateways_atomically_share_one_hash(make_store) -> None:
     gateway_a, gateway_b = make_store(), make_store()
     assert gateway_a.reserve("not-ready") is ReserveStatus.NOT_READY

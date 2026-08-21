@@ -26,6 +26,7 @@ from .base import StreamBridge
 logger = logging.getLogger(__name__)
 
 _ENV_REDIS_URL = "DEER_FLOW_STREAM_BRIDGE_REDIS_URL"
+_ENV_KEY_PREFIX = "DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX"
 
 
 def _resolve_config(app_config: AppConfig | None) -> StreamBridgeConfig | None:
@@ -43,6 +44,11 @@ def _resolve_config(app_config: AppConfig | None) -> StreamBridgeConfig | None:
 
 def _resolve_redis_url(config: StreamBridgeConfig) -> str:
     return config.redis_url or os.getenv(_ENV_REDIS_URL) or os.getenv("REDIS_URL") or "redis://localhost:6379/0"
+
+
+def _resolve_key_prefix(config: StreamBridgeConfig) -> str:
+    value = os.getenv(_ENV_KEY_PREFIX)
+    return config.key_prefix if value is None else value
 
 
 @contextlib.asynccontextmanager
@@ -73,6 +79,7 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
         bridge = RedisStreamBridge(
             redis_url=redis_url,
             queue_maxsize=config.queue_maxsize,
+            namespace_prefix=_resolve_key_prefix(config),
             max_connections=config.max_connections,
             stream_ttl_seconds=config.stream_ttl_seconds,
         )

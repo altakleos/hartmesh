@@ -64,6 +64,7 @@ class RedisStreamBridge(StreamBridge):
         redis_url: str,
         queue_maxsize: int = 256,
         key_prefix: str = "deerflow:stream_bridge",
+        namespace_prefix: str = "",
         max_connections: int | None = None,
         stream_ttl_seconds: int | None = 86400,
         client: Redis | None = None,
@@ -71,6 +72,7 @@ class RedisStreamBridge(StreamBridge):
         self._redis_url = redis_url
         self._maxsize = max(1, queue_maxsize)
         self._key_prefix = key_prefix.rstrip(":")
+        self._namespace_prefix = namespace_prefix.rstrip(":")
         if stream_ttl_seconds is not None and stream_ttl_seconds > 0:
             self._stream_ttl_seconds = stream_ttl_seconds
         else:
@@ -81,8 +83,9 @@ class RedisStreamBridge(StreamBridge):
         self._redis = client if client is not None else Redis.from_url(redis_url, decode_responses=True, max_connections=max_connections)
         self._owns_client = client is None
 
-    def _stream_key(self, run_id: str) -> str:
-        return f"{self._key_prefix}:{run_id}"
+    def _key(self, run_id: str) -> str:
+        name = f"{self._key_prefix}:{run_id}"
+        return f"{self._namespace_prefix}:{name}" if self._namespace_prefix else name
 
     async def _xadd_retained(self, key: str, fields: dict[str, str], *, maxlen: int) -> None:
         if self._stream_ttl_seconds is None:
@@ -164,7 +167,7 @@ class RedisStreamBridge(StreamBridge):
         return None
 
     async def publish(self, run_id: str, event: str, data: Any) -> None:
-        key = self._stream_key(run_id)
+        key = self._key(run_id)
         await self._xadd_retained(
             key,
             {
@@ -177,7 +180,7 @@ class RedisStreamBridge(StreamBridge):
 
     async def publish_end(self, run_id: str) -> None:
         # Keep the configured number of data events plus the internal end marker.
-        key = self._stream_key(run_id)
+        key = self._key(run_id)
         await self._xadd_retained(
             key,
             {"kind": _KIND_END},
@@ -186,7 +189,7 @@ class RedisStreamBridge(StreamBridge):
 
     async def stream_exists(self, run_id: str) -> bool:
         """Return whether Redis still has retained stream data for *run_id*."""
-        return bool(await self._redis.exists(self._stream_key(run_id)))
+        return bool(await self._redis.exists(self._key(run_id)))
 
     async def _resolve_start_stream_id(self, key: str, last_event_id: str | None) -> str:
         if last_event_id is None:
@@ -229,7 +232,7 @@ class RedisStreamBridge(StreamBridge):
         last_event_id: str | None = None,
         heartbeat_interval: float = 15.0,
     ) -> AsyncIterator[StreamItem]:
-        key = self._stream_key(run_id)
+        key = self._key(run_id)
         stream_id = await self._resolve_start_stream_id(key, last_event_id)
         gap_detection_enabled = last_event_id is not None and self._parse_stream_id(last_event_id) is not None
         pending_initial_response: list[Any] | None = None
@@ -368,7 +371,7 @@ class RedisStreamBridge(StreamBridge):
     async def cleanup(self, run_id: str, *, delay: float = 0) -> None:
         if delay > 0:
             await asyncio.sleep(delay)
-        await self._redis.delete(self._stream_key(run_id))
+        await self._redis.delete(self._key(run_id))
 
     async def close(self) -> None:
         if not self._owns_client:

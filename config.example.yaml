@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 41
+config_version: 42
 
 # ============================================================================
 # Logging
@@ -1335,7 +1335,7 @@ sandbox:
 #   #                                # owner). Liveness is deliberately independent
 #   #                                # of idle_timeout: renewal keeps running even
 #   #                                # at idle_timeout: 0.
-#   #   key_prefix: deerflow:sandbox:owner
+#   #   key_prefix: deerflow:sandbox:owner  # overridden by DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX
 #   #
 #   # NOTE: the redis ownership store is fail-closed, matching the stream bridge's
 #   # fail-hard policy. Redis.from_url is lazy so a down Redis does not block
@@ -2048,7 +2048,8 @@ database:
   #   ttl_seconds: 86400      # redis leak safety net; bounds residual copies if a
   #                           # thread-delete purge fails (purge itself is immediate).
   #                           # 0 explicitly disables expiry (redis maxmemory only)
-  #   key_prefix: ""          # default: hash of the database identity
+  #   key_prefix: ""          # default: hash of the database identity;
+  #                           # DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX overrides
 
 # Deployment promise checked once at Gateway startup. The local profile keeps
 # process-local memory convenient for development. durable_production refuses
@@ -2222,6 +2223,9 @@ run_ownership:
 # stream_bridge:
 #   type: redis                  # recommended for Docker / multi-worker gateway
 #   redis_url: redis://redis:6379/0
+#   key_prefix: ""              # optional outer namespace; overridden by
+#                                # DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX. Enabling
+#                                # one starts fresh streams; no migration occurs.
 #   queue_maxsize: 256           # data events retained per run (Redis MAXLEN).
 #                                # Older valid cursors receive SSE `gap`.
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.

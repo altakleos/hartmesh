@@ -5,7 +5,10 @@ from __future__ import annotations
 import enum
 import logging
 
-from deerflow.community.aio_sandbox.ownership.factory import resolve_ownership_redis_url
+from deerflow.community.aio_sandbox.ownership.factory import (
+    resolve_ownership_key_prefix,
+    resolve_ownership_redis_url,
+)
 from deerflow.config.sandbox_config import SandboxOwnershipConfig
 
 logger = logging.getLogger(__name__)
@@ -278,9 +281,10 @@ def make_e2b_capacity_store(
         return None
     if ownership.type != "redis":
         raise ValueError(f"Unknown sandbox ownership type: {ownership.type!r}")
-    logger.info("E2B deployment capacity: redis (key_prefix=%s, hard_limit=%d)", ownership.key_prefix, hard_limit)
+    key_prefix = resolve_ownership_key_prefix(ownership)
+    logger.info("E2B deployment capacity: redis (key_prefix=%s, hard_limit=%d)", key_prefix, hard_limit)
     return RedisE2BCapacityStore(
         redis_url=resolve_ownership_redis_url(ownership),
         hard_limit=hard_limit,
-        key_prefix=ownership.key_prefix,
+        key_prefix=key_prefix,
     )
