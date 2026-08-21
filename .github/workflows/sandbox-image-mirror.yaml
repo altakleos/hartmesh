@@ -1,0 +1,72 @@
+name: Mirror Sandbox Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Digest-pinned source OCI reference ending in @sha256:<64 lowercase hex characters>
+        required: true
+        type: string
+      version:
+        description: Release version without the leading v (for example, 2.1.0+hartmesh.1)
+        required: true
+        type: string
+
+permissions:
+  packages: write
+
+jobs:
+  mirror-sandbox-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject a source that is not digest-pinned
+        id: source
+        env:
+          SOURCE: ${{ inputs.source }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$SOURCE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::source must end with @sha256:<64 lowercase hex characters>"
+            exit 1
+          fi
+          printf 'digest=%s\n' "${SOURCE##*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the workflow revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+
+      - name: Compute the release image tag
+        id: identity
+        env:
+          VERSION: ${{ inputs.version }}
+        run: scripts/release_tag_spellings.sh "$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to the destination registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: crane auth login ghcr.io -u "$GITHUB_ACTOR" -p "$GH_TOKEN"
+
+      - name: Copy by digest and verify the mirror
+        env:
+          SOURCE: ${{ inputs.source }}
+          SOURCE_DIGEST: ${{ steps.source.outputs.digest }}
+          IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
+          MIRROR_REPOSITORY: ghcr.io/${{ github.repository }}-sandbox
+        run: |
+          set -euo pipefail
+          DESTINATION="${MIRROR_REPOSITORY}:${IMAGE_TAG}"
+          crane copy "$SOURCE" "$DESTINATION"
+          MIRROR_DIGEST="$(crane digest "$DESTINATION")"
+          if [ "$MIRROR_DIGEST" != "$SOURCE_DIGEST" ]; then
+            echo "::error::mirror digest $MIRROR_DIGEST does not match source digest $SOURCE_DIGEST"
+            exit 1
+          fi
+          {
+            echo "### Verified sandbox mirror"
+            echo
+            echo "Pinned reference: \`${MIRROR_REPOSITORY}@${MIRROR_DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
