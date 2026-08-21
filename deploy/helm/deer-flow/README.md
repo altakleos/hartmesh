@@ -453,6 +453,12 @@ requires Gateway and accepted sandbox Pods on different Ready schedulable nodes,
 observes the TokenReview-protected materialization and a real Lease renewal,
 faults Gateway and Lease ownership, proves cleanup of the exact owned sandbox
 resources, and writes v2 evidence only after offline exact-subject validation.
+The opt-in GitHub Actions Kubernetes qualification workflow selects this v2
+scope. Its dispatch therefore requires pinned Gateway, provisioner, and AIO
+sandbox images plus an RWX storage class. The runner creates the accepted
+sandbox through the provisioner-backed AIO provider and executes a bounded
+file read inside the real sandbox container, so the lane also serves as the
+hardened-sandbox smoke for the chart's restricted security baseline.
 Lease owner loss deliberately fails closed; this scope does not claim same-run
 sandbox rehydration or replacement.
 A renewal is proven only when the Lease keeps the exact UID, accepted-attempt
