@@ -59,6 +59,10 @@ spec:
               value: {{ .Values.provisioner.sandboxImage | quote }}
             - name: SANDBOX_RUNTIME_CLASS
               value: {{ .Values.sandbox.runtimeClassName | default "" | quote }}
+            {{- if .Values.sandbox.volumeMode }}
+            - name: SANDBOX_VOLUME_MODE
+              value: {{ .Values.sandbox.volumeMode | quote }}
+            {{- end }}
             # In-cluster API access via the mounted ServiceAccount token.
             # K8S_API_SERVER is intentionally unset (do NOT use host.docker.internal).
             # Service type for per-sandbox Services. ClusterIP (default) routes the

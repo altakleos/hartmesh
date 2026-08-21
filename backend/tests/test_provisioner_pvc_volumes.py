@@ -1,6 +1,23 @@
 """Regression tests for provisioner three-way skills + PVC volume support."""
 
+from types import ModuleType
+
 import pytest
+
+
+def _configure_pvc_volume_mode(
+    provisioner_module: ModuleType,
+    skills_pvc_name: str,
+    userdata_pvc_name: str,
+) -> None:
+    provisioner_module.SKILLS_PVC_NAME = skills_pvc_name
+    provisioner_module.USERDATA_PVC_NAME = userdata_pvc_name
+    provisioner_module.SANDBOX_VOLUME_CONFIG = provisioner_module.resolve_sandbox_volume_mode(
+        "pvc",
+        userdata_pvc_name=userdata_pvc_name,
+        skills_pvc_name=skills_pvc_name,
+    )
+
 
 # ── _build_volumes ─────────────────────────────────────────────────────
 
@@ -76,14 +93,13 @@ class TestBuildVolumes:
 
     def test_pvc_returns_two_volumes(self, provisioner_module):
         """PVC mode falls back to 1 skills volume + 1 user-data volume."""
-        provisioner_module.SKILLS_PVC_NAME = "my-skills-pvc"
-        provisioner_module.USERDATA_PVC_NAME = ""
+        _configure_pvc_volume_mode(provisioner_module, "my-skills-pvc", "userdata-pvc")
         volumes = provisioner_module._build_volumes("thread-1")
         assert len(volumes) == 2
 
-    def test_skills_pvc_overrides_hostpath(self, provisioner_module):
-        """When SKILLS_PVC_NAME is set, skills volume should use PVC."""
-        provisioner_module.SKILLS_PVC_NAME = "my-skills-pvc"
+    def test_pvc_mode_uses_configured_skills_claim(self, provisioner_module):
+        """PVC mode should use the configured skills claim."""
+        _configure_pvc_volume_mode(provisioner_module, "my-skills-pvc", "userdata-pvc")
         volumes = provisioner_module._build_volumes("thread-1")
         skills_vol = volumes[0]
         assert skills_vol.persistent_volume_claim is not None
@@ -91,9 +107,9 @@ class TestBuildVolumes:
         assert skills_vol.persistent_volume_claim.read_only is True
         assert skills_vol.host_path is None
 
-    def test_userdata_pvc_overrides_hostpath(self, provisioner_module):
-        """When USERDATA_PVC_NAME is set, user-data volume should use PVC."""
-        provisioner_module.USERDATA_PVC_NAME = "my-userdata-pvc"
+    def test_pvc_mode_uses_configured_userdata_claim(self, provisioner_module):
+        """PVC mode should use the configured user-data claim."""
+        _configure_pvc_volume_mode(provisioner_module, "skills-pvc", "my-userdata-pvc")
         volumes = provisioner_module._build_volumes("thread-1")
         userdata_vol = volumes[-1]
         assert userdata_vol.persistent_volume_claim is not None
@@ -102,15 +118,14 @@ class TestBuildVolumes:
 
     def test_both_pvc_set(self, provisioner_module):
         """When both PVC names are set, both volumes use PVC."""
-        provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
-        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+        _configure_pvc_volume_mode(provisioner_module, "skills-pvc", "userdata-pvc")
         volumes = provisioner_module._build_volumes("thread-1")
         assert volumes[0].persistent_volume_claim is not None
         assert volumes[-1].persistent_volume_claim is not None
 
     def test_pvc_volume_names_are_stable(self, provisioner_module):
         """PVC mode volume names must stay 'skills' and 'user-data'."""
-        provisioner_module.SKILLS_PVC_NAME = "x"
+        _configure_pvc_volume_mode(provisioner_module, "x", "userdata-pvc")
         volumes = provisioner_module._build_volumes("thread-1")
         assert volumes[0].name == "skills"
         assert volumes[-1].name == "user-data"
@@ -139,8 +154,7 @@ class TestBuildVolumes:
 
     def test_extra_mount_uses_userdata_pvc_when_configured(self, provisioner_module):
         """PVC mode should use the same DeerFlow data PVC for runtime config mounts."""
-        provisioner_module.SKILLS_PVC_NAME = ""
-        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+        _configure_pvc_volume_mode(provisioner_module, "skills-pvc", "userdata-pvc")
         provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
         extra_mounts = [
             provisioner_module.ExtraMount(
@@ -152,8 +166,8 @@ class TestBuildVolumes:
 
         volumes = provisioner_module._build_volumes("thread-1", extra_mounts=extra_mounts)
 
-        # Three skill projections + user-data (4 base) + 1 extra volume.
-        assert len(volumes) == 5
+        # One skills PVC + one user-data PVC + one extra PVC volume.
+        assert len(volumes) == 3
         extra_vol = volumes[-1]
         assert extra_vol.name == "extra-0"
         assert extra_vol.persistent_volume_claim is not None
@@ -243,13 +257,13 @@ class TestBuildVolumeMounts:
 
     def test_pvc_returns_two_mounts(self, provisioner_module):
         """PVC mode falls back to 1 skills mount + 1 user-data mount."""
-        provisioner_module.SKILLS_PVC_NAME = "x"
+        _configure_pvc_volume_mode(provisioner_module, "x", "userdata-pvc")
         mounts = provisioner_module._build_volume_mounts("thread-1")
         assert len(mounts) == 2
 
     def test_pvc_skills_mount_is_single_root(self, provisioner_module):
         """PVC mode skills mount is at /mnt/skills."""
-        provisioner_module.SKILLS_PVC_NAME = "x"
+        _configure_pvc_volume_mode(provisioner_module, "x", "userdata-pvc")
         mounts = provisioner_module._build_volume_mounts("thread-1")
         assert mounts[0].mount_path == "/mnt/skills"
 
@@ -262,30 +276,30 @@ class TestBuildVolumeMounts:
 
     def test_skills_pvc_does_not_set_subpath_by_default(self, provisioner_module):
         """PVC-backed skills keep legacy root mount unless explicitly configured."""
-        provisioner_module.SKILLS_PVC_NAME = "my-skills-pvc"
         provisioner_module.SKILLS_PVC_SUBPATH_TEMPLATE = ""
+        _configure_pvc_volume_mode(provisioner_module, "my-skills-pvc", "userdata-pvc")
         mounts = provisioner_module._build_volume_mounts("thread-42", user_id="user-7")
         skills_mount = mounts[0]
         assert skills_mount.sub_path is None
 
     def test_skills_pvc_can_use_user_scoped_subpath_template(self, provisioner_module):
         """Operators can opt into per-user/thread skills subPath for shared PVCs."""
-        provisioner_module.SKILLS_PVC_NAME = "my-skills-pvc"
         provisioner_module.SKILLS_PVC_SUBPATH_TEMPLATE = "deer-flow/users/{user_id}/threads/{thread_id}/skills"
+        _configure_pvc_volume_mode(provisioner_module, "my-skills-pvc", "userdata-pvc")
         mounts = provisioner_module._build_volume_mounts("thread-42", user_id="user-7")
         skills_mount = mounts[0]
         assert skills_mount.sub_path == "deer-flow/users/user-7/threads/thread-42/skills"
 
     def test_pvc_sets_user_scoped_subpath(self, provisioner_module):
         """PVC mode should include user_id in the user-data subPath."""
-        provisioner_module.USERDATA_PVC_NAME = "my-pvc"
+        _configure_pvc_volume_mode(provisioner_module, "skills-pvc", "my-pvc")
         mounts = provisioner_module._build_volume_mounts("thread-42", user_id="user-7")
         userdata_mount = mounts[-1]
         assert userdata_mount.sub_path == "deer-flow/users/user-7/threads/thread-42/user-data"
 
     def test_pvc_defaults_to_default_user_subpath(self, provisioner_module):
         """Older callers should still land under a stable default user namespace."""
-        provisioner_module.USERDATA_PVC_NAME = "my-pvc"
+        _configure_pvc_volume_mode(provisioner_module, "skills-pvc", "my-pvc")
         mounts = provisioner_module._build_volume_mounts("thread-42")
         userdata_mount = mounts[-1]
         assert userdata_mount.sub_path == "deer-flow/users/default/threads/thread-42/user-data"
@@ -315,8 +329,7 @@ class TestBuildVolumeMounts:
 
     def test_extra_mount_uses_pvc_subpath(self, provisioner_module):
         """PVC extra mounts should point at the same user-scoped DeerFlow path."""
-        provisioner_module.SKILLS_PVC_NAME = ""
-        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+        _configure_pvc_volume_mode(provisioner_module, "skills-pvc", "userdata-pvc")
         provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
         extra_mounts = [
             provisioner_module.ExtraMount(
@@ -393,22 +406,19 @@ class TestBuildPodVolumes:
 
     def test_pod_pvc_has_two_volumes(self, provisioner_module):
         """PVC Pod spec should contain exactly 2 volumes."""
-        provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
-        provisioner_module.USERDATA_PVC_NAME = ""
+        _configure_pvc_volume_mode(provisioner_module, "skills-pvc", "userdata-pvc")
         pod = provisioner_module._build_pod("sandbox-1", "thread-1")
         assert len(pod.spec.volumes) == 2
 
     def test_pod_pvc_has_two_mounts(self, provisioner_module):
         """PVC container should have exactly 2 volume mounts."""
-        provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
-        provisioner_module.USERDATA_PVC_NAME = ""
+        _configure_pvc_volume_mode(provisioner_module, "skills-pvc", "userdata-pvc")
         pod = provisioner_module._build_pod("sandbox-1", "thread-1")
         assert len(pod.spec.containers[0].volume_mounts) == 2
 
     def test_pod_pvc_mode_uses_user_scoped_subpath(self, provisioner_module):
         """Pod should use a user-scoped subPath for PVC user-data."""
-        provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
-        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+        _configure_pvc_volume_mode(provisioner_module, "skills-pvc", "userdata-pvc")
         pod = provisioner_module._build_pod("sandbox-1", "thread-1", user_id="user-7")
         assert pod.spec.volumes[0].persistent_volume_claim is not None
         assert pod.spec.volumes[-1].persistent_volume_claim is not None
@@ -462,9 +472,8 @@ class TestBuildPodVolumes:
 
     def test_pod_pvc_mode_can_use_user_scoped_skills_subpath(self, provisioner_module):
         """Pod should use a configured user-scoped subPath for PVC skills."""
-        provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
         provisioner_module.SKILLS_PVC_SUBPATH_TEMPLATE = "deer-flow/users/{user_id}/threads/{thread_id}/skills"
-        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+        _configure_pvc_volume_mode(provisioner_module, "skills-pvc", "userdata-pvc")
         pod = provisioner_module._build_pod("sandbox-1", "thread-1", user_id="user-7")
         skills_mount = pod.spec.containers[0].volume_mounts[0]
         assert skills_mount.sub_path == "deer-flow/users/user-7/threads/thread-1/skills"
