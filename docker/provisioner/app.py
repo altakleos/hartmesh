@@ -44,6 +44,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Literal, NamedTuple
 
 import urllib3
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -126,6 +127,64 @@ THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
 DEER_FLOW_HOST_BASE_DIR = os.environ.get("DEER_FLOW_HOST_BASE_DIR", "/.deer-flow")
 SKILLS_PVC_NAME = os.environ.get("SKILLS_PVC_NAME", "")
 USERDATA_PVC_NAME = os.environ.get("USERDATA_PVC_NAME", "")
+
+
+class SandboxVolumeConfig(NamedTuple):
+    """One startup-resolved sandbox volume mode and its selection reason."""
+
+    mode: Literal["pvc", "hostpath"]
+    reason: Literal["explicit", "inferred"]
+
+
+def resolve_sandbox_volume_mode(
+    explicit_mode: str | None,
+    *,
+    userdata_pvc_name: str,
+    skills_pvc_name: str,
+) -> SandboxVolumeConfig:
+    """Resolve the sandbox volume mode, rejecting incomplete PVC settings."""
+
+    requested_mode = (explicit_mode or "").strip()
+    if requested_mode and requested_mode not in {"pvc", "hostpath"}:
+        raise RuntimeError(
+            f"Invalid SANDBOX_VOLUME_MODE={requested_mode!r}; expected 'pvc' or 'hostpath'",
+        )
+    if requested_mode == "hostpath":
+        return SandboxVolumeConfig(mode="hostpath", reason="explicit")
+
+    missing_names = [
+        name
+        for name, value in (
+            ("USERDATA_PVC_NAME", userdata_pvc_name),
+            ("SKILLS_PVC_NAME", skills_pvc_name),
+        )
+        if not value
+    ]
+    if requested_mode == "pvc":
+        if missing_names:
+            raise RuntimeError(
+                "Invalid SANDBOX_VOLUME_MODE=pvc: missing required " + ", ".join(missing_names),
+            )
+        return SandboxVolumeConfig(mode="pvc", reason="explicit")
+
+    if not missing_names:
+        return SandboxVolumeConfig(mode="pvc", reason="inferred")
+    if len(missing_names) == 2:
+        return SandboxVolumeConfig(mode="hostpath", reason="inferred")
+    raise RuntimeError(
+        "Invalid inferred SANDBOX_VOLUME_MODE=pvc: missing required " + missing_names[0],
+    )
+
+
+def _sandbox_volume_config_from_env() -> SandboxVolumeConfig:
+    return resolve_sandbox_volume_mode(
+        os.environ.get("SANDBOX_VOLUME_MODE"),
+        userdata_pvc_name=os.environ.get("USERDATA_PVC_NAME", ""),
+        skills_pvc_name=os.environ.get("SKILLS_PVC_NAME", ""),
+    )
+
+
+SANDBOX_VOLUME_CONFIG = _sandbox_volume_config_from_env()
 SKILLS_PVC_SUBPATH_TEMPLATE = os.environ.get("SKILLS_PVC_SUBPATH_TEMPLATE", "")
 ACCEPTED_SKILL_PROJECTION_PROFILE = os.environ.get(
     "ACCEPTED_SKILL_PROJECTION_PROFILE",
@@ -491,6 +550,11 @@ def _ensure_namespace() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global authentication_v1, coordination_v1, core_v1, networking_v1
+    logger.info(
+        "Sandbox volume mode: %s (%s)",
+        SANDBOX_VOLUME_CONFIG.mode,
+        SANDBOX_VOLUME_CONFIG.reason,
+    )
     logger.info(
         "Sandbox runtime class: %s",
         _sandbox_runtime_label(),
@@ -1371,7 +1435,7 @@ def _sandbox_url(sandbox_id: str, node_port: int | None = None) -> str:
 def _build_extra_volumes(extra_mounts: list[ExtraMount] | None = None) -> list[k8s_client.V1Volume]:
     volumes: list[k8s_client.V1Volume] = []
     for index, mount in enumerate(_validated_extra_mounts(extra_mounts)):
-        if USERDATA_PVC_NAME:
+        if SANDBOX_VOLUME_CONFIG.mode == "pvc":
             volumes.append(
                 k8s_client.V1Volume(
                     name=_extra_mount_volume_name(index),
@@ -1402,7 +1466,7 @@ def _build_extra_volume_mounts(extra_mounts: list[ExtraMount] | None = None) -> 
             mount_path=mount.container_path,
             read_only=mount.read_only,
         )
-        if USERDATA_PVC_NAME:
+        if SANDBOX_VOLUME_CONFIG.mode == "pvc":
             volume_mount.sub_path = _extra_mount_pvc_sub_path(mount.host_path)
         mounts.append(volume_mount)
     return mounts
@@ -1417,7 +1481,7 @@ def _build_volumes(
     provision_lark_cli_runtime: bool = False,
     provision_lark_cli_broker: bool = False,
 ) -> list[k8s_client.V1Volume]:
-    """Build volume list: PVC when configured, otherwise hostPath.
+    """Build the volume list for the startup-resolved PVC or hostPath mode.
 
     Skills are split into public, per-user custom, and legacy (global-custom)
     volumes so that ``/mnt/skills/{public,custom,legacy}/`` paths resolve
@@ -1429,7 +1493,7 @@ def _build_volumes(
 
     # ── Skills volumes ────────────────────────────────────────────────
 
-    if SKILLS_PVC_NAME:
+    if SANDBOX_VOLUME_CONFIG.mode == "pvc":
         # PVC mode: three-way subPath not yet supported; fall back to
         # single-volume mount for backward compatibility.
         logger.warning("SKILLS_PVC_NAME is set — three-way skills layout is not supported in PVC mode yet; falling back to single /mnt/skills mount")
@@ -1485,7 +1549,7 @@ def _build_volumes(
 
     # ── User-data volume ──────────────────────────────────────────────
 
-    if USERDATA_PVC_NAME:
+    if SANDBOX_VOLUME_CONFIG.mode == "pvc":
         userdata_vol = k8s_client.V1Volume(
             name="user-data",
             persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
@@ -1531,7 +1595,7 @@ def _build_volumes(
             mount = credential_mounts.get(container_path)
             if mount is None:
                 continue
-            if USERDATA_PVC_NAME:
+            if SANDBOX_VOLUME_CONFIG.mode == "pvc":
                 volumes.append(
                     k8s_client.V1Volume(
                         name=volume_name,
@@ -1572,7 +1636,7 @@ def _build_volume_mounts(
     mounts: list[k8s_client.V1VolumeMount] = []
     del include_legacy_skills  # retained for request compatibility
 
-    if SKILLS_PVC_NAME:
+    if SANDBOX_VOLUME_CONFIG.mode == "pvc":
         skills_mount = k8s_client.V1VolumeMount(
             name="skills",
             mount_path="/mnt/skills",
@@ -1610,7 +1674,7 @@ def _build_volume_mounts(
         mount_path="/mnt/user-data",
         read_only=False,
     )
-    if USERDATA_PVC_NAME:
+    if SANDBOX_VOLUME_CONFIG.mode == "pvc":
         userdata_mount.sub_path = f"deer-flow/users/{user_id}/threads/{thread_id}/user-data"
     mounts.append(userdata_mount)
     mounts.extend(
@@ -1710,7 +1774,7 @@ def _build_lark_cli_broker_sidecars(
             mount_path=sidecar_path,
             read_only=mount.read_only,
         )
-        if USERDATA_PVC_NAME:
+        if SANDBOX_VOLUME_CONFIG.mode == "pvc":
             sidecar_mount.sub_path = _extra_mount_pvc_sub_path(mount.host_path)
         volume_mounts.append(sidecar_mount)
     broker_env = [

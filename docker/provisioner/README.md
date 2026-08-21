@@ -24,7 +24,7 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 2. **Pod Creation**: The provisioner creates a dedicated Pod in `K8S_NAMESPACE` with:
    - The sandbox container image (all-in-one-sandbox)
-   - HostPath volumes mounted for:
+   - PVC or hostPath volumes, selected once at startup, mounted for:
      - `/mnt/skills/{public,custom,legacy}` → Read-only enabled-only skill projections
      - `/mnt/user-data` → Read-write access to thread-specific data
    - Resource limits (CPU, memory, ephemeral storage)
@@ -82,7 +82,7 @@ Create a new sandbox Pod + Service.
 }
 ```
 
-`user_id` is optional for backwards compatibility and defaults to `default`. When `USERDATA_PVC_NAME` is set, the provisioner uses it to isolate PVC-backed user-data directories.
+`user_id` is optional for backwards compatibility and defaults to `default`. In `pvc` volume mode, the provisioner uses `USERDATA_PVC_NAME` to isolate PVC-backed user-data directories.
 
 When the Gateway mounts that same storage at its DeerFlow home and the PVC
 subpaths align, set `sandbox.thread_data_mounts: true` in the Gateway's
@@ -153,13 +153,14 @@ The provisioner is configured via environment variables. Docker Compose sets loc
 | `PROVISIONER_CREATE_NAMESPACE` | `false` | Set to `true` only for operator-controlled single-namespace local/Compose installs that should create `K8S_NAMESPACE` when absent. Helm leaves this disabled and requires the sandbox namespace to be pre-created. |
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
 | `SANDBOX_RUNTIME_CLASS` | empty (cluster default) | Optional Kubernetes RuntimeClass for sandbox Pods, such as `gvisor`; an empty value omits `runtimeClassName` and uses the cluster default runtime |
+| `SANDBOX_VOLUME_MODE` | empty (infer) | `pvc` or `hostpath`. When empty, both PVC names select `pvc`, neither selects `hostpath`, and exactly one configured name is a startup error. |
 | `LARK_CLI_INIT_IMAGE` | empty (feature off) | Optional lark-cli init image (Pattern A). When set, sandbox Pods requesting the lark-cli runtime get an init container + shared `emptyDir` that provisions `lark-cli`, instead of a hostPath/PVC runtime mount. See [`docker/lark-cli-init`](../lark-cli-init/README.md) |
 | `LARK_CLI_BROKER_IMAGE` | empty (feature off) | Optional lark-cli broker image (Pattern B, issue #4338). When set, sandbox Pods requesting the broker get a shim init container + a `lark-cli-broker` sidecar that holds the credentials; the plaintext `config`/`data` are mounted into the **sidecar only**, never the sandbox. Supersedes `LARK_CLI_INIT_IMAGE` when both are set. See [`docker/lark-cli-broker`](../lark-cli-broker/README.md) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
 | `DEER_FLOW_HOST_BASE_DIR` | `/.deer-flow` | **Host machine** DeerFlow data root containing global and per-user `skills_view` projections |
-| `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
+| `SKILLS_PVC_NAME` | empty | Required skills claim name in `pvc` mode; the claim is mounted read-only |
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty | Optional `subPath` template for `SKILLS_PVC_NAME`. Supports `{user_id}` and `{thread_id}`. When empty, the skills PVC root is mounted unchanged |
-| `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
+| `USERDATA_PVC_NAME` | empty | Required home claim name in `pvc` mode; uses `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
 | `ACCEPTED_SKILL_PROJECTION_PROFILE` | disabled | Set to `rwx_verified_copy_v2` to enable verified nonempty durable skill snapshots. The configured home claim must report `ReadWriteMany`. V1 is parse-only compatibility evidence and remains empty-only. |
 | `ACCEPTED_SKILL_RUNTIME_IMAGE` | empty | Digest-pinned provisioner image containing `accepted_skills.py`; used for the verifier init container and capability gate. Required by `rwx_verified_copy_v2`. |
 | `ACCEPTED_ATTEMPT_LEASE_SECONDS` | `120` | Native Lease duration for one accepted sandbox attempt (30–900 seconds). |
@@ -173,7 +174,23 @@ The provisioner is configured via environment variables. Docker Compose sets loc
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
 
-Every provisioner-created sandbox container, init container, and sidecar uses the restricted baseline `allowPrivilegeEscalation: false`, drops all Linux capabilities, and selects the `RuntimeDefault` seccomp profile. The provisioner deliberately leaves `runAsNonRoot` and `runAsUser` unset because those depend on the configured image; set `SANDBOX_RUNTIME_CLASS` to select an isolation runtime such as gVisor, or leave it empty to omit `runtimeClassName` and use the cluster default runtime. A PSA `restricted` namespace must also use allowed volume sources: configure `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME` for PVC-backed mounts instead of the local/hybrid hostPath mode.
+### Sandbox volume mode
+
+The provisioner resolves one volume mode at startup and every sandbox volume and mount builder uses that decision:
+
+| `SANDBOX_VOLUME_MODE` | `USERDATA_PVC_NAME` | `SKILLS_PVC_NAME` | Result |
+|---|---|---|---|
+| empty | unset | unset | Infer `hostpath` for legacy Compose/local deployments |
+| empty | set | set | Infer `pvc` |
+| empty | set | unset | Startup error naming `SKILLS_PVC_NAME` |
+| empty | unset | set | Startup error naming `USERDATA_PVC_NAME` |
+| `pvc` | set | set | Explicit PVC mode |
+| `pvc` | either missing | any | Startup error naming every missing variable |
+| `hostpath` | any | any | Explicit legacy hostPath layout; configured claim names are ignored |
+
+Kubernetes deployments should set `sandbox.volumeMode: pvc` in Helm values. This makes a missing home or skills claim name fail the provisioner process instead of allowing inference to select hostPath. Leave the value empty only when the both-set/both-unset inference contract is intentional; use explicit `hostpath` for Compose or hybrid development that needs node filesystem mounts.
+
+Every provisioner-created sandbox container, init container, and sidecar uses the restricted baseline `allowPrivilegeEscalation: false`, drops all Linux capabilities, and selects the `RuntimeDefault` seccomp profile. The provisioner deliberately leaves `runAsNonRoot` and `runAsUser` unset because those depend on the configured image; set `SANDBOX_RUNTIME_CLASS` to select an isolation runtime such as gVisor, or leave it empty to omit `runtimeClassName` and use the cluster default runtime. A PSA `restricted` namespace must also use allowed volume sources: select `pvc` mode and configure both `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME`.
 
 ### Custom sandbox image
 
@@ -449,7 +466,7 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 ## Security Considerations
 
-1. **HostPath Volumes**: The provisioner mounts host directories into sandbox Pods by default. Ensure these paths contain only trusted data. For production, prefer PVC-based volumes (set `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME`) to avoid node-specific data loss risks.
+1. **HostPath Volumes**: The provisioner infers hostPath only when both claim names are absent, or uses it when explicitly selected. Ensure these paths contain only trusted data. For production, set `SANDBOX_VOLUME_MODE=pvc` and configure both `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME` to avoid node-specific data loss risks.
 
 2. **Resource Limits**: Each sandbox Pod has CPU, memory, and storage limits to prevent resource exhaustion.
 

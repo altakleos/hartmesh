@@ -147,6 +147,14 @@ image:
   pullSecrets:
     - { name: regcred }
 
+# Kubernetes installs should fail closed unless both sandbox claims resolve.
+sandbox:
+  volumeMode: pvc
+
+# Pre-create this read-only skills claim in the sandbox namespace.
+skills:
+  existingClaim: deer-flow-skills
+
 ingress:
   enabled: true
   className: nginx
@@ -159,6 +167,16 @@ ingress:
 # ordinary values files. It may contain OPENAI_API_KEY and other provider vars.
 existingSecret: deer-flow-provider
 ```
+
+The provisioner resolves its volume mode once at startup. `sandbox.volumeMode:
+pvc` requires both the home and skills claim names; the chart supplies the home
+claim name while `persistence.home.enabled: true`, but operators must configure
+`skills.existingClaim`. A missing name stops the provisioner with an error that
+identifies the missing environment variable. The empty default infers `pvc`
+only when both names are present and `hostpath` only when neither is present;
+exactly one name is also an error. Use explicit `hostpath` only for local or
+hybrid deployments that intentionally mount node filesystem paths—the claim
+values, if present, are ignored in that mode.
 
 Provide your model config under `config` (keep secrets as `$VAR` references —
 they resolve from the selected Secret):
@@ -260,6 +278,9 @@ helm install deer-flow deploy/helm/deer-flow -n acme -f my-values.yaml
 ```yaml
 namespace: ""              # use `helm -n acme`
 sandboxNamespace: acme-sbx # must already exist
+
+sandbox:
+  volumeMode: pvc
 
 persistence:
   home:
@@ -560,7 +581,9 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   multi-node clusters so sandbox Pods on other nodes can mount it. Set
   `persistence.home.existingClaim` to consume a pre-created claim instead;
   leave `persistence.home.enabled: true` so the provisioner receives the same
-  claim name.
+  claim name. Kubernetes deployments should set `sandbox.volumeMode: pvc` and
+  also configure `skills.existingClaim`; either missing claim name then fails
+  provisioner startup instead of selecting a hostPath fallback.
 - **Provisioner RBAC.** The provisioner gets a ServiceAccount with a namespaced
   Role in the sandbox namespace (the exact Pod, Service, Secret,
   NetworkPolicy, Lease, and PVC-read verbs used by the provisioner) and a
@@ -617,6 +640,11 @@ storage, multiple Gateway replicas, inline credentials, and unsafe
 probe/shutdown timing before an install or upgrade. This validation is
 deployment reproducibility, not evidence that live Kubernetes
 termination/recovery has been qualified.
+- **Sandbox volumes.** Set `sandbox.volumeMode: pvc` and provide
+  `skills.existingClaim`; the enabled home persistence supplies the other claim
+  name. An empty mode now rejects exactly-one-claim configurations at
+  provisioner startup. Select `hostpath` explicitly only to preserve the
+  legacy local/hybrid layout.
 - **Skills.** Disabled by default (emptyDir at `/app/skills`). Populate via
   `skills.existingClaim` or `skills.configMap`, or bake skills into a custom
   gateway image.

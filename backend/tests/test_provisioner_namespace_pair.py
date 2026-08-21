@@ -123,6 +123,11 @@ def test_sandbox_skills_pvc_is_read_only_at_claim_and_mount_levels(
 ) -> None:
     provisioner_module.SKILLS_PVC_NAME = "tenant-skills"
     provisioner_module.USERDATA_PVC_NAME = "tenant-home"
+    provisioner_module.SANDBOX_VOLUME_CONFIG = provisioner_module.resolve_sandbox_volume_mode(
+        "pvc",
+        userdata_pvc_name="tenant-home",
+        skills_pvc_name="tenant-skills",
+    )
 
     pod = provisioner_module._build_pod("sandbox-1", "thread-1")
     skills_volume = next(volume for volume in pod.spec.volumes if volume.name == "skills")

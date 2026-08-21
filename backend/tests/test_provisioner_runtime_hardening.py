@@ -169,6 +169,15 @@ def test_rendered_pvc_backed_sandbox_satisfies_restricted_except_run_as_non_root
 ) -> None:
     monkeypatch.setattr(provisioner_module, "SKILLS_PVC_NAME", "skills-rwx")
     monkeypatch.setattr(provisioner_module, "USERDATA_PVC_NAME", "home-rwx")
+    monkeypatch.setattr(
+        provisioner_module,
+        "SANDBOX_VOLUME_CONFIG",
+        provisioner_module.resolve_sandbox_volume_mode(
+            "pvc",
+            userdata_pvc_name="home-rwx",
+            skills_pvc_name="skills-rwx",
+        ),
+    )
 
     pod = provisioner_module._build_pod(
         "restricted-sample",

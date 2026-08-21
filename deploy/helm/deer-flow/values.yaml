@@ -153,6 +153,10 @@ sandbox:
   # -- Set to `gvisor` (or another RuntimeClass) to sandbox under it; leave
   #    empty to use the cluster default runtime.
   runtimeClassName: ""
+  # -- Sandbox volume mode (`pvc` or `hostpath`). Empty infers `pvc` only when
+  #    both claim names are configured, or `hostpath` when neither is. Kubernetes
+  #    deployments should set `pvc` explicitly so missing claims fail startup.
+  volumeMode: ""
 
 # -- Sandbox provisioner (K8s-native code execution). Creates sandbox Pods in
 #    this namespace via a ServiceAccount + RBAC.
