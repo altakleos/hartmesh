@@ -68,16 +68,35 @@ jobs:
 
           for COMPONENT in backend frontend provisioner; do
             IMAGE_REPOSITORY="${IMAGE_BASE}-${COMPONENT}"
-            SHA_DIGEST="$(crane digest "${IMAGE_REPOSITORY}:sha-${SHORT_SHA}")"
-            TAG_DIGEST="$(crane digest "${IMAGE_REPOSITORY}:${IMAGE_TAG}")"
-            assert_digest "${COMPONENT} sha tag" "$SHA_DIGEST"
+            TAG_REFERENCE="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+            SHA_REFERENCE="${IMAGE_REPOSITORY}:sha-${SHORT_SHA}"
+            TAG_DIGEST="$(crane digest "$TAG_REFERENCE")"
             assert_digest "${COMPONENT} release tag" "$TAG_DIGEST"
-            if [ "$TAG_DIGEST" != "$SHA_DIGEST" ]; then
-              echo "::error::${IMAGE_REPOSITORY}:${IMAGE_TAG} does not match :sha-${SHORT_SHA}"
-              exit 1
+            if SHA_DIGEST="$(crane digest "$SHA_REFERENCE" 2>/dev/null)"; then
+              assert_digest "${COMPONENT} sha tag" "$SHA_DIGEST"
+              if [ "$TAG_DIGEST" != "$SHA_DIGEST" ]; then
+                echo "::error::${TAG_REFERENCE} does not match ${SHA_REFERENCE}"
+                exit 1
+              fi
+              REVISION_CHECK="verified"
+            else
+              TAG_LIST_FILE="${RUNNER_TEMP}/${COMPONENT}-tags.txt"
+              if ! crane ls "$IMAGE_REPOSITORY" > "$TAG_LIST_FILE"; then
+                echo "::error::Unable to confirm whether ${SHA_REFERENCE} exists because ${IMAGE_REPOSITORY} tags could not be listed"
+                exit 1
+              fi
+              if grep -Fxq "sha-${SHORT_SHA}" "$TAG_LIST_FILE"; then
+                echo "::error::${SHA_REFERENCE} is listed but its digest could not be resolved"
+                exit 1
+              fi
+              echo "::warning::${SHA_REFERENCE} was not found; recording ${TAG_REFERENCE} as the published identity"
+              echo "::warning::First 50 tags currently present in ${IMAGE_REPOSITORY}:"
+              head -50 "$TAG_LIST_FILE"
+              REVISION_CHECK="tag-not-found"
             fi
             printf '%s_repository=%s\n' "$COMPONENT" "$IMAGE_REPOSITORY" >> "$GITHUB_OUTPUT"
-            printf '%s_digest=%s\n' "$COMPONENT" "$SHA_DIGEST" >> "$GITHUB_OUTPUT"
+            printf '%s_digest=%s\n' "$COMPONENT" "$TAG_DIGEST" >> "$GITHUB_OUTPUT"
+            printf '%s_revision_check=%s\n' "$COMPONENT" "$REVISION_CHECK" >> "$GITHUB_OUTPUT"
           done
 
           CHART_MANIFEST_DIGEST="$(crane digest "ghcr.io/${OWNER}/charts/deer-flow:${CHART_OCI_TAG}")"
@@ -103,10 +122,13 @@ jobs:
           CHART_OCI_TAG: ${{ steps.identity.outputs.chart_oci_tag }}
           BACKEND_REPOSITORY: ${{ steps.resolve.outputs.backend_repository }}
           BACKEND_DIGEST: ${{ steps.resolve.outputs.backend_digest }}
+          BACKEND_REVISION_CHECK: ${{ steps.resolve.outputs.backend_revision_check }}
           FRONTEND_REPOSITORY: ${{ steps.resolve.outputs.frontend_repository }}
           FRONTEND_DIGEST: ${{ steps.resolve.outputs.frontend_digest }}
+          FRONTEND_REVISION_CHECK: ${{ steps.resolve.outputs.frontend_revision_check }}
           PROVISIONER_REPOSITORY: ${{ steps.resolve.outputs.provisioner_repository }}
           PROVISIONER_DIGEST: ${{ steps.resolve.outputs.provisioner_digest }}
+          PROVISIONER_REVISION_CHECK: ${{ steps.resolve.outputs.provisioner_revision_check }}
           CHART_REPOSITORY: ${{ steps.resolve.outputs.chart_repository }}
           CHART_MANIFEST_DIGEST: ${{ steps.resolve.outputs.chart_manifest_digest }}
           PACKAGE_SHA256: ${{ steps.resolve.outputs.package_sha256 }}
@@ -126,6 +148,7 @@ jobs:
                       "repository": os.environ[f"{name.upper()}_REPOSITORY"],
                       "tag": image_tag,
                       "digest": os.environ[f"{name.upper()}_DIGEST"],
+                      "revision_check": os.environ[f"{name.upper()}_REVISION_CHECK"],
                   }
                   for name in ("backend", "frontend", "provisioner")
               },
@@ -165,11 +188,11 @@ jobs:
         run: |
           {
             echo "### Release artifact digests"
-            echo "| Artifact | Pinned identity |"
-            echo "| --- | --- |"
-            echo '| backend | `${{ steps.resolve.outputs.backend_repository }}@${{ steps.resolve.outputs.backend_digest }}` |'
-            echo '| frontend | `${{ steps.resolve.outputs.frontend_repository }}@${{ steps.resolve.outputs.frontend_digest }}` |'
-            echo '| provisioner | `${{ steps.resolve.outputs.provisioner_repository }}@${{ steps.resolve.outputs.provisioner_digest }}` |'
-            echo '| chart manifest | `${{ steps.resolve.outputs.chart_manifest_digest }}` |'
-            echo '| chart package SHA-256 | `${{ steps.resolve.outputs.package_sha256 }}` |'
+            echo "| Artifact | Pinned identity | Revision check |"
+            echo "| --- | --- | --- |"
+            echo '| backend | `${{ steps.resolve.outputs.backend_repository }}@${{ steps.resolve.outputs.backend_digest }}` | `${{ steps.resolve.outputs.backend_revision_check }}` |'
+            echo '| frontend | `${{ steps.resolve.outputs.frontend_repository }}@${{ steps.resolve.outputs.frontend_digest }}` | `${{ steps.resolve.outputs.frontend_revision_check }}` |'
+            echo '| provisioner | `${{ steps.resolve.outputs.provisioner_repository }}@${{ steps.resolve.outputs.provisioner_digest }}` | `${{ steps.resolve.outputs.provisioner_revision_check }}` |'
+            echo '| chart manifest | `${{ steps.resolve.outputs.chart_manifest_digest }}` | n/a |'
+            echo '| chart package SHA-256 | `${{ steps.resolve.outputs.package_sha256 }}` | n/a |'
           } >> "$GITHUB_STEP_SUMMARY"
