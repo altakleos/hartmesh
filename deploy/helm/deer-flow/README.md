@@ -35,8 +35,9 @@ helm install deer-flow oci://ghcr.io/<owner>/charts/deer-flow \
 ```
 
 where `<owner>` is the GitHub owner the chart is published from and `<version>`
-matches the release tag without the leading `v` (tag `v0.1.0` → `--version
-0.1.0`).
+matches the release tag without the leading `v` (tag
+`v2.1.0+hartmesh.1` → `--version 2.1.0+hartmesh.1`). Helm handles the chart's
+underscore-normalized OCI storage tag internally.
 
 > **Note:** the helm chart is new in 2.1.0 - no chart was published before it.
 > It publishes to `oci://ghcr.io/<owner>/charts/deer-flow` (the `charts/` prefix
@@ -47,26 +48,34 @@ For local evaluation, the legacy shared tag values remain supported:
 
 ```yaml
 image:
-  registry: ghcr.io/<owner>     # owner prefix; images are <owner>/deer-flow-<name>
-  tag: "<version>"              # match the release tag (sans leading `v`)
+  registry: ghcr.io/<owner>
+  tag: "vX.Y.Z-hartmesh.N"      # release-manifest.json -> images.*.tag
+  gatewayImage: <repo>-backend
+  frontendImage: <repo>-frontend
+  provisionerImage: <repo>-provisioner
   pullSecrets:
     - { name: regcred }         # only if the GHCR package is private
 ```
 
-The chart's `gatewayImage` / `frontendImage` / `provisionerImage` defaults
-already match the published image names (`deer-flow-backend`,
-`deer-flow-frontend`, `deer-flow-provisioner`), so only `registry` and `tag`
-are required. New GHCR packages default to **private** — flip the package to
-public in its GHCR settings page for unauthenticated pulls, otherwise create a
-pull secret (step 1) and reference it via `image.pullSecrets`.
+Only a repository actually named `deer-flow` can rely on the chart's legacy
+`gatewayImage` / `frontendImage` / `provisionerImage` defaults. Other forks
+publish `<repo>-backend`, `<repo>-frontend`, and `<repo>-provisioner`, so they
+must set those three names as shown (or use the per-workload repositories
+below). New GHCR packages default to **private** — flip the package to public in
+its GHCR settings page for unauthenticated pulls, otherwise create a pull secret
+(step 1) and reference it via `image.pullSecrets`.
 
 > The OCI chart and the images are versioned independently of the chart's
-> `appVersion`; always set `image.tag` to the release that matches your chart
-> `--version` unless you have a reason to pin differently.
+> `appVersion`; for local evaluation, use the image tag recorded in
+> `release-manifest.json`. It includes the leading `v` and uses the registry-safe
+> spelling, which differs from the chart `--version` when build metadata is
+> present.
 
-For the validated one-replica profile, use immutable per-workload references.
-The Gateway and enabled provisioner are execution artifacts and therefore both
-require digests; tags remain documentation only and are not appended:
+For the validated one-replica profile, use immutable per-workload references
+from `release-manifest.json`. Map `images.backend` to `gateway.image`, and map
+the frontend and provisioner entries directly. The sandbox mirror workflow
+prints the separately verified sandbox digest. With a digest set, a workload's
+tag is documentation only and is not appended:
 
 ```yaml
 deployment:
@@ -75,15 +84,25 @@ deployment:
 
 gateway:
   image:
-    repository: ghcr.io/yourorg/deer-flow-backend
-    tag: "2.1.0"
-    digest: sha256:<64-lowercase-hex>
+    repository: ghcr.io/<owner>/<repo>-backend
+    digest: "sha256:..." # release-manifest.json -> images.backend.digest
+
+frontend:
+  image:
+    repository: ghcr.io/<owner>/<repo>-frontend
+    digest: "sha256:..." # release-manifest.json -> images.frontend.digest
 
 provisioner:
   image:
-    repository: ghcr.io/yourorg/deer-flow-provisioner
-    tag: "2.1.0"
-    digest: sha256:<64-lowercase-hex>
+    repository: ghcr.io/<owner>/<repo>-provisioner
+    digest: "sha256:..." # release-manifest.json -> images.provisioner.digest
+  sandboxImage: "ghcr.io/<owner>/<repo>-sandbox@sha256:..." # mirror workflow summary
+
+sandbox:
+  volumeMode: pvc
+
+skills:
+  existingClaim: deer-flow-skills
 
 # Production validation accepts only references to separately managed
 # credentials; inline passwords and connection URLs are rejected.
@@ -101,10 +120,9 @@ config: |
     postgres_url: $DATABASE_URL
 ```
 
-`frontend.image`, `nginx.image`, `postgresql.image`, and `redis.image` accept
-the same optional `digest` form. They are not part of the current invocation
-qualification boundary, but pinning them is recommended for a reproducible
-full deployment.
+`nginx.image`, `postgresql.image`, and `redis.image` accept the same optional
+`digest` form. They are not part of the current invocation qualification
+boundary, but pinning them is recommended for a reproducible full deployment.
 
 ## 1. Build & push images (custom builds only)
 
