@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -21,6 +22,8 @@ def render_chart(
 ) -> list[dict[str, object]]:
     """Render the chart into parsed Kubernetes objects."""
     if _HELM is None:
+        if os.environ.get("CI"):
+            pytest.fail("helm is required in CI to verify rendered chart values")
         pytest.skip("helm is required to verify rendered chart values")
     result = subprocess.run(
         [
