@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -39,11 +40,30 @@ def render_chart(
     return [document for document in yaml.safe_load_all(result.stdout) if isinstance(document, dict)]
 
 
+def find_rendered_object(
+    documents: list[dict[str, object]],
+    kind: str,
+    *,
+    component: str | None = None,
+) -> dict[str, Any]:
+    """Return one rendered object by kind and optional component label."""
+    return next(document for document in documents if document.get("kind") == kind and (component is None or document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component") == component))
+
+
+def container_env(deployment: dict[str, Any]) -> dict[str, str | None]:
+    """Return the first container's environment as a name/value mapping."""
+    env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+    return {item["name"]: item.get("value") for item in env}
+
+
 def deployment_env(
     component: str,
     *extra_args: str,
 ) -> dict[str, str | None]:
     """Render the chart and return one workload's container environment."""
-    deployment = next(document for document in render_chart(*extra_args) if document.get("kind") == "Deployment" and document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component") == component)
-    env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
-    return {item["name"]: item.get("value") for item in env}
+    deployment = find_rendered_object(
+        render_chart(*extra_args),
+        "Deployment",
+        component=component,
+    )
+    return container_env(deployment)

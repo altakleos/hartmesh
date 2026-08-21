@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
@@ -35,7 +35,7 @@ class _NamespaceApi:
     ],
 )
 def test_create_namespace_mode_is_resolved_from_environment(
-    provisioner_module,
+    provisioner_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     raw_value: str | None,
     expected: bool,
@@ -48,7 +48,9 @@ def test_create_namespace_mode_is_resolved_from_environment(
     assert provisioner_module._provisioner_create_namespace_from_env() is expected
 
 
-def test_missing_sandbox_namespace_fails_closed_by_default(provisioner_module) -> None:
+def test_missing_sandbox_namespace_fails_closed_by_default(
+    provisioner_module: ModuleType,
+) -> None:
     api = _NamespaceApi(exists=False)
     provisioner_module.K8S_NAMESPACE = "acme-sbx"
     provisioner_module.core_v1 = api
@@ -63,7 +65,9 @@ def test_missing_sandbox_namespace_fails_closed_by_default(provisioner_module) -
     assert api.created == []
 
 
-def test_namespace_creation_requires_explicit_opt_in(provisioner_module) -> None:
+def test_namespace_creation_requires_explicit_opt_in(
+    provisioner_module: ModuleType,
+) -> None:
     api = _NamespaceApi(exists=False)
     provisioner_module.K8S_NAMESPACE = "deer-flow"
     provisioner_module.PROVISIONER_CREATE_NAMESPACE = True
@@ -100,7 +104,7 @@ def test_compose_explicitly_keeps_single_namespace_creation(
     ids=["same-namespace", "split-namespace"],
 )
 def test_accepted_gate_peers_select_the_gateway_namespace(
-    provisioner_module,
+    provisioner_module: ModuleType,
     sandbox_namespace: str,
     gateway_namespace: str,
 ) -> None:
@@ -115,7 +119,7 @@ def test_accepted_gate_peers_select_the_gateway_namespace(
 
 
 def test_sandbox_skills_pvc_is_read_only_at_claim_and_mount_levels(
-    provisioner_module,
+    provisioner_module: ModuleType,
 ) -> None:
     provisioner_module.SKILLS_PVC_NAME = "tenant-skills"
     provisioner_module.USERDATA_PVC_NAME = "tenant-home"

@@ -34,6 +34,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- default (include "deer-flow.namespace" .) .Values.sandboxNamespace -}}
 {{- end -}}
 
+{{/* Cluster-scoped RBAC names include the release namespace so one release per
+     tenant remains collision-free even when every release has the same name. */}}
+{{- define "deer-flow.provisionerClusterRoleName" -}}
+{{- printf "%s-provisioner-ns-%s" (include "deer-flow.fullname" .) (include "deer-flow.namespace" .) -}}
+{{- end -}}
+
 {{- define "deer-flow.imagePullSecrets" -}}
 {{- with .Values.image.pullSecrets }}
 imagePullSecrets:

@@ -5,21 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from support.helm import render_chart
-
-
-def _object(
-    documents: list[dict[str, Any]],
-    kind: str,
-    *,
-    component: str | None = None,
-) -> dict[str, Any]:
-    return next(document for document in documents if document.get("kind") == kind and (component is None or document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component") == component))
-
-
-def _container_env(deployment: dict[str, Any]) -> dict[str, str | None]:
-    items = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
-    return {item["name"]: item.get("value") for item in items}
+from support.helm import container_env, find_rendered_object, render_chart
 
 
 def test_split_namespace_routes_sandboxes_without_moving_gateway_identity() -> None:
@@ -29,10 +15,14 @@ def test_split_namespace_routes_sandboxes_without_moving_gateway_identity() -> N
         namespace="acme",
     )
 
-    provisioner = _object(documents, "Deployment", component="provisioner")
-    environment = _container_env(provisioner)
-    role = _object(documents, "Role", component="provisioner")
-    role_binding = _object(documents, "RoleBinding", component="provisioner")
+    provisioner = find_rendered_object(documents, "Deployment", component="provisioner")
+    environment = container_env(provisioner)
+    role = find_rendered_object(documents, "Role", component="provisioner")
+    role_binding = find_rendered_object(
+        documents,
+        "RoleBinding",
+        component="provisioner",
+    )
 
     assert provisioner["metadata"]["namespace"] == "acme"
     assert environment["K8S_NAMESPACE"] == "acme-sbx"
@@ -56,8 +46,12 @@ def test_provisioner_rbac_matches_audited_api_calls() -> None:
         namespace="acme",
     )
 
-    role = _object(documents, "Role", component="provisioner")
-    cluster_role = _object(documents, "ClusterRole", component="provisioner")
+    role = find_rendered_object(documents, "Role", component="provisioner")
+    cluster_role = find_rendered_object(
+        documents,
+        "ClusterRole",
+        component="provisioner",
+    )
 
     assert cluster_role["rules"] == [
         {
@@ -106,6 +100,45 @@ def test_provisioner_rbac_matches_audited_api_calls() -> None:
     ]
 
 
+def test_cluster_scoped_rbac_names_are_unique_per_release_namespace() -> None:
+    acme_documents = render_chart(
+        "--set",
+        "sandboxNamespace=acme-sbx",
+        namespace="acme",
+    )
+    beta_documents = render_chart(
+        "--set",
+        "sandboxNamespace=beta-sbx",
+        namespace="beta",
+    )
+
+    acme_role = find_rendered_object(
+        acme_documents,
+        "ClusterRole",
+        component="provisioner",
+    )
+    beta_role = find_rendered_object(
+        beta_documents,
+        "ClusterRole",
+        component="provisioner",
+    )
+    acme_binding = find_rendered_object(
+        acme_documents,
+        "ClusterRoleBinding",
+        component="provisioner",
+    )
+    beta_binding = find_rendered_object(
+        beta_documents,
+        "ClusterRoleBinding",
+        component="provisioner",
+    )
+
+    assert acme_role["metadata"]["name"] != beta_role["metadata"]["name"]
+    assert acme_binding["metadata"]["name"] != beta_binding["metadata"]["name"]
+    assert acme_binding["roleRef"]["name"] == acme_role["metadata"]["name"]
+    assert beta_binding["roleRef"]["name"] == beta_role["metadata"]["name"]
+
+
 @pytest.mark.parametrize(
     ("extra_args", "expected_namespace"),
     [
@@ -121,15 +154,19 @@ def test_release_namespace_resolution(
     documents = render_chart(*extra_args, namespace="foo")
 
     rendered_namespaces = {document.get("metadata", {}).get("namespace") for document in documents if document.get("metadata", {}).get("namespace") is not None}
-    provisioner = _object(documents, "Deployment", component="provisioner")
-    environment = _container_env(provisioner)
+    provisioner = find_rendered_object(
+        documents,
+        "Deployment",
+        component="provisioner",
+    )
+    environment = container_env(provisioner)
 
     assert rendered_namespaces == {expected_namespace}
     assert environment["K8S_NAMESPACE"] == expected_namespace
     assert environment["PROVISIONER_GATEWAY_NAMESPACE"] == expected_namespace
 
 
-def test_release_namespace_default_preserves_the_rendered_object_set() -> None:
+def test_release_namespace_default_preserves_rendered_objects_except_qualified_rbac_names() -> None:
     release_namespace_documents = render_chart(namespace="foo")
     legacy_namespace_documents = render_chart(
         "--set",
@@ -138,7 +175,13 @@ def test_release_namespace_default_preserves_the_rendered_object_set() -> None:
     )
 
     def identities(documents: list[dict[str, Any]]) -> set[tuple[str, str]]:
-        return {(document["kind"], document["metadata"]["name"]) for document in documents}
+        return {
+            (
+                document["kind"],
+                ("<namespace-qualified-provisioner-rbac>" if document["kind"] in {"ClusterRole", "ClusterRoleBinding"} else document["metadata"]["name"]),
+            )
+            for document in documents
+        }
 
     assert identities(release_namespace_documents) == identities(
         legacy_namespace_documents,
@@ -152,10 +195,14 @@ def test_home_existing_claim_drives_gateway_and_provisioner_without_creating_pvc
         namespace="acme",
     )
 
-    gateway = _object(documents, "Deployment", component="gateway")
-    provisioner = _object(documents, "Deployment", component="provisioner")
+    gateway = find_rendered_object(documents, "Deployment", component="gateway")
+    provisioner = find_rendered_object(
+        documents,
+        "Deployment",
+        component="provisioner",
+    )
     home_volume = next(volume for volume in gateway["spec"]["template"]["spec"]["volumes"] if volume["name"] == "home")
 
     assert not any(document.get("kind") == "PersistentVolumeClaim" for document in documents)
     assert home_volume["persistentVolumeClaim"]["claimName"] == "acme-home"
-    assert _container_env(provisioner)["USERDATA_PVC_NAME"] == "acme-home"
+    assert container_env(provisioner)["USERDATA_PVC_NAME"] == "acme-home"
