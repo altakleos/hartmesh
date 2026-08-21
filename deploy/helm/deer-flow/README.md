@@ -228,6 +228,49 @@ chart default entirely - keep the `tools:`/`tool_groups:` block (or the agent
 will have no tools) and the `sandbox:`/`database:`/`checkpointer:`/`stream_bridge:`
 sections shown above.
 
+### Split release and sandbox namespaces
+
+By default, `namespace: ""` follows Helm's release namespace and
+`sandboxNamespace: ""` places sandbox resources there too. For a split
+deployment, pre-create a second namespace and provide same-name home and skills
+claims in both namespaces before installing the chart:
+
+```bash
+kubectl create namespace acme-sbx
+helm install deer-flow deploy/helm/deer-flow -n acme -f my-values.yaml
+```
+
+```yaml
+namespace: ""              # use `helm -n acme`
+sandboxNamespace: acme-sbx # must already exist
+
+persistence:
+  home:
+    enabled: true           # required even when existingClaim is set
+    existingClaim: acme-home
+
+skills:
+  existingClaim: acme-skills
+```
+
+The provisioner remains in `acme`, but its namespaced Role and RoleBinding are
+rendered into `acme-sbx`; the binding subject is the provisioner ServiceAccount
+in `acme`. `K8S_NAMESPACE=acme-sbx` selects where sandbox resources are
+created, while `PROVISIONER_GATEWAY_NAMESPACE=acme` deliberately remains the
+Gateway identity namespace checked by TokenReview. Accepted-skill NetworkPolicy
+peers select Gateway and provisioner Pods in that release namespace.
+
+The chart never creates `sandboxNamespace` and does not grant namespace-create
+RBAC. Its ClusterRole grants only name-pinned `get` for that Namespace object
+and TokenReview create. The provisioner's `PROVISIONER_CREATE_NAMESPACE` escape hatch defaults to
+`false`; set it to `true` only for operator-controlled single-namespace local or
+Compose environments. The repository's Compose files opt in explicitly.
+
+When `persistence.home.existingClaim` is set, the chart does not create the
+home PVC. Both the Gateway home volume and provisioner `USERDATA_PVC_NAME` use
+the existing claim. Keep `persistence.home.enabled: true`, because disabling it
+also suppresses the provisioner environment variable.
+
 ## 3. Install (from a local chart checkout)
 
 For a custom build or local development, install from the chart directory:
@@ -492,16 +535,19 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC
   user-data mode. Default `ReadWriteOnce`; use `ReadWriteMany` (NFS) on
-  multi-node clusters so sandbox Pods on other nodes can mount it.
+  multi-node clusters so sandbox Pods on other nodes can mount it. Set
+  `persistence.home.existingClaim` to consume a pre-created claim instead;
+  leave `persistence.home.enabled: true` so the provisioner receives the same
+  claim name.
 - **Provisioner RBAC.** The provisioner gets a ServiceAccount with a namespaced
-  Role (get/list/watch/create/delete on pods and services; application-managed
-  Secret, NetworkPolicy, and Lease lifecycle; and read-only PVC checks) and a narrow ClusterRole
-  (namespace get/create plus TokenReview). It uses in-cluster service-account
-  credentials — no kubeconfig mount. The Role applies to every named resource
-  kind in the release namespace, not only label-matched sandbox objects;
+  Role in the sandbox namespace (the exact Pod, Service, Secret,
+  NetworkPolicy, Lease, and PVC-read verbs used by the provisioner) and a
+  ClusterRole containing name-pinned namespace get plus TokenReview create. It uses
+  in-cluster service-account credentials — no kubeconfig mount. The Role applies
+  to every named resource kind in the sandbox namespace, not only label-matched sandbox objects;
   Kubernetes RBAC cannot narrow these verbs by attempt label. Treat the
-  provisioner as a trusted namespace control-plane component. The unused
-  update/patch/pods-exec/events verbs were dropped (audited against
+  provisioner as a trusted sandbox-namespace control-plane component. Unused
+  list/watch/pod-log/update/patch/pods-exec/events verbs were dropped (audited against
   `docker/provisioner/app.py`).
 - **Immutable durable skills.** Set
   `provisioner.acceptedSkillProjectionProfile: rwx_verified_copy_v2`, pin both
@@ -528,6 +574,13 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   exact-artifact Kubernetes qualification remains a separate opt-in release gate.
 
 ## Upgrading existing values
+
+**Namespace default change:** `namespace` now defaults to `""`, so Helm's
+`-n/--namespace` selects the release namespace. Existing installations that
+relied on the old implicit `deer-flow` value must install with `-n deer-flow`
+or set `namespace: deer-flow` explicitly. This is the one intentional default
+behavior change in the split-namespace patch; empty `sandboxNamespace` otherwise
+preserves single-namespace sandbox placement.
 
 Legacy `image.registry`, `image.tag`, and the three image-name keys continue to
 render tag references. Existing raw `config:` overrides remain valid, but an
@@ -605,11 +658,11 @@ per-workload with testing:
   non-root by default (defense in depth — the chart already forces the uid via
   `securityContext`, so this is not required). A cluster enforcing the
   `restricted` Pod Security Admission standard would require this setting.
-- **Provisioner RBAC narrowing.** The Role grants get/list/watch/create/delete
-  on pods and services in the namespace (update/patch/pods-exec/events were
-  dropped as unused). These verbs still apply to *all* Pods in the namespace,
+- **Provisioner RBAC narrowing.** The Role grants the audited verbs required
+  for sandbox lifecycle on resource kinds in the dedicated
+  sandbox namespace. These verbs still apply to *all* matching kinds there,
   not just sandbox Pods — RBAC can't scope by label, so the remaining
-  options are a dedicated sandbox namespace or admission control (OPA/Kyverno).
+  option for finer restrictions is admission control (OPA/Kyverno).
 - **`startupProbe`.** Workloads have readiness + liveness probes but no startup
   probe. The gateway's `livenessProbe.initialDelaySeconds: 30` covers slow starts
   today; a `startupProbe` would let it take arbitrarily long to initialize
