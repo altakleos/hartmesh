@@ -52,16 +52,22 @@ unset values preserve the legacy stream name
 `acme:deerflow:stream_bridge:<run_id>`. Adding or changing the prefix starts
 fresh per-run streams. Existing retained streams are not migrated.
 
-Multi-tenant deployments that share Redis must use the same tenant prefix for
-all three Redis-backed subsystems:
+The ownership and checkpoint-cache environment variables are replace-style
+overrides, unlike the stream bridge's outer namespace. Setting all three to the
+bare tenant string would flatten ownership and cache names and discard their
+normal subsystem prefixes. For tenant `acme`, the effective overrides should
+therefore be:
 
-- `DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX`
-- `DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX`
-- `DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX`
+- `DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX=acme`
+- `DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX=acme:ckpt-hist:v1`
+- `DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX=acme:deerflow:sandbox:owner`
 
-For tenant `acme`, configure all three as `acme` and restrict the Redis user to
-key and stream-channel ACL patterns `~acme:* &acme:*`. Configuring only a subset
-leaves the remaining subsystem names outside the tenant boundary.
+The Helm chart derives exactly these values from the recommended one-knob form
+`redis.tenantPrefix: acme`. Its `redis.keyPrefixes.*` values are explicit
+per-subsystem overrides; a non-empty override wins and, for ownership or cache,
+must include any desired subsystem namespace. Restrict the Redis user to key and
+stream-channel ACL patterns `~acme:* &acme:*`. Configuring only a subset outside
+Helm leaves the remaining subsystem names outside the tenant boundary.
 
 ### Extensions
 

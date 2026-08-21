@@ -269,8 +269,12 @@ postgresql:
 redis:
   # -- Deploy a bundled redis StatefulSet. Disable to use an external Redis.
   enabled: true
-  # -- Redis ACL namespace for each Gateway subsystem. Multi-tenant deployments
-  #    must set all three to the same tenant prefix; empty omits the env vars.
+  # -- One outer Redis ACL namespace for this tenant. When set, empty subsystem
+  #    overrides below derive names that preserve each subsystem namespace.
+  tenantPrefix: ""
+  # -- Optional per-subsystem overrides. These replace the derived values;
+  #    leave them empty to use tenantPrefix, or omit all prefix env vars when
+  #    tenantPrefix is also empty.
   keyPrefixes:
     streamBridge: ""
     checkpointCache: ""
