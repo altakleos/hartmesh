@@ -6,7 +6,7 @@ name: Verify Versions
 # images + chart), not just the chart.
 #
 # Sources verified: deploy/helm/deer-flow/Chart.yaml (version + appVersion),
-# backend/pyproject.toml, frontend/package.json. Logic lives in
+# backend/pyproject.toml, backend/uv.lock, frontend/package.json. Logic lives in
 # scripts/verify_versions.sh so it can also be run locally.
 
 on:

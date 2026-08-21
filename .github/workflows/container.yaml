@@ -8,7 +8,7 @@ on:
 jobs:
   verify-versions:
     # Gate the release: every version source must match the v* tag. A forgotten
-    # bump in Chart.yaml, pyproject.toml, or package.json fails here and skips
+    # bump in Chart.yaml, pyproject.toml, uv.lock, or package.json fails here and skips
     # all image builds. See scripts/verify_versions.sh.
     uses: ./.github/workflows/verify-versions.yml
 
