@@ -43,6 +43,15 @@ def _redis_error() -> type[Exception]:
     return RedisError
 
 
+def _is_permission_error(exc: Exception) -> bool:
+    """Recognize Redis ACL errors across redis-py versions."""
+    try:
+        from redis.exceptions import NoPermissionError
+    except ImportError:
+        return "NOPERM" in str(exc).upper()
+    return isinstance(exc, NoPermissionError) or "NOPERM" in str(exc).upper()
+
+
 class RedisCheckpointHistoryCache:
     def __init__(
         self,
@@ -59,6 +68,7 @@ class RedisCheckpointHistoryCache:
         self._ttl = ttl_seconds if ttl_seconds > 0 else None
         self._hits = 0
         self._misses = 0
+        self._purge_disabled = False
 
     async def aget_many(self, keys: list[str]) -> dict[str, dict[str, Any]]:
         if not keys:
@@ -97,6 +107,9 @@ class RedisCheckpointHistoryCache:
         """SCAN+UNLINK every entry of one thread. Failure degrades to
         TTL-bounded residual retention; the source-of-truth delete already
         happened, so this never raises."""
+        if self._purge_disabled:
+            logger.debug("checkpoint history cache thread purge skipped because ACL denies SCAN")
+            return
         stem = thread_key_stem(key_prefix, thread_id)
         try:
             cursor = 0
@@ -107,6 +120,14 @@ class RedisCheckpointHistoryCache:
                 if cursor == 0:
                     break
         except _redis_error() as exc:
+            if _is_permission_error(exc):
+                self._purge_disabled = True
+                ttl_consequence = f"entries expire via TTL ({self._ttl}s)" if self._ttl is not None else "TTL is disabled, so residual entries do not expire"
+                logger.warning(
+                    "ACL denies SCAN; checkpoint history cache will not purge on thread delete; %s",
+                    ttl_consequence,
+                )
+                return
             logger.warning("checkpoint history cache thread purge failed; residual entries expire via TTL: %s", exc)
 
     def stats(self) -> CheckpointCacheStats:
