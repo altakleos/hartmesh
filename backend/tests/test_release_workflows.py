@@ -95,6 +95,15 @@ def test_release_manifest_records_revision_check_without_requiring_sha_tag() -> 
         assert f"{component}_revision_check" in workflow
 
 
+def test_release_workflows_pass_registry_tokens_over_stdin() -> None:
+    expected_login = "printf '%s' \"$GH_TOKEN\" | crane auth login ghcr.io -u \"$GITHUB_ACTOR\" --password-stdin"
+
+    for workflow_path in (_MANIFEST, _MIRROR):
+        workflow = workflow_path.read_text(encoding="utf-8")
+        assert " -p " not in workflow
+        assert expected_login in workflow
+
+
 def test_sandbox_mirror_dispatch_contract_is_manual_and_minimal() -> None:
     workflow = _MIRROR.read_text(encoding="utf-8")
 

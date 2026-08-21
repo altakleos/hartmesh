@@ -41,7 +41,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          crane auth login ghcr.io -u "$GITHUB_ACTOR" -p "$GH_TOKEN"
+          printf '%s' "$GH_TOKEN" | crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           printf '%s' "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
       - name: Resolve and cross-check published artifacts
@@ -102,7 +102,7 @@ jobs:
           CHART_MANIFEST_DIGEST="$(crane digest "ghcr.io/${OWNER}/charts/deer-flow:${CHART_OCI_TAG}")"
           assert_digest "chart OCI tag" "$CHART_MANIFEST_DIGEST"
           CHART_DIRECTORY="$RUNNER_TEMP/release-chart"
-          mkdir -p "$CHART_DIRECTORY"
+          mkdir --parents "$CHART_DIRECTORY"
           helm pull "$CHART_REPOSITORY" --version "$VERSION" --destination "$CHART_DIRECTORY"
           CHART_PACKAGE="$CHART_DIRECTORY/deer-flow-${VERSION}.tgz"
           if [ ! -f "$CHART_PACKAGE" ]; then

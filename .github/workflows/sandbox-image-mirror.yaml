@@ -48,7 +48,7 @@ jobs:
       - name: Authenticate to the destination registry
         env:
           GH_TOKEN: ${{ github.token }}
-        run: crane auth login ghcr.io -u "$GITHUB_ACTOR" -p "$GH_TOKEN"
+        run: printf '%s' "$GH_TOKEN" | crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
       - name: Copy by digest and verify the mirror
         env:
