@@ -22,7 +22,7 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, and optional `user_id`.
 
-2. **Pod Creation**: The provisioner creates a dedicated Pod in the `deer-flow` namespace with:
+2. **Pod Creation**: The provisioner creates a dedicated Pod in `K8S_NAMESPACE` with:
    - The sandbox container image (all-in-one-sandbox)
    - HostPath volumes mounted for:
      - `/mnt/skills/{public,custom,legacy}` → Read-only enabled-only skill projections
@@ -149,7 +149,8 @@ The provisioner is configured via environment variables. Docker Compose sets loc
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `K8S_NAMESPACE` | `deer-flow` | Kubernetes namespace for sandbox resources |
+| `K8S_NAMESPACE` | `deer-flow` | Pre-existing Kubernetes namespace for sandbox resources |
+| `PROVISIONER_CREATE_NAMESPACE` | `false` | Set to `true` only for operator-controlled single-namespace local/Compose installs that should create `K8S_NAMESPACE` when absent. Helm leaves this disabled and requires the sandbox namespace to be pre-created. |
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
 | `SANDBOX_RUNTIME_CLASS` | empty (cluster default) | Optional Kubernetes RuntimeClass for sandbox Pods, such as `gvisor`; an empty value omits `runtimeClassName` and uses the cluster default runtime |
 | `LARK_CLI_INIT_IMAGE` | empty (feature off) | Optional lark-cli init image (Pattern A). When set, sandbox Pods requesting the lark-cli runtime get an init container + shared `emptyDir` that provisions `lark-cli`, instead of a hostPath/PVC runtime mount. See [`docker/lark-cli-init`](../lark-cli-init/README.md) |
@@ -214,7 +215,9 @@ the corresponding lost worker follows the existing orphan-terminalization contra
 
 Gateway management calls use a distinct projected ServiceAccount token. The token is audience
 bound, reread on every request for rotation, and checked with TokenReview against the exact Gateway
-namespace and ServiceAccount. The Gateway's readiness path authenticates to `/api/capabilities`
+namespace and ServiceAccount. This identity namespace can differ from `K8S_NAMESPACE`; accepted
+NetworkPolicy peers use the Gateway namespace selector so split deployments stay fail closed without
+blocking the capability gate. The Gateway's readiness path authenticates to `/api/capabilities`
 and requires the configured projection profile before it admits new work. The per-attempt bearer
 capability remains narrower and is accepted only by that attempt's in-Pod gate.
 
@@ -300,12 +303,13 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
    - Current context should point to your local cluster
 
 3. **Kubernetes Access**:
-   - Helm grants a namespaced Role for Pod/Pod-log/Service lifecycle,
+   - Helm grants a Role in the sandbox namespace for Pod/Service lifecycle,
      immutable Secret lifecycle, NetworkPolicy lifecycle, Lease lifecycle, and
-     read-only access to the configured PVC, plus a ClusterRole for namespace
-     discovery/creation and TokenReview.
+     read-only access to the configured PVC, plus a ClusterRole containing
+     name-pinned namespace get and TokenReview create. The sandbox namespace must
+     be pre-created; the chart does not grant namespace creation.
    - Kubernetes RBAC applies those verbs to every resource of each named kind
-     in the release namespace; it cannot restrict them by sandbox label or
+     in the sandbox namespace; it cannot restrict them by sandbox label or
      attempt identity. Treat the provisioner as a trusted namespace
      control-plane component. Use a dedicated sandbox namespace or admission
      policy if compromise isolation from unrelated namespace resources is a

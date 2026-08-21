@@ -55,6 +55,16 @@ requires pinned images, shared durable state, and safe lifecycle timing; do not
 claim multi-replica or zero-downtime behavior. Its render contract is pinned by
 `backend/tests/test_helm_durable_deployment_contract.py`.
 
+The chart can place provisioner-created sandboxes in a separate, pre-created
+`sandboxNamespace`. The provisioner stays in the release namespace, receives
+namespaced sandbox lifecycle RBAC only in the sandbox namespace, and retains
+only name-pinned namespace get and TokenReview create at cluster scope.
+`K8S_NAMESPACE` selects sandbox
+resources; `PROVISIONER_GATEWAY_NAMESPACE` remains the release namespace used
+to validate the Gateway ServiceAccount identity. Empty `sandboxNamespace`
+preserves single-namespace behavior, while empty `namespace` follows Helm's
+release namespace.
+
 ## Repository Map
 
 ```
