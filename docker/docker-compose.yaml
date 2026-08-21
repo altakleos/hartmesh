@@ -169,6 +169,8 @@ services:
       - ~/.kube/config:/root/.kube/config:ro
     environment:
       - K8S_NAMESPACE=deer-flow
+      # Compose owns this local single namespace and preserves create-if-missing.
+      - PROVISIONER_CREATE_NAMESPACE=true
       - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
       # Optional lark-cli init image (Pattern A). Empty ⇒ legacy runtime mount.
       # Set to a published tag (e.g. deer-flow/lark-cli-init:v1.0.65) to provision

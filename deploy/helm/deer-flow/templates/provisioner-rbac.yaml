@@ -14,23 +14,24 @@ metadata:
   {{- end }}
 ---
 {{- end }}
-# Namespaced permissions: manage sandbox Pods + Services in this namespace.
+# Namespaced permissions: manage sandbox resources in the sandbox namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "deer-flow.fullname" . }}-provisioner
-  namespace: {{ include "deer-flow.namespace" . }}
+  namespace: {{ include "deer-flow.sandboxNamespace" . }}
   labels:
     {{- include "deer-flow.labels" . | nindent 4 }}
     app.kubernetes.io/component: provisioner
 rules:
-  # Verbs mirror docker/provisioner/app.py. update/patch and pods/exec
-  # and events were unused and dropped (least privilege). These verbs still
-  # apply to *all* Pods in the namespace - scoping to sandbox Pods is deferred
-  # (see README "Not yet enforced").
+  # Verbs mirror docker/provisioner/app.py. They still apply to every resource
+  # of each kind in the sandbox namespace because RBAC cannot scope by label.
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "services"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+    resources: ["pods"]
+    verbs: ["get", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create", "delete"]
@@ -39,7 +40,7 @@ rules:
     verbs: ["get"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+    verbs: ["get", "create", "delete"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "create", "delete", "update"]
@@ -48,7 +49,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "deer-flow.fullname" . }}-provisioner
-  namespace: {{ include "deer-flow.namespace" . }}
+  namespace: {{ include "deer-flow.sandboxNamespace" . }}
   labels:
     {{- include "deer-flow.labels" . | nindent 4 }}
     app.kubernetes.io/component: provisioner
@@ -61,8 +62,8 @@ roleRef:
   name: {{ include "deer-flow.fullname" . }}-provisioner
   apiGroup: rbac.authorization.k8s.io
 ---
-# Cluster-scoped: read/create Namespaces so the provisioner can ensure the
-# sandbox namespace exists (mirrors docker/provisioner/README.md:202-206).
+# Cluster-scoped namespace existence check and authentication. Namespace create
+# is deliberately not granted by the chart; operators must pre-create it.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -73,7 +74,8 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "create"]
+    resourceNames: [{{ include "deer-flow.sandboxNamespace" . | quote }}]
+    verbs: ["get"]
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]

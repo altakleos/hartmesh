@@ -14,11 +14,11 @@ _CHART = _REPO_ROOT / "deploy" / "helm" / "deer-flow"
 _HELM = shutil.which("helm")
 
 
-def deployment_env(
-    component: str,
+def render_chart(
     *extra_args: str,
-) -> dict[str, str | None]:
-    """Render the chart and return one workload's container environment."""
+    namespace: str = "deer-flow",
+) -> list[dict[str, object]]:
+    """Render the chart into parsed Kubernetes objects."""
     if _HELM is None:
         pytest.skip("helm is required to verify rendered chart values")
     result = subprocess.run(
@@ -28,7 +28,7 @@ def deployment_env(
             "deer-flow",
             str(_CHART),
             "--namespace",
-            "deer-flow",
+            namespace,
             *extra_args,
         ],
         check=False,
@@ -36,8 +36,14 @@ def deployment_env(
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    deployment = next(
-        document for document in yaml.safe_load_all(result.stdout) if isinstance(document, dict) and document.get("kind") == "Deployment" and document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component") == component
-    )
+    return [document for document in yaml.safe_load_all(result.stdout) if isinstance(document, dict)]
+
+
+def deployment_env(
+    component: str,
+    *extra_args: str,
+) -> dict[str, str | None]:
+    """Render the chart and return one workload's container environment."""
+    deployment = next(document for document in render_chart(*extra_args) if document.get("kind") == "Deployment" and document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component") == component)
     env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
     return {item["name"]: item.get("value") for item in env}
