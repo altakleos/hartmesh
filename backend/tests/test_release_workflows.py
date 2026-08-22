@@ -58,11 +58,9 @@ def test_release_manifest_dispatch_contract_is_manual_and_minimal() -> None:
     workflow = _MANIFEST.read_text(encoding="utf-8")
 
     trigger = _top_level_block(workflow, "on", "permissions")
-    assert _input_names(workflow) == {"sandbox", "version"}
+    assert _input_names(workflow) == {"version"}
     assert "        required: true\n" in _input_body(workflow, "version")
     assert "        type: string\n" in _input_body(workflow, "version")
-    assert "        required: false\n" in _input_body(workflow, "sandbox")
-    assert "        type: string\n" in _input_body(workflow, "sandbox")
     assert trigger.count("workflow_dispatch:") == 1
     assert all(event not in trigger for event in ("push:", "pull_request:", "schedule:", "workflow_call:"))
     assert _top_level_block(workflow, "permissions", "jobs").strip().splitlines() == ["contents: write", "  packages: read"]
@@ -81,7 +79,7 @@ def test_release_manifest_resolves_and_records_every_published_identity() -> Non
     assert "release-manifest.json" in workflow
     for field in ("schema", "version", "tag", "commit", "images", "chart", "repository", "digest", "oci_tag", "manifest_digest", "package_sha256"):
         assert f'"{field}"' in workflow
-    for component in ("backend", "frontend", "provisioner"):
+    for component in ("backend", "frontend", "provisioner", "sandbox"):
         assert f'"{component}"' in workflow
     assert "actions/upload-artifact@" in workflow
     assert "gh release create" in workflow
@@ -111,7 +109,7 @@ def test_release_manifest_records_revision_check_without_requiring_sha_tag() -> 
     assert 'printf \'%s_digest=%s\\n\' "$COMPONENT" "$TAG_DIGEST"' in workflow
     assert 'printf \'%s_revision_check=%s\\n\' "$COMPONENT" "$REVISION_CHECK"' in workflow
     assert '"revision_check": os.environ[f"{name.upper()}_REVISION_CHECK"]' in workflow
-    for component in ("backend", "frontend", "provisioner"):
+    for component in ("backend", "frontend", "provisioner", "sandbox"):
         assert f"{component}_revision_check" in workflow
 
 
@@ -124,20 +122,15 @@ def test_release_workflows_pass_registry_tokens_over_stdin() -> None:
         assert expected_login in workflow
 
 
-def test_release_manifest_validates_and_records_an_optional_sandbox() -> None:
+def test_release_manifest_resolves_sandbox_as_a_built_image() -> None:
     workflow = _MANIFEST.read_text(encoding="utf-8")
 
-    validation = workflow.index('if ! [[ "$SANDBOX" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]')
-    assert validation < workflow.index("actions/checkout@")
-    assert validation < workflow.index("imjasonh/setup-crane@")
-    assert 'SANDBOX_DIGEST="$(crane digest "$SANDBOX")"' in workflow
-    assert 'assert_digest "sandbox image" "$SANDBOX_DIGEST"' in workflow
-    assert 'if [ "$SANDBOX_DIGEST" != "$SANDBOX_EXPECTED_DIGEST" ]; then' in workflow
-    assert 'if os.environ["SANDBOX_PRESENT"] == "true":' in workflow
-    assert 'manifest["sandbox"] = {' in workflow
-    assert '"repository": os.environ["SANDBOX_REPOSITORY"]' in workflow
-    assert '"digest": os.environ["SANDBOX_DIGEST"]' in workflow
-    assert '"sandbox": {' not in workflow
+    assert "for COMPONENT in backend frontend provisioner sandbox; do" in workflow
+    assert 'for name in ("backend", "frontend", "provisioner", "sandbox")' in workflow
+    assert "SANDBOX_PRESENT" not in workflow
+    assert "inputs.sandbox" not in workflow
+    assert 'manifest["sandbox"]' not in workflow
+    assert '"sandbox"' in workflow
     assert '"schema": 1' in workflow
 
 
