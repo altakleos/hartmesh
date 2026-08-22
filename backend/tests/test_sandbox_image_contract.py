@@ -6,10 +6,10 @@ import os
 import subprocess
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SU_SHIM = REPO_ROOT / "docker/sandbox/su-shim.sh"
 SANDBOX_DOCKERFILE = REPO_ROOT / "docker/sandbox/Dockerfile"
+SANDBOX_SMOKE_WORKFLOW = REPO_ROOT / ".github/workflows/sandbox-image-smoke.yml"
 
 
 def test_sandbox_dockerfile_pins_the_verified_base_and_non_root_user() -> None:
@@ -72,6 +72,24 @@ def test_every_vendor_substitution_is_asserted_before_it_runs() -> None:
 
     assert dockerfile.count("grep -q ") == len(asserted_substitutions)
     assert 'test "$(grep -cE \'chown "?(nobody|root)\' $G)" = 1' in dockerfile
+
+
+def test_sandbox_smoke_runs_the_image_with_the_restricted_profile() -> None:
+    workflow = SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3" in workflow
+    assert "docker build --tag deer-flow-sandbox-smoke docker/sandbox" in workflow
+    assert "--user 1000:1000" in workflow
+    assert "--cap-drop=ALL" in workflow
+    assert "--security-opt=no-new-privileges" in workflow
+    assert "/v1/sandbox" in workflow
+    assert "/v1/shell/exec" in workflow
+    assert "/v1/bash/exec" in workflow
+    assert "id -un" in workflow
+    assert "jq --raw-output '.data.output'" in workflow
+    assert "jq --raw-output '.data.stdout'" in workflow
+    assert 'test "$shell_user" = "gem"' in workflow
+    assert "permission denied|operation not permitted" in workflow
 
 
 def test_su_shim_preserves_login_environment_and_stdin_for_same_uid(

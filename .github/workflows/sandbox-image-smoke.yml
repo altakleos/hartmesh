@@ -1,0 +1,76 @@
+name: Sandbox Image Smoke
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docker/sandbox/**"
+      - ".github/workflows/sandbox-image-smoke.yml"
+  pull_request:
+    paths:
+      - "docker/sandbox/**"
+      - ".github/workflows/sandbox-image-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  restricted-profile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Build the sandbox image
+        run: docker build --tag deer-flow-sandbox-smoke docker/sandbox
+
+      - name: Exercise the restricted runtime profile
+        run: |
+          set -euo pipefail
+          container_id="$(docker run --detach \
+            --user 1000:1000 \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --publish 127.0.0.1:18080:8080 \
+            deer-flow-sandbox-smoke)"
+          trap 'docker logs "$container_id" 2>&1 || true; docker rm --force "$container_id" >/dev/null 2>&1 || true' EXIT
+
+          ready=false
+          for _attempt in $(seq 1 90); do
+            if curl --fail --silent --show-error --max-time 5 \
+              http://127.0.0.1:18080/v1/sandbox >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            echo "::error::sandbox did not become ready"
+            exit 1
+          fi
+
+          shell_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"id -un"}' \
+            http://127.0.0.1:18080/v1/shell/exec)"
+          shell_user="$(printf '%s' "$shell_response" | jq --raw-output '.data.output' | tr -d '\r\n')"
+          test "$shell_user" = "gem"
+
+          bash_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"id -un"}' \
+            http://127.0.0.1:18080/v1/bash/exec)"
+          bash_user="$(printf '%s' "$bash_response" | jq --raw-output '.data.stdout' | tr -d '\r\n')"
+          test "$bash_user" = "gem"
+
+          logs="$(docker logs "$container_id" 2>&1)"
+          if printf '%s' "$logs" | grep -Eiq 'permission denied|operation not permitted'; then
+            printf '%s\n' "$logs"
+            echo "::error::sandbox emitted a restricted-profile permission failure"
+            exit 1
+          fi
+
+          printf 'shell user: %s\nbash user: %s\n' "$shell_user" "$bash_user"
+          docker rm --force "$container_id" >/dev/null
+          trap - EXIT
