@@ -1,6 +1,6 @@
 {
   "name": "deer-flow-frontend",
-  "version": "2.1.0+hartmesh.2",
+  "version": "2.1.0+hartmesh.3",
   "private": true,
   "type": "module",
   "scripts": {
