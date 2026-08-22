@@ -5,6 +5,11 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.2] — 2026-08-21
+
+- feat: build a restricted-compatible sandbox image (#14)
+- feat: consume the hardened sandbox image (#15)
+
 ## [2.1.0+hartmesh.1] — 2026-08-21
 
 - feat: harden Kubernetes sandbox runtime (#7)
@@ -925,6 +930,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 - **ci:** Consolidate PR/issue labeling and fix the reviewing-job crash and
   label thrash. ([#3455])
 
+[2.1.0+hartmesh.2]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.2
 [2.1.0+hartmesh.1]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.1
 [2.0.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.0.0
 
