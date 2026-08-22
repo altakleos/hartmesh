@@ -2187,6 +2187,12 @@ def _build_pod(
             ],
             init_containers=init_container_items or None,
             volumes=volumes,
+            security_context=k8s_client.V1PodSecurityContext(
+                run_as_non_root=True,
+                run_as_user=1000,
+                run_as_group=1000,
+                fs_group=1000,
+            ),
             affinity=(
                 k8s_client.V1Affinity(
                     pod_anti_affinity=k8s_client.V1PodAntiAffinity(
