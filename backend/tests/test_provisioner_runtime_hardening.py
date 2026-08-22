@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import PurePosixPath
 from types import ModuleType
 from typing import Any
 
@@ -31,6 +32,24 @@ def _accepted_projection(provisioner_module: ModuleType) -> Any:
         file_count=1,
         total_bytes=1,
     )
+
+
+def _assert_sandbox_mounts_avoid_entrypoint_chown_paths(pod: Any) -> None:
+    forbidden_roots = {
+        PurePosixPath("/home/gem"),
+        PurePosixPath("/home/gem/Downloads"),
+        PurePosixPath("/var/log/gem"),
+        PurePosixPath("/var/lib/aio-sandbox"),
+        PurePosixPath("/opt/gem"),
+        PurePosixPath("/opt/jupyter"),
+    }
+    sandbox = next(container for container in pod.spec.containers if container.name == "sandbox")
+
+    for mount in sandbox.volume_mounts:
+        mount_path = PurePosixPath(mount.mount_path)
+        for forbidden_root in forbidden_roots:
+            assert mount_path != forbidden_root, mount.mount_path
+            assert forbidden_root not in mount_path.parents, mount.mount_path
 
 
 @pytest.mark.parametrize(
@@ -102,6 +121,12 @@ def test_default_sandbox_container_uses_restricted_security_context(
 ) -> None:
     pod = provisioner_module._build_pod("restricted", "thread-1")
 
+    pod_security = pod.spec.security_context
+    assert pod_security.run_as_non_root is True
+    assert pod_security.run_as_user == 1000
+    assert pod_security.run_as_group == 1000
+    assert pod_security.fs_group == 1000
+
     security = pod.spec.containers[0].security_context
     assert security.allow_privilege_escalation is False
     assert security.capabilities.drop == ["ALL"]
@@ -109,6 +134,7 @@ def test_default_sandbox_container_uses_restricted_security_context(
     assert security.seccomp_profile.type == "RuntimeDefault"
     assert security.run_as_non_root is None
     assert security.run_as_user is None
+    _assert_sandbox_mounts_avoid_entrypoint_chown_paths(pod)
 
 
 def test_every_container_in_an_initialized_sandbox_is_hardened(
@@ -161,9 +187,10 @@ def test_every_container_in_an_initialized_sandbox_is_hardened(
         assert security.seccomp_profile.type == "RuntimeDefault", container.name
         assert security.run_as_non_root is None, container.name
         assert security.run_as_user is None, container.name
+    _assert_sandbox_mounts_avoid_entrypoint_chown_paths(pod)
 
 
-def test_rendered_pvc_backed_sandbox_satisfies_restricted_except_run_as_non_root(
+def test_rendered_pvc_backed_sandbox_satisfies_restricted(
     provisioner_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -195,7 +222,12 @@ def test_rendered_pvc_backed_sandbox_satisfies_restricted_except_run_as_non_root
     assert spec["hostIPC"] is False
     assert spec["shareProcessNamespace"] is False
     assert spec["automountServiceAccountToken"] is False
-    assert "securityContext" not in spec
+    assert spec["securityContext"] == {
+        "fsGroup": 1000,
+        "runAsGroup": 1000,
+        "runAsNonRoot": True,
+        "runAsUser": 1000,
+    }
     assert "sysctls" not in spec
 
     allowed_volume_types = {
