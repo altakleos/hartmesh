@@ -49,6 +49,9 @@ logger = logging.getLogger(__name__)
 
 DOCUMENT_VERSION = "2.0"
 CORE_CATEGORIES = frozenset({"preference", "correction", "context", "goal", "behavior", "identity", "constraint", "decision", "other"})
+# The scope lock, rather than wall-clock age, is the safety window: once an
+# opener owns it, every matching temp left by an earlier writer is an orphan.
+ATOMIC_WRITE_TEMP_MAX_AGE_SECONDS = 0
 
 
 class MemoryStorageError(RuntimeError):
@@ -357,6 +360,24 @@ def _atomic_write(path: Path, raw: bytes) -> None:
             temp.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _sweep_stale_atomic_write_temps(path: Path) -> None:
+    """Remove this target's orphaned write siblings while its scope is locked."""
+    cutoff = time.time() - ATOMIC_WRITE_TEMP_MAX_AGE_SECONDS
+    prefix = f".{path.name}."
+    for temp in path.parent.glob(f"{prefix}*.tmp"):
+        token = temp.name.removeprefix(prefix).removesuffix(".tmp")
+        if len(token) != 32 or any(character not in "0123456789abcdef" for character in token):
+            continue
+        try:
+            if temp.stat().st_mtime > cutoff:
+                continue
+            temp.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            logger.warning("Failed to remove stale DeerMem atomic-write temp %s", temp, exc_info=True)
 
 
 @contextmanager
@@ -723,6 +744,18 @@ class FileMemoryStorage(MemoryStorage):
     def _scope_lock(self, key: tuple[str | None, str | None]) -> threading.RLock:
         with self._cache_lock:
             return self._scope_locks.setdefault(key, threading.RLock())
+
+    def _open_scope(self, path: Path, key: tuple[str | None, str | None]) -> None:
+        """Clean owned crash temps before this instance first loads a scope."""
+        with self._cache_lock:
+            if key in self._memory_cache:
+                return
+        with self._scope_lock(key):
+            with _process_file_lock(
+                path.parent / ".memory.lock",
+                float(getattr(self._config, "file_lock_timeout_seconds", 10)),
+            ):
+                _sweep_stale_atomic_write_temps(path)
 
     def _get_memory_file_path(self, agent_name: str | None = None, *, user_id: str | None = None) -> Path:
         return memory_file_path(self._config, agent_name, user_id=user_id)
@@ -1267,6 +1300,7 @@ class FileMemoryStorage(MemoryStorage):
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         path = self._get_memory_file_path(agent_name, user_id=user_id)
         key = self._cache_key(agent_name, user_id=user_id)
+        self._open_scope(path, key)
         journal_path = path.parent / ".memory.journal.json"
         legacy_path = self._legacy_agent_memory_path(path, agent_name) if agent_name is not None else None
         previous_default_dir = path.parent / "agents" / "lead-agent"
@@ -1295,6 +1329,7 @@ class FileMemoryStorage(MemoryStorage):
     def reload(self, agent_name: str | None = None, *, user_id: str | None = None, _rebuild_retrieval: bool = True) -> dict[str, Any]:
         path = self._get_memory_file_path(agent_name, user_id=user_id)
         key = self._cache_key(agent_name, user_id=user_id)
+        self._open_scope(path, key)
         legacy_path = self._legacy_agent_memory_path(path, agent_name) if agent_name is not None else None
         previous_default_dir = path.parent / "agents" / "lead-agent"
         needs_migration = (
@@ -1357,6 +1392,7 @@ class FileMemoryStorage(MemoryStorage):
         """
         path = self._get_memory_file_path(agent_name, user_id=user_id)
         key = self._cache_key(agent_name, user_id=user_id)
+        self._open_scope(path, key)
         lock_path = path.parent / ".memory.lock"
         notifications: list[RetrievalNotification] = []
         deleted_metadata_ids: list[str] = []

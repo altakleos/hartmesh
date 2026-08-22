@@ -377,6 +377,8 @@ Complete first-admin setup before making the service reachable beyond loopback.
 Administrators can configure stdio MCP processes and trusted Python plugins, so administrator access is equivalent to code execution.
 
 See the [Helm deployment guide](deploy/helm/deer-flow/README.md) for the one-Gateway render contract, accepted-skill projection, credentials, and exact qualification procedure.
+The chart also documents non-recursive PVC ownership handling and the
+values-driven startup budget used by provisioner-created gVisor sandboxes.
 
 ## Extension model
 

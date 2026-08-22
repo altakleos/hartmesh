@@ -628,7 +628,9 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   leave `persistence.home.enabled: true` so the provisioner receives the same
   claim name. Kubernetes deployments should set `sandbox.volumeMode: pvc` and
   also configure `skills.existingClaim`; Helm rejects a half-configured claim
-  pair instead of installing a crashlooping provisioner.
+  pair instead of installing a crashlooping provisioner. Gateway, PostgreSQL,
+  and Redis PVC mounts use `fsGroupChangePolicy: OnRootMismatch`, avoiding a
+  recursive ownership walk when the volume root already has the expected group.
 - **Provisioner RBAC.** The provisioner gets a ServiceAccount with a namespaced
   Role in the sandbox namespace (the exact Pod, Service, Secret,
   NetworkPolicy, Lease, and PVC-read verbs used by the provisioner) and a
@@ -709,13 +711,13 @@ container escalates privileges or runs as uid 0.
 
 | workload | runAsUser | fsGroup | writable-path handling |
 |---|---|---|---|
-| gateway | 1000 | 1000 | `.deer-flow` PVC group-writable via fsGroup; `PYTHONDONTWRITEBYTECODE=1` suppresses `.pyc` writes; `UV_CACHE_DIR=/tmp` |
-| frontend | 1000 (`node`) | 1000 | `emptyDir` at `/app/frontend/.next/cache` (root-owned in the image) |
+| gateway | 1000 | 1000 | `.deer-flow` PVC group-writable via fsGroup with `OnRootMismatch`; `PYTHONDONTWRITEBYTECODE=1` suppresses `.pyc` writes; `UV_CACHE_DIR=/tmp` |
+| frontend | 1000 (`node`) | 1000 | `emptyDir` at `/app/frontend/.next/cache` (root-owned in the image); fsGroup uses `OnRootMismatch` for uniformity |
 | nginx | 101 (`nginx`) | 101 | command writes the rendered config to `/tmp/nginx.conf` and loads `nginx -c /tmp/nginx.conf` (since `/etc/nginx` is root-owned); `emptyDir` at `/var/cache/nginx` |
 | provisioner | 1000 | — | no PVC; `PYTHONDONTWRITEBYTECODE=1` |
 | sandbox | 1000 (`gem`) | 1000 | repository-built image pre-seeds vendor runtime paths; sandbox Pod mounts stay at `/mnt/user-data` and `/mnt/skills`; fsGroup uses `OnRootMismatch`, so pre-owned volumes (1000:1000) are not re-walked at mount |
-| postgres | 999 (`postgres`) | 999 | official `postgres:16` entrypoint detects non-root and skips the chown/gosu dance; data PVC group-writable via fsGroup |
-| redis | 999 (`redis`) | 999 | official `redis:7-alpine` entrypoint detects non-root and skips the gosu dance; data PVC group-writable via fsGroup |
+| postgres | 999 (`postgres`) | 999 | official `postgres:16` entrypoint detects non-root and skips the chown/gosu dance; data PVC group-writable via fsGroup with `OnRootMismatch` |
+| redis | 999 (`redis`) | 999 | official `redis:7-alpine` entrypoint detects non-root and skips the gosu dance; data PVC group-writable via fsGroup with `OnRootMismatch` |
 
 Every container sets:
 
@@ -765,6 +767,15 @@ config: |
     image: ghcr.io/example/deer-flow-sandbox@sha256:<same-64-lowercase-hex>
 ```
 
+Provisioner-created sandbox Pods have a startup probe on `/v1/sandbox`. The
+default `sandbox.startupProbe` values are 0 seconds initial delay, 10 seconds
+period, 3 seconds timeout, and 15 failures: a 150-second budget, which gives the
+measured 90-second gVisor startup 60 seconds of margin. Override those four
+values together if the image startup profile changes. Image pulling precedes
+container start, so the measured 4-minute-21-second cold pull is outside the
+startup-probe budget. Once startup succeeds, the existing liveness probe resumes
+and detects a non-responsive sandbox in about 40 seconds.
+
 **ConfigMap rollout.** ConfigMaps mount via `subPath`, which does **not** receive
 in-place updates — a `helm upgrade` that changes only a ConfigMap would leave
 pods on stale config. Each pod template carries a `checksum/*` annotation (SHA256
@@ -803,11 +814,11 @@ per-workload with testing:
   sandbox namespace. These verbs still apply to *all* matching kinds there,
   not just sandbox Pods — RBAC can't scope by label, so the remaining
   option for finer restrictions is admission control (OPA/Kyverno).
-- **`startupProbe`.** Workloads have readiness + liveness probes but no startup
-  probe. The gateway's `livenessProbe.initialDelaySeconds: 30` covers slow starts
-  today; a `startupProbe` would let it take arbitrarily long to initialize
-  without risking a liveness kill during a cold start (e.g. slow model config
-  load).
+- **Gateway `startupProbe`.** The provisioner-created sandbox has a values-driven
+  startup probe, but the Gateway workload still relies on
+  `livenessProbe.initialDelaySeconds: 30`. A Gateway startup probe would isolate
+  any future slow application initialization from its steady-state liveness
+  budget.
 
 None of these affect correctness of the current deployment.
 

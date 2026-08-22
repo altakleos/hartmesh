@@ -3,12 +3,51 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import PurePosixPath
 from types import ModuleType
 from typing import Any
 
 import pytest
 import yaml
+
+
+def _simulate_kubelet_probe_lifecycle(
+    startup_probe: Any,
+    liveness_probe: Any,
+    *,
+    endpoint_is_healthy: Callable[[int], bool],
+    duration_seconds: int,
+) -> tuple[int | None, int, int | None]:
+    """Observe startup/liveness behavior using Kubernetes probe sequencing."""
+    next_startup = startup_probe.initial_delay_seconds
+    next_liveness: int | None = None
+    startup_failures = 0
+    liveness_failures = 0
+    ready_at: int | None = None
+
+    for now in range(duration_seconds + 1):
+        if ready_at is None and now == next_startup:
+            if endpoint_is_healthy(now):
+                ready_at = now
+                next_liveness = now + liveness_probe.initial_delay_seconds
+            else:
+                startup_failures += 1
+                if startup_failures >= startup_probe.failure_threshold:
+                    return None, 1, now
+                next_startup += startup_probe.period_seconds
+            continue
+
+        if ready_at is not None and now == next_liveness:
+            if endpoint_is_healthy(now):
+                liveness_failures = 0
+            else:
+                liveness_failures += 1
+                if liveness_failures >= liveness_probe.failure_threshold:
+                    return ready_at, 1, now
+            next_liveness += liveness_probe.period_seconds
+
+    return ready_at, 0, None
 
 
 def _accepted_projection(provisioner_module: ModuleType) -> Any:
@@ -136,6 +175,49 @@ def test_default_sandbox_container_uses_restricted_security_context(
     assert security.run_as_non_root is None
     assert security.run_as_user is None
     _assert_sandbox_mounts_avoid_entrypoint_chown_paths(pod)
+
+
+def test_sandbox_probe_lifecycle_allows_90_second_boot_then_kills_a_hang(
+    provisioner_module: ModuleType,
+) -> None:
+    pod = provisioner_module._build_pod("slow-start", "thread-1")
+    container = pod.spec.containers[0]
+
+    startup = container.startup_probe
+    assert startup.http_get.path == "/v1/sandbox"
+    assert startup.initial_delay_seconds == 0
+    assert startup.period_seconds == 10
+    assert startup.timeout_seconds == 3
+    assert startup.failure_threshold == 15
+    assert startup.initial_delay_seconds + startup.period_seconds * startup.failure_threshold == 150
+    assert 150 - 90 == 60
+
+    liveness = container.liveness_probe
+    assert liveness.initial_delay_seconds == 10
+    assert liveness.period_seconds == 10
+    assert liveness.timeout_seconds == 3
+    assert liveness.failure_threshold == 3
+    assert liveness.initial_delay_seconds + liveness.period_seconds * liveness.failure_threshold == 40
+
+    slow_start = _simulate_kubelet_probe_lifecycle(
+        startup,
+        liveness,
+        endpoint_is_healthy=lambda now: now >= 90,
+        duration_seconds=180,
+    )
+    assert slow_start == (90, 0, None)
+
+    post_start_hang = _simulate_kubelet_probe_lifecycle(
+        startup,
+        liveness,
+        endpoint_is_healthy=lambda now: 90 <= now < 100,
+        duration_seconds=180,
+    )
+    ready_at, restart_count, killed_at = post_start_hang
+    assert ready_at == 90
+    assert restart_count == 1
+    assert killed_at is not None
+    assert killed_at - ready_at <= 40
 
 
 def test_every_container_in_an_initialized_sandbox_is_hardened(
