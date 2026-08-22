@@ -9,6 +9,22 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SU_SHIM = REPO_ROOT / "docker/sandbox/su-shim.sh"
+SANDBOX_DOCKERFILE = REPO_ROOT / "docker/sandbox/Dockerfile"
+
+
+def test_sandbox_dockerfile_pins_the_verified_base_and_non_root_user() -> None:
+    dockerfile = SANDBOX_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert (
+        "ARG BASE_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/"
+        "all-in-one-sandbox@sha256:"
+        "6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7"
+        in dockerfile
+    )
+    assert "FROM ${BASE_IMAGE}" in dockerfile
+    assert "COPY --chmod=0755 su-shim.sh /usr/local/bin/su" in dockerfile
+    assert "ENV BROWSER_NO_SANDBOX=--no-sandbox" in dockerfile
+    assert dockerfile.rstrip().endswith("USER 1000:1000")
 
 
 def test_su_shim_preserves_login_environment_and_stdin_for_same_uid(
@@ -53,4 +69,3 @@ def test_su_shim_preserves_login_environment_and_stdin_for_same_uid(
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == f"stdin-preserved|{home}|gem|{home}"
-
