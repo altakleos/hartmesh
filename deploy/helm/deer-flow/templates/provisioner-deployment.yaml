@@ -64,6 +64,14 @@ spec:
             - name: SANDBOX_VOLUME_MODE
               value: {{ .Values.sandbox.volumeMode | quote }}
             {{- end }}
+            - name: SANDBOX_STARTUP_PROBE_INITIAL_DELAY_SECONDS
+              value: {{ .Values.sandbox.startupProbe.initialDelaySeconds | quote }}
+            - name: SANDBOX_STARTUP_PROBE_PERIOD_SECONDS
+              value: {{ .Values.sandbox.startupProbe.periodSeconds | quote }}
+            - name: SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS
+              value: {{ .Values.sandbox.startupProbe.timeoutSeconds | quote }}
+            - name: SANDBOX_STARTUP_PROBE_FAILURE_THRESHOLD
+              value: {{ .Values.sandbox.startupProbe.failureThreshold | quote }}
             # In-cluster API access via the mounted ServiceAccount token.
             # K8S_API_SERVER is intentionally unset (do NOT use host.docker.internal).
             # Service type for per-sandbox Services. ClusterIP (default) routes the

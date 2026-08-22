@@ -66,6 +66,10 @@ pnpm build
 pnpm start
 ```
 
+The production container vendors the `packageManager`-pinned pnpm release into
+the image under a non-root-readable Corepack cache. Container startup therefore
+does not need egress to a package registry to resolve its toolchain.
+
 ## Site Map
 
 ```

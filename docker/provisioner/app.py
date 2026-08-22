@@ -218,6 +218,36 @@ def _bounded_int_env(name: str, default: int, *, minimum: int, maximum: int) -> 
     return value
 
 
+SANDBOX_STARTUP_PROBE_INITIAL_DELAY_SECONDS = _bounded_int_env(
+    "SANDBOX_STARTUP_PROBE_INITIAL_DELAY_SECONDS",
+    0,
+    minimum=0,
+    maximum=300,
+)
+SANDBOX_STARTUP_PROBE_PERIOD_SECONDS = _bounded_int_env(
+    "SANDBOX_STARTUP_PROBE_PERIOD_SECONDS",
+    10,
+    minimum=1,
+    maximum=300,
+)
+SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS = _bounded_int_env(
+    "SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS",
+    3,
+    minimum=1,
+    maximum=300,
+)
+SANDBOX_STARTUP_PROBE_FAILURE_THRESHOLD = _bounded_int_env(
+    "SANDBOX_STARTUP_PROBE_FAILURE_THRESHOLD",
+    15,
+    minimum=1,
+    maximum=60,
+)
+if SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS > SANDBOX_STARTUP_PROBE_PERIOD_SECONDS:
+    raise RuntimeError(
+        "Invalid sandbox startup probe: SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS must not exceed SANDBOX_STARTUP_PROBE_PERIOD_SECONDS",
+    )
+
+
 ACCEPTED_ATTEMPT_LEASE_SECONDS = _bounded_int_env(
     "ACCEPTED_ATTEMPT_LEASE_SECONDS",
     120,
@@ -2156,6 +2186,16 @@ def _build_pod(
                         period_seconds=5,
                         timeout_seconds=3,
                         failure_threshold=3,
+                    ),
+                    startup_probe=k8s_client.V1Probe(
+                        http_get=k8s_client.V1HTTPGetAction(
+                            path="/v1/sandbox",
+                            port=SANDBOX_CONTAINER_PORT,
+                        ),
+                        initial_delay_seconds=SANDBOX_STARTUP_PROBE_INITIAL_DELAY_SECONDS,
+                        period_seconds=SANDBOX_STARTUP_PROBE_PERIOD_SECONDS,
+                        timeout_seconds=SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS,
+                        failure_threshold=SANDBOX_STARTUP_PROBE_FAILURE_THRESHOLD,
                     ),
                     liveness_probe=k8s_client.V1Probe(
                         http_get=k8s_client.V1HTTPGetAction(

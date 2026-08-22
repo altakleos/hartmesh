@@ -63,6 +63,7 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       # initContainer ensures the subPath `deer-flow/` exists on the PV so the

@@ -1,6 +1,12 @@
 """Tests for memory storage providers (DI: FileMemoryStorage(config) / create_storage)."""
 
+import os
+import subprocess
+import sys
+import textwrap
 import threading
+import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -73,6 +79,173 @@ class TestFileMemoryStorage:
         memory = storage.load()
         assert isinstance(memory, dict)
         assert memory["version"] == "1.0"
+
+    def test_open_sweeps_owned_atomic_write_temp_only(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        owned_temp = tmp_path / f".memory.json.{'a' * 32}.tmp"
+        unrelated_temp = tmp_path / f".journal.json.{'b' * 32}.tmp"
+        nested_temp = tmp_path / "nested" / f".memory.json.{'c' * 32}.tmp"
+        nested_temp.parent.mkdir()
+        for temp in (owned_temp, unrelated_temp, nested_temp):
+            temp.write_bytes(b"incomplete")
+
+        FileMemoryStorage(DeerMemConfig()).load()
+
+        assert not owned_temp.exists()
+        assert unrelated_temp.exists()
+        assert nested_temp.exists()
+
+    def test_open_waits_for_live_atomic_writer(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        release_path = tmp_path / "release-writer"
+        ready_path = tmp_path / "writer-ready"
+        child = textwrap.dedent(
+            """
+            import os
+            import sys
+            import time
+            from pathlib import Path
+
+            from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+            from deerflow.agents.memory.backends.deermem.deermem.core import storage as storage_module
+
+            ready = Path(sys.argv[1])
+            release = Path(sys.argv[2])
+            original_fsync = os.fsync
+            original_atomic_write = storage_module._atomic_write
+
+            def block_fsync(descriptor: int) -> None:
+                ready.write_text("ready", encoding="utf-8")
+                while not release.exists():
+                    time.sleep(0.01)
+                original_fsync(descriptor)
+
+            def block_memory_write(path: Path, raw: bytes) -> None:
+                if path.name != "memory.json":
+                    original_atomic_write(path, raw)
+                    return
+                storage_module.os.fsync = block_fsync
+                try:
+                    original_atomic_write(path, raw)
+                finally:
+                    storage_module.os.fsync = original_fsync
+
+            storage_module._atomic_write = block_memory_write
+            memory = storage_module.create_empty_memory()
+            memory["user"]["workContext"]["summary"] = "committed by live writer"
+            storage_module.FileMemoryStorage(DeerMemConfig()).save(memory)
+            """
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", child, str(ready_path), str(release_path)],
+            env={**os.environ, "DEERMEM_DATA_DIR": str(tmp_path)},
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 10
+        while not ready_path.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not ready_path.exists():
+            process.kill()
+            _, stderr = process.communicate(timeout=5)
+            pytest.fail(f"writer did not reach atomic fsync: {stderr}")
+
+        loaded_summary: list[str] = []
+
+        def open_store() -> None:
+            memory = FileMemoryStorage(DeerMemConfig()).load()
+            loaded_summary.append(memory["user"]["workContext"]["summary"])
+
+        opener = threading.Thread(target=open_store)
+        opener.start()
+        time.sleep(0.1)
+        assert opener.is_alive()
+        assert list(tmp_path.glob(".memory.json.*.tmp"))
+
+        release_path.write_text("release", encoding="utf-8")
+        process.wait(timeout=5)
+        opener.join(timeout=5)
+
+        assert process.returncode == 0
+        assert not opener.is_alive()
+        assert loaded_summary == ["committed by live writer"]
+        assert list(tmp_path.glob(".memory.json.*.tmp")) == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="SIGKILL crash evidence is POSIX-only")
+    def test_sigkill_temp_is_removed_on_immediate_next_open(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        original = create_empty_memory()
+        original["user"]["workContext"]["summary"] = "last committed value"
+        assert FileMemoryStorage(DeerMemConfig()).save(original)
+        ready_path = tmp_path / "writer-ready"
+        child = textwrap.dedent(
+            """
+            import sys
+            import time
+            from pathlib import Path
+
+            from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+            from deerflow.agents.memory.backends.deermem.deermem.core import storage as storage_module
+
+            ready = Path(sys.argv[1])
+            original_atomic_write = storage_module._atomic_write
+            original_fsync = storage_module.os.fsync
+
+            def block_fsync(_descriptor: int) -> None:
+                ready.write_text("ready", encoding="utf-8")
+                time.sleep(60)
+
+            def block_memory_write(path: Path, raw: bytes) -> None:
+                if path.name != "memory.json":
+                    original_atomic_write(path, raw)
+                    return
+                storage_module.os.fsync = block_fsync
+                try:
+                    original_atomic_write(path, raw)
+                finally:
+                    storage_module.os.fsync = original_fsync
+
+            storage_module._atomic_write = block_memory_write
+            memory = storage_module.create_empty_memory()
+            memory["user"]["workContext"]["summary"] = "uncommitted value"
+            storage_module.FileMemoryStorage(DeerMemConfig()).save(memory)
+            """
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", child, str(ready_path)],
+            env={**os.environ, "DEERMEM_DATA_DIR": str(tmp_path)},
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 10
+        while not ready_path.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not ready_path.exists():
+            process.kill()
+            _, stderr = process.communicate(timeout=5)
+            pytest.fail(f"writer did not reach atomic fsync: {stderr}")
+
+        process.kill()
+        process.wait(timeout=5)
+        temps = list(tmp_path.glob(".memory.json.*.tmp"))
+        assert temps
+
+        reopened = FileMemoryStorage(DeerMemConfig()).load()
+
+        assert reopened["user"]["workContext"]["summary"] == "last committed value"
+        assert list(tmp_path.glob(".memory.json.*.tmp")) == []
 
     def test_save_writes_to_file(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))

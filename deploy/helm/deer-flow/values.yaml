@@ -157,6 +157,14 @@ sandbox:
   #    both claim names are configured, or `hostpath` when neither is. Kubernetes
   #    deployments should set `pvc` explicitly so missing claims fail startup.
   volumeMode: ""
+  # -- Startup probe for provisioner-created sandbox Pods. The 150-second
+  #    default budget gives a measured 90-second gVisor startup 60 seconds of
+  #    margin; image pulling happens before the container/probe lifecycle.
+  startupProbe:
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 15
 
 # -- Sandbox provisioner (K8s-native code execution). Creates sandbox Pods in
 #    this namespace via a ServiceAccount + RBAC.
