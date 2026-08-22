@@ -15,16 +15,63 @@ SANDBOX_DOCKERFILE = REPO_ROOT / "docker/sandbox/Dockerfile"
 def test_sandbox_dockerfile_pins_the_verified_base_and_non_root_user() -> None:
     dockerfile = SANDBOX_DOCKERFILE.read_text(encoding="utf-8")
 
-    assert (
-        "ARG BASE_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/"
-        "all-in-one-sandbox@sha256:"
-        "6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7"
-        in dockerfile
-    )
+    assert "ARG BASE_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox@sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7" in dockerfile
     assert "FROM ${BASE_IMAGE}" in dockerfile
     assert "COPY --chmod=0755 su-shim.sh /usr/local/bin/su" in dockerfile
     assert "ENV BROWSER_NO_SANDBOX=--no-sandbox" in dockerfile
     assert dockerfile.rstrip().endswith("USER 1000:1000")
+
+
+def test_every_vendor_substitution_is_asserted_before_it_runs() -> None:
+    dockerfile = SANDBOX_DOCKERFILE.read_text(encoding="utf-8")
+    asserted_substitutions = (
+        (
+            'grep -q \'chown "root:${USER}" "${RUN_DIR}"\'      $G',
+            'sed -i \'s|chown "root:${USER}" "${RUN_DIR}"|chown "${USER}:${USER}" "${RUN_DIR}"|\'       $G',
+        ),
+        (
+            'grep -q \'chown "root:${USER}" "${tmp_config}"\'   $G',
+            'sed -i \'s|chown "root:${USER}" "${tmp_config}"|chown "${USER}:${USER}" "${tmp_config}"|\' $G',
+        ),
+        (
+            "grep -q '^chown nobody /var/lib/nginx'           $G",
+            "sed -i 's|^chown nobody /var/lib/nginx|chown $USER:$USER /var/lib/nginx|'                $G",
+        ),
+        (
+            "grep -q 'chown nobody:root \"${NGINX_RUNTIME_DIR}\"' $G",
+            'sed -i \'s|chown nobody:root "${NGINX_RUNTIME_DIR}"|chown $USER:$USER "${NGINX_RUNTIME_DIR}"|\' $G',
+        ),
+        (
+            "grep -q 'chown nobody:root \"${NGINX_RUNTIME_DIR}/${temp_dir}\"' $G",
+            'sed -i \'s|chown nobody:root "${NGINX_RUNTIME_DIR}/${temp_dir}"|chown $USER:$USER "${NGINX_RUNTIME_DIR}/${temp_dir}"|\' $G',
+        ),
+        (
+            "grep -q '^user=root'                             $S",
+            "sed -i 's|^user=root|user=%(ENV_USER)s|'                                                 $S",
+        ),
+        (
+            "grep -q '^chown=root:%(ENV_USER)s'               $S",
+            "sed -i 's|^chown=root:%(ENV_USER)s|chown=%(ENV_USER)s:%(ENV_USER)s|'                     $S",
+        ),
+        (
+            "grep -q '^user=root'                             $N",
+            "sed -i 's|^user=root|user=%(ENV_USER)s|'                                                 $N",
+        ),
+        (
+            "grep -q 'os.chown(tmp_path, 0, gid)'             $B",
+            "sed -i 's|os.chown(tmp_path, 0, gid)|os.chown(tmp_path, os.getuid(), gid)|'              $B",
+        ),
+        (
+            "grep -q 'os.initgroups(username, gid)'           $B",
+            "sed -i 's|os.initgroups(username, gid)|(os.initgroups(username, gid) if os.getuid() == 0 else None)|' $B",
+        ),
+    )
+
+    for assertion, substitution in asserted_substitutions:
+        assert dockerfile.index(assertion) < dockerfile.index(substitution)
+
+    assert dockerfile.count("grep -q ") == len(asserted_substitutions)
+    assert 'test "$(grep -cE \'chown "?(nobody|root)\' $G)" = 1' in dockerfile
 
 
 def test_su_shim_preserves_login_environment_and_stdin_for_same_uid(
@@ -34,9 +81,7 @@ def test_su_shim_preserves_login_environment_and_stdin_for_same_uid(
     fake_bin.mkdir()
     fake_getent = fake_bin / "getent"
     fake_getent.write_text(
-        "#!/bin/sh\n"
-        "[ \"$1\" = passwd ] || exit 2\n"
-        "printf 'gem:x:%s:%s::%s:/bin/bash\\n' \"$TEST_UID\" \"$TEST_GID\" \"$TEST_HOME\"\n",
+        '#!/bin/sh\n[ "$1" = passwd ] || exit 2\nprintf \'gem:x:%s:%s::%s:/bin/bash\\n\' "$TEST_UID" "$TEST_GID" "$TEST_HOME"\n',
         encoding="utf-8",
     )
     fake_getent.chmod(0o755)
