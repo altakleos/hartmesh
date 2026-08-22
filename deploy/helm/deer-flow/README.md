@@ -17,13 +17,13 @@ pod-loss qualification.
 
 - A Kubernetes cluster (Docker Desktop K8s, OrbStack, kind, k3d, or a real cluster).
 - `kubectl` + `helm` 3.8+ installed (OCI registry support stabilized in 3.8; earlier 3.x needs `HELM_EXPERIMENTAL_OCI=1`).
-- The three DeerFlow images — either the published ones (see "Install the
+- The four DeerFlow images — either the published ones (see "Install the
   published chart" below) or built locally (see step 1).
 - An Ingress controller (e.g. ingress-nginx) if you enable `ingress`.
 
 ## Install the published chart (GHCR)
 
-The chart and all three images are published to GHCR on every `v*` release tag
+The chart and all four images are published to GHCR on every `v*` release tag
 (see `.github/workflows/container.yaml` and `chart.yaml`). Skip the build step
 and install directly:
 
@@ -41,7 +41,7 @@ underscore-normalized OCI storage tag internally.
 
 > **Note:** the helm chart is new in 2.1.0 - no chart was published before it.
 > It publishes to `oci://ghcr.io/<owner>/charts/deer-flow` (the `charts/` prefix
-> keeps it distinct from the `deer-flow-{backend,frontend,provisioner}` image
+> keeps it distinct from the `deer-flow-{backend,frontend,provisioner,sandbox}` image
 > packages).
 
 For local evaluation, the legacy shared tag values remain supported:
@@ -59,11 +59,12 @@ image:
 
 Only a repository actually named `deer-flow` can rely on the chart's legacy
 `gatewayImage` / `frontendImage` / `provisionerImage` defaults. Other forks
-publish `<repo>-backend`, `<repo>-frontend`, and `<repo>-provisioner`, so they
-must set those three names as shown (or use the per-workload repositories
-below). New GHCR packages default to **private** — flip the package to public in
-its GHCR settings page for unauthenticated pulls, otherwise create a pull secret
-(step 1) and reference it via `image.pullSecrets`.
+publish `<repo>-backend`, `<repo>-frontend`, `<repo>-provisioner`, and
+`<repo>-sandbox`. They must set the three legacy workload names as shown and
+set both sandbox references separately (or use the per-workload repositories
+below). New GHCR packages default to **private** — flip the package to public
+in its GHCR settings page for unauthenticated pulls, otherwise create a pull
+secret (step 1) and reference it via `image.pullSecrets`.
 
 > The OCI chart and the images are versioned independently of the chart's
 > `appVersion`; for local evaluation, use the image tag recorded in
@@ -72,10 +73,10 @@ its GHCR settings page for unauthenticated pulls, otherwise create a pull secret
 > present.
 
 For the validated one-replica profile, use immutable per-workload references
-from `release-manifest.json`. Map `images.backend` to `gateway.image`, and map
-the frontend and provisioner entries directly. The sandbox mirror workflow
-prints the separately verified sandbox digest. With a digest set, a workload's
-tag is documentation only and is not appended:
+from `release-manifest.json`. Map `images.backend` to `gateway.image`, map the
+frontend and provisioner entries directly, and map `images.sandbox` to both
+independent sandbox references. With a digest set, a workload's tag is
+documentation only and is not appended:
 
 ```yaml
 deployment:
@@ -96,7 +97,7 @@ provisioner:
   image:
     repository: ghcr.io/<owner>/<repo>-provisioner
     digest: "sha256:..." # release-manifest.json -> images.provisioner.digest
-  sandboxImage: "ghcr.io/<owner>/<repo>-sandbox@sha256:..." # mirror workflow summary
+  sandboxImage: "ghcr.io/<owner>/<repo>-sandbox@sha256:..." # images.sandbox
 
 sandbox:
   volumeMode: pvc
@@ -118,6 +119,10 @@ config: |
   database:
     backend: postgres
     postgres_url: $DATABASE_URL
+  sandbox:
+    use: deerflow.community.aio_sandbox:AioSandboxProvider
+    provisioner_url: http://provisioner:8002
+    image: "ghcr.io/<owner>/<repo>-sandbox@sha256:..." # same images.sandbox
 ```
 
 `nginx.image`, `postgresql.image`, and `redis.image` accept the same optional
@@ -139,10 +144,13 @@ docker build -t $REGISTRY/deer-flow-backend:$TAG --build-arg UV_EXTRAS=postgres 
 docker build -t $REGISTRY/deer-flow-frontend:$TAG -f frontend/Dockerfile .
 # provisioner
 docker build -t $REGISTRY/deer-flow-provisioner:$TAG -f docker/provisioner/Dockerfile docker/provisioner
+# restricted-profile sandbox
+docker build -t $REGISTRY/deer-flow-sandbox:$TAG docker/sandbox
 
 docker push $REGISTRY/deer-flow-backend:$TAG
 docker push $REGISTRY/deer-flow-frontend:$TAG
 docker push $REGISTRY/deer-flow-provisioner:$TAG
+docker push $REGISTRY/deer-flow-sandbox:$TAG
 ```
 
 These names match the legacy image defaults. New values files should set each
@@ -705,6 +713,7 @@ container escalates privileges or runs as uid 0.
 | frontend | 1000 (`node`) | 1000 | `emptyDir` at `/app/frontend/.next/cache` (root-owned in the image) |
 | nginx | 101 (`nginx`) | 101 | command writes the rendered config to `/tmp/nginx.conf` and loads `nginx -c /tmp/nginx.conf` (since `/etc/nginx` is root-owned); `emptyDir` at `/var/cache/nginx` |
 | provisioner | 1000 | — | no PVC; `PYTHONDONTWRITEBYTECODE=1` |
+| sandbox | 1000 (`gem`) | 1000 | repository-built image pre-seeds vendor runtime paths; sandbox Pod mounts stay at `/mnt/user-data` and `/mnt/skills` |
 | postgres | 999 (`postgres`) | 999 | official `postgres:16` entrypoint detects non-root and skips the chown/gosu dance; data PVC group-writable via fsGroup |
 | redis | 999 (`redis`) | 999 | official `redis:7-alpine` entrypoint detects non-root and skips the gosu dance; data PVC group-writable via fsGroup |
 
@@ -734,6 +743,27 @@ vendor entrypoint then skips `write_browser_supervisor_config` entirely. This
 is supported but is not the default because browser tools become unavailable.
 Do not add a `Localhost` seccomp profile merely to nest Chromium's sandbox
 under gVisor; that combination remains a cluster-qualification decision.
+
+The sandbox's `sudo` command is intentionally unusable: the image adds no
+sudoers entry, and `no-new-privileges` prevents the setuid binary from gaining
+privilege. The vendor `/v1/sandbox` metadata may still advertise `sudo`; treat
+that field as an upstream capability description, not an authorization promise.
+
+`provisioner.sandboxImage` selects the image used when creating a Pod, while
+the `sandbox.image` field inside the `config:` blob identifies the provider's
+expected image. They are independent consumers and must be set to the same
+immutable release-manifest identity in production. The following shows only
+the relevant excerpt; retain the rest of the chart's complete `config:` value:
+
+```yaml
+provisioner:
+  sandboxImage: ghcr.io/example/deer-flow-sandbox@sha256:<64-lowercase-hex>
+config: |
+  sandbox:
+    use: deerflow.community.aio_sandbox:AioSandboxProvider
+    provisioner_url: http://provisioner:8002
+    image: ghcr.io/example/deer-flow-sandbox@sha256:<same-64-lowercase-hex>
+```
 
 **ConfigMap rollout.** ConfigMaps mount via `subPath`, which does **not** receive
 in-place updates — a `helm upgrade` that changes only a ConfigMap would leave
