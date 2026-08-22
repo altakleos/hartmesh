@@ -107,7 +107,7 @@ distinguishes it from a release.
    git push origin v2.1.0+hartmesh.1
    ```
    Pushing the tag triggers the publishing workflows below. Wait for both the
-   chart and all three container jobs to succeed before recording the release
+   chart and all four container jobs to succeed before recording the release
    identity.
 6. **Mirror and record identities.** Follow
    [Manual release workflows](#manual-release-workflows), then perform the
@@ -136,8 +136,11 @@ the canonical artifact SHA-256 plus exact subject and complete passing-scenario 
 ## What CI publishes on a `v*` tag
 
 - `.github/workflows/container.yaml` — builds and pushes `backend`,
-  `frontend`, and `provisioner` images to `ghcr.io`, tagged with the release
-  tag's registry-safe image spelling and `sha-<short-commit>`.
+  `frontend`, `provisioner`, and `sandbox` images to `ghcr.io`, tagged with the
+  release tag's registry-safe image spelling and `sha-<short-commit>`. The
+  sandbox image adapts the upstream AIO runtime to uid 1000 and the Kubernetes
+  Pod Security `restricted` profile; build-time source assertions deliberately
+  stop publication when the pinned vendor entrypoint changes.
 - `.github/workflows/chart.yaml` — packages the Helm chart and pushes it as an
   OCI artifact to `ghcr.io`. Users install with:
   ```bash
@@ -206,10 +209,34 @@ authentication:
 crane manifest <ref> >/dev/null
 ```
 
-For example, check the three image references from `release-manifest.json`, the
-sandbox mirror tag from its workflow summary, and
+For example, check the four image references from `release-manifest.json` and
 `ghcr.io/<owner>/charts/deer-flow:2.1.0_hartmesh.1`. A successful authenticated
 pull is not evidence that visibility was changed.
+
+### Bumping the sandbox base
+
+The Dockerfile default and release workflow currently pin upstream AIO base
+digest
+`sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7`.
+To move it:
+
+1. Resolve the new upstream image to a digest and verify that every exact
+   `grep -q` source line in `docker/sandbox/Dockerfile` is present. Stop if any
+   line moved; review the vendor change instead of guessing a substitution.
+2. Dispatch `sandbox-image-mirror.yaml` with the digest-pinned upstream
+   reference and the upcoming release version. Confirm the destination digest
+   matches.
+3. Update both the Dockerfile's `BASE_IMAGE` default and the sandbox job's
+   `BASE_IMAGE` build argument in `.github/workflows/container.yaml` to that
+   same digest.
+4. Build once with one pinned source string deliberately changed and retain the
+   failed assertion output, then revert it. Run the restricted-profile smoke
+   workflow before merging.
+
+Keeping the third-party reference as the Dockerfile default makes local builds
+portable; the release workflow repoints it to the authenticated GHCR
+`<repo>-sandbox-base` cache so a release does not depend on the third-party
+registry.
 
 ## Nightly builds
 

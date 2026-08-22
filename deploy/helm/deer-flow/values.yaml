@@ -182,7 +182,7 @@ provisioner:
       cpu: 500m
       memory: 512Mi
   # -- AIO-compatible sandbox container image used for sandbox Pods.
-  sandboxImage: "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+  sandboxImage: "ghcr.io/bytedance/deer-flow-sandbox:latest"
   # -- Service type for per-sandbox Services. `ClusterIP` (default) exposes
   #    sandboxes only inside the cluster via Service DNS - correct for the
   #    in-cluster gateway and avoids binding the code-execution surface on
@@ -376,7 +376,7 @@ config: |
     use: deerflow.community.aio_sandbox:AioSandboxProvider
     provisioner_url: http://provisioner:8002
     accepted_skill_projection_profile: disabled
-    image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+    image: ghcr.io/bytedance/deer-flow-sandbox:latest
     port: 8080
     replicas: 3
 
