@@ -7,9 +7,11 @@ gate. `release_tag_spellings.sh <version>` is the sole implementation of the
 registry-safe release spellings and emits `image_tag=...` plus
 `chart_oci_tag=...` lines suitable for `GITHUB_OUTPUT`. Both manual-only release
 workflows consume that helper: `release-manifest.yaml` resolves and records a
-completed tag publish, while `sandbox-image-mirror.yaml` copies and verifies an
-operator-selected digest. Keep publishing out of these local scripts and keep
-the workflows dispatch-only.
+completed four-image tag publish, while `sandbox-image-mirror.yaml` copies and
+verifies an operator-selected upstream digest into the distinct
+`<repo>-sandbox-base` cache. The tag-triggered container workflow is the sole
+publisher of the deployable `<repo>-sandbox` package. Keep publishing out of
+these local scripts and keep the two manual workflows dispatch-only.
 
 ## Service Startup Contracts
 

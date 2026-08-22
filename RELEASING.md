@@ -27,9 +27,10 @@ For `2.1.0+hartmesh.1`, the published spellings are:
 The shared implementation of the two registry spellings is
 `scripts/release_tag_spellings.sh`; release workflows must call it instead of
 reimplementing the substitutions. Published image repositories are
-`ghcr.io/<owner>/<repo>-backend`, `-frontend`, and `-provisioner`. The chart is
-`oci://ghcr.io/<owner>/charts/deer-flow`. The optional sandbox mirror is
-`ghcr.io/<owner>/<repo>-sandbox`.
+`ghcr.io/<owner>/<repo>-backend`, `-frontend`, `-provisioner`, and `-sandbox`.
+The chart is `oci://ghcr.io/<owner>/charts/deer-flow`. The separately managed
+upstream base cache is `ghcr.io/<owner>/<repo>-sandbox-base`; it is not a
+deployable HartMesh image.
 
 ## Version sources
 
@@ -146,10 +147,9 @@ the canonical artifact SHA-256 plus exact subject and complete passing-scenario 
 
 ## Manual release workflows
 
-After selecting an exact upstream sandbox digest, dispatch the mirror workflow.
-It rejects floating sources, copies by digest, verifies the destination digest,
-and prints the reference to use for `sandbox.sandboxImage` and the release
-manifest:
+Before the first hardened-sandbox build, mirror its exact upstream base digest.
+The workflow rejects floating sources, copies by digest, verifies the
+destination digest, and prints the cached reference:
 
 ```bash
 gh workflow run sandbox-image-mirror.yaml \
@@ -157,30 +157,33 @@ gh workflow run sandbox-image-mirror.yaml \
   -f version=2.1.0+hartmesh.1
 ```
 
-Copy the verified `ghcr.io/<owner>/<repo>-sandbox@sha256:...` reference from the
-mirror summary. After the tag-triggered chart and all three image jobs succeed,
-dispatch the manifest workflow and pass that reference through its optional
-`sandbox` input:
+The destination is
+`ghcr.io/<owner>/<repo>-sandbox-base@sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7`.
+The release sandbox build consumes that cache by digest, so a tag build does
+not depend on the third-party registry. The mirror has a distinct package name
+because `.github/workflows/container.yaml` is the sole publisher of the
+deployable `<repo>-sandbox` package.
+
+After the tag-triggered chart and four image jobs succeed, dispatch the
+manifest workflow without a sandbox input:
 
 ```bash
 gh workflow run release-manifest.yaml \
-  -f version=2.1.0+hartmesh.1 \
-  -f 'sandbox=ghcr.io/<owner>/<repo>-sandbox@sha256:<64-lowercase-hex>'
+  -f version=2.1.0+hartmesh.1
 ```
 
 The manifest workflow checks out the exact tag, cross-checks each release image
 against its `sha-` tag when present, resolves the chart, creates the GitHub
 Release if needed, and attaches `release-manifest.json` as both a workflow
 artifact and a release asset. A missing `sha-` tag is recorded as
-`revision_check: tag-not-found`; a resolved digest mismatch remains fatal. When
-`sandbox` is supplied, the workflow verifies its digest and adds
-`"sandbox": {"repository": "...", "digest": "sha256:..."}`. Omitting the input
-omits that key from the schema-1 manifest.
+`revision_check: tag-not-found`; a resolved digest mismatch remains fatal. The
+schema-1 manifest always records all four built images under `images`, including
+`images.sandbox`, with the same repository, digest, tag, and revision-check
+shape.
 
 Do not dispatch the manifest while a publish job is pending or failed: a
 missing image or a tag/digest mismatch intentionally fails the workflow. The
-sandbox must be mirrored first so its verified reference can be included in the
-manifest.
+sandbox base must be mirrored before the sandbox build can publish.
 
 ### First-publish GHCR visibility
 
