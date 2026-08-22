@@ -713,7 +713,7 @@ container escalates privileges or runs as uid 0.
 | frontend | 1000 (`node`) | 1000 | `emptyDir` at `/app/frontend/.next/cache` (root-owned in the image) |
 | nginx | 101 (`nginx`) | 101 | command writes the rendered config to `/tmp/nginx.conf` and loads `nginx -c /tmp/nginx.conf` (since `/etc/nginx` is root-owned); `emptyDir` at `/var/cache/nginx` |
 | provisioner | 1000 | — | no PVC; `PYTHONDONTWRITEBYTECODE=1` |
-| sandbox | 1000 (`gem`) | 1000 | repository-built image pre-seeds vendor runtime paths; sandbox Pod mounts stay at `/mnt/user-data` and `/mnt/skills` |
+| sandbox | 1000 (`gem`) | 1000 | repository-built image pre-seeds vendor runtime paths; sandbox Pod mounts stay at `/mnt/user-data` and `/mnt/skills`; fsGroup uses `OnRootMismatch`, so pre-owned volumes (1000:1000) are not re-walked at mount |
 | postgres | 999 (`postgres`) | 999 | official `postgres:16` entrypoint detects non-root and skips the chown/gosu dance; data PVC group-writable via fsGroup |
 | redis | 999 (`redis`) | 999 | official `redis:7-alpine` entrypoint detects non-root and skips the gosu dance; data PVC group-writable via fsGroup |
 

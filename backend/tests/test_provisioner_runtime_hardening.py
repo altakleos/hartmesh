@@ -126,6 +126,7 @@ def test_default_sandbox_container_uses_restricted_security_context(
     assert pod_security.run_as_user == 1000
     assert pod_security.run_as_group == 1000
     assert pod_security.fs_group == 1000
+    assert pod_security.fs_group_change_policy == "OnRootMismatch"
 
     security = pod.spec.containers[0].security_context
     assert security.allow_privilege_escalation is False
@@ -224,6 +225,7 @@ def test_rendered_pvc_backed_sandbox_satisfies_restricted(
     assert spec["automountServiceAccountToken"] is False
     assert spec["securityContext"] == {
         "fsGroup": 1000,
+        "fsGroupChangePolicy": "OnRootMismatch",
         "runAsGroup": 1000,
         "runAsNonRoot": True,
         "runAsUser": 1000,

@@ -2192,6 +2192,7 @@ def _build_pod(
                 run_as_user=1000,
                 run_as_group=1000,
                 fs_group=1000,
+                fs_group_change_policy="OnRootMismatch",
             ),
             affinity=(
                 k8s_client.V1Affinity(
