@@ -718,6 +718,23 @@ Every container sets:
 All listening ports are >1024 (8001 / 3000 / 2026 / 8002 / 5432), so no
 `NET_BIND_SERVICE` capability is required.
 
+The repository-owned sandbox image runs Chromium with
+`BROWSER_NO_SANDBOX=--no-sandbox`. This is the expected posture when sandbox
+Pods use the chart's gVisor RuntimeClass: the gVisor Sentry already intercepts
+every syscall in userspace and supplies the host-kernel boundary that
+Chromium's own sandbox would otherwise provide. The residual risk is
+intra-container: renderer and agent code share uid 1000, so a renderer exploit
+could reach that tenant's agent workspace without the agent's cooperation. It
+does not bypass gVisor's tenant boundary, and the container already runs
+arbitrary tenant agent code.
+
+For the more conservative browser-free profile, set `DISABLE_BROWSER=true` in
+the sandbox container environment (or bake it into a derived image). The
+vendor entrypoint then skips `write_browser_supervisor_config` entirely. This
+is supported but is not the default because browser tools become unavailable.
+Do not add a `Localhost` seccomp profile merely to nest Chromium's sandbox
+under gVisor; that combination remains a cluster-qualification decision.
+
 **ConfigMap rollout.** ConfigMaps mount via `subPath`, which does **not** receive
 in-place updates — a `helm upgrade` that changes only a ConfigMap would leave
 pods on stale config. Each pod template carries a `checksum/*` annotation (SHA256
