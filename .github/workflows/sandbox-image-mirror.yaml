@@ -1,4 +1,4 @@
-name: Mirror Sandbox Image
+name: Mirror Sandbox Base Image
 
 on:
   workflow_dispatch:
@@ -56,7 +56,7 @@ jobs:
           SOURCE: ${{ inputs.source }}
           SOURCE_DIGEST: ${{ steps.source.outputs.digest }}
           IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
-          MIRROR_REPOSITORY: ghcr.io/${{ github.repository }}-sandbox
+          MIRROR_REPOSITORY: ghcr.io/${{ github.repository }}-sandbox-base
         run: |
           set -euo pipefail
           DESTINATION="${MIRROR_REPOSITORY}:${IMAGE_TAG}"
@@ -67,7 +67,7 @@ jobs:
             exit 1
           fi
           {
-            echo "### Verified sandbox mirror"
+            echo "### Verified sandbox base mirror"
             echo
             echo "Pinned reference: \`${MIRROR_REPOSITORY}@${MIRROR_DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -166,8 +166,25 @@ def test_sandbox_mirror_rejects_floating_sources_before_network_and_verifies_cop
     assert "crane copy" in workflow
     assert 'if [ "$MIRROR_DIGEST" != "$SOURCE_DIGEST" ]; then' in workflow
     assert "scripts/release_tag_spellings.sh" in workflow
+    assert "MIRROR_REPOSITORY: ghcr.io/${{ github.repository }}-sandbox-base" in workflow
     assert ":latest" not in workflow
     assert "value=latest" not in workflow
+
+
+def test_only_the_release_container_workflow_publishes_the_sandbox_package() -> None:
+    sandbox_publishers = []
+    package_declaration = re.compile(
+        r"^\s+(?:IMAGE_NAME: \$\{\{ github\.repository \}\}-sandbox|"
+        r"MIRROR_REPOSITORY: ghcr\.io/\$\{\{ github\.repository \}\}-sandbox)\s*$",
+        flags=re.MULTILINE,
+    )
+
+    for workflow_path in sorted((_ROOT / ".github/workflows").glob("*.y*ml")):
+        workflow = workflow_path.read_text(encoding="utf-8")
+        if package_declaration.search(workflow):
+            sandbox_publishers.append(workflow_path.name)
+
+    assert sandbox_publishers == ["container.yaml"]
 
 
 def test_shared_release_spelling_script_is_the_only_substitution_implementation() -> None:
