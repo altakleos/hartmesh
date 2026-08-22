@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
+_CONTAINERS = _ROOT / ".github/workflows/container.yaml"
 _MANIFEST = _ROOT / ".github/workflows/release-manifest.yaml"
 _MIRROR = _ROOT / ".github/workflows/sandbox-image-mirror.yaml"
 _SPELLINGS = _ROOT / "scripts/release_tag_spellings.sh"
@@ -31,9 +32,26 @@ def _input_body(workflow: str, name: str) -> str:
 
 
 def _assert_actions_are_pinned(workflow: str) -> None:
-    action_lines = [line.strip() for line in workflow.splitlines() if "uses:" in line]
+    action_lines = [line.strip() for line in workflow.splitlines() if "uses:" in line and "uses: ./" not in line]
     assert action_lines
     assert all(_PINNED_ACTION.fullmatch(line) for line in action_lines)
+
+
+def test_release_builds_and_attests_four_version_gated_images() -> None:
+    workflow = _CONTAINERS.read_text(encoding="utf-8")
+
+    for component in ("backend", "frontend", "provisioner", "sandbox"):
+        assert f"  {component}-container:" in workflow
+        assert f"IMAGE_NAME: ${{{{ github.repository }}}}-{component}" in workflow
+    assert workflow.count("needs: verify-versions") == 4
+    assert workflow.count("docker/metadata-action@") == 4
+    assert workflow.count("docker/build-push-action@") == 4
+    assert workflow.count("actions/attest-build-provenance@") == 4
+    assert "context: docker/sandbox" in workflow
+    assert "file: docker/sandbox/Dockerfile" in workflow
+    action_lines = [line.strip() for line in workflow.splitlines() if "uses:" in line and "uses: ./" not in line]
+    assert action_lines
+    assert all(re.fullmatch(r"uses: [^\s]+@[0-9a-f]{40} # ?v\d+(?:\.\d+)*", line) for line in action_lines)
 
 
 def test_release_manifest_dispatch_contract_is_manual_and_minimal() -> None:
