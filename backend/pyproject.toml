@@ -1,6 +1,6 @@
 [project]
 name = "deer-flow"
-version = "2.1.0+hartmesh.3"
+version = "2.1.0+hartmesh.4"
 description = "LangGraph-based AI agent system with sandbox execution capabilities"
 readme = "README.md"
 requires-python = ">=3.12"
