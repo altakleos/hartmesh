@@ -769,12 +769,34 @@ config: |
 
 Provisioner-created sandbox Pods have a startup probe on `/v1/sandbox`. The
 default `sandbox.startupProbe` values are 0 seconds initial delay, 10 seconds
-period, 3 seconds timeout, and 15 failures: a 150-second budget, which gives the
-measured 90-second gVisor startup 60 seconds of margin. Override those four
-values together if the image startup profile changes. Image pulling precedes
-container start, so the measured 4-minute-21-second cold pull is outside the
-startup-probe budget. Once startup succeeds, the existing liveness probe resumes
-and detects a non-responsive sandbox in about 40 seconds.
+period, 3 seconds timeout, and 20 failures: a 200-second budget. The longest of
+three quota-filling concurrent gVisor starts served at 134 seconds, leaving 66
+seconds (6.6 poll periods) of margin. Raising the old 15-failure threshold adds
+at most 50 seconds before diagnosing a sandbox that never starts, but adds no
+delay to a healthy sandbox because startup probing stops on its first success.
+The period remains 10 seconds, so this change does not coarsen the Ready-time
+quantisation. Image pulling precedes container start and is outside the probe
+budget.
+
+After startup first succeeds, `sandbox.livenessProbe` takes over with defaults
+of 10 seconds initial delay, 10 seconds period, 10 seconds timeout, and 3
+failures. A dead server refuses immediately, so the larger timeout does not
+change its conservative configured detection budget: `10 + (10 × 3) = 40`
+seconds. A wedged server that still listens can consume every timeout. Raising
+the timeout from 3 to 10 seconds therefore adds up to `(10 − 3) × 3 = 21`
+seconds, for a 61-second worst case. This deliberately trades up to 21 seconds
+of wedged-listener detection for tolerance of healthy responses that exceed 3
+seconds during the roughly 30-second startup tail; increasing the failure
+threshold instead would also delay immediate connection-refused detection.
+
+A stricter startup success signal was considered and rejected for this change.
+Kubernetes requires a startup probe's `successThreshold` to remain 1, and the
+current image exposes no boot-complete endpoint distinct from the reachable
+`/v1/sandbox` endpoint. Adding one would require defining the required
+supervised-service set and changing the vendor API or image, rather than a
+chart-only adjustment. It would also move the product's Ready latency later.
+The existing 10-second poll period and first-answer Ready behavior are therefore
+preserved while liveness absorbs the measured tail.
 
 **ConfigMap rollout.** ConfigMaps mount via `subPath`, which does **not** receive
 in-place updates — a `helm upgrade` that changes only a ConfigMap would leave

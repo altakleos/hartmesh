@@ -72,6 +72,14 @@ spec:
               value: {{ .Values.sandbox.startupProbe.timeoutSeconds | quote }}
             - name: SANDBOX_STARTUP_PROBE_FAILURE_THRESHOLD
               value: {{ .Values.sandbox.startupProbe.failureThreshold | quote }}
+            - name: SANDBOX_LIVENESS_PROBE_INITIAL_DELAY_SECONDS
+              value: {{ .Values.sandbox.livenessProbe.initialDelaySeconds | quote }}
+            - name: SANDBOX_LIVENESS_PROBE_PERIOD_SECONDS
+              value: {{ .Values.sandbox.livenessProbe.periodSeconds | quote }}
+            - name: SANDBOX_LIVENESS_PROBE_TIMEOUT_SECONDS
+              value: {{ .Values.sandbox.livenessProbe.timeoutSeconds | quote }}
+            - name: SANDBOX_LIVENESS_PROBE_FAILURE_THRESHOLD
+              value: {{ .Values.sandbox.livenessProbe.failureThreshold | quote }}
             # In-cluster API access via the mounted ServiceAccount token.
             # K8S_API_SERVER is intentionally unset (do NOT use host.docker.internal).
             # Service type for per-sandbox Services. ClusterIP (default) routes the

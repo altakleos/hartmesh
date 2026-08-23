@@ -177,7 +177,7 @@ def test_default_sandbox_container_uses_restricted_security_context(
     _assert_sandbox_mounts_avoid_entrypoint_chown_paths(pod)
 
 
-def test_sandbox_probe_lifecycle_allows_90_second_boot_then_kills_a_hang(
+def test_sandbox_probe_lifecycle_allows_concurrent_boot_then_kills_a_hang(
     provisioner_module: ModuleType,
 ) -> None:
     pod = provisioner_module._build_pod("slow-start", "thread-1")
@@ -188,36 +188,49 @@ def test_sandbox_probe_lifecycle_allows_90_second_boot_then_kills_a_hang(
     assert startup.initial_delay_seconds == 0
     assert startup.period_seconds == 10
     assert startup.timeout_seconds == 3
-    assert startup.failure_threshold == 15
-    assert startup.initial_delay_seconds + startup.period_seconds * startup.failure_threshold == 150
-    assert 150 - 90 == 60
+    assert startup.failure_threshold == 20
+    assert startup.initial_delay_seconds + startup.period_seconds * startup.failure_threshold == 200
+    assert 200 - 134 == 66
 
     liveness = container.liveness_probe
     assert liveness.initial_delay_seconds == 10
     assert liveness.period_seconds == 10
-    assert liveness.timeout_seconds == 3
+    assert liveness.timeout_seconds == 10
     assert liveness.failure_threshold == 3
-    assert liveness.initial_delay_seconds + liveness.period_seconds * liveness.failure_threshold == 40
+    refused_worst_case_seconds = liveness.initial_delay_seconds + liveness.period_seconds * liveness.failure_threshold
+    assert refused_worst_case_seconds == 40
+    wedged_worst_case_seconds = refused_worst_case_seconds + (liveness.timeout_seconds - 3) * liveness.failure_threshold
+    assert wedged_worst_case_seconds == 61
 
-    slow_start = _simulate_kubelet_probe_lifecycle(
+    concurrent_start = _simulate_kubelet_probe_lifecycle(
         startup,
         liveness,
-        endpoint_is_healthy=lambda now: now >= 90,
-        duration_seconds=180,
+        endpoint_is_healthy=lambda now: now >= 134,
+        duration_seconds=240,
     )
-    assert slow_start == (90, 0, None)
+    assert concurrent_start == (140, 0, None)
 
     post_start_hang = _simulate_kubelet_probe_lifecycle(
         startup,
         liveness,
-        endpoint_is_healthy=lambda now: 90 <= now < 100,
-        duration_seconds=180,
+        endpoint_is_healthy=lambda now: 134 <= now < 150,
+        duration_seconds=240,
     )
     ready_at, restart_count, killed_at = post_start_hang
-    assert ready_at == 90
+    assert ready_at == 140
     assert restart_count == 1
     assert killed_at is not None
     assert killed_at - ready_at <= 40
+
+
+def test_built_sandbox_never_has_liveness_without_startup(
+    provisioner_module: ModuleType,
+) -> None:
+    pod = provisioner_module._build_pod("probe-ordering", "thread-1")
+    containers_with_liveness = [container for container in pod.spec.containers if container.liveness_probe is not None]
+
+    assert containers_with_liveness
+    assert all(container.startup_probe is not None for container in containers_with_liveness)
 
 
 def test_every_container_in_an_initialized_sandbox_is_hardened(

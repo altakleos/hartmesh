@@ -154,6 +154,14 @@ The provisioner is configured via environment variables. Docker Compose sets loc
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
 | `SANDBOX_RUNTIME_CLASS` | empty (cluster default) | Optional Kubernetes RuntimeClass for sandbox Pods, such as `gvisor`; an empty value omits `runtimeClassName` and uses the cluster default runtime |
 | `SANDBOX_VOLUME_MODE` | empty (infer) | `pvc` or `hostpath`. When empty, both PVC names select `pvc`, neither selects `hostpath`, and exactly one configured name is a startup error. |
+| `SANDBOX_STARTUP_PROBE_INITIAL_DELAY_SECONDS` | `0` | Sandbox startup probe initial delay (0–300 seconds). |
+| `SANDBOX_STARTUP_PROBE_PERIOD_SECONDS` | `10` | Sandbox startup probe period (1–300 seconds). Must be at least its timeout. |
+| `SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS` | `3` | Sandbox startup probe timeout (1–300 seconds). |
+| `SANDBOX_STARTUP_PROBE_FAILURE_THRESHOLD` | `20` | Sandbox startup probe failure threshold (1–60); the default gives a 200-second budget. |
+| `SANDBOX_LIVENESS_PROBE_INITIAL_DELAY_SECONDS` | `10` | Sandbox liveness probe initial delay after startup succeeds (0–300 seconds). |
+| `SANDBOX_LIVENESS_PROBE_PERIOD_SECONDS` | `10` | Sandbox liveness probe period (1–300 seconds). Must be at least its timeout. |
+| `SANDBOX_LIVENESS_PROBE_TIMEOUT_SECONDS` | `10` | Sandbox liveness probe timeout (1–300 seconds). |
+| `SANDBOX_LIVENESS_PROBE_FAILURE_THRESHOLD` | `3` | Sandbox liveness probe failure threshold (1–60). |
 | `LARK_CLI_INIT_IMAGE` | empty (feature off) | Optional lark-cli init image (Pattern A). When set, sandbox Pods requesting the lark-cli runtime get an init container + shared `emptyDir` that provisions `lark-cli`, instead of a hostPath/PVC runtime mount. See [`docker/lark-cli-init`](../lark-cli-init/README.md) |
 | `LARK_CLI_BROKER_IMAGE` | empty (feature off) | Optional lark-cli broker image (Pattern B, issue #4338). When set, sandbox Pods requesting the broker get a shim init container + a `lark-cli-broker` sidecar that holds the credentials; the plaintext `config`/`data` are mounted into the **sidecar only**, never the sandbox. Supersedes `LARK_CLI_INIT_IMAGE` when both are set. See [`docker/lark-cli-broker`](../lark-cli-broker/README.md) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
