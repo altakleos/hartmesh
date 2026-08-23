@@ -238,13 +238,42 @@ SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS = _bounded_int_env(
 )
 SANDBOX_STARTUP_PROBE_FAILURE_THRESHOLD = _bounded_int_env(
     "SANDBOX_STARTUP_PROBE_FAILURE_THRESHOLD",
-    15,
+    20,
     minimum=1,
     maximum=60,
 )
 if SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS > SANDBOX_STARTUP_PROBE_PERIOD_SECONDS:
     raise RuntimeError(
         "Invalid sandbox startup probe: SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS must not exceed SANDBOX_STARTUP_PROBE_PERIOD_SECONDS",
+    )
+
+SANDBOX_LIVENESS_PROBE_INITIAL_DELAY_SECONDS = _bounded_int_env(
+    "SANDBOX_LIVENESS_PROBE_INITIAL_DELAY_SECONDS",
+    10,
+    minimum=0,
+    maximum=300,
+)
+SANDBOX_LIVENESS_PROBE_PERIOD_SECONDS = _bounded_int_env(
+    "SANDBOX_LIVENESS_PROBE_PERIOD_SECONDS",
+    10,
+    minimum=1,
+    maximum=300,
+)
+SANDBOX_LIVENESS_PROBE_TIMEOUT_SECONDS = _bounded_int_env(
+    "SANDBOX_LIVENESS_PROBE_TIMEOUT_SECONDS",
+    10,
+    minimum=1,
+    maximum=300,
+)
+SANDBOX_LIVENESS_PROBE_FAILURE_THRESHOLD = _bounded_int_env(
+    "SANDBOX_LIVENESS_PROBE_FAILURE_THRESHOLD",
+    3,
+    minimum=1,
+    maximum=60,
+)
+if SANDBOX_LIVENESS_PROBE_TIMEOUT_SECONDS > SANDBOX_LIVENESS_PROBE_PERIOD_SECONDS:
+    raise RuntimeError(
+        "Invalid sandbox liveness probe: SANDBOX_LIVENESS_PROBE_TIMEOUT_SECONDS must not exceed SANDBOX_LIVENESS_PROBE_PERIOD_SECONDS",
     )
 
 
@@ -2202,10 +2231,10 @@ def _build_pod(
                             path="/v1/sandbox",
                             port=SANDBOX_CONTAINER_PORT,
                         ),
-                        initial_delay_seconds=10,
-                        period_seconds=10,
-                        timeout_seconds=3,
-                        failure_threshold=3,
+                        initial_delay_seconds=SANDBOX_LIVENESS_PROBE_INITIAL_DELAY_SECONDS,
+                        period_seconds=SANDBOX_LIVENESS_PROBE_PERIOD_SECONDS,
+                        timeout_seconds=SANDBOX_LIVENESS_PROBE_TIMEOUT_SECONDS,
+                        failure_threshold=SANDBOX_LIVENESS_PROBE_FAILURE_THRESHOLD,
                     ),
                     resources=k8s_client.V1ResourceRequirements(
                         requests={
