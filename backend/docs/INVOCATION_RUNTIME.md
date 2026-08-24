@@ -283,7 +283,7 @@ same provider snapshot used by route, resource, tool, model, skill, and agent as
 
 ## Restrictive invocation constraints
 
-`deerflow-extension-api` 0.11.0 defines one optional, singular constraints provider with
+`deerflow-extension-api` 0.12.0 defines one optional, singular constraints provider with
 separate v1 and v2 contracts. Gateway invokes it only for a genuinely absent invocation,
 after invocation-start authorization allows and before atomic acceptance. V2 receives only
 the sealed split identity and final Origin, bounded namespaced correlation lookup references,

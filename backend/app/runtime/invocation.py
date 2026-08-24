@@ -114,6 +114,8 @@ class InternalLaunchIntent:
     external_key: str | None = None
     scheduled_system_owned: bool = False
     thread_id_explicit: bool = True
+    require_existing_thread: bool = False
+    trusted_notification: bool = False
 
     def __post_init__(self) -> None:
         for name in ("input", "command", "metadata", "config", "context", "checkpoint"):
@@ -172,6 +174,7 @@ class PreparedLaunch:
     caller_intent_digest: str | None = None
     caller_intent_digest_version: str | None = None
     principal: InvocationPrincipal = field(default_factory=lambda: InvocationPrincipal())
+    require_existing_thread: bool = False
 
     def __post_init__(self) -> None:
         for name in ("metadata", "kwargs"):

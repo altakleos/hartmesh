@@ -31,6 +31,7 @@ from .store.base import (
     LifecycleTransitionResult,
     LifecycleType,
     RunEnsureResult,
+    RunIdempotencyConflict,
     ThreadOperationReleaseOutcome,
     ThreadOperationReleaseResult,
     build_lifecycle_payload,
@@ -294,6 +295,10 @@ class RunRecord:
     )
     state_version: int = 0
     pending_lifecycle_type: LifecycleType | None = field(default=None, repr=False)
+    idempotency_key: str | None = None
+    # True only on the caller that recovered an existing idempotent admission;
+    # that caller must not attach a second worker to the durable run.
+    idempotency_reused: bool = False
 
 
 @dataclass(frozen=True)
@@ -446,6 +451,7 @@ class RunManager:
             "model_name": record.model_name,
             "owner_worker_id": record.owner_worker_id,
             "lease_expires_at": record.lease_expires_at,
+            "idempotency_key": record.idempotency_key,
         }
         if record.user_id is not None:
             payload["user_id"] = record.user_id
@@ -1756,6 +1762,7 @@ class RunManager:
             execution_evidence_json=row.get("execution_evidence_json"),
             execution_evidence_digest=row.get("execution_evidence_digest"),
             state_version=row.get("state_version") or 0,
+            idempotency_key=row.get("idempotency_key"),
         )
 
     @classmethod
@@ -1921,12 +1928,20 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
-    async def get(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+    async def get(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        raise_on_store_error: bool = False,
+    ) -> RunRecord | None:
         """Return a run record by ID, or ``None``.
 
         Args:
             run_id: The run ID to look up.
             user_id: Optional user ID for permission filtering when hydrating from store.
+            raise_on_store_error: Propagate store hydration/mapping failures so
+                lifecycle callers can distinguish them from a missing run.
         """
         async with self._lock:
             record = self._runs.get(run_id)
@@ -1937,6 +1952,8 @@ class RunManager:
         try:
             row = await self._store.get(run_id, user_id=user_id)
         except Exception as exc:
+            if raise_on_store_error:
+                raise
             from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 
             log_bounded_failure(
@@ -1960,6 +1977,8 @@ class RunManager:
         try:
             return self._record_from_store(row)
         except Exception as exc:
+            if raise_on_store_error:
+                raise
             from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 
             log_bounded_failure(
@@ -1973,12 +1992,22 @@ class RunManager:
             )
             return None
 
-    async def aget(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+    async def aget(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        raise_on_store_error: bool = False,
+    ) -> RunRecord | None:
         """Return a run record by ID, checking the persistent store as fallback.
 
         Alias for :meth:`get` for backward compatibility.
         """
-        return await self.get(run_id, user_id=user_id)
+        return await self.get(
+            run_id,
+            user_id=user_id,
+            raise_on_store_error=raise_on_store_error,
+        )
 
     async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
@@ -3153,6 +3182,7 @@ class RunManager:
         model_name: str | None = None,
         user_id: str | None = None,
         accepted_invocation: Any | None = None,
+        idempotency_key: str | None = None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         admission = await self._admit_thread_operation(
@@ -3166,6 +3196,7 @@ class RunManager:
             model_name=model_name,
             user_id=user_id,
             accepted_invocation=accepted_invocation,
+            idempotency_key=idempotency_key,
             candidate_run_id=candidate_run_id,
         )
         return admission.record
@@ -3258,6 +3289,10 @@ class RunManager:
         async def decide() -> Any:
             try:
                 return await self._call_store_with_retry(operation, run_id, call)
+            except RunIdempotencyConflict:
+                # This is a definitive uniqueness result, not an uncertain
+                # commit response that needs candidate reconciliation.
+                raise
             except Exception as exc:
                 if reconcile is None:
                     raise
@@ -3466,6 +3501,7 @@ class RunManager:
         caller_intent_json: dict[str, Any] | None = None,
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
+        idempotency_key: str | None = None,
     ) -> RunAdmission:
         """Atomically check for inflight runs and create a new one.
 
@@ -3529,6 +3565,7 @@ class RunManager:
             caller_intent_json=caller_intent_json if operation_kind == ThreadOperationKind.run else None,
             caller_intent_digest=caller_intent_digest if operation_kind == ThreadOperationKind.run else None,
             caller_intent_digest_version=caller_intent_digest_version if operation_kind == ThreadOperationKind.run else None,
+            idempotency_key=idempotency_key,
         )
 
         async with self._lock:
@@ -3542,6 +3579,27 @@ class RunManager:
                 same_intent = local_keyed.caller_intent_json == caller_intent_json and local_keyed.caller_intent_digest == caller_intent_digest and local_keyed.caller_intent_digest_version == caller_intent_digest_version
                 outcome = AdmissionOutcome.known_same if same_intent else AdmissionOutcome.key_conflict
                 return RunAdmission(record=local_keyed, outcome=outcome)
+
+            if idempotency_key is not None:
+                for existing in self._runs.values():
+                    if existing.idempotency_key != idempotency_key:
+                        continue
+                    if existing.thread_id != thread_id or existing.user_id != user_id:
+                        raise RuntimeError("Run idempotency key resolved to a different thread or user")
+                    existing.idempotency_reused = True
+                    return RunAdmission(record=existing, outcome=AdmissionOutcome.known_same)
+
+            def reuse_idempotent_run(conflict: RunIdempotencyConflict) -> RunAdmission:
+                existing = self._record_from_store(conflict.existing)
+                if existing.thread_id != thread_id or existing.user_id != user_id:
+                    raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
+                current = self._runs.get(existing.run_id)
+                if current is None:
+                    self._runs[existing.run_id] = existing
+                    self._index_run_locked(existing)
+                    current = existing
+                current.idempotency_reused = True
+                return RunAdmission(record=current, outcome=AdmissionOutcome.known_same)
 
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
@@ -3743,31 +3801,35 @@ class RunManager:
                     created_store_row = store_admission.row
                     claimed_store_rows = {row["run_id"]: row for row in store_admission.claimed}
                 elif multitask_strategy == "reject":
+                    create_kwargs = {
+                        "run_id": run_id,
+                        "thread_id": thread_id,
+                        "owner_worker_id": self._worker_id,
+                        "lease_expires_at": lease_expires_at,
+                        "operation_kind": operation_kind.value,
+                        "multitask_strategy": "reject",
+                        "assistant_id": assistant_id,
+                        "user_id": user_id,
+                        "model_name": model_name,
+                        "metadata": metadata,
+                        "kwargs": kwargs,
+                        "created_at": now,
+                        "grace_seconds": grace_seconds,
+                        "idempotency_key": idempotency_key,
+                        **accepted_persisted,
+                    }
                     try:
                         atomic_result = await self._await_atomic_admission_result(
                             "create_thread_operation_atomic",
                             run_id,
-                            lambda: self._store.create_thread_operation_atomic(
-                                run_id=run_id,
-                                thread_id=thread_id,
-                                owner_worker_id=self._worker_id,
-                                lease_expires_at=lease_expires_at,
-                                operation_kind=operation_kind.value,
-                                multitask_strategy="reject",
-                                assistant_id=assistant_id,
-                                user_id=user_id,
-                                model_name=model_name,
-                                metadata=metadata,
-                                kwargs=kwargs,
-                                created_at=now,
-                                grace_seconds=grace_seconds,
-                                **accepted_persisted,
-                            ),
+                            lambda: self._store.create_thread_operation_atomic(**create_kwargs),
                             admission_cancellation,
                             lambda error: reconcile_store_failure(error, keyed=False),
                         )
                         created_store_row, claimed_rows = atomic_result
                         claimed_store_rows = {row["run_id"]: row for row in claimed_rows}
+                    except RunIdempotencyConflict as exc:
+                        return reuse_idempotent_run(exc)
                     except ConflictError:
                         if admission_cancellation.requested:
                             raise asyncio.CancelledError() from None
@@ -3783,6 +3845,23 @@ class RunManager:
                             raise ConflictError(f"Thread {thread_id} already has an active run") from exc
                         raise
                 else:
+                    create_kwargs = {
+                        "run_id": run_id,
+                        "thread_id": thread_id,
+                        "owner_worker_id": self._worker_id,
+                        "lease_expires_at": lease_expires_at,
+                        "operation_kind": operation_kind.value,
+                        "multitask_strategy": multitask_strategy,
+                        "assistant_id": assistant_id,
+                        "user_id": user_id,
+                        "model_name": model_name,
+                        "metadata": metadata,
+                        "kwargs": kwargs,
+                        "created_at": now,
+                        "grace_seconds": grace_seconds,
+                        **accepted_persisted,
+                    }
+                    create_kwargs["idempotency_key"] = idempotency_key
                     # Interrupt / rollback: store-side claim + insert in one
                     # transaction. Retry on IntegrityError in case another
                     # worker races us between our SELECT FOR UPDATE and INSERT.
@@ -3792,28 +3871,15 @@ class RunManager:
                             atomic_result = await self._await_atomic_admission_result(
                                 "create_thread_operation_atomic",
                                 run_id,
-                                lambda: self._store.create_thread_operation_atomic(
-                                    run_id=run_id,
-                                    thread_id=thread_id,
-                                    owner_worker_id=self._worker_id,
-                                    lease_expires_at=lease_expires_at,
-                                    operation_kind=operation_kind.value,
-                                    multitask_strategy=multitask_strategy,
-                                    assistant_id=assistant_id,
-                                    user_id=user_id,
-                                    model_name=model_name,
-                                    metadata=metadata,
-                                    kwargs=kwargs,
-                                    created_at=now,
-                                    grace_seconds=grace_seconds,
-                                    **accepted_persisted,
-                                ),
+                                lambda: self._store.create_thread_operation_atomic(**create_kwargs),
                                 admission_cancellation,
                                 lambda error: reconcile_store_failure(error, keyed=False),
                             )
                             created_store_row, claimed_rows = atomic_result
                             claimed_store_rows = {row["run_id"]: row for row in claimed_rows}
                             break
+                        except RunIdempotencyConflict as exc:
+                            return reuse_idempotent_run(exc)
                         except Exception as exc:
                             if admission_cancellation.requested:
                                 raise asyncio.CancelledError() from None

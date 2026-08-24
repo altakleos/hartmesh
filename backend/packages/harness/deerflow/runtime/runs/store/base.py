@@ -322,6 +322,14 @@ class LifecycleReadiness:
             raise ValueError("lifecycle readiness status and reason disagree")
 
 
+class RunIdempotencyConflict(RuntimeError):
+    """A run with the requested process-wide idempotency key already exists."""
+
+    def __init__(self, existing: dict[str, Any]) -> None:
+        super().__init__(f"Run idempotency key already belongs to {existing.get('run_id')}")
+        self.existing = existing
+
+
 class RunStore(abc.ABC):
     # Custom stores retain their compatibility behavior until they implement
     # the same row+journal transaction and explicitly override this flag.
@@ -480,6 +488,7 @@ class RunStore(abc.ABC):
         caller_intent_json: dict[str, Any] | None = None,
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         pass
 
@@ -830,6 +839,7 @@ class RunStore(abc.ABC):
         caller_intent_json: dict[str, Any] | None = None,
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
+        idempotency_key: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -865,9 +875,10 @@ class RunStore(abc.ABC):
                 caller_intent_json,
                 caller_intent_digest,
                 caller_intent_digest_version,
+                idempotency_key,
             )
         ):
-            raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot persist accepted invocation facts")
+            raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot persist accepted invocation or idempotency facts")
         return await self.create_run_atomic(
             run_id,
             thread_id=thread_id,

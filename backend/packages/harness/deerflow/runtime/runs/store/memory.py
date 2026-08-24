@@ -38,6 +38,7 @@ from deerflow.runtime.runs.store.base import (
     LifecycleTransitionResult,
     LifecycleType,
     RunEnsureResult,
+    RunIdempotencyConflict,
     RunStore,
     StatusFinalization,
     ThreadOperationReleaseOutcome,
@@ -456,6 +457,7 @@ class MemoryRunStore(RunStore):
         caller_intent_json: dict[str, Any] | None = None,
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         thread_id = validate_thread_identifier(thread_id)
         if model_name is not None:
@@ -498,6 +500,7 @@ class MemoryRunStore(RunStore):
             "caller_intent_digest_version": caller_intent_digest_version if operation_kind == "run" else None,
             "execution_evidence_json": None,
             "execution_evidence_digest": None,
+            "idempotency_key": idempotency_key,
             # ``put`` is an idempotent snapshot write. Preserve a cancellation
             # request that may have raced a retry of an earlier snapshot.
             "cancel_action": existing.get("cancel_action") if existing else None,
@@ -970,6 +973,7 @@ class MemoryRunStore(RunStore):
         caller_intent_json: dict[str, Any] | None = None,
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
+        idempotency_key: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
 
@@ -981,6 +985,11 @@ class MemoryRunStore(RunStore):
             model_name = validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
         now = datetime.now(UTC).isoformat()
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+
+        if idempotency_key is not None:
+            for existing in self._runs.values():
+                if existing.get("idempotency_key") == idempotency_key:
+                    raise RunIdempotencyConflict(existing)
 
         # For reject: check if any active run exists
         if multitask_strategy == "reject":
@@ -1062,6 +1071,7 @@ class MemoryRunStore(RunStore):
             "error": None,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
+            "idempotency_key": idempotency_key,
             "cancel_action": None,
             "cancel_requested_at": None,
             "created_at": created_at or now,

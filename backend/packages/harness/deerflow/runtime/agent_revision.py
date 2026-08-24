@@ -24,6 +24,7 @@ AGENT_CONFIG_FACTORY_INCLUDED_FIELDS = frozenset(
         "model_settings",
         "thinking_enabled",
         "reasoning_effort",
+        "allowed_subagents",
     }
 )
 AGENT_CONFIG_FACTORY_EXCLUDED_FIELDS = frozenset({"name", "description", "github"})
@@ -53,6 +54,7 @@ APP_CONFIG_FACTORY_INCLUDED_FIELDS = frozenset(
         "llm_call",
         "loop_detection",
         "tool_progress",
+        "verification",
         "read_before_write",
         "safety_finish_reason",
         "database",

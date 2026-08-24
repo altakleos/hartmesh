@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0020_merge_mcp_task_results"
+HEAD = "0021_merge_managed_subagents"
 BASELINE = "0001_baseline"
 
 

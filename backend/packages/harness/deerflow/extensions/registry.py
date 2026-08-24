@@ -13,9 +13,11 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from deerflow_extension_api import (
+    AgentAssemblyObserver,
     AuthorizationProvider,
     AuthorizationProviderFactory,
     CapabilityHealthProbe,
+    ContextCompactionObserver,
     ExtensionData,
     ExtensionService,
     InvocationConstraintsProvider,
@@ -126,6 +128,8 @@ class _RegistryMark:
     mcp_interceptor_count: int
     task_lifecycle_count: int
     system_model_observer_count: int
+    agent_assembly_observer_count: int
+    context_compaction_observer_count: int
     service_count: int
     router_count: int
 
@@ -151,6 +155,16 @@ class LoadedExtensions:
     mcp_interceptor_conflicts: frozenset[str] = frozenset()
     task_lifecycle: tuple[tuple[str, TaskLifecycleContributor], ...] = ()
     system_model_observers: tuple[tuple[str, SystemModelCallObserver], ...] = ()
+    agent_assembly_observers: tuple[tuple[str, AgentAssemblyObserver], ...] = ()
+    # No has_context_compaction_observers precomputed flag: unlike agent-assembly
+    # description (a synchronous, per-graph-build cost worth short-circuiting
+    # ahead of time), the compaction hook sites test this tuple's own truthiness
+    # directly, so a redundant flag would just be another thing to keep in sync.
+    # Note "sites", plural: notify_context_compacted is the last of them, and a
+    # check there cannot cover work already done by the time it is called --
+    # _freeze_compaction_sources runs an O(context-size) hashing pass one frame
+    # earlier and has to make the same test itself.
+    context_compaction_observers: tuple[tuple[str, ContextCompactionObserver], ...] = ()
     services: tuple[tuple[str, ExtensionService], ...] = ()
     routers: tuple[tuple[str, Any], ...] = ()
 
@@ -159,6 +173,7 @@ class LoadedExtensions:
     has_middleware_contributors: bool = False
     has_task_lifecycle: bool = False
     has_system_model_observers: bool = False
+    has_agent_assembly_observers: bool = False
     needs_task_store: bool = False
 
     @property
@@ -191,6 +206,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._mcp_interceptor_conflicts: set[str] = set()
         self._task_lifecycle: list[_Entry] = []
         self._system_model_observers: list[_Entry] = []
+        self._agent_assembly_observers: list[_Entry] = []
+        self._context_compaction_observers: list[_Entry] = []
         self._services: list[_Entry] = []
         self._routers: list[_Entry] = []
         self._current_source: str | None = None
@@ -348,6 +365,12 @@ class ExtensionRegistry(ExtensionRegistryContract):
     def system_model_observer(self, observer: SystemModelCallObserver) -> None:
         self._system_model_observers.append((self._source(), observer))
 
+    def agent_assembly_observer(self, observer: AgentAssemblyObserver) -> None:
+        self._agent_assembly_observers.append((self._source(), observer))
+
+    def context_compaction_observer(self, observer: ContextCompactionObserver) -> None:
+        self._context_compaction_observers.append((self._source(), observer))
+
     def service(self, service: ExtensionService) -> None:
         self._services.append((self._source(), service))
 
@@ -377,6 +400,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
         for bucket in (
             self._task_lifecycle,
             self._system_model_observers,
+            self._agent_assembly_observers,
+            self._context_compaction_observers,
             self._services,
             self._routers,
         ):
@@ -394,6 +419,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
             len(self._mcp_interceptors),
             len(self._task_lifecycle),
             len(self._system_model_observers),
+            len(self._agent_assembly_observers),
+            len(self._context_compaction_observers),
             len(self._services),
             len(self._routers),
         )
@@ -414,6 +441,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
         del self._mcp_interceptors[mark.mcp_interceptor_count :]
         del self._task_lifecycle[mark.task_lifecycle_count :]
         del self._system_model_observers[mark.system_model_observer_count :]
+        del self._agent_assembly_observers[mark.agent_assembly_observer_count :]
+        del self._context_compaction_observers[mark.context_compaction_observer_count :]
         del self._services[mark.service_count :]
         del self._routers[mark.router_count :]
 
@@ -432,12 +461,15 @@ class ExtensionRegistry(ExtensionRegistryContract):
             mcp_interceptor_conflicts=frozenset(self._mcp_interceptor_conflicts),
             task_lifecycle=tuple(self._task_lifecycle),
             system_model_observers=tuple(self._system_model_observers),
+            agent_assembly_observers=tuple(self._agent_assembly_observers),
+            context_compaction_observers=tuple(self._context_compaction_observers),
             services=tuple(self._services),
             routers=tuple(self._routers),
             has_middleware_contributors=bool(self._middlewares),
             has_task_lifecycle=bool(self._task_lifecycle),
             has_system_model_observers=bool(self._system_model_observers),
-            needs_task_store=bool(self._middlewares or self._task_lifecycle or self._system_model_observers),
+            has_agent_assembly_observers=bool(self._agent_assembly_observers),
+            needs_task_store=bool(self._middlewares or self._task_lifecycle or self._system_model_observers or self._context_compaction_observers),
         )
 
 

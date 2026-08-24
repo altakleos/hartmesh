@@ -134,9 +134,10 @@ def _validate_agent_storage(config: AppConfig) -> None:
     """Fail fast on an agent-storage backend the database cannot support.
 
     ``agent_storage.backend: db`` needs a durable, shared SQL database — a
-    ``memory`` database is per-process, so agent definitions would silently
-    diverge across nodes (and there is no SQL URL to open). Mirrors deermem's
-    create_storage fail-fast and the multi-worker gate above.
+    ``memory`` database is per-process, so custom-agent and managed-subagent
+    definitions would silently diverge across nodes (and there is no SQL URL
+    to open). Mirrors deermem's create_storage fail-fast and the multi-worker
+    gate above.
 
     Also warns when a multi-worker Postgres deployment leaves agent storage on
     ``file``: custom agents created on one node's local disk are invisible to
@@ -157,7 +158,9 @@ def _validate_agent_storage(config: AppConfig) -> None:
         workers = 1
     if workers > 1 and db_backend == "postgres" and backend == "file":
         logger.warning(
-            "GATEWAY_WORKERS=%s with database.backend='postgres' but agent_storage.backend='file': custom agents are stored per-node on local disk and are not visible across workers/nodes. Set agent_storage.backend='db' to share them.",
+            "GATEWAY_WORKERS=%s with database.backend='postgres' but agent_storage.backend='file': "
+            "custom agents and managed subagents are stored per-node on local disk and are not visible "
+            "across workers/nodes. Set agent_storage.backend='db' to share them.",
             workers,
         )
 
@@ -751,6 +754,7 @@ def get_run_context(request: Request) -> RunContext:
         checkpoint_channel_mode=getattr(request.app.state, "checkpoint_channel_mode", "full"),
         checkpoint_snapshot_frequency=getattr(request.app.state, "checkpoint_snapshot_frequency", None),
         thread_store=get_thread_store(request),
+        mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=app_config,
         authorization_provider=authorization_provider,
         extensions=getattr(request.app.state, "extensions", None),
@@ -845,13 +849,13 @@ async def get_current_user_from_request(request: Request):
     return user
 
 
-async def require_admin_user(request: Request, *, detail: str) -> User:
-    """Require the authenticated caller to be an admin user.
+async def is_admin_user(request: Request) -> bool:
+    """Return whether the authenticated caller is an admin user.
 
     ``AuthMiddleware`` normally stamps ``request.state.user`` before the request
     reaches a router. Falling back to the strict dependency keeps the route safe
     in tests or alternative ASGI compositions that mount a router without the
-    global middleware. ``detail`` is the route-specific 403 message.
+    global middleware.
 
     Centralising this here means a future change to the admin definition (e.g.
     allowing an internal system role, adding audit logging, or switching to a
@@ -863,6 +867,19 @@ async def require_admin_user(request: Request, *, detail: str) -> User:
     if user is None:
         user = await get_current_user_from_request(request)
 
+    return getattr(user, "system_role", None) == "admin"
+
+
+async def require_admin_user(request: Request, *, detail: str) -> User:
+    """Require the authenticated caller to be an admin user.
+
+    ``detail`` is the route-specific 403 message. The shared predicate keeps
+    read-side redaction and write authorization on the same admin definition.
+    """
+
+    user = getattr(request.state, "user", None)
+    if user is None:
+        user = await get_current_user_from_request(request)
     if getattr(user, "system_role", None) != "admin":
         raise HTTPException(status_code=403, detail=detail)
     return user

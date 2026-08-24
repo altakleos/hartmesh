@@ -44,6 +44,7 @@ from deerflow.runtime.runs.store.base import (
     LifecycleTransitionResult,
     LifecycleType,
     RunEnsureResult,
+    RunIdempotencyConflict,
     RunStore,
     StatusFinalization,
     ThreadOperationReleaseOutcome,
@@ -746,6 +747,7 @@ class RunRepository(RunStore):
         caller_intent_json: dict[str, Any] | None = None,
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         """Insert or update a run row.
 
@@ -795,6 +797,7 @@ class RunRepository(RunStore):
             "caller_intent_json": self._safe_json(caller_intent_json) if operation_kind == "run" else None,
             "caller_intent_digest": caller_intent_digest if operation_kind == "run" else None,
             "caller_intent_digest_version": caller_intent_digest_version if operation_kind == "run" else None,
+            "idempotency_key": idempotency_key,
             "updated_at": now,
         }
         async with self._sf() as session:
@@ -1552,6 +1555,7 @@ class RunRepository(RunStore):
         caller_intent_json: dict[str, Any] | None = None,
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
+        idempotency_key: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -1587,6 +1591,7 @@ class RunRepository(RunStore):
             "kwargs_json": self._safe_json(kwargs) or {},
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
+            "idempotency_key": idempotency_key,
             "created_at": created,
             "updated_at": now,
             "origin_json": self._safe_json(origin_json) if operation_kind == "run" else None,
@@ -1691,6 +1696,10 @@ class RunRepository(RunStore):
                 await session.rollback()
                 if _is_run_primary_key_violation(exc):
                     raise DuplicateRunIdentityError(run_id) from None
+                if idempotency_key is not None:
+                    existing = (await session.execute(select(RunRow).where(RunRow.idempotency_key == idempotency_key))).scalar_one_or_none()
+                    if existing is not None:
+                        raise RunIdempotencyConflict(self._row_to_dict(existing)) from exc
                 raise
 
             new_row = await session.get(RunRow, run_id)
