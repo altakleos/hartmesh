@@ -10,6 +10,7 @@ from deerflow.authz.runtime import (
     authorization_provider_from_context,
     resolve_authorization_provider,
 )
+from deerflow.authz.sandbox_authz import authorize_sandbox_execution
 from deerflow.authz.tool_filter import apply_tool_authorization
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "RbacAuthorizationProvider",
     "apply_tool_authorization",
     "authorization_provider_from_context",
+    "authorize_sandbox_execution",
     "build_principal_from_context",
     "filter_tools_by_authorization",
     "normalize_authz_attributes",

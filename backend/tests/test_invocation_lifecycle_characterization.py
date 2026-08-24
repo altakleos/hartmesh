@@ -418,9 +418,14 @@ async def test_native_channel_revalidates_owner_dedupes_and_continues_clarificat
 class _TaskRepo:
     def __init__(self):
         self.updated: list[tuple[tuple, dict]] = []
+        self.released: list[str] = []
 
     async def update_after_launch(self, *args, **kwargs):
         self.updated.append((args, kwargs))
+
+    async def release_dispatch_lease(self, task_id: str, **_updates) -> bool:
+        self.released.append(task_id)
+        return True
 
 
 class _TaskRunRepo:
@@ -433,13 +438,27 @@ class _TaskRunRepo:
     async def has_active_runs(self, _task_id):
         return self.active
 
+    async def get_active_run(self, task_id: str) -> dict | None:
+        if not self.active:
+            return None
+        return {
+            "id": "task-run-active",
+            "task_id": task_id,
+            "thread_id": "scheduled-thread",
+            "status": "running",
+        }
+
     async def create(self, **kwargs):
         self.events.append(("task_run_created", kwargs["run_record_id"]))
         self.created.append(kwargs)
         return {"id": kwargs["run_record_id"]}
 
-    async def update_status(self, run_record_id, **kwargs):
+    async def claim_queued_run(self, run_record_id: str, **_kwargs) -> dict:
+        return {"id": run_record_id, "status": "launching"}
+
+    async def update_status(self, run_record_id, **kwargs) -> bool:
         self.updated.append((run_record_id, kwargs))
+        return True
 
 
 def _scheduled_task(*, context_mode: str) -> dict:
@@ -504,19 +523,13 @@ async def test_scheduled_task_persists_task_run_before_durable_launch(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("trigger", "outcome", "creates_skip_tombstone"),
-    [("scheduled", "skipped", True), ("manual", "conflict", False)],
-)
-async def test_scheduled_task_overlap_never_crosses_launch_boundary(
-    trigger,
-    outcome,
-    creates_skip_tombstone,
-):
+@pytest.mark.parametrize("trigger", ["scheduled", "manual"])
+async def test_scheduled_task_overlap_never_crosses_launch_boundary(trigger):
     from app.scheduler.service import ScheduledTaskService
 
     events: list[tuple] = []
     task_run_repo = _TaskRunRepo(events, active=True)
+    task_repo = _TaskRepo()
     launches = []
 
     async def launch_run(**kwargs):
@@ -524,7 +537,7 @@ async def test_scheduled_task_overlap_never_crosses_launch_boundary(
         return {"run_id": "unreachable", "thread_id": kwargs["thread_id"]}
 
     service = ScheduledTaskService(
-        task_repo=_TaskRepo(),
+        task_repo=task_repo,
         task_run_repo=task_run_repo,
         invocation_runtime=CallbackInvocationRuntime(launch_run),
         poll_interval_seconds=5,
@@ -537,13 +550,11 @@ async def test_scheduled_task_overlap_never_crosses_launch_boundary(
         trigger=trigger,
     )
 
-    assert result["outcome"] == outcome
+    assert result["outcome"] == "conflict"
     assert launches == []
-    assert bool(task_run_repo.created) is creates_skip_tombstone
-    if creates_skip_tombstone:
-        assert task_run_repo.created[0]["status"] == "skipped"
-    else:
-        assert result["task_run_id"] is None
+    assert task_run_repo.created == []
+    assert result["task_run_id"] is None
+    assert task_repo.released == (["task-1"] if trigger == "scheduled" else [])
 
 
 @pytest.mark.anyio

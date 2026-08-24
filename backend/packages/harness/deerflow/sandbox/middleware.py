@@ -12,8 +12,10 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
+from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.sandbox_provider import (
     _NO_BINDING,
@@ -110,6 +112,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         sandbox_id = None if sandbox_state is None else sandbox_state.get("sandbox_id")
         if isinstance(sandbox_id, str) and not has_accepted_binding:
             return super().before_agent(state, runtime)
+        try:
+            authorize_sandbox_execution(
+                context=runtime.context or {},
+                app_config=safe_app_config(),
+            )
+        except SandboxAuthorizationError:
+            logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
+            return None
         provider = get_sandbox_provider()
         prebound = False
         runtime_sandbox_id = (runtime.context or {}).get("sandbox_id")
@@ -177,6 +187,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         sandbox_id = None if sandbox_state is None else sandbox_state.get("sandbox_id")
         if isinstance(sandbox_id, str) and not has_accepted_binding:
             return await super().abefore_agent(state, runtime)
+        try:
+            authorize_sandbox_execution(
+                context=runtime.context or {},
+                app_config=safe_app_config(),
+            )
+        except SandboxAuthorizationError:
+            logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
+            return None
         provider = get_sandbox_provider()
         prebound = False
         runtime_sandbox_id = (runtime.context or {}).get("sandbox_id")

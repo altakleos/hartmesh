@@ -14,6 +14,7 @@ from app.scheduler.service import ScheduledTaskService
 class _TaskRepository:
     def __init__(self) -> None:
         self.updates: list[tuple[str, dict]] = []
+        self.released: list[str] = []
         self.recovery_error: str | None = None
 
     async def update_after_launch(self, task_id: str, **updates) -> None:
@@ -22,6 +23,10 @@ class _TaskRepository:
     async def cancel_stuck_once_tasks(self, *, error: str) -> int:
         self.recovery_error = error
         return 1
+
+    async def release_dispatch_lease(self, task_id: str, **_updates) -> bool:
+        self.released.append(task_id)
+        return True
 
 
 class _TaskRunRepository:
@@ -34,6 +39,16 @@ class _TaskRunRepository:
     async def has_active_runs(self, _task_id: str) -> bool:
         return self.active
 
+    async def get_active_run(self, task_id: str) -> dict | None:
+        if not self.active:
+            return None
+        return {
+            "id": "task-run-active",
+            "task_id": task_id,
+            "thread_id": "thread-active",
+            "status": "running",
+        }
+
     async def count_active_runs(self) -> int:
         return int(self.active)
 
@@ -41,8 +56,12 @@ class _TaskRunRepository:
         self.created.append(row)
         return row
 
-    async def update_status(self, task_run_id: str, **updates) -> None:
+    async def claim_queued_run(self, task_run_id: str, **_updates) -> dict:
+        return {"id": task_run_id, "status": "launching"}
+
+    async def update_status(self, task_run_id: str, **updates) -> bool:
         self.updated.append((task_run_id, updates))
+        return True
 
     async def mark_stale_active_runs(self, *, error: str) -> int:
         self.recovery_error = error
@@ -155,22 +174,13 @@ async def test_manual_occurrence_uses_fresh_thread_and_preserves_manual_facts() 
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("trigger", "outcome", "creates_tombstone"),
-    [
-        ("scheduled", "skipped", True),
-        ("manual", "conflict", False),
-    ],
-)
-async def test_overlap_stops_before_runtime_and_only_scheduled_creates_tombstone(
-    trigger: str,
-    outcome: str,
-    creates_tombstone: bool,
-) -> None:
+@pytest.mark.parametrize("trigger", ["scheduled", "manual"])
+async def test_overlap_stops_before_runtime_without_duplicate_history(trigger: str) -> None:
     runtime = _RuntimeSpy()
+    tasks = _TaskRepository()
     task_runs = _TaskRunRepository(active=True)
     service = ScheduledTaskService(
-        task_repo=_TaskRepository(),
+        task_repo=tasks,
         task_run_repo=task_runs,
         invocation_runtime=runtime,
         poll_interval_seconds=5,
@@ -184,14 +194,11 @@ async def test_overlap_stops_before_runtime_and_only_scheduled_creates_tombstone
         trigger=trigger,
     )
 
-    assert result["outcome"] == outcome
+    assert result["outcome"] == "conflict"
     assert runtime.intents == []
-    assert bool(task_runs.created) is creates_tombstone
-    if creates_tombstone:
-        assert task_runs.created[0]["status"] == "skipped"
-        assert task_runs.updated[0][1]["status"] == "skipped"
-    else:
-        assert result["task_run_id"] is None
+    assert task_runs.created == []
+    assert result["task_run_id"] is None
+    assert tasks.released == (["task-1"] if trigger == "scheduled" else [])
 
 
 @pytest.mark.anyio
