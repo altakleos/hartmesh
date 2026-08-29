@@ -45,6 +45,7 @@ an ordinary unit test.
 | Trusted contributor and hydrated evidence | One immutable trusted context carries validated persistable evidence, runtime-only values, and stable handles without secret persistence; reconstruction recomputes every derivable digest and refuses contradictory retained authority before replay/observe/cancel/recovery. | `backend/packages/extension-api/deerflow_extension_api/contributors.py`; `backend/packages/harness/deerflow/extensions/contributors.py`; `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/runs/manager.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/mcp/tools.py` | `test_worker_carries_one_trusted_context_without_parallel_attributes_path`; `test_hydration_recomputes_bound_effective_and_trusted_evidence`; `test_store_reconstruction_rejects_corrupt_accepted_evidence_before_recovery`; `test_external_replay_lookup_rejects_corrupt_accepted_evidence_with_stable_error` | Store/event/response redaction and reconstruction tests | Implemented; wholly absent legacy evidence uses the non-privileged compatibility path |
 | Restrictive authorization and constraints | Authority failures fail closed; required async operations are validated at startup; v2 constraints bind accepted material and can only narrow a dispatch ledger that gives equal retries one physical start. | `backend/app/runtime/authorization.py`; `backend/app/runtime/constraints.py`; `backend/packages/harness/deerflow/diagnostics.py`; `backend/packages/harness/deerflow/runtime/constraints.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/tools/builtins/task_tool.py` | `test_v2_host_rejects_projection_for_different_bound_material`; `test_worker_enforces_zero_ceiling_before_any_subagent_dispatch`; `test_task_dispatch_inflight_equal_replay_waits_for_one_physical_start`; `test_create_app_fails_closed_for_malformed_required_v2_constraints_provider` | Required-capability health/readiness tests | Implemented |
 | Pinned agent and extension material | Accepted agent material and extension generation remain pinned; every effective skill package is copied and hashed from one bounded immutable snapshot shared by lead, slash/deferred discovery, policy, sandbox, and subagent consumers; remote v2 execution binds and revalidates the admitted isolation tuple before graph/model work. | `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/agent_revision.py`; `backend/packages/harness/deerflow/runtime/skill_snapshot.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py`; `docker/provisioner/app.py` | `test_restart_drift_fails_before_graph_construction_or_model_work`; `test_same_process_live_edit_cannot_replace_accepted_slash_skill`; `test_live_allowed_tools_edit_cannot_widen_accepted_policy`; `test_remote_v1_material_receipt_is_compatibility_only`; `test_accepted_pod_isolation_digest_binds_every_pod_security_field`; `test_v2_execution_fence_rereads_every_supporting_resource` | Fake-Kubernetes and Helm-render evidence only; live cross-node exact-artifact qualification is separate | Implemented offline; live cross-node execution remains unqualified until the opt-in gate passes |
+| Bound actual agent assembly | Every accepted durable lead run validates the finished descriptor against accepted anchors and atomically binds one immutable V1 fingerprint under the running owner/state-version fence before checkpoint or graph execution; recovery must match it. | `backend/packages/harness/deerflow/runtime/assembly_evidence.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0023_agent_assembly_evidence.py` | `test_accepted_durable_evidence_is_bound_before_checkpoint_access_and_astream`; `test_recovered_assembly_must_match_original_before_astream`; `test_ownership_loss_during_evidence_bind_does_not_terminalize_new_owner`; `test_lifecycle_summary_does_not_verify_evidence_from_another_accepted_run` | PostgreSQL first/repeat/stale/concurrent bind qualification | Implemented; evidence is an execution record, not code attestation |
 | Transactional lifecycle evidence | Every normal-run state change increments one state version and commits its safe lifecycle event atomically; maintained retained-cardinality plus bounded edge reads detects interior deletion. | `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0017_lifecycle_integrity.py`; `backend/packages/harness/deerflow/runtime/runs/store/base.py`; `backend/packages/harness/deerflow/runtime/runs/store/memory.py` | `test_sql_row_and_lifecycle_event_commit_together`; `test_lifecycle_readiness_rejects_deleted_interior_event_without_scanning` | PostgreSQL CAS/cursor qualification | Implemented; PostgreSQL atomicity is a gated qualification |
 | Polling observation and bounded summaries | Authorized observation reads a pruning-aware bounded page and its source-aware summaries from one database snapshot. | `backend/packages/harness/deerflow/runtime/runs/lifecycle_query.py`; `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/app/runtime/api.py` | `test_context_query_excludes_other_owners_and_auxiliary_rows`; `test_malformed_ahead_and_pruned_cursors_are_typed`; `test_sql_context_page_loads_summary_rows_only_for_bounded_page_ids`; `test_postgres_query_uses_one_repeatable_read_snapshot` | Repeatable-read PostgreSQL query qualification | Implemented; PostgreSQL snapshot isolation is a gated qualification |
 | Scoped service observation | An authenticated service is owner-scoped unless an operator grants a finite run/thread/owner/source search scope; the current coherent authorization provider still makes the final observe decision. | `backend/app/runtime/visibility.py`; `backend/app/runtime/invocation.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_ordinary_service_cannot_observe_another_owner_or_trigger_policy`; `test_current_authorization_denial_overrides_a_valid_visibility_grant`; `test_context_pagination_stays_inside_the_finite_owner_scope` | Memory and SQL bounded-query tests; no external service | Implemented |
@@ -494,6 +495,9 @@ exactly-once claim:
   not promise exactly-once model execution, resumable model execution after process loss, or
   rollback of already-committed external tool effects. A process may die before execution,
   during a model/tool call, or after an external side effect.
+  Before checkpoint access or graph invocation, an accepted durable lead run also binds the
+  actual assembly's V1 fingerprint under its owner/state-version fence. A bare third-party
+  graph remains compatible outside this boundary but is insufficient here.
 - **Observation boundary** — Cursor polling of transactional lifecycle rows is the
   authoritative v1 evidence path. The run row and lifecycle journal, read through
   `DurableInvocationPort.observe`, establish current state; a push sink is optional
@@ -599,6 +603,15 @@ accepted-context, authorization, and constraint evidence digests. Static facts
 are not copied into each event. Historical rows without a sealed Origin retain
 legacy event/snapshot readability but cannot prove a summary.
 
+The summary's `assembly_evidence` is a further bounded projection containing
+only V1, the effective model, and full overall/prompt/toolset/middleware/skillset/
+policy digests. The stored V1 object is strictly parsed and its canonical digest
+recomputed before `assembly_evidence_status="verified"` is returned. An active
+row with no bound record is `pending`; a terminal pre-feature row or any partial,
+malformed, or digest-mismatched pair is null with `legacy_unavailable`. Stored
+content is never reflected on failure. This says which assembly HartMesh admitted
+to execute; it is not a cryptographic attestation of source code or behavior.
+
 The portable observation validates the complete page relationship on direct
 construction and wire parsing. All snapshots and events belong to the observed
 thread; a singular query contains only its requested run. Snapshot and summary
@@ -653,6 +666,16 @@ lifecycle row in the same transaction. The complete v1 vocabulary is `accepted`,
 neither row nor journal. Interrupt/rollback replacement commits every predecessor
 transition and the replacement acceptance as one ordered batch.
 
+Assembly binding is not another lifecycle transition and does not increment the
+state version. After `started`, `bind_assembly_evidence(run_id, owner_id,
+lease_epoch, ...)` atomically fills the both-null pair or compares the already
+bound valid record while checking that exact running fence. `bound` and
+`already_matching` proceed; `mismatch` ends the attempt as
+`agent_assembly_drift`; missing evidence ends it as
+`assembly_evidence_unavailable`; and ownership loss leaves terminalization to the
+current owner. The pair is retained through success, failure, cancellation, and
+timeout.
+
 An active invocation lost with its process is terminalized as failed with
 `stop_reason=orphan_recovered`; it does not resume model execution. A product retry is a new
 invocation under the new process generation, while a replay of the lost invocation's retained
@@ -673,13 +696,14 @@ becomes live pod evidence by implication or aggregation.
 The PostgreSQL migration qualification starts both from an empty schema and from
 the real durable-invocation predecessor `0011_mcp_tasks` with representative
 normal, auxiliary, and MCP-task rows. It applies every invocation revision through
-`0019_inbound_event_identity`, applies upstream's `0012_mcp_task_results` branch,
-and verifies the single `0020_merge_mcp_task_results` head plus accepted/idempotency/caller-intent columns,
+`0019_inbound_event_identity`, joins the result, managed-subagent, and scheduled-enqueue
+branches through `0022_merge_scheduled_enqueue`, and verifies the single
+`0023_agent_assembly_evidence` head plus accepted/idempotency/caller-intent/assembly columns,
 checks and partial indexes, validates lifecycle singleton/journal/index/retained-cardinality
 and inbound receipt arbitration, and then uses `RunRepository` for
 replay, cancellation, orphan recovery, lifecycle, and summary reads/writes. The
 same CI marker suite retains the independent-session equal/unequal admission,
-lifecycle CAS/cursor ordering, and repeatable-read query races. With
+assembly bind, lifecycle CAS/cursor ordering, and repeatable-read query races. With
 `DEERFLOW_TEST_POSTGRES_URL` configured, any marked skip fails the session;
 SQLite remains a fast compatibility tier rather than PostgreSQL evidence.
 
@@ -687,7 +711,7 @@ The supported feature-tail downgrade stops at `0011_mcp_tasks` and re-upgrade pr
 representative core MCP task survives; bounded result columns from the sibling branch are
 also outside that predecessor. It cannot represent accepted evidence,
 external retry keys, canonical caller intent, state versions, lifecycle events, inbound
-receipts, or execution evidence, so those feature facts are deliberately lost and are not
+receipts, execution evidence, or assembly evidence, so those feature facts are deliberately lost and are not
 invented on re-upgrade. A further technical downgrade to `0010_run_cancel_request` executes
 the unrelated MCP-task downgrade and destroys MCP-task state; it is not the supported
 invocation rollback. Operators must quiesce writers and back up PostgreSQL before rollback.
@@ -777,6 +801,18 @@ storage source/version, validated agent configuration, SOUL bytes, resolved non-
 execution settings and opaque secret-handle IDs, effective tool groups/tools, enabled skill
 manifest/content digests, and thinking/reasoning/planning/subagent defaults. Guard tests make
 new graph-factory configuration fields choose explicit inclusion or exclusion.
+
+After the worker restores that accepted material, it installs an opaque
+server-owned descriptor-required sentinel, starts under the execution fence, and
+assembles under the accepted extension generation. `AssemblyEvidenceV1`
+fingerprints the actual effective model, prompt hash, authorized tool/deferred-tool
+set, ordered middleware chain, enabled skill names plus immutable skill catalog,
+and complete effective policy projection. Admission-comparable policy anchors are
+the bootstrap, non-interactive, plan, recursion, and full subagent release-policy
+fields. Model, skill, or policy contradictions fail before binding; any later
+fingerprint change fails comparison without replacing the original. Project 02's
+managed-subagent material must feed this canonical subagent/skill projection
+deterministically without changing the V1 envelope unless compatibility breaks.
 
 Skill evidence is calculated from `AcceptedSkillSnapshot`, not from mutable live paths. The
 Gateway copies every non-symlink regular file in each effective skill package—including

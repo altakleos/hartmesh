@@ -55,6 +55,18 @@ strict source kinds `http`, `scheduled_task`, `native_channel`, and `service`.
 Historical rows that predate sealed Origin remain readable through events and
 snapshots but cannot manufacture a summary.
 
+Each summary also carries `assembly_evidence` and
+`assembly_evidence_status`. Verified evidence is the exact bounded V1
+projection: version, effective model, overall fingerprint, and full prompt,
+toolset, middleware, skillset, and policy digests. The host reparses the stored
+V1 record and recomputes its canonical storage digest before returning
+`verified`; it never exposes raw stored JSON. Missing active evidence is
+`pending`, while terminal legacy rows and malformed/partial storage are
+`legacy_unavailable` with a null projection. Those are the only status values.
+Legacy v1 summary wires that predate both fields remain readable and receive the
+same active/terminal default. This evidence records the assembly admitted for
+execution; it is not a signature or source-code attestation.
+
 `RuntimeCapabilities` is the same exact strict record over every Adapter. Extension
 manifest/health, build provenance, persistence tier, and qualification evidence are
 deployment facts and therefore never appear in this package. Gateway exposes an

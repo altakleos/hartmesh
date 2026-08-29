@@ -264,6 +264,8 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                     accepted_context_digest=summary.get("accepted_context_digest"),
                     authorization_evidence_digests=tuple(summary.get("authorization_evidence_digests", ())),
                     constraint_evidence_digest=summary.get("constraint_evidence_digest"),
+                    assembly_evidence=summary.get("assembly_evidence"),
+                    assembly_evidence_status=summary.get("assembly_evidence_status"),
                 )
                 for summary in result.page.summaries
             )

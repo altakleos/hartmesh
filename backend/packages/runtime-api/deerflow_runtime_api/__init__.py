@@ -32,6 +32,16 @@ _MAX_CORRELATION_VALUE_BYTES = 1024
 _MAX_CORRELATION_REFERENCES = 64
 _MAX_AUTHORIZATION_EVIDENCE_DIGESTS = 64
 _MAX_INVOCATION_SUMMARY_BYTES = 16 * 1024
+_ASSEMBLY_EVIDENCE_FIELDS = (
+    "version",
+    "fingerprint",
+    "effective_model",
+    "prompt_digest",
+    "toolset_digest",
+    "middleware_digest",
+    "skillset_digest",
+    "policy_digest",
+)
 MAX_OBSERVATION_PAGE_SIZE = 500
 MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES = 4 * 1024
 MAX_OBSERVATION_PAYLOAD_BYTES = 12 * 1024 * 1024
@@ -148,6 +158,26 @@ def _optional_digest(value: Any, name: str) -> str | None:
     if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
         raise ValueError(f"{name} must be a lowercase SHA-256 digest or null")
     return value
+
+
+def _assembly_evidence(value: Any) -> Mapping[str, ImmutableJsonValue]:
+    if not isinstance(value, Mapping) or set(value) != set(_ASSEMBLY_EVIDENCE_FIELDS):
+        raise ValueError("assembly_evidence must contain exactly the bounded v1 projection")
+    if type(value.get("version")) is not int or value["version"] != 1:
+        raise ValueError("assembly_evidence version must be 1")
+    effective_model = _optional_model_profile_identifier(value.get("effective_model"), "assembly_evidence")
+    if effective_model is None:
+        raise ValueError("assembly_evidence effective_model must be non-null")
+    projected: dict[str, ImmutableJsonValue] = {
+        "version": 1,
+        "fingerprint": _optional_digest(value.get("fingerprint"), "assembly_evidence fingerprint"),
+        "effective_model": effective_model,
+    }
+    for name in _ASSEMBLY_EVIDENCE_FIELDS[3:]:
+        projected[name] = _optional_digest(value.get(name), f"assembly_evidence {name}")
+    if any(projected[name] is None for name in _ASSEMBLY_EVIDENCE_FIELDS if name != "version"):
+        raise ValueError("assembly_evidence digests and effective_model must be non-null")
+    return MappingProxyType(projected)
 
 
 def _correlation_value(value: Any) -> ImmutableJsonValue:
@@ -455,6 +485,8 @@ class InvocationSummaryV1(_Record):
     accepted_context_digest: str | None = None
     authorization_evidence_digests: tuple[str, ...] = ()
     constraint_evidence_digest: str | None = None
+    assembly_evidence: Mapping[str, ImmutableJsonValue] | None = None
+    assembly_evidence_status: Literal["legacy_unavailable", "pending", "verified"] | None = None
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["invocation.summary.v1"] = field(default=KIND, init=False)
 
@@ -491,6 +523,19 @@ class InvocationSummaryV1(_Record):
         if len(set(authorization_digests)) != len(authorization_digests):
             raise ValueError("invocation summary authorization evidence digests must be unique")
         object.__setattr__(self, "authorization_evidence_digests", authorization_digests)
+        evidence_status = self.assembly_evidence_status
+        if evidence_status is None:
+            evidence_status = "pending" if self.status in {"pending", "running"} else "legacy_unavailable"
+            object.__setattr__(self, "assembly_evidence_status", evidence_status)
+        if evidence_status not in {"legacy_unavailable", "pending", "verified"}:
+            raise ValueError("unsupported assembly_evidence_status")
+        if self.assembly_evidence is None:
+            if evidence_status == "verified":
+                raise ValueError("verified assembly evidence must be present")
+        else:
+            if evidence_status != "verified":
+                raise ValueError("assembly evidence may be present only when verified")
+            object.__setattr__(self, "assembly_evidence", _assembly_evidence(self.assembly_evidence))
         encoded = json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
         if len(encoded) > _MAX_INVOCATION_SUMMARY_BYTES:
             raise ValueError("an invocation summary is limited to 16 KiB canonical JSON")
@@ -502,6 +547,34 @@ class InvocationSummaryV1(_Record):
             raise TypeError("correlation_references must be a list")
         values["correlation_references"] = tuple(InvocationCorrelationReferenceV1.from_dict(reference) for reference in references)
         return cls(**values)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> Self:
+        """Parse current summaries and legacy v1 payloads without assembly fields."""
+
+        if not isinstance(payload, Mapping):
+            raise TypeError("runtime API record must be an object")
+        expected = {item.name for item in fields(cls)}
+        unknown = set(payload) - expected
+        missing = expected - set(payload)
+        if unknown:
+            raise ValueError(f"unknown fields for {cls.KIND}: {', '.join(sorted(unknown))}")
+        assembly_fields = {"assembly_evidence", "assembly_evidence_status"}
+        if missing & assembly_fields and missing & assembly_fields != assembly_fields:
+            raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(missing & assembly_fields))}")
+        required_missing = missing - assembly_fields
+        if required_missing:
+            raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(required_missing))}")
+        if payload["api_version"] != API_VERSION:
+            raise ValueError("unsupported runtime API version")
+        if payload["kind"] != cls.KIND:
+            raise ValueError("unexpected runtime API record kind")
+        values = dict(payload)
+        values.pop("api_version")
+        values.pop("kind")
+        values.setdefault("assembly_evidence", None)
+        values.setdefault("assembly_evidence_status", None)
+        return cls._from_wire(values)
 
 
 _SNAPSHOT_FIELDS = {"run_id", "thread_id", "status", "state_version"}

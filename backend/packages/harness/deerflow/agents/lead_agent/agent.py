@@ -116,6 +116,20 @@ def unwrap_agent_graph(agent_result: Any) -> Any:
     return agent_result.graph if isinstance(agent_result, LeadAgentAssembly) else agent_result
 
 
+def split_agent_factory_result(agent_result: Any) -> tuple[Any, Any | None]:
+    """Return a factory result's graph and optional authoritative descriptor.
+
+    Third-party factories may continue returning a bare graph.  Accepted
+    durable workers use the second tuple item to fail closed when such a
+    factory cannot provide assembly evidence; ordinary callers can keep using
+    :func:`unwrap_agent_graph`.
+    """
+
+    if isinstance(agent_result, LeadAgentAssembly):
+        return agent_result.graph, agent_result.descriptor
+    return agent_result, None
+
+
 def _default_max_total_subagents(app_config: object) -> int:
     subagents_config = getattr(app_config, "subagents", None)
     return getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
@@ -825,13 +839,15 @@ def _complete_assembly(
     ``notify_agent_assembled``'s own zero-observer fast path.
     """
     from deerflow.extensions import get_agent_build_extensions
+    from deerflow.runtime.assembly_evidence import assembly_evidence_is_required
 
     resolved_extensions = get_agent_build_extensions()
-    if not resolved_extensions.has_agent_assembly_observers:
+    has_observers = resolved_extensions.has_agent_assembly_observers
+    evidence_required = assembly_evidence_is_required(_get_runtime_config(config))
+    if not has_observers and not evidence_required:
         return LeadAgentAssembly(graph=graph, descriptor=None)
 
     from deerflow.agents.assembly_descriptor import build_assembly_descriptor
-    from deerflow.extensions.notify import notify_agent_assembled
 
     resolved_policies = dict(effective_policies)
     resolved_policies.setdefault(
@@ -854,7 +870,10 @@ def _complete_assembly(
         enabled_skills=enabled_skills,
         effective_policies=resolved_policies,
     )
-    notify_agent_assembled(descriptor, resolved_extensions)
+    if has_observers:
+        from deerflow.extensions.notify import notify_agent_assembled
+
+        notify_agent_assembled(descriptor, resolved_extensions)
     return LeadAgentAssembly(graph=graph, descriptor=descriptor)
 
 

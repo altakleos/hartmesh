@@ -49,6 +49,7 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
         "Trusted contributor and hydrated evidence",
         "Restrictive authorization and constraints",
         "Pinned agent and extension material",
+        "Bound actual agent assembly",
         "Transactional lifecycle evidence",
         "Polling observation and bounded summaries",
         "Scoped service observation",
@@ -101,6 +102,12 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
             "test_remote_v1_material_receipt_is_compatibility_only",
             "test_accepted_pod_isolation_digest_binds_every_pod_security_field",
             "test_v2_execution_fence_rereads_every_supporting_resource",
+        },
+        "Bound actual agent assembly": {
+            "test_accepted_durable_evidence_is_bound_before_checkpoint_access_and_astream",
+            "test_recovered_assembly_must_match_original_before_astream",
+            "test_ownership_loss_during_evidence_bind_does_not_terminalize_new_owner",
+            "test_lifecycle_summary_does_not_verify_evidence_from_another_accepted_run",
         },
         "Transactional lifecycle evidence": {
             "test_lifecycle_readiness_rejects_deleted_interior_event_without_scanning",

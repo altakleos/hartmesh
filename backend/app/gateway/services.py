@@ -704,6 +704,17 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
                 value.pop(key, None)
 
 
+def strip_server_owned_assembly_context(config: dict[str, Any]) -> None:
+    """Drop the evidence marker spelling even for authenticated internal callers."""
+
+    from deerflow.runtime.assembly_evidence import strip_assembly_evidence_requirement
+
+    for section in ("context", "configurable"):
+        value = config.get(section)
+        if isinstance(value, dict):
+            strip_assembly_evidence_requirement(value)
+
+
 def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None, *, internal: bool = False) -> None:
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
     and ``config['context']`` so they are visible to legacy configurable readers and
@@ -2509,6 +2520,9 @@ class _GatewayLaunchNormalizer:
         # Merge DeerFlow-specific context overrides into both ``configurable``
         # and ``context``. Only agent-relevant keys are forwarded.
         merge_run_context_overrides(config, intent.context, internal=is_internal_caller)
+        # Accepted durable workers install the opaque marker later, after
+        # accepted context has been rebuilt. No request channel owns it.
+        strip_server_owned_assembly_context(config)
         if not is_internal_caller:
             # ``intent.config`` is free-form and copied by ``build_run_config``;
             # scrub any internal-only keys smuggled there.

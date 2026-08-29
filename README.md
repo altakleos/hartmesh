@@ -276,6 +276,24 @@ Evidence: accepted-execution sources in [`runtime/`](backend/packages/harness/de
 
 Remote evidence: [`skill_projection.py`](backend/packages/harness/deerflow/runtime/skill_projection.py) and [projection tests](backend/tests/test_kubernetes_accepted_skill_projection.py).
 
+### Bound actual agent assembly
+
+For accepted durable runs, HartMesh now validates and atomically binds the
+actual assembled lead graph before checkpoint access or model/tool execution.
+The retained V1 record contains only the effective model and full digests for
+the prompt, authorized tools, ordered middleware, effective skills, policies,
+and overall descriptor. Recovery may proceed only when a newly assembled graph
+matches that record; a missing descriptor or drift fails closed without
+overwriting the original evidence. Authorized lifecycle observation exposes a
+smaller revalidated projection with `pending`, `verified`, or
+`legacy_unavailable` status.
+
+This is an execution record—what HartMesh assembled and admitted—not a
+signature, proof of model/tool correctness, or cryptographic source-code
+attestation.
+
+Evidence: [`assembly_evidence.py`](backend/packages/harness/deerflow/runtime/assembly_evidence.py), [store contracts](backend/tests/test_assembly_evidence_store.py), and [worker recovery tests](backend/tests/test_accepted_invocation.py).
+
 ### Policy that follows execution
 
 HartMesh keeps effective subject, acting service, and source evidence distinct.
@@ -416,7 +434,7 @@ This repository does not yet document a HartMesh sync cadence, API/configuration
 
 Treat these hashes as provenance, not a maintenance promise.
 
-The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's `0012_mcp_task_results`; `0020_merge_mcp_task_results` joins them.
+The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, and `0023_agent_assembly_evidence` is the current head.
 
 PostgreSQL operators should quiesce writers and back up data before rollback; use the migration guidance in [backend/AGENTS.md](backend/AGENTS.md).
 

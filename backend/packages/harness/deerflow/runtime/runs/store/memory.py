@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import copy
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from typing import Any
@@ -17,6 +17,11 @@ from deerflow_extension_api import (
     validate_thread_identifier,
 )
 
+from deerflow.runtime.assembly_evidence import (
+    AssemblyEvidenceError,
+    AssemblyEvidenceV1,
+    assembly_evidence_digest,
+)
 from deerflow.runtime.runs.lifecycle_query import (
     CursorAhead,
     LifecyclePage,
@@ -30,6 +35,7 @@ from deerflow.runtime.runs.lifecycle_query import (
 )
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
+    BindAssemblyEvidenceOutcome,
     CancellationRequestOutcome,
     CancellationRequestResult,
     DuplicateRunIdentityError,
@@ -328,6 +334,52 @@ class MemoryRunStore(RunStore):
         return deadline > datetime.now(UTC)
 
     @_atomic_memory_mutation
+    async def bind_assembly_evidence(
+        self,
+        run_id: str,
+        *,
+        owner_id: str,
+        lease_epoch: int,
+        evidence_json: Mapping[str, object],
+        evidence_digest: str,
+    ) -> BindAssemblyEvidenceOutcome:
+        actual = AssemblyEvidenceV1.from_persisted_json(evidence_json)
+        if assembly_evidence_digest(actual) != evidence_digest:
+            raise AssemblyEvidenceError("assembly_descriptor_invalid")
+        normalized = actual.to_persisted_json()
+
+        row = self._runs.get(run_id)
+        if row is None or row.get("operation_kind", "run") != "run":
+            return BindAssemblyEvidenceOutcome.not_found
+        if (
+            row.get("status") != "running"
+            or row.get("state_version") != lease_epoch
+            or not self._owned_run_fence_matches(
+                row,
+                expected_owner_worker_id=owner_id,
+                require_unexpired_lease=row.get("lease_expires_at") is not None,
+            )
+        ):
+            return BindAssemblyEvidenceOutcome.ownership_lost
+
+        stored_json = row.get("assembly_evidence_json")
+        stored_digest = row.get("assembly_evidence_digest")
+        if stored_json is None and stored_digest is None:
+            row["assembly_evidence_json"] = copy.deepcopy(normalized)
+            row["assembly_evidence_digest"] = evidence_digest
+            row["updated_at"] = datetime.now(UTC).isoformat()
+            return BindAssemblyEvidenceOutcome.bound
+        if stored_json is None or stored_digest is None:
+            return BindAssemblyEvidenceOutcome.mismatch
+        try:
+            persisted = AssemblyEvidenceV1.from_persisted_json(stored_json)
+        except AssemblyEvidenceError:
+            return BindAssemblyEvidenceOutcome.mismatch
+        if stored_digest == evidence_digest and assembly_evidence_digest(persisted) == stored_digest and persisted.to_persisted_json() == normalized:
+            return BindAssemblyEvidenceOutcome.already_matching
+        return BindAssemblyEvidenceOutcome.mismatch
+
+    @_atomic_memory_mutation
     async def request_cancel_fenced(
         self,
         run_id: str,
@@ -500,6 +552,8 @@ class MemoryRunStore(RunStore):
             "caller_intent_digest_version": caller_intent_digest_version if operation_kind == "run" else None,
             "execution_evidence_json": None,
             "execution_evidence_digest": None,
+            "assembly_evidence_json": existing.get("assembly_evidence_json") if existing else None,
+            "assembly_evidence_digest": existing.get("assembly_evidence_digest") if existing else None,
             "idempotency_key": idempotency_key,
             # ``put`` is an idempotent snapshot write. Preserve a cancellation
             # request that may have raced a retry of an earlier snapshot.
@@ -1094,6 +1148,8 @@ class MemoryRunStore(RunStore):
             "caller_intent_digest_version": caller_intent_digest_version if operation_kind == "run" else None,
             "execution_evidence_json": None,
             "execution_evidence_digest": None,
+            "assembly_evidence_json": None,
+            "assembly_evidence_digest": None,
             "state_version": 1 if operation_kind == "run" else 0,
         }
         self._runs[run_id] = new_row

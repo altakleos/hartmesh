@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -22,6 +23,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunLifecycleCursorStateRow, RunLifecycleEventRow, RunRow
+from deerflow.runtime.assembly_evidence import (
+    AssemblyEvidenceError,
+    AssemblyEvidenceV1,
+    assembly_evidence_digest,
+)
 from deerflow.runtime.runs.lifecycle_query import (
     CursorAhead,
     LifecycleOrderingCorruption,
@@ -35,6 +41,7 @@ from deerflow.runtime.runs.lifecycle_query import (
 )
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
+    BindAssemblyEvidenceOutcome,
     CancellationRequestOutcome,
     CancellationRequestResult,
     DuplicateRunIdentityError,
@@ -662,6 +669,66 @@ class RunRepository(RunStore):
         if deadline.tzinfo is None:
             deadline = deadline.replace(tzinfo=UTC)
         return deadline > datetime.now(UTC)
+
+    async def bind_assembly_evidence(
+        self,
+        run_id: str,
+        *,
+        owner_id: str,
+        lease_epoch: int,
+        evidence_json: Mapping[str, object],
+        evidence_digest: str,
+    ) -> BindAssemblyEvidenceOutcome:
+        actual = AssemblyEvidenceV1.from_persisted_json(evidence_json)
+        if assembly_evidence_digest(actual) != evidence_digest:
+            raise AssemblyEvidenceError("assembly_descriptor_invalid")
+        normalized = actual.to_persisted_json()
+
+        async with self._sf() as session:
+            await self._begin_lifecycle_write(session)
+            statement = select(RunRow).where(
+                RunRow.run_id == run_id,
+                RunRow.operation_kind == "run",
+            )
+            if session.get_bind().dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            row = (await session.execute(statement)).scalar_one_or_none()
+            if row is None:
+                await session.commit()
+                return BindAssemblyEvidenceOutcome.not_found
+            if (
+                row.status != "running"
+                or row.state_version != lease_epoch
+                or not self._owned_run_fence_matches(
+                    row,
+                    expected_owner_worker_id=owner_id,
+                    require_unexpired_lease=row.lease_expires_at is not None,
+                )
+            ):
+                await session.commit()
+                return BindAssemblyEvidenceOutcome.ownership_lost
+
+            stored_json = row.assembly_evidence_json
+            stored_digest = row.assembly_evidence_digest
+            if stored_json is None and stored_digest is None:
+                row.assembly_evidence_json = normalized
+                row.assembly_evidence_digest = evidence_digest
+                row.updated_at = datetime.now(UTC)
+                await session.commit()
+                return BindAssemblyEvidenceOutcome.bound
+            if stored_json is None or stored_digest is None:
+                await session.commit()
+                return BindAssemblyEvidenceOutcome.mismatch
+            try:
+                persisted = AssemblyEvidenceV1.from_persisted_json(stored_json)
+            except AssemblyEvidenceError:
+                await session.commit()
+                return BindAssemblyEvidenceOutcome.mismatch
+            if stored_digest == evidence_digest and assembly_evidence_digest(persisted) == stored_digest and persisted.to_persisted_json() == normalized:
+                await session.commit()
+                return BindAssemblyEvidenceOutcome.already_matching
+            await session.commit()
+            return BindAssemblyEvidenceOutcome.mismatch
 
     @staticmethod
     def _normalize_model_name(model_name: str | None) -> str | None:
