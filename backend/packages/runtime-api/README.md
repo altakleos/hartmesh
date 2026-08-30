@@ -15,6 +15,7 @@ object.
   admission;
 - `InvocationQuery` and `ContextInvocationsQuery` /
   `InvocationObservation` for access-filtered lifecycle pages;
+- an opt-in strict durable tool-receipt page on one-invocation observations;
 - `InvocationSummaryV1` and `InvocationCorrelationReferenceV1` for bounded,
   source-aware accepted evidence joined to those pages;
 - `CancelInvocationRequest` / `InvocationControlReceipt` for version-fenced
@@ -66,6 +67,25 @@ V1 record and recomputes its canonical storage digest before returning
 Legacy v1 summary wires that predate both fields remain readable and receive the
 same active/terminal default. This evidence records the assembly admitted for
 execution; it is not a signature or source-code attestation.
+
+`InvocationQuery` may set `include_tool_receipts=True`, an independent opaque
+`tool_receipt_cursor`, and `tool_receipt_limit` (1–100). Receipt inclusion is
+valid only for the exact run query; context observations never enumerate tool
+attempts. The optional `InvocationObservation.tool_receipts` object strictly
+validates its fixed page/item fields, stable full-digest IDs, lead/subagent
+scope, accepted anchor digests, timestamps, safe error codes, terminal-state
+coherence, and bounded decision references. Its `evidence_status` is
+`available`, `legacy_unavailable`, or `invalid`; a start without an outcome is
+`indeterminate`. Legacy v1 query/observation wires without receipt fields remain
+readable and default to no receipt request/page.
+
+The host stores only bounded safe request/result projection digests, never raw
+arguments, results, provider messages, headers, stack traces, or credentials.
+Those digests support equality checks against an independently available
+projection; they are not encryption, confidentiality, or correctness proof.
+A durable receipt records HartMesh's observation of a tool attempt. It does not
+guarantee an external side effect occurred exactly once or that the tool result
+was correct.
 
 `RuntimeCapabilities` is the same exact strict record over every Adapter. Extension
 manifest/health, build provenance, persistence tier, and qualification evidence are
@@ -125,7 +145,8 @@ the current `invocation:observe` authorization decision is still mandatory. Revo
 checked on the next poll, grant-invisible and nonexistent targets share the same public failure,
 and cancellation never inherits an observation grant.
 
-Lifecycle cursor tokens are opaque. Callers persist `next_cursor`, handle
+Lifecycle and tool-receipt cursor tokens are opaque and independently scoped.
+Callers persist `next_cursor`, handle
 `cursor_gap` by resuming at `minimum_available_cursor`, reject `cursor_ahead`,
 and may safely repeat a page by deduplicating stable event IDs/cursors. Reads are
 at least once. Page limits are 1–500. Event payloads are limited to 4 KiB,

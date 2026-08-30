@@ -7,19 +7,16 @@ parent agent always agree. Display ids (``r1..rN``) are positional over the
 append-only message list, which keeps them stable across turns — but only
 while history stays append-only (see the renumbering caveat below).
 
-Layering contract: a tool receipt is an immutable *fact* record per tool call,
-message-carried. It is distinct from the runtime-layer run delivery receipt
-(``run.delivery`` event, one per run, event-store-carried) — the two layers
-share only the verdict *structure* convention (``source``/``requirement`` +
-details); the ``satisfied`` boolean stays exclusive to the runtime hard gate,
-and advisory layers use neutral vocabulary (``citation_resolved``,
-``supported``) so the model never conflates evidence with acceptance.
+Layering contract: this module owns only the compact, message-carried display
+receipt. Accepted durable runs independently write stable full-digest
+``tool_receipt.started.v1``/``tool_receipt.outcome.v1`` evidence through
+``runtime.tool_evidence``. Display IDs and short hashes are never authoritative
+join keys for that ledger.
 
-Freshness caveat: receipts capture execution truth (the raw tool return,
-stamped before sanitization/truncation rewrites content further out the
-chain). After compaction, only the sanitized ``content`` survives — so
-``output_sha256`` is a *freshness stamp*, not a re-checkable fingerprint
-against the persisted message.
+Freshness caveat: the outer receipt middleware now sees the final sanitized and
+budgeted model-visible result. The compact ``output_sha256`` remains a display
+freshness stamp; the durable ledger separately stores a full digest over the
+same observed projection plus result type/status.
 
 Renumbering caveat: compaction/summarization (which long subagent runs use)
 drops older ``ToolMessage``s, and since display ids are assigned positionally

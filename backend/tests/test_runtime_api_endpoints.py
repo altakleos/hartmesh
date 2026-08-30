@@ -239,6 +239,74 @@ def test_invocation_observation_maps_cursor_and_read_fence() -> None:
     assert response.json()["state_version"] == 2
 
 
+def test_invocation_observation_opts_into_independent_receipt_paging() -> None:
+    class Adapter:
+        async def observe(self, query):
+            assert query == InvocationQuery(
+                run_id="run-1",
+                limit=20,
+                include_tool_receipts=True,
+                tool_receipt_cursor="trc1.opaque",
+                tool_receipt_limit=7,
+            )
+            return InvocationObservation(
+                run_id="run-1",
+                thread_id="thread-1",
+                status="running",
+                state_version=2,
+                snapshots=(),
+                events=(),
+                next_cursor="lc1.Mg",
+                minimum_available_cursor="lc1.MA",
+                read_fence_cursor="lc1.Mg",
+                tool_receipts={
+                    "items": (),
+                    "next_cursor": None,
+                    "pruned_before": None,
+                    "evidence_status": "available",
+                    "invalid_event_count": 0,
+                },
+            )
+
+    with TestClient(_app_with_adapter(Adapter())) as client:
+        response = client.get(
+            "/api/runtime/v1/invocations/run-1",
+            params={
+                "limit": "20",
+                "include_tool_receipts": "true",
+                "tool_receipt_cursor": "trc1.opaque",
+                "tool_receipt_limit": "7",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["tool_receipts"]["evidence_status"] == "available"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "include_tool_receipts=yes",
+        "tool_receipt_cursor=trc1.opaque",
+        "include_tool_receipts=true&tool_receipt_cursor=",
+        "include_tool_receipts=true&tool_receipt_limit=0",
+        "include_tool_receipts=true&tool_receipt_limit=101",
+        "include_tool_receipts=true&tool_receipt_limit=01",
+        "include_tool_receipts=true&include_tool_receipts=true",
+    ],
+)
+def test_invocation_receipt_paging_rejects_values_outside_the_exact_http_contract(query: str) -> None:
+    class Adapter:
+        async def observe(self, _query):
+            raise AssertionError("invalid receipt paging must not reach the runtime")
+
+    with TestClient(_app_with_adapter(Adapter())) as client:
+        response = client.get(f"/api/runtime/v1/invocations/run-1?{query}")
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid_request"
+
+
 def test_context_observation_defaults_to_a_100_event_page() -> None:
     class Adapter:
         async def observe(self, query):

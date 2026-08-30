@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0023_agent_assembly_evidence"
+HEAD = "0024_tool_receipt_idempotency"
 BASELINE = "0001_baseline"
 
 

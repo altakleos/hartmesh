@@ -167,6 +167,7 @@ def _build_runtime_middlewares(
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
     from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
@@ -180,6 +181,13 @@ def _build_runtime_middlewares(
     # the raw tool output first; the budget wrapper then truncates the already
     # neutralized text.
     outer_wrappers: list[AgentMiddleware] = [
+        # One outer observation sees the final, sanitized/budgeted model-visible
+        # result on return while writing durable start evidence before any inner
+        # authorization or tool code. Display stamping is independently gated.
+        ToolReceiptMiddleware(
+            render_mode=receipts_render_mode,
+            display_enabled=app_config.verification.receipts_enabled,
+        ),
         InputSanitizationMiddleware(),
         ToolOutputBudgetMiddleware.from_app_config(app_config),
         ToolResultSanitizationMiddleware(),
@@ -211,12 +219,6 @@ def _build_runtime_middlewares(
     # normal results (ToolErrorHandling stamps it on the inner return path)
     # and on self-stamped short-circuit messages; the remainder fall back to
     # message.status (see make_tool_receipt).
-    verification_config = app_config.verification
-    if verification_config.receipts_enabled:
-        from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
-
-        tail.append(ToolReceiptMiddleware(render_mode=receipts_render_mode))
-
     # Authorization uses the existing GuardrailMiddleware so execution-time
     # deny, audit, and fail-closed handling stay in one proven implementation.
     # It is appended before an explicit guardrail provider, making authorization
@@ -240,6 +242,7 @@ def _build_runtime_middlewares(
                         infrastructure_tool_names=authorization_infrastructure_tool_names,
                     ),
                     fail_closed=authorization_config.fail_closed,
+                    decision_kind="authorization",
                 )
             )
 

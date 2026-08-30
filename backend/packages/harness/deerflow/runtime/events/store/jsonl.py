@@ -30,7 +30,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.events.store.base import AppendOutcome, RunEventStore, resolve_owned_run, validate_idempotent_append
+from deerflow.runtime.tool_evidence import (
+    TOOL_RECEIPT_CATEGORY,
+    TOOL_RECEIPT_STARTED_EVENT,
+    DurableToolReceiptV1,
+    ToolEvidenceRuntimeBinding,
+    ToolReceiptIntegrityError,
+    canonical_digest,
+    receipt_event_metadata,
+    require_started_transition,
+    reserve_attempt_from_events,
+)
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -40,11 +51,16 @@ _SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
 class JsonlRunEventStore(RunEventStore):
-    def __init__(self, base_dir: str | Path | None = None):
+    def __init__(self, base_dir: str | Path | None = None, *, run_store: object | None = None):
         self._base_dir = Path(base_dir) if base_dir else Path(".deer-flow")
+        self._run_store = run_store
         self._seq_counters: dict[str, int] = {}  # thread_id -> current max seq
         # Per-thread asyncio.Lock — serialises concurrent writes within one process.
         self._write_locks: dict[str, asyncio.Lock] = {}
+        # Rebuilt per run on first receipt append. The index is bounded by the
+        # run files themselves and is discarded when a run is deleted.
+        self._dedupe_index: dict[tuple[str, str, str], dict] = {}
+        self._dedupe_loaded_runs: set[tuple[str, str]] = set()
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
         return self._write_locks.setdefault(thread_id, asyncio.Lock())
@@ -213,6 +229,130 @@ class JsonlRunEventStore(RunEventStore):
             await asyncio.to_thread(self._write_record, record)
             return record, True
 
+    async def append_idempotent(
+        self,
+        run_id,
+        *,
+        event_type,
+        idempotency_key,
+        body,
+        owner_id,
+        lease_epoch,
+    ) -> AppendOutcome:
+        detached = validate_idempotent_append(
+            event_type=event_type,
+            idempotency_key=idempotency_key,
+            body=body,
+        )
+        # Resolve once to find the lock, then verify again while holding it so
+        # a local ownership transition cannot race the append boundary.
+        run = await resolve_owned_run(
+            self._run_store,
+            run_id,
+            owner_id=owner_id,
+            lease_epoch=lease_epoch,
+        )
+        thread_id = run["thread_id"]
+        async with self._get_write_lock(thread_id):
+            await resolve_owned_run(
+                self._run_store,
+                run_id,
+                owner_id=owner_id,
+                lease_epoch=lease_epoch,
+            )
+            loaded_key = (thread_id, run_id)
+            persisted = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+            if loaded_key not in self._dedupe_loaded_runs:
+                for event in persisted:
+                    persisted_key = event.get("idempotency_key")
+                    persisted_type = event.get("event_type")
+                    if isinstance(persisted_key, str) and isinstance(persisted_type, str):
+                        self._dedupe_index[(run_id, persisted_type, persisted_key)] = event
+                self._dedupe_loaded_runs.add(loaded_key)
+            key = (run_id, event_type, idempotency_key)
+            existing = self._dedupe_index.get(key)
+            if existing is not None:
+                if canonical_digest(existing.get("content")) != canonical_digest(detached):
+                    raise ToolReceiptIntegrityError("receipt_idempotency_conflict")
+                return AppendOutcome(event=existing, created=False)
+            await self._ensure_seq_loaded(thread_id)
+            receipt = DurableToolReceiptV1.from_event_body(detached, occurred_at=datetime.now(UTC))
+            if receipt.phase != "started":
+                require_started_transition(persisted, receipt)
+            record = {
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "event_type": event_type,
+                "category": TOOL_RECEIPT_CATEGORY,
+                "content": detached,
+                "metadata": receipt_event_metadata(receipt),
+                "idempotency_key": idempotency_key,
+                "seq": self._next_seq(thread_id),
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+            await asyncio.to_thread(self._write_record, record)
+            self._dedupe_index[key] = record
+            return AppendOutcome(event=record, created=True)
+
+    async def reserve_tool_attempt(
+        self,
+        run_id,
+        *,
+        binding,
+        tool_call_id,
+        tool_name,
+        request_projection_digest,
+        owner_id,
+        lease_epoch,
+    ) -> AppendOutcome:
+        if not isinstance(binding, ToolEvidenceRuntimeBinding) or binding.run_id != run_id:
+            raise ToolReceiptIntegrityError("receipt_attempt_binding_invalid")
+        run = await resolve_owned_run(
+            self._run_store,
+            run_id,
+            owner_id=owner_id,
+            lease_epoch=lease_epoch,
+        )
+        thread_id = run["thread_id"]
+        async with self._get_write_lock(thread_id):
+            await resolve_owned_run(
+                self._run_store,
+                run_id,
+                owner_id=owner_id,
+                lease_epoch=lease_epoch,
+            )
+            events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+            receipt, existing = reserve_attempt_from_events(
+                events,
+                binding=binding,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                request_projection_digest=request_projection_digest,
+            )
+            if existing is not None:
+                return AppendOutcome(event=dict(existing), created=False)
+            body = validate_idempotent_append(
+                event_type=TOOL_RECEIPT_STARTED_EVENT,
+                idempotency_key=receipt.idempotency_key,
+                body=receipt.to_event_body(),
+            )
+            await self._ensure_seq_loaded(thread_id)
+            record = {
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "event_type": TOOL_RECEIPT_STARTED_EVENT,
+                "category": TOOL_RECEIPT_CATEGORY,
+                "content": body,
+                "metadata": receipt_event_metadata(receipt),
+                "idempotency_key": receipt.idempotency_key,
+                "seq": self._next_seq(thread_id),
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+            await asyncio.to_thread(self._write_record, record)
+            self._dedupe_index[(run_id, TOOL_RECEIPT_STARTED_EVENT, receipt.idempotency_key)] = record
+            self._dedupe_loaded_runs.add((thread_id, run_id))
+            return AppendOutcome(event=record, created=True)
+
     async def _write_batch_async(self, thread_id: str, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
         async with self._get_write_lock(thread_id):
             await self._ensure_seq_loaded(thread_id)
@@ -280,7 +420,7 @@ class JsonlRunEventStore(RunEventStore):
         else:
             return messages[-limit:]
 
-    async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
+    async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
         if event_types is not None:
             events = [e for e in events if e.get("event_type") in event_types]
@@ -325,6 +465,9 @@ class JsonlRunEventStore(RunEventStore):
             count = len(all_events)
             await asyncio.to_thread(self._delete_thread_files, thread_id)
             self._seq_counters.pop(thread_id, None)
+            run_ids = {event.get("run_id") for event in all_events}
+            self._dedupe_index = {key: value for key, value in self._dedupe_index.items() if key[0] not in run_ids}
+            self._dedupe_loaded_runs = {key for key in self._dedupe_loaded_runs if key[0] != thread_id}
             # Pop the lock inside the held scope to minimise the window where a new caller
             # could obtain a fresh lock while a waiting coroutine still holds the old one.
             # Note: coroutines that already acquired a reference to this lock before the
@@ -337,4 +480,6 @@ class JsonlRunEventStore(RunEventStore):
             events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
             count = len(events)
             await asyncio.to_thread(self._delete_run_file, thread_id, run_id)
+            self._dedupe_index = {key: value for key, value in self._dedupe_index.items() if key[0] != run_id}
+            self._dedupe_loaded_runs.discard((thread_id, run_id))
             return count

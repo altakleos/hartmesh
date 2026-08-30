@@ -384,6 +384,18 @@ def test_local_development_profile_explicitly_allows_process_local_storage() -> 
     validate_deployment_profile(config)
 
 
+@pytest.mark.parametrize("backend", ["memory", "jsonl"])
+def test_durable_profile_rejects_non_database_tool_receipt_storage(backend: str) -> None:
+    config = SimpleNamespace(
+        deployment=SimpleNamespace(profile="durable_production"),
+        database=SimpleNamespace(backend="sqlite"),
+        run_events=SimpleNamespace(backend=backend),
+    )
+
+    with pytest.raises(ValueError, match="fenced idempotent tool receipts"):
+        validate_deployment_profile(config)
+
+
 def test_native_ingress_report_distinguishes_durable_and_best_effort() -> None:
     def config(*, database: str, receipt_backend: str):
         return SimpleNamespace(

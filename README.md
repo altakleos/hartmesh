@@ -298,6 +298,21 @@ attestation.
 
 Evidence: [`assembly_evidence.py`](backend/packages/harness/deerflow/runtime/assembly_evidence.py), [store contracts](backend/tests/test_assembly_evidence_store.py), and [worker recovery tests](backend/tests/test_accepted_invocation.py).
 
+### Durable tool-attempt receipts
+
+After accepted assembly is bound, every lead or delegated tool attempt writes a
+stable, fenced start before inner policy or tool code and at most one terminal
+outcome. A process-loss gap remains visible as `indeterminate`; compact `r1`,
+`r2`, … receipts in model context stay renumberable and independent. Authorized
+one-run observation exposes an opt-in, cursor-paged receipt projection without
+raw arguments, results, credentials, or exception messages.
+
+A durable receipt records HartMesh's observation of a tool attempt. It does not
+guarantee an external side effect occurred exactly once or that the tool result
+was correct.
+
+Evidence: [`tool_evidence.py`](backend/packages/harness/deerflow/runtime/tool_evidence.py), [event-store contracts](backend/tests/test_tool_receipt_event_store.py), and [HTTP reference](backend/docs/API.md#durable-invocation-runtime-api).
+
 ### Policy that follows execution
 
 HartMesh keeps effective subject, acting service, and source evidence distinct.
@@ -367,7 +382,7 @@ unpassed gate—not durability or recovery evidence.
 | Mode | Reported boundary |
 | --- | --- |
 | `local_development` | Allows process-local state without a durability claim. |
-| `durable_production` | Rejects process-local invocation state at startup and readiness. |
+| `durable_production` | Rejects process-local invocation state and requires database-backed run events for fenced tool receipts at startup and readiness. |
 | Helm `local_evaluation` | One-Gateway evaluation defaults; explicitly unqualified. |
 | Helm `durable_one_replica` | Requires digest-pinned images, PostgreSQL/shared state, and safe probes and shutdown timing; still unqualified without exact passing evidence. |
 
@@ -438,7 +453,7 @@ This repository does not yet document a HartMesh sync cadence, API/configuration
 
 Treat these hashes as provenance, not a maintenance promise.
 
-The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, and `0023_agent_assembly_evidence` is the current head.
+The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, and `0024_tool_receipt_idempotency` is the current head.
 
 PostgreSQL operators should quiesce writers and back up data before rollback; use the migration guidance in [backend/AGENTS.md](backend/AGENTS.md).
 

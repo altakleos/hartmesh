@@ -534,7 +534,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # the previous backend.
         run_events_config = getattr(config, "run_events", None)
         app.state.run_events_config = run_events_config
-        app.state.run_event_store = make_run_event_store(run_events_config)
+        app.state.run_event_store = make_run_event_store(
+            run_events_config,
+            run_store=app.state.run_store,
+        )
 
         # RunManager with store backing for persistence
         run_ownership_config = getattr(config, "run_ownership", None)

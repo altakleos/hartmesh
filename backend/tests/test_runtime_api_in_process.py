@@ -531,7 +531,13 @@ async def test_visible_policy_denial_precedes_lifecycle_read_and_cancel_mutation
     )
     principal = InvocationPrincipal(user_id="service-1", role="service")
 
-    run_result = await runtime.observe_invocation_lifecycle(InternalInvocationLifecycleQuery(run_id="run-1", principal=principal))
+    run_result = await runtime.observe_invocation_lifecycle(
+        InternalInvocationLifecycleQuery(
+            run_id="run-1",
+            principal=principal,
+            include_tool_receipts=True,
+        )
+    )
     context_result = await runtime.observe_context_lifecycle(InternalContextLifecycleQuery(thread_id="thread-1", principal=principal))
     cancel_result = await runtime.cancel_run(
         InternalCancelRequest(

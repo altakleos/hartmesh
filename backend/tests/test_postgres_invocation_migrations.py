@@ -65,7 +65,7 @@ _MANAGED_SUBAGENTS_REVISION = "0014_managed_subagents"
 _MANAGED_SUBAGENTS_MERGE_REVISION = "0021_merge_managed_subagents"
 _SCHEDULED_ENQUEUE_REVISION = "0015_scheduled_task_enqueue"
 _SCHEDULED_MERGE_REVISION = "0022_merge_scheduled_enqueue"
-_MERGE_HEAD_REVISION = "0023_agent_assembly_evidence"
+_MERGE_HEAD_REVISION = "0024_tool_receipt_idempotency"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
     "0012_invocation_idempotency",

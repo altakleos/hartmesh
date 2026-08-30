@@ -46,6 +46,22 @@ returns the bounded digest projection documented in
 [INVOCATION_RUNTIME.md](INVOCATION_RUNTIME.md), never raw prompt, schema,
 middleware configuration, or arbitrary extension data.
 
+Accepted durable runs also require a run-event sink for durable tool receipts.
+`deployment.profile: durable_production` accepts only `run_events.backend: db`,
+which provides fenced attempt reservation and storage-level idempotency. The
+`memory` and `jsonl` adapters implement the same receipt contract for local
+tests/evaluation, but they are not a shared production boundary. A storage
+failure while reserving `started` fails before authorization/provider/tool
+dispatch. `verification.receipts_enabled` controls only compact model-facing
+display receipts; it cannot disable durable evidence for an accepted run.
+
+Receipt events retain bounded classifications and full SHA-256 projection
+digests, never raw arguments, results, credentials, exception messages, or
+headers. A digest supports comparison with a separately available projection;
+it does not make low-entropy material confidential. See
+[RUN_EVENT_STREAM.md](RUN_EVENT_STREAM.md#durable-tool-attempt-evidence) for the
+schema and limitations.
+
 ### Redis subsystem namespaces
 
 The stream bridge accepts an optional outer Redis namespace:

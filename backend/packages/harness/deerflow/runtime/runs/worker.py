@@ -576,6 +576,11 @@ def _build_runtime_context(
     from deerflow.runtime.assembly_evidence import strip_assembly_evidence_requirement
 
     strip_assembly_evidence_requirement(runtime_ctx)
+    from deerflow.runtime.tool_evidence import strip_tool_evidence_context
+
+    # Tool evidence objects are executable host capabilities. A request may
+    # use a lookalike key but can never inject a sink, fence, or anchor.
+    strip_tool_evidence_context(runtime_ctx)
     runtime_ctx.pop("authz_attributes", None)
     return runtime_ctx
 
@@ -620,9 +625,19 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
         strip_assembly_evidence_requirement(configurable)
+        from deerflow.runtime.tool_evidence import strip_tool_evidence_context
+
+        strip_tool_evidence_context(configurable)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         strip_assembly_evidence_requirement(existing_context)
+        from deerflow.runtime.tool_evidence import (
+            TOOL_EVIDENCE_CONTEXT_KEY,
+            TOOL_EVIDENCE_SINK_KEY,
+            strip_tool_evidence_context,
+        )
+
+        strip_tool_evidence_context(existing_context)
         if REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY in runtime_context:
             existing_context[REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY] = runtime_context[REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY]
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -681,6 +696,12 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
                 existing_context[internal_key] = runtime_context[internal_key]
             else:
                 existing_context.pop(internal_key, None)
+        for internal_key in (
+            TOOL_EVIDENCE_CONTEXT_KEY,
+            TOOL_EVIDENCE_SINK_KEY,
+        ):
+            if internal_key in runtime_context:
+                existing_context[internal_key] = runtime_context[internal_key]
         if INVOCATION_ORIGIN_CONTEXT_KEY in runtime_context:
             existing_context.pop("authz_attributes", None)
             for compatibility_key in (
@@ -1470,6 +1491,38 @@ async def run_agent(
             else:
                 record.ownership_lost = True
                 raise AssemblyEvidenceError("assembly_evidence_fence_lost")
+
+            if event_store is None:
+                raise AssemblyEvidenceError("tool_receipt_sink_unavailable")
+            from deerflow.runtime.tool_evidence import (
+                RunEventToolReceiptSink,
+                ToolEvidenceRuntimeBinding,
+                install_tool_evidence_context,
+            )
+
+            owner_id = record.owner_worker_id
+            lease_epoch = record.state_version
+            if not isinstance(owner_id, str) or not owner_id or type(lease_epoch) is not int:
+                raise AssemblyEvidenceError("tool_receipt_fence_unavailable")
+            catalog = pinned_material_for_cleanup.subagent_catalog
+            install_tool_evidence_context(
+                runtime_ctx,
+                binding=ToolEvidenceRuntimeBinding(
+                    run_id=run_id,
+                    execution_task_id=run_id,
+                    execution_kind="lead",
+                    subagent_name=None,
+                    owner_id=owner_id,
+                    lease_epoch=lease_epoch,
+                    agent_revision_digest=evidence.accepted_agent_revision_digest,
+                    assembly_fingerprint=evidence.fingerprint,
+                    extension_generation=evidence.extension_generation,
+                    subagent_catalog_digest=catalog.digest,
+                    subagent_definition_digest=None,
+                ),
+                sink=RunEventToolReceiptSink(event_store),
+            )
+            _install_runtime_context(config, runtime_ctx)
 
             if checkpointer is not None:
                 for preflight_config in checkpoint_preflight_configs:

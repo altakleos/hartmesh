@@ -2080,7 +2080,65 @@ class RunManager:
 
         if self._store is None or not self._store.durable_lifecycle:
             raise RuntimeError("the configured run store has no durable lifecycle query support")
-        return await self._store.query_lifecycle(query)
+        page = await self._store.query_lifecycle(query)
+        if not query.include_tool_receipts:
+            return page
+        assert query.run_id is not None
+        if not any(snapshot.get("run_id") == query.run_id for snapshot in page.snapshots):
+            # Receipt reads inherit the exact lifecycle visibility decision.
+            # Never bypass an owner/grant filter with the unscoped row/event
+            # lookups needed after that decision.
+            return page
+        row = await self._store.get(query.run_id, user_id=None)
+        if row is None:
+            return page
+        from deerflow.runtime.runs.lifecycle_query import (
+            build_invocation_summary,
+            build_tool_receipt_page,
+            decode_tool_receipt_cursor,
+        )
+        from deerflow.runtime.tool_evidence import (
+            TOOL_RECEIPT_OUTCOME_EVENT,
+            TOOL_RECEIPT_STARTED_EVENT,
+        )
+
+        summary = build_invocation_summary(row)
+        legacy_unavailable = summary is None or summary.get("assembly_evidence_status") != "verified"
+        if self._event_store is None:
+            if not legacy_unavailable:
+                raise RuntimeError("durable tool receipt event storage is unavailable")
+            events: list[dict] = []
+        else:
+            after_seq = (
+                decode_tool_receipt_cursor(
+                    query.tool_receipt_cursor,
+                    run_id=query.run_id,
+                    thread_id=str(row["thread_id"]),
+                )
+                if query.tool_receipt_cursor is not None
+                else None
+            )
+            events = await self._event_store.list_events(
+                str(row["thread_id"]),
+                query.run_id,
+                event_types=[
+                    TOOL_RECEIPT_STARTED_EVENT,
+                    TOOL_RECEIPT_OUTCOME_EVENT,
+                ],
+                limit=10_000,
+                after_seq=after_seq,
+                user_id=None,
+            )
+        receipt_page = build_tool_receipt_page(
+            events,
+            run_id=query.run_id,
+            thread_id=str(row["thread_id"]),
+            cursor=query.tool_receipt_cursor,
+            limit=query.tool_receipt_limit,
+            legacy_unavailable=legacy_unavailable,
+            events_include_prefix=query.tool_receipt_cursor is None,
+        )
+        return replace(page, tool_receipts=receipt_page)
 
     async def context_visible_in_scope(
         self,

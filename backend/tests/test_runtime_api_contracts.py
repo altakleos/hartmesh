@@ -235,6 +235,68 @@ def test_every_public_record_round_trips_strictly() -> None:
         record_from_dict({"api_version": "deerflow.runtime/v1", "kind": "invocation.unknown"})
 
 
+def test_tool_receipt_page_round_trips_and_rejects_unbounded_error_text() -> None:
+    from deerflow_runtime_api import InvocationObservation, record_from_dict
+
+    item = {
+        "receipt_id": "tr_" + "a" * 64,
+        "task_id": "run-1",
+        "kind": "lead",
+        "subagent_name": None,
+        "tool_name": "web_search",
+        "attempt": 1,
+        "status": "succeeded",
+        "started_at": "2026-08-30T00:00:00+00:00",
+        "finished_at": "2026-08-30T00:00:01+00:00",
+        "request_projection_digest": "b" * 64,
+        "result_projection_digest": "c" * 64,
+        "result_kind": "tool_message",
+        "safe_error_code": None,
+        "authz_decision_ref": "pd_" + "d" * 64,
+        "guardrail_decision_refs": (),
+        "agent_revision_digest": "e" * 64,
+        "assembly_fingerprint": "f" * 64,
+        "extension_generation": 3,
+        "subagent_catalog_digest": "1" * 64,
+        "subagent_definition_digest": None,
+    }
+    page = {
+        "items": [item],
+        "next_cursor": None,
+        "pruned_before": None,
+        "evidence_status": "available",
+        "invalid_event_count": 0,
+    }
+    observation = InvocationObservation(
+        run_id="run-1",
+        thread_id="thread-1",
+        status="running",
+        state_version=2,
+        snapshots=(),
+        events=(),
+        next_cursor="opaque-1",
+        minimum_available_cursor="opaque-0",
+        read_fence_cursor="opaque-1",
+        tool_receipts=page,
+    )
+
+    assert record_from_dict(observation.to_dict()) == observation
+    bad_item = {**item, "status": "failed", "safe_error_code": "provider said secret text"}
+    with pytest.raises(ValueError, match="safe error code"):
+        InvocationObservation(
+            run_id="run-1",
+            thread_id="thread-1",
+            status="running",
+            state_version=2,
+            snapshots=(),
+            events=(),
+            next_cursor="opaque-1",
+            minimum_available_cursor="opaque-0",
+            read_fence_cursor="opaque-1",
+            tool_receipts={**page, "items": [bad_item]},
+        )
+
+
 @pytest.mark.parametrize("row_kind", ["snapshot", "event"])
 @pytest.mark.parametrize("construction", ["direct", "from_dict", "record_from_dict"])
 def test_observation_rejects_cross_thread_snapshots_and_events(

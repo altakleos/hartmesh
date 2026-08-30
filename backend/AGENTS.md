@@ -28,6 +28,19 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   snapshot manifests while actual hashes use assembled bytes. Policy anchors
   use accepted options/material plus validated constraints. Evidence is an
   execution record, not source attestation.
+- After actual assembly is bound, the worker installs the server-owned durable
+  tool-evidence context and fenced `RunEventToolReceiptSink`. The outermost tool
+  wrapper atomically reserves `tool_receipt.started.v1` before authorization,
+  guardrails, provider, or tool code, then appends one idempotent
+  `tool_receipt.outcome.v1` (`succeeded|failed|denied|cancelled`) when control
+  returns. Missing outcomes remain `indeterminate`; stale owners cannot append.
+  Lead identity is the run ID, while each delegated execution uses a stable task
+  digest plus the accepted subagent catalog/definition anchors. Raw arguments,
+  results, and exception messages never enter these events. A durable receipt
+  records HartMesh's observation of a tool attempt. It does not guarantee an
+  external side effect occurred exactly once or that the tool result was correct.
+  `durable_production` therefore requires `run_events.backend: db`; memory and
+  JSONL remain local-only evidence adapters.
 - `packages/runtime-api/` is the stdlib-only portable contract; Gateway HTTP and
   in-process adapters must remain behaviorally identical. The synchronous
   `DeerFlowClient` is a legacy local graph client and does not enter `InvocationRuntime`;

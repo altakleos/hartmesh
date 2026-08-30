@@ -12,6 +12,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
+from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, ClassVar, Literal, Protocol, Self, runtime_checkable
@@ -28,6 +29,9 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _PUBLIC_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,191}\Z", re.ASCII)
 _AGENT_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}\Z", re.ASCII)
 _THREAD_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
+_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.:/-]+\Z", re.ASCII)
+_RECEIPT_ID_RE = re.compile(r"tr_[0-9a-f]{64}\Z")
+_DECISION_REF_RE = re.compile(r"pd_[0-9a-f]{64}\Z")
 _MAX_CORRELATION_VALUE_BYTES = 1024
 _MAX_CORRELATION_REFERENCES = 64
 _MAX_AUTHORIZATION_EVIDENCE_DIGESTS = 64
@@ -49,8 +53,27 @@ _SUBAGENT_CATALOG_FIELDS = (
     "allowed_names",
 )
 MAX_OBSERVATION_PAGE_SIZE = 500
+MAX_TOOL_RECEIPT_PAGE_SIZE = 100
 MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES = 4 * 1024
 MAX_OBSERVATION_PAYLOAD_BYTES = 12 * 1024 * 1024
+_SAFE_TOOL_RECEIPT_ERROR_CODES = frozenset(
+    {
+        "authorization_denied",
+        "guardrail_denied",
+        "cancelled",
+        "timeout",
+        "tool_error",
+        "invalid_input",
+        "permission_denied",
+        "rate_limited",
+        "transient_error",
+        "configuration_error",
+        "not_found",
+        "no_results",
+        "internal_error",
+        "unknown_error",
+    }
+)
 
 
 class EnsureDisposition(StrEnum):
@@ -416,6 +439,9 @@ class InvocationQuery(_Record):
     cursor: str | None = None
     limit: int = 100
     include_snapshot: bool = True
+    include_tool_receipts: bool = False
+    tool_receipt_cursor: str | None = None
+    tool_receipt_limit: int = 100
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["invocation.query"] = field(default=KIND, init=False)
 
@@ -426,6 +452,37 @@ class InvocationQuery(_Record):
             raise ValueError(f"limit must be between 1 and {MAX_OBSERVATION_PAGE_SIZE}")
         if type(self.include_snapshot) is not bool:
             raise TypeError("include_snapshot must be a boolean")
+        if type(self.include_tool_receipts) is not bool:
+            raise TypeError("include_tool_receipts must be a boolean")
+        _optional_nonempty(self.tool_receipt_cursor, "tool_receipt_cursor")
+        if self.tool_receipt_cursor is not None and not self.include_tool_receipts:
+            raise ValueError("tool_receipt_cursor requires include_tool_receipts")
+        if type(self.tool_receipt_limit) is not int or not 1 <= self.tool_receipt_limit <= MAX_TOOL_RECEIPT_PAGE_SIZE:
+            raise ValueError("tool_receipt_limit must be between 1 and 100")
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> Self:
+        """Parse current queries and legacy v1 payloads without receipt fields."""
+
+        if not isinstance(payload, Mapping):
+            raise TypeError("runtime API record must be an object")
+        expected = {item.name for item in fields(cls)}
+        unknown = set(payload) - expected
+        missing = expected - set(payload)
+        if unknown:
+            raise ValueError(f"unknown fields for {cls.KIND}: {', '.join(sorted(unknown))}")
+        optional = {"include_tool_receipts", "tool_receipt_cursor", "tool_receipt_limit"}
+        if missing - optional:
+            raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(missing - optional))}")
+        if payload["api_version"] != API_VERSION or payload["kind"] != cls.KIND:
+            raise ValueError("unsupported runtime API query envelope")
+        values = dict(payload)
+        values.pop("api_version")
+        values.pop("kind")
+        values.setdefault("include_tool_receipts", False)
+        values.setdefault("tool_receipt_cursor", None)
+        values.setdefault("tool_receipt_limit", 100)
+        return cls(**values)
 
 
 @dataclass(frozen=True)
@@ -659,6 +716,142 @@ _LIFECYCLE_STATUSES_BY_TYPE = {
     "interrupted": frozenset({"error", "interrupted"}),
 }
 
+_TOOL_RECEIPT_PAGE_FIELDS = {
+    "items",
+    "next_cursor",
+    "pruned_before",
+    "evidence_status",
+    "invalid_event_count",
+}
+_TOOL_RECEIPT_ITEM_FIELDS = {
+    "receipt_id",
+    "task_id",
+    "kind",
+    "subagent_name",
+    "tool_name",
+    "attempt",
+    "status",
+    "started_at",
+    "finished_at",
+    "request_projection_digest",
+    "result_projection_digest",
+    "result_kind",
+    "safe_error_code",
+    "authz_decision_ref",
+    "guardrail_decision_refs",
+    "agent_revision_digest",
+    "assembly_fingerprint",
+    "extension_generation",
+    "subagent_catalog_digest",
+    "subagent_definition_digest",
+}
+
+
+def _tool_receipt_page(value: Any) -> Mapping[str, ImmutableJsonValue]:
+    if not isinstance(value, Mapping) or set(value) != _TOOL_RECEIPT_PAGE_FIELDS:
+        raise ValueError("tool receipt page fields are invalid")
+    items = value.get("items")
+    if not isinstance(items, (list, tuple)) or len(items) > MAX_TOOL_RECEIPT_PAGE_SIZE:
+        raise ValueError("tool receipt items must be a list of at most 100")
+    for item in items:
+        if not isinstance(item, Mapping) or set(item) != _TOOL_RECEIPT_ITEM_FIELDS:
+            raise ValueError("tool receipt item fields are invalid")
+        if not isinstance(item.get("receipt_id"), str) or _RECEIPT_ID_RE.fullmatch(item["receipt_id"]) is None:
+            raise ValueError("tool receipt id is invalid")
+        kind = item.get("kind")
+        status = item.get("status")
+        if kind not in {"lead", "subagent"} or status not in {
+            "succeeded",
+            "failed",
+            "denied",
+            "cancelled",
+            "indeterminate",
+        }:
+            raise ValueError("tool receipt execution kind or status is invalid")
+        if type(item.get("attempt")) is not int or item["attempt"] < 1:
+            raise ValueError("tool receipt attempt is invalid")
+        task_id = item.get("task_id")
+        if not isinstance(task_id, str) or not task_id or len(task_id.encode("utf-8")) > 128:
+            raise ValueError("tool receipt task id is invalid")
+        subagent_name = item.get("subagent_name")
+        if (kind == "lead" and subagent_name is not None) or (kind == "subagent" and (not isinstance(subagent_name, str) or not subagent_name or len(subagent_name.encode("utf-8")) > 128)):
+            raise ValueError("tool receipt subagent name is invalid")
+        tool_name = item.get("tool_name")
+        if not isinstance(tool_name, str) or len(tool_name.encode("utf-8")) > 128 or _TOOL_NAME_RE.fullmatch(tool_name) is None:
+            raise ValueError("tool receipt tool name is invalid")
+        for timestamp_name in ("started_at", "finished_at"):
+            timestamp = item.get(timestamp_name)
+            if timestamp is None and timestamp_name == "finished_at":
+                continue
+            if not isinstance(timestamp, str) or len(timestamp.encode("utf-8")) > 64:
+                raise ValueError(f"tool receipt {timestamp_name} is invalid")
+            try:
+                parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"tool receipt {timestamp_name} is invalid") from exc
+            if parsed.tzinfo is None:
+                raise ValueError(f"tool receipt {timestamp_name} is invalid")
+        _optional_digest(item.get("request_projection_digest"), "tool receipt request projection")
+        if item.get("request_projection_digest") is None:
+            raise ValueError("tool receipt request projection digest is required")
+        _optional_digest(item.get("result_projection_digest"), "tool receipt result projection")
+        _optional_digest(item.get("agent_revision_digest"), "tool receipt agent revision")
+        _optional_digest(item.get("assembly_fingerprint"), "tool receipt assembly fingerprint")
+        _optional_digest(item.get("subagent_catalog_digest"), "tool receipt subagent catalog")
+        if any(item.get(name) is None for name in ("agent_revision_digest", "assembly_fingerprint", "subagent_catalog_digest")):
+            raise ValueError("tool receipt accepted anchor digest is required")
+        definition_digest = _optional_digest(
+            item.get("subagent_definition_digest"),
+            "tool receipt subagent definition",
+        )
+        if (kind == "lead" and definition_digest is not None) or (kind == "subagent" and definition_digest is None):
+            raise ValueError("tool receipt subagent definition anchor is invalid")
+        if type(item.get("extension_generation")) is not int or item["extension_generation"] < 0:
+            raise ValueError("tool receipt extension generation is invalid")
+        result_kind = item.get("result_kind")
+        if result_kind is not None and (not isinstance(result_kind, str) or not result_kind or len(result_kind.encode("utf-8")) > 64):
+            raise ValueError("tool receipt result kind is invalid")
+        safe_error_code = item.get("safe_error_code")
+        if safe_error_code is not None and safe_error_code not in _SAFE_TOOL_RECEIPT_ERROR_CODES:
+            raise ValueError("tool receipt safe error code is invalid")
+        if status == "succeeded" and (item.get("result_projection_digest") is None or result_kind is None or safe_error_code is not None or item.get("finished_at") is None):
+            raise ValueError("successful tool receipt outcome fields are invalid")
+        if status in {"failed", "denied", "cancelled"} and (safe_error_code is None or item.get("finished_at") is None):
+            raise ValueError("terminal tool receipt outcome fields are invalid")
+        if status == "indeterminate" and any(
+            item.get(name) is not None
+            for name in (
+                "finished_at",
+                "result_projection_digest",
+                "result_kind",
+                "safe_error_code",
+                "authz_decision_ref",
+            )
+        ):
+            raise ValueError("indeterminate tool receipt outcome fields are invalid")
+        authz_ref = item.get("authz_decision_ref")
+        if authz_ref is not None and (not isinstance(authz_ref, str) or _DECISION_REF_RE.fullmatch(authz_ref) is None):
+            raise ValueError("tool receipt authorization reference is invalid")
+        guardrail_refs = item.get("guardrail_decision_refs")
+        if not isinstance(guardrail_refs, (list, tuple)) or len(guardrail_refs) > 16 or any(not isinstance(ref, str) or _DECISION_REF_RE.fullmatch(ref) is None for ref in guardrail_refs):
+            raise ValueError("tool receipt guardrail references are invalid")
+        if len(set(guardrail_refs)) != len(guardrail_refs):
+            raise ValueError("tool receipt guardrail references are invalid")
+        if status == "indeterminate" and guardrail_refs:
+            raise ValueError("indeterminate tool receipt outcome fields are invalid")
+    if value.get("evidence_status") not in {"available", "legacy_unavailable", "invalid"}:
+        raise ValueError("tool receipt evidence status is invalid")
+    if type(value.get("invalid_event_count")) is not int or value["invalid_event_count"] < 0:
+        raise ValueError("tool receipt invalid event count is invalid")
+    for name in ("next_cursor", "pruned_before"):
+        if value.get(name) is not None:
+            cursor = _nonempty(value[name], name)
+            if len(cursor.encode("utf-8")) > 4096:
+                raise ValueError(f"{name} is too long")
+    frozen = _json_value(value, object_only=True)
+    assert isinstance(frozen, Mapping)
+    return frozen
+
 
 def _fixed_public_rows(
     rows: Any,
@@ -738,6 +931,7 @@ class InvocationObservation(_Record):
     minimum_available_cursor: str
     read_fence_cursor: str
     summaries: tuple[InvocationSummaryV1, ...] = ()
+    tool_receipts: Mapping[str, ImmutableJsonValue] | None = None
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["invocation.observation"] = field(default=KIND, init=False)
 
@@ -791,6 +985,10 @@ class InvocationObservation(_Record):
             if summary.status != snapshot["status"] or summary.state_version != snapshot["state_version"]:
                 raise ValueError("observation summary and snapshot current state must agree")
         object.__setattr__(self, "summaries", summaries)
+        if self.tool_receipts is not None:
+            if self.run_id is None:
+                raise ValueError("tool receipts require a singular invocation observation")
+            object.__setattr__(self, "tool_receipts", _tool_receipt_page(self.tool_receipts))
         encoded = json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
         if len(encoded) > MAX_OBSERVATION_PAYLOAD_BYTES:
             raise ValueError("an invocation observation is limited to 12 MiB canonical JSON")
@@ -806,8 +1004,9 @@ class InvocationObservation(_Record):
         missing = expected - set(payload)
         if unknown:
             raise ValueError(f"unknown fields for {cls.KIND}: {', '.join(sorted(unknown))}")
-        if missing - {"summaries"}:
-            raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(missing - {'summaries'}))}")
+        optional = {"summaries", "tool_receipts"}
+        if missing - optional:
+            raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(missing - optional))}")
         if payload["api_version"] != API_VERSION:
             raise ValueError("unsupported runtime API version")
         if payload["kind"] != cls.KIND:
@@ -816,6 +1015,7 @@ class InvocationObservation(_Record):
         values.pop("api_version")
         values.pop("kind")
         values.setdefault("summaries", ())
+        values.setdefault("tool_receipts", None)
         return cls._from_wire(values)
 
     @classmethod
@@ -1053,6 +1253,7 @@ __all__ = [
     "ImmutableJsonValue",
     "JsonValue",
     "MAX_OBSERVATION_PAGE_SIZE",
+    "MAX_TOOL_RECEIPT_PAGE_SIZE",
     "MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES",
     "MAX_OBSERVATION_PAYLOAD_BYTES",
     "ResumeInputV1",

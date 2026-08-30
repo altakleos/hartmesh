@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from deerflow_extension_api import validate_thread_identifier
 
@@ -18,8 +19,10 @@ from deerflow.runtime.assembly_evidence import (
 )
 
 _CURSOR_VERSION = "deerflow.lifecycle.cursor/v1"
+_TOOL_RECEIPT_CURSOR_VERSION = "deerflow.tool-receipt.cursor/v1"
 INVOCATION_SOURCE_KINDS = frozenset({"http", "scheduled_task", "native_channel", "service"})
 MAX_LIFECYCLE_PAGE_SIZE = 500
+MAX_TOOL_RECEIPT_PAGE_SIZE = 100
 MAX_INVOCATION_SUMMARY_BYTES = 16 * 1024
 _MAX_CORRELATION_REFERENCES = 64
 _MAX_CORRELATION_VALUE_BYTES = 1024
@@ -31,6 +34,10 @@ _NONTERMINAL_RUN_STATUSES = frozenset({"pending", "running"})
 
 class InvalidLifecycleCursor(ValueError):
     """The opaque lifecycle cursor is malformed or uses another version."""
+
+
+class InvalidToolReceiptCursor(ValueError):
+    """A receipt cursor is malformed or scoped to another authorized run."""
 
 
 class CursorGap(ValueError):
@@ -125,6 +132,248 @@ def decode_lifecycle_cursor(token: str) -> int:
     return cursor
 
 
+def _receipt_cursor_checksum(payload: Mapping[str, object]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(b"hartmesh/tool-receipt-cursor/v1\0" + encoded).hexdigest()
+
+
+def encode_tool_receipt_cursor(*, run_id: str, thread_id: str, after_seq: int) -> str:
+    if not isinstance(run_id, str) or not run_id or len(run_id.encode("utf-8")) > 64:
+        raise ValueError("invalid tool receipt cursor run_id")
+    validate_thread_identifier(thread_id, field_name="tool receipt cursor thread_id")
+    if type(after_seq) is not int or after_seq < 0:
+        raise ValueError("invalid tool receipt cursor position")
+    core = {
+        "version": _TOOL_RECEIPT_CURSOR_VERSION,
+        "run_id": run_id,
+        "thread_id": thread_id,
+        "after_seq": after_seq,
+    }
+    payload = {**core, "checksum": _receipt_cursor_checksum(core)}
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).rstrip(b"=").decode("ascii")
+    return f"trc1.{encoded}"
+
+
+def decode_tool_receipt_cursor(token: str, *, run_id: str, thread_id: str) -> int:
+    if not isinstance(token, str) or len(token.encode("utf-8")) > 4096 or not token.startswith("trc1."):
+        raise InvalidToolReceiptCursor("invalid tool receipt cursor")
+    encoded = token[5:]
+    try:
+        raw = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
+        payload = json.loads(raw)
+    except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise InvalidToolReceiptCursor("invalid tool receipt cursor") from exc
+    expected = {"version", "run_id", "thread_id", "after_seq", "checksum"}
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise InvalidToolReceiptCursor("invalid tool receipt cursor fields")
+    core = {key: payload[key] for key in ("version", "run_id", "thread_id", "after_seq")}
+    if (
+        payload["version"] != _TOOL_RECEIPT_CURSOR_VERSION
+        or payload["run_id"] != run_id
+        or payload["thread_id"] != thread_id
+        or payload["checksum"] != _receipt_cursor_checksum(core)
+        or type(payload["after_seq"]) is not int
+        or payload["after_seq"] < 0
+    ):
+        raise InvalidToolReceiptCursor("tool receipt cursor scope or checksum mismatch")
+    return payload["after_seq"]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolReceiptLifecycleItem:
+    receipt_id: str
+    task_id: str
+    kind: Literal["lead", "subagent"]
+    subagent_name: str | None
+    tool_name: str
+    attempt: int
+    status: Literal["succeeded", "failed", "denied", "cancelled", "indeterminate"]
+    started_at: str
+    finished_at: str | None
+    request_projection_digest: str
+    result_projection_digest: str | None
+    result_kind: str | None
+    safe_error_code: str | None
+    authz_decision_ref: str | None
+    guardrail_decision_refs: tuple[str, ...]
+    agent_revision_digest: str
+    assembly_fingerprint: str
+    extension_generation: int
+    subagent_catalog_digest: str
+    subagent_definition_digest: str | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "receipt_id": self.receipt_id,
+            "task_id": self.task_id,
+            "kind": self.kind,
+            "subagent_name": self.subagent_name,
+            "tool_name": self.tool_name,
+            "attempt": self.attempt,
+            "status": self.status,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "request_projection_digest": self.request_projection_digest,
+            "result_projection_digest": self.result_projection_digest,
+            "result_kind": self.result_kind,
+            "safe_error_code": self.safe_error_code,
+            "authz_decision_ref": self.authz_decision_ref,
+            "guardrail_decision_refs": self.guardrail_decision_refs,
+            "agent_revision_digest": self.agent_revision_digest,
+            "assembly_fingerprint": self.assembly_fingerprint,
+            "extension_generation": self.extension_generation,
+            "subagent_catalog_digest": self.subagent_catalog_digest,
+            "subagent_definition_digest": self.subagent_definition_digest,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ToolReceiptPage:
+    items: tuple[ToolReceiptLifecycleItem, ...]
+    next_cursor: str | None
+    pruned_before: str | None
+    evidence_status: Literal["available", "legacy_unavailable", "invalid"]
+    invalid_event_count: int = 0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "items": tuple(item.to_dict() for item in self.items),
+            "next_cursor": self.next_cursor,
+            "pruned_before": self.pruned_before,
+            "evidence_status": self.evidence_status,
+            "invalid_event_count": self.invalid_event_count,
+        }
+
+
+def build_tool_receipt_page(
+    events: list[dict] | tuple[dict, ...],
+    *,
+    run_id: str,
+    thread_id: str,
+    cursor: str | None,
+    limit: int,
+    legacy_unavailable: bool,
+    events_include_prefix: bool = True,
+) -> ToolReceiptPage:
+    """Pair bounded start/outcome evidence without exposing corrupt payloads."""
+
+    from deerflow.runtime.tool_evidence import (
+        TOOL_RECEIPT_OUTCOME_EVENT,
+        TOOL_RECEIPT_STARTED_EVENT,
+        ToolEvidenceError,
+        receipt_from_event,
+    )
+
+    if type(limit) is not int or not 1 <= limit <= MAX_TOOL_RECEIPT_PAGE_SIZE:
+        raise ValueError("tool receipt limit must be between 1 and 100")
+    after_seq = 0 if cursor is None else decode_tool_receipt_cursor(cursor, run_id=run_id, thread_id=thread_id)
+    starts: list[tuple[int, Any, str]] = []
+    outcomes: dict[str, tuple[Any, str]] = {}
+    invalid = 0
+    for event in sorted(events, key=lambda item: item.get("seq", -1)):
+        try:
+            if event.get("run_id") != run_id or event.get("thread_id") != thread_id:
+                raise ToolEvidenceError("receipt_event_scope_invalid")
+            seq = event.get("seq")
+            event_type = event.get("event_type")
+            if (
+                type(seq) is not int
+                or seq < 1
+                or event.get("category") != "tool"
+                or event_type
+                not in {
+                    TOOL_RECEIPT_STARTED_EVENT,
+                    TOOL_RECEIPT_OUTCOME_EVENT,
+                }
+            ):
+                raise ToolEvidenceError("receipt_event_invalid")
+            receipt = receipt_from_event(event)
+            if receipt.context.run_id != run_id:
+                raise ToolEvidenceError("receipt_event_scope_invalid")
+            timestamp = str(event["created_at"])
+            if event_type == TOOL_RECEIPT_STARTED_EVENT:
+                if receipt.phase != "started":
+                    raise ToolEvidenceError("receipt_event_phase_invalid")
+                starts.append((seq, receipt, timestamp))
+            else:
+                if receipt.phase == "started" or receipt.receipt_id in outcomes:
+                    raise ToolEvidenceError("receipt_event_phase_invalid")
+                outcomes[receipt.receipt_id] = (receipt, timestamp)
+        except (ToolEvidenceError, KeyError, TypeError, ValueError):
+            invalid += 1
+
+    selected_starts = [entry for entry in starts if entry[0] > after_seq]
+    has_more = len(selected_starts) > limit
+    selected_starts = selected_starts[:limit]
+    items: list[ToolReceiptLifecycleItem] = []
+    selected_ids: set[str] = set()
+    for _seq, started, started_at in selected_starts:
+        if started.receipt_id in selected_ids:
+            invalid += 1
+            continue
+        selected_ids.add(started.receipt_id)
+        outcome_entry = outcomes.get(started.receipt_id)
+        outcome = outcome_entry[0] if outcome_entry is not None else None
+        finished_at = outcome_entry[1] if outcome_entry is not None else None
+        if outcome is not None and (outcome.context != started.context or outcome.tool_name != started.tool_name or outcome.request_projection_digest != started.request_projection_digest):
+            invalid += 1
+            outcome = None
+            finished_at = None
+        context = started.context
+        items.append(
+            ToolReceiptLifecycleItem(
+                receipt_id=started.receipt_id,
+                task_id=context.execution_task_id,
+                kind=context.execution_kind,
+                subagent_name=context.subagent_name,
+                tool_name=started.tool_name,
+                attempt=context.attempt,
+                status=(outcome.phase if outcome is not None else "indeterminate"),
+                started_at=started_at,
+                finished_at=finished_at,
+                request_projection_digest=started.request_projection_digest,
+                result_projection_digest=(outcome.result_projection_digest if outcome is not None else None),
+                result_kind=(outcome.result_kind if outcome is not None else None),
+                safe_error_code=(outcome.safe_error_code if outcome is not None else None),
+                authz_decision_ref=(outcome.authz_decision_ref if outcome is not None else None),
+                guardrail_decision_refs=(outcome.guardrail_decision_refs if outcome is not None else ()),
+                agent_revision_digest=context.agent_revision_digest,
+                assembly_fingerprint=context.assembly_fingerprint,
+                extension_generation=context.extension_generation,
+                subagent_catalog_digest=context.subagent_catalog_digest,
+                subagent_definition_digest=context.subagent_definition_digest,
+            )
+        )
+    # A store-side cursor window can begin with the outcome for the final
+    # receipt on the preceding page. Its start is intentionally outside this
+    # read, so only a complete-prefix projection may classify an unmatched
+    # outcome as corrupt.
+    if events_include_prefix:
+        orphan_outcomes = set(outcomes) - {receipt.receipt_id for _, receipt, _ in starts}
+        invalid += len(orphan_outcomes)
+    next_cursor = None
+    if has_more and selected_starts:
+        next_cursor = encode_tool_receipt_cursor(
+            run_id=run_id,
+            thread_id=thread_id,
+            after_seq=selected_starts[-1][0],
+        )
+    status: Literal["available", "legacy_unavailable", "invalid"]
+    if invalid:
+        status = "invalid"
+    elif legacy_unavailable and not starts:
+        status = "legacy_unavailable"
+    else:
+        status = "available"
+    return ToolReceiptPage(
+        items=tuple(items),
+        next_cursor=next_cursor,
+        pruned_before=None,
+        evidence_status=status,
+        invalid_event_count=invalid,
+    )
+
+
 @dataclass(frozen=True)
 class LifecycleQuery:
     """One invocation or context query after authorization and visibility."""
@@ -137,6 +386,9 @@ class LifecycleQuery:
     include_snapshot: bool = True
     source_kind: str | None = None
     visibility_scope: LifecycleVisibilityScope | None = None
+    include_tool_receipts: bool = False
+    tool_receipt_cursor: str | None = None
+    tool_receipt_limit: int = 100
 
     def __post_init__(self) -> None:
         if (self.run_id is None) == (self.thread_id is None):
@@ -154,6 +406,14 @@ class LifecycleQuery:
             raise TypeError("visibility_scope must be a LifecycleVisibilityScope or None")
         if self.visibility_scope is not None and self.visibility_scope.thread_id != self.thread_id:
             raise ValueError("lifecycle visibility scope is bound to another exact context")
+        if type(self.include_tool_receipts) is not bool:
+            raise TypeError("include_tool_receipts must be a boolean")
+        if self.include_tool_receipts and self.run_id is None:
+            raise ValueError("tool receipts require one exact invocation target")
+        if type(self.tool_receipt_limit) is not int or not 1 <= self.tool_receipt_limit <= MAX_TOOL_RECEIPT_PAGE_SIZE:
+            raise ValueError("tool receipt limit must be between 1 and 100")
+        if self.tool_receipt_cursor is not None and not self.include_tool_receipts:
+            raise ValueError("tool receipt cursor requires receipt inclusion")
 
 
 @dataclass(frozen=True)
@@ -166,6 +426,7 @@ class LifecyclePage:
     minimum_available_cursor: str
     read_fence_cursor: str
     summaries: tuple[dict[str, Any], ...] = ()
+    tool_receipts: ToolReceiptPage | None = None
 
 
 def invocation_source_kind(row: Mapping[str, Any]) -> str | None:
@@ -372,10 +633,17 @@ __all__ = [
     "CursorAhead",
     "CursorGap",
     "InvalidLifecycleCursor",
+    "InvalidToolReceiptCursor",
     "LifecycleOrderingCorruption",
     "LifecyclePage",
     "LifecycleQuery",
     "MAX_LIFECYCLE_PAGE_SIZE",
+    "MAX_TOOL_RECEIPT_PAGE_SIZE",
+    "ToolReceiptLifecycleItem",
+    "ToolReceiptPage",
+    "build_tool_receipt_page",
+    "decode_tool_receipt_cursor",
+    "encode_tool_receipt_cursor",
     "build_invocation_summary",
     "decode_lifecycle_cursor",
     "encode_lifecycle_cursor",

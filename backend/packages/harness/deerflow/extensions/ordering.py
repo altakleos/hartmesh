@@ -79,8 +79,10 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+    from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+    from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
     from deerflow.guardrails.middleware import GuardrailMiddleware
 
     return (
@@ -93,6 +95,16 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
             outer=ToolReceiptMiddleware,
             inner=ToolErrorHandlingMiddleware,
             reason=("ToolReceiptMiddleware reads the deerflow_tool_meta status stamped by ToolErrorHandlingMiddleware when building each receipt, so its wrap_tool_call chain must enclose the stamping step"),
+        ),
+        OrderingConstraint(
+            outer=ToolReceiptMiddleware,
+            inner=ToolResultSanitizationMiddleware,
+            reason=("Durable result commitments cover the exact sanitized model-visible result, so ToolReceiptMiddleware must observe ToolResultSanitizationMiddleware's return value"),
+        ),
+        OrderingConstraint(
+            outer=ToolReceiptMiddleware,
+            inner=ToolOutputBudgetMiddleware,
+            reason=("Durable result commitments cover the exact bounded model-visible result, so ToolReceiptMiddleware must observe ToolOutputBudgetMiddleware's return value"),
         ),
         *(
             OrderingConstraint(

@@ -111,11 +111,20 @@ def _paging_values(
     request: Request,
     *,
     allow_source_kind: bool = False,
+    allow_tool_receipts: bool = False,
 ) -> tuple[str | None, int, str | None] | JSONResponse:
     items = list(request.query_params.multi_items())
     allowed = {"cursor", "limit"}
     if allow_source_kind:
         allowed.add("source_kind")
+    if allow_tool_receipts:
+        allowed.update(
+            {
+                "include_tool_receipts",
+                "tool_receipt_cursor",
+                "tool_receipt_limit",
+            }
+        )
     if any(key not in allowed for key, _value in items):
         return runtime_error_response(422, FailureCode.invalid_request)
     if any(sum(key == name for key, _value in items) > 1 for name in allowed):
@@ -131,6 +140,24 @@ def _paging_values(
     if str(limit) != raw_limit or not 1 <= limit <= 500:
         return runtime_error_response(422, FailureCode.invalid_request)
     return cursor, limit, request.query_params.get("source_kind")
+
+
+def _tool_receipt_paging(request: Request) -> tuple[bool, str | None, int] | JSONResponse:
+    raw_include = request.query_params.get("include_tool_receipts", "false")
+    if raw_include not in {"true", "false"}:
+        return runtime_error_response(422, FailureCode.invalid_request)
+    include = raw_include == "true"
+    cursor = request.query_params.get("tool_receipt_cursor")
+    if cursor == "" or (cursor is not None and not include):
+        return runtime_error_response(422, FailureCode.invalid_request)
+    raw_limit = request.query_params.get("tool_receipt_limit", "100")
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        return runtime_error_response(422, FailureCode.invalid_request)
+    if str(limit) != raw_limit or not 1 <= limit <= 100:
+        return runtime_error_response(422, FailureCode.invalid_request)
+    return include, cursor, limit
 
 
 @router.get("/capabilities")
@@ -226,12 +253,23 @@ async def observe_invocation(
 
     if error := _permission_error(request, "runs", "read"):
         return error
-    paging = _paging_values(request)
+    paging = _paging_values(request, allow_tool_receipts=True)
     if isinstance(paging, JSONResponse):
         return paging
     cursor, limit, _source_kind = paging
+    receipt_paging = _tool_receipt_paging(request)
+    if isinstance(receipt_paging, JSONResponse):
+        return receipt_paging
+    include_tool_receipts, tool_receipt_cursor, tool_receipt_limit = receipt_paging
     try:
-        query = InvocationQuery(run_id=run_id, cursor=cursor, limit=limit)
+        query = InvocationQuery(
+            run_id=run_id,
+            cursor=cursor,
+            limit=limit,
+            include_tool_receipts=include_tool_receipts,
+            tool_receipt_cursor=tool_receipt_cursor,
+            tool_receipt_limit=tool_receipt_limit,
+        )
     except (TypeError, ValueError):
         return runtime_error_response(422, FailureCode.invalid_request)
     result = await _invoke_runtime_operation("observe", lambda: runtime.observe(query))

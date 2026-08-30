@@ -1529,10 +1529,12 @@ sandbox:
 # ============================================================================
 # Tool Result Verification
 # ============================================================================
-# Deterministic receipts are stamped onto tool results and injected into the
+# Compact display receipts are stamped onto tool results and injected into the
 # model context so final reports can cite executed actions. Disable them only
-# if the extra provenance context is not wanted. The selective judge settings
-# are reserved for acceptance-criteria review and remain off by default.
+# if that extra model context is not wanted. This switch does not disable the
+# independently stored durable receipts for accepted durable runs.
+# The selective judge settings are reserved for acceptance-criteria review and
+# remain off by default.
 verification:
   receipts_enabled: true
   # Lead-chain ledger rendering: 'delegation_only' renders only while
@@ -2094,7 +2096,8 @@ database:
 
 # Deployment promise checked once at Gateway startup. The local profile keeps
 # process-local memory convenient for development. durable_production refuses
-# process-local invocation state and also participates in /ready.
+# process-local invocation state, requires run_events.backend: db for fenced
+# idempotent tool receipts, and also participates in /ready.
 deployment:
   profile: local_development
   readiness:
@@ -2125,11 +2128,13 @@ deployment:
 # ============================================================================
 # Run Events Configuration
 # ============================================================================
-# Storage backend for run events (messages + execution traces).
+# Storage backend for run events (messages, execution traces, and durable tool
+# attempt receipts).
 #
 # backend: memory  -- No persistence, data lost on restart (default)
-# backend: db      -- SQL database via ORM, full query capability (production)
+# backend: db      -- SQL database via ORM, fenced/idempotent receipts (production)
 # backend: jsonl   -- Append-only JSONL files (lightweight single-node persistence)
+# durable_production requires db. Memory/JSONL receipt evidence is local-only.
 #
 # run_events:
 #   backend: memory

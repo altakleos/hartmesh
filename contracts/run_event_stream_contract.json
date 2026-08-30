@@ -51,7 +51,8 @@
       "content": {"type": ["string", "object", "array", "number", "boolean", "null"]},
       "metadata": {"type": "object"},
       "created_at": {"type": "string", "format": "date-time"},
-      "user_id": {"type": ["string", "null"]}
+      "user_id": {"type": ["string", "null"]},
+      "idempotency_key": {"type": ["string", "null"], "maxLength": 128}
     },
     "additionalProperties": true
   },
@@ -68,6 +69,7 @@
     "middleware": "Middleware state-change audit evidence.",
     "context": "Identity-only evidence about effective hidden context.",
     "subagent": "Subagent lifecycle and persisted step evidence.",
+    "tool": "Bounded, redacted, owner-fenced durable tool-attempt evidence.",
     "workspace": "Run-scoped workspace and output file-change evidence."
   },
   "events": [
@@ -297,6 +299,72 @@
         "type": "object",
         "required": ["task_id"],
         "properties": {"task_id": {"type": "string", "minLength": 1}},
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "tool_receipt.started.v1",
+      "category": "tool",
+      "producer": "ToolReceiptMiddleware through RunEventToolReceiptSink before inner authorization/tool dispatch",
+      "content_schema": {
+        "type": "object",
+        "required": ["version", "receipt_id", "idempotency_key", "phase", "tool_name", "request_projection_digest", "context"],
+        "properties": {
+          "version": {"const": 1},
+          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
+          "idempotency_key": {"type": "string", "pattern": "^tr_[0-9a-f]{64}:start$"},
+          "phase": {"const": "started"},
+          "tool_name": {"type": "string", "minLength": 1, "maxLength": 128},
+          "request_projection_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "result_projection_digest": {"type": "null"},
+          "result_kind": {"type": "null"},
+          "safe_error_code": {"type": "null"},
+          "authz_decision_ref": {"type": "null"},
+          "guardrail_decision_refs": {"type": "array", "maxItems": 0},
+          "context": {"type": "object"}
+        },
+        "additionalProperties": false
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["receipt_id", "task_id"],
+        "properties": {
+          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
+          "task_id": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "tool_receipt.outcome.v1",
+      "category": "tool",
+      "producer": "ToolReceiptMiddleware through RunEventToolReceiptSink when control returns",
+      "content_schema": {
+        "type": "object",
+        "required": ["version", "receipt_id", "idempotency_key", "phase", "tool_name", "request_projection_digest", "context"],
+        "properties": {
+          "version": {"const": 1},
+          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
+          "idempotency_key": {"type": "string", "pattern": "^tr_[0-9a-f]{64}:terminal$"},
+          "phase": {"enum": ["succeeded", "failed", "denied", "cancelled"]},
+          "tool_name": {"type": "string", "minLength": 1, "maxLength": 128},
+          "request_projection_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "result_projection_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+          "result_kind": {"type": ["string", "null"], "maxLength": 64},
+          "safe_error_code": {"type": ["string", "null"], "maxLength": 64},
+          "authz_decision_ref": {"type": ["string", "null"], "maxLength": 128},
+          "guardrail_decision_refs": {"type": "array", "maxItems": 16, "items": {"type": "string", "maxLength": 128}},
+          "context": {"type": "object"}
+        },
+        "additionalProperties": false
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["receipt_id", "task_id"],
+        "properties": {
+          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
+          "task_id": {"type": "string", "minLength": 1}
+        },
         "additionalProperties": true
       }
     },

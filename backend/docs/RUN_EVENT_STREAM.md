@@ -125,6 +125,44 @@ cursor. Equality with the minimum resumes at the first retained event.
 the marker monotonically but never beyond `last_cursor`. Pruning is operator-
 initiated only; no retention timer or worker exists.
 
+### Durable tool-attempt evidence
+
+Accepted durable lead and subagent executions also write two rich run-event
+types: `tool_receipt.started.v1` and `tool_receipt.outcome.v1`, both in
+`category="tool"`. These are not invocation-state transitions and do not change
+`RunRow.state_version`. The outer tool wrapper atomically reserves and commits
+the start under the current `(owner_id, lease_epoch)` fence before calling any
+authorization, guardrail, provider, or tool code. All terminal phases share one
+idempotency slot, so an identical replay returns the first stored event and a
+different terminal phase is an integrity failure. Store time is authoritative
+and is retained on duplicate appends.
+
+Receipt identity is `tr_` plus the full SHA-256 digest of version, run ID,
+execution-task ID, model tool-call ID, and durable attempt number. Attempt
+reservation belongs to the event store: an unfinished recovery reuses its
+start, while a genuinely new dispatch after a terminal outcome increments the
+number. A stable subagent execution-task digest and the accepted subagent
+catalog/definition digests keep equal provider call IDs in different execution
+scopes distinct. A crash after start writes no synthetic outcome; the lifecycle
+projection reports that pair as `indeterminate`.
+
+Receipt bodies are strict canonical JSON capped at 8 KiB. They store the safe
+tool name, full projection digests, bounded server-derived policy references,
+worker fence, and accepted assembly/revision/generation anchors. Request
+projections retain field names and JSON shapes; credential-like values become a
+secret-handle class, and unclassified strings become length/type markers rather
+than raw hashes. Only a field explicitly marked evidence-safe in its
+server-owned tool schema may contribute a bounded scalar value. Result digests
+cover the exact sanitized and budgeted model-visible result plus result
+type/status. Raw arguments, results, URLs with credentials, exception messages,
+headers, and stack traces are forbidden.
+
+A digest can compare a receipt with an independently available projection; it
+does not make low-entropy content confidential and is not a truth assertion.
+A durable receipt records HartMesh's observation of a tool attempt. It does not
+guarantee an external side effect occurred exactly once or that the tool result
+was correct.
+
 ## Categories
 
 `category="message"` means an event is eligible for a message projection; it
@@ -146,6 +184,7 @@ through run-event or specialized APIs:
 | `middleware` | Middleware state-change audit evidence. |
 | `context` | Effective hidden-context identity. |
 | `subagent` | Subagent lifecycle and step history. |
+| `tool` | Bounded durable tool-attempt start/outcome evidence. |
 | `workspace` | Workspace/output file-change evidence. |
 
 ## Producers
@@ -163,6 +202,8 @@ through run-event or specialized APIs:
 | `llm.error` | `trace` | `on_llm_error()` |
 | `context:memory` | `context` | `record_memory_context()` |
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
+| `tool_receipt.started.v1` | `tool` | `RunEventToolReceiptSink.reserve_started()` |
+| `tool_receipt.outcome.v1` | `tool` | `RunEventToolReceiptSink.record_outcome()` |
 
 Current middleware tags are `guardrail`, `mcp_preparation`,
 `safety_termination`, `skill_activation`, and `skill_secrets`.
@@ -222,6 +263,7 @@ Schema. It is the authoritative field-level reference.
 | Historical subtask cards | Fetch `subagent.step` through the run-events endpoint, filtered and paginated by `task_id`. |
 | Memory audit | Filters run events to `context:memory` and compares `content_sha256`; full memory text is not duplicated into the event store. |
 | Workspace review | `GET /api/threads/{thread_id}/runs/{run_id}/workspace-changes` projects the latest `workspace_changes` payload. |
+| Authorized durable receipt page | `GET /api/runtime/v1/invocations/{run_id}?include_tool_receipts=true` pairs starts/outcomes with an independently scoped cursor and a 100-item cap. |
 
 Token and cost summaries are not reconstructed by reading event rows.
 `RunJournal` accumulates usage while callbacks fire, and the worker writes the
@@ -258,9 +300,10 @@ be used by new producers.
 
 ## Known Gaps
 
-- Tool-call intent is embedded in `llm.ai.response.content.tool_calls`; it is
-  not a first-class event. A missing or timed-out result may have no dedicated
-  outcome event.
+- Model tool-call intent remains embedded in `llm.ai.response.content.tool_calls`;
+  accepted durable executions additionally record an attempt start/outcome.
+  Local/direct and historical pre-feature runs have display receipts only, and a
+  started attempt interrupted by process loss deliberately has no outcome.
 - `run.end.metadata.status` is only a root graph completion marker and is
   always `success`. `RunRow.status` remains authoritative for lifecycle state.
   The separate lifecycle journal records authoritative worker-loss recovery as
