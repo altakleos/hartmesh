@@ -221,6 +221,40 @@ def _assembly_evidence_projection(row: Mapping[str, Any]) -> tuple[dict[str, Any
     )
 
 
+def _subagent_catalog_projection(
+    row: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    """Return the validated catalog summary without prompts or definitions."""
+
+    revision = row.get("agent_revision_json")
+    if not isinstance(revision, Mapping):
+        return None, "legacy_unavailable"
+    accepted_digest = _safe_digest(row.get("agent_revision_digest"))
+    if accepted_digest is None or _safe_digest(revision.get("digest")) != accepted_digest:
+        return None, "legacy_unavailable"
+    raw_catalog = revision.get("subagent_catalog")
+    if not isinstance(raw_catalog, Mapping):
+        return None, "legacy_unavailable"
+    try:
+        from deerflow.runtime.subagent_snapshot import (
+            ResolvedSubagentCatalogV1,
+            SubagentCatalogError,
+        )
+
+        catalog = ResolvedSubagentCatalogV1.from_persisted_json(raw_catalog)
+    except (SubagentCatalogError, TypeError, ValueError):
+        return None, "legacy_unavailable"
+    return (
+        {
+            "version": catalog.version,
+            "digest": catalog.digest,
+            "count": len(catalog.entries),
+            "allowed_names": catalog.allowed_names,
+        },
+        "verified",
+    )
+
+
 def _safe_correlation_value(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int)):
         return value
@@ -297,6 +331,7 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
         manifest = decisions.get("capability_manifest")
         extension_manifest_digest = _safe_digest(manifest.get("digest")) if isinstance(manifest, Mapping) else None
         assembly_evidence, assembly_evidence_status = _assembly_evidence_projection(row)
+        subagent_catalog, subagent_catalog_status = _subagent_catalog_projection(row)
         summary = {
             "run_id": str(row["run_id"]),
             "thread_id": str(row["thread_id"]),
@@ -313,6 +348,8 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
             "constraint_evidence_digest": constraint_evidence_digest,
             "assembly_evidence": assembly_evidence,
             "assembly_evidence_status": assembly_evidence_status,
+            "subagent_catalog": subagent_catalog,
+            "subagent_catalog_status": subagent_catalog_status,
         }
         encoded = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
         return summary if len(encoded) <= MAX_INVOCATION_SUMMARY_BYTES else None

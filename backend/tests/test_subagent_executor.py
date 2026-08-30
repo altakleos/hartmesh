@@ -449,6 +449,99 @@ class TestAgentConstruction:
         global_storage.assert_not_called()
 
     @pytest.mark.anyio
+    async def test_accepted_executor_loads_only_its_frozen_skill_scope(
+        self,
+        classes,
+    ):
+        from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+        from deerflow.runtime.subagent_snapshot import (
+            ResolvedSkillScopesV1,
+            ResolvedSubagentCatalogV1,
+            resolved_subagent_definition,
+        )
+
+        entry = resolved_subagent_definition(
+            name="planner",
+            source_kind="managed",
+            source_version="source-v1",
+            description="Accepted planner",
+            system_prompt="Accepted planner prompt",
+            model=None,
+            model_settings={},
+            tool_names=(),
+            skill_names=("worker-skill",),
+            max_turns=7,
+            timeout_seconds=11,
+            inherits_tools=True,
+        )
+        catalog = ResolvedSubagentCatalogV1.from_entries(
+            (entry,),
+            allowed_names=("planner",),
+        )
+        lead_skill = SimpleNamespace(name="lead-skill")
+        worker_skill = SimpleNamespace(name="worker-skill")
+        snapshot = SimpleNamespace(
+            skills=(lead_skill, worker_skill),
+            projections=(
+                SimpleNamespace(name="lead-skill", content_digest="a" * 64),
+                SimpleNamespace(name="worker-skill", content_digest="b" * 64),
+            ),
+        )
+        material = ResolvedAgentMaterialV1(
+            agent_id="lead",
+            storage_source="file",
+            storage_version="v1",
+            agent_config={"name": "lead"},
+            soul="",
+            model_profile={"name": "parent-model"},
+            subagent_catalog=catalog,
+            skill_scopes=ResolvedSkillScopesV1.from_scopes(
+                {
+                    "lead": ("a" * 64,),
+                    "subagent:planner": ("b" * 64,),
+                }
+            ),
+            skill_snapshot=snapshot,
+        )
+
+        executor = classes["SubagentExecutor"](
+            config=entry.to_subagent_config(),
+            tools=[],
+            parent_model="parent-model",
+            resolved_agent_material=material,
+        )
+
+        assert [skill.name for skill in await executor._load_skills()] == ["worker-skill"]
+
+    def test_accepted_executor_requires_the_selected_frozen_definition(
+        self,
+        classes,
+        base_config,
+    ):
+        from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+        from deerflow.runtime.subagent_snapshot import SubagentCatalogError
+
+        material = ResolvedAgentMaterialV1(
+            agent_id="lead",
+            storage_source="file",
+            storage_version="v1",
+            agent_config={"name": "lead"},
+            soul="",
+            model_profile={"name": "parent-model"},
+        )
+
+        with pytest.raises(
+            SubagentCatalogError,
+            match="subagent_definition_drift",
+        ):
+            classes["SubagentExecutor"](
+                config=base_config,
+                tools=[],
+                parent_model="parent-model",
+                resolved_agent_material=material,
+            )
+
+    @pytest.mark.anyio
     async def test_build_initial_state_consolidates_system_prompt_and_skill_discovery(
         self,
         classes,

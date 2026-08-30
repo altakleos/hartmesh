@@ -46,6 +46,13 @@ def test_invocation_summary_is_strict_immutable_and_round_trips() -> None:
             "policy_digest": "6" * 64,
         },
         assembly_evidence_status="verified",
+        subagent_catalog={
+            "version": 1,
+            "digest": "7" * 64,
+            "count": 1,
+            "allowed_names": ["planner"],
+        },
+        subagent_catalog_status="verified",
     )
 
     wire = summary.to_dict()
@@ -83,6 +90,13 @@ def test_invocation_summary_is_strict_immutable_and_round_trips() -> None:
             "policy_digest": "6" * 64,
         },
         "assembly_evidence_status": "verified",
+        "subagent_catalog": {
+            "version": 1,
+            "digest": "7" * 64,
+            "count": 1,
+            "allowed_names": ["planner"],
+        },
+        "subagent_catalog_status": "verified",
         "api_version": "deerflow.runtime/v1",
         "kind": "invocation.summary.v1",
     }
@@ -122,9 +136,63 @@ def test_invocation_summary_freezes_assembly_projection_and_reads_legacy_wire() 
     ).to_dict()
     legacy_wire.pop("assembly_evidence")
     legacy_wire.pop("assembly_evidence_status")
+    legacy_wire.pop("subagent_catalog")
+    legacy_wire.pop("subagent_catalog_status")
     legacy = record_from_dict(legacy_wire)
     assert legacy.assembly_evidence is None
     assert legacy.assembly_evidence_status == "legacy_unavailable"
+    assert legacy.subagent_catalog is None
+    assert legacy.subagent_catalog_status == "legacy_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("catalog", "status"),
+    [
+        (None, "verified"),
+        ({"version": 1}, "verified"),
+        (
+            {
+                "version": 1,
+                "digest": "7" * 64,
+                "count": 0,
+                "allowed_names": ["planner"],
+            },
+            "verified",
+        ),
+        (
+            {
+                "version": 1,
+                "digest": "7" * 64,
+                "count": 1,
+                "allowed_names": ["planner", "planner"],
+            },
+            "verified",
+        ),
+        (
+            {
+                "version": 1,
+                "digest": "7" * 64,
+                "count": 1,
+                "allowed_names": [],
+            },
+            "verified",
+        ),
+        (None, "corrupt"),
+    ],
+)
+def test_invocation_summary_rejects_invalid_subagent_catalog_projection(catalog, status) -> None:
+    from deerflow_runtime_api import InvocationSummaryV1
+
+    with pytest.raises(ValueError, match="subagent catalog"):
+        InvocationSummaryV1(
+            run_id="run-1",
+            thread_id="thread-1",
+            status="running",
+            state_version=2,
+            source_kind="http",
+            subagent_catalog=catalog,
+            subagent_catalog_status=status,
+        )
 
 
 @pytest.mark.parametrize(
@@ -410,6 +478,65 @@ def test_lifecycle_summary_revalidates_and_redacts_bound_assembly_evidence() -> 
     }
     assert "accepted_agent_revision_digest" not in summary["assembly_evidence"]
     assert len(json.dumps(summary, sort_keys=True).encode("utf-8")) <= 16 * 1024
+
+
+def test_lifecycle_summary_exposes_only_bounded_subagent_catalog_facts() -> None:
+    from deerflow.runtime.runs.lifecycle_query import build_invocation_summary
+    from deerflow.runtime.subagent_snapshot import (
+        ResolvedSubagentCatalogV1,
+        resolved_subagent_definition,
+    )
+
+    entry = resolved_subagent_definition(
+        name="planner",
+        source_kind="managed",
+        source_version="source-v1",
+        description="private description",
+        system_prompt="private prompt",
+        model=None,
+        model_settings={},
+        tool_names=(),
+        skill_names=(),
+        max_turns=7,
+        timeout_seconds=30,
+    )
+    catalog = ResolvedSubagentCatalogV1.from_entries(
+        (entry,),
+        allowed_names=("planner",),
+    )
+    row = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "running",
+        "state_version": 2,
+        **_accepted_fields("http", "request-1"),
+        "agent_revision_json": {
+            "version": 1,
+            "agent_id": "lead",
+            "storage_source": "file",
+            "storage_version": "v1",
+            "digest": "a" * 64,
+            "subagent_catalog": catalog.to_persisted_json(),
+            "skill_scopes": {
+                "version": 1,
+                "scopes": {"lead": [], "subagent:planner": []},
+                "digest": "b" * 64,
+            },
+        },
+    }
+
+    summary = build_invocation_summary(row)
+
+    assert summary is not None
+    assert summary["subagent_catalog"] == {
+        "version": 1,
+        "digest": catalog.digest,
+        "count": 1,
+        "allowed_names": ("planner",),
+    }
+    assert summary["subagent_catalog_status"] == "verified"
+    assert "private prompt" not in json.dumps(summary)
+    assert "private description" not in json.dumps(summary)
 
 
 @pytest.mark.parametrize(

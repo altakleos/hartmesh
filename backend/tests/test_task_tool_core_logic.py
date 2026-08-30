@@ -13,6 +13,13 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+from deerflow.runtime.subagent_snapshot import (
+    ResolvedSkillScopesV1,
+    ResolvedSubagentCatalogV1,
+    resolved_subagent_definition,
+)
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
 from deerflow.subagents.config import SubagentConfig
 from deerflow.subagents.status_contract import (
@@ -65,6 +72,40 @@ def _make_subagent_config(name: str = "general-purpose") -> SubagentConfig:
         system_prompt="Base system prompt",
         max_turns=50,
         timeout_seconds=10,
+    )
+
+
+def _accepted_material_with_planner() -> tuple[ResolvedAgentMaterialV1, object]:
+    entry = resolved_subagent_definition(
+        name="planner",
+        source_kind="managed",
+        source_version="source-v1",
+        description="Accepted planner",
+        system_prompt="Accepted planner prompt",
+        model=None,
+        model_settings={},
+        tool_names=("read_file",),
+        skill_names=(),
+        max_turns=7,
+        timeout_seconds=11,
+        inherits_tools=True,
+    )
+    catalog = ResolvedSubagentCatalogV1.from_entries(
+        (entry,),
+        allowed_names=("planner",),
+    )
+    return (
+        ResolvedAgentMaterialV1(
+            agent_id="lead",
+            storage_source="file",
+            storage_version="v1",
+            agent_config={"name": "lead"},
+            soul="",
+            model_profile={"name": "parent"},
+            subagent_catalog=catalog,
+            skill_scopes=ResolvedSkillScopesV1.from_scopes({"lead": (), "subagent:planner": ()}),
+        ),
+        entry,
     )
 
 
@@ -259,6 +300,104 @@ def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
     assert message.content == "Task failed. Error: Unknown subagent type 'general-purpose'. Available: general-purpose"
     assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == "Unknown subagent type 'general-purpose'. Available: general-purpose"
+
+
+def test_accepted_task_rejects_missing_name_without_live_fallback(monkeypatch):
+    runtime = _make_runtime()
+    material, _entry = _accepted_material_with_planner()
+    runtime.context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = material
+
+    def live_read_forbidden(*_args, **_kwargs):
+        raise AssertionError("accepted dispatch must not read the live registry")
+
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_available_subagent_names",
+        live_read_forbidden,
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_subagent_config",
+        live_read_forbidden,
+    )
+
+    result = _run_task_tool(
+        runtime=runtime,
+        description="blocked delegation",
+        prompt="do work",
+        subagent_type="edited-live-name",
+        tool_call_id="tc-not-accepted",
+    )
+
+    message = _task_tool_message(result)
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == "subagent_not_accepted"
+
+
+def test_accepted_task_passes_frozen_definition_and_config_to_executor(monkeypatch):
+    runtime = _make_runtime()
+    material, entry = _accepted_material_with_planner()
+    runtime.context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = material
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def retain_resolved_agent_material(self, _consumer_id):
+            return None
+
+        def execute_async(self, _prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    def live_read_forbidden(*_args, **_kwargs):
+        raise AssertionError("accepted dispatch must not read the live registry")
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_available_subagent_names",
+        live_read_forbidden,
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_subagent_config",
+        live_read_forbidden,
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(
+        "deerflow.tools.get_available_tools",
+        lambda **_kwargs: [
+            SimpleNamespace(name="read_file"),
+            SimpleNamespace(name="write_file"),
+        ],
+    )
+
+    _run_task_tool(
+        runtime=runtime,
+        description="accepted delegation",
+        prompt="do work",
+        subagent_type="planner",
+        tool_call_id="tc-accepted",
+    )
+
+    assert captured["config"].system_prompt == "Accepted planner prompt"
+    assert captured["config"].max_turns == 7
+    assert captured["config"].tools == ["read_file"]
+    assert [tool.name for tool in captured["tools"]] == [
+        "read_file",
+        "write_file",
+    ]
+    assert captured["resolved_agent_material"] is material
+    assert "resolved_subagent_definition" not in captured
+    assert "parent_subagent_catalog_digest" not in captured
 
 
 def test_task_tool_enforces_caller_subagent_snapshot(monkeypatch):

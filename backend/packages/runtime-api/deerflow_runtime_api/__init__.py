@@ -42,6 +42,12 @@ _ASSEMBLY_EVIDENCE_FIELDS = (
     "skillset_digest",
     "policy_digest",
 )
+_SUBAGENT_CATALOG_FIELDS = (
+    "version",
+    "digest",
+    "count",
+    "allowed_names",
+)
 MAX_OBSERVATION_PAGE_SIZE = 500
 MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES = 4 * 1024
 MAX_OBSERVATION_PAYLOAD_BYTES = 12 * 1024 * 1024
@@ -178,6 +184,37 @@ def _assembly_evidence(value: Any) -> Mapping[str, ImmutableJsonValue]:
     if any(projected[name] is None for name in _ASSEMBLY_EVIDENCE_FIELDS if name != "version"):
         raise ValueError("assembly_evidence digests and effective_model must be non-null")
     return MappingProxyType(projected)
+
+
+def _subagent_catalog(value: Any) -> Mapping[str, ImmutableJsonValue]:
+    if not isinstance(value, Mapping) or set(value) != set(_SUBAGENT_CATALOG_FIELDS):
+        raise ValueError("subagent catalog must contain exactly the bounded v1 projection")
+    if type(value.get("version")) is not int or value["version"] != 1:
+        raise ValueError("subagent catalog version must be 1")
+    digest = _optional_digest(value.get("digest"), "subagent catalog digest")
+    count = value.get("count")
+    if type(count) is not int or not 0 <= count <= 64:
+        raise ValueError("subagent catalog count must be an integer from 0 through 64")
+    raw_names = value.get("allowed_names")
+    if not isinstance(raw_names, (list, tuple)):
+        raise ValueError("subagent catalog allowed_names must be a list")
+    names = tuple(raw_names)
+    if len(names) != count:
+        raise ValueError("subagent catalog count must equal its allowed name count")
+    if any(not isinstance(name, str) or _AGENT_IDENTIFIER_RE.fullmatch(name) is None or name != name.lower() for name in names):
+        raise ValueError("subagent catalog allowed names must be canonical agent identifiers")
+    if names != tuple(sorted(set(names))):
+        raise ValueError("subagent catalog allowed names must be sorted and unique")
+    if digest is None:
+        raise ValueError("subagent catalog digest must be non-null")
+    return MappingProxyType(
+        {
+            "version": 1,
+            "digest": digest,
+            "count": count,
+            "allowed_names": names,
+        }
+    )
 
 
 def _correlation_value(value: Any) -> ImmutableJsonValue:
@@ -487,6 +524,8 @@ class InvocationSummaryV1(_Record):
     constraint_evidence_digest: str | None = None
     assembly_evidence: Mapping[str, ImmutableJsonValue] | None = None
     assembly_evidence_status: Literal["legacy_unavailable", "pending", "verified"] | None = None
+    subagent_catalog: Mapping[str, ImmutableJsonValue] | None = None
+    subagent_catalog_status: Literal["legacy_unavailable", "verified"] | None = None
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["invocation.summary.v1"] = field(default=KIND, init=False)
 
@@ -536,6 +575,19 @@ class InvocationSummaryV1(_Record):
             if evidence_status != "verified":
                 raise ValueError("assembly evidence may be present only when verified")
             object.__setattr__(self, "assembly_evidence", _assembly_evidence(self.assembly_evidence))
+        catalog_status = self.subagent_catalog_status
+        if catalog_status is None:
+            catalog_status = "legacy_unavailable"
+            object.__setattr__(self, "subagent_catalog_status", catalog_status)
+        if catalog_status not in {"legacy_unavailable", "verified"}:
+            raise ValueError("unsupported subagent catalog status")
+        if self.subagent_catalog is None:
+            if catalog_status == "verified":
+                raise ValueError("verified subagent catalog must be present")
+        else:
+            if catalog_status != "verified":
+                raise ValueError("subagent catalog may be present only when verified")
+            object.__setattr__(self, "subagent_catalog", _subagent_catalog(self.subagent_catalog))
         encoded = json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
         if len(encoded) > _MAX_INVOCATION_SUMMARY_BYTES:
             raise ValueError("an invocation summary is limited to 16 KiB canonical JSON")
@@ -559,10 +611,15 @@ class InvocationSummaryV1(_Record):
         missing = expected - set(payload)
         if unknown:
             raise ValueError(f"unknown fields for {cls.KIND}: {', '.join(sorted(unknown))}")
-        assembly_fields = {"assembly_evidence", "assembly_evidence_status"}
-        if missing & assembly_fields and missing & assembly_fields != assembly_fields:
-            raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(missing & assembly_fields))}")
-        required_missing = missing - assembly_fields
+        additive_field_pairs = (
+            {"assembly_evidence", "assembly_evidence_status"},
+            {"subagent_catalog", "subagent_catalog_status"},
+        )
+        for field_pair in additive_field_pairs:
+            if missing & field_pair and missing & field_pair != field_pair:
+                raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(missing & field_pair))}")
+        additive_fields = set().union(*additive_field_pairs)
+        required_missing = missing - additive_fields
         if required_missing:
             raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(required_missing))}")
         if payload["api_version"] != API_VERSION:
@@ -574,6 +631,8 @@ class InvocationSummaryV1(_Record):
         values.pop("kind")
         values.setdefault("assembly_evidence", None)
         values.setdefault("assembly_evidence_status", None)
+        values.setdefault("subagent_catalog", None)
+        values.setdefault("subagent_catalog_status", None)
         return cls._from_wire(values)
 
 

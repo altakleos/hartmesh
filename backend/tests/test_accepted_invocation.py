@@ -338,6 +338,46 @@ async def test_restart_drift_fails_before_graph_construction_or_model_work() -> 
 
 
 @pytest.mark.asyncio
+async def test_legacy_nonterminal_revision_fails_before_resolution_or_graph_work() -> None:
+    accepted = _accepted(_material())
+    accepted = replace(
+        accepted,
+        agent_revision=replace(
+            accepted.agent_revision,
+            subagent_catalog=None,
+            skill_scopes=None,
+            legacy_live_catalog=True,
+            material=None,
+        ),
+    )
+    manager = RunManager()
+    record = await manager.create_or_reject(
+        "thread-worker-legacy-catalog",
+        accepted_invocation=accepted,
+    )
+    resolver = AsyncMock(side_effect=AssertionError("legacy rows must not resolve live material"))
+    factory = AsyncMock(side_effect=AssertionError("legacy rows must not construct a graph"))
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            agent_revision_resolver=resolver,
+        ),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    resolver.assert_not_called()
+    factory.assert_not_called()
+    assert record.status is RunStatus.error
+    assert record.stop_reason == "subagent_catalog_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_restart_equality_uses_the_exact_resolved_object_once() -> None:
     material = _material()
     accepted = _accepted(material)
@@ -376,6 +416,81 @@ async def test_restart_equality_uses_the_exact_resolved_object_once() -> None:
 
     assert calls == 1
     assert seen is material
+    assert record.status is RunStatus.success
+
+
+@pytest.mark.asyncio
+async def test_restart_rebinds_persisted_catalog_instead_of_live_managed_state() -> None:
+    from deerflow.runtime.subagent_snapshot import (
+        ResolvedSkillScopesV1,
+        ResolvedSubagentCatalogV1,
+        resolved_subagent_definition,
+    )
+
+    entry = resolved_subagent_definition(
+        name="planner",
+        source_kind="managed",
+        source_version="source-v1",
+        description="Accepted planner",
+        system_prompt="Accepted prompt",
+        model=None,
+        model_settings={},
+        tool_names=(),
+        skill_names=(),
+        max_turns=8,
+        timeout_seconds=30,
+        inherits_tools=True,
+    )
+    catalog = ResolvedSubagentCatalogV1.from_entries(
+        (entry,),
+        allowed_names=("planner",),
+    )
+    material = replace(
+        _material(),
+        subagent_catalog=catalog,
+        skill_scopes=ResolvedSkillScopesV1.from_scopes({"lead": (), "subagent:planner": ()}),
+    )
+    accepted = _accepted(material)
+    accepted = replace(
+        accepted,
+        agent_revision=replace(accepted.agent_revision, material=None),
+    )
+    live_candidate = replace(
+        material,
+        subagent_catalog=ResolvedSubagentCatalogV1.empty(),
+        skill_scopes=ResolvedSkillScopesV1.empty(),
+    )
+    manager = RunManager()
+    record = await manager.create_or_reject(
+        "thread-worker-catalog-recovery",
+        accepted_invocation=accepted,
+    )
+    seen = None
+
+    class _Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    def factory(*, config):
+        nonlocal seen
+        seen = config["context"][RESOLVED_AGENT_MATERIAL_CONTEXT_KEY]
+        return _Agent()
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            agent_revision_resolver=lambda _record, _config: ResolvedAgentRevision.from_material(live_candidate),
+        ),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    assert seen is not None
+    assert seen.subagent_catalog == catalog
     assert record.status is RunStatus.success
 
 
@@ -423,6 +538,7 @@ async def test_pinned_material_replaces_mutated_factory_context_after_digest_che
 
 def _durable_test_descriptor(material: ResolvedAgentMaterialV1, *, prompt: str = "accepted prompt"):
     from deerflow.agents.assembly_descriptor import build_assembly_descriptor
+    from deerflow.agents.lead_agent.agent import _subagent_release_policy
 
     defaults = material.runtime_defaults
     return build_assembly_descriptor(
@@ -443,13 +559,13 @@ def _durable_test_descriptor(material: ResolvedAgentMaterialV1, *, prompt: str =
             "non_interactive": bool(defaults.get("non_interactive", False)),
             "plan_mode": bool(defaults.get("is_plan_mode", False)),
             "recursion_limit": "framework-default",
-            "subagents": {
-                "enabled": False,
-                "max_concurrent": int(defaults.get("max_concurrent_subagents", 3)),
-                "max_total": int(defaults.get("max_total_subagents", 6)),
-                "type_allowlist": [],
-                "runtime_limits": {},
-            },
+            "subagents": _subagent_release_policy(
+                material.app_config,
+                enabled=False,
+                max_concurrent=int(defaults.get("max_concurrent_subagents", 3)),
+                max_total=int(defaults.get("max_total_subagents", 6)),
+                resolved_subagent_catalog=material.subagent_catalog,
+            ),
         },
     )
 

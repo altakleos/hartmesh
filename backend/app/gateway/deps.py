@@ -746,6 +746,29 @@ def get_run_context(request: Request) -> RunContext:
     else:
         authorization_provider = resolver.resolve(authorization_config).provider
 
+    def _resolve_recovered_agent_revision(record, config):
+        """Rebuild lead material while retaining accepted subagent facts."""
+
+        from deerflow.runtime.agent_revision import resolve_agent_revision
+
+        accepted = getattr(record, "accepted_invocation", None)
+        accepted_revision = getattr(accepted, "agent_revision", None)
+        return resolve_agent_revision(
+            config,
+            app_config=app_config,
+            user_id=getattr(record, "user_id", None),
+            accepted_subagent_catalog=getattr(
+                accepted_revision,
+                "subagent_catalog",
+                None,
+            ),
+            accepted_skill_scopes=getattr(
+                accepted_revision,
+                "skill_scopes",
+                None,
+            ),
+        )
+
     return RunContext(
         checkpointer=get_checkpointer(request),
         store=get_store(request),
@@ -764,6 +787,7 @@ def get_run_context(request: Request) -> RunContext:
             "clock",
             None,
         ),
+        agent_revision_resolver=_resolve_recovered_agent_revision,
     )
 
 

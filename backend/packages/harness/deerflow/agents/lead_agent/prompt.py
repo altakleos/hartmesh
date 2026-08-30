@@ -23,6 +23,7 @@ from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_sectio
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+    from deerflow.runtime.subagent_snapshot import ResolvedSubagentCatalogV1
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +300,13 @@ Skip simple one-off tasks.
 """
 
 
-def _build_available_subagents_description(available_names: list[str], bash_available: bool, *, app_config: AppConfig | None = None) -> str:
+def _build_available_subagents_description(
+    available_names: list[str],
+    bash_available: bool,
+    *,
+    app_config: AppConfig | None = None,
+    resolved_subagent_catalog: ResolvedSubagentCatalogV1 | None = None,
+) -> str:
     """Dynamically build subagent type descriptions from registry.
 
     Mirrors Codex's pattern where agent_type_description is dynamically generated
@@ -320,7 +327,16 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
 
     lines = []
     for name in available_names:
-        if name in builtin_descriptions:
+        if resolved_subagent_catalog is not None:
+            entry = resolved_subagent_catalog.get(name)
+            if entry is None:
+                continue
+            desc = html.escape(
+                entry.description.split("\n")[0].strip(),
+                quote=False,
+            )
+            lines.append(f"- **{name}**: {desc}")
+        elif name in builtin_descriptions:
             lines.append(f"- **{name}**: {builtin_descriptions[name]}")
         else:
             config = get_subagent_config(name, app_config=app_config)
@@ -344,6 +360,7 @@ def _build_subagent_section(
     *,
     app_config: AppConfig | None = None,
     allowed_subagents: list[str] | None = None,
+    resolved_subagent_catalog: ResolvedSubagentCatalogV1 | None = None,
 ) -> str:
     """Build the subagent system prompt section with dynamic subagent limits.
 
@@ -356,7 +373,9 @@ def _build_subagent_section(
     """
     n = clamp_subagent_concurrency(max_concurrent)
     total = clamp_total_subagents_per_run(max_total)
-    if allowed_subagents is None:
+    if resolved_subagent_catalog is not None:
+        available_names = list(resolved_subagent_catalog.allowed_names)
+    elif allowed_subagents is None:
         available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
     else:
         available_names = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents) if app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
@@ -366,7 +385,12 @@ def _build_subagent_section(
 
     # Dynamically build subagent type descriptions from registry (aligned with Codex's
     # agent_type_description pattern where all registered roles are listed in the tool spec).
-    available_subagents = _build_available_subagents_description(available_names, bash_available, app_config=app_config)
+    available_subagents = _build_available_subagents_description(
+        available_names,
+        bash_available,
+        app_config=app_config,
+        resolved_subagent_catalog=resolved_subagent_catalog,
+    )
     direct_tool_examples = "bash, ls, read_file, web_search, etc." if bash_available else "ls, read_file, web_search, etc."
     direct_execution_example = (
         '# User asks: "Run the tests"\n# Thinking: Direct bash is cheaper than delegation\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
@@ -1018,6 +1042,7 @@ def apply_prompt_template(
     resolved_soul: str | bytes | None = None,
     resolved_skills: tuple[Skill, ...] | None = None,
     allowed_subagents: list[str] | None = None,
+    resolved_subagent_catalog: ResolvedSubagentCatalogV1 | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = clamp_subagent_concurrency(max_concurrent_subagents)
@@ -1026,7 +1051,17 @@ def apply_prompt_template(
         subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
         total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
     total = clamp_total_subagents_per_run(total)
-    subagent_section = _build_subagent_section(n, total, app_config=app_config, allowed_subagents=allowed_subagents) if subagent_enabled else ""
+    subagent_section = (
+        _build_subagent_section(
+            n,
+            total,
+            app_config=app_config,
+            allowed_subagents=allowed_subagents,
+            resolved_subagent_catalog=resolved_subagent_catalog,
+        )
+        if subagent_enabled
+        else ""
+    )
 
     # Add subagent reminder to critical_reminders if enabled
     reminder_benefits = "specialist capability or context isolation" if n == 1 else "real parallel latency, specialist capability, or context isolation"

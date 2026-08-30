@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 42
+config_version: 43
 
 # ============================================================================
 # Logging
@@ -1464,6 +1464,12 @@ sandbox:
 #   # Per-request runtime context can temporarily override this with
 #   # `max_total_subagents`, clamped to the same 1-50 range.
 #   max_total_per_run: 6
+#
+#   # Maximum number of effective definitions captured for one accepted run.
+#   # Operators may lower this admission bound, but the hard maximum is 64.
+#   # Managed subagent changes apply to invocations accepted after the edit;
+#   # an in-flight or recovered invocation uses its accepted snapshot.
+#   max_catalog_entries: 64
 #
 #   # Per-run token ceiling for subagents (#3875 Phase 2). A backstop against a
 #   # subagent that burns tokens on trivial work. At the hard-stop threshold the

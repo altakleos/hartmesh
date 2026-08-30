@@ -11,6 +11,11 @@ from deerflow.config.app_config import AppConfig
 from deerflow.persistence.agents import make_agent_store
 from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1, ResolvedAgentRevision, canonical_digest
 from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+from deerflow.runtime.subagent_snapshot import (
+    ResolvedSkillScopesV1,
+    ResolvedSubagentCatalogV1,
+    snapshot_effective_subagents,
+)
 
 RESOLVED_AGENT_MATERIAL_CONTEXT_KEY = "__deerflow_resolved_agent_material_v1"
 
@@ -166,10 +171,14 @@ def resolve_agent_revision(
     *,
     app_config: AppConfig,
     user_id: str | None,
+    accepted_subagent_catalog: ResolvedSubagentCatalogV1 | None = None,
+    accepted_skill_scopes: ResolvedSkillScopesV1 | None = None,
 ) -> ResolvedAgentRevision:
     """Resolve current material once and return the exact captured object."""
     assert_agent_config_projection_complete()
     assert_app_config_projection_complete()
+    if (accepted_subagent_catalog is None) != (accepted_skill_scopes is None):
+        raise ValueError("accepted catalog recovery requires its matching skill scopes")
     cfg = _runtime_config(config)
     is_bootstrap = bool(cfg.get("is_bootstrap", False))
     agent_name = validate_agent_name(cfg.get("agent_name"))
@@ -199,6 +208,7 @@ def resolve_agent_revision(
     model_config = pinned_app_config.get_model_config(selected_model) if selected_model else None
     if model_config is None and pinned_app_config.models:
         model_config = pinned_app_config.models[0]
+    resolved_model_name = model_config.name if model_config is not None else selected_model
     model_profile = _safe_settings(model_config or {}, path="models.selected")
     model_profile["app_execution_digest"] = canonical_digest(
         {
@@ -217,18 +227,45 @@ def resolve_agent_revision(
     configured_tools = tuple(sorted(tool.name for tool in pinned_app_config.tools if not groups or tool.group in groups))
 
     enabled_skills, _ = _skills(pinned_app_config, user_id=user_id)
+    enabled_skill_names = tuple(skill.name for skill in enabled_skills)
     if is_bootstrap:
-        available_names: set[str] | None = {"bootstrap"}
+        lead_skill_names: set[str] | None = {"bootstrap"}
     elif pinned_agent_config and pinned_agent_config.skills is not None:
-        available_names = set(pinned_agent_config.skills)
+        lead_skill_names = set(pinned_agent_config.skills)
     else:
-        available_names = None
-    live_effective_skills = tuple(skill for skill in enabled_skills if available_names is None or skill.name in available_names)
+        lead_skill_names = None
+    live_lead_skills = tuple(skill for skill in enabled_skills if lead_skill_names is None or skill.name in lead_skill_names)
+
+    subagent_catalog = accepted_subagent_catalog
+    if subagent_catalog is None:
+        subagent_catalog = snapshot_effective_subagents(
+            app_config=pinned_app_config,
+            agent_config=pinned_agent_config,
+            user_id=user_id,
+            is_bootstrap=is_bootstrap,
+            enabled=bool(cfg.get("subagent_enabled", False)),
+            available_skill_names=enabled_skill_names,
+            parent_model_name=resolved_model_name,
+        )
+    transitive_skill_names = {skill.name for skill in live_lead_skills}
+    for entry in subagent_catalog.entries:
+        transitive_skill_names.update(entry.skill_names)
+    transitive_skills = tuple(skill for skill in enabled_skills if skill.name in transitive_skill_names)
     skill_snapshot = snapshot_effective_skills(
-        live_effective_skills,
+        transitive_skills,
         user_id=user_id,
     )
-    effective_skills = skill_snapshot.skills if skill_snapshot is not None else ()
+    snapshot_skills_by_name = {skill.name: skill for skill in (() if skill_snapshot is None else skill_snapshot.skills)}
+    projection_digest_by_name = {projection.name: projection.content_digest for projection in (() if skill_snapshot is None else skill_snapshot.projections)}
+    effective_skills = tuple(snapshot_skills_by_name[skill.name] for skill in live_lead_skills if skill.name in snapshot_skills_by_name)
+    skill_scopes = accepted_skill_scopes
+    if skill_scopes is None:
+        skill_scopes = ResolvedSkillScopesV1.from_scopes(
+            {
+                "lead": tuple(projection_digest_by_name[skill.name] for skill in live_lead_skills if skill.name in projection_digest_by_name),
+                **{f"subagent:{entry.name}": tuple(projection_digest_by_name[name] for name in entry.skill_names if name in projection_digest_by_name) for entry in subagent_catalog.entries},
+            }
+        )
     skill_projection = tuple(projection.to_json() for projection in skill_snapshot.projections) if skill_snapshot is not None else ()
 
     agent_projection = None
@@ -275,6 +312,8 @@ def resolve_agent_revision(
             tools=configured_tools,
             skills=skill_projection,
             runtime_defaults=runtime_defaults,
+            subagent_catalog=subagent_catalog,
+            skill_scopes=skill_scopes,
             app_config=pinned_app_config,
             agent_config_object=pinned_agent_config,
             enabled_skill_objects=effective_skills,

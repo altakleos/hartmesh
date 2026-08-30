@@ -436,9 +436,18 @@ def _bridge() -> SimpleNamespace:
 
 def _assembled_graph(material: ResolvedAgentMaterialV1, graph: object):
     from deerflow.agents.assembly_descriptor import build_assembly_descriptor
-    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+    from deerflow.agents.lead_agent.agent import (
+        LeadAgentAssembly,
+        _subagent_release_policy,
+    )
 
     defaults = material.runtime_defaults
+    allowed_subagents = getattr(
+        material.agent_config_object,
+        "allowed_subagents",
+        None,
+    )
+    subagents_enabled = bool(defaults.get("subagent_enabled", False)) and allowed_subagents != []
     descriptor = build_assembly_descriptor(
         namespace="deerflow",
         agent_name="lead-agent",
@@ -457,16 +466,179 @@ def _assembled_graph(material: ResolvedAgentMaterialV1, graph: object):
             "non_interactive": False,
             "plan_mode": bool(defaults.get("is_plan_mode", False)),
             "recursion_limit": "framework-default",
-            "subagents": {
-                "enabled": False,
-                "max_concurrent": int(defaults.get("max_concurrent_subagents", 3)),
-                "max_total": int(defaults.get("max_total_subagents", 6)),
-                "type_allowlist": [],
-                "runtime_limits": {},
-            },
+            "subagents": _subagent_release_policy(
+                material.app_config,
+                enabled=subagents_enabled,
+                max_concurrent=int(defaults.get("max_concurrent_subagents", 3)),
+                max_total=int(defaults.get("max_total_subagents", 6)),
+                resolved_subagent_catalog=material.subagent_catalog,
+            ),
         },
     )
     return LeadAgentAssembly(graph=graph, descriptor=descriptor)
+
+
+@pytest.mark.anyio
+async def test_process_restart_completes_with_frozen_catalog_after_managed_edit_and_delete(
+    monkeypatch,
+) -> None:
+    """Qualify the persisted-catalog seam across a real store round trip."""
+
+    from deerflow.config.agents_config import AgentConfig
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.model_config import ModelConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.persistence.managed_subagents import ManagedSubagentDefinition
+    from deerflow.runtime import agent_revision
+    from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+    from deerflow.subagents import registry
+
+    live = [
+        ManagedSubagentDefinition(
+            name="planner",
+            description="Accepted planner",
+            system_prompt="Accepted planner prompt",
+            tools=[],
+            skills=[],
+        )
+    ]
+    monkeypatch.setattr(
+        registry,
+        "_managed_definitions",
+        lambda **_: tuple(live),
+    )
+    app_config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        models=[
+            ModelConfig(
+                name="offline-model",
+                use="provider.OfflineModel",
+                model="offline",
+            )
+        ],
+    )
+    lead_config = AgentConfig(
+        name="lead-agent",
+        skills=[],
+        allowed_subagents=["planner"],
+    )
+    monkeypatch.setattr(
+        agent_revision,
+        "_skills",
+        lambda _app_config, *, user_id: ((), ()),
+    )
+    monkeypatch.setattr(
+        agent_revision,
+        "make_agent_store",
+        lambda _app_config: SimpleNamespace(
+            snapshot=lambda _name, *, user_id: SimpleNamespace(
+                config=lead_config,
+                soul="",
+                source="file",
+                version="lead-v1",
+            )
+        ),
+    )
+    runtime_config = {
+        "configurable": {
+            "agent_name": "lead-agent",
+            "subagent_enabled": True,
+            "model_name": "offline-model",
+        }
+    }
+    accepted_revision = agent_revision.resolve_agent_revision(
+        runtime_config,
+        app_config=app_config,
+        user_id="owner-1",
+    )
+    accepted_material = accepted_revision.material
+    assert accepted_material is not None
+    accepted_planner = accepted_material.subagent_catalog.get("planner")
+    assert accepted_planner is not None
+    assert accepted_planner.system_prompt == "Accepted planner prompt"
+
+    store = MemoryRunStore()
+    first_process = RunManager(
+        store=store,
+        worker_id="catalog-recovery-worker",
+    )
+    admitted = await first_process.create_or_reject(
+        "thread-catalog-process-recovery",
+        user_id="owner-1",
+        accepted_invocation=_accepted(accepted_material),
+    )
+    run_id = admitted.run_id
+
+    # The accepted row is the only state that survives the worker loss.  Its
+    # revision deliberately has no process-local material after hydration.
+    del admitted, first_process
+    live[0] = live[0].model_copy(update={"system_prompt": "Edited after acceptance"})
+    live.clear()
+
+    def recovery_live_read_forbidden(**_kwargs):
+        raise AssertionError("accepted recovery must not read the deleted managed row")
+
+    monkeypatch.setattr(
+        registry,
+        "_managed_definitions",
+        recovery_live_read_forbidden,
+    )
+    restarted = RunManager(
+        store=store,
+        worker_id="catalog-recovery-worker",
+    )
+    persisted_row = await store.get(run_id)
+    assert persisted_row is not None
+    recovered = restarted._record_from_store(persisted_row)
+    assert recovered.accepted_invocation is not None
+    assert recovered.accepted_invocation.agent_revision.material is None
+    assert recovered.accepted_invocation.agent_revision.subagent_catalog == accepted_material.subagent_catalog
+
+    # Recreate the process-local worker handoff around the persisted record.
+    # RunManager admission normally performs these two index writes; doing
+    # them explicitly is the process-boundary seam under qualification here.
+    async with restarted._lock:
+        recovered.store_only = False
+        restarted._runs[recovered.run_id] = recovered
+        restarted._index_run_locked(recovered)
+
+    seen_prompts: list[str] = []
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    def factory(*, config):
+        material = config["context"][RESOLVED_AGENT_MATERIAL_CONTEXT_KEY]
+        planner = material.subagent_catalog.get("planner")
+        assert planner is not None
+        seen_prompts.append(planner.system_prompt)
+        return _assembled_graph(material, Agent())
+
+    await run_agent(
+        _bridge(),
+        restarted,
+        recovered,
+        ctx=RunContext(
+            checkpointer=None,
+            app_config=app_config,
+            agent_revision_resolver=lambda record, config: agent_revision.resolve_agent_revision(
+                config,
+                app_config=app_config,
+                user_id=record.user_id,
+                accepted_subagent_catalog=(record.accepted_invocation.agent_revision.subagent_catalog),
+                accepted_skill_scopes=(record.accepted_invocation.agent_revision.skill_scopes),
+            ),
+        ),
+        agent_factory=factory,
+        graph_input={},
+        config=runtime_config,
+    )
+
+    assert recovered.status is RunStatus.success
+    assert seen_prompts == ["Accepted planner prompt"]
+    row = await store.get(recovered.run_id)
+    assert row is not None and row["status"] == "success"
 
 
 @pytest.mark.anyio
