@@ -689,6 +689,7 @@ async def _assert_postgres_checks_reject_invalid_rows(engine: AsyncEngine) -> No
     scope = "http:v1:sha256:" + "a" * 64
     digest = "b" * 64
     caller_intent = '{"version":"caller-intent/v1","intent":{}}'
+    assembly_evidence = '{"version":1}'
     await assert_rejected("negative-version", state_version=-1)
     await assert_rejected("key-pair", extra_columns="external_scope", extra_values=":external_scope", external_scope=scope)
     await assert_rejected("reverse-key-pair", extra_columns="external_key", extra_values=":external_key", external_key="raw:key-only")
@@ -865,31 +866,36 @@ async def _assert_postgres_checks_reject_invalid_rows(engine: AsyncEngine) -> No
     await assert_rejected(
         "assembly-evidence-json-only",
         extra_columns="assembly_evidence_json",
-        extra_values="CAST('{\"version\":1}' AS json)",
+        extra_values="CAST(:assembly_evidence_json AS json)",
+        assembly_evidence_json=assembly_evidence,
     )
     await assert_rejected(
         "auxiliary-assembly-evidence",
         operation_kind="checkpoint_write",
         extra_columns="assembly_evidence_json, assembly_evidence_digest",
-        extra_values="CAST('{\"version\":1}' AS json), :assembly_evidence_digest",
+        extra_values="CAST(:assembly_evidence_json AS json), :assembly_evidence_digest",
+        assembly_evidence_json=assembly_evidence,
         assembly_evidence_digest=digest,
     )
     await assert_rejected(
         "assembly-evidence-uppercase",
         extra_columns="assembly_evidence_json, assembly_evidence_digest",
-        extra_values="CAST('{\"version\":1}' AS json), :assembly_evidence_digest",
+        extra_values="CAST(:assembly_evidence_json AS json), :assembly_evidence_digest",
+        assembly_evidence_json=assembly_evidence,
         assembly_evidence_digest="A" * 64,
     )
     await assert_rejected(
         "assembly-evidence-nonhex",
         extra_columns="assembly_evidence_json, assembly_evidence_digest",
-        extra_values="CAST('{\"version\":1}' AS json), :assembly_evidence_digest",
+        extra_values="CAST(:assembly_evidence_json AS json), :assembly_evidence_digest",
+        assembly_evidence_json=assembly_evidence,
         assembly_evidence_digest="g" * 64,
     )
     await assert_rejected(
         "assembly-evidence-length",
         extra_columns="assembly_evidence_json, assembly_evidence_digest",
-        extra_values="CAST('{\"version\":1}' AS json), :assembly_evidence_digest",
+        extra_values="CAST(:assembly_evidence_json AS json), :assembly_evidence_digest",
+        assembly_evidence_json=assembly_evidence,
         assembly_evidence_digest="a" * 63,
     )
 
