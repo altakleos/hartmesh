@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0022_merge_scheduled_enqueue"
+HEAD = "0023_agent_assembly_evidence"
 
 
 def _url(tmp_path: Path) -> str:

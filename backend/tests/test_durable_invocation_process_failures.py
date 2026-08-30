@@ -434,6 +434,41 @@ def _bridge() -> SimpleNamespace:
     return SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
 
 
+def _assembled_graph(material: ResolvedAgentMaterialV1, graph: object):
+    from deerflow.agents.assembly_descriptor import build_assembly_descriptor
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+
+    defaults = material.runtime_defaults
+    descriptor = build_assembly_descriptor(
+        namespace="deerflow",
+        agent_name="lead-agent",
+        requested_model=None,
+        effective_model=str(material.model_profile["name"]),
+        model_config=SimpleNamespace(),
+        thinking_enabled=bool(defaults.get("thinking_enabled", True)),
+        reasoning_effort=defaults.get("reasoning_effort"),
+        rendered_base_prompt="offline qualification prompt",
+        tools=[],
+        middlewares=[],
+        deferred_names=frozenset(),
+        enabled_skills=list(material.enabled_skill_objects),
+        effective_policies={
+            "bootstrap": False,
+            "non_interactive": False,
+            "plan_mode": bool(defaults.get("is_plan_mode", False)),
+            "recursion_limit": "framework-default",
+            "subagents": {
+                "enabled": False,
+                "max_concurrent": int(defaults.get("max_concurrent_subagents", 3)),
+                "max_total": int(defaults.get("max_total_subagents", 6)),
+                "type_allowlist": [],
+                "runtime_limits": {},
+            },
+        },
+    )
+    return LeadAgentAssembly(graph=graph, descriptor=descriptor)
+
+
 @pytest.mark.anyio
 async def test_process_loss_during_execution_is_fenced_before_stale_completion() -> None:
     store = MemoryRunStore()
@@ -470,7 +505,9 @@ async def test_process_loss_during_execution_is_fenced_before_stale_completion()
     def factory(*, config):
         assert config["context"]
         counts["graph"] += 1
-        return BlockingAgent()
+        material = record.accepted_invocation.agent_revision.material
+        assert material is not None
+        return _assembled_graph(material, BlockingAgent())
 
     counts["attachments"] += 1
     worker = asyncio.create_task(
@@ -521,7 +558,7 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
     def factory(*, config):
         assert config["context"]
         counts["graph"] += 1
-        return Agent()
+        return _assembled_graph(material, Agent())
 
     await run_agent(
         _bridge(),

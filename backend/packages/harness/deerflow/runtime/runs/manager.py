@@ -24,6 +24,7 @@ from .lifecycle_query import LifecyclePage, LifecycleQuery, LifecycleVisibilityS
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .store.base import (
     AdmissionOutcome,
+    BindAssemblyEvidenceOutcome,
     CancellationRequestOutcome,
     DuplicateRunIdentityError,
     EditReplayVisibility,
@@ -52,6 +53,18 @@ _MAX_POST_COMMIT_OBLIGATION_COUNT = 2_147_483_647
 ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
 LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachable."
+ASSEMBLY_EVIDENCE_UNAVAILABLE_ERROR = "Agent assembly evidence is unavailable"
+ASSEMBLY_EVIDENCE_UNAVAILABLE_STOP_REASON = "assembly_evidence_unavailable"
+
+_ACCEPTED_INVOCATION_MARKER_FIELDS = (
+    "agent_revision_digest",
+    "agent_revision_json",
+    "origin_json",
+    "principal_projection_json",
+    "principal_projection_digest",
+    "base_origin_digest",
+    "accepted_context_digest",
+)
 
 _RETRYABLE_SQLITE_MESSAGES = (
     "database is locked",
@@ -289,6 +302,8 @@ class RunRecord:
     caller_intent_digest_version: str | None = None
     execution_evidence_json: dict[str, Any] | None = None
     execution_evidence_digest: str | None = None
+    assembly_evidence_json: dict[str, Any] | None = None
+    assembly_evidence_digest: str | None = None
     execution_lease_renewal: Callable[[], Awaitable[bool]] | None = field(
         default=None,
         repr=False,
@@ -416,6 +431,8 @@ class RunManager:
         record.lease_expires_at = row.get("lease_expires_at")
         record.execution_evidence_json = row.get("execution_evidence_json")
         record.execution_evidence_digest = row.get("execution_evidence_digest")
+        record.assembly_evidence_json = row.get("assembly_evidence_json")
+        record.assembly_evidence_digest = row.get("assembly_evidence_digest")
         record.updated_at = row.get("updated_at") or record.updated_at
 
     def _thread_records_locked(self, thread_id: str) -> list[RunRecord]:
@@ -1761,6 +1778,8 @@ class RunManager:
             caller_intent_digest_version=row.get("caller_intent_digest_version"),
             execution_evidence_json=row.get("execution_evidence_json"),
             execution_evidence_digest=row.get("execution_evidence_digest"),
+            assembly_evidence_json=row.get("assembly_evidence_json"),
+            assembly_evidence_digest=row.get("assembly_evidence_digest"),
             state_version=row.get("state_version") or 0,
             idempotency_key=row.get("idempotency_key"),
         )
@@ -2274,6 +2293,122 @@ class RunManager:
                     stop_reason=restore_stop_reason,
                 )
             return RunStartOutcome.cancelled
+
+    @property
+    def requires_assembly_evidence(self) -> bool:
+        """Whether accepted runs use an authoritative durable lifecycle store."""
+
+        return self._store is not None and self._store.durable_lifecycle
+
+    async def _resolve_uncertain_assembly_evidence_bind(
+        self,
+        run_id: str,
+        *,
+        owner_id: str,
+        lease_epoch: int,
+        evidence_json: dict[str, object],
+        evidence_digest: str,
+    ) -> BindAssemblyEvidenceOutcome:
+        """Re-read one uncertain bind without assuming that ownership was lost."""
+
+        from deerflow.runtime.assembly_evidence import (
+            AssemblyEvidenceError,
+            AssemblyEvidenceV1,
+            assembly_evidence_digest,
+        )
+
+        assert self._store is not None
+        try:
+            row = await self._call_store_with_retry(
+                "reconcile_assembly_evidence_bind",
+                run_id,
+                lambda: self._store.get(run_id),
+            )
+        except Exception:
+            logger.exception("Could not reconcile uncertain assembly evidence bind for run %s", run_id)
+            return BindAssemblyEvidenceOutcome.ownership_lost
+        if row is None:
+            return BindAssemblyEvidenceOutcome.not_found
+        lease_expires_at = row.get("lease_expires_at")
+        if row.get("status") != RunStatus.running.value or row.get("owner_worker_id") != owner_id or row.get("state_version") != lease_epoch or (lease_expires_at is not None and is_lease_expired(lease_expires_at, grace_seconds=0)):
+            return BindAssemblyEvidenceOutcome.ownership_lost
+
+        stored_json = row.get("assembly_evidence_json")
+        stored_digest = row.get("assembly_evidence_digest")
+        if stored_json is None or stored_digest is None:
+            return BindAssemblyEvidenceOutcome.mismatch
+        try:
+            persisted = AssemblyEvidenceV1.from_persisted_json(stored_json)
+            if stored_digest == evidence_digest and assembly_evidence_digest(persisted) == stored_digest and persisted.to_persisted_json() == evidence_json:
+                return BindAssemblyEvidenceOutcome.already_matching
+        except (AssemblyEvidenceError, TypeError, ValueError):
+            pass
+        return BindAssemblyEvidenceOutcome.mismatch
+
+    async def bind_assembly_evidence(
+        self,
+        run_id: str,
+        evidence: object,
+    ) -> BindAssemblyEvidenceOutcome:
+        """Bind V1 evidence using this worker's current owner/version fence."""
+
+        from deerflow.runtime.assembly_evidence import AssemblyEvidenceV1, assembly_evidence_digest
+
+        if not isinstance(evidence, AssemblyEvidenceV1):
+            raise RunStartupError("Invalid agent assembly evidence")
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return BindAssemblyEvidenceOutcome.not_found
+            owner_id = record.owner_worker_id
+            lease_epoch = record.state_version
+        if self._store is None or not self._store.durable_lifecycle or owner_id is None:
+            return BindAssemblyEvidenceOutcome.ownership_lost
+
+        evidence_json = evidence.to_persisted_json()
+        evidence_digest = assembly_evidence_digest(evidence)
+        try:
+            outcome = await self._call_store_with_retry(
+                "bind_assembly_evidence",
+                run_id,
+                lambda: self._store.bind_assembly_evidence(
+                    run_id,
+                    owner_id=owner_id,
+                    lease_epoch=lease_epoch,
+                    evidence_json=evidence_json,
+                    evidence_digest=evidence_digest,
+                ),
+            )
+        except Exception:
+            logger.exception("Assembly evidence bind failed for run %s", run_id)
+            outcome = await self._resolve_uncertain_assembly_evidence_bind(
+                run_id,
+                owner_id=owner_id,
+                lease_epoch=lease_epoch,
+                evidence_json=evidence_json,
+                evidence_digest=evidence_digest,
+            )
+        if not isinstance(outcome, BindAssemblyEvidenceOutcome):
+            logger.error("Assembly evidence bind returned an invalid outcome for run %s", run_id)
+            outcome = await self._resolve_uncertain_assembly_evidence_bind(
+                run_id,
+                owner_id=owner_id,
+                lease_epoch=lease_epoch,
+                evidence_json=evidence_json,
+                evidence_digest=evidence_digest,
+            )
+        async with self._lock:
+            current = self._runs.get(run_id)
+            if current is not None:
+                if outcome in (
+                    BindAssemblyEvidenceOutcome.bound,
+                    BindAssemblyEvidenceOutcome.already_matching,
+                ):
+                    current.assembly_evidence_json = evidence_json
+                    current.assembly_evidence_digest = evidence_digest
+                elif outcome is BindAssemblyEvidenceOutcome.ownership_lost:
+                    current.ownership_lost = True
+        return outcome
 
     async def set_execution_lease_renewal(
         self,
@@ -4051,6 +4186,49 @@ class RunManager:
                         capability_id="run_store",
                     ),
                 )
+                run_id = row.get("run_id")
+                is_unreadable_accepted_run = (
+                    isinstance(run_id, str)
+                    and bool(run_id)
+                    and (row.get("operation_kind") or ThreadOperationKind.run.value) == ThreadOperationKind.run.value
+                    and any(row.get(field_name) is not None for field_name in _ACCEPTED_INVOCATION_MARKER_FIELDS)
+                )
+                if not is_unreadable_accepted_run:
+                    continue
+                async with self._lock:
+                    live_record = self._runs.get(run_id)
+                    if live_record is not None and live_record.status in (RunStatus.pending, RunStatus.running) and not live_record.ownership_lost:
+                        continue
+                try:
+                    takeover_kwargs = {
+                        "grace_seconds": grace_seconds,
+                        "error": ASSEMBLY_EVIDENCE_UNAVAILABLE_ERROR,
+                        "stop_reason": ASSEMBLY_EVIDENCE_UNAVAILABLE_STOP_REASON,
+                    }
+                    if self._store.durable_lifecycle:
+                        takeover_kwargs["expected_state_version"] = row.get("state_version") or 0
+                    claimed = await self._call_store_with_retry(
+                        "claim_unreadable_accepted_run",
+                        run_id,
+                        lambda: self._store.claim_for_takeover(
+                            run_id,
+                            **takeover_kwargs,
+                        ),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to terminalize unreadable accepted run %s",
+                        run_id,
+                        exc_info=True,
+                    )
+                    continue
+                if claimed:
+                    claimed_any = True
+                    logger.warning(
+                        "Terminalized unreadable accepted run %s with %s",
+                        run_id,
+                        ASSEMBLY_EVIDENCE_UNAVAILABLE_STOP_REASON,
+                    )
                 continue
 
             async with self._lock:

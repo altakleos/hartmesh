@@ -11,6 +11,12 @@ from typing import Any
 
 from deerflow_extension_api import validate_thread_identifier
 
+from deerflow.runtime.assembly_evidence import (
+    AssemblyEvidenceError,
+    AssemblyEvidenceV1,
+    assembly_evidence_digest,
+)
+
 _CURSOR_VERSION = "deerflow.lifecycle.cursor/v1"
 INVOCATION_SOURCE_KINDS = frozenset({"http", "scheduled_task", "native_channel", "service"})
 MAX_LIFECYCLE_PAGE_SIZE = 500
@@ -20,6 +26,7 @@ _MAX_CORRELATION_VALUE_BYTES = 1024
 _MAX_VISIBILITY_SELECTORS = 128
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _PUBLIC_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,191}\Z", re.ASCII)
+_NONTERMINAL_RUN_STATUSES = frozenset({"pending", "running"})
 
 
 class InvalidLifecycleCursor(ValueError):
@@ -173,6 +180,47 @@ def _safe_digest(value: Any) -> str | None:
     return value if isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None else None
 
 
+def _assembly_evidence_projection(row: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """Return only revalidated public evidence, never raw stored material."""
+
+    raw_evidence = row.get("assembly_evidence_json")
+    raw_digest = row.get("assembly_evidence_digest")
+    if raw_evidence is None and raw_digest is None:
+        status = str(row.get("status"))
+        return None, "pending" if status in _NONTERMINAL_RUN_STATUSES else "legacy_unavailable"
+    if not isinstance(raw_evidence, Mapping) or _safe_digest(raw_digest) is None:
+        return None, "legacy_unavailable"
+    try:
+        evidence = AssemblyEvidenceV1.from_persisted_json(raw_evidence)
+        if assembly_evidence_digest(evidence) != raw_digest:
+            return None, "legacy_unavailable"
+        accepted_revision_digest = _safe_digest(row.get("agent_revision_digest"))
+        extension_generation = row.get("extension_generation")
+        if (
+            accepted_revision_digest is None
+            or type(extension_generation) is not int
+            or extension_generation < 0
+            or evidence.accepted_agent_revision_digest != accepted_revision_digest
+            or evidence.extension_generation != extension_generation
+        ):
+            return None, "legacy_unavailable"
+    except (AssemblyEvidenceError, TypeError, ValueError):
+        return None, "legacy_unavailable"
+    return (
+        {
+            "version": evidence.version,
+            "fingerprint": evidence.fingerprint,
+            "effective_model": evidence.effective_model,
+            "prompt_digest": evidence.prompt_digest,
+            "toolset_digest": evidence.toolset_digest,
+            "middleware_digest": evidence.middleware_digest,
+            "skillset_digest": evidence.skillset_digest,
+            "policy_digest": evidence.policy_digest,
+        },
+        "verified",
+    )
+
+
 def _safe_correlation_value(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int)):
         return value
@@ -248,6 +296,7 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
         constraint_evidence_digest = _safe_digest(constraints.get("evidence_digest")) if isinstance(constraints, Mapping) else None
         manifest = decisions.get("capability_manifest")
         extension_manifest_digest = _safe_digest(manifest.get("digest")) if isinstance(manifest, Mapping) else None
+        assembly_evidence, assembly_evidence_status = _assembly_evidence_projection(row)
         summary = {
             "run_id": str(row["run_id"]),
             "thread_id": str(row["thread_id"]),
@@ -262,6 +311,8 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
             "accepted_context_digest": _safe_digest(row.get("accepted_context_digest")),
             "authorization_evidence_digests": tuple(authorization_digests),
             "constraint_evidence_digest": constraint_evidence_digest,
+            "assembly_evidence": assembly_evidence,
+            "assembly_evidence_status": assembly_evidence_status,
         }
         encoded = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
         return summary if len(encoded) <= MAX_INVOCATION_SUMMARY_BYTES else None

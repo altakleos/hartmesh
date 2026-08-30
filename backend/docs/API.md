@@ -865,6 +865,15 @@ digests. It excludes model input, secrets, secret handles, private policy
 reasons, and unbounded context. A pre-Origin historical row remains readable
 but has no summary.
 
+Accepted durable summaries include a nullable `assembly_evidence` object with
+only `version`, `fingerprint`, `effective_model`, `prompt_digest`,
+`toolset_digest`, `middleware_digest`, `skillset_digest`, and `policy_digest`.
+`assembly_evidence_status` is `pending`, `verified`, or
+`legacy_unavailable`. The server returns `verified` only after strict V1 parsing
+and canonical digest revalidation; partial or corrupt storage is returned as
+null/unavailable without reflecting stored content. The record identifies the
+graph HartMesh assembled and admitted, not a cryptographic code attestation.
+
 Ensure uses the existing durable idempotency boundary. Its strict v1 record always carries the
 complete option record: null model/thinking/checkpoint/interrupt values mean omission, while
 the serialized `multitask_strategy="reject"` is the defaulted caller intent. Object-key order

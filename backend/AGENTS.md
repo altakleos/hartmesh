@@ -19,6 +19,16 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   extension generation, and effective skill material before worker/model work;
   keyed replay, lifecycle observation, and fenced cancellation use that same
   accepted record. Fail closed rather than falling back to a less durable path.
+- Durable lead order: verify material; rebuild trusted context with the
+  server-owned `__deerflow_require_assembly_evidence` sentinel; materialize skills;
+  fence start; assemble/validate `AssemblyEvidenceV1`; bind; only then access
+  checkpoints or graph/model/tools. Proceed only on `bound`/`already_matching`.
+  Missing/unreadable evidence: `assembly_evidence_unavailable`; invalid/changed:
+  `agent_assembly_drift`; ownership loss cannot terminalize its successor. V1
+  hashes sorted skills/catalog and `bootstrap`, `non_interactive`, `plan_mode`,
+  `recursion_limit`, and `subagents` policy. Project 02 must update these
+  deterministically and retain V1 unless incompatible. Evidence is execution, not
+  source attestation.
 - `packages/runtime-api/` is the stdlib-only portable contract; Gateway HTTP and
   in-process adapters must remain behaviorally identical. The synchronous
   `DeerFlowClient` is a legacy local graph client and does not enter `InvocationRuntime`;

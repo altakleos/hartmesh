@@ -249,22 +249,52 @@ class TestLeadAgentAssembly:
         assembly = assemble_lead_agent({"configurable": {"thread_id": "t-3"}})
         assert assembly.descriptor is None
 
+    def test_server_owned_evidence_requirement_builds_without_an_observer(self, monkeypatch):
+        from deerflow.agents.lead_agent.agent import assemble_lead_agent
+        from deerflow.runtime.assembly_evidence import install_assembly_evidence_requirement
 
-class TestFactoryConsumersUnwrapTheGraph:
-    """A missed unwrap fails at request time, not at import time."""
+        self._isolate_from_the_ambient_config(monkeypatch)
+        context = {}
+        install_assembly_evidence_requirement(context)
 
-    def test_worker_unwraps_the_assembly(self):
-        from deerflow.agents.lead_agent.agent import LeadAgentAssembly
-        from deerflow.runtime.runs.worker import _agent_graph
+        assembly = assemble_lead_agent(
+            {
+                "configurable": {"thread_id": "t-evidence"},
+                "context": context,
+            }
+        )
+
+        assert assembly.descriptor is not None
+        assert assembly.descriptor.agent_name == "lead-agent"
+
+    def test_client_shaped_evidence_flag_cannot_request_a_descriptor(self, monkeypatch):
+        from deerflow.agents.lead_agent.agent import assemble_lead_agent
+        from deerflow.runtime.assembly_evidence import REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY
+
+        self._isolate_from_the_ambient_config(monkeypatch)
+        assembly = assemble_lead_agent(
+            {
+                "configurable": {
+                    "thread_id": "t-forged-evidence",
+                    REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY: True,
+                },
+                "context": {REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY: True},
+            }
+        )
+
+        assert assembly.descriptor is None
+
+
+class TestFactoryResultCompatibility:
+    """Factory consumers can accept both the enriched and legacy result shapes."""
+
+    def test_factory_result_can_be_split_without_duck_typing(self):
+        from deerflow.agents.lead_agent.agent import LeadAgentAssembly, split_agent_factory_result
 
         graph = object()
-        assert _agent_graph(LeadAgentAssembly(graph=graph, descriptor=object())) is graph
-
-    def test_worker_leaves_a_third_party_bare_graph_alone(self):
-        from deerflow.runtime.runs.worker import _agent_graph
-
-        graph = object()
-        assert _agent_graph(graph) is graph
+        descriptor = object()
+        assert split_agent_factory_result(LeadAgentAssembly(graph=graph, descriptor=descriptor)) == (graph, descriptor)
+        assert split_agent_factory_result(graph) == (graph, None)
 
 
 class TestAssemblyObserverHost:

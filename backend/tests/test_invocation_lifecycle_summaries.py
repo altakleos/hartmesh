@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -33,6 +35,17 @@ def test_invocation_summary_is_strict_immutable_and_round_trips() -> None:
         accepted_context_digest="d" * 64,
         authorization_evidence_digests=("e" * 64,),
         constraint_evidence_digest="f" * 64,
+        assembly_evidence={
+            "version": 1,
+            "fingerprint": "1" * 64,
+            "effective_model": "gpt-5",
+            "prompt_digest": "2" * 64,
+            "toolset_digest": "3" * 64,
+            "middleware_digest": "4" * 64,
+            "skillset_digest": "5" * 64,
+            "policy_digest": "6" * 64,
+        },
+        assembly_evidence_status="verified",
     )
 
     wire = summary.to_dict()
@@ -59,9 +72,95 @@ def test_invocation_summary_is_strict_immutable_and_round_trips() -> None:
         "accepted_context_digest": "d" * 64,
         "authorization_evidence_digests": ["e" * 64],
         "constraint_evidence_digest": "f" * 64,
+        "assembly_evidence": {
+            "version": 1,
+            "fingerprint": "1" * 64,
+            "effective_model": "gpt-5",
+            "prompt_digest": "2" * 64,
+            "toolset_digest": "3" * 64,
+            "middleware_digest": "4" * 64,
+            "skillset_digest": "5" * 64,
+            "policy_digest": "6" * 64,
+        },
+        "assembly_evidence_status": "verified",
         "api_version": "deerflow.runtime/v1",
         "kind": "invocation.summary.v1",
     }
+
+
+def test_invocation_summary_freezes_assembly_projection_and_reads_legacy_wire() -> None:
+    from deerflow_runtime_api import InvocationSummaryV1, record_from_dict
+
+    caller_evidence = {
+        "version": 1,
+        "fingerprint": "1" * 64,
+        "effective_model": "gpt-5",
+        "prompt_digest": "2" * 64,
+        "toolset_digest": "3" * 64,
+        "middleware_digest": "4" * 64,
+        "skillset_digest": "5" * 64,
+        "policy_digest": "6" * 64,
+    }
+    summary = InvocationSummaryV1(
+        run_id="run-1",
+        thread_id="thread-1",
+        status="running",
+        state_version=2,
+        source_kind="http",
+        assembly_evidence=caller_evidence,
+        assembly_evidence_status="verified",
+    )
+    caller_evidence["fingerprint"] = "f" * 64
+    assert summary.assembly_evidence["fingerprint"] == "1" * 64
+
+    legacy_wire = InvocationSummaryV1(
+        run_id="run-legacy",
+        thread_id="thread-1",
+        status="success",
+        state_version=3,
+        source_kind="http",
+    ).to_dict()
+    legacy_wire.pop("assembly_evidence")
+    legacy_wire.pop("assembly_evidence_status")
+    legacy = record_from_dict(legacy_wire)
+    assert legacy.assembly_evidence is None
+    assert legacy.assembly_evidence_status == "legacy_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("evidence", "status"),
+    [
+        (None, "verified"),
+        ({"version": 1}, "verified"),
+        (
+            {
+                "version": 1,
+                "fingerprint": "A" * 64,
+                "effective_model": "gpt-5",
+                "prompt_digest": "2" * 64,
+                "toolset_digest": "3" * 64,
+                "middleware_digest": "4" * 64,
+                "skillset_digest": "5" * 64,
+                "policy_digest": "6" * 64,
+            },
+            "verified",
+        ),
+        (None, "corrupt"),
+    ],
+)
+def test_invocation_summary_rejects_invalid_assembly_projection(evidence, status) -> None:
+    from deerflow_runtime_api import InvocationSummaryV1
+
+    with pytest.raises(ValueError, match="assembly"):
+        InvocationSummaryV1(
+            run_id="run-1",
+            thread_id="thread-1",
+            status="running",
+            state_version=2,
+            source_kind="http",
+            assembly_evidence=evidence,
+            assembly_evidence_status=status,
+        )
 
 
 @pytest.mark.parametrize("construction", ["direct", "wire"])
@@ -258,6 +357,122 @@ def _accepted_fields(source_kind: str, source_id: str) -> dict[str, object]:
             "capability_manifest": {"version": 1, "generation": 4, "digest": "1" * 64},
         },
     }
+
+
+def _persisted_assembly_evidence() -> tuple[dict[str, object], str]:
+    from deerflow.runtime.assembly_evidence import AssemblyEvidenceV1, assembly_evidence_digest
+
+    evidence = AssemblyEvidenceV1(
+        version=1,
+        fingerprint="1" * 64,
+        descriptor_version=1,
+        namespace="deerflow",
+        agent_name="lead_agent",
+        effective_model="gpt-5",
+        prompt_digest="2" * 64,
+        toolset_digest="3" * 64,
+        middleware_digest="4" * 64,
+        skillset_digest="5" * 64,
+        policy_digest="6" * 64,
+        accepted_agent_revision_digest="a" * 64,
+        extension_generation=4,
+    )
+    return evidence.to_persisted_json(), assembly_evidence_digest(evidence)
+
+
+def test_lifecycle_summary_revalidates_and_redacts_bound_assembly_evidence() -> None:
+    from deerflow.runtime.runs.lifecycle_query import build_invocation_summary
+
+    evidence_json, evidence_digest = _persisted_assembly_evidence()
+    row = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "running",
+        "state_version": 2,
+        **_accepted_fields("http", "request-1"),
+        "assembly_evidence_json": evidence_json,
+        "assembly_evidence_digest": evidence_digest,
+    }
+
+    summary = build_invocation_summary(row)
+
+    assert summary is not None
+    assert summary["assembly_evidence_status"] == "verified"
+    assert summary["assembly_evidence"] == {
+        "version": 1,
+        "fingerprint": "1" * 64,
+        "effective_model": "gpt-5",
+        "prompt_digest": "2" * 64,
+        "toolset_digest": "3" * 64,
+        "middleware_digest": "4" * 64,
+        "skillset_digest": "5" * 64,
+        "policy_digest": "6" * 64,
+    }
+    assert "accepted_agent_revision_digest" not in summary["assembly_evidence"]
+    assert len(json.dumps(summary, sort_keys=True).encode("utf-8")) <= 16 * 1024
+
+
+@pytest.mark.parametrize(
+    "transplanted_anchor",
+    ["agent_revision_digest", "extension_generation"],
+)
+def test_lifecycle_summary_does_not_verify_evidence_from_another_accepted_run(
+    transplanted_anchor: str,
+) -> None:
+    from deerflow.runtime.runs.lifecycle_query import build_invocation_summary
+
+    evidence_json, evidence_digest = _persisted_assembly_evidence()
+    row = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "running",
+        "state_version": 2,
+        **_accepted_fields("http", "request-1"),
+        "assembly_evidence_json": evidence_json,
+        "assembly_evidence_digest": evidence_digest,
+    }
+    row[transplanted_anchor] = "b" * 64 if transplanted_anchor == "agent_revision_digest" else 5
+
+    summary = build_invocation_summary(row)
+
+    assert summary is not None
+    assert summary["assembly_evidence"] is None
+    assert summary["assembly_evidence_status"] == "legacy_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("status", "evidence_json", "evidence_digest", "expected_status"),
+    [
+        ("pending", None, None, "pending"),
+        ("success", None, None, "legacy_unavailable"),
+        ("running", {"secret": "must-not-leak"}, "a" * 64, "legacy_unavailable"),
+        ("running", {"version": 1}, None, "legacy_unavailable"),
+    ],
+)
+def test_lifecycle_summary_reports_missing_or_corrupt_evidence_without_leaking(
+    status: str,
+    evidence_json: dict[str, object] | None,
+    evidence_digest: str | None,
+    expected_status: str,
+) -> None:
+    from deerflow.runtime.runs.lifecycle_query import build_invocation_summary
+
+    row = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": status,
+        "state_version": 2,
+        **_accepted_fields("http", "request-1"),
+        "assembly_evidence_json": evidence_json,
+        "assembly_evidence_digest": evidence_digest,
+    }
+
+    summary = build_invocation_summary(row)
+
+    assert summary is not None
+    assert summary["assembly_evidence"] is None
+    assert summary["assembly_evidence_status"] == expected_status
+    assert "must-not-leak" not in json.dumps(summary)
 
 
 @pytest.mark.anyio

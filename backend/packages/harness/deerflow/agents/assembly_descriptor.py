@@ -438,6 +438,26 @@ def _skill_content_hash(skill: object) -> str | None:
     return canonical_hash(content)
 
 
+def _skill_catalog(enabled_skills: list[object]) -> list[dict[str, object]]:
+    return [
+        {
+            "name": str(getattr(skill, "name", "")),
+            "description": str(getattr(skill, "description", "")),
+            "allowed_tools": sorted(str(item) for item in (getattr(skill, "allowed_tools", None) or ())),
+            "content_hash": _skill_content_hash(skill),
+            "secrets_autonomous": bool(getattr(skill, "secrets_autonomous", True)),
+            "required_secrets": sorted(f"{getattr(requirement, 'name', '')}:{bool(getattr(requirement, 'optional', False))}" for requirement in (getattr(skill, "required_secrets", None) or ())),
+        }
+        for skill in enabled_skills
+    ]
+
+
+def skill_catalog_digest(enabled_skills: list[object]) -> str:
+    """Digest accepted immutable skill objects exactly as assembly does."""
+
+    return canonical_hash(sorted(_skill_catalog(enabled_skills), key=lambda item: item["name"]))
+
+
 def build_assembly_descriptor(
     *,
     namespace: str,
@@ -463,17 +483,7 @@ def build_assembly_descriptor(
     hashed rather than listed field-by-field so editing a skill's body changes
     the fingerprint while the descriptor stays small.
     """
-    skill_catalog = [
-        {
-            "name": str(getattr(skill, "name", "")),
-            "description": str(getattr(skill, "description", "")),
-            "allowed_tools": sorted(str(item) for item in (getattr(skill, "allowed_tools", None) or ())),
-            "content_hash": _skill_content_hash(skill),
-            "secrets_autonomous": bool(getattr(skill, "secrets_autonomous", True)),
-            "required_secrets": sorted(f"{getattr(requirement, 'name', '')}:{bool(getattr(requirement, 'optional', False))}" for requirement in (getattr(skill, "required_secrets", None) or ())),
-        }
-        for skill in enabled_skills
-    ]
+    skill_catalog = _skill_catalog(enabled_skills)
     assembled_tools = list(tools)
     for middleware in middlewares:
         middleware_tools = getattr(middleware, "tools", None)
@@ -482,7 +492,7 @@ def build_assembly_descriptor(
 
     resolved_policies = dict(effective_policies)
     resolved_policies["prompt_template_id"] = prompt_template_id
-    resolved_policies["skill_catalog_hash"] = canonical_hash(sorted(skill_catalog, key=lambda item: item["name"]))
+    resolved_policies["skill_catalog_hash"] = skill_catalog_digest(enabled_skills)
 
     return AgentAssemblyDescriptor(
         namespace=namespace,
@@ -507,4 +517,5 @@ __all__ = [
     "describe_middleware",
     "describe_model_identity",
     "describe_tool",
+    "skill_catalog_digest",
 ]

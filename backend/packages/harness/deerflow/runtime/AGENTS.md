@@ -9,6 +9,16 @@ must match the stored request evidence. State changes and lifecycle events are
 transactional, cancellation is fenced, and an active row lost with its process
 is terminalized rather than resuming model execution.
 
+Accepted durable lead execution also binds `AssemblyEvidenceV1` to the running
+owner/state-version fence. After accepted material is verified and the run starts,
+the worker assembles under the frozen extension generation, validates the actual
+model/prompt/tools/middleware/skills/policy descriptor against accepted anchors,
+and atomically binds or compares it before constructing a checkpoint accessor or
+calling `astream`. `assembly_evidence_unavailable` covers a missing descriptor;
+`agent_assembly_drift` covers invalid, contradictory, or changed evidence. Bound
+evidence is immutable and survives every terminal outcome. It proves only which
+assembly the runtime admitted, not the integrity of the Python code that produced it.
+
 The portable `deerflow-runtime-api` DTOs contain runtime operations only;
 deployment provenance and qualification are administrator-only. Memory-backed
 local development is explicitly unqualified. Real Postgres and opt-in

@@ -109,6 +109,10 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Agents & runtime
 
+- **runtime:** Accepted durable lead runs now bind a bounded fingerprint of the
+  actual assembled model, prompt, authorized tools, middleware, skills, and
+  policy before checkpoint or graph execution; recovery must match it, and
+  authorized lifecycle summaries expose only the revalidated digest projection.
 - **middleware:** New `TokenBudgetMiddleware` enforces a per-run token budget,
   shared additively across the lead agent and subagents. ([#3412])
 - **middleware:** Structured tool-result metadata and a tool-progress state

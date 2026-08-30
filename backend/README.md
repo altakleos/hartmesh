@@ -485,11 +485,11 @@ nearest `packages/harness/deerflow/persistence/migrations/AGENTS.md` for the ful
 CI qualifies the durable invocation migration tail against the real PostgreSQL
 service, not SQLite: it installs an empty schema to head, then upgrades
 representative normal, auxiliary, and MCP-task rows from the real predecessor
-`0011_mcp_tasks` through HartMesh's `0019_inbound_event_identity` tail and
-upstream's `0012_mcp_task_results` branch to the single
-`0020_merge_mcp_task_results` head. It checks exact
+`0011_mcp_tasks` through HartMesh's `0019_inbound_event_identity` tail, the
+upstream result/managed-subagent/scheduled-enqueue branches, and their merges to
+the single `0023_agent_assembly_evidence` head. It checks exact
 constraints and indexes (including lifecycle integrity and leased inbound
-receipts) and runs concurrent admission/lifecycle/receipt contracts. The marked
+receipts) and runs concurrent admission/assembly/lifecycle/receipt contracts. The marked
 suite must not skip when `DEERFLOW_TEST_POSTGRES_URL` is configured and prints
 the PostgreSQL version and Alembic head in job output.
 
@@ -497,7 +497,7 @@ The supported durable-invocation rollback stops at `0011_mcp_tasks`, preserving
 core MCP-task rows while dropping the later bounded-result columns. It necessarily drops invocation-tail facts that the
 predecessor cannot represent: accepted evidence, external idempotency identity,
 caller intent, state versions, lifecycle rows, inbound receipts, and execution
-evidence. Re-upgrade does not reconstruct them. A further technical downgrade to
+evidence, including agent assembly evidence. Re-upgrade does not reconstruct them. A further technical downgrade to
 `0010_run_cancel_request` invokes the unrelated MCP-task downgrade and destroys
 MCP-task data; it is not the supported invocation rollback. Stop writers and take
 a database backup before any rollback.

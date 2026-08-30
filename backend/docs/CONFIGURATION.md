@@ -36,6 +36,16 @@ above `pool_size`; its default of 10 matches SQLAlchemy. The
 for deployment systems such as Helm. When the variable is absent, the YAML
 value or the default applies.
 
+Assembly evidence has no client or operator enable switch. Every accepted run
+using a durable lifecycle store requests a descriptor through server-owned
+context, validates it against accepted model/skill/policy anchors, and binds it
+atomically before checkpoint or graph execution. Memory and SQLite exercise the
+same contract for local development; only the separately passing PostgreSQL
+qualification gate supports PostgreSQL locking claims. Lifecycle observation
+returns the bounded digest projection documented in
+[INVOCATION_RUNTIME.md](INVOCATION_RUNTIME.md), never raw prompt, schema,
+middleware configuration, or arbitrary extension data.
+
 ### Redis subsystem namespaces
 
 The stream bridge accepts an optional outer Redis namespace:

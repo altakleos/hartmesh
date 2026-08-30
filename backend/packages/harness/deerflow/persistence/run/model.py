@@ -63,6 +63,12 @@ class RunRow(Base):
         nullable=True,
     )
 
+    # Bounded V1 proof of the actual lead-agent graph assembled after accepted
+    # material was restored. It is bound once under the running owner/version
+    # fence and retained through every terminal outcome.
+    assembly_evidence_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    assembly_evidence_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # Convenience fields (for listing pages without querying RunEventStore)
     message_count: Mapped[int] = mapped_column(default=0)
     first_human_message: Mapped[str | None] = mapped_column(Text)
@@ -113,6 +119,22 @@ class RunRow(Base):
         CheckConstraint(
             "execution_evidence_digest IS NULL OR (operation_kind = 'run' AND length(execution_evidence_digest) = 64)",
             name="ck_runs_execution_evidence_run_only",
+        ),
+        CheckConstraint(
+            "(assembly_evidence_json IS NULL) = (assembly_evidence_digest IS NULL)",
+            name="ck_runs_assembly_evidence_pair",
+        ),
+        CheckConstraint(
+            "assembly_evidence_digest IS NULL OR operation_kind = 'run'",
+            name="ck_runs_assembly_evidence_run_only",
+        ),
+        CheckConstraint(
+            "assembly_evidence_digest IS NULL OR (length(assembly_evidence_digest) = 64 AND lower(assembly_evidence_digest) = assembly_evidence_digest "
+            "AND length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace("
+            "replace(replace(replace(replace(replace(replace(assembly_evidence_digest, '0', ''), '1', ''), '2', ''), '3', ''), "
+            "'4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), 'b', ''), 'c', ''), 'd', ''), "
+            "'e', ''), 'f', '')) = 0)",
+            name="ck_runs_assembly_evidence_digest_format",
         ),
         CheckConstraint(
             "external_scope IS NULL OR length(external_scope) <= 96",

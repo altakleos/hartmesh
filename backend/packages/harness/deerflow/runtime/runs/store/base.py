@@ -14,6 +14,7 @@ import abc
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
@@ -26,7 +27,9 @@ from deerflow.runtime.runs.lifecycle_query import (
 
 _LIFECYCLE_EVIDENCE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 _LIFECYCLE_SAFE_REASONS = {
+    "agent_assembly_drift",
     "agent_revision_drift",
+    "assembly_evidence_unavailable",
     "accepted_skill_execution_fence_failed",
     "accepted_skill_execution_lease_unavailable",
     "constraint_evidence_mismatch",
@@ -76,6 +79,16 @@ class AdmissionOutcome(StrEnum):
     created = "created"
     known_same = "known_same"
     key_conflict = "key_conflict"
+
+
+class BindAssemblyEvidenceOutcome(StrEnum):
+    """Finite outcome of binding evidence under the current execution fence."""
+
+    bound = "bound"
+    already_matching = "already_matching"
+    mismatch = "mismatch"
+    ownership_lost = "ownership_lost"
+    not_found = "not_found"
 
 
 class DuplicateRunIdentityError(RuntimeError):
@@ -412,6 +425,25 @@ class RunStore(abc.ABC):
         """Transition only while the expected worker still owns the run."""
 
         raise NotImplementedError
+
+    async def bind_assembly_evidence(
+        self,
+        run_id: str,
+        *,
+        owner_id: str,
+        lease_epoch: int,
+        evidence_json: Mapping[str, object],
+        evidence_digest: str,
+    ) -> BindAssemblyEvidenceOutcome:
+        """Bind or compare one V1 record under the active execution fence.
+
+        Custom stores are not assumed to implement the atomicity contract.
+        The compatibility default therefore fails closed instead of attempting
+        a worker-side read followed by a write.
+        """
+
+        del run_id, owner_id, lease_epoch, evidence_json, evidence_digest
+        return BindAssemblyEvidenceOutcome.ownership_lost
 
     async def request_cancel_fenced(
         self,

@@ -3382,6 +3382,21 @@ def test_strip_internal_context_keys_scrubs_config_smuggled_non_interactive():
     assert "non_interactive" not in via_configurable["configurable"]
 
 
+def test_server_owned_assembly_requirement_is_scrubbed_for_every_caller():
+    from app.gateway.services import strip_server_owned_assembly_context
+    from deerflow.runtime.assembly_evidence import REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY
+
+    config = {
+        "context": {REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY: True},
+        "configurable": {REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY: "forged"},
+    }
+
+    strip_server_owned_assembly_context(config)
+
+    assert REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY not in config["context"]
+    assert REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY not in config["configurable"]
+
+
 # --- Authorization identity anti-forgery tests ---
 
 

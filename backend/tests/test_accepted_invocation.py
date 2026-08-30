@@ -421,6 +421,554 @@ async def test_pinned_material_replaces_mutated_factory_context_after_digest_che
     assert record.status is RunStatus.success
 
 
+def _durable_test_descriptor(material: ResolvedAgentMaterialV1, *, prompt: str = "accepted prompt"):
+    from deerflow.agents.assembly_descriptor import build_assembly_descriptor
+
+    defaults = material.runtime_defaults
+    return build_assembly_descriptor(
+        namespace="deerflow",
+        agent_name=str(defaults.get("agent_name") or "lead-agent"),
+        requested_model=None,
+        effective_model=str(material.model_profile["name"]),
+        model_config=SimpleNamespace(),
+        thinking_enabled=bool(defaults.get("thinking_enabled", True)),
+        reasoning_effort=defaults.get("reasoning_effort"),
+        rendered_base_prompt=prompt,
+        tools=[],
+        middlewares=[],
+        deferred_names=frozenset(),
+        enabled_skills=list(material.enabled_skill_objects),
+        effective_policies={
+            "bootstrap": False,
+            "non_interactive": bool(defaults.get("non_interactive", False)),
+            "plan_mode": bool(defaults.get("is_plan_mode", False)),
+            "recursion_limit": "framework-default",
+            "subagents": {
+                "enabled": False,
+                "max_concurrent": int(defaults.get("max_concurrent_subagents", 3)),
+                "max_total": int(defaults.get("max_total_subagents", 6)),
+                "type_allowlist": [],
+                "runtime_limits": {},
+            },
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_accepted_durable_bare_graph_fails_before_graph_invocation() -> None:
+    from deerflow.runtime.assembly_evidence import assembly_evidence_is_required
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-assembly")
+    record = await manager.create_or_reject(
+        "thread-worker-bare",
+        accepted_invocation=_accepted(_material()),
+    )
+    calls = {"factory": 0, "astream": 0}
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            calls["astream"] += 1
+            yield {"messages": []}
+
+    def factory(*, config):
+        calls["factory"] += 1
+        assert assembly_evidence_is_required(config["context"])
+        return Agent()
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    assert calls == {"factory": 1, "astream": 0}
+    assert record.status is RunStatus.error
+    assert record.stop_reason == "assembly_evidence_unavailable"
+    row = await store.get(record.run_id)
+    assert row is not None
+    assert row["assembly_evidence_json"] is None
+    assert row["assembly_evidence_digest"] is None
+
+
+@pytest.mark.asyncio
+async def test_accepted_durable_evidence_is_bound_before_checkpoint_access_and_astream(
+    monkeypatch,
+) -> None:
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+
+    material = _material()
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-assembly")
+    record = await manager.create_or_reject(
+        "thread-worker-evidence",
+        accepted_invocation=_accepted(material),
+    )
+    observed_bound_evidence = False
+    checkpoint_preflight_saw_bound_evidence = False
+
+    async def compatibility_check(_checkpointer, _config, _mode):
+        nonlocal checkpoint_preflight_saw_bound_evidence
+        row = await store.get(record.run_id)
+        checkpoint_preflight_saw_bound_evidence = bool(row and row["status"] == "running" and row["assembly_evidence_json"] and row["assembly_evidence_digest"])
+
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker.aensure_checkpoint_mode_compatible",
+        compatibility_check,
+    )
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            nonlocal observed_bound_evidence
+            row = await store.get(record.run_id)
+            observed_bound_evidence = bool(row and row["status"] == "running" and row["assembly_evidence_json"] and row["assembly_evidence_digest"])
+            yield {"messages": []}
+
+    def factory(*, config):
+        return LeadAgentAssembly(
+            graph=Agent(),
+            descriptor=_durable_test_descriptor(material),
+        )
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=object()),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    assert checkpoint_preflight_saw_bound_evidence is True
+    assert observed_bound_evidence is True
+    assert record.status is RunStatus.success
+    row = await store.get(record.run_id)
+    assert row is not None
+    assert row["status"] == "success"
+    assert row["assembly_evidence_json"] == record.assembly_evidence_json
+    assert row["assembly_evidence_digest"] == record.assembly_evidence_digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_outcome", ["failure", "cancellation", "timeout"])
+async def test_worker_retains_bound_evidence_on_terminal_outcome(
+    terminal_outcome: str,
+) -> None:
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+    from deerflow.runtime.runs.store.base import LifecycleType
+
+    material = _material()
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-terminal-evidence")
+    record = await manager.create_or_reject(
+        f"thread-terminal-{terminal_outcome}",
+        accepted_invocation=_accepted(material),
+    )
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            stream_started.set()
+            if terminal_outcome == "failure":
+                raise RuntimeError("expected model failure")
+            await release_stream.wait()
+            if False:
+                yield {"messages": []}
+
+    task = asyncio.create_task(
+        run_agent(
+            _bridge(),
+            manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=lambda **_kwargs: LeadAgentAssembly(
+                graph=Agent(),
+                descriptor=_durable_test_descriptor(material),
+            ),
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+    await asyncio.wait_for(stream_started.wait(), timeout=1)
+
+    if terminal_outcome == "cancellation":
+        await manager.cancel(record.run_id)
+    elif terminal_outcome == "timeout":
+        await manager.set_status(
+            record.run_id,
+            RunStatus.timeout,
+            error="Run timed out",
+            lifecycle_type=LifecycleType.timed_out,
+        )
+        release_stream.set()
+
+    await asyncio.wait_for(task, timeout=1)
+
+    row = await store.get(record.run_id)
+    assert row is not None
+    assert (
+        row["status"]
+        == {
+            "failure": "error",
+            "cancellation": "interrupted",
+            "timeout": "timeout",
+        }[terminal_outcome]
+    )
+    assert row["assembly_evidence_json"] is not None
+    assert row["assembly_evidence_digest"] is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed_dimension",
+    ["identical", "model", "prompt", "tool_authorization", "middleware", "skills", "policy"],
+)
+async def test_recovered_assembly_must_match_original_before_astream(
+    changed_dimension: str,
+) -> None:
+    from deerflow_extension_api import MiddlewareDescriptor, ToolDescriptor
+
+    from deerflow.agents.assembly_descriptor import skill_catalog_digest
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+    from deerflow.runtime.assembly_evidence import (
+        AcceptedAssemblyAnchors,
+        assembly_evidence_digest,
+        build_assembly_evidence,
+        canonical_durable_policy_digest,
+        canonical_skillset_digest,
+    )
+    from deerflow.runtime.runs.store.base import BindAssemblyEvidenceOutcome
+
+    material = _material()
+    accepted = _accepted(material)
+    original_descriptor = _durable_test_descriptor(material, prompt="original prompt")
+    if changed_dimension == "identical":
+        changed_descriptor = original_descriptor
+    elif changed_dimension == "model":
+        changed_descriptor = replace(original_descriptor, effective_model="changed-model")
+    elif changed_dimension == "prompt":
+        changed_descriptor = replace(original_descriptor, base_prompt_hash="f" * 64)
+    elif changed_dimension == "tool_authorization":
+        changed_descriptor = replace(
+            original_descriptor,
+            tools=(
+                ToolDescriptor(
+                    name="newly-authorized-tool",
+                    description_hash="1" * 64,
+                    schema_hash="2" * 64,
+                    source="builtin",
+                ),
+            ),
+        )
+    elif changed_dimension == "middleware":
+        changed_descriptor = replace(
+            original_descriptor,
+            middlewares=(
+                MiddlewareDescriptor(
+                    name="NewPolicyMiddleware",
+                    module="tests.assembly",
+                    policy_parameters={"enabled": True},
+                ),
+            ),
+        )
+    elif changed_dimension == "skills":
+        changed_descriptor = replace(original_descriptor, enabled_skills=("forged-skill",))
+    else:
+        changed_descriptor = replace(
+            original_descriptor,
+            effective_policies={
+                **original_descriptor.effective_policies,
+                "recursion_limit": 999,
+            },
+        )
+    original_evidence = build_assembly_evidence(
+        original_descriptor,
+        anchors=AcceptedAssemblyAnchors(
+            run_id="placeholder",
+            expected_namespace="deerflow",
+            expected_agent_name="lead-agent",
+            expected_effective_model="default",
+            expected_skillset_digest=canonical_skillset_digest(
+                (),
+                catalog_digest=skill_catalog_digest([]),
+            ),
+            expected_policy_digest=canonical_durable_policy_digest(original_descriptor.effective_policies),
+            agent_revision_digest=accepted.agent_revision.digest,
+            extension_generation=accepted.extension_generation,
+            extension_manifest_digest=None,
+            trusted_context_execution_digest=None,
+        ),
+    )
+
+    class RecoveredStore(MemoryRunStore):
+        durable_lifecycle = True
+
+        async def start_run(self, run_id, **kwargs):
+            started = await super().start_run(run_id, **kwargs)
+            assert started is True
+            row = await self.get(run_id)
+            assert row is not None
+            outcome = await super().bind_assembly_evidence(
+                run_id,
+                owner_id=row["owner_worker_id"],
+                lease_epoch=row["state_version"],
+                evidence_json=original_evidence.to_persisted_json(),
+                evidence_digest=assembly_evidence_digest(original_evidence),
+            )
+            assert outcome is BindAssemblyEvidenceOutcome.bound
+            return True
+
+    store = RecoveredStore()
+    manager = RunManager(store=store, worker_id="worker-assembly")
+    record = await manager.create_or_reject(
+        "thread-worker-recovered",
+        accepted_invocation=accepted,
+    )
+    astream_calls = 0
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            nonlocal astream_calls
+            astream_calls += 1
+            yield {"messages": []}
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: LeadAgentAssembly(
+            graph=Agent(),
+            descriptor=changed_descriptor,
+        ),
+        graph_input={},
+        config={},
+    )
+
+    if changed_dimension == "identical":
+        assert astream_calls == 1
+        assert record.status is RunStatus.success
+        assert record.stop_reason is None
+    else:
+        assert astream_calls == 0
+        assert record.status is RunStatus.error
+        assert record.stop_reason == "agent_assembly_drift"
+    row = await store.get(record.run_id)
+    assert row is not None
+    assert row["assembly_evidence_json"] == original_evidence.to_persisted_json()
+
+
+@pytest.mark.asyncio
+async def test_broken_assembly_observer_is_fail_open_and_evidence_still_binds() -> None:
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+    from deerflow.extensions.notify import notify_agent_assembled
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    material = _material()
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-observer")
+    record = await manager.create_or_reject(
+        "thread-worker-observer",
+        accepted_invocation=_accepted(material),
+    )
+    observer_calls = 0
+
+    class BrokenObserver:
+        def on_agent_assembled(self, _app_store, _descriptor):
+            nonlocal observer_calls
+            observer_calls += 1
+            raise RuntimeError("private observer failure")
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("broken-observer"):
+        registry.agent_assembly_observer(BrokenObserver())
+    extensions = registry.build()
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    def factory(**_kwargs):
+        descriptor = _durable_test_descriptor(material)
+        notify_agent_assembled(descriptor)
+        return LeadAgentAssembly(graph=Agent(), descriptor=descriptor)
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, extensions=extensions),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    row = await store.get(record.run_id)
+    assert observer_calls == 1
+    assert record.status is RunStatus.success
+    assert row is not None
+    assert row["assembly_evidence_json"] is not None
+    assert row["assembly_evidence_digest"] is not None
+    assert "private observer failure" not in str(row)
+
+
+@pytest.mark.asyncio
+async def test_ownership_loss_during_evidence_bind_does_not_terminalize_new_owner() -> None:
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+    from deerflow.runtime.runs.store.base import BindAssemblyEvidenceOutcome
+
+    material = _material()
+
+    class OwnershipTransferredStore(MemoryRunStore):
+        durable_lifecycle = True
+
+        async def bind_assembly_evidence(self, run_id, **_kwargs):
+            row = self._runs[run_id]
+            row["owner_worker_id"] = "worker-new-owner"
+            return BindAssemblyEvidenceOutcome.ownership_lost
+
+    store = OwnershipTransferredStore()
+    manager = RunManager(store=store, worker_id="worker-old-owner")
+    record = await manager.create_or_reject(
+        "thread-worker-transfer",
+        accepted_invocation=_accepted(material),
+    )
+    astream_calls = 0
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            nonlocal astream_calls
+            astream_calls += 1
+            yield {"messages": []}
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: LeadAgentAssembly(
+            graph=Agent(),
+            descriptor=_durable_test_descriptor(material),
+        ),
+        graph_input={},
+        config={},
+    )
+
+    row = await store.get(record.run_id)
+    assert astream_calls == 0
+    assert record.ownership_lost is True
+    assert row is not None
+    assert row["owner_worker_id"] == "worker-new-owner"
+    assert row["status"] == "running"
+    assert row.get("stop_reason") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_behavior", ["malformed", "raises"])
+async def test_unexpected_evidence_bind_failure_stops_before_model_work(
+    store_behavior: str,
+) -> None:
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+
+    material = _material()
+
+    class UnexpectedBindStore(MemoryRunStore):
+        durable_lifecycle = True
+
+        async def bind_assembly_evidence(self, _run_id, **_kwargs):
+            if store_behavior == "raises":
+                raise RuntimeError("private persistence failure")
+            return object()
+
+    store = UnexpectedBindStore()
+    manager = RunManager(store=store, worker_id="worker-bind-failure")
+    record = await manager.create_or_reject(
+        f"thread-bind-{store_behavior}",
+        accepted_invocation=_accepted(material),
+    )
+    bridge = _bridge()
+    astream_calls = 0
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            nonlocal astream_calls
+            astream_calls += 1
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: LeadAgentAssembly(
+            graph=Agent(),
+            descriptor=_durable_test_descriptor(material),
+        ),
+        graph_input={},
+        config={},
+    )
+
+    row = await store.get(record.run_id)
+    assert astream_calls == 0
+    assert record.ownership_lost is False
+    assert row is not None
+    assert row["status"] == "error"
+    assert row["assembly_evidence_json"] is None
+    assert row["stop_reason"] == "agent_assembly_drift"
+    assert bridge.publish.await_count >= 1
+    assert bridge.publish.await_args.args[1:] == (
+        "error",
+        {
+            "message": "Agent assembly does not match the accepted durable execution",
+            "name": "AssemblyEvidenceError",
+        },
+    )
+    assert "private persistence failure" not in str(bridge.publish.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_rollback_cancellation_before_evidence_bind_does_not_access_checkpoint() -> None:
+    material = _material()
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-prebind-cancel")
+    record = await manager.create_or_reject(
+        "thread-prebind-cancel",
+        accepted_invocation=_accepted(material),
+    )
+    record.abort_action = "rollback"
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(return_value=None),
+        adelete_thread=AsyncMock(),
+    )
+
+    def cancelled_factory(**_kwargs):
+        raise asyncio.CancelledError
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer),
+        agent_factory=cancelled_factory,
+        graph_input={},
+        config={},
+    )
+
+    row = await store.get(record.run_id)
+    assert row is not None
+    assert row["status"] == "error"
+    assert row["assembly_evidence_json"] is None
+    checkpointer.aget_tuple.assert_not_awaited()
+    checkpointer.adelete_thread.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_worker_replaces_forged_runtime_identity_with_accepted_facts() -> None:
     material = _material()
@@ -521,7 +1069,7 @@ async def test_store_reconstruction_rejects_corrupt_accepted_evidence_before_rec
         user_id="u1",
         accepted_invocation=_accepted(_material()),
     )
-    store._runs[record.run_id]["principal_projection_digest"] = "0" * 64
+    store._runs[record.run_id]["agent_revision_json"]["version"] = 99
 
     reconstructed = RunManager(store=store)
     assert await reconstructed.get(record.run_id, user_id="u1") is None
@@ -533,7 +1081,9 @@ async def test_store_reconstruction_rejects_corrupt_accepted_evidence_before_rec
     )
     persisted = await store.get(record.run_id, user_id=None)
     assert persisted is not None
-    assert persisted["status"] == "pending"
+    assert persisted["status"] == "error"
+    assert persisted["error"] == "Agent assembly evidence is unavailable"
+    assert persisted["stop_reason"] == "assembly_evidence_unavailable"
 
 
 @pytest.mark.asyncio

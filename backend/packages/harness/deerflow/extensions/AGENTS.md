@@ -179,6 +179,15 @@ host build would move every agent's fingerprint on every redeploy and make that
 finer question unanswerable — `build` stays a reported field a consumer can
 compare directly. Registered `AgentAssemblyObserver`s are notified
 synchronously at the end of construction; failures are contained per observer.
+
+Assembly observers remain observational and fail-open. Accepted durable runs
+independently request the same descriptor through a server-owned opaque context
+sentinel, validate it against accepted anchors, and atomically bind bounded V1
+evidence before graph execution. An observer failure therefore neither prevents
+that authoritative bind nor authorizes execution without it. The persisted
+evidence contains only identifiers and full digests; observers do not supply its
+accepted model, skill, policy, revision, or extension anchors. It is an execution
+record, not a cryptographic code attestation.
 Gateway `resolve_agent_factory()` now returns `assemble_lead_agent`, so every
 consumer must unwrap `.graph` — a third-party factory returning a bare graph
 stays supported.

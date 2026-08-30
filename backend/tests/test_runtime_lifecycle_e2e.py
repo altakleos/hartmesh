@@ -17,6 +17,7 @@ import time
 import uuid
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -157,10 +158,57 @@ class _ScriptedAgent:
 
 def _make_agent_factory(controller: _RunController, **agent_kwargs):
     def factory(*, config):
-        del config
+        from deerflow.agents.assembly_descriptor import build_assembly_descriptor
+        from deerflow.agents.lead_agent.agent import LeadAgentAssembly, _subagent_release_policy
+        from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+
+        runtime_context = config.get("context") or {}
+        material = runtime_context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
         agent = _ScriptedAgent(controller, **agent_kwargs)
         controller.instances.append(agent)
-        return agent
+        if material is None:
+            # Read-only state accessors invoke the same factory without accepted
+            # invocation material and remain compatible with a bare graph.
+            return agent
+
+        defaults = material.runtime_defaults
+        is_bootstrap = bool(defaults.get("is_bootstrap", False))
+        enabled_skills = list(material.enabled_skill_objects)
+        if is_bootstrap:
+            enabled_skills = [skill for skill in enabled_skills if getattr(skill, "name", None) == "bootstrap"]
+        requested_subagents = bool(defaults.get("subagent_enabled", False))
+        allowed_subagents = getattr(material.agent_config_object, "allowed_subagents", None)
+        subagents_enabled = requested_subagents and allowed_subagents != []
+        max_concurrent = int(runtime_context.get("max_concurrent_subagents", defaults.get("max_concurrent_subagents", 3)))
+        max_total = int(runtime_context.get("max_total_subagents", defaults.get("max_total_subagents", 6)))
+
+        descriptor = build_assembly_descriptor(
+            namespace="deerflow",
+            agent_name="bootstrap" if is_bootstrap else str(defaults.get("agent_name") or "lead-agent"),
+            requested_model=None,
+            effective_model=str(material.model_profile["name"]),
+            model_config=SimpleNamespace(),
+            thinking_enabled=bool(defaults.get("thinking_enabled", True)),
+            reasoning_effort=defaults.get("reasoning_effort"),
+            rendered_base_prompt="runtime lifecycle test prompt",
+            tools=[],
+            middlewares=[],
+            deferred_names=frozenset(),
+            enabled_skills=enabled_skills,
+            effective_policies={
+                "bootstrap": is_bootstrap,
+                "non_interactive": bool(defaults.get("non_interactive", False)),
+                "plan_mode": bool(defaults.get("is_plan_mode", False)),
+                "recursion_limit": config.get("recursion_limit", "framework-default"),
+                "subagents": _subagent_release_policy(
+                    material.app_config,
+                    enabled=subagents_enabled,
+                    max_concurrent=max_concurrent,
+                    max_total=max_total,
+                ),
+            },
+        )
+        return LeadAgentAssembly(graph=agent, descriptor=descriptor)
 
     return factory
 

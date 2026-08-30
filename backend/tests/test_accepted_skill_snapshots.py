@@ -151,6 +151,51 @@ def _accepted(revision) -> AcceptedInvocation:
     )
 
 
+def _assembled_agent_for_revision(revision: ResolvedAgentRevision, graph: object):
+    """Build the minimal authoritative descriptor needed by durable worker tests."""
+
+    from deerflow.agents.assembly_descriptor import build_assembly_descriptor
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly, _subagent_release_policy
+
+    material = revision.material
+    assert material is not None
+    defaults = material.runtime_defaults
+    enabled_skills = list(material.enabled_skill_objects)
+    if bool(defaults.get("is_bootstrap", False)):
+        enabled_skills = [skill for skill in enabled_skills if skill.name == "bootstrap"]
+    requested_subagents = bool(defaults.get("subagent_enabled", False))
+    allowed_subagents = getattr(material.agent_config_object, "allowed_subagents", None)
+    max_concurrent = int(defaults.get("max_concurrent_subagents", 3))
+    max_total = int(defaults.get("max_total_subagents", 6))
+    descriptor = build_assembly_descriptor(
+        namespace="deerflow",
+        agent_name=("bootstrap" if bool(defaults.get("is_bootstrap", False)) else str(defaults.get("agent_name") or "lead-agent")),
+        requested_model=None,
+        effective_model=str(material.model_profile["name"]),
+        model_config=SimpleNamespace(),
+        thinking_enabled=bool(defaults.get("thinking_enabled", True)),
+        reasoning_effort=defaults.get("reasoning_effort"),
+        rendered_base_prompt="accepted prompt",
+        tools=[],
+        middlewares=[],
+        deferred_names=frozenset(),
+        enabled_skills=enabled_skills,
+        effective_policies={
+            "bootstrap": bool(defaults.get("is_bootstrap", False)),
+            "non_interactive": bool(defaults.get("non_interactive", False)),
+            "plan_mode": bool(defaults.get("is_plan_mode", False)),
+            "recursion_limit": "framework-default",
+            "subagents": _subagent_release_policy(
+                material.app_config,
+                enabled=requested_subagents and allowed_subagents != [],
+                max_concurrent=max_concurrent,
+                max_total=max_total,
+            ),
+        },
+    )
+    return LeadAgentAssembly(graph=graph, descriptor=descriptor)
+
+
 def _runtime_for_revision(revision) -> SimpleNamespace:
     material = revision.material
     assert material is not None
@@ -1664,6 +1709,13 @@ async def test_remote_materialization_is_refenced_immediately_before_astream(
 ) -> None:
     skill_file = _write_skill(tmp_path, body="Pinned remote material")
     revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    assert revision.material is not None
+    revision = ResolvedAgentRevision.from_material(
+        replace(
+            revision.material,
+            model_profile={**revision.material.model_profile, "name": "default"},
+        )
+    )
     store = MemoryRunStore()
     manager = RunManager(
         store=store,
@@ -1729,7 +1781,7 @@ async def test_remote_materialization_is_refenced_immediately_before_astream(
         manager,
         record,
         ctx=RunContext(checkpointer=None),
-        agent_factory=lambda **_kwargs: Agent(),
+        agent_factory=lambda **_kwargs: _assembled_agent_for_revision(revision, Agent()),
         graph_input={},
         config={},
     )

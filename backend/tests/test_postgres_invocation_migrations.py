@@ -45,9 +45,11 @@ from deerflow.persistence.bootstrap import _get_alembic_config, _get_head_revisi
 from deerflow.persistence.inbound_receipt.model import InboundReceiptRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.run.sql import RunRepository
+from deerflow.runtime.assembly_evidence import AssemblyEvidenceV1, assembly_evidence_digest
 from deerflow.runtime.runs.lifecycle_query import LifecycleQuery
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
+    BindAssemblyEvidenceOutcome,
     CancellationRequestOutcome,
     LifecycleTransition,
     LifecycleType,
@@ -62,7 +64,8 @@ _MCP_MERGE_REVISION = "0020_merge_mcp_task_results"
 _MANAGED_SUBAGENTS_REVISION = "0014_managed_subagents"
 _MANAGED_SUBAGENTS_MERGE_REVISION = "0021_merge_managed_subagents"
 _SCHEDULED_ENQUEUE_REVISION = "0015_scheduled_task_enqueue"
-_MERGE_HEAD_REVISION = "0022_merge_scheduled_enqueue"
+_SCHEDULED_MERGE_REVISION = "0022_merge_scheduled_enqueue"
+_MERGE_HEAD_REVISION = "0023_agent_assembly_evidence"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
     "0012_invocation_idempotency",
@@ -152,6 +155,8 @@ _ACCEPTED_COLUMNS = {
     "caller_intent_digest_version": ("character varying", 40, True),
     "execution_evidence_json": ("json", None, True),
     "execution_evidence_digest": ("character varying", 64, True),
+    "assembly_evidence_json": ("json", None, True),
+    "assembly_evidence_digest": ("character varying", 64, True),
 }
 _RUN_CHECKS = {
     "ck_runs_state_version_nonnegative",
@@ -159,6 +164,9 @@ _RUN_CHECKS = {
     "ck_runs_keyed_request_digest",
     "ck_runs_execution_evidence_pair",
     "ck_runs_execution_evidence_run_only",
+    "ck_runs_assembly_evidence_pair",
+    "ck_runs_assembly_evidence_run_only",
+    "ck_runs_assembly_evidence_digest_format",
     "ck_runs_external_identity_run_only",
     "ck_runs_external_scope_length",
     "ck_runs_external_key_length",
@@ -681,6 +689,7 @@ async def _assert_postgres_checks_reject_invalid_rows(engine: AsyncEngine) -> No
     scope = "http:v1:sha256:" + "a" * 64
     digest = "b" * 64
     caller_intent = '{"version":"caller-intent/v1","intent":{}}'
+    assembly_evidence = '{"version":1}'
     await assert_rejected("negative-version", state_version=-1)
     await assert_rejected("key-pair", extra_columns="external_scope", extra_values=":external_scope", external_scope=scope)
     await assert_rejected("reverse-key-pair", extra_columns="external_key", extra_values=":external_key", external_key="raw:key-only")
@@ -848,6 +857,47 @@ async def _assert_postgres_checks_reject_invalid_rows(engine: AsyncEngine) -> No
         caller_intent_json=caller_intent,
         caller_intent_digest=digest,
     )
+    await assert_rejected(
+        "partial-assembly-evidence",
+        extra_columns="assembly_evidence_digest",
+        extra_values=":assembly_evidence_digest",
+        assembly_evidence_digest=digest,
+    )
+    await assert_rejected(
+        "assembly-evidence-json-only",
+        extra_columns="assembly_evidence_json",
+        extra_values="CAST(:assembly_evidence_json AS json)",
+        assembly_evidence_json=assembly_evidence,
+    )
+    await assert_rejected(
+        "auxiliary-assembly-evidence",
+        operation_kind="checkpoint_write",
+        extra_columns="assembly_evidence_json, assembly_evidence_digest",
+        extra_values="CAST(:assembly_evidence_json AS json), :assembly_evidence_digest",
+        assembly_evidence_json=assembly_evidence,
+        assembly_evidence_digest=digest,
+    )
+    await assert_rejected(
+        "assembly-evidence-uppercase",
+        extra_columns="assembly_evidence_json, assembly_evidence_digest",
+        extra_values="CAST(:assembly_evidence_json AS json), :assembly_evidence_digest",
+        assembly_evidence_json=assembly_evidence,
+        assembly_evidence_digest="A" * 64,
+    )
+    await assert_rejected(
+        "assembly-evidence-nonhex",
+        extra_columns="assembly_evidence_json, assembly_evidence_digest",
+        extra_values="CAST(:assembly_evidence_json AS json), :assembly_evidence_digest",
+        assembly_evidence_json=assembly_evidence,
+        assembly_evidence_digest="g" * 64,
+    )
+    await assert_rejected(
+        "assembly-evidence-length",
+        extra_columns="assembly_evidence_json, assembly_evidence_digest",
+        extra_values="CAST(:assembly_evidence_json AS json), :assembly_evidence_digest",
+        assembly_evidence_json=assembly_evidence,
+        assembly_evidence_digest="a" * 63,
+    )
 
 
 async def _assert_lifecycle_constraints_reject_invalid_rows(engine: AsyncEngine) -> None:
@@ -937,6 +987,7 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     mcp_results = script.get_revision(_MCP_RESULTS_REVISION)
     mcp_merge = script.get_revision(_MCP_MERGE_REVISION)
     managed_subagents_merge = script.get_revision(_MANAGED_SUBAGENTS_MERGE_REVISION)
+    scheduled_merge = script.get_revision(_SCHEDULED_MERGE_REVISION)
     merge_head = script.get_revision(_MERGE_HEAD_REVISION)
     assert mcp_results is not None
     assert mcp_results.down_revision == _PRE_FEATURE_REVISION
@@ -950,11 +1001,13 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
         _MCP_MERGE_REVISION,
         _MANAGED_SUBAGENTS_REVISION,
     }
-    assert merge_head is not None
-    assert set(merge_head.down_revision) == {
+    assert scheduled_merge is not None
+    assert set(scheduled_merge.down_revision) == {
         _MANAGED_SUBAGENTS_MERGE_REVISION,
         _SCHEDULED_ENQUEUE_REVISION,
     }
+    assert merge_head is not None
+    assert merge_head.down_revision == _SCHEDULED_MERGE_REVISION
     assert script.get_current_head() == _MERGE_HEAD_REVISION
 
 
@@ -1024,6 +1077,134 @@ async def test_fresh_postgres_migration_chain_reaches_exact_head_schema() -> Non
         await _assert_postgres_head_contract(engine, schema)
         await _assert_postgres_checks_reject_invalid_rows(engine)
         await _assert_lifecycle_constraints_reject_invalid_rows(engine)
+
+
+@pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for PostgreSQL assembly binding qualification",
+)
+async def test_postgres_assembly_evidence_bind_is_fenced_idempotent_and_atomic() -> None:
+    def evidence(fingerprint: str) -> AssemblyEvidenceV1:
+        return AssemblyEvidenceV1(
+            version=1,
+            fingerprint=fingerprint,
+            descriptor_version=1,
+            namespace="deerflow",
+            agent_name="lead-agent",
+            effective_model="gpt-5",
+            prompt_digest="2" * 64,
+            toolset_digest="3" * 64,
+            middleware_digest="4" * 64,
+            skillset_digest="5" * 64,
+            policy_digest="6" * 64,
+            accepted_agent_revision_digest="7" * 64,
+            extension_generation=1,
+        )
+
+    async with _isolated_postgres_schema() as (schema, engine):
+        await _upgrade(engine, schema, "head")
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        left = RunRepository(sessions)
+        right = RunRepository(sessions)
+        lease_expires_at = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+
+        await left.put(
+            "repeat-run",
+            thread_id="thread-repeat",
+            owner_worker_id="worker-1",
+            lease_expires_at=lease_expires_at,
+        )
+        assert await left.start_run("repeat-run") is True
+        repeat_row = await left.get("repeat-run")
+        assert repeat_row is not None
+        lease_epoch = repeat_row["state_version"]
+        original = evidence("a" * 64)
+        original_json = original.to_persisted_json()
+        original_digest = assembly_evidence_digest(original)
+
+        assert (
+            await left.bind_assembly_evidence(
+                "repeat-run",
+                owner_id="worker-1",
+                lease_epoch=lease_epoch,
+                evidence_json=original_json,
+                evidence_digest=original_digest,
+            )
+            is BindAssemblyEvidenceOutcome.bound
+        )
+        assert (
+            await right.bind_assembly_evidence(
+                "repeat-run",
+                owner_id="worker-1",
+                lease_epoch=lease_epoch,
+                evidence_json=dict(reversed(list(original_json.items()))),
+                evidence_digest=original_digest,
+            )
+            is BindAssemblyEvidenceOutcome.already_matching
+        )
+        assert (
+            await right.bind_assembly_evidence(
+                "repeat-run",
+                owner_id="worker-stale",
+                lease_epoch=lease_epoch,
+                evidence_json=original_json,
+                evidence_digest=original_digest,
+            )
+            is BindAssemblyEvidenceOutcome.ownership_lost
+        )
+        async with engine.begin() as connection:
+            await connection.execute(
+                sa.text("UPDATE runs SET lease_expires_at = :expired WHERE run_id = 'repeat-run'"),
+                {"expired": datetime.now(UTC) - timedelta(minutes=1)},
+            )
+        assert (
+            await left.bind_assembly_evidence(
+                "repeat-run",
+                owner_id="worker-1",
+                lease_epoch=lease_epoch,
+                evidence_json=original_json,
+                evidence_digest=original_digest,
+            )
+            is BindAssemblyEvidenceOutcome.ownership_lost
+        )
+
+        await left.put(
+            "race-run",
+            thread_id="thread-race",
+            owner_worker_id="worker-1",
+            lease_expires_at=lease_expires_at,
+        )
+        assert await left.start_run("race-run") is True
+        race_row = await left.get("race-run")
+        assert race_row is not None
+        race_epoch = race_row["state_version"]
+        first = evidence("b" * 64)
+        second = evidence("c" * 64)
+        outcomes = await asyncio.gather(
+            left.bind_assembly_evidence(
+                "race-run",
+                owner_id="worker-1",
+                lease_epoch=race_epoch,
+                evidence_json=first.to_persisted_json(),
+                evidence_digest=assembly_evidence_digest(first),
+            ),
+            right.bind_assembly_evidence(
+                "race-run",
+                owner_id="worker-1",
+                lease_epoch=race_epoch,
+                evidence_json=second.to_persisted_json(),
+                evidence_digest=assembly_evidence_digest(second),
+            ),
+        )
+        assert sorted(outcomes) == sorted([BindAssemblyEvidenceOutcome.bound, BindAssemblyEvidenceOutcome.mismatch])
+        persisted = await left.get("race-run")
+        assert persisted is not None
+        assert persisted["assembly_evidence_digest"] in {
+            assembly_evidence_digest(first),
+            assembly_evidence_digest(second),
+        }
 
 
 @pytest.mark.anyio
