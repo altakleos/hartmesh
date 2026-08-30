@@ -26,9 +26,8 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   Missing/unreadable evidence: `assembly_evidence_unavailable`; invalid/changed:
   `agent_assembly_drift`; ownership loss cannot terminalize its successor. V1
   hashes sorted skills/catalog and `bootstrap`, `non_interactive`, `plan_mode`,
-  `recursion_limit`, and `subagents` policy. Project 02 must update these
-  deterministically and retain V1 unless incompatible. Evidence is execution, not
-  source attestation.
+  `recursion_limit`, and frozen `subagents` catalog policy. Retain V1 unless
+  incompatible. Evidence is execution, not source attestation.
 - `packages/runtime-api/` is the stdlib-only portable contract; Gateway HTTP and
   in-process adapters must remain behaviorally identical. The synchronous
   `DeerFlowClient` is a legacy local graph client and does not enter `InvocationRuntime`;

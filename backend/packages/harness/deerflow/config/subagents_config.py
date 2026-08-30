@@ -13,6 +13,7 @@ MIN_TOTAL_SUBAGENTS_PER_RUN = 1
 MAX_TOTAL_SUBAGENTS_PER_RUN = 50
 MIN_CONCURRENT_SUBAGENT_CALLS = 1
 MAX_CONCURRENT_SUBAGENT_CALLS = 4
+MAX_SUBAGENT_CATALOG_ENTRIES = 64
 
 
 def clamp_subagent_concurrency(value: int) -> int:
@@ -138,6 +139,12 @@ class SubagentsAppConfig(BaseModel):
         ge=MIN_TOTAL_SUBAGENTS_PER_RUN,
         le=MAX_TOTAL_SUBAGENTS_PER_RUN,
         description="Default total number of subagent delegations allowed in one lead-agent run. This is a deterministic backstop against repeated legal-sized task batches. Valid range: 1-50.",
+    )
+    max_catalog_entries: int = Field(
+        default=MAX_SUBAGENT_CATALOG_ENTRIES,
+        ge=1,
+        le=MAX_SUBAGENT_CATALOG_ENTRIES,
+        description="Maximum number of subagent definitions snapshotted for one accepted invocation. Operators may lower, but never raise, the hard limit of 64.",
     )
     token_budget: TokenBudgetConfig = Field(
         default_factory=default_subagent_token_budget,

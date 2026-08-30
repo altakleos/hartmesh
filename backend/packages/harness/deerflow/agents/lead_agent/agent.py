@@ -69,6 +69,7 @@ from deerflow.runtime.checkpoint_mode import (
     frozen_checkpoint_channel_mode,
     inject_checkpoint_mode,
 )
+from deerflow.runtime.subagent_snapshot import ResolvedSubagentCatalogV1
 from deerflow.skills.types import Skill
 from deerflow.tracing import build_tracing_callbacks
 
@@ -141,6 +142,7 @@ def _subagent_release_policy(
     enabled: bool,
     max_concurrent: int,
     max_total: int,
+    resolved_subagent_catalog: ResolvedSubagentCatalogV1 | None = None,
 ) -> dict[str, object]:
     """Delegation limits as the run will actually enforce them.
 
@@ -155,6 +157,17 @@ def _subagent_release_policy(
         "type_allowlist": [],
         "runtime_limits": {},
     }
+    if resolved_subagent_catalog is not None:
+        policy["catalog_digest"] = resolved_subagent_catalog.digest
+        policy["type_allowlist"] = list(resolved_subagent_catalog.allowed_names)
+        policy["runtime_limits"] = {
+            entry.name: {
+                "max_turns": entry.max_turns,
+                "timeout_seconds": entry.timeout_seconds,
+            }
+            for entry in resolved_subagent_catalog.entries
+        }
+        return policy
     if not enabled:
         return policy
 
@@ -915,7 +928,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     agent_config = resolved_material.agent_config_object if resolved_material is not None else (load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None)
     # Keep compatibility with lightweight AgentConfig-shaped objects used by
     # integrations that predate caller-level subagent restrictions.
-    allowed_subagents = getattr(agent_config, "allowed_subagents", None) if agent_config is not None else None
+    allowed_subagents = list(resolved_material.subagent_catalog.allowed_names) if resolved_material is not None else (getattr(agent_config, "allowed_subagents", None) if agent_config is not None else None)
     # The request switch may disable delegation, but it can never widen the
     # server-side custom-agent policy. An explicit empty list is a hard deny.
     subagent_enabled = bool(requested_subagent_enabled and allowed_subagents != [])
@@ -1073,6 +1086,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             resolved_soul=resolved_material.soul if resolved_material is not None else None,
             resolved_skills=resolved_material.all_skill_objects if resolved_material is not None else None,
             allowed_subagents=allowed_subagents,
+            resolved_subagent_catalog=(resolved_material.subagent_catalog if resolved_material is not None else None),
         )
         graph = create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
@@ -1105,6 +1119,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                     enabled=subagent_enabled,
                     max_concurrent=max_concurrent_subagents,
                     max_total=max_total_subagents,
+                    resolved_subagent_catalog=(resolved_material.subagent_catalog if resolved_material is not None else None),
                 ),
                 "deferred_tools": {
                     "enabled": resolved_app_config.tool_search.enabled,
@@ -1192,6 +1207,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         resolved_soul=resolved_material.soul if resolved_material is not None else None,
         resolved_skills=resolved_material.all_skill_objects if resolved_material is not None else None,
         allowed_subagents=allowed_subagents,
+        resolved_subagent_catalog=(resolved_material.subagent_catalog if resolved_material is not None else None),
     )
     graph = create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides),
@@ -1225,6 +1241,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                 enabled=subagent_enabled,
                 max_concurrent=max_concurrent_subagents,
                 max_total=max_total_subagents,
+                resolved_subagent_catalog=(resolved_material.subagent_catalog if resolved_material is not None else None),
             ),
             "deferred_tools": {
                 "enabled": resolved_app_config.tool_search.enabled,

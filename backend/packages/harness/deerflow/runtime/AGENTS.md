@@ -9,6 +9,18 @@ must match the stored request evidence. State changes and lifecycle events are
 transactional, cancellation is fenced, and an active row lost with its process
 is terminalized rather than resuming model execution.
 
+`subagent_snapshot.py` is the sole live-to-immutable seam for durable subagents.
+Admission captures a bounded `ResolvedSubagentCatalogV1` plus a digest-scoped
+`ResolvedSkillScopesV1` map for `lead` and every `subagent:<name>`. Both are part
+of the agent revision digest and are embedded in `agent_revision_json`; even a
+delegation-disabled revision carries their canonical empty forms. Worker recovery
+validates internal catalog/scope digests and required accepted skill bytes, then
+reuses the persisted objects without comparing current managed records. Legacy
+terminal revisions without these fields remain readable; legacy nonterminal
+execution stops with `subagent_catalog_unavailable`. Do not install an older
+runtime that cannot validate the additive fields until all such nonterminal rows
+are drained or terminalized.
+
 Accepted durable lead execution also binds `AssemblyEvidenceV1` to the running
 owner/state-version fence. After accepted material is verified and the run starts,
 the worker assembles under the frozen extension generation, validates the actual
@@ -18,6 +30,10 @@ calling `astream`. `assembly_evidence_unavailable` covers a missing descriptor;
 `agent_assembly_drift` covers invalid, contradictory, or changed evidence. Bound
 evidence is immutable and survives every terminal outcome. It proves only which
 assembly the runtime admitted, not the integrity of the Python code that produced it.
+
+Lifecycle summaries expose only catalog version, digest, entry count, and allowed
+names after strict revalidation. Prompts, descriptions, models, tools, skills,
+policy settings, source records, and user identifiers never enter that projection.
 
 The portable `deerflow-runtime-api` DTOs contain runtime operations only;
 deployment provenance and qualification are administrator-only. Memory-backed

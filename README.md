@@ -266,7 +266,9 @@ Evidence: [`invocation.py`](backend/app/runtime/invocation.py) and the [closure 
 
 Admission pins the agent revision, extension generation, trusted context, constraints evidence, effective skill packages, and execution/projection profile.
 
-One immutable accepted skill tree serves lead and subagent prompts, activation, policy, and sandbox reads.
+It also resolves the effective subagent catalog once, including each allowed worker's prompt, model/profile settings, tools, skills, limits, source version, and definition digest. Lead discovery, delegation policy, worker construction, retries, and recovery all use that catalog. Managed subagent changes apply to invocations accepted after the edit; an in-flight or recovered invocation uses its accepted snapshot.
+
+One immutable accepted skill tree contains the transitive union needed by the lead and its allowed subagents. Prompt, discovery, activation, and tool policy expose only the accepted per-agent scope; because all accepted packages may share one sandbox tree, that scoping is not a filesystem-confidentiality boundary.
 
 Nonempty accepted skills use a supported accepted-only profile: local container-backed AIO or Kubernetes with the fenced `rwx_verified_copy_v2` projection.
 
@@ -286,7 +288,9 @@ and overall descriptor. Recovery may proceed only when a newly assembled graph
 matches that record; a missing descriptor or drift fails closed without
 overwriting the original evidence. Authorized lifecycle observation exposes a
 smaller revalidated projection with `pending`, `verified`, or
-`legacy_unavailable` status.
+`legacy_unavailable` status. The same authorized summary exposes only the
+accepted subagent catalog version, digest, count, and allowed names—not worker
+prompts or definitions.
 
 This is an execution record—what HartMesh assembled and admitted—not a
 signature, proof of model/tool correctness, or cryptographic source-code

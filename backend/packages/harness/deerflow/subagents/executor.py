@@ -43,6 +43,10 @@ from deerflow.runtime.skill_projection import (
     SkillProjectionConsumerToken,
     get_skill_projection_coordinator,
 )
+from deerflow.runtime.subagent_snapshot import (
+    ResolvedSubagentDefinitionV1,
+    SubagentCatalogError,
+)
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -611,6 +615,28 @@ class SubagentExecutor:
         ):
             raise TypeError("resolved_agent_material must be ResolvedAgentMaterialV1 or None")
         self.resolved_agent_material = resolved_agent_material
+        if resolved_agent_material is not None and self.app_config is None and resolved_agent_material.app_config is not None:
+            self.app_config = resolved_agent_material.app_config
+            if self.model_name is None:
+                self.model_name = resolve_subagent_model_name(
+                    config,
+                    parent_model,
+                    app_config=self.app_config,
+                )
+        self.resolved_subagent_definition: ResolvedSubagentDefinitionV1 | None = None
+        self.parent_subagent_catalog_digest: str | None = None
+        if resolved_agent_material is not None:
+            catalog = resolved_agent_material.subagent_catalog
+            catalog_entry = catalog.get(config.name)
+            if catalog_entry is None or config != catalog_entry.to_subagent_config():
+                raise SubagentCatalogError("subagent_definition_drift")
+            if self.app_config is not None:
+                catalog_entry.verify_execution_settings(
+                    self.app_config,
+                    parent_model_name=self.model_name,
+                )
+            self.resolved_subagent_definition = catalog_entry
+            self.parent_subagent_catalog_digest = catalog.digest
         self._owns_resolved_agent_material = False
         if skill_projection_token is not None and not isinstance(
             skill_projection_token,
@@ -740,13 +766,17 @@ class SubagentExecutor:
         schema and probes every middleware, so it is skipped entirely when no
         observer is registered to receive it.
         """
-        if not getattr(extensions, "has_agent_assembly_observers", False):
+        has_observers = getattr(
+            extensions,
+            "has_agent_assembly_observers",
+            False,
+        )
+        if not has_observers and self.resolved_subagent_definition is None:
             return
 
         from types import SimpleNamespace
 
         from deerflow.agents.assembly_descriptor import build_assembly_descriptor
-        from deerflow.extensions.notify import notify_agent_assembled
 
         try:
             get_model_config = getattr(app_config, "get_model_config", None)
@@ -785,9 +815,13 @@ class SubagentExecutor:
                         "enabled": bool(deferred_names),
                         "catalog_hash": (deferred_setup.catalog_hash if deferred_setup is not None else None),
                     },
+                    "accepted_definition_digest": (self.resolved_subagent_definition.definition_digest if self.resolved_subagent_definition is not None else None),
+                    "parent_catalog_digest": self.parent_subagent_catalog_digest,
                 },
             )
-        except Exception:
+        except Exception as exc:
+            if self.resolved_subagent_definition is not None:
+                raise SubagentCatalogError("subagent_definition_drift") from exc
             logger.warning(
                 "[trace=%s] Could not describe subagent %s assembly",
                 self.trace_id,
@@ -796,7 +830,10 @@ class SubagentExecutor:
             )
             return
         self.assembly_descriptor = descriptor
-        notify_agent_assembled(descriptor, extensions)
+        if has_observers:
+            from deerflow.extensions.notify import notify_agent_assembled
+
+            notify_agent_assembled(descriptor, extensions)
 
     def _consume_guard_stop_reason(self) -> str | None:
         """Pop and return the guard-cap stop reason set during the last run.
@@ -823,7 +860,7 @@ class SubagentExecutor:
             return []
 
         if self.resolved_agent_material is not None:
-            all_skills = list(self.resolved_agent_material.enabled_skill_objects)
+            all_skills = list(self.resolved_agent_material.skill_objects_for_scope(f"subagent:{self.config.name}"))
             logger.info(
                 "[trace=%s] Subagent %s loaded %d accepted snapshot skill(s)",
                 self.trace_id,

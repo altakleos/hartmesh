@@ -21,6 +21,7 @@ from deerflow.runtime.accepted_invocation import (
     INVOCATION_IDENTITY_CONTEXT_KEY,
     INVOCATION_ORIGIN_CONTEXT_KEY,
     TRUSTED_RUN_CONTEXT_KEY,
+    ResolvedAgentMaterialV1,
     canonical_digest,
 )
 from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
@@ -289,38 +290,57 @@ async def task_tool(
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
-    allowed_subagents = metadata.get("allowed_subagents")
-    if allowed_subagents is None:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
-    else:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+    parent_context = runtime.context if runtime is not None else None
+    parent_context = parent_context if isinstance(parent_context, dict) else {}
+    resolved_agent_material = parent_context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+    if not isinstance(resolved_agent_material, ResolvedAgentMaterialV1):
+        resolved_agent_material = None
 
-    # Preserve the dedicated sandbox-policy guidance before the generic
-    # registry/policy membership gate filters bash from the visible catalog.
-    if subagent_type == "bash":
-        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
-        if not host_bash_allowed:
+    resolved_subagent_definition = None
+    allowed_subagents = metadata.get("allowed_subagents")
+    if resolved_agent_material is not None:
+        catalog = resolved_agent_material.subagent_catalog
+        available_subagent_names = list(catalog.allowed_names)
+        resolved_subagent_definition = catalog.get(subagent_type)
+        if resolved_subagent_definition is None:
             return _task_result_command(
                 tool_call_id=tool_call_id,
                 status="failed",
-                error=LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
+                error="subagent_not_accepted",
             )
-
-    # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
-    if config is None or subagent_type not in available_subagent_names:
-        if available_subagent_names:
-            available = ", ".join(available_subagent_names)
-        elif allowed_subagents is not None:
-            available = "none permitted by caller policy"
+        config = resolved_subagent_definition.to_subagent_config()
+    else:
+        if allowed_subagents is None:
+            available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
         else:
-            available = "none"
-        error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
-        return _task_result_command(
-            tool_call_id=tool_call_id,
-            status="failed",
-            error=error,
-        )
+            available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+
+        # Preserve the dedicated sandbox-policy guidance before the generic
+        # registry/policy membership gate filters bash from the visible catalog.
+        if subagent_type == "bash":
+            host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+            if not host_bash_allowed:
+                return _task_result_command(
+                    tool_call_id=tool_call_id,
+                    status="failed",
+                    error=LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
+                )
+
+        # Get subagent configuration
+        config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+        if config is None or subagent_type not in available_subagent_names:
+            if available_subagent_names:
+                available = ", ".join(available_subagent_names)
+            elif allowed_subagents is not None:
+                available = "none permitted by caller policy"
+            else:
+                available = "none"
+            error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
+            return _task_result_command(
+                tool_call_id=tool_call_id,
+                status="failed",
+                error=error,
+            )
     # Build config overrides
     overrides: dict = {}
 
@@ -359,8 +379,6 @@ async def task_tool(
     # None when absent (e.g. internal-auth runs) so guardrail behavior is
     # unchanged. Without this, role-aware policy silently mis-attributes any
     # tool call delegated to a subagent (user_role=None).
-    parent_context = runtime.context if runtime is not None else None
-    parent_context = parent_context if isinstance(parent_context, dict) else {}
     user_role = parent_context.get("user_role")
     oauth_provider = parent_context.get("oauth_provider")
     oauth_id = parent_context.get("oauth_id")
@@ -394,14 +412,9 @@ async def task_tool(
     subagent_reservation = parent_context.get(SUBAGENT_RESERVATION_CONTEXT_KEY)
     accepted_extension_generation = parent_context.get("accepted_extension_generation")
     accepted_extension_manifest_digest = parent_context.get("accepted_extension_manifest_digest")
-    resolved_agent_material = parent_context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
     skill_projection_token = parent_context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
     if not isinstance(skill_projection_token, SkillProjectionConsumerToken):
         skill_projection_token = None
-    from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
-
-    if not isinstance(resolved_agent_material, ResolvedAgentMaterialV1):
-        resolved_agent_material = None
     from deerflow.extensions.mcp import (
         build_mcp_preparation_audit_sink,
         mcp_invocation_facts_from_context,
@@ -412,7 +425,7 @@ async def task_tool(
     deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
-    if parent_available_skills is not None:
+    if parent_available_skills is not None and resolved_agent_material is None:
         overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
 
     if overrides:
@@ -473,6 +486,8 @@ async def task_tool(
                 ),
                 "skill_snapshot_id": getattr(snapshot, "snapshot_id", None),
                 "skill_snapshot_digest": getattr(snapshot, "content_digest", None),
+                "subagent_definition_digest": (resolved_subagent_definition.definition_digest if resolved_subagent_definition is not None else None),
+                "parent_subagent_catalog_digest": (resolved_agent_material.subagent_catalog.digest if resolved_agent_material is not None else None),
             }
         )
         dispatch_ticket = dispatch_ledger.acquire(

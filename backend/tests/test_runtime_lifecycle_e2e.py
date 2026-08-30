@@ -205,6 +205,7 @@ def _make_agent_factory(controller: _RunController, **agent_kwargs):
                     enabled=subagents_enabled,
                     max_concurrent=max_concurrent,
                     max_total=max_total,
+                    resolved_subagent_catalog=material.subagent_catalog,
                 ),
             },
         )

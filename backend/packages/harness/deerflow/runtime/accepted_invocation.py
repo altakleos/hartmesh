@@ -12,6 +12,10 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from deerflow.runtime.skill_snapshot import AcceptedSkillSnapshot
+    from deerflow.runtime.subagent_snapshot import (
+        ResolvedSkillScopesV1,
+        ResolvedSubagentCatalogV1,
+    )
 
 from deerflow_extension_api import (
     InvocationIdentityV1,
@@ -245,6 +249,8 @@ class ResolvedAgentMaterialV1:
     tools: tuple[str, ...] = ()
     skills: tuple[Mapping[str, Any], ...] = ()
     runtime_defaults: Mapping[str, Any] = field(default_factory=dict)
+    subagent_catalog: ResolvedSubagentCatalogV1 | None = None
+    skill_scopes: ResolvedSkillScopesV1 | None = None
     app_config: Any | None = field(default=None, repr=False, compare=False)
     agent_config_object: Any | None = field(default=None, repr=False, compare=False)
     enabled_skill_objects: tuple[Any, ...] = field(default=(), repr=False, compare=False)
@@ -257,6 +263,26 @@ class ResolvedAgentMaterialV1:
     )
 
     def __post_init__(self) -> None:
+        from deerflow.runtime.subagent_snapshot import (
+            ResolvedSkillScopesV1,
+            ResolvedSubagentCatalogV1,
+        )
+
+        catalog = self.subagent_catalog
+        if catalog is None:
+            catalog = ResolvedSubagentCatalogV1.empty()
+        if not isinstance(catalog, ResolvedSubagentCatalogV1):
+            raise TypeError("subagent_catalog must be ResolvedSubagentCatalogV1 or None")
+        scopes = self.skill_scopes
+        if scopes is None:
+            scopes = ResolvedSkillScopesV1.empty()
+        if not isinstance(scopes, ResolvedSkillScopesV1):
+            raise TypeError("skill_scopes must be ResolvedSkillScopesV1 or None")
+        expected_scopes = {"lead", *(f"subagent:{name}" for name in catalog.allowed_names)}
+        if set(scopes.scopes) != expected_scopes:
+            raise ValueError("accepted skill scopes must exactly match the subagent catalog")
+        object.__setattr__(self, "subagent_catalog", catalog)
+        object.__setattr__(self, "skill_scopes", scopes)
         canonical_agent_id = canonicalize_agent_identifier(
             self.agent_id,
             field_name="resolved agent material id",
@@ -293,6 +319,21 @@ class ResolvedAgentMaterialV1:
         """Verify process-local immutable material immediately before use."""
         if self.skill_snapshot is not None:
             self.skill_snapshot.verify()
+        permitted = {projection.content_digest for projection in (() if self.skill_snapshot is None else self.skill_snapshot.projections)}
+        required = {digest for digests in self.skill_scopes.scopes.values() for digest in digests}
+        if not required <= permitted:
+            from deerflow.runtime.subagent_snapshot import SubagentCatalogError
+
+            raise SubagentCatalogError("subagent_skill_material_missing")
+
+    def skill_objects_for_scope(self, scope: str) -> tuple[Any, ...]:
+        """Return only the accepted packages authorized for one agent scope."""
+
+        digests = set(self.skill_scopes.for_scope(scope))
+        if not digests or self.skill_snapshot is None:
+            return ()
+        projection_by_name = {projection.name: projection for projection in self.skill_snapshot.projections}
+        return tuple(skill for skill in self.skill_snapshot.skills if ((projection := projection_by_name.get(str(getattr(skill, "name", "")))) is not None and projection.content_digest in digests))
 
     def retain_process_material(self) -> ResolvedAgentMaterialV1:
         """Return an equivalent material record with an independent lease."""
@@ -321,6 +362,8 @@ class ResolvedAgentMaterialV1:
             "tools": list(self.tools),
             "skills": [_deep_thaw(skill) for skill in self.skills],
             "runtime_defaults": _deep_thaw(self.runtime_defaults),
+            "subagent_catalog": self.subagent_catalog.to_persisted_json(),
+            "skill_scopes": self.skill_scopes.to_persisted_json(),
         }
 
 
@@ -332,6 +375,9 @@ class ResolvedAgentRevision:
     digest: str
     storage_source: str
     storage_version: str
+    subagent_catalog: ResolvedSubagentCatalogV1 | None = field(default=None, repr=False)
+    skill_scopes: ResolvedSkillScopesV1 | None = field(default=None, repr=False)
+    legacy_live_catalog: bool = field(default=False, repr=False)
     material: ResolvedAgentMaterialV1 | None = field(default=None, repr=False, compare=False)
 
     @classmethod
@@ -341,17 +387,23 @@ class ResolvedAgentRevision:
             digest=canonical_digest(material.projector()),
             storage_source=material.storage_source,
             storage_version=material.storage_version,
+            subagent_catalog=material.subagent_catalog,
+            skill_scopes=material.skill_scopes,
             material=material,
         )
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        result = {
             "version": _AGENT_REVISION_VERSION,
             "agent_id": self.agent_id,
             "storage_source": self.storage_source,
             "storage_version": self.storage_version,
             "digest": self.digest,
         }
+        if self.subagent_catalog is not None and self.skill_scopes is not None:
+            result["subagent_catalog"] = self.subagent_catalog.to_persisted_json()
+            result["skill_scopes"] = self.skill_scopes.to_persisted_json()
+        return result
 
 
 @dataclass(frozen=True)
@@ -578,14 +630,43 @@ class AcceptedInvocation:
 
         if revision_json.get("version") != _AGENT_REVISION_VERSION:
             raise ValueError("agent revision has an unsupported version")
-        expected_revision_fields = {
+        base_revision_fields = {
             "version",
             "agent_id",
             "storage_source",
             "storage_version",
             "digest",
         }
-        if set(revision_json) != expected_revision_fields:
+        snapshotted_revision_fields = base_revision_fields | {
+            "subagent_catalog",
+            "skill_scopes",
+        }
+        revision_fields = set(revision_json)
+        if revision_fields == base_revision_fields:
+            subagent_catalog = None
+            skill_scopes = None
+            legacy_live_catalog = True
+        elif revision_fields == snapshotted_revision_fields:
+            from deerflow.runtime.subagent_snapshot import (
+                ResolvedSkillScopesV1,
+                ResolvedSubagentCatalogV1,
+                SubagentCatalogError,
+            )
+
+            raw_catalog = revision_json.get("subagent_catalog")
+            raw_scopes = revision_json.get("skill_scopes")
+            if not isinstance(raw_catalog, Mapping) or not isinstance(raw_scopes, Mapping):
+                raise SubagentCatalogError("subagent_catalog_invalid")
+            subagent_catalog = ResolvedSubagentCatalogV1.from_persisted_json(raw_catalog)
+            skill_scopes = ResolvedSkillScopesV1.from_persisted_json(raw_scopes)
+            expected_scopes = {
+                "lead",
+                *(f"subagent:{name}" for name in subagent_catalog.allowed_names),
+            }
+            if set(skill_scopes.scopes) != expected_scopes:
+                raise SubagentCatalogError("subagent_catalog_invalid")
+            legacy_live_catalog = False
+        else:
             raise ValueError("agent revision has unknown or missing fields")
         persisted_revision_digest = _require_digest(
             revision_digest,
@@ -604,6 +685,9 @@ class AcceptedInvocation:
             digest=persisted_revision_digest,
             storage_source=str(revision_json.get("storage_source")),
             storage_version=str(revision_json.get("storage_version")),
+            subagent_catalog=subagent_catalog,
+            skill_scopes=skill_scopes,
+            legacy_live_catalog=legacy_live_catalog,
         )
         thread_id = validate_thread_identifier(row.get("thread_id"), field_name="persisted thread_id")
         extension_generation = row.get("extension_generation")

@@ -25,7 +25,7 @@ import threading
 import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from functools import lru_cache
 from typing import Any, Literal, cast
@@ -810,6 +810,7 @@ def _accepted_assembly_anchors(
             enabled=subagents_enabled,
             max_concurrent=max_concurrent,
             max_total=max_total,
+            resolved_subagent_catalog=material.subagent_catalog,
         ),
     }
     trusted_context = accepted.trusted_context
@@ -1201,10 +1202,32 @@ async def run_agent(
             continuation_config["configurable"] = configurable
             return RunnableConfig(**continuation_config)
 
+        async def _fail_unavailable_subagent_catalog() -> None:
+            error = "Accepted subagent catalog is unavailable"
+            await run_manager.set_status_if_not_cancelled(
+                run_id,
+                RunStatus.error,
+                error=error,
+                stop_reason="subagent_catalog_unavailable",
+                **terminal_status_kwargs,
+            )
+            await bridge.publish(
+                run_id,
+                "error",
+                {
+                    "message": error,
+                    "name": "SubagentCatalogUnavailableError",
+                },
+            )
+
         accepted = record.accepted_invocation
         if accepted is not None:
             from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1, ResolvedAgentRevision
             from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+
+            if accepted.agent_revision.subagent_catalog is None:
+                await _fail_unavailable_subagent_catalog()
+                return
 
             pinned_material = accepted.agent_revision.material
             if pinned_material is None:
@@ -1220,16 +1243,44 @@ async def run_agent(
                 elif isinstance(resolved, ResolvedAgentMaterialV1):
                     pinned_material = resolved
             if isinstance(pinned_material, ResolvedAgentMaterialV1):
+                accepted_catalog = accepted.agent_revision.subagent_catalog
+                accepted_scopes = accepted.agent_revision.skill_scopes
+                if accepted_scopes is None:
+                    await _fail_unavailable_subagent_catalog()
+                    return
+                # A restart resolver may rebuild the lead's other immutable
+                # inputs from their normal stores, but managed definitions are
+                # prospective state. Rebind the already-validated persisted
+                # catalog before digest comparison; never compare it to live
+                # managed rows.
+                if pinned_material.subagent_catalog != accepted_catalog or pinned_material.skill_scopes != accepted_scopes:
+                    pinned_material = replace(
+                        pinned_material,
+                        subagent_catalog=accepted_catalog,
+                        skill_scopes=accepted_scopes,
+                    )
+            if isinstance(pinned_material, ResolvedAgentMaterialV1):
                 pinned_material_for_cleanup = pinned_material
                 try:
                     await asyncio.to_thread(pinned_material.verify_process_material)
-                except Exception:
-                    error = "Accepted skill snapshot no longer matches captured material"
+                except Exception as exc:
+                    from deerflow.runtime.subagent_snapshot import (
+                        SubagentCatalogError,
+                    )
+
+                    if isinstance(exc, SubagentCatalogError):
+                        stop_reason = exc.code
+                        error = "Accepted subagent skill material is unavailable"
+                        error_name = "SubagentSkillMaterialError"
+                    else:
+                        stop_reason = "agent_revision_drift"
+                        error = "Accepted skill snapshot no longer matches captured material"
+                        error_name = "AgentRevisionDriftError"
                     await run_manager.set_status_if_not_cancelled(
                         run_id,
                         RunStatus.error,
                         error=error,
-                        stop_reason="agent_revision_drift",
+                        stop_reason=stop_reason,
                         **terminal_status_kwargs,
                     )
                     await bridge.publish(
@@ -1237,7 +1288,7 @@ async def run_agent(
                         "error",
                         {
                             "message": error,
-                            "name": "AgentRevisionDriftError",
+                            "name": error_name,
                         },
                     )
                     return

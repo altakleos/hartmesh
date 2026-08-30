@@ -266,6 +266,8 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                     constraint_evidence_digest=summary.get("constraint_evidence_digest"),
                     assembly_evidence=summary.get("assembly_evidence"),
                     assembly_evidence_status=summary.get("assembly_evidence_status"),
+                    subagent_catalog=summary.get("subagent_catalog"),
+                    subagent_catalog_status=summary.get("subagent_catalog_status"),
                 )
                 for summary in result.page.summaries
             )

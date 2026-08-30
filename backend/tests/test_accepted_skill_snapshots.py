@@ -53,7 +53,6 @@ from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox_provider import AcceptedSkillExecutionEvidenceV1
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import Skill, SkillCategory
-from deerflow.subagents.config import SubagentConfig
 
 
 @pytest.fixture
@@ -190,6 +189,7 @@ def _assembled_agent_for_revision(revision: ResolvedAgentRevision, graph: object
                 enabled=requested_subagents and allowed_subagents != [],
                 max_concurrent=max_concurrent,
                 max_total=max_total,
+                resolved_subagent_catalog=material.subagent_catalog,
             ),
         },
     )
@@ -866,15 +866,57 @@ async def test_lead_and_subagent_share_the_same_snapshot_and_revision(
     revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
     material = revision.material
     assert material is not None
-    executor = executor_module.SubagentExecutor(
-        config=SubagentConfig(
-            name="general-purpose",
-            description="test",
-            skills=["immutable-skill"],
+    from deerflow.runtime.subagent_snapshot import (
+        ResolvedSkillScopesV1,
+        ResolvedSubagentCatalogV1,
+        resolved_subagent_definition,
+    )
+
+    projection = material.skill_snapshot.projections[0]
+    definition = resolved_subagent_definition(
+        name="general-purpose",
+        source_kind="builtin",
+        source_version="test-source",
+        description="test",
+        system_prompt="",
+        model=None,
+        model_settings={},
+        tool_names=(),
+        skill_names=("immutable-skill",),
+        max_turns=50,
+        timeout_seconds=900,
+        inherits_tools=True,
+        policy_settings={
+            "token_budget": material.app_config.subagents.get_token_budget_for(
+                "general-purpose",
+                summarization_enabled=False,
+            ).model_dump(mode="json"),
+        },
+    )
+    catalog = ResolvedSubagentCatalogV1.from_entries(
+        (definition,),
+        allowed_names=("general-purpose",),
+    )
+    material = replace(
+        material,
+        # This test exercises shared skill material only.  Leave model
+        # construction deferred instead of inventing a live model profile for
+        # the synthetic catalog assembled below.
+        app_config=None,
+        subagent_catalog=catalog,
+        skill_scopes=ResolvedSkillScopesV1.from_scopes(
+            {
+                "lead": (projection.content_digest,),
+                "subagent:general-purpose": (projection.content_digest,),
+            }
         ),
+    )
+    revision = ResolvedAgentRevision.from_material(material)
+    executor = executor_module.SubagentExecutor(
+        config=definition.to_subagent_config(),
         tools=[],
         app_config=material.app_config,
-        parent_model="test-model",
+        parent_model=None,
         resolved_agent_material=material,
     )
 

@@ -236,6 +236,15 @@ projection; older rows without it remain readable through the conservative legac
 Historical null rows remain readable. Auxiliary checkpoint/artifact operation rows carry
 none of these facts.
 
+The safe agent revision metadata does embed the versioned effective subagent
+catalog and its per-agent skill-content scope map. Their full prompts and
+execution settings are authoritative input material, not public lifecycle data.
+New revisions always write both fields, including canonical empty values. A
+pre-feature terminal row without them remains readable; a pre-feature
+nonterminal row cannot execute through live resolution and fails closed. Because
+the fields are additive, rollback to code that cannot validate them is safe only
+after rows written by the newer runtime have been drained or terminalized.
+
 Principal projection v2 stores the nested v1 split identity. Historical v1 projections
 remain readable, but their legacy `is_internal` flag is treated conservatively: an
 attributed channel user or a principal whose role is not `service`/`internal` is never
@@ -612,6 +621,11 @@ malformed, or digest-mismatched pair is null with `legacy_unavailable`. Stored
 content is never reflected on failure. This says which assembly HartMesh admitted
 to execute; it is not a cryptographic attestation of source code or behavior.
 
+The summary's independently validated `subagent_catalog` projection contains
+only V1, its full digest, entry count, and exact sorted allowed names, paired with
+`verified` or `legacy_unavailable`. It never exposes descriptions, prompts,
+models/settings, tools, skills, limits, source records, or policy material.
+
 The portable observation validates the complete page relationship on direct
 construction and wire parsing. All snapshots and events belong to the observed
 thread; a singular query contains only its requested run. Snapshot and summary
@@ -802,6 +816,23 @@ execution settings and opaque secret-handle IDs, effective tool groups/tools, en
 manifest/content digests, and thinking/reasoning/planning/subagent defaults. Guard tests make
 new graph-factory configuration fields choose explicit inclusion or exclusion.
 
+Admission also resolves every reachable effective subagent once through
+`runtime/subagent_snapshot.py`. Registry precedence remains built-in, then
+`config.yaml` custom, then enabled managed, with per-name overrides applied to
+the winner. The canonical V1 definition captures source version, description,
+effective prompt/model settings, tools, skills, limits, and construction policy;
+the catalog binds exact allowed names and is capped at 64 entries and 256 KiB.
+Named missing or invalid definitions fail admission instead of being omitted.
+Managed subagent changes apply to invocations accepted after the edit; an
+in-flight or recovered invocation uses its accepted snapshot.
+
+Admission snapshots the transitive union of lead and allowed-subagent skill
+packages once, while a content-digest scope map limits prompt/discovery/tool
+loading to `lead` or the relevant `subagent:<name>`. A shared accepted sandbox
+tree may contain that full union; scope is not a filesystem-confidentiality
+claim. Recovery validates catalog/scope digests and required accepted package
+material but never compares the catalog with current managed state.
+
 After the worker restores that accepted material, it installs an opaque
 server-owned descriptor-required sentinel, starts under the execution fence, and
 assembles under the accepted extension generation. `AssemblyEvidenceV1`
@@ -809,10 +840,12 @@ fingerprints the actual effective model, prompt hash, authorized tool/deferred-t
 set, ordered middleware chain, enabled skill names plus immutable skill catalog,
 and complete effective policy projection. Admission-comparable policy anchors are
 the bootstrap, non-interactive, plan, recursion, and full subagent release-policy
-fields. Model, skill, or policy contradictions fail before binding; any later
+fields, including the catalog digest, exact allowed names, and frozen limits.
+Subagent descriptors likewise record their accepted definition digest and parent
+catalog digest. Model, skill, or policy contradictions fail before binding; any later
 fingerprint change fails comparison without replacing the original. Project 02's
-managed-subagent material must feed this canonical subagent/skill projection
-deterministically without changing the V1 envelope unless compatibility breaks.
+managed-subagent material feeds this canonical subagent/skill projection without
+changing the V1 evidence envelope.
 
 Skill evidence is calculated from `AcceptedSkillSnapshot`, not from mutable live paths. The
 Gateway copies every non-symlink regular file in each effective skill package—including

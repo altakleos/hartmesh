@@ -72,6 +72,9 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `title` - Auto-title generation (enabled, max_words, max_chars, model_name; null model_name uses fast local fallback, explicit model_name uses the prompt_template LLM path)
 - `summarization` - Context summarization (enabled, trigger conditions, keep policy)
 - `subagents.enabled` - Master switch for subagent delegation
+- `subagents.max_catalog_entries` - Per-invocation admission cap for the immutable
+  effective subagent catalog; defaults to and can never exceed 64. It is read at
+  admission, so edits affect the next invocation, not an already accepted run.
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, shutdown_flush_timeout_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens, staleness_review_enabled, staleness_age_days, staleness_min_candidates, staleness_max_removals_per_cycle, staleness_protected_categories, staleness_max_lifetime_multiplier, staleness_max_extension_days)
 
 **`extensions_config.json`**:
