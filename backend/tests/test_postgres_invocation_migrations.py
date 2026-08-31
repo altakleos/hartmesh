@@ -67,7 +67,7 @@ _SCHEDULED_ENQUEUE_REVISION = "0015_scheduled_task_enqueue"
 _SCHEDULED_MERGE_REVISION = "0022_merge_scheduled_enqueue"
 _ASSEMBLY_EVIDENCE_REVISION = "0023_agent_assembly_evidence"
 _TOOL_RECEIPT_REVISION = "0024_tool_receipt_idempotency"
-_MERGE_HEAD_REVISION = "0025_tenant_identity"
+_TENANT_IDENTITY_REVISION = "0025_tenant_identity"
 _MCP_TASK_LINEAGE_REVISION = "0026_mcp_task_lineage"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
@@ -1128,7 +1128,7 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     scheduled_merge = script.get_revision(_SCHEDULED_MERGE_REVISION)
     assembly_evidence = script.get_revision(_ASSEMBLY_EVIDENCE_REVISION)
     tool_receipts = script.get_revision(_TOOL_RECEIPT_REVISION)
-    merge_head = script.get_revision(_MERGE_HEAD_REVISION)
+    tenant_identity = script.get_revision(_TENANT_IDENTITY_REVISION)
     mcp_task_lineage = script.get_revision(_MCP_TASK_LINEAGE_REVISION)
     assert mcp_results is not None
     assert mcp_results.down_revision == _PRE_FEATURE_REVISION
@@ -1151,10 +1151,10 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     assert assembly_evidence.down_revision == _SCHEDULED_MERGE_REVISION
     assert tool_receipts is not None
     assert tool_receipts.down_revision == _ASSEMBLY_EVIDENCE_REVISION
-    assert merge_head is not None
-    assert merge_head.down_revision == _TOOL_RECEIPT_REVISION
+    assert tenant_identity is not None
+    assert tenant_identity.down_revision == _TOOL_RECEIPT_REVISION
     assert mcp_task_lineage is not None
-    assert mcp_task_lineage.down_revision == _MERGE_HEAD_REVISION
+    assert mcp_task_lineage.down_revision == _TENANT_IDENTITY_REVISION
     assert script.get_current_head() == _MCP_TASK_LINEAGE_REVISION
 
 
@@ -1220,7 +1220,7 @@ async def test_fresh_postgres_migration_chain_reaches_exact_head_schema() -> Non
             revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
         print(f"PostgreSQL qualification: server_version={server_version} migration_head={revision}")
 
-        assert revision == _get_head_revision() == _MERGE_HEAD_REVISION
+        assert revision == _get_head_revision() == _MCP_TASK_LINEAGE_REVISION
         await _assert_postgres_head_contract(engine, schema)
         await _assert_postgres_checks_reject_invalid_rows(engine)
         await _assert_lifecycle_constraints_reject_invalid_rows(engine)
@@ -1720,7 +1720,7 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
 
         await _upgrade(engine, schema, "head")
         async with engine.connect() as connection:
-            assert await connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == _MERGE_HEAD_REVISION
+            assert await connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == _MCP_TASK_LINEAGE_REVISION
         await _assert_postgres_head_contract(engine, schema)
 
         async with engine.connect() as connection:
