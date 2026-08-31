@@ -449,7 +449,10 @@ async def test_allowed_start_evidence_is_attached_before_durable_admission() -> 
         async def admit(self, launch, *, candidate_run_id):
             self.events.append("admit")
             assert launch.accepted_invocation is not accepted
-            assert launch.accepted_invocation.to_persisted()["decision_evidence_json"] == evidence
+            assert launch.accepted_invocation.to_persisted()["decision_evidence_json"] == {
+                **evidence,
+                "tool_receipts": {"version": 1},
+            }
             self.record.run_id = candidate_run_id
             return DurableAdmission(self.record, AdmissionOutcome.created)
 

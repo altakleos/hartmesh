@@ -50,6 +50,7 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
         "Restrictive authorization and constraints",
         "Pinned agent and extension material",
         "Bound actual agent assembly",
+        "Durable tool-attempt receipts",
         "Transactional lifecycle evidence",
         "Polling observation and bounded summaries",
         "Scoped service observation",
@@ -108,6 +109,12 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
             "test_recovered_assembly_must_match_original_before_astream",
             "test_ownership_loss_during_evidence_bind_does_not_terminalize_new_owner",
             "test_lifecycle_summary_does_not_verify_evidence_from_another_accepted_run",
+        },
+        "Durable tool-attempt receipts": {
+            "test_start_is_acknowledged_before_tool_side_effect_and_success_is_terminal",
+            "test_jsonl_reopen_reuses_unfinished_attempt_reservation",
+            "test_start_then_terminal_are_monotonic_and_terminals_conflict",
+            "test_pairs_start_and_outcome_and_keeps_crash_gap_indeterminate",
         },
         "Transactional lifecycle evidence": {
             "test_lifecycle_readiness_rejects_deleted_interior_event_without_scanning",

@@ -36,6 +36,14 @@ from deerflow.runtime.skill_projection import (
     SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
     SkillProjectionConsumerToken,
 )
+from deerflow.runtime.tool_evidence import (
+    TOOL_EVIDENCE_CONTEXT_KEY,
+    TOOL_EVIDENCE_SINK_KEY,
+    DurableToolReceiptSink,
+    ToolEvidenceRuntimeBinding,
+    cross_loop_receipt_sink,
+    stable_subagent_task_id,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -415,6 +423,11 @@ async def task_tool(
     skill_projection_token = parent_context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
     if not isinstance(skill_projection_token, SkillProjectionConsumerToken):
         skill_projection_token = None
+    tool_evidence_binding = parent_context.get(TOOL_EVIDENCE_CONTEXT_KEY)
+    tool_evidence_sink = parent_context.get(TOOL_EVIDENCE_SINK_KEY)
+    if not isinstance(tool_evidence_binding, ToolEvidenceRuntimeBinding) or not isinstance(tool_evidence_sink, DurableToolReceiptSink):
+        tool_evidence_binding = None
+        tool_evidence_sink = None
     from deerflow.extensions.mcp import (
         build_mcp_preparation_audit_sink,
         mcp_invocation_facts_from_context,
@@ -562,6 +575,14 @@ async def task_tool(
         executor_kwargs["resolved_agent_material"] = resolved_agent_material
     if skill_projection_token is not None:
         executor_kwargs["skill_projection_token"] = skill_projection_token
+    if tool_evidence_binding is not None and tool_evidence_sink is not None:
+        executor_kwargs["tool_evidence_parent_binding"] = tool_evidence_binding
+        executor_kwargs["tool_evidence_sink"] = cross_loop_receipt_sink(tool_evidence_sink)
+        executor_kwargs["tool_evidence_execution_task_id"] = stable_subagent_task_id(
+            tool_evidence_binding,
+            parent_tool_call_id=tool_call_id,
+            subagent_name=config.name,
+        )
     try:
         executor = SubagentExecutor(**executor_kwargs)
     except BaseException as exc:

@@ -89,7 +89,8 @@ on installs that never enabled it. The convention is:
 - `migrations/versions/0020_merge_mcp_task_results.py` — no-op merge of `0019_inbound_event_identity` and sibling `0012_mcp_task_results`
 - `migrations/versions/0021_merge_managed_subagents.py` — no-op merge of the published HartMesh head and upstream's managed-subagent branch
 - `migrations/versions/0022_merge_scheduled_enqueue.py` — no-op merge of the HartMesh head and upstream's scheduled-enqueue branch
-- `migrations/versions/0023_agent_assembly_evidence.py` — current head; adds the nullable both-or-neither bounded V1 assembly JSON/digest pair and run-only/lowercase-SHA-256 checks
+- `migrations/versions/0023_agent_assembly_evidence.py` — adds the nullable both-or-neither bounded V1 assembly JSON/digest pair and run-only/lowercase-SHA-256 checks
+- `migrations/versions/0024_tool_receipt_idempotency.py` — current head; adds nullable `run_events.idempotency_key` and the receipt append uniqueness index on `(run_id, event_type, idempotency_key)`
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch decision + locking
 - `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps)

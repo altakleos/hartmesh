@@ -3,7 +3,7 @@
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import override
+from typing import Literal, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -42,10 +42,18 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
       - False: allow it through with a warning
     """
 
-    def __init__(self, provider: GuardrailProvider, *, fail_closed: bool = True, passport: str | None = None):
+    def __init__(
+        self,
+        provider: GuardrailProvider,
+        *,
+        fail_closed: bool = True,
+        passport: str | None = None,
+        decision_kind: Literal["authorization", "guardrail"] = "guardrail",
+    ):
         self.provider = provider
         self.fail_closed = fail_closed
         self.passport = passport
+        self.decision_kind = decision_kind
 
     def _resolve_policy_identity(self) -> tuple[str, str]:
         """Return ``(policy_id, policy_version)`` without the provider's full declaration.
@@ -74,6 +82,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         return {
             "fail_closed": self.fail_closed,
             "passport": self.passport,
+            "decision_kind": self.decision_kind,
             "policy": {"id": policy_id, "version": policy_version},
             "provider_parameters": provider_parameters,
         }
@@ -134,6 +143,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             policy_id=policy_id,
             policy_version=policy_version,
             reason_codes=reason_codes,
+            kind=self.decision_kind,
         )
 
     def _record_guardrail_event(

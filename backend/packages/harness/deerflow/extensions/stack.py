@@ -35,6 +35,7 @@ def _anchors() -> dict[Placement, PlacementAnchor]:
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.terminal_response_middleware import TerminalResponseMiddleware
+    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
     return {
         # Outer of the retry loop, so one logical decision stays one event even
@@ -53,7 +54,14 @@ def _anchors() -> dict[Placement, PlacementAnchor]:
             outer_of_last(ClarificationMiddleware),
             innermost(),
         ),
-        Placement.TOOL_VISIBLE: outermost(),
+        # The host-owned durable receipt envelope is the one allowed wrapper
+        # outside TOOL_VISIBLE. Contributions still observe the final
+        # sanitized/bounded content, but cannot short-circuit before a durable
+        # start is acknowledged.
+        Placement.TOOL_VISIBLE: PlacementAnchor.of(
+            inner_of_last(ToolReceiptMiddleware),
+            outermost(),
+        ),
         # As close to the tool callable as the chain allows. Deliberately NOT
         # inner_of(ToolErrorHandlingMiddleware): SkillToolPolicyMiddleware and
         # ClarificationMiddleware are appended later and also wrap tool calls,

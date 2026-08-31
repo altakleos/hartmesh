@@ -47,6 +47,11 @@ from deerflow.runtime.subagent_snapshot import (
     ResolvedSubagentDefinitionV1,
     SubagentCatalogError,
 )
+from deerflow.runtime.tool_evidence import (
+    DurableToolReceiptSink,
+    ToolEvidenceRuntimeBinding,
+    install_tool_evidence_context,
+)
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -489,6 +494,9 @@ class SubagentExecutor:
         mcp_preparation_audit_sink: Any | None = None,
         resolved_agent_material: ResolvedAgentMaterialV1 | None = None,
         skill_projection_token: SkillProjectionConsumerToken | None = None,
+        tool_evidence_parent_binding: ToolEvidenceRuntimeBinding | None = None,
+        tool_evidence_sink: DurableToolReceiptSink | None = None,
+        tool_evidence_execution_task_id: str | None = None,
     ):
         """Initialize the executor.
 
@@ -615,6 +623,23 @@ class SubagentExecutor:
         ):
             raise TypeError("resolved_agent_material must be ResolvedAgentMaterialV1 or None")
         self.resolved_agent_material = resolved_agent_material
+        evidence_parts = (
+            tool_evidence_parent_binding,
+            tool_evidence_sink,
+            tool_evidence_execution_task_id,
+        )
+        if any(item is not None for item in evidence_parts) and not all(item is not None for item in evidence_parts):
+            raise TypeError("tool evidence binding, sink, and stable task ID must be supplied together")
+        if tool_evidence_parent_binding is not None and not isinstance(tool_evidence_parent_binding, ToolEvidenceRuntimeBinding):
+            raise TypeError("tool_evidence_parent_binding must be ToolEvidenceRuntimeBinding or None")
+        if tool_evidence_sink is not None and not isinstance(tool_evidence_sink, DurableToolReceiptSink):
+            raise TypeError("tool_evidence_sink must implement DurableToolReceiptSink")
+        if tool_evidence_execution_task_id is not None and (not isinstance(tool_evidence_execution_task_id, str) or not tool_evidence_execution_task_id.startswith("st_") or len(tool_evidence_execution_task_id) != 67):
+            raise TypeError("tool_evidence_execution_task_id must be a stable subagent task ID")
+        self.tool_evidence_parent_binding = tool_evidence_parent_binding
+        self.tool_evidence_binding: ToolEvidenceRuntimeBinding | None = None
+        self.tool_evidence_sink = tool_evidence_sink
+        self.tool_evidence_execution_task_id = tool_evidence_execution_task_id
         if resolved_agent_material is not None and self.app_config is None and resolved_agent_material.app_config is not None:
             self.app_config = resolved_agent_material.app_config
             if self.model_name is None:
@@ -1226,6 +1251,12 @@ class SubagentExecutor:
                 context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = self.resolved_agent_material
             if self.skill_projection_token is not None:
                 context[SKILL_PROJECTION_TOKEN_CONTEXT_KEY] = self.skill_projection_token
+            if self.tool_evidence_binding is not None and self.tool_evidence_sink is not None:
+                install_tool_evidence_context(
+                    context,
+                    binding=self.tool_evidence_binding,
+                    sink=self.tool_evidence_sink,
+                )
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -1531,6 +1562,16 @@ class SubagentExecutor:
             Unique execution ID that can be used to check status later.
         """
         execution_id = str(uuid.uuid4())
+        if self.tool_evidence_parent_binding is not None:
+            definition = self.resolved_subagent_definition
+            if definition is None:
+                raise SubagentCatalogError("subagent_definition_evidence_unavailable")
+            assert self.tool_evidence_execution_task_id is not None
+            self.tool_evidence_binding = self.tool_evidence_parent_binding.for_subagent(
+                execution_task_id=self.tool_evidence_execution_task_id,
+                subagent_name=self.config.name,
+                subagent_definition_digest=definition.definition_digest,
+            )
 
         # Create initial pending result
         result = SubagentResult(

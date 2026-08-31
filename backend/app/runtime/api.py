@@ -178,6 +178,9 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                         cursor=request.cursor,
                         limit=request.limit,
                         include_snapshot=request.include_snapshot,
+                        include_tool_receipts=request.include_tool_receipts,
+                        tool_receipt_cursor=request.tool_receipt_cursor,
+                        tool_receipt_limit=request.tool_receipt_limit,
                     )
                 )
                 thread_id = None
@@ -296,6 +299,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                 minimum_available_cursor=result.page.minimum_available_cursor,
                 read_fence_cursor=result.page.read_fence_cursor,
                 summaries=summaries,
+                tool_receipts=(result.page.tool_receipts.to_dict() if result.page.tool_receipts is not None else None),
             )
         except (KeyError, TypeError, ValueError):
             return unexpected_adapter_failure("observe", exc_info=False)

@@ -51,7 +51,8 @@
       "content": {"type": ["string", "object", "array", "number", "boolean", "null"]},
       "metadata": {"type": "object"},
       "created_at": {"type": "string", "format": "date-time"},
-      "user_id": {"type": ["string", "null"]}
+      "user_id": {"type": ["string", "null"]},
+      "idempotency_key": {"type": ["string", "null"], "maxLength": 128}
     },
     "additionalProperties": true
   },
@@ -68,6 +69,7 @@
     "middleware": "Middleware state-change audit evidence.",
     "context": "Identity-only evidence about effective hidden context.",
     "subagent": "Subagent lifecycle and persisted step evidence.",
+    "tool": "Bounded, redacted, owner-fenced durable tool-attempt evidence.",
     "workspace": "Run-scoped workspace and output file-change evidence."
   },
   "events": [
@@ -297,6 +299,148 @@
         "type": "object",
         "required": ["task_id"],
         "properties": {"task_id": {"type": "string", "minLength": 1}},
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "tool_receipt.started.v1",
+      "category": "tool",
+      "producer": "ToolReceiptMiddleware through RunEventToolReceiptSink before inner authorization/tool dispatch",
+      "content_schema": {
+        "type": "object",
+        "required": ["version", "receipt_id", "idempotency_key", "phase", "tool_name", "request_projection_digest", "result_projection_digest", "result_kind", "safe_error_code", "authz_decision_ref", "guardrail_decision_refs", "context"],
+        "properties": {
+          "version": {"const": 1},
+          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
+          "idempotency_key": {"type": "string", "pattern": "^tr_[0-9a-f]{64}:start$"},
+          "phase": {"const": "started"},
+          "tool_name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:/-]+$"},
+          "request_projection_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "result_projection_digest": {"type": "null"},
+          "result_kind": {"type": "null"},
+          "safe_error_code": {"type": "null"},
+          "authz_decision_ref": {"type": "null"},
+          "guardrail_decision_refs": {"type": "array", "maxItems": 0},
+          "context": {
+            "type": "object",
+            "required": ["run_id", "execution_task_id", "execution_kind", "subagent_name", "tool_call_id", "attempt", "owner_id", "lease_epoch", "agent_revision_digest", "assembly_fingerprint", "extension_generation", "subagent_catalog_digest", "subagent_definition_digest"],
+            "properties": {
+              "run_id": {"type": "string", "minLength": 1, "maxLength": 64},
+              "execution_task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+              "execution_kind": {"enum": ["lead", "subagent"]},
+              "subagent_name": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
+              "tool_call_id": {"type": "string", "minLength": 1, "maxLength": 256},
+              "attempt": {"type": "integer", "minimum": 1},
+              "owner_id": {"type": "string", "minLength": 1, "maxLength": 128},
+              "lease_epoch": {"type": "integer", "minimum": 0},
+              "agent_revision_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "assembly_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "extension_generation": {"type": "integer", "minimum": 0},
+              "subagent_catalog_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "subagent_definition_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+            },
+            "allOf": [
+              {
+                "if": {"properties": {"execution_kind": {"const": "lead"}}},
+                "then": {"properties": {"subagent_name": {"type": "null"}, "subagent_definition_digest": {"type": "null"}}}
+              },
+              {
+                "if": {"properties": {"execution_kind": {"const": "subagent"}}},
+                "then": {"properties": {"subagent_name": {"type": "string", "minLength": 1, "maxLength": 128}, "subagent_definition_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["receipt_id", "task_id", "tool_call_id", "attempt", "writer_fence_digest", "dispatch_generation_digest"],
+        "properties": {
+          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
+          "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "tool_call_id": {"type": "string", "minLength": 1, "maxLength": 256},
+          "attempt": {"type": "integer", "minimum": 1},
+          "writer_fence_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "dispatch_generation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "tool_receipt.outcome.v1",
+      "category": "tool",
+      "producer": "ToolReceiptMiddleware through RunEventToolReceiptSink when control returns",
+      "content_schema": {
+        "type": "object",
+        "required": ["version", "receipt_id", "idempotency_key", "phase", "tool_name", "request_projection_digest", "result_projection_digest", "result_kind", "safe_error_code", "authz_decision_ref", "guardrail_decision_refs", "context"],
+        "properties": {
+          "version": {"const": 1},
+          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
+          "idempotency_key": {"type": "string", "pattern": "^tr_[0-9a-f]{64}:terminal$"},
+          "phase": {"enum": ["succeeded", "failed", "denied", "cancelled"]},
+          "tool_name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:/-]+$"},
+          "request_projection_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "result_projection_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+          "result_kind": {"type": ["string", "null"], "minLength": 1, "maxLength": 64},
+          "safe_error_code": {"enum": [null, "authorization_denied", "guardrail_denied", "cancelled", "timeout", "tool_error", "invalid_input", "permission_denied", "rate_limited", "transient_error", "configuration_error", "not_found", "no_results", "internal_error", "unknown_error"]},
+          "authz_decision_ref": {"type": ["string", "null"], "pattern": "^pd_[0-9a-f]{64}$"},
+          "guardrail_decision_refs": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^pd_[0-9a-f]{64}$"}},
+          "context": {
+            "type": "object",
+            "required": ["run_id", "execution_task_id", "execution_kind", "subagent_name", "tool_call_id", "attempt", "owner_id", "lease_epoch", "agent_revision_digest", "assembly_fingerprint", "extension_generation", "subagent_catalog_digest", "subagent_definition_digest"],
+            "properties": {
+              "run_id": {"type": "string", "minLength": 1, "maxLength": 64},
+              "execution_task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+              "execution_kind": {"enum": ["lead", "subagent"]},
+              "subagent_name": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
+              "tool_call_id": {"type": "string", "minLength": 1, "maxLength": 256},
+              "attempt": {"type": "integer", "minimum": 1},
+              "owner_id": {"type": "string", "minLength": 1, "maxLength": 128},
+              "lease_epoch": {"type": "integer", "minimum": 0},
+              "agent_revision_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "assembly_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "extension_generation": {"type": "integer", "minimum": 0},
+              "subagent_catalog_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "subagent_definition_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+            },
+            "allOf": [
+              {
+                "if": {"properties": {"execution_kind": {"const": "lead"}}},
+                "then": {"properties": {"subagent_name": {"type": "null"}, "subagent_definition_digest": {"type": "null"}}}
+              },
+              {
+                "if": {"properties": {"execution_kind": {"const": "subagent"}}},
+                "then": {"properties": {"subagent_name": {"type": "string", "minLength": 1, "maxLength": 128}, "subagent_definition_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"phase": {"const": "succeeded"}}},
+            "then": {"properties": {"result_projection_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "result_kind": {"type": "string", "minLength": 1, "maxLength": 64}, "safe_error_code": {"type": "null"}}}
+          },
+          {
+            "if": {"properties": {"phase": {"enum": ["failed", "denied", "cancelled"]}}},
+            "then": {"properties": {"safe_error_code": {"enum": ["authorization_denied", "guardrail_denied", "cancelled", "timeout", "tool_error", "invalid_input", "permission_denied", "rate_limited", "transient_error", "configuration_error", "not_found", "no_results", "internal_error", "unknown_error"]}}}
+          }
+        ],
+        "additionalProperties": false
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["receipt_id", "task_id", "tool_call_id", "attempt", "writer_fence_digest", "dispatch_generation_digest"],
+        "properties": {
+          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
+          "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "tool_call_id": {"type": "string", "minLength": 1, "maxLength": 256},
+          "attempt": {"type": "integer", "minimum": 1},
+          "writer_fence_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "dispatch_generation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
         "additionalProperties": true
       }
     },

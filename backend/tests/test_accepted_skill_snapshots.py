@@ -38,6 +38,7 @@ from deerflow.runtime.agent_revision import (
     RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
     resolve_agent_revision,
 )
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -1825,7 +1826,10 @@ async def test_remote_materialization_is_refenced_immediately_before_astream(
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=MemoryRunEventStore(run_store=store),
+        ),
         agent_factory=lambda **_kwargs: _assembled_agent_for_revision(revision, Agent()),
         graph_input={},
         config={},

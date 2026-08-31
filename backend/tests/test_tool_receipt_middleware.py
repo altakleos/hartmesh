@@ -298,6 +298,17 @@ def test_factory_registers_receipt_middleware_outer_of_short_circuiting_layers()
         assert receipt_index < names.index(short_circuiter), f"ToolReceiptMiddleware must be outer of {short_circuiter}"
 
 
-def test_factory_omits_receipt_middleware_when_disabled():
+def test_factory_keeps_inert_durable_observer_when_display_receipts_disabled():
     middlewares = _build({"sandbox": {"use": "test"}, "verification": {"receipts_enabled": False}})
-    assert "ToolReceiptMiddleware" not in [type(m).__name__ for m in middlewares]
+    receipt = next(middleware for middleware in middlewares if type(middleware).__name__ == "ToolReceiptMiddleware")
+    assert receipt._display_enabled is False
+
+
+def test_release_policy_declares_display_and_render_behavior() -> None:
+    assert ToolReceiptMiddleware(
+        render_mode="delegation_only",
+        display_enabled=False,
+    ).release_policy_parameters() == {
+        "render_mode": "delegation_only",
+        "display_enabled": False,
+    }

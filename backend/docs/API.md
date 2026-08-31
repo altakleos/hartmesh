@@ -796,7 +796,7 @@ container, while each `to_dict()` call returns a new mutable JSON wire copy.
 | `GET /capabilities` | Administrator-only strict `runtime.capabilities`; reports only portable ensure, invocation/context observation, cancel control, and unsupported context export/retirement. |
 | `GET /deployment` | Administrator-only `deerflow.deployment/v1` report with extension manifest/health, latest safe admission-readiness reason codes/correlation, bounded image/source provenance when supplied, persistence facts, and an operator-asserted qualification reference or explicit `unqualified` state. This is not part of `DurableInvocationPort` and is not remote attestation. |
 | `POST /invocations/ensure` | Exact `invocation.ensure` body. `external_key` is required; the server derives its scope from the authenticated principal or service. |
-| `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. |
+| `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. Optional `include_tool_receipts=true` adds an independently paged receipt projection; `tool_receipt_limit` is 1–100 and `tool_receipt_cursor` is scoped to this run. |
 | `GET /contexts/{thread_id}/invocations` | Access-filtered normal-run lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500; optional `source_kind` is `http|scheduled_task|native_channel|service`. |
 | `POST /invocations/{run_id}/control` | Exact `invocation.cancel` body with required `expected_state_version`; body and path run IDs must match. |
 
@@ -841,8 +841,11 @@ null. Observation is represented by `invocation.query` (`run_id`) or
 `context.invocations.query` (`thread_id`) plus nullable cursor, limit,
 `include_snapshot`, and strict nullable `source_kind`. HTTP supplies the path
 identity and fixes `include_snapshot=true`; invocation paging accepts `cursor`
-and `limit`, while context paging additionally accepts `source_kind`. Control
-accepts exactly:
+and `limit`, plus additive `include_tool_receipts`, `tool_receipt_cursor`, and
+`tool_receipt_limit` fields. HTTP accepts exact lowercase `true|false`; a
+receipt cursor without inclusion, duplicate parameters, an empty cursor, or a
+limit outside 1–100 is `422 invalid_request`. Context paging additionally
+accepts `source_kind` but cannot request receipts. Control accepts exactly:
 
 ```json
 {
@@ -864,6 +867,28 @@ correlation references, agent/extension identity, and acceptance evidence
 digests. It excludes model input, secrets, secret handles, private policy
 reasons, and unbounded context. A pre-Origin historical row remains readable
 but has no summary.
+
+When explicitly requested for one visible run, an observation also carries a
+strict `tool_receipts` page. Each item includes its full `tr_<sha256>` identity,
+stable lead/subagent task scope, subagent name when applicable, tool name,
+attempt, `succeeded|failed|denied|cancelled|indeterminate` status, start/finish
+store timestamps, request/result projection digests, safe result/error kind,
+bounded policy decision references, and the accepted revision/assembly/
+extension/catalog/definition anchors. The page contains at most 100 items and
+has independent `next_cursor`, nullable `pruned_before`, `evidence_status`, and
+`invalid_event_count` fields. Old runs return `legacy_unavailable`; malformed
+receipt events are not reflected and make the page `invalid`. A start with no
+terminal event is `indeterminate`, including a process-loss gap.
+
+Receipt evidence never contains raw tool arguments, results, provider messages,
+headers, stack traces, or credential-bearing URLs. Request digests use field
+names/types, classified secret handles, length/type markers, and only bounded
+server-declared evidence-safe scalar values. Result digests cover the exact
+sanitized and output-budgeted model-visible result plus type/status. Digests are
+comparison commitments, not encryption, confidentiality, or truth evidence.
+A durable receipt records HartMesh's observation of a tool attempt. It does not
+guarantee an external side effect occurred exactly once or that the tool result
+was correct.
 
 Accepted durable summaries include a nullable `assembly_evidence` object with
 only `version`, `fingerprint`, `effective_model`, `prompt_digest`,
@@ -896,7 +921,8 @@ cursors. Cursor metadata, returned events, and their summaries share one SQL
 snapshot. Context pages fetch summaries only for distinct run IDs in the
 bounded event page, not every run in the thread. Limits are 500 events per page,
 4 KiB canonical JSON per lifecycle payload, 16 KiB per summary, and 12 MiB for
-the full portable observation.
+the full portable observation; the independent tool-receipt page is capped at
+100 items and each canonical receipt event body at 8 KiB.
 
 Lifecycle event types are exactly `accepted`, `started`,
 `cancellation_requested`, `cancelled`, `succeeded`, `failed`, `timed_out`, and
@@ -958,8 +984,10 @@ restart nor pod loss; `node_durable` survives process restart on its node; and
 `shared_durable` uses the configured shared PostgreSQL store. `atomic_lifecycle` is
 reported independently because an in-memory store can be atomic without being
 restart-durable. `deployment.profile: durable_production` refuses process-local
-state at startup and readiness; `local_development` permits it without claiming
-durability. Qualification remains `unqualified` with `trust="none_declared"` unless a
+state and requires `run_events.backend: db` for fenced idempotent tool receipts
+at startup and readiness; `local_development` permits memory/JSONL evidence
+without claiming durability. Qualification remains `unqualified` with
+`trust="none_declared"` unless a
 reference is explicitly supplied. A supplied reference retains v1
 `status="qualified"` but is labelled `trust="operator_asserted"`; it is not independently
 verified by the Gateway. Live health never changes the manifest digest or an

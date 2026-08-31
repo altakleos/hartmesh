@@ -46,6 +46,7 @@ an ordinary unit test.
 | Restrictive authorization and constraints | Authority failures fail closed; required async operations are validated at startup; v2 constraints bind accepted material and can only narrow a dispatch ledger that gives equal retries one physical start. | `backend/app/runtime/authorization.py`; `backend/app/runtime/constraints.py`; `backend/packages/harness/deerflow/diagnostics.py`; `backend/packages/harness/deerflow/runtime/constraints.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/tools/builtins/task_tool.py` | `test_v2_host_rejects_projection_for_different_bound_material`; `test_worker_enforces_zero_ceiling_before_any_subagent_dispatch`; `test_task_dispatch_inflight_equal_replay_waits_for_one_physical_start`; `test_create_app_fails_closed_for_malformed_required_v2_constraints_provider` | Required-capability health/readiness tests | Implemented |
 | Pinned agent and extension material | Accepted agent material and extension generation remain pinned; every effective skill package is copied and hashed from one bounded immutable snapshot shared by lead, slash/deferred discovery, policy, sandbox, and subagent consumers; remote v2 execution binds and revalidates the admitted isolation tuple before graph/model work. | `backend/packages/harness/deerflow/runtime/accepted_invocation.py`; `backend/packages/harness/deerflow/runtime/agent_revision.py`; `backend/packages/harness/deerflow/runtime/skill_snapshot.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py`; `docker/provisioner/app.py` | `test_restart_drift_fails_before_graph_construction_or_model_work`; `test_same_process_live_edit_cannot_replace_accepted_slash_skill`; `test_live_allowed_tools_edit_cannot_widen_accepted_policy`; `test_remote_v1_material_receipt_is_compatibility_only`; `test_accepted_pod_isolation_digest_binds_every_pod_security_field`; `test_v2_execution_fence_rereads_every_supporting_resource` | Fake-Kubernetes and Helm-render evidence only; live cross-node exact-artifact qualification is separate | Implemented offline; live cross-node execution remains unqualified until the opt-in gate passes |
 | Bound actual agent assembly | Every accepted durable lead run validates the finished descriptor against accepted anchors and atomically binds one immutable V1 fingerprint under the running owner/state-version fence before checkpoint or graph execution; recovery must match it. | `backend/packages/harness/deerflow/runtime/assembly_evidence.py`; `backend/packages/harness/deerflow/runtime/runs/worker.py`; `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0023_agent_assembly_evidence.py` | `test_accepted_durable_evidence_is_bound_before_checkpoint_access_and_astream`; `test_recovered_assembly_must_match_original_before_astream`; `test_ownership_loss_during_evidence_bind_does_not_terminalize_new_owner`; `test_lifecycle_summary_does_not_verify_evidence_from_another_accepted_run` | PostgreSQL first/repeat/stale/concurrent bind qualification | Implemented; evidence is an execution record, not code attestation |
+| Durable tool-attempt receipts | Every accepted lead/subagent tool attempt reserves one fenced stable start before any inner policy/provider/tool code and appends at most one idempotent terminal outcome; store-owned contiguous attempt history suppresses completed recovery replay under any writer fence, crash gaps remain indeterminate, and raw arguments/results never enter evidence. | `backend/packages/harness/deerflow/runtime/tool_evidence.py`; `backend/packages/harness/deerflow/agents/middlewares/tool_receipt_middleware.py`; `backend/packages/harness/deerflow/runtime/events/store/`; `backend/packages/harness/deerflow/persistence/migrations/versions/0024_tool_receipt_idempotency.py` | `test_start_is_acknowledged_before_tool_side_effect_and_success_is_terminal`; `test_completed_attempt_replay_under_same_fence_does_not_reserve_again`; `test_jsonl_reopen_reuses_unfinished_attempt_reservation`; `test_start_then_terminal_are_monotonic_and_terminals_conflict`; `test_pairs_start_and_outcome_and_keeps_crash_gap_indeterminate` | PostgreSQL receipt reservation/idempotency qualification | Implemented offline; external effects are not exactly-once |
 | Transactional lifecycle evidence | Every normal-run state change increments one state version and commits its safe lifecycle event atomically; maintained retained-cardinality plus bounded edge reads detects interior deletion. | `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/packages/harness/deerflow/persistence/migrations/versions/0017_lifecycle_integrity.py`; `backend/packages/harness/deerflow/runtime/runs/store/base.py`; `backend/packages/harness/deerflow/runtime/runs/store/memory.py` | `test_sql_row_and_lifecycle_event_commit_together`; `test_lifecycle_readiness_rejects_deleted_interior_event_without_scanning` | PostgreSQL CAS/cursor qualification | Implemented; PostgreSQL atomicity is a gated qualification |
 | Polling observation and bounded summaries | Authorized observation reads a pruning-aware bounded page and its source-aware summaries from one database snapshot. | `backend/packages/harness/deerflow/runtime/runs/lifecycle_query.py`; `backend/packages/harness/deerflow/persistence/run/sql.py`; `backend/app/runtime/api.py` | `test_context_query_excludes_other_owners_and_auxiliary_rows`; `test_malformed_ahead_and_pruned_cursors_are_typed`; `test_sql_context_page_loads_summary_rows_only_for_bounded_page_ids`; `test_postgres_query_uses_one_repeatable_read_snapshot` | Repeatable-read PostgreSQL query qualification | Implemented; PostgreSQL snapshot isolation is a gated qualification |
 | Scoped service observation | An authenticated service is owner-scoped unless an operator grants a finite run/thread/owner/source search scope; the current coherent authorization provider still makes the final observe decision. | `backend/app/runtime/visibility.py`; `backend/app/runtime/invocation.py`; `backend/packages/harness/deerflow/persistence/run/sql.py` | `test_ordinary_service_cannot_observe_another_owner_or_trigger_policy`; `test_current_authorization_denial_overrides_a_valid_visibility_grant`; `test_context_pagination_stays_inside_the_finite_owner_scope` | Memory and SQL bounded-query tests; no external service | Implemented |
@@ -569,8 +570,12 @@ provenance, persistence tier, and explicit qualification status. Persistence
 atomicity is independent from restart/pod-loss durability: memory is
 `process_local`, SQLite is `node_durable`, and PostgreSQL is `shared_durable`.
 The `durable_production` deployment profile fails startup/readiness with
-process-local state or an unbounded PostgreSQL command timeout; `local_development`
-remains an explicit convenience profile where disabling that timeout is permitted.
+process-local invocation state, any `run_events.backend` other than `db`, or an
+unbounded PostgreSQL command timeout. Database-backed run events are required
+so accepted tool attempts can honor fenced reservation and storage-level
+idempotency; `local_development` remains an explicit convenience profile where
+memory/JSONL events and disabling that timeout are permitted without a durable
+claim.
 The report also carries the latest safe admission-readiness status, reason codes,
 and correlation identifier. Its optional `post_commit_obligations` field is a
 versioned, process-local operational snapshot: it reports saturated pending counts
@@ -625,6 +630,38 @@ The summary's independently validated `subagent_catalog` projection contains
 only V1, its full digest, entry count, and exact sorted allowed names, paired with
 `verified` or `legacy_unavailable`. It never exposes descriptions, prompts,
 models/settings, tools, skills, limits, source records, or policy material.
+
+One-invocation observation has an independent, opt-in durable tool-receipt page.
+Set `include_tool_receipts=true`; `tool_receipt_limit` defaults to 100 and is
+bounded to 1–100, and `tool_receipt_cursor` pages only that exact authorized run.
+The page pairs `tool_receipt.started.v1` and `tool_receipt.outcome.v1` records and
+returns stable receipt/task identity, lead/subagent attribution, attempt and
+status, store timestamps, full projection/accepted-anchor digests, and bounded
+authorization/guardrail references. A start without a matching terminal record
+is `indeterminate`. Pre-feature runs report `evidence_status="legacy_unavailable"`;
+their event tails are never projected. Malformed evidence is contained, omitted, and counted with
+`evidence_status="invalid"` rather than reflected. The page also returns its own
+`next_cursor`, nullable `pruned_before`, and `invalid_event_count`. Context-wide
+observation cannot request receipts, so callers must first select and authorize
+one exact run. Receipt cursors are checksummed and bound to both run and thread.
+
+The receipt request digest commits to a bounded safe projection of argument
+names/types plus only server-declared evidence-safe scalar fields. Credential-like
+fields are classified, and unclassified strings contribute shape/length rather
+than their raw value or raw-value hash. The result digest commits to the exact
+sanitized and budgeted model-visible result plus type/status. These SHA-256
+digests are equality evidence, not a confidentiality mechanism; low-entropy
+values may still be guessable when a projection is independently available.
+Each start and terminal carries the same validated dispatch-generation digest,
+derived from the store-owned run/task/tool-call/attempt identity. Public
+checkpoint namespace/ID, task ID, and node-attempt fields form only a local
+dispatch observation because the framework counter may reset on reconstruction.
+The store reconciles that observation with contiguous durable history: recovery
+reuses the latest start and terminal regardless of writer-fence changes, then a
+binding-local offset maps the next live retry to the immediate successor.
+A durable receipt records HartMesh's observation of a tool attempt. It does not
+guarantee an external side effect occurred exactly once or that the tool result
+was correct.
 
 The portable observation validates the complete page relationship on direct
 construction and wire parsing. All snapshots and events belong to the observed
@@ -712,7 +749,8 @@ the real durable-invocation predecessor `0011_mcp_tasks` with representative
 normal, auxiliary, and MCP-task rows. It applies every invocation revision through
 `0019_inbound_event_identity`, joins the result, managed-subagent, and scheduled-enqueue
 branches through `0022_merge_scheduled_enqueue`, and verifies the single
-`0023_agent_assembly_evidence` head plus accepted/idempotency/caller-intent/assembly columns,
+`0024_tool_receipt_idempotency` head plus accepted/idempotency/caller-intent/assembly columns
+and the nullable run-event receipt idempotency key/partial unique index,
 checks and partial indexes, validates lifecycle singleton/journal/index/retained-cardinality
 and inbound receipt arbitration, and then uses `RunRepository` for
 replay, cancellation, orphan recovery, lifecycle, and summary reads/writes. The

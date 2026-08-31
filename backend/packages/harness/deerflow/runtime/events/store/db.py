@@ -16,7 +16,22 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.persistence.run.model import RunRow
+from deerflow.runtime.events.store.base import AppendOutcome, RunEventStore, validate_idempotent_append
+from deerflow.runtime.tool_evidence import (
+    TOOL_RECEIPT_CATEGORY,
+    TOOL_RECEIPT_OUTCOME_EVENT,
+    TOOL_RECEIPT_STARTED_EVENT,
+    DurableToolReceiptV1,
+    ToolReceiptIntegrityError,
+    ToolReceiptOwnershipLost,
+    canonical_digest,
+    parse_tool_receipt_event,
+    receipt_event_metadata,
+    require_started_transition,
+    require_tool_attempt_binding_fence,
+    reserve_attempt_from_events,
+)
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -148,6 +163,7 @@ class DbRunEventStore(RunEventStore):
                         run_id=run_id,
                         user_id=user_id,
                         event_type=event_type,
+                        idempotency_key=None,
                         category=category,
                         content=db_content,
                         event_metadata=metadata,
@@ -184,6 +200,7 @@ class DbRunEventStore(RunEventStore):
                             run_id=e["run_id"],
                             user_id=e.get("user_id", user_id),
                             event_type=e["event_type"],
+                            idempotency_key=e.get("idempotency_key"),
                             category=category,
                             content=db_content,
                             event_metadata=metadata,
@@ -238,6 +255,7 @@ class DbRunEventStore(RunEventStore):
                         run_id=run_id,
                         user_id=user_id,
                         event_type=event_type,
+                        idempotency_key=None,
                         category=category,
                         content=db_content,
                         event_metadata=metadata,
@@ -246,6 +264,179 @@ class DbRunEventStore(RunEventStore):
                     )
                     session.add(row)
                 return self._row_to_dict(row), True
+
+    @staticmethod
+    def _require_owned_run(row: RunRow | None, *, owner_id: str, lease_epoch: int) -> RunRow:
+        if row is None or row.operation_kind != "run" or row.status != "running" or row.owner_worker_id != owner_id or row.state_version != lease_epoch:
+            raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
+        deadline = row.lease_expires_at
+        if deadline is not None:
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=UTC)
+            if deadline <= datetime.now(UTC):
+                raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
+        return row
+
+    async def append_idempotent(
+        self,
+        run_id,
+        *,
+        event_type,
+        idempotency_key,
+        body,
+        owner_id,
+        lease_epoch,
+    ) -> AppendOutcome:
+        detached = validate_idempotent_append(
+            event_type=event_type,
+            idempotency_key=idempotency_key,
+            body=body,
+        )
+        # Resolve only the thread for the in-process lock. Ownership is checked
+        # again from a row lock in the insertion transaction.
+        async with self._sf() as lookup_session:
+            thread_id = await lookup_session.scalar(select(RunRow.thread_id).where(RunRow.run_id == run_id))
+        if not isinstance(thread_id, str):
+            raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    run = await session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+                    run = self._require_owned_run(run, owner_id=owner_id, lease_epoch=lease_epoch)
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
+                    existing = await session.scalar(
+                        select(RunEventRow)
+                        .where(
+                            RunEventRow.run_id == run_id,
+                            RunEventRow.event_type == event_type,
+                            RunEventRow.idempotency_key == idempotency_key,
+                        )
+                        .limit(1)
+                    )
+                    if existing is not None:
+                        record = self._row_to_dict(existing)
+                        if canonical_digest(record["content"]) != canonical_digest(detached):
+                            raise ToolReceiptIntegrityError("receipt_idempotency_conflict")
+                        parse_tool_receipt_event(record)
+                        return AppendOutcome(event=record, created=False)
+                    receipt = DurableToolReceiptV1.from_event_body(detached, occurred_at=datetime.now(UTC))
+                    if receipt.phase != "started":
+                        start_rows = await session.execute(
+                            select(RunEventRow).where(
+                                RunEventRow.run_id == run_id,
+                                RunEventRow.event_type == TOOL_RECEIPT_STARTED_EVENT,
+                                RunEventRow.idempotency_key == f"{receipt.receipt_id}:start",
+                            )
+                        )
+                        require_started_transition(
+                            [self._row_to_dict(start_row) for start_row in start_rows.scalars()],
+                            receipt,
+                        )
+                    row = RunEventRow(
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        user_id=run.user_id,
+                        event_type=event_type,
+                        idempotency_key=idempotency_key,
+                        category=TOOL_RECEIPT_CATEGORY,
+                        content=json.dumps(detached, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                        event_metadata={
+                            "content_is_json": True,
+                            "content_is_dict": True,
+                            **receipt_event_metadata(
+                                receipt,
+                                writer_owner_id=owner_id,
+                                writer_lease_epoch=lease_epoch,
+                            ),
+                        },
+                        seq=(max_seq or 0) + 1,
+                        created_at=datetime.now(UTC),
+                    )
+                    session.add(row)
+                return AppendOutcome(event=self._row_to_dict(row), created=True)
+
+    async def reserve_tool_attempt(
+        self,
+        run_id,
+        *,
+        binding,
+        tool_call_id,
+        tool_name,
+        request_projection_digest,
+        observed_node_attempt,
+        expected_attempt,
+        owner_id,
+        lease_epoch,
+    ) -> AppendOutcome:
+        binding = require_tool_attempt_binding_fence(
+            binding,
+            run_id=run_id,
+            owner_id=owner_id,
+            lease_epoch=lease_epoch,
+        )
+        async with self._sf() as lookup_session:
+            thread_id = await lookup_session.scalar(select(RunRow.thread_id).where(RunRow.run_id == run_id))
+        if not isinstance(thread_id, str):
+            raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    run = await session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+                    run = self._require_owned_run(run, owner_id=owner_id, lease_epoch=lease_epoch)
+                    # Sequence assignment's advisory lock is also the
+                    # cross-process attempt-reservation serialization point.
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
+                    result = await session.execute(
+                        select(RunEventRow)
+                        .where(
+                            RunEventRow.run_id == run_id,
+                            RunEventRow.event_type.in_((TOOL_RECEIPT_STARTED_EVENT, TOOL_RECEIPT_OUTCOME_EVENT)),
+                        )
+                        .order_by(RunEventRow.seq.asc())
+                    )
+                    events = [self._row_to_dict(event_row) for event_row in result.scalars()]
+                    receipt, existing, terminal = reserve_attempt_from_events(
+                        events,
+                        binding=binding,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        request_projection_digest=request_projection_digest,
+                        observed_node_attempt=observed_node_attempt,
+                        expected_attempt=expected_attempt,
+                    )
+                    if existing is not None:
+                        return AppendOutcome(
+                            event=dict(existing),
+                            created=False,
+                            terminal_event=(dict(terminal) if terminal is not None else None),
+                        )
+                    body = validate_idempotent_append(
+                        event_type=TOOL_RECEIPT_STARTED_EVENT,
+                        idempotency_key=receipt.idempotency_key,
+                        body=receipt.to_event_body(),
+                    )
+                    row = RunEventRow(
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        user_id=run.user_id,
+                        event_type=TOOL_RECEIPT_STARTED_EVENT,
+                        idempotency_key=receipt.idempotency_key,
+                        category=TOOL_RECEIPT_CATEGORY,
+                        content=json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                        event_metadata={
+                            "content_is_json": True,
+                            "content_is_dict": True,
+                            **receipt_event_metadata(
+                                receipt,
+                                writer_owner_id=owner_id,
+                                writer_lease_epoch=lease_epoch,
+                            ),
+                        },
+                        seq=(max_seq or 0) + 1,
+                        created_at=datetime.now(UTC),
+                    )
+                    session.add(row)
+                return AppendOutcome(event=self._row_to_dict(row), created=True)
 
     async def list_messages(
         self,

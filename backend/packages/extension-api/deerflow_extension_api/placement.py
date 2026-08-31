@@ -29,7 +29,8 @@ class Placement(StrEnum):
 
     TOOL_VISIBLE = "tool_visible"
     """Tool axis, outer end. Guarantee: outer of truncation, sanitization and
-    error wrapping. Observes what the model finally sees."""
+    error wrapping. Observes final model-visible content inside any host-owned
+    evidence envelope."""
 
     TOOL_RAW = "tool_raw"
     """Tool axis, inner end. Guarantee: adjacent to the real callable

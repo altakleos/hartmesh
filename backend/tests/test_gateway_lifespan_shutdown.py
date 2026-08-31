@@ -136,6 +136,7 @@ async def test_durable_gateway_startup_fails_when_receipt_channel_cannot_start(
     raw = AppConfig(sandbox=SandboxConfig(use="test")).model_dump(mode="python")
     raw["deployment"]["profile"] = "durable_production"
     raw["database"]["backend"] = "postgres"
+    raw["run_events"]["backend"] = "db"
     raw["channels"] = {"github": {"enabled": True}}
     raw["memory"]["enabled"] = False
     startup_config = AppConfig.model_validate(raw)

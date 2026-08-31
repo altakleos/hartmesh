@@ -28,6 +28,7 @@ from deerflow_extension_api import (
 _DIGEST_VERSION = 1
 _AGENT_REVISION_VERSION = 1
 _DECISION_EVIDENCE_V1 = {"version": 1, "decisions": []}
+_TOOL_RECEIPT_EVIDENCE_V1 = {"version": 1}
 _SHA256_LENGTH = 64
 _EFFECTIVE_EXECUTION_PROJECTION_KEY = "__accepted_request_projection_v1"
 _REQUEST_DIGEST_VERSION = "sha256-canonical-json-v1"
@@ -446,6 +447,26 @@ class AcceptedInvocation:
             return None
         return digest
 
+    @property
+    def tool_receipt_evidence_version(self) -> int | None:
+        """Receipt capability captured when this invocation was admitted."""
+
+        return self.tool_receipt_evidence_version_from_persisted({"decision_evidence_json": self.decision_evidence})
+
+    @staticmethod
+    def tool_receipt_evidence_version_from_persisted(
+        row: Mapping[str, Any],
+    ) -> int | None:
+        """Read only the additive capability marker from a persisted row."""
+
+        decision_evidence = row.get("decision_evidence_json")
+        if not isinstance(decision_evidence, Mapping):
+            return None
+        evidence = decision_evidence.get("tool_receipts")
+        if not isinstance(evidence, Mapping) or set(evidence) != {"version"}:
+            return None
+        return 1 if evidence.get("version") == 1 else None
+
     @classmethod
     def seal(
         cls,
@@ -501,6 +522,7 @@ class AcceptedInvocation:
             }
         )
         decision_evidence = copy.deepcopy(_DECISION_EVIDENCE_V1)
+        decision_evidence["tool_receipts"] = copy.deepcopy(_TOOL_RECEIPT_EVIDENCE_V1)
         if extension_manifest_digest is not None:
             decision_evidence["capability_manifest"] = {
                 "version": 1,
@@ -704,6 +726,9 @@ class AcceptedInvocation:
             raise ValueError("accepted decision evidence must be a mapping")
         if decision_evidence.get("version") != 1 or not isinstance(decision_evidence.get("decisions", []), (list, tuple)):
             raise ValueError("accepted decision evidence has an unsupported version or malformed decisions")
+        tool_receipt_evidence = decision_evidence.get("tool_receipts")
+        if tool_receipt_evidence is not None and (not isinstance(tool_receipt_evidence, Mapping) or set(tool_receipt_evidence) != {"version"} or tool_receipt_evidence.get("version") != 1):
+            raise ValueError("accepted tool receipt evidence is malformed")
         trusted_json = decision_evidence.get("trusted_run_context")
         if "trusted_run_context" in decision_evidence and not isinstance(trusted_json, Mapping):
             raise ValueError("trusted run-context evidence is malformed")

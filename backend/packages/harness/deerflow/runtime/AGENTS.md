@@ -35,6 +35,21 @@ Lifecycle summaries expose only catalog version, digest, entry count, and allowe
 names after strict revalidation. Prompts, descriptions, models, tools, skills,
 policy settings, source records, and user identifiers never enter that projection.
 
+`runtime/tool_evidence.py` is the deep module for durable tool-attempt evidence.
+It owns the V1 context/receipt schemas, canonical full SHA-256 identities and
+projections, bounded redaction policy, state transitions, trusted runtime keys,
+and the sink port/adapters. Attempt reservation belongs to `RunEventStore`, not
+process memory: public LangGraph checkpoint/task data is only a local retry
+observation. The store owns contiguous attempt numbering; a reconstructed
+counter reuses the latest durable start and terminal, then a binding-local
+offset maps its next live retry to the immediate successor. Conflicting immutable anchors fail
+closed. `ToolReceiptMiddleware` is only the observation point; do not duplicate
+receipt identity, redaction, transition, or event parsing logic in middleware,
+subagents, or lifecycle consumers. The accepted lead binding is propagated to a
+subagent with a stable server-derived execution-task ID and the immutable
+catalog/definition digests. Caller-supplied `__tool_evidence_*` fields are always
+stripped before the worker installs typed values.
+
 The portable `deerflow-runtime-api` DTOs contain runtime operations only;
 deployment provenance and qualification are administrator-only. Memory-backed
 local development is explicitly unqualified. Real Postgres and opt-in

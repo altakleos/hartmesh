@@ -367,6 +367,9 @@ class InternalInvocationLifecycleQuery:
     cursor: str | None = None
     limit: int = 100
     include_snapshot: bool = True
+    include_tool_receipts: bool = False
+    tool_receipt_cursor: str | None = None
+    tool_receipt_limit: int = 100
 
 
 @dataclass(frozen=True)
@@ -893,6 +896,9 @@ class InvocationRuntime:
                 # read snapshot as its fence, even when the caller omits the
                 # snapshot collection from the public response.
                 include_snapshot=True,
+                include_tool_receipts=query.include_tool_receipts,
+                tool_receipt_cursor=query.tool_receipt_cursor,
+                tool_receipt_limit=query.tool_receipt_limit,
             )
         )
         authoritative_snapshot = next(
