@@ -376,6 +376,67 @@ def test_config_summary_replaces_raw_tenant_id_with_safe_projection(tmp_path):
     assert "customer-readable-name" not in str(summary)
 
 
+@pytest.mark.parametrize(
+    "manager_class",
+    [
+        "honcho",
+        "deerflow.agents.memory.backends.honcho.honcho_manager:HonchoMemoryManager",
+    ],
+)
+def test_config_summary_redacts_honcho_endpoint_and_identity_overrides(
+    tmp_path,
+    manager_class,
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""config_version: 45
+deployment:
+  tenant_id: customer-readable-name
+memory:
+  manager_class: {manager_class}
+  backend_config:
+    base_url: https://admin:provider-password@honcho.example/v3?api_key=query-secret
+    api_key: literal-api-secret
+    workspace_prefix: customer-readable-prefix
+    workspace_overrides:
+      alice@example.com: customer-alpha-shared
+      bob@example.com: customer-alpha-shared
+    user_peer_overrides:
+      alice@example.com: peer-alice-private
+    assistant_peer: assistant-private
+    _hartmesh_tenant:
+      tenant_public_ref: caller-forged
+""",
+        encoding="utf-8",
+    )
+
+    summary = support_bundle.collect_config_summary(config_path)
+    backend = summary["memory"]["backend_config"]
+    rendered = repr(summary)
+
+    assert backend["endpoint_posture"] == "https"
+    assert "base_url" not in backend
+    assert backend["workspace_prefix"] == "<redacted>"
+    assert backend["workspace_overrides"] == {"configured_count": 2}
+    assert backend["user_peer_overrides"] == {"configured_count": 1}
+    assert backend["assistant_peer"] == "<redacted>"
+    assert backend["_hartmesh_tenant"] == "<reserved-server-owned>"
+    for sensitive in (
+        "provider-password",
+        "query-secret",
+        "literal-api-secret",
+        "customer-readable-prefix",
+        "alice@example.com",
+        "bob@example.com",
+        "customer-alpha-shared",
+        "peer-alice-private",
+        "assistant-private",
+        "caller-forged",
+        "honcho.example",
+    ):
+        assert sensitive not in rendered
+
+
 def test_create_support_bundle_masks_hardcoded_env_secret(tmp_path):
     project_root = tmp_path / "project"
     project_root.mkdir()

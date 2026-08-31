@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from _router_auth_helpers import make_authed_test_app
+from fastapi.testclient import TestClient
 from langchain_core.messages import HumanMessage
 
 from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
@@ -143,3 +145,18 @@ async def test_effective_memory_flows_from_injection_to_the_existing_debug_api()
 
     effective_content = update["messages"][1].content
     assert events[0]["content"] == {"content_sha256": hashlib.sha256(effective_content.encode("utf-8")).hexdigest()}
+
+
+def test_memory_observation_metadata_requires_run_owner_access() -> None:
+    from app.gateway.routers import thread_runs
+
+    app = make_authed_test_app(owner_check_passes=False)
+    app.include_router(thread_runs.router)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/threads/another-users-thread/runs/run-1/events",
+            params={"event_types": "memory.observation.v1"},
+        )
+
+    assert response.status_code == 404

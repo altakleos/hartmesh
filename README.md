@@ -493,6 +493,7 @@ Version sources report `2.1.0`, but no tag contains the audited HartMesh impleme
 - [Gateway API](backend/docs/API.md) — authenticated HTTP behavior
 - [Extension API](backend/packages/extension-api/README.md) — policy and trust boundaries
 - [Tenant identity](backend/docs/TENANT_IDENTITY.md) — server-owned trust boundary, schema/Redis migration, ACLs, and rollback
+- [Honcho memory backend](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md) — tenant/user isolation, durable observation limits, and existing-workspace migration
 - [Helm deployment](deploy/helm/deer-flow/README.md) — one-Gateway modes and qualification
 - [Configuration](config.example.yaml) — operator settings
 - [Backend guide](backend/AGENTS.md) and [frontend guide](frontend/AGENTS.md) — architecture and tests
@@ -507,6 +508,10 @@ make support-bundle
 ```
 
 Review generated support material before sharing it.
+For Honcho, the generated config summary omits the endpoint, raw workspace/user
+overrides, assistant peer, and reserved tenant projection. It retains only
+HTTP/HTTPS posture and configured override counts; it never includes the API
+key or memory content.
 
 This repository does not yet document a HartMesh-owned issue tracker, release channel, or private vulnerability-reporting route.
 

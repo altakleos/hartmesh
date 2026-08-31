@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 45
+config_version: 46
 
 # ============================================================================
 # Logging
@@ -1812,14 +1812,26 @@ memory:
   # Honcho example (replace this DeerMem backend_config block when
   # manager_class is honcho). This remote HTTP adapter uses Honcho's server-side
   # deriver to build user-model memory representations; no local LLM calls.
+  # The Gateway derives every workspace namespace from deployment.tenant_id and
+  # adds a collision-resistant user component. Never configure the reserved
+  # _hartmesh_tenant key. workspace_prefix is deprecated and, when present,
+  # must exactly equal the derived value. Production workspace overrides may
+  # only repeat each user's derived workspace; sharing is local-development-only
+  # and requires the explicit allow_local_shared_workspaces opt-in.
   #
   # backend_config:
   #   base_url: http://localhost:8000
   #   # api_key: $HONCHO_API_KEY   # hosted Honcho; plain-http + api_key needs allow_insecure_http: true
-  #   workspace_prefix: deerflow-u-   # one isolated workspace per user id
-  #   # workspace_overrides: {}    # map specific user ids to custom workspaces
-  #   # user_peer_overrides: {}    # map specific user ids to custom peer names
+  #   # workspace_overrides: {}    # normally omit; production values cannot escape/share
+  #   # user_peer_overrides: {}    # must retain the tenant/user prefix and be unique
+  #   allow_local_shared_workspaces: false # loud local-only opt-in; never a production escape hatch
   #   assistant_peer: deerflow
+  #   message_char_limit: 8000
+  #   max_injection_chars: 6000
+  #   timeout_seconds: 10
+  #   connect_timeout_seconds: 3
+  #   failure_policy:
+  #     read: fail_open            # fail_open | fail_closed
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
     storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast

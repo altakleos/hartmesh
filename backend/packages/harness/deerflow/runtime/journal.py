@@ -36,6 +36,7 @@ from deerflow.runtime.events.catalog import (
     LLM_HUMAN_INPUT_EVENT,
     LLM_TOOL_RESULT_EVENT,
     MEMORY_CONTEXT_EVENT,
+    MEMORY_OBSERVATION_EVENT,
     MIDDLEWARE_EVENT_PATTERN,
     RUN_END_EVENT,
     RUN_ERROR_EVENT,
@@ -845,6 +846,23 @@ class RunJournal(BaseCallbackHandler):
             content={"content_sha256": content_sha256},
         )
         self._memory_context_recorded = True
+
+    def record_memory_observation(self, observation: Any) -> None:
+        """Buffer one bounded mutable-memory observation.
+
+        Unlike the frozen ``context:memory`` identity, retries are intentionally
+        not deduplicated: Honcho may return different mutable context each time.
+        """
+
+        from deerflow.runtime.memory_observation import MemoryObservationV1
+
+        if not isinstance(observation, MemoryObservationV1):
+            raise TypeError("observation must be MemoryObservationV1")
+        self._put(
+            event_type=MEMORY_OBSERVATION_EVENT.event_type,
+            category=MEMORY_OBSERVATION_EVENT.category,
+            content=observation.to_event_body(),
+        )
 
     def _record_produced_artifacts(self, artifacts: Any, tool_name: str | None) -> None:
         """Accumulate produced artifact paths, deduped by (path, tool_name)."""

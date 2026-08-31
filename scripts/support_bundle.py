@@ -14,6 +14,7 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 try:
     import yaml
@@ -232,10 +233,38 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
 
 
 def _safe_tenant_config_projection(config: Any) -> Any:
-    """Replace the operator-readable tenant ID with its public projection."""
+    """Replace operator-readable tenant and Honcho identity data with safe projections."""
 
     if not isinstance(config, dict):
         return config
+    memory = config.get("memory")
+    manager_class = memory.get("manager_class") if isinstance(memory, dict) else None
+    if isinstance(memory, dict) and isinstance(manager_class, str) and "honcho" in manager_class.lower():
+        backend_config = memory.get("backend_config")
+        if isinstance(backend_config, dict):
+            base_url = backend_config.pop("base_url", None)
+            scheme = ""
+            if isinstance(base_url, str):
+                try:
+                    scheme = urlsplit(base_url).scheme.lower()
+                except ValueError:
+                    pass
+            backend_config["endpoint_posture"] = scheme if scheme in {"http", "https"} else "invalid_or_unset"
+
+            if "workspace_prefix" in backend_config:
+                backend_config["workspace_prefix"] = "<redacted>"
+
+            for key in ("workspace_overrides", "user_peer_overrides"):
+                if key in backend_config:
+                    overrides = backend_config[key]
+                    backend_config[key] = {
+                        "configured_count": len(overrides) if isinstance(overrides, dict) else 0,
+                    }
+            if "assistant_peer" in backend_config:
+                backend_config["assistant_peer"] = "<redacted>"
+            if "_hartmesh_tenant" in backend_config:
+                backend_config["_hartmesh_tenant"] = "<reserved-server-owned>"
+
     deployment = config.get("deployment")
     if not isinstance(deployment, dict):
         return config
@@ -866,6 +895,7 @@ def render_bundle_readme(triage: dict[str, Any]) -> str:
         "- `.env` is not included.",
         "- Raw conversation messages are not included.",
         "- Thread workspace/upload/output file contents are not included; optional thread data is a file manifest only.",
+        "- Honcho endpoints and identity overrides are reduced to transport posture, counts, and redacted markers.",
         "",
     ]
     return "\n".join(lines)

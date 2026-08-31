@@ -160,6 +160,33 @@ must be added to the central `RedisTenantComponent` inventory and accept the
 typed Redis `TenantNamespaceV1`; a factory-local prefix is not a tenancy
 boundary.
 
+## Honcho contextual-memory namespace
+
+When `memory.manager_class: honcho`, the Gateway derives a Honcho namespace
+from `TenantIdentityV1.namespace(HONCHO)` and passes only its pseudonymous
+projection through the reserved `_hartmesh_tenant` backend key. That key is
+server-owned: file/API values are discarded, and durable production refuses a
+manager without the frozen projection. The portable Honcho adapter never
+imports the host tenant type.
+
+The final workspace combines this namespace with a sanitized user component
+and a 16-hex SHA-256 suffix. User peers and sessions also carry tenant digest
+prefixes. Identical user/thread IDs in two tenant releases therefore resolve to
+different Honcho scopes, while a missing user causes no provider request.
+Production workspace overrides must equal the derived workspace for their
+specific user; cross-user or namespace-escaping overrides are rejected. A
+warned shared-workspace mode exists only for explicit local development.
+
+Honcho supplies mutable contextual memory. It is tenant- and user-scoped, but it is not HartMesh's source of truth for admission, checkpoints, invocation status, authorization, or audit evidence.
+
+Existing workspaces are never copied or dual-read automatically. Follow the
+[Honcho migration procedure](../packages/harness/deerflow/agents/memory/backends/honcho/README.md#existing-workspace-migration),
+which stops writers, generates a bounded dry-run mapping, requires provider
+copy tooling, verifies isolated reads, and retains old workspaces for rollback.
+Health and deployment reporting include only the tenant public reference,
+digest prefix, safe namespace, isolation/transport/failure posture, timestamps,
+and stable error code; Honcho remains an optional contextual dependency.
+
 ## Stable failures
 
 | Code | Meaning |
