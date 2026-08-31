@@ -60,8 +60,13 @@ class RedisCheckpointHistoryCache:
         serde: Any,
         ttl_seconds: int,
         max_connections: int | None = None,
+        client: Any | None = None,
     ) -> None:
-        self._client = _create_client(redis_url, max_connections=max_connections)
+        self._client = client or _create_client(
+            redis_url,
+            max_connections=max_connections,
+        )
+        self._owns_client = client is None
         self._serde = serde
         # ttl_seconds=0 is an explicit opt-out of expiry (no SETEX) — not the
         # default, and leaked/orphaned keys then rely on redis maxmemory only.
@@ -137,4 +142,5 @@ class RedisCheckpointHistoryCache:
         return CheckpointCacheStats(hits=self._hits, misses=self._misses)
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        if self._owns_client:
+            await self._client.aclose()

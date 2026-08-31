@@ -40,6 +40,7 @@ from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime import RunManager
 from deerflow.runtime.runs.lifecycle_query import LifecycleQuery, LifecycleVisibilityScope
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 class _AllowObserve:
@@ -285,6 +286,7 @@ async def test_gateway_service_runtime_uses_the_application_visibility_resolver(
             run_manager=RunManager(store=store),
             thread_store=ThreadStore(),
             runtime_readiness=None,
+            tenant_identity=TenantIdentityV1.from_canonical_id("local"),
             service_observation_visibility_resolver=(
                 ConfiguredServiceObservationGrantResolver(
                     lambda: config.service_observation_grants,

@@ -15,12 +15,16 @@ from deerflow.runtime.skill_projection import (
     SkillProjectionBusyError,
     get_skill_projection_coordinator,
 )
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+
+_TEST_TENANT = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
 
 
 def _launch(*, thread_id: str, external_key: str):
     material = SimpleNamespace(skill_snapshot=None)
     accepted = SimpleNamespace(
         agent_revision=SimpleNamespace(material=material),
+        tenant=_TEST_TENANT,
         to_persisted=lambda: {},
     )
     return SimpleNamespace(
@@ -96,7 +100,7 @@ async def test_atomic_replacement_commits_while_old_projection_remains_exclusive
 ) -> None:
     thread_id = f"projection-{strategy}-replacement"
     store = MemoryRunStore()
-    manager = RunManager(store=store)
+    manager = RunManager(store=store, tenant=_TEST_TENANT)
     old = await manager.create_or_reject(
         thread_id,
         user_id="projection-owner",
@@ -576,7 +580,10 @@ async def test_gateway_real_manager_recovers_response_lost_creator_by_candidate_
                 raise OSError("lost after commit")
             return result
 
-    manager = RunManager(store=_ResponseLostStore())
+    manager = RunManager(
+        store=_ResponseLostStore(),
+        tenant=_TEST_TENANT,
+    )
     monkeypatch.setattr(services, "get_run_manager", lambda _request: manager)
     monkeypatch.setattr(
         services,

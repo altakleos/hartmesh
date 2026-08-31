@@ -21,6 +21,10 @@ synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
 
+`check_tenant_namespaces.py` is the read-only Redis migration inventory. It
+requires `--dry-run`, bounds SCAN/key/channel counts, and reports only prefix
+counts—never keys, values, or credentials.
+
 ## Backend Static Analysis Commands
 
 The root `detect-thread-boundaries` target statically inventories execution

@@ -13,6 +13,7 @@ from functools import wraps
 from typing import Any
 
 from deerflow_extension_api import (
+    TenantReferenceV1,
     validate_model_profile_identifier,
     validate_thread_identifier,
 )
@@ -53,8 +54,10 @@ from deerflow.runtime.runs.store.base import (
     build_lifecycle_payload,
     lifecycle_owner_scope,
     lifecycle_type_for_status,
+    tenant_store_columns,
     validate_execution_evidence_run,
 )
+from deerflow.runtime.tenant_identity import TenantIdentityError
 
 _TERMINAL_STATUSES = {"success", "error", "timeout", "interrupted"}
 
@@ -90,7 +93,10 @@ def _atomic_memory_mutation[**P, R](method: Callable[P, Awaitable[R]]) -> Callab
 class MemoryRunStore(RunStore):
     durable_lifecycle = True
 
-    def __init__(self) -> None:
+    def __init__(self, *, tenant: TenantReferenceV1 | None = None) -> None:
+        if tenant is not None and not isinstance(tenant, TenantReferenceV1):
+            raise TypeError("tenant must be TenantReferenceV1 or None")
+        self._tenant = tenant
         self._runs: dict[str, dict[str, Any]] = {}
         # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
         # used as an ordered set), maintained in lockstep with ``_runs`` so
@@ -102,6 +108,13 @@ class MemoryRunStore(RunStore):
         self._lifecycle_cursor = 0
         self._lifecycle_pruned_through = 0
 
+    def _tenant_visible(self, row: Mapping[str, Any]) -> bool:
+        return self._tenant is None or row.get("tenant_digest") == self._tenant.digest
+
+    def _visible_run(self, run_id: str) -> dict[str, Any] | None:
+        row = self._runs.get(run_id)
+        return row if row is not None and self._tenant_visible(row) else None
+
     async def initialize_lifecycle(self) -> None:
         return None
 
@@ -111,7 +124,7 @@ class MemoryRunStore(RunStore):
         run_id: str | None = None,
         thread_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        return [dict(event) for event in self._lifecycle_events if (run_id is None or event["run_id"] == run_id) and (thread_id is None or event["thread_id"] == thread_id)]
+        return [dict(event) for event in self._lifecycle_events if self._tenant_visible(event) and (run_id is None or event["run_id"] == run_id) and (thread_id is None or event["thread_id"] == thread_id)]
 
     async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage:
         requested = validate_cursor_window(
@@ -124,7 +137,8 @@ class MemoryRunStore(RunStore):
         for index in range(start_index, len(self._lifecycle_events)):
             event = self._lifecycle_events[index]
             if not (
-                requested < event["cursor"] <= self._lifecycle_cursor
+                self._tenant_visible(event)
+                and requested < event["cursor"] <= self._lifecycle_cursor
                 and (query.run_id is None or event["run_id"] == query.run_id)
                 and (query.thread_id is None or event["thread_id"] == query.thread_id)
                 and (query.owner_scope is None or event["owner_scope"] == query.owner_scope)
@@ -152,7 +166,7 @@ class MemoryRunStore(RunStore):
             else:
                 summary_run_ids = tuple(dict.fromkeys(event["run_id"] for event in events))
             for run_id in summary_run_ids:
-                row = self._runs.get(run_id)
+                row = self._visible_run(run_id)
                 if row is None or row.get("operation_kind", "run") != "run":
                     continue
                 if query.owner_scope is not None and lifecycle_owner_scope(row.get("user_id")) != query.owner_scope:
@@ -188,7 +202,7 @@ class MemoryRunStore(RunStore):
         if scope.thread_id != thread_id:
             raise ValueError("lifecycle visibility scope is bound to another context")
         for run_id in self._runs_by_thread.get(thread_id, {}):
-            row = self._runs.get(run_id)
+            row = self._visible_run(run_id)
             if row is None or row.get("operation_kind", "run") != "run":
                 continue
             if scope.permits(
@@ -223,6 +237,8 @@ class MemoryRunStore(RunStore):
             "run_id": row["run_id"],
             "thread_id": row["thread_id"],
             "owner_scope": lifecycle_owner_scope(row.get("user_id")),
+            "tenant_ref": row.get("tenant_ref"),
+            "tenant_digest": row.get("tenant_digest"),
             "lifecycle_type": transition.lifecycle_type,
             "state_version": row["state_version"],
             "status": row["status"],
@@ -284,7 +300,7 @@ class MemoryRunStore(RunStore):
         require_unexpired_lease: bool = False,
     ) -> LifecycleTransitionResult:
         payload = build_lifecycle_payload(transition)
-        row = self._runs.get(run_id)
+        row = self._visible_run(run_id)
         if row is None or row.get("operation_kind", "run") != "run":
             return LifecycleTransitionResult(applied=False)
         if user_id is not None and row.get("user_id") != user_id:
@@ -349,7 +365,7 @@ class MemoryRunStore(RunStore):
             raise AssemblyEvidenceError("assembly_descriptor_invalid")
         normalized = actual.to_persisted_json()
 
-        row = self._runs.get(run_id)
+        row = self._visible_run(run_id)
         if row is None or row.get("operation_kind", "run") != "run":
             return BindAssemblyEvidenceOutcome.not_found
         if (
@@ -437,7 +453,7 @@ class MemoryRunStore(RunStore):
     ) -> CancellationRequestResult:
         if action not in ("interrupt", "rollback"):
             raise ValueError(f"Unsupported cancellation action: {action}")
-        row = self._runs.get(run_id)
+        row = self._visible_run(run_id)
         if row is None or row.get("operation_kind", "run") != "run" or (user_id is not None and row.get("user_id") != user_id):
             return CancellationRequestResult(CancellationRequestOutcome.not_found_or_invisible)
         if expected_owner_worker_id is not None and not self._owned_run_fence_matches(
@@ -500,6 +516,7 @@ class MemoryRunStore(RunStore):
         principal_projection_digest: str | None = None,
         base_origin_digest: str | None = None,
         accepted_context_digest: str | None = None,
+        tenant: TenantReferenceV1 | None = None,
         agent_revision_json: dict[str, Any] | None = None,
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
@@ -514,10 +531,16 @@ class MemoryRunStore(RunStore):
         idempotency_key: str | None = None,
     ) -> None:
         thread_id = validate_thread_identifier(thread_id)
+        tenant_ref, tenant_digest = tenant_store_columns(self._tenant, tenant)
         if model_name is not None:
             model_name = validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
         now = datetime.now(UTC).isoformat()
         existing = self._runs.get(run_id)
+        if existing is not None and not self._tenant_visible(existing):
+            raise TenantIdentityError(
+                "tenant_identity_mismatch",
+                "run identity is already bound to a different tenant",
+            )
         lifecycle_row = operation_kind == "run" and status is not None
         new_row = {
             "run_id": run_id,
@@ -532,6 +555,8 @@ class MemoryRunStore(RunStore):
             "kwargs": kwargs or {},
             "error": error,
             "stop_reason": stop_reason,
+            "tenant_ref": tenant_ref,
+            "tenant_digest": tenant_digest,
             "created_at": created_at or now,
             "updated_at": now,
             "owner_worker_id": owner_worker_id,
@@ -598,7 +623,7 @@ class MemoryRunStore(RunStore):
                 new_row["status"] = status
 
     async def get(self, run_id, *, user_id=None):
-        run = self._runs.get(run_id)
+        run = self._visible_run(run_id)
         if run is None:
             return None
         if user_id is not None and run.get("user_id") != user_id:
@@ -608,7 +633,7 @@ class MemoryRunStore(RunStore):
     async def authoritative_get(self, run_id: str) -> dict[str, Any] | None:
         """Return one row by primary identity without applying owner scope."""
 
-        return self._runs.get(run_id)
+        return self._visible_run(run_id)
 
     async def get_by_external_identity(
         self,
@@ -616,7 +641,7 @@ class MemoryRunStore(RunStore):
         external_key: str,
     ) -> dict[str, Any] | None:
         run_id = self._runs_by_external_identity.get((external_scope, external_key))
-        return self._runs.get(run_id) if run_id is not None else None
+        return self._visible_run(run_id) if run_id is not None else None
 
     async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
         # Use the thread index for an O(runs-in-thread) lookup instead of
@@ -625,7 +650,7 @@ class MemoryRunStore(RunStore):
         run_ids = self._runs_by_thread.get(thread_id)
         if not run_ids:
             return []
-        results = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)]
+        results = [run for run_id in run_ids if (run := self._visible_run(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)]
         results.sort(key=lambda r: r["created_at"], reverse=True)
         return results[:limit]
 
@@ -633,7 +658,7 @@ class MemoryRunStore(RunStore):
         run_ids = self._runs_by_thread.get(thread_id) or ()
         sources: set[str] = set()
         for run_id in run_ids:
-            run = self._runs.get(run_id)
+            run = self._visible_run(run_id)
             if run is None or run.get("operation_kind", "run") != "run" or run.get("status") != "success":
                 continue
             if user_id is not None and run.get("user_id") != user_id:
@@ -647,7 +672,7 @@ class MemoryRunStore(RunStore):
         run_ids = self._runs_by_thread.get(thread_id) or ()
         results = []
         for run_id in run_ids:
-            run = self._runs.get(run_id)
+            run = self._visible_run(run_id)
             if run is None:
                 continue
             if user_id is not None and run.get("user_id") != user_id:
@@ -661,10 +686,10 @@ class MemoryRunStore(RunStore):
 
     async def get_many_by_thread(self, thread_id, run_ids, *, user_id=None):
         thread_run_ids = self._runs_by_thread.get(thread_id) or ()
-        return {run_id: run for run_id in thread_run_ids if run_id in run_ids and (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)}
+        return {run_id: run for run_id in thread_run_ids if run_id in run_ids and (run := self._visible_run(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)}
 
     async def update_status(self, run_id, status, *, error=None, stop_reason=None):
-        run = self._runs.get(run_id)
+        run = self._visible_run(run_id)
         if run is None:
             return False
         # Guard: only transition rows that are still active. ``interrupted``
@@ -702,7 +727,7 @@ class MemoryRunStore(RunStore):
         execution_evidence_digest: str | None = None,
     ) -> bool:
         validate_execution_evidence_run(run_id, execution_evidence_json)
-        run = self._runs.get(run_id)
+        run = self._visible_run(run_id)
         if run is None or run["status"] != "pending" or run.get("cancel_action") is not None:
             return False
         result = await self.transition_run_atomic(
@@ -721,13 +746,15 @@ class MemoryRunStore(RunStore):
     async def update_model_name(self, run_id, model_name):
         if model_name is not None:
             model_name = validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
-        if run_id in self._runs:
-            self._runs[run_id]["model_name"] = model_name
-            self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+        run = self._visible_run(run_id)
+        if run is not None:
+            run["model_name"] = model_name
+            run["updated_at"] = datetime.now(UTC).isoformat()
 
     async def delete(self, run_id, *, user_id=None):
-        run = self._runs.pop(run_id, None)
+        run = self._visible_run(run_id)
         if run is not None:
+            self._runs.pop(run_id, None)
             self._unindex_run(run_id, run["thread_id"])
             scope = run.get("external_scope")
             key = run.get("external_key")
@@ -736,7 +763,7 @@ class MemoryRunStore(RunStore):
             self._lifecycle_events = [event for event in self._lifecycle_events if event["run_id"] != run_id]
 
     async def update_run_completion(self, run_id, *, status, **kwargs):
-        run = self._runs.get(run_id)
+        run = self._visible_run(run_id)
         if run is None:
             return False
         current_status = run.get("status")
@@ -770,21 +797,22 @@ class MemoryRunStore(RunStore):
         return True
 
     async def update_run_progress(self, run_id, **kwargs):
-        if run_id in self._runs and self._runs[run_id].get("status") == "running":
+        run = self._visible_run(run_id)
+        if run is not None and run.get("status") == "running":
             for key, value in kwargs.items():
                 if value is not None:
-                    self._runs[run_id][key] = value
-            self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+                    run[key] = value
+            run["updated_at"] = datetime.now(UTC).isoformat()
 
     async def list_pending(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()
-        results = [r for r in self._runs.values() if r.get("operation_kind", "run") == "run" and r["status"] == "pending" and r["created_at"] <= now]
+        results = [r for r in self._runs.values() if self._tenant_visible(r) and r.get("operation_kind", "run") == "run" and r["status"] == "pending" and r["created_at"] <= now]
         results.sort(key=lambda r: r["created_at"])
         return results
 
     async def list_inflight(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()
-        results = [r for r in self._runs.values() if r["status"] in ("pending", "running") and r["created_at"] <= now]
+        results = [r for r in self._runs.values() if self._tenant_visible(r) and r["status"] in ("pending", "running") and r["created_at"] <= now]
         results.sort(key=lambda r: r["created_at"])
         return results
 
@@ -793,7 +821,7 @@ class MemoryRunStore(RunStore):
         # Use the thread index for an O(runs-in-thread) lookup instead of
         # scanning every run in the process (mirrors ``list_by_thread``).
         run_ids = self._runs_by_thread.get(thread_id) or ()
-        completed = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and run.get("status") in statuses]
+        completed = [run for run_id in run_ids if (run := self._visible_run(run_id)) is not None and run.get("operation_kind", "run") == "run" and run.get("status") in statuses]
         by_model: dict[str, dict] = {}
         for r in completed:
             usage_by_model = r.get("token_usage_by_model") or {}
@@ -835,7 +863,7 @@ class MemoryRunStore(RunStore):
         owner_worker_id: str,
         lease_expires_at: str,
     ) -> bool:
-        run = self._runs.get(run_id)
+        run = self._visible_run(run_id)
         if run is None:
             return False
         if run["status"] not in ("pending", "running"):
@@ -863,7 +891,7 @@ class MemoryRunStore(RunStore):
         )
         if not renewed:
             return LeaseRenewal(renewed=False)
-        run = self._runs.get(run_id)
+        run = self._visible_run(run_id)
         return LeaseRenewal(
             renewed=True,
             cancel_action=run.get("cancel_action") if run is not None else None,
@@ -887,7 +915,7 @@ class MemoryRunStore(RunStore):
         error: str | None = None,
         stop_reason: str | None = None,
     ) -> StatusFinalization:
-        run = self._runs.get(run_id)
+        run = self._visible_run(run_id)
         if run is None:
             return StatusFinalization(finalized=False)
         if run.get("cancel_action") is not None:
@@ -923,7 +951,7 @@ class MemoryRunStore(RunStore):
     ) -> bool:
         from deerflow.utils.time import is_lease_expired
 
-        run = self._runs.get(run_id)
+        run = self._visible_run(run_id)
         if run is None:
             return False
         if run["status"] not in ("pending", "running"):
@@ -964,6 +992,8 @@ class MemoryRunStore(RunStore):
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
         results = []
         for r in self._runs.values():
+            if not self._tenant_visible(r):
+                continue
             if r["status"] not in ("pending", "running"):
                 continue
             created_at = r.get("created_at", "")
@@ -1018,6 +1048,7 @@ class MemoryRunStore(RunStore):
         principal_projection_digest: str | None = None,
         base_origin_digest: str | None = None,
         accepted_context_digest: str | None = None,
+        tenant: TenantReferenceV1 | None = None,
         agent_revision_json: dict[str, Any] | None = None,
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
@@ -1037,6 +1068,7 @@ class MemoryRunStore(RunStore):
             raise DuplicateRunIdentityError(run_id)
 
         thread_id = validate_thread_identifier(thread_id)
+        tenant_ref, tenant_digest = tenant_store_columns(self._tenant, tenant)
         if model_name is not None:
             model_name = validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
         now = datetime.now(UTC).isoformat()
@@ -1044,12 +1076,16 @@ class MemoryRunStore(RunStore):
 
         if idempotency_key is not None:
             for existing in self._runs.values():
+                if not self._tenant_visible(existing):
+                    continue
                 if existing.get("idempotency_key") == idempotency_key:
                     raise RunIdempotencyConflict(existing)
 
         # For reject: check if any active run exists
         if multitask_strategy == "reject":
             for r in self._runs.values():
+                if not self._tenant_visible(r):
+                    continue
                 if r["thread_id"] == thread_id and r["status"] in ("pending", "running"):
                     raise ConflictError(f"Thread {thread_id} already has an active run")
 
@@ -1064,6 +1100,8 @@ class MemoryRunStore(RunStore):
         if multitask_strategy in ("interrupt", "rollback"):
             candidates: list[dict[str, Any]] = []
             for r in self._runs.values():
+                if not self._tenant_visible(r):
+                    continue
                 if r["thread_id"] != thread_id:
                     continue
                 if r["status"] not in ("pending", "running"):
@@ -1132,6 +1170,8 @@ class MemoryRunStore(RunStore):
             "cancel_requested_at": None,
             "created_at": created_at or now,
             "updated_at": now,
+            "tenant_ref": tenant_ref,
+            "tenant_digest": tenant_digest,
             "origin_json": origin_json if operation_kind == "run" else None,
             "principal_projection_json": principal_projection_json if operation_kind == "run" else None,
             "principal_projection_digest": principal_projection_digest if operation_kind == "run" else None,
@@ -1178,7 +1218,7 @@ class MemoryRunStore(RunStore):
     ) -> ThreadOperationReleaseResult:
         """Release one exact auxiliary row under its captured ownership fence."""
 
-        row = self._runs.get(run_id)
+        row = self._visible_run(run_id)
         if row is None:
             return ThreadOperationReleaseResult(
                 outcome=ThreadOperationReleaseOutcome.absent,

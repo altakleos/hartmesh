@@ -43,6 +43,10 @@ from deerflow.runtime.runs.manager import RunManager, ThreadOperationKind
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+
+_TEST_TENANT_IDENTITY = TenantIdentityV1.from_canonical_id("local")
+_TEST_TENANT = _TEST_TENANT_IDENTITY.to_persisted_reference()
 
 
 def _material(*, soul: str = "steady") -> ResolvedAgentMaterialV1:
@@ -88,6 +92,7 @@ def test_material_and_accepted_digests_are_stable_and_mutation_safe() -> None:
         execution_options={"multitask_strategy": "reject"},
         extension_generation=7,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=_TEST_TENANT,
     )
 
     assert len(accepted.principal_digest) == 64
@@ -97,14 +102,40 @@ def test_material_and_accepted_digests_are_stable_and_mutation_safe() -> None:
     assert accepted.to_persisted()["decision_evidence_json"] == {
         "version": 1,
         "decisions": [],
-        "tool_receipts": {"version": 1},
+        "tool_receipts": {"version": 2},
     }
-    assert accepted.tool_receipt_evidence_version == 1
+    assert accepted.tool_receipt_evidence_version == 2
     legacy = replace(
         accepted,
         decision_evidence={"version": 1, "decisions": []},
     )
     assert legacy.tool_receipt_evidence_version is None
+
+
+def test_same_user_thread_and_external_key_are_distinct_across_tenants() -> None:
+    common = {
+        "principal": PrincipalProjection(user_id="same-user", role="member"),
+        "origin": InvocationOrigin(source_kind="http"),
+        "thread_id": "same-thread",
+        "context_references": {"external_key_reference": "raw:same-external-key"},
+        "agent_revision": ResolvedAgentRevision.from_material(_material()),
+        "normalized_input": {"messages": []},
+        "execution_options": {"multitask_strategy": "reject"},
+        "extension_generation": 7,
+        "contributor_execution_digest": canonical_digest({"version": 1, "execution": []}),
+    }
+
+    tenant_a = AcceptedInvocation.seal(
+        **common,
+        tenant=TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference(),
+    )
+    tenant_b = AcceptedInvocation.seal(
+        **common,
+        tenant=TenantIdentityV1.from_canonical_id("tenant-b").to_persisted_reference(),
+    )
+
+    assert tenant_a.accepted_context_digest != tenant_b.accepted_context_digest
+    assert tenant_a.runtime_identity_digest != tenant_b.runtime_identity_digest
 
 
 def test_persisted_effective_execution_restores_frozen_execution_options() -> None:
@@ -127,6 +158,7 @@ def test_persisted_effective_execution_restores_frozen_execution_options() -> No
         contributor_execution_digest=canonical_digest(
             {"version": 1, "execution": []},
         ),
+        tenant=_TEST_TENANT,
     )
     effective_projection = {
         "accepted_digest_semantics": "canonical_execution_v2",
@@ -135,6 +167,7 @@ def test_persisted_effective_execution_restores_frozen_execution_options() -> No
         "agent_revision_digest": accepted.agent_revision.digest,
         "principal_digest": accepted.principal_digest,
         "base_origin_digest": accepted.base_origin_digest,
+        "tenant_digest": accepted.tenant.digest,
         "accepted_context_digest": accepted.accepted_context_digest,
         "runtime_identity_digest": accepted.runtime_identity_digest,
         "contributor_execution_digest": accepted.contributor_execution_digest,
@@ -164,6 +197,97 @@ def test_persisted_effective_execution_restores_frozen_execution_options() -> No
 
     assert restored is not None
     assert dict(restored.execution_options) == execution_options
+
+
+def test_explicit_schema_binding_preserves_legacy_accepted_evidence() -> None:
+    """A CLI-backfilled row remains recoverable without rewriting old proofs."""
+
+    execution_options = {
+        "multitask_strategy": "reject",
+        "interrupt_before": None,
+        "interrupt_after": None,
+        "checkpoint_id": None,
+        "recursion_limit": 1000,
+    }
+    contributor_digest = canonical_digest({"version": 1, "execution": []})
+    accepted = AcceptedInvocation.seal(
+        principal=PrincipalProjection(user_id="u1", role="member"),
+        origin=InvocationOrigin(source_kind="http"),
+        thread_id="thread-legacy-tenant-binding",
+        context_references={},
+        agent_revision=ResolvedAgentRevision.from_material(_material()),
+        normalized_input={},
+        execution_options=execution_options,
+        extension_generation=7,
+        contributor_execution_digest=contributor_digest,
+        tenant=_TEST_TENANT,
+    )
+    legacy_context_digest = canonical_digest(
+        {
+            "version": 1,
+            "context": {},
+            "contributor_execution_digest": contributor_digest,
+            "trusted_context_execution_digest": None,
+        }
+    )
+    legacy_runtime_digest = canonical_digest(
+        {
+            "version": 1,
+            "principal_digest": accepted.principal_digest,
+            "base_origin_digest": accepted.base_origin_digest,
+            "thread_id": accepted.thread_id,
+            "agent_revision_digest": accepted.agent_revision.digest,
+            "input": {},
+            "execution_options": execution_options,
+            "extension_generation": accepted.extension_generation,
+            "extension_manifest_digest": None,
+            "accepted_context_digest": legacy_context_digest,
+        }
+    )
+    legacy_projection = {
+        "accepted_digest_semantics": "canonical_execution_v2",
+        "thread_id": accepted.thread_id,
+        "agent_selector": "default",
+        "agent_revision_digest": accepted.agent_revision.digest,
+        "principal_digest": accepted.principal_digest,
+        "base_origin_digest": accepted.base_origin_digest,
+        "accepted_context_digest": legacy_context_digest,
+        "runtime_identity_digest": legacy_runtime_digest,
+        "contributor_execution_digest": contributor_digest,
+        "extension_generation": accepted.extension_generation,
+        "input": {},
+        "command": None,
+        "multitask_strategy": "reject",
+        "checkpoint": {},
+        "interrupt_before": None,
+        "interrupt_after": None,
+        "execution_context": {},
+        "recursion_limit": 1000,
+    }
+    persisted = {
+        **accepted.to_persisted(),
+        "accepted_context_digest": legacy_context_digest,
+        "decision_evidence_json": {
+            "version": 1,
+            "decisions": [],
+            "tool_receipts": {"version": 1},
+        },
+        "thread_id": accepted.thread_id,
+        "kwargs": {
+            "__accepted_request_projection_v1": legacy_projection,
+        },
+        "request_digest": canonical_effective_execution_digest(
+            legacy_projection,
+        ),
+        "request_digest_version": "sha256-canonical-json-v1",
+    }
+
+    restored = AcceptedInvocation.from_persisted(persisted)
+
+    assert restored is not None
+    assert restored.tenant == _TEST_TENANT
+    assert restored.accepted_context_digest == legacy_context_digest
+    assert restored.runtime_identity_digest == legacy_runtime_digest
 
 
 def test_revision_digest_changes_with_execution_material_and_storage_version() -> None:
@@ -206,6 +330,7 @@ async def test_full_agent_identifier_domain_seals_into_trusted_context(
                 extensions=SimpleNamespace(generation=1),
                 capability_manifest=SimpleNamespace(digest="f" * 64),
                 contributor_host=None,
+                tenant_identity=_TEST_TENANT_IDENTITY,
             )
         ),
     )
@@ -260,6 +385,7 @@ async def test_cancelled_revision_resolution_releases_late_process_material(
                 extensions=SimpleNamespace(generation=1),
                 capability_manifest=SimpleNamespace(digest="f" * 64),
                 contributor_host=None,
+                tenant_identity=_TEST_TENANT_IDENTITY,
             )
         ),
     )
@@ -326,6 +452,7 @@ async def test_cancelled_run_context_contribution_releases_published_material(
                 extensions=SimpleNamespace(generation=1),
                 capability_manifest=SimpleNamespace(digest="f" * 64),
                 contributor_host=BlockingContributorHost(),
+                tenant_identity=_TEST_TENANT_IDENTITY,
             )
         ),
     )
@@ -362,6 +489,7 @@ def _accepted(material: ResolvedAgentMaterialV1) -> AcceptedInvocation:
         execution_options={},
         extension_generation=3,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=_TEST_TENANT,
     )
 
 
@@ -378,7 +506,7 @@ async def test_restart_drift_fails_before_graph_construction_or_model_work() -> 
     accepted = _accepted(_material())
     persisted_revision = replace(accepted.agent_revision, material=None)
     accepted = replace(accepted, agent_revision=persisted_revision)
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-worker",
         accepted_invocation=accepted,
@@ -396,6 +524,7 @@ async def test_restart_drift_fails_before_graph_construction_or_model_work() -> 
         record,
         ctx=RunContext(
             checkpointer=None,
+            tenant=_TEST_TENANT,
             agent_revision_resolver=lambda _record, _config: ResolvedAgentRevision.from_material(_material(soul="drifted")),
         ),
         agent_factory=factory,
@@ -406,6 +535,71 @@ async def test_restart_drift_fails_before_graph_construction_or_model_work() -> 
     assert factory_called is False
     assert record.status is RunStatus.error
     assert record.stop_reason == "agent_revision_drift"
+
+
+@pytest.mark.asyncio
+async def test_tenant_mismatch_fails_before_resolution_graph_or_model_work() -> None:
+    accepted = _accepted(_material())
+    accepted = replace(
+        accepted,
+        tenant=TenantIdentityV1.from_canonical_id("other-tenant").to_persisted_reference(),
+    )
+    manager = RunManager(tenant=accepted.tenant)
+    record = await manager.create_or_reject(
+        "thread-worker-tenant-mismatch",
+        accepted_invocation=accepted,
+    )
+    resolver = AsyncMock(side_effect=AssertionError("tenant mismatch must not resolve material"))
+    factory = AsyncMock(side_effect=AssertionError("tenant mismatch must not construct a graph"))
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            tenant=_TEST_TENANT,
+            agent_revision_resolver=resolver,
+        ),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    resolver.assert_not_called()
+    factory.assert_not_called()
+    assert record.status is RunStatus.error
+    assert record.stop_reason == "tenant_identity_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_missing_worker_tenant_fails_before_resolution_graph_or_model_work() -> None:
+    accepted = _accepted(_material())
+    manager = RunManager(tenant=_TEST_TENANT)
+    record = await manager.create_or_reject(
+        "thread-worker-missing-tenant",
+        accepted_invocation=accepted,
+    )
+    resolver = AsyncMock(side_effect=AssertionError("missing tenant must not resolve material"))
+    factory = AsyncMock(side_effect=AssertionError("missing tenant must not construct a graph"))
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            agent_revision_resolver=resolver,
+        ),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    resolver.assert_not_called()
+    factory.assert_not_called()
+    assert record.status is RunStatus.error
+    assert record.stop_reason == "tenant_identity_mismatch"
 
 
 @pytest.mark.asyncio
@@ -421,7 +615,7 @@ async def test_legacy_nonterminal_revision_fails_before_resolution_or_graph_work
             material=None,
         ),
     )
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-worker-legacy-catalog",
         accepted_invocation=accepted,
@@ -435,6 +629,7 @@ async def test_legacy_nonterminal_revision_fails_before_resolution_or_graph_work
         record,
         ctx=RunContext(
             checkpointer=None,
+            tenant=_TEST_TENANT,
             agent_revision_resolver=resolver,
         ),
         agent_factory=factory,
@@ -453,7 +648,7 @@ async def test_restart_equality_uses_the_exact_resolved_object_once() -> None:
     material = _material()
     accepted = _accepted(material)
     accepted = replace(accepted, agent_revision=replace(accepted.agent_revision, material=None))
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-worker-equal",
         accepted_invocation=accepted,
@@ -479,7 +674,11 @@ async def test_restart_equality_uses_the_exact_resolved_object_once() -> None:
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None, agent_revision_resolver=resolver),
+        ctx=RunContext(
+            checkpointer=None,
+            tenant=_TEST_TENANT,
+            agent_revision_resolver=resolver,
+        ),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -531,7 +730,7 @@ async def test_restart_rebinds_persisted_catalog_instead_of_live_managed_state()
         subagent_catalog=ResolvedSubagentCatalogV1.empty(),
         skill_scopes=ResolvedSkillScopesV1.empty(),
     )
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-worker-catalog-recovery",
         accepted_invocation=accepted,
@@ -553,6 +752,7 @@ async def test_restart_rebinds_persisted_catalog_instead_of_live_managed_state()
         record,
         ctx=RunContext(
             checkpointer=None,
+            tenant=_TEST_TENANT,
             agent_revision_resolver=lambda _record, _config: ResolvedAgentRevision.from_material(live_candidate),
         ),
         agent_factory=factory,
@@ -577,7 +777,7 @@ async def test_pinned_material_replaces_mutated_factory_context_after_digest_che
             "channel_name": None,
         },
     )
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-worker-mutation",
         accepted_invocation=_accepted(material),
@@ -596,7 +796,7 @@ async def test_pinned_material_replaces_mutated_factory_context_after_digest_che
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=factory,
         graph_input={},
         config={"context": {"agent_name": "mutated-target", "is_bootstrap": False}},
@@ -648,7 +848,11 @@ async def test_accepted_durable_bare_graph_fails_before_graph_invocation() -> No
     from deerflow.runtime.assembly_evidence import assembly_evidence_is_required
 
     store = MemoryRunStore()
-    manager = RunManager(store=store, worker_id="worker-assembly")
+    manager = RunManager(
+        store=store,
+        worker_id="worker-assembly",
+        tenant=_TEST_TENANT,
+    )
     record = await manager.create_or_reject(
         "thread-worker-bare",
         accepted_invocation=_accepted(_material()),
@@ -669,7 +873,7 @@ async def test_accepted_durable_bare_graph_fails_before_graph_invocation() -> No
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -692,7 +896,11 @@ async def test_accepted_durable_evidence_is_bound_before_checkpoint_access_and_a
 
     material = _material()
     store = MemoryRunStore()
-    manager = RunManager(store=store, worker_id="worker-assembly")
+    manager = RunManager(
+        store=store,
+        worker_id="worker-assembly",
+        tenant=_TEST_TENANT,
+    )
     record = await manager.create_or_reject(
         "thread-worker-evidence",
         accepted_invocation=_accepted(material),
@@ -730,6 +938,7 @@ async def test_accepted_durable_evidence_is_bound_before_checkpoint_access_and_a
         ctx=RunContext(
             checkpointer=object(),
             event_store=MemoryRunEventStore(run_store=store),
+            tenant=_TEST_TENANT,
         ),
         agent_factory=factory,
         graph_input={},
@@ -756,7 +965,11 @@ async def test_legacy_accepted_run_binds_assembly_without_starting_receipt_tail(
         decision_evidence={"version": 1, "decisions": []},
     )
     store = MemoryRunStore()
-    manager = RunManager(store=store, worker_id="worker-legacy-receipts")
+    manager = RunManager(
+        store=store,
+        worker_id="worker-legacy-receipts",
+        tenant=_TEST_TENANT,
+    )
     record = await manager.create_or_reject(
         "thread-worker-legacy-receipts",
         accepted_invocation=legacy,
@@ -773,7 +986,11 @@ async def test_legacy_accepted_run_binds_assembly_without_starting_receipt_tail(
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None, event_store=None),
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=None,
+            tenant=_TEST_TENANT,
+        ),
         agent_factory=lambda **_kwargs: LeadAgentAssembly(
             graph=Agent(),
             descriptor=_durable_test_descriptor(material),
@@ -796,7 +1013,11 @@ async def test_worker_retains_bound_evidence_on_terminal_outcome(
 
     material = _material()
     store = MemoryRunStore()
-    manager = RunManager(store=store, worker_id="worker-terminal-evidence")
+    manager = RunManager(
+        store=store,
+        worker_id="worker-terminal-evidence",
+        tenant=_TEST_TENANT,
+    )
     record = await manager.create_or_reject(
         f"thread-terminal-{terminal_outcome}",
         accepted_invocation=_accepted(material),
@@ -821,6 +1042,7 @@ async def test_worker_retains_bound_evidence_on_terminal_outcome(
             ctx=RunContext(
                 checkpointer=None,
                 event_store=MemoryRunEventStore(run_store=store),
+                tenant=_TEST_TENANT,
             ),
             agent_factory=lambda **_kwargs: LeadAgentAssembly(
                 graph=Agent(),
@@ -937,6 +1159,7 @@ async def test_recovered_assembly_must_match_original_before_astream(
             expected_policy_digest=canonical_durable_policy_digest(original_descriptor.effective_policies),
             agent_revision_digest=accepted.agent_revision.digest,
             extension_generation=accepted.extension_generation,
+            tenant=accepted.tenant,
         ),
     )
 
@@ -959,7 +1182,11 @@ async def test_recovered_assembly_must_match_original_before_astream(
             return True
 
     store = RecoveredStore()
-    manager = RunManager(store=store, worker_id="worker-assembly")
+    manager = RunManager(
+        store=store,
+        worker_id="worker-assembly",
+        tenant=_TEST_TENANT,
+    )
     record = await manager.create_or_reject(
         "thread-worker-recovered",
         accepted_invocation=accepted,
@@ -979,6 +1206,7 @@ async def test_recovered_assembly_must_match_original_before_astream(
         ctx=RunContext(
             checkpointer=None,
             event_store=MemoryRunEventStore(run_store=store),
+            tenant=_TEST_TENANT,
         ),
         agent_factory=lambda **_kwargs: LeadAgentAssembly(
             graph=Agent(),
@@ -1009,7 +1237,11 @@ async def test_broken_assembly_observer_is_fail_open_and_evidence_still_binds() 
 
     material = _material()
     store = MemoryRunStore()
-    manager = RunManager(store=store, worker_id="worker-observer")
+    manager = RunManager(
+        store=store,
+        worker_id="worker-observer",
+        tenant=_TEST_TENANT,
+    )
     record = await manager.create_or_reject(
         "thread-worker-observer",
         accepted_invocation=_accepted(material),
@@ -1043,6 +1275,7 @@ async def test_broken_assembly_observer_is_fail_open_and_evidence_still_binds() 
         ctx=RunContext(
             checkpointer=None,
             event_store=MemoryRunEventStore(run_store=store),
+            tenant=_TEST_TENANT,
             extensions=extensions,
         ),
         agent_factory=factory,
@@ -1075,7 +1308,11 @@ async def test_ownership_loss_during_evidence_bind_does_not_terminalize_new_owne
             return BindAssemblyEvidenceOutcome.ownership_lost
 
     store = OwnershipTransferredStore()
-    manager = RunManager(store=store, worker_id="worker-old-owner")
+    manager = RunManager(
+        store=store,
+        worker_id="worker-old-owner",
+        tenant=_TEST_TENANT,
+    )
     record = await manager.create_or_reject(
         "thread-worker-transfer",
         accepted_invocation=_accepted(material),
@@ -1092,7 +1329,7 @@ async def test_ownership_loss_during_evidence_bind_does_not_terminalize_new_owne
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=lambda **_kwargs: LeadAgentAssembly(
             graph=Agent(),
             descriptor=_durable_test_descriptor(material),
@@ -1128,7 +1365,11 @@ async def test_unexpected_evidence_bind_failure_stops_before_model_work(
             return object()
 
     store = UnexpectedBindStore()
-    manager = RunManager(store=store, worker_id="worker-bind-failure")
+    manager = RunManager(
+        store=store,
+        worker_id="worker-bind-failure",
+        tenant=_TEST_TENANT,
+    )
     record = await manager.create_or_reject(
         f"thread-bind-{store_behavior}",
         accepted_invocation=_accepted(material),
@@ -1146,7 +1387,7 @@ async def test_unexpected_evidence_bind_failure_stops_before_model_work(
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=lambda **_kwargs: LeadAgentAssembly(
             graph=Agent(),
             descriptor=_durable_test_descriptor(material),
@@ -1177,7 +1418,11 @@ async def test_unexpected_evidence_bind_failure_stops_before_model_work(
 async def test_rollback_cancellation_before_evidence_bind_does_not_access_checkpoint() -> None:
     material = _material()
     store = MemoryRunStore()
-    manager = RunManager(store=store, worker_id="worker-prebind-cancel")
+    manager = RunManager(
+        store=store,
+        worker_id="worker-prebind-cancel",
+        tenant=_TEST_TENANT,
+    )
     record = await manager.create_or_reject(
         "thread-prebind-cancel",
         accepted_invocation=_accepted(material),
@@ -1195,7 +1440,7 @@ async def test_rollback_cancellation_before_evidence_bind_does_not_access_checkp
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=checkpointer),
+        ctx=RunContext(checkpointer=checkpointer, tenant=_TEST_TENANT),
         agent_factory=cancelled_factory,
         graph_input={},
         config={},
@@ -1229,8 +1474,9 @@ async def test_worker_replaces_forged_runtime_identity_with_accepted_facts() -> 
         execution_options={},
         extension_generation=3,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=_TEST_TENANT,
     )
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-worker-identity",
         accepted_invocation=accepted,
@@ -1251,7 +1497,7 @@ async def test_worker_replaces_forged_runtime_identity_with_accepted_facts() -> 
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=factory,
         graph_input={},
         config={
@@ -1276,7 +1522,7 @@ async def test_worker_replaces_forged_runtime_identity_with_accepted_facts() -> 
 @pytest.mark.asyncio
 async def test_normal_rows_persist_safe_facts_and_auxiliary_rows_do_not() -> None:
     store = MemoryRunStore()
-    manager = RunManager(store=store)
+    manager = RunManager(store=store, tenant=_TEST_TENANT)
     accepted = _accepted(_material())
     record = await manager.create_or_reject(
         "thread-persisted",
@@ -1303,7 +1549,7 @@ async def test_normal_rows_persist_safe_facts_and_auxiliary_rows_do_not() -> Non
 @pytest.mark.asyncio
 async def test_store_reconstruction_rejects_corrupt_accepted_evidence_before_recovery() -> None:
     store = MemoryRunStore()
-    writer = RunManager(store=store)
+    writer = RunManager(store=store, tenant=_TEST_TENANT)
     record = await writer.create_or_reject(
         "thread-corrupt-reconstruction",
         user_id="u1",
@@ -1311,7 +1557,7 @@ async def test_store_reconstruction_rejects_corrupt_accepted_evidence_before_rec
     )
     store._runs[record.run_id]["agent_revision_json"]["version"] = 99
 
-    reconstructed = RunManager(store=store)
+    reconstructed = RunManager(store=store, tenant=_TEST_TENANT)
     assert await reconstructed.get(record.run_id, user_id="u1") is None
     assert (
         await reconstructed.reconcile_orphaned_inflight_runs(
@@ -1329,7 +1575,7 @@ async def test_store_reconstruction_rejects_corrupt_accepted_evidence_before_rec
 @pytest.mark.asyncio
 async def test_external_replay_lookup_rejects_corrupt_accepted_evidence_with_stable_error() -> None:
     store = MemoryRunStore()
-    writer = RunManager(store=store)
+    writer = RunManager(store=store, tenant=_TEST_TENANT)
     accepted = _accepted(_material())
     admission = await writer.ensure_or_reject(
         "thread-corrupt-replay",
@@ -1345,7 +1591,7 @@ async def test_external_replay_lookup_rejects_corrupt_accepted_evidence_with_sta
     )
     store._runs[admission.record.run_id]["principal_projection_digest"] = "0" * 64
 
-    reconstructed = RunManager(store=store)
+    reconstructed = RunManager(store=store, tenant=_TEST_TENANT)
     with pytest.raises(RuntimeError, match="^accepted_evidence_invalid$"):
         await reconstructed.get_by_external_identity(
             "http:user:u1",
@@ -1473,6 +1719,7 @@ async def test_every_launch_source_is_sealed_with_host_selected_origin(
                 extensions=SimpleNamespace(generation=9),
                 capability_manifest=SimpleNamespace(digest="f" * 64),
                 contributor_host=contributor_spy,
+                tenant_identity=_TEST_TENANT_IDENTITY,
             )
         ),
     )

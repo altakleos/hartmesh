@@ -20,6 +20,9 @@ from deerflow.runtime.assembly_evidence import (
     canonical_skillset_digest,
     verify_bound_assembly,
 )
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+
+_TEST_TENANT = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
 
 
 def _policies() -> dict[str, object]:
@@ -232,6 +235,17 @@ def test_persisted_evidence_is_strict_bounded_and_round_trips():
         "assembly_descriptor_invalid",
         lambda: AssemblyEvidenceV1.from_persisted_json({**payload, "fingerprint": "A" * 64}),
     )
+
+
+def test_new_assembly_evidence_carries_the_accepted_tenant_anchor():
+    evidence = build_assembly_evidence(
+        _descriptor(),
+        anchors=replace(_anchors(), tenant=_TEST_TENANT),
+    )
+
+    assert evidence.version == 2
+    assert evidence.tenant == _TEST_TENANT
+    assert AssemblyEvidenceV1.from_persisted_json(evidence.to_persisted_json()) == evidence
 
 
 def test_bound_evidence_requires_byte_equivalent_v1_evidence():

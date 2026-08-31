@@ -27,6 +27,7 @@ from app.runtime.invocation import (
 )
 from app.runtime.native_binding import build_verified_webhook_route_binding
 from deerflow.runtime import ConflictError as RuntimeConflictError
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 class _RuntimeSpy:
@@ -390,7 +391,15 @@ def test_channel_fact_validator_rejects_mismatched_agent_and_sender() -> None:
 def test_http_normalizer_does_not_trust_channel_owner_facts() -> None:
     from app.gateway.services import _GatewayLaunchNormalizer
 
-    request = SimpleNamespace(headers={}, state=SimpleNamespace())
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                tenant_identity=TenantIdentityV1.from_canonical_id("local"),
+            )
+        ),
+    )
     intent = InternalLaunchIntent(
         thread_id="thread-1",
         source_kind=InternalSourceKind.native_channel,

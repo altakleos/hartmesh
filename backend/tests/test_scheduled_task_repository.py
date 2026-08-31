@@ -1065,6 +1065,9 @@ async def test_reconcile_ignores_stale_parent_last_run_before_metadata_fallback(
 @pytest.mark.asyncio
 async def test_reconcile_preserves_row_when_heartbeat_wins_takeover(tmp_path):
     class RenewedRunRepository:
+        def scope_run_statement(self, statement):
+            return statement
+
         async def claim_for_takeover(self, *_args, **_kwargs):
             return False
 

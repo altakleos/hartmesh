@@ -32,6 +32,11 @@ class RunRow(Base):
     error: Mapped[str | None] = mapped_column(Text)
     stop_reason: Mapped[str | None] = mapped_column(String(50))
 
+    # Pseudonymous server-owned tenant anchor. Nullable only for rows created
+    # before the tenant-binding migration.
+    tenant_ref: Mapped[str | None] = mapped_column(String(23), nullable=True)
+    tenant_digest: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
     # Host-sealed invocation facts. Nullable for historical rows and for
     # auxiliary checkpoint operations, which are not agent invocations.
     origin_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -100,6 +105,10 @@ class RunRow(Base):
 
     __table_args__ = (
         CheckConstraint("state_version >= 0", name="ck_runs_state_version_nonnegative"),
+        CheckConstraint(
+            "(tenant_ref IS NULL) = (tenant_digest IS NULL)",
+            name="ck_runs_tenant_pair",
+        ),
         CheckConstraint(
             "(external_scope IS NULL) = (external_key IS NULL)",
             name="ck_runs_external_key_pair",
@@ -228,6 +237,8 @@ class RunLifecycleEventRow(Base):
     run_id: Mapped[str] = mapped_column(String(64), ForeignKey("runs.run_id", ondelete="CASCADE"), nullable=False)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
     owner_scope: Mapped[str] = mapped_column(String(96), nullable=False)
+    tenant_ref: Mapped[str | None] = mapped_column(String(23), nullable=True)
+    tenant_digest: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     lifecycle_type: Mapped[str] = mapped_column(String(32), nullable=False)
     state_version: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -242,6 +253,10 @@ class RunLifecycleEventRow(Base):
     __table_args__ = (
         CheckConstraint("cursor > 0", name="ck_run_lifecycle_event_cursor_positive"),
         CheckConstraint("state_version > 0", name="ck_run_lifecycle_event_version_positive"),
+        CheckConstraint(
+            "(tenant_ref IS NULL) = (tenant_digest IS NULL)",
+            name="ck_run_lifecycle_event_tenant_pair",
+        ),
         CheckConstraint(
             "lifecycle_type IN ('accepted', 'started', 'cancellation_requested', 'cancelled', 'succeeded', 'failed', 'timed_out', 'interrupted')",
             name="ck_run_lifecycle_event_type",

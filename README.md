@@ -262,6 +262,19 @@ HTTP create, stream, and wait routes, scheduled tasks, authenticated native chan
 
 Evidence: [`invocation.py`](backend/app/runtime/invocation.py) and the [closure matrix](backend/docs/INVOCATION_RUNTIME.md#concern-to-evidence-closure-matrix).
 
+### One server-owned tenant boundary
+
+Each Gateway process/release resolves one immutable tenant identity from
+`DEER_FLOW_TENANT_ID` or `deployment.tenant_id`; durable production requires an
+explicit non-`local` value. Tenant identity is selected by the operator at service startup. It cannot be selected by an API caller and does not replace per-user authorization.
+
+Accepted evidence, run/event persistence, recovery, extension facts, and all
+covered Redis keys use the same pseudonymous tenant reference. Each tenant
+release needs a separate database or PostgreSQL schema. Existing deployments
+must explicitly bind a legacy nonempty schema and copy retained Redis data
+offline; no request and no automatic dual-read path can select or infer a
+tenant. See the [tenant identity and migration guide](backend/docs/TENANT_IDENTITY.md).
+
 ### Pinned accepted execution material
 
 Admission pins the agent revision, extension generation, trusted context, constraints evidence, effective skill packages, and execution/projection profile.
@@ -457,7 +470,7 @@ This repository does not yet document a HartMesh sync cadence, API/configuration
 
 Treat these hashes as provenance, not a maintenance promise.
 
-The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, and `0024_tool_receipt_idempotency` is the current head.
+The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, `0024_tool_receipt_idempotency` fences receipt appends, and `0025_tenant_identity` is the current head.
 
 PostgreSQL operators should quiesce writers and back up data before rollback; use the migration guidance in [backend/AGENTS.md](backend/AGENTS.md).
 
@@ -471,6 +484,7 @@ Version sources report `2.1.0`, but no tag contains the audited HartMesh impleme
 - [Runtime API](backend/packages/runtime-api/README.md) — DTOs and `DurableInvocationPort`
 - [Gateway API](backend/docs/API.md) — authenticated HTTP behavior
 - [Extension API](backend/packages/extension-api/README.md) — policy and trust boundaries
+- [Tenant identity](backend/docs/TENANT_IDENTITY.md) — server-owned trust boundary, schema/Redis migration, ACLs, and rollback
 - [Helm deployment](deploy/helm/deer-flow/README.md) — one-Gateway modes and qualification
 - [Configuration](config.example.yaml) — operator settings
 - [Backend guide](backend/AGENTS.md) and [frontend guide](frontend/AGENTS.md) — architecture and tests

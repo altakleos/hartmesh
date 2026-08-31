@@ -8,7 +8,7 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale.
 
-**Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
+**Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`. `deployment.tenant_id` is the exception to ordinary config re-reading: application construction resolves it exactly once (with `DEER_FLOW_TENANT_ID` precedence) into `app.state.tenant_identity`, and every startup component reuses that immutable object. A file edit never switches a running process tenant.
 
 Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig`, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `plugins`, `database`, `checkpointer`, `run_events`, `stream_bridge`, `sandbox`, `log_level`, `logging`, `channels`, `channel_connections`, `scheduler`, `mcp_tasks`, `run_ownership`. Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`. `scheduler.recursion_limit` is the exception inside that section: it is read from `get_app_config()` at each scheduled dispatch, so a YAML edit applies to the next run without restarting the poller.
 
@@ -28,17 +28,26 @@ Config values starting with `$` are resolved as environment variables (e.g., `$O
 `database.pool_max_overflow` additionally accepts the direct deployment override
 `DATABASE_POOL_MAX_OVERFLOW`; when set, it takes precedence over the YAML field,
 and when absent the YAML value or default 10 applies.
-Redis tenant namespaces follow the same direct-override rule:
+Tenant identity is selected by the operator at service startup. It cannot be selected by an API caller and does not replace per-user authorization.
+
+`deployment.tenant_id` is a lowercase DNS label and changing it is
+restart-required. Durable production requires an explicit non-`local` value;
+local development alone may default to `local`. Runtime code gets the immutable
+`TenantIdentityV1` or a typed `TenantNamespaceV1`, never a request field or a
+freshly parsed config value. Persisted and public contracts receive only
+`TenantReferenceV1`; see `backend/docs/TENANT_IDENTITY.md`.
+
+Legacy Redis prefix fields still follow the direct-override precedence rule:
 `DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX`,
 `DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX`, and
 `DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX` take precedence over their respective
-YAML fields when present. The stream-bridge value adds an outer namespace, but
-the checkpoint-cache and ownership values replace their subsystem prefixes. A
-shared multi-tenant Helm deployment should set `redis.tenantPrefix`; the chart
-derives `<tenant>`, `<tenant>:ckpt-hist:v1`, and
-`<tenant>:deerflow:sandbox:owner` so every emitted name fits one `<tenant>:*`
-ACL boundary without flattening the replace-style keyspaces. Non-empty
-`redis.keyPrefixes.*` values are explicit per-subsystem replacements.
+YAML fields when present. They are validation-only in a Gateway: each nonempty
+value must exactly equal the corresponding central projection under
+`hm:v1:<tenant-public-ref>:redis` or the exact legacy projection stored by the
+explicit `deerflow deployment bind-tenant` command. Startup reads that database
+record before opening Redis and otherwise fails with the conflicting field
+named. `tenant.id`, not `redis.tenantPrefix`, is the Helm source of truth. The
+following feature release removes these compatibility inputs.
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
 **Extensions Configuration** (`extensions_config.json`):

@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
 
+from deerflow_extension_api import TenantReferenceV1
+
 from deerflow.runtime.runs.lifecycle_query import (
     LifecyclePage,
     LifecycleQuery,
@@ -42,9 +44,33 @@ _LIFECYCLE_SAFE_REASONS = {
     "safety_capped",
     "scheduled_task_orphan_recovered",
     "subagent_limit_capped",
+    "tenant_identity_mismatch",
     "token_capped",
     "worker_attachment_failed",
 }
+
+
+def tenant_store_columns(
+    configured: TenantReferenceV1 | None,
+    supplied: TenantReferenceV1 | None,
+) -> tuple[str | None, str | None]:
+    """Validate one typed tenant anchor and project it to storage columns."""
+
+    if configured is not None and not isinstance(configured, TenantReferenceV1):
+        raise TypeError("configured tenant must be TenantReferenceV1 or None")
+    if supplied is not None and not isinstance(supplied, TenantReferenceV1):
+        raise TypeError("supplied tenant must be TenantReferenceV1 or None")
+    if configured is not None and supplied is not None and supplied != configured:
+        from deerflow.runtime.tenant_identity import TenantIdentityError
+
+        raise TenantIdentityError(
+            "tenant_identity_mismatch",
+            "run tenant differs from the process tenant identity",
+        )
+    effective = configured or supplied
+    if effective is None:
+        return None, None
+    return effective.public_ref, effective.digest
 
 
 @dataclass(frozen=True)
@@ -509,6 +535,7 @@ class RunStore(abc.ABC):
         principal_projection_digest: str | None = None,
         base_origin_digest: str | None = None,
         accepted_context_digest: str | None = None,
+        tenant: TenantReferenceV1 | None = None,
         agent_revision_json: dict[str, Any] | None = None,
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
@@ -860,6 +887,7 @@ class RunStore(abc.ABC):
         principal_projection_digest: str | None = None,
         base_origin_digest: str | None = None,
         accepted_context_digest: str | None = None,
+        tenant: TenantReferenceV1 | None = None,
         agent_revision_json: dict[str, Any] | None = None,
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
@@ -896,6 +924,7 @@ class RunStore(abc.ABC):
                 principal_projection_digest,
                 base_origin_digest,
                 accepted_context_digest,
+                tenant,
                 agent_revision_json,
                 agent_revision_digest,
                 extension_generation,
@@ -953,6 +982,7 @@ class RunStore(abc.ABC):
         principal_projection_digest: str | None = None,
         base_origin_digest: str | None = None,
         accepted_context_digest: str | None = None,
+        tenant: TenantReferenceV1 | None = None,
         agent_revision_json: dict[str, Any] | None = None,
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,

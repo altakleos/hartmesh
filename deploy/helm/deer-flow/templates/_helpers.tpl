@@ -167,27 +167,66 @@ imagePullSecrets:
 {{- or .Values.redis.enabled .Values.redis.external.redisUrl .Values.redis.external.existingSecret .Values.redis.existingSecret -}}
 {{- end -}}
 
-{{/* Gateway Redis prefixes. Explicit subsystem values win; the one-knob tenant
-     form preserves replace-style ownership and checkpoint-cache namespaces. */}}
+{{/* Canonical TenantIdentityV1 projection. Keep this byte-for-byte aligned
+     with runtime/tenant_identity.py canonical JSON and public-ref rules. */}}
+{{- define "deer-flow.tenantId" -}}
+{{- $tenantId := .Values.tenant.id | default "" -}}
+{{- if and $tenantId (not (regexMatch "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$" $tenantId)) -}}
+{{- fail "tenant.id must be a lowercase DNS label of 1-63 characters" -}}
+{{- end -}}
+{{- $tenantId -}}
+{{- end -}}
+
+{{- define "deer-flow.tenantPublicRef" -}}
+{{- $tenantId := include "deer-flow.tenantId" . | default "local" -}}
+{{- $canonical := printf "{\"tenant_id\":\"%s\",\"version\":1}" $tenantId -}}
+{{- $digest := sha256sum $canonical -}}
+{{- printf "tenant-%s" (substr 0 16 $digest) -}}
+{{- end -}}
+
+{{- define "deer-flow.redisTenantPrefix" -}}
+{{- printf "hm:v1:%s:redis" (include "deer-flow.tenantPublicRef" .) -}}
+{{- end -}}
+
+{{/* Gateway Redis prefixes. A noncanonical selection requires both the
+     configured compatibility field and the exact operator-declared copy of
+     the database migration record. Runtime startup verifies that DB record. */}}
 {{- define "deer-flow.redisKeyPrefixEnv" -}}
-{{- $tenant := .Values.redis.tenantPrefix | default "" -}}
-{{- $streamBridge := .Values.redis.keyPrefixes.streamBridge | default $tenant -}}
-{{- $checkpointCache := .Values.redis.keyPrefixes.checkpointCache -}}
-{{- if and (not $checkpointCache) $tenant -}}{{- $checkpointCache = printf "%s:ckpt-hist:v1" $tenant -}}{{- end -}}
-{{- $sandboxOwnership := .Values.redis.keyPrefixes.sandboxOwnership -}}
-{{- if and (not $sandboxOwnership) $tenant -}}{{- $sandboxOwnership = printf "%s:deerflow:sandbox:owner" $tenant -}}{{- end -}}
-{{- with $streamBridge }}
+{{- $streamBridge := include "deer-flow.redisTenantPrefix" . -}}
+{{- $checkpointCache := printf "%s:ckpt-hist:v1" $streamBridge -}}
+{{- $sandboxOwnership := printf "%s:deerflow:sandbox:owner" $streamBridge -}}
+{{- $recordedStream := .Values.tenant.legacyRedisPrefixes.streamBridge | default "" | trimSuffix ":" -}}
+{{- $recordedCheckpoint := .Values.tenant.legacyRedisPrefixes.checkpointCache | default "" | trimSuffix ":" -}}
+{{- $recordedOwnership := .Values.tenant.legacyRedisPrefixes.sandboxOwnership | default "" | trimSuffix ":" -}}
+{{- $legacyTenant := .Values.redis.tenantPrefix | default "" -}}
+{{- $legacyTenant = $legacyTenant | trimSuffix ":" -}}
+{{- if and $legacyTenant (and (ne $legacyTenant $streamBridge) (ne $legacyTenant $recordedStream)) -}}
+{{- fail "redis.tenantPrefix conflicts with the canonical or operator-recorded legacy tenant namespace" -}}
+{{- end -}}
+{{- $configuredStream := .Values.redis.keyPrefixes.streamBridge | default "" -}}
+{{- $configuredStream = $configuredStream | trimSuffix ":" -}}
+{{- if and $configuredStream (and (ne $configuredStream $streamBridge) (ne $configuredStream $recordedStream)) -}}
+{{- fail "redis.keyPrefixes.streamBridge conflicts with the canonical or operator-recorded legacy tenant namespace" -}}
+{{- end -}}
+{{- if and $legacyTenant $configuredStream (ne $legacyTenant $configuredStream) -}}
+{{- fail "redis.tenantPrefix conflicts with redis.keyPrefixes.streamBridge" -}}
+{{- end -}}
+{{- $configuredCheckpoint := .Values.redis.keyPrefixes.checkpointCache | default "" -}}
+{{- $configuredCheckpoint = $configuredCheckpoint | trimSuffix ":" -}}
+{{- if and $configuredCheckpoint (and (ne $configuredCheckpoint $checkpointCache) (ne $configuredCheckpoint $recordedCheckpoint)) -}}
+{{- fail "redis.keyPrefixes.checkpointCache conflicts with the canonical or operator-recorded legacy tenant namespace" -}}
+{{- end -}}
+{{- $configuredOwnership := .Values.redis.keyPrefixes.sandboxOwnership | default "" -}}
+{{- $configuredOwnership = $configuredOwnership | trimSuffix ":" -}}
+{{- if and $configuredOwnership (and (ne $configuredOwnership $sandboxOwnership) (ne $configuredOwnership $recordedOwnership)) -}}
+{{- fail "redis.keyPrefixes.sandboxOwnership conflicts with the canonical or operator-recorded legacy tenant namespace" -}}
+{{- end -}}
 - name: DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX
-  value: {{ . | quote }}
-{{- end }}
-{{- with $checkpointCache }}
+  value: {{ ($configuredStream | default $legacyTenant | default $streamBridge) | quote }}
 - name: DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX
-  value: {{ . | quote }}
-{{- end }}
-{{- with $sandboxOwnership }}
+  value: {{ ($configuredCheckpoint | default $checkpointCache) | quote }}
 - name: DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX
-  value: {{ . | quote }}
-{{- end }}
+  value: {{ ($configuredOwnership | default $sandboxOwnership) | quote }}
 {{- end -}}
 
 {{/* SHA256 checksums of the ConfigMaps. Mount these as pod-template
@@ -254,6 +293,7 @@ imagePullSecrets:
 {{- include "deer-flow.validateDigest" (dict "name" "redis" "digest" .Values.redis.image.digest) -}}
 
 {{- $mode := .Values.deployment.mode -}}
+{{- $tenantId := include "deer-flow.tenantId" . -}}
 {{- if not (has $mode (list "local_evaluation" "durable_one_replica")) -}}
 {{- fail "deployment.mode must be local_evaluation or durable_one_replica" -}}
 {{- end -}}
@@ -550,6 +590,7 @@ imagePullSecrets:
 {{- end -}}
 
 {{- if eq $mode "durable_one_replica" -}}
+  {{- if or (not $tenantId) (eq $tenantId "local") -}}{{- fail "durable_one_replica requires tenant.id to be an explicit non-local identity" -}}{{- end -}}
   {{- if not .Values.gateway.image.digest -}}{{- fail "production validation requires a gateway image digest" -}}{{- end -}}
   {{- if and .Values.provisioner.enabled (not .Values.provisioner.image.digest) -}}{{- fail "production validation requires a provisioner image digest" -}}{{- end -}}
   {{- if ne $tier "shared_durable" -}}{{- fail "durable_one_replica requires shared_durable persistence" -}}{{- end -}}

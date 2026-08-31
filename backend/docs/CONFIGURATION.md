@@ -17,6 +17,23 @@ Run `make config-upgrade` to merge new fields into your config.
 
 ## Configuration Sections
 
+### Deployment tenant identity
+
+`deployment.tenant_id` selects one server-owned identity for the Gateway
+process. `DEER_FLOW_TENANT_ID` takes precedence over YAML. The value is a
+lowercase DNS label of 1-63 characters and changing it requires a Gateway
+restart. `durable_production` requires an explicit non-`local` value; local
+development defaults to `local` only when both sources are absent.
+
+Tenant identity is selected by the operator at service startup. It cannot be selected by an API caller and does not replace per-user authorization.
+
+The raw identifier stays in trusted startup configuration. Durable records,
+extensions, health, and lifecycle output use only its pseudonymous reference
+and digest. Each tenant release needs a separate database or PostgreSQL schema;
+the singleton schema binding rejects accidental reuse. See
+[Server-Owned Tenant Identity](TENANT_IDENTITY.md) for the trust boundary,
+migration, rollback, and Redis ACL procedure.
+
 ### Database
 
 The `database` section configures the application ORM engine as well as the
@@ -64,7 +81,14 @@ schema and limitations.
 
 ### Redis subsystem namespaces
 
-The stream bridge accepts an optional outer Redis namespace:
+The Gateway derives every covered Redis name from the server-owned tenant
+identity. For tenant public reference `tenant-<digest-prefix>`, the shared base
+is `hm:v1:tenant-<digest-prefix>:redis`; the stream bridge, checkpoint cache,
+and sandbox ownership factories receive their component projection from one
+central adapter.
+
+The old prefix fields remain only as validation inputs during the first
+feature release containing this change:
 
 ```yaml
 stream_bridge:
@@ -72,28 +96,22 @@ stream_bridge:
   key_prefix: ""
 ```
 
-`DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX` directly overrides `key_prefix`. Empty or
-unset values preserve the legacy stream name
-`deerflow:stream_bridge:<run_id>`; a value such as `acme` produces
-`acme:deerflow:stream_bridge:<run_id>`. Adding or changing the prefix starts
-fresh per-run streams. Existing retained streams are not migrated.
+`DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX`,
+`DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX`, and
+`DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX` still take precedence over their YAML
+counterparts when present, but a nonempty value must exactly match its canonical
+tenant-derived projection or the corresponding legacy projection stored by the
+explicit `deerflow deployment bind-tenant` migration command. Startup reads
+the schema binding before constructing Redis consumers; an unrecorded mismatch
+fails with `tenant_namespace_conflict` and names the field. The following
+feature release removes these compatibility inputs.
 
-The ownership and checkpoint-cache environment variables are replace-style
-overrides, unlike the stream bridge's outer namespace. Setting all three to the
-bare tenant string would flatten ownership and cache names and discard their
-normal subsystem prefixes. For tenant `acme`, the effective overrides should
-therefore be:
-
-- `DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX=acme`
-- `DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX=acme:ckpt-hist:v1`
-- `DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX=acme:deerflow:sandbox:owner`
-
-The Helm chart derives exactly these values from the recommended one-knob form
-`redis.tenantPrefix: acme`. Its `redis.keyPrefixes.*` values are explicit
-per-subsystem overrides; a non-empty override wins and, for ownership or cache,
-must include any desired subsystem namespace. Restrict the Redis user to key and
-stream-channel ACL patterns `~acme:* &acme:*`. Configuring only a subset outside
-Helm leaves the remaining subsystem names outside the tenant boundary.
+Use both Redis ACL forms for the canonical base:
+`~hm:v1:tenant-<digest-prefix>:redis*` for keys/streams and
+`&hm:v1:tenant-<digest-prefix>:redis*` for pub/sub channels. Existing Redis data
+is never searched or copied automatically. Follow the bounded inventory,
+offline copy, and verification procedure in
+[Server-Owned Tenant Identity](TENANT_IDENTITY.md#database-binding-and-migration).
 
 ### Extensions
 

@@ -49,11 +49,14 @@ from deerflow.runtime.skill_snapshot import (
     cleanup_abandoned_skill_snapshots,
     snapshot_effective_skills,
 )
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 from deerflow.sandbox import tools as sandbox_tools
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox_provider import AcceptedSkillExecutionEvidenceV1
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import Skill, SkillCategory
+
+_TEST_TENANT = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
 
 
 @pytest.fixture
@@ -148,6 +151,7 @@ def _accepted(revision) -> AcceptedInvocation:
         execution_options={},
         extension_generation=1,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=_TEST_TENANT,
     )
 
 
@@ -1156,7 +1160,7 @@ async def test_terminal_worker_releases_snapshot_after_execution(
     material = revision.material
     assert material is not None and material.skill_snapshot is not None
     snapshot_root = material.skill_snapshot.root
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-worker",
         accepted_invocation=_accepted(revision),
@@ -1184,7 +1188,7 @@ async def test_terminal_worker_releases_snapshot_after_execution(
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -1208,7 +1212,7 @@ async def test_replacement_worker_waits_for_old_projection_before_start(
     )
     revision = ResolvedAgentRevision.from_material(material)
     accepted = _accepted(revision)
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     old = await manager.create_or_reject(
         "thread-1",
         user_id="user-1",
@@ -1267,7 +1271,7 @@ async def test_replacement_worker_waits_for_old_projection_before_start(
             bridge,
             manager,
             replacement,
-            ctx=RunContext(checkpointer=None),
+            ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
             agent_factory=factory,
             graph_input={},
             config={"context": {"user_id": "user-1"}},
@@ -1310,7 +1314,7 @@ async def test_superseded_worker_cancels_projection_wait_without_claiming() -> N
         model_profile={},
     )
     accepted = _accepted(ResolvedAgentRevision.from_material(material))
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     old = await manager.create_or_reject(
         "thread-1",
         user_id="user-1",
@@ -1361,7 +1365,7 @@ async def test_superseded_worker_cancels_projection_wait_without_claiming() -> N
             bridge,
             manager,
             waiting,
-            ctx=RunContext(checkpointer=None),
+            ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
             agent_factory=factory,
             graph_input={},
             config={"context": {"user_id": "user-1"}},
@@ -1466,7 +1470,7 @@ async def test_terminal_worker_clears_explicit_empty_view_before_later_binding(
 
     provider = LocalSandboxProvider()
     set_sandbox_provider(provider)
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-worker",
         user_id="user-1",
@@ -1518,7 +1522,7 @@ async def test_terminal_worker_clears_explicit_empty_view_before_later_binding(
             bridge,
             manager,
             record,
-            ctx=RunContext(checkpointer=None),
+            ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
             agent_factory=lambda **_kwargs: _Agent(),
             graph_input={},
             config={"context": {"user_id": "user-1"}},
@@ -1565,7 +1569,7 @@ async def test_cancelled_before_start_releases_snapshot(
     material = revision.material
     assert material is not None and material.skill_snapshot is not None
     snapshot_root = material.skill_snapshot.root
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-worker",
         accepted_invocation=_accepted(revision),
@@ -1581,7 +1585,7 @@ async def test_cancelled_before_start_releases_snapshot(
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("cancelled run must not construct a graph")),
         graph_input={},
         config={},
@@ -1603,7 +1607,7 @@ async def test_snapshot_drift_fails_before_graph_construction(
     snapshot_file = material.enabled_skill_objects[0].skill_file
     snapshot_file.chmod(0o600)
     snapshot_file.write_text("tampered", encoding="utf-8")
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-worker",
         accepted_invocation=_accepted(revision),
@@ -1624,7 +1628,7 @@ async def test_snapshot_drift_fails_before_graph_construction(
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -1645,7 +1649,7 @@ async def test_remote_materialization_failure_precedes_running_and_graph(
     skill_file = _write_skill(tmp_path, body="Pinned remote material")
     revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
     store = MemoryRunStore()
-    manager = RunManager(store=store)
+    manager = RunManager(store=store, tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-worker",
         accepted_invocation=_accepted(revision),
@@ -1675,7 +1679,7 @@ async def test_remote_materialization_failure_precedes_running_and_graph(
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -1698,6 +1702,7 @@ async def test_remote_materialization_replacement_fails_before_graph_constructio
     store = MemoryRunStore()
     manager = RunManager(
         store=store,
+        tenant=_TEST_TENANT,
         run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True),
     )
     record = await manager.create_or_reject(
@@ -1736,7 +1741,7 @@ async def test_remote_materialization_replacement_fails_before_graph_constructio
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -1765,6 +1770,7 @@ async def test_remote_materialization_is_refenced_immediately_before_astream(
     store = MemoryRunStore()
     manager = RunManager(
         store=store,
+        tenant=_TEST_TENANT,
         run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True),
     )
     record = await manager.create_or_reject(
@@ -1829,6 +1835,7 @@ async def test_remote_materialization_is_refenced_immediately_before_astream(
         ctx=RunContext(
             checkpointer=None,
             event_store=MemoryRunEventStore(run_store=store),
+            tenant=_TEST_TENANT,
         ),
         agent_factory=lambda **_kwargs: _assembled_agent_for_revision(revision, Agent()),
         graph_input={},

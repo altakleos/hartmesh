@@ -35,6 +35,20 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### ⚠ Breaking changes
 
+- **deployment tenancy:** The Gateway now resolves one operator-owned
+  `TenantIdentityV1`; `durable_production` and Helm `durable_one_replica`
+  require an explicit non-`local` value. Each database schema binds to one safe
+  tenant digest, and every covered Redis key uses the canonical
+  `hm:v1:<tenant-public-ref>:redis` namespace. Before upgrading a nonempty
+  deployment, stop writers, back up database/Redis, dry-run and then execute
+  `deerflow deployment bind-tenant --tenant-id <id>
+  --expected-nonempty-schema`, copy retained Redis keys offline, and verify
+  readiness. Rollback after binding requires compatible code or restoring the
+  backup; never delete the singleton identity row. During this feature release,
+  the binding command can record exact legacy Redis component projections;
+  config/Helm may select only those recorded values or canonical projections.
+  This legacy compatibility path is removed in the following feature release.
+  See `backend/docs/TENANT_IDENTITY.md`.
 - **skills:** Sandboxes now reserve `/mnt/skills` for managed enabled-only
   projections. `DEER_FLOW_HOST_SKILLS_PATH` and `SKILLS_HOST_PATH` are no longer
   used; Docker/AIO and hostPath deployments derive projection paths from
@@ -256,6 +270,11 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Changed
 
+- **tenant identity:** Accepted/trusted context, run/event/lifecycle storage,
+  assembly evidence, durable tool receipts, extension contributor requests,
+  recovery, deployment reports, support diagnostics, and Redis factories now
+  consume the same immutable server-owned tenant reference. Recovery stops
+  before ownership/model/tool work on a mismatch.
 - **frontend performance:** Keep the public root and localized docs static;
   lazy-load closed workspace panels and editor/highlighter dependencies;
   incrementally derive streamed message state; bound streaming Markdown work;
@@ -594,6 +613,11 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Security
 
+- **tenant isolation:** Strip tenant-looking client/context aliases, bind
+  external-key admission and durable evidence to the process identity, reject
+  schema/prefix drift, expose only the pseudonymous reference, and document
+  separate-schema plus Redis key/channel ACL boundaries. Tenant identity is not
+  a replacement for per-user authorization.
 - **prompt-injection:** New input-sanitization middleware defends against
   prompt-injection, forged framework tags in the input guardrail are blocked,
   and system context is injected as a `SystemMessage` for role isolation. ([#3662],

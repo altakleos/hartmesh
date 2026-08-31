@@ -14,8 +14,10 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
+from deerflow_extension_api import TenantReferenceV1
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
+from deerflow.runtime.tenant_identity import TenantIdentityError
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
@@ -55,6 +57,7 @@ STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a dur
 LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachable."
 ASSEMBLY_EVIDENCE_UNAVAILABLE_ERROR = "Agent assembly evidence is unavailable"
 ASSEMBLY_EVIDENCE_UNAVAILABLE_STOP_REASON = "assembly_evidence_unavailable"
+TENANT_IDENTITY_MISMATCH_ERROR = "Persisted run tenant does not match this Gateway process identity."
 
 _ACCEPTED_INVOCATION_MARKER_FIELDS = (
     "agent_revision_digest",
@@ -373,7 +376,10 @@ class RunManager:
         run_ownership_config: RunOwnershipConfig | None = None,
         event_store: RunEventStore | None = None,
         on_orphans_recovered: OrphanRecoveryCallback | None = None,
+        tenant: TenantReferenceV1 | None = None,
     ) -> None:
+        if tenant is not None and not isinstance(tenant, TenantReferenceV1):
+            raise TypeError("tenant must be TenantReferenceV1 or None")
         self._runs: dict[str, RunRecord] = {}
         # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
         # used as an ordered set), maintained in lockstep with ``_runs`` so
@@ -387,6 +393,7 @@ class RunManager:
         self._run_ownership_config = run_ownership_config
         self._event_store = event_store
         self._on_orphans_recovered = on_orphans_recovered
+        self._tenant = tenant
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
         self._orphan_recovery_task: asyncio.Task[None] | None = None
@@ -411,6 +418,25 @@ class RunManager:
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
         self._runs_by_thread.setdefault(record.thread_id, {})[record.run_id] = None
+
+    def _require_accepted_tenant(self, accepted_invocation: Any | None) -> None:
+        """Reject a foreign accepted invocation before durable admission."""
+
+        if accepted_invocation is None:
+            return
+        accepted_tenant = getattr(accepted_invocation, "tenant", None)
+        if accepted_tenant != self._tenant:
+            raise TenantIdentityError(
+                "tenant_identity_mismatch",
+                "accepted invocation tenant differs from or lacks the process tenant identity",
+            )
+
+    def _row_matches_process_tenant(self, row: dict[str, Any]) -> bool:
+        """Compare raw durable anchors before hydration or takeover."""
+
+        if self._tenant is None:
+            return row.get("tenant_ref") is None and row.get("tenant_digest") is None
+        return row.get("tenant_ref") == self._tenant.public_ref and row.get("tenant_digest") == self._tenant.digest
 
     def _unindex_run_locked(self, run_id: str, thread_id: str) -> None:
         """Drop *run_id* from the thread index. Caller must hold ``self._lock``."""
@@ -454,6 +480,16 @@ class RunManager:
         return [record for run_id in run_ids if (record := self._runs.get(run_id)) is not None]
 
     @staticmethod
+    def _accepted_store_payload(accepted_invocation: Any) -> dict[str, Any]:
+        """Adapt accepted evidence to the store's typed tenant boundary."""
+
+        payload = accepted_invocation.to_persisted()
+        payload.pop("tenant_ref", None)
+        payload.pop("tenant_digest", None)
+        payload["tenant"] = accepted_invocation.tenant
+        return payload
+
+    @staticmethod
     def _store_put_payload(record: RunRecord, *, error: str | None = None, stop_reason: str | None = None) -> dict[str, Any]:
         payload = {
             "thread_id": record.thread_id,
@@ -475,7 +511,7 @@ class RunManager:
         if record.stop_reason is not None:
             payload["stop_reason"] = record.stop_reason
         if record.operation_kind == ThreadOperationKind.run and record.accepted_invocation is not None:
-            payload.update(record.accepted_invocation.to_persisted())
+            payload.update(RunManager._accepted_store_payload(record.accepted_invocation))
         if record.operation_kind == ThreadOperationKind.run and record.external_scope is not None:
             payload.update(
                 external_scope=record.external_scope,
@@ -2105,7 +2141,7 @@ class RunManager:
         summary = build_invocation_summary(row)
         from deerflow.runtime.accepted_invocation import AcceptedInvocation
 
-        legacy_unavailable = summary is None or summary.get("assembly_evidence_status") != "verified" or AcceptedInvocation.tool_receipt_evidence_version_from_persisted(row) != 1
+        legacy_unavailable = summary is None or summary.get("assembly_evidence_status") != "verified" or AcceptedInvocation.tool_receipt_evidence_version_from_persisted(row) not in (1, 2)
         if legacy_unavailable:
             events: list[dict] = []
         elif self._event_store is None:
@@ -3712,6 +3748,7 @@ class RunManager:
         partial unique index on ``(thread_id) WHERE status IN
         ('pending','running')``.
         """
+        self._require_accepted_tenant(accepted_invocation)
         attachment_supervised = operation_kind == ThreadOperationKind.run and candidate_run_id is not None
         if candidate_run_id is None:
             run_id = str(uuid.uuid4())
@@ -3940,7 +3977,7 @@ class RunManager:
             # 2) Persist to store while still holding the local lock. The
             #    store is the source of truth for cross-process atomicity.
             if self._store is not None:
-                accepted_persisted = accepted_invocation.to_persisted() if accepted_invocation is not None and operation_kind == ThreadOperationKind.run else {}
+                accepted_persisted = self._accepted_store_payload(accepted_invocation) if accepted_invocation is not None and operation_kind == ThreadOperationKind.run else {}
                 keyed = external_scope is not None and external_key is not None
                 if keyed:
                     try:
@@ -4232,6 +4269,40 @@ class RunManager:
         claimed_any = False
         now = _now_iso()
         for row in rows:
+            if not self._row_matches_process_tenant(row):
+                run_id = row.get("run_id")
+                if not isinstance(run_id, str) or not run_id:
+                    continue
+                try:
+                    mismatch_takeover = {
+                        "grace_seconds": grace_seconds,
+                        "error": TENANT_IDENTITY_MISMATCH_ERROR,
+                        "stop_reason": "tenant_identity_mismatch",
+                    }
+                    if self._store.durable_lifecycle:
+                        mismatch_takeover["expected_state_version"] = row.get("state_version") or 0
+                    claimed = await self._call_store_with_retry(
+                        "terminalize_tenant_mismatch",
+                        run_id,
+                        lambda: self._store.claim_for_takeover(
+                            run_id,
+                            **mismatch_takeover,
+                        ),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to terminalize tenant-mismatched run %s",
+                        run_id,
+                        exc_info=True,
+                    )
+                    continue
+                if claimed:
+                    claimed_any = True
+                    logger.error(
+                        "Terminalized recovered run %s code=tenant_identity_mismatch before execution ownership",
+                        run_id,
+                    )
+                continue
             try:
                 record = self._record_from_store(row)
             except Exception as exc:

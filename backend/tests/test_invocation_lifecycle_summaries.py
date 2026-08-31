@@ -480,6 +480,28 @@ def test_lifecycle_summary_revalidates_and_redacts_bound_assembly_evidence() -> 
     assert len(json.dumps(summary, sort_keys=True).encode("utf-8")) <= 16 * 1024
 
 
+def test_lifecycle_summary_exposes_only_safe_tenant_reference() -> None:
+    from deerflow.runtime.runs.lifecycle_query import build_invocation_summary
+    from deerflow.runtime.tenant_identity import TenantIdentityV1
+
+    identity = TenantIdentityV1.from_canonical_id("customer-readable-name")
+    row = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "status": "running",
+        "state_version": 2,
+        "tenant_ref": identity.public_ref,
+        "tenant_digest": identity.digest,
+        **_accepted_fields("http", "request-1"),
+    }
+
+    summary = build_invocation_summary(row)
+
+    assert summary is not None
+    assert summary["tenant_identity"] == identity.to_persisted_reference().to_json()
+    assert "customer-readable-name" not in json.dumps(summary)
+
+
 def test_lifecycle_summary_exposes_only_bounded_subagent_catalog_facts() -> None:
     from deerflow.runtime.runs.lifecycle_query import build_invocation_summary
     from deerflow.runtime.subagent_snapshot import (

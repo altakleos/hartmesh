@@ -3653,6 +3653,7 @@ class TestSubagentGuardrailAttribution:
         )
         trusted = TrustedRunContextV1(
             identity=InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="human", subject_id="owner-1", role="member")),
+            tenant=__import__("deerflow.runtime.tenant_identity", fromlist=["TenantIdentityV1"]).TenantIdentityV1.from_canonical_id("local").to_persisted_reference(),
             origin=SealedOriginV1(
                 source_kind="native_channel",
                 references=(binding_reference,),

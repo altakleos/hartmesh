@@ -568,9 +568,11 @@ async def test_service_scope_is_derived_from_the_authenticated_host_identity() -
     from app.gateway.services import _GatewayLaunchNormalizer
     from app.runtime.idempotency import scope_for_service
     from app.runtime.invocation import InternalLaunchIntent, InternalSourceKind
+    from deerflow.runtime.tenant_identity import TenantIdentityV1, tenant_admission_scope
 
+    tenant = TenantIdentityV1.from_canonical_id("local")
     request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace()),
+        app=SimpleNamespace(state=SimpleNamespace(tenant_identity=tenant)),
         headers={},
         state=SimpleNamespace(
             user=SimpleNamespace(
@@ -598,7 +600,10 @@ async def test_service_scope_is_derived_from_the_authenticated_host_identity() -
     )
 
     assert identity is not None
-    assert identity.external_scope == scope_for_service("service-1")
+    assert identity.external_scope == tenant_admission_scope(
+        tenant.to_persisted_reference(),
+        scope_for_service("service-1"),
+    )
     assert identity.principal.user_id == "service-1"
     assert identity.principal.role == "service"
     with pytest.raises(ValueError, match="authenticated service identity"):

@@ -61,8 +61,10 @@ from deerflow.runtime.constraints import (
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.store.base import AdmissionOutcome
 from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 _DIGESTS = tuple(character * 64 for character in "abcdef")
+_TEST_TENANT = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
 
 
 def _request_v2(**overrides: object) -> ConstraintProjectionRequestV2:
@@ -486,6 +488,7 @@ def _accepted_v2() -> AcceptedInvocation:
     revision = ResolvedAgentRevision.from_material(material)
     trusted_context = TrustedRunContextV1(
         identity=request.identity,
+        tenant=_TEST_TENANT,
         origin=request.origin,
         thread_id=request.thread_id,
         external_key_reference=request.external_key_reference,
@@ -513,6 +516,7 @@ def _accepted_v2() -> AcceptedInvocation:
         extension_generation=request.extension_generation,
         extension_manifest_digest=request.extension_manifest_digest,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=trusted_context.tenant,
         trusted_context=trusted_context,
     )
 
@@ -799,7 +803,7 @@ async def test_worker_enforces_zero_ceiling_before_any_subagent_dispatch() -> No
     decision_evidence = dict(accepted.decision_evidence)
     decision_evidence["constraints"] = InternalConstraintDecision.projected(projection).evidence["constraints"]
     accepted = dataclasses.replace(accepted, decision_evidence=decision_evidence)
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject("thread-1", accepted_invocation=accepted)
     record.request_digest = _DIGESTS[3]
     seen: dict[str, object] = {}
@@ -824,7 +828,11 @@ async def test_worker_enforces_zero_ceiling_before_any_subagent_dispatch() -> No
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None, constraint_clock=lambda: now),
+        ctx=RunContext(
+            checkpointer=None,
+            constraint_clock=lambda: now,
+            tenant=_TEST_TENANT,
+        ),
         agent_factory=_factory,
         graph_input={},
         config={},
@@ -862,7 +870,7 @@ async def test_worker_rejects_unknown_mandatory_obligation_before_graph_construc
     evidence = dict(accepted.decision_evidence)
     evidence["constraints"] = InternalConstraintDecision.projected(projection).evidence["constraints"]
     accepted = dataclasses.replace(accepted, decision_evidence=evidence)
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject("thread-1", accepted_invocation=accepted)
     record.request_digest = _DIGESTS[3]
     factory_calls = 0
@@ -881,7 +889,11 @@ async def test_worker_rejects_unknown_mandatory_obligation_before_graph_construc
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None, constraint_clock=lambda: now),
+        ctx=RunContext(
+            checkpointer=None,
+            constraint_clock=lambda: now,
+            tenant=_TEST_TENANT,
+        ),
         agent_factory=_factory,
         graph_input={},
         config={},

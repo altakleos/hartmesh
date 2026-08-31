@@ -11,10 +11,18 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import threading
 import uuid
 
 from deerflow.config.sandbox_config import SandboxOwnershipConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig
+from deerflow.runtime.tenant_identity import (
+    LegacyRedisPrefixRecordV1,
+    RedisTenantComponent,
+    TenantIdentityError,
+    TenantNamespaceV1,
+    redis_component_key_prefix,
+)
 
 from .base import SandboxOwnershipStore
 
@@ -23,6 +31,48 @@ logger = logging.getLogger(__name__)
 _ENV_OWNERSHIP_REDIS_URL = "DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL"
 _ENV_OWNERSHIP_KEY_PREFIX = "DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX"
 _ENV_STREAM_BRIDGE_REDIS_URL = "DEER_FLOW_STREAM_BRIDGE_REDIS_URL"
+
+_tenant_namespace_lock = threading.Lock()
+_tenant_namespace: TenantNamespaceV1 | None = None
+_legacy_redis_prefixes: LegacyRedisPrefixRecordV1 | None = None
+
+
+def bind_ownership_tenant_namespace(
+    namespace: TenantNamespaceV1,
+    *,
+    legacy_redis_prefixes: LegacyRedisPrefixRecordV1 | None = None,
+) -> None:
+    """Bind the process-wide Redis namespace used by lazy sandbox providers."""
+
+    global _legacy_redis_prefixes, _tenant_namespace
+    with _tenant_namespace_lock:
+        if _tenant_namespace is not None and (_tenant_namespace != namespace or _legacy_redis_prefixes != legacy_redis_prefixes):
+            raise TenantIdentityError(
+                "tenant_namespace_conflict",
+                "sandbox ownership is already bound to another process tenant or legacy prefix record",
+            )
+        _tenant_namespace = namespace
+        _legacy_redis_prefixes = legacy_redis_prefixes
+
+
+def unbind_ownership_tenant_namespace(namespace: TenantNamespaceV1) -> None:
+    """Release a Gateway-owned binding without clearing a newer binding."""
+
+    global _legacy_redis_prefixes, _tenant_namespace
+    with _tenant_namespace_lock:
+        if _tenant_namespace == namespace:
+            _tenant_namespace = None
+            _legacy_redis_prefixes = None
+
+
+def _bound_tenant_namespace() -> TenantNamespaceV1 | None:
+    with _tenant_namespace_lock:
+        return _tenant_namespace
+
+
+def _bound_legacy_redis_prefixes() -> LegacyRedisPrefixRecordV1 | None:
+    with _tenant_namespace_lock:
+        return _legacy_redis_prefixes
 
 
 def generate_owner_id() -> str:
@@ -50,8 +100,8 @@ def resolve_ownership_config(config: SandboxOwnershipConfig | None, *, stream_br
     if config is not None:
         return config
 
-    if stream_bridge is not None and stream_bridge.type == "redis":
-        redis_url = stream_bridge.redis_url or os.getenv(_ENV_OWNERSHIP_REDIS_URL) or os.getenv(_ENV_STREAM_BRIDGE_REDIS_URL)
+    if stream_bridge is not None and getattr(stream_bridge, "type", None) == "redis":
+        redis_url = getattr(stream_bridge, "redis_url", None) or os.getenv(_ENV_OWNERSHIP_REDIS_URL) or os.getenv(_ENV_STREAM_BRIDGE_REDIS_URL)
         logger.info("Sandbox ownership: redis inferred from stream_bridge.type (multi-instance deployment)")
         return SandboxOwnershipConfig(type="redis", redis_url=redis_url)
 
@@ -69,10 +119,27 @@ def resolve_ownership_redis_url(
     return config.redis_url or os.getenv(_ENV_OWNERSHIP_REDIS_URL) or os.getenv(_ENV_STREAM_BRIDGE_REDIS_URL) or os.getenv("REDIS_URL") or "redis://localhost:6379/0"
 
 
-def resolve_ownership_key_prefix(config: SandboxOwnershipConfig) -> str:
+def resolve_ownership_key_prefix(
+    config: SandboxOwnershipConfig,
+    *,
+    tenant_namespace: TenantNamespaceV1 | None = None,
+    legacy_redis_prefixes: LegacyRedisPrefixRecordV1 | None = None,
+) -> str:
     """Resolve the Redis namespace shared by ownership-adjacent stores."""
     env_prefix = os.getenv(_ENV_OWNERSHIP_KEY_PREFIX)
-    return config.key_prefix if env_prefix is None else env_prefix
+    configured = config.key_prefix if env_prefix is None else env_prefix
+    namespace = tenant_namespace or _bound_tenant_namespace()
+    if namespace is None:
+        return configured
+    explicitly_configured = env_prefix is not None or "key_prefix" in config.model_fields_set
+    field = _ENV_OWNERSHIP_KEY_PREFIX if env_prefix is not None else "sandbox.ownership.key_prefix"
+    return redis_component_key_prefix(
+        namespace,
+        RedisTenantComponent.SANDBOX_OWNERSHIP,
+        configured_prefix=configured if explicitly_configured else None,
+        configured_field=field,
+        legacy_record=(legacy_redis_prefixes if legacy_redis_prefixes is not None else _bound_legacy_redis_prefixes()),
+    )
 
 
 def compute_lease_ttl(config: SandboxOwnershipConfig) -> float:
@@ -85,7 +152,13 @@ def compute_lease_ttl(config: SandboxOwnershipConfig) -> float:
     return config.renewal_interval_seconds * config.ttl_multiplier
 
 
-def make_sandbox_ownership_store(config: SandboxOwnershipConfig | None, *, owner_id: str | None = None) -> SandboxOwnershipStore:
+def make_sandbox_ownership_store(
+    config: SandboxOwnershipConfig | None,
+    *,
+    owner_id: str | None = None,
+    tenant_namespace: TenantNamespaceV1 | None = None,
+    legacy_redis_prefixes: LegacyRedisPrefixRecordV1 | None = None,
+) -> SandboxOwnershipStore:
     """Build the ownership store for *config*.
 
     Caller owns the returned store and must ``close()`` it.
@@ -112,7 +185,11 @@ def make_sandbox_ownership_store(config: SandboxOwnershipConfig | None, *, owner
             owner_id=effective_owner_id,
             redis_url=redis_url,
             ttl_seconds=ttl,
-            key_prefix=resolve_ownership_key_prefix(resolved),
+            key_prefix=resolve_ownership_key_prefix(
+                resolved,
+                tenant_namespace=tenant_namespace,
+                legacy_redis_prefixes=legacy_redis_prefixes,
+            ),
         )
 
     raise ValueError(f"Unknown sandbox ownership type: {resolved.type!r}")

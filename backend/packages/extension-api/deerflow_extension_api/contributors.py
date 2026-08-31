@@ -23,6 +23,7 @@ from deerflow_extension_api.identifiers import (
     validate_thread_identifier,
 )
 from deerflow_extension_api.identity import InvocationIdentityV1
+from deerflow_extension_api.tenant import TenantReferenceV1
 
 ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION = "1.0"
 RUN_CONTEXT_CONTRIBUTOR_CAPABILITY_API_VERSION = "1.0"
@@ -149,11 +150,14 @@ class OriginContributionRequestV1:
     authenticated_subject_reference: str | None = None
     source_references: tuple[SafeContextReferenceV1, ...] = ()
     identity: InvocationIdentityV1 | None = None
+    tenant: TenantReferenceV1 | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_references", tuple(self.source_references))
         if self.identity is not None and not isinstance(self.identity, InvocationIdentityV1):
             raise TypeError("identity must be InvocationIdentityV1 or None")
+        if self.tenant is not None and not isinstance(self.tenant, TenantReferenceV1):
+            raise TypeError("tenant must be TenantReferenceV1 or None")
 
 
 @dataclass(frozen=True)
@@ -297,6 +301,7 @@ class TrustedRunContextV1:
     profile_revision: ResolvedProfileRevisionReferenceV1
     extension_generation: int
     extension_manifest_digest: str | None
+    tenant: TenantReferenceV1 | None = None
     persistable_references: tuple[NamespacedContextReferenceV1, ...] = ()
     runtime_only_references: tuple[NamespacedContextReferenceV1, ...] = ()
     secret_handles: tuple[NamespacedContextReferenceV1, ...] = ()
@@ -308,6 +313,8 @@ class TrustedRunContextV1:
     def __post_init__(self) -> None:
         if not isinstance(self.identity, InvocationIdentityV1):
             raise TypeError("trusted run context identity must be InvocationIdentityV1")
+        if self.tenant is not None and not isinstance(self.tenant, TenantReferenceV1):
+            raise TypeError("trusted run context tenant must be TenantReferenceV1 or None")
         if not isinstance(self.origin, SealedOriginV1):
             raise TypeError("trusted run context origin must be SealedOriginV1")
         validate_thread_identifier(self.thread_id, field_name="thread_id")
@@ -393,8 +400,8 @@ class TrustedRunContextV1:
             raise ValueError("canonical trusted run context is limited to 32 KiB")
 
     def _full_projection(self) -> dict[str, object]:
-        return {
-            "version": 1,
+        projection = {
+            "version": 2 if self.tenant is not None else 1,
             "identity": self.identity.to_json(),
             "origin": {
                 "source_kind": self.origin.source_kind,
@@ -415,6 +422,9 @@ class TrustedRunContextV1:
             "runtime_reference_digest": self.runtime_reference_digest,
             "runtime_reference_count": self.runtime_reference_count,
         }
+        if self.tenant is not None:
+            projection["tenant"] = self.tenant.to_json()
+        return projection
 
     def bind_run(self, run_id: str) -> TrustedRunContextV1:
         """Return the same accepted facts bound to the admitted run ID."""
@@ -448,7 +458,7 @@ class TrustedRunContextV1:
         persistable_execution = tuple(item for item in self.persistable_references if item.reference.purpose == "execution")
         persistable_handles = tuple(item for item in self.secret_handles if item.reference.storage_class == "persistable")
         projection = {
-            "version": 1,
+            "version": 2 if self.tenant is not None else 1,
             "identity": self.identity.to_json(),
             "base_origin": {
                 "source_kind": self.origin.source_kind,
@@ -471,6 +481,8 @@ class TrustedRunContextV1:
             "runtime_reference_digest": self.runtime_reference_digest,
             "runtime_reference_count": self.runtime_reference_count,
         }
+        if self.tenant is not None:
+            projection["tenant"] = self.tenant.to_json()
         return hashlib.sha256(
             json.dumps(
                 projection,
@@ -518,7 +530,11 @@ class TrustedRunContextV1:
             "runtime_reference_count",
             "evidence_digest",
         }
-        if not isinstance(value, dict) or set(value) != expected or value.get("version") != 1:
+        if not isinstance(value, dict) or value.get("version") not in {1, 2}:
+            raise ValueError("trusted run context has unknown fields or an unsupported version")
+        if value.get("version") == 2:
+            expected.add("tenant")
+        if set(value) != expected:
             raise ValueError("trusted run context has unknown fields or an unsupported version")
         origin = value["origin"]
         agent = value["agent_revision"]
@@ -532,6 +548,7 @@ class TrustedRunContextV1:
         runtime_count = value["runtime_reference_count"]
         trusted = cls(
             identity=InvocationIdentityV1.from_json(value["identity"]),  # type: ignore[arg-type]
+            tenant=(TenantReferenceV1.from_json(value["tenant"]) if value.get("version") == 2 else None),
             origin=SealedOriginV1(
                 source_kind=origin["source_kind"],  # type: ignore[arg-type]
                 references=tuple(_reference_from_json(item) for item in origin["references"]),  # type: ignore[union-attr]
@@ -566,9 +583,12 @@ class RunContextContributionRequestV1:
     thread_id: str
     agent_revision: ResolvedAgentRevisionReferenceV1
     external_key_reference: str | None = None
+    tenant: TenantReferenceV1 | None = None
 
     def __post_init__(self) -> None:
         validate_thread_identifier(self.thread_id, field_name="thread_id")
+        if self.tenant is not None and not isinstance(self.tenant, TenantReferenceV1):
+            raise TypeError("tenant must be TenantReferenceV1 or None")
 
 
 @dataclass(frozen=True)

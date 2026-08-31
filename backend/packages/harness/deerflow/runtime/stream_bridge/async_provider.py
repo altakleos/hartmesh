@@ -20,6 +20,12 @@ from collections.abc import AsyncIterator
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, get_stream_bridge_config
+from deerflow.runtime.tenant_identity import (
+    LegacyRedisPrefixRecordV1,
+    RedisTenantComponent,
+    TenantNamespaceV1,
+    redis_component_key_prefix,
+)
 
 from .base import StreamBridge
 
@@ -46,13 +52,32 @@ def _resolve_redis_url(config: StreamBridgeConfig) -> str:
     return config.redis_url or os.getenv(_ENV_REDIS_URL) or os.getenv("REDIS_URL") or "redis://localhost:6379/0"
 
 
-def _resolve_key_prefix(config: StreamBridgeConfig) -> str:
+def _resolve_key_prefix(
+    config: StreamBridgeConfig,
+    tenant_namespace: TenantNamespaceV1 | None = None,
+    legacy_redis_prefixes: LegacyRedisPrefixRecordV1 | None = None,
+) -> str:
     value = os.getenv(_ENV_KEY_PREFIX)
-    return config.key_prefix if value is None else value
+    configured = config.key_prefix if value is None else value
+    if tenant_namespace is None:
+        return configured
+    field = "stream_bridge.key_prefix" if value is None else _ENV_KEY_PREFIX
+    return redis_component_key_prefix(
+        tenant_namespace,
+        RedisTenantComponent.STREAM_BRIDGE,
+        configured_prefix=configured or None,
+        configured_field=field,
+        legacy_record=legacy_redis_prefixes,
+    )
 
 
 @contextlib.asynccontextmanager
-async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterator[StreamBridge]:
+async def make_stream_bridge(
+    app_config: AppConfig | None = None,
+    *,
+    tenant_namespace: TenantNamespaceV1 | None = None,
+    legacy_redis_prefixes: LegacyRedisPrefixRecordV1 | None = None,
+) -> AsyncIterator[StreamBridge]:
     """Async context manager that yields a :class:`StreamBridge`.
 
     Falls back to :class:`MemoryStreamBridge` when no configuration is
@@ -79,7 +104,11 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
         bridge = RedisStreamBridge(
             redis_url=redis_url,
             queue_maxsize=config.queue_maxsize,
-            namespace_prefix=_resolve_key_prefix(config),
+            namespace_prefix=_resolve_key_prefix(
+                config,
+                tenant_namespace,
+                legacy_redis_prefixes,
+            ),
             max_connections=config.max_connections,
             stream_ttl_seconds=config.stream_ttl_seconds,
         )

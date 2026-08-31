@@ -51,8 +51,14 @@ from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import ConflictError, IdempotencyConflictError, RunManager
 from deerflow.runtime.runs.store.base import AdmissionOutcome
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.tenant_identity import (
+    TenantIdentityV1,
+    tenant_admission_scope,
+)
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
+_TEST_TENANT_IDENTITY = TenantIdentityV1.from_canonical_id("local")
+_TEST_TENANT = _TEST_TENANT_IDENTITY.to_persisted_reference()
 
 
 class _ReadyAdmissionFence:
@@ -614,16 +620,63 @@ async def test_http_identity_uses_authenticated_subject_and_auth_disabled_defaul
         state=SimpleNamespace(
             user=SimpleNamespace(id="owner-1", system_role="user", oauth_provider=None, oauth_id=None),
             auth_source=AUTH_SOURCE_SESSION,
-        )
+        ),
+        app=SimpleNamespace(state=SimpleNamespace(tenant_identity=_TEST_TENANT_IDENTITY)),
     )
     session_identity = await _GatewayLaunchNormalizer(session_request).identify(InternalLaunchIntent(thread_id="thread-1", external_key="request-1"))
     assert session_identity is not None
-    assert session_identity.external_scope == scope_for_http("user", "owner-1")
+    assert session_identity.external_scope == tenant_admission_scope(
+        _TEST_TENANT_IDENTITY.to_persisted_reference(),
+        scope_for_http("user", "owner-1"),
+    )
 
-    disabled_request = SimpleNamespace(state=SimpleNamespace(user=None, auth_source=AUTH_SOURCE_AUTH_DISABLED))
+    disabled_request = SimpleNamespace(
+        state=SimpleNamespace(user=None, auth_source=AUTH_SOURCE_AUTH_DISABLED),
+        app=SimpleNamespace(state=SimpleNamespace(tenant_identity=_TEST_TENANT_IDENTITY)),
+    )
     disabled_identity = await _GatewayLaunchNormalizer(disabled_request).identify(InternalLaunchIntent(thread_id="thread-1", external_key="request-1"))
     assert disabled_identity is not None
-    assert disabled_identity.external_scope == scope_for_http("default-user", AUTH_DISABLED_USER_ID)
+    assert disabled_identity.external_scope == tenant_admission_scope(
+        _TEST_TENANT_IDENTITY.to_persisted_reference(),
+        scope_for_http("default-user", AUTH_DISABLED_USER_ID),
+    )
+
+
+@pytest.mark.anyio
+async def test_admission_scope_includes_the_server_owned_tenant() -> None:
+    async def identify(tenant_id: str):
+        tenant = TenantIdentityV1.from_canonical_id(tenant_id)
+        request = SimpleNamespace(
+            state=SimpleNamespace(
+                user=SimpleNamespace(
+                    id="owner-1",
+                    system_role="user",
+                    oauth_provider=None,
+                    oauth_id=None,
+                ),
+                auth_source=AUTH_SOURCE_SESSION,
+            ),
+            app=SimpleNamespace(
+                state=SimpleNamespace(tenant_identity=tenant),
+            ),
+        )
+        return await _GatewayLaunchNormalizer(request).identify(
+            InternalLaunchIntent(
+                thread_id="shared-thread",
+                external_key="shared-request",
+            )
+        )
+
+    tenant_a = await identify("tenant-a")
+    tenant_b = await identify("tenant-b")
+
+    assert tenant_a is not None
+    assert tenant_b is not None
+    assert tenant_a.external_scope == tenant_admission_scope(
+        TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference(),
+        scope_for_http("user", "owner-1"),
+    )
+    assert tenant_a.external_scope != tenant_b.external_scope
 
 
 @pytest.mark.anyio
@@ -639,7 +692,8 @@ async def test_internal_source_mappings_use_only_trusted_scope_facts(monkeypatch
         state=SimpleNamespace(
             user=SimpleNamespace(id="internal", system_role="internal"),
             auth_source=AUTH_SOURCE_INTERNAL,
-        )
+        ),
+        app=SimpleNamespace(state=SimpleNamespace(tenant_identity=_TEST_TENANT_IDENTITY)),
     )
     normalizer = _GatewayLaunchNormalizer(request, trust_internal_launch_facts=True)
     channel = await normalizer.identify(
@@ -668,7 +722,10 @@ async def test_internal_source_mappings_use_only_trusted_scope_facts(monkeypatch
         )
     )
     assert channel is not None
-    assert channel.external_scope == scope_for_channel("slack", "connection-1", "workspace-1", "chat-1")
+    assert channel.external_scope == tenant_admission_scope(
+        _TEST_TENANT_IDENTITY.to_persisted_reference(),
+        scope_for_channel("slack", "connection-1", "workspace-1", "chat-1"),
+    )
 
     scheduled = await normalizer.identify(
         InternalLaunchIntent(
@@ -682,7 +739,10 @@ async def test_internal_source_mappings_use_only_trusted_scope_facts(monkeypatch
         )
     )
     assert scheduled is not None
-    assert scheduled.external_scope == scope_for_scheduler("owner-1", "task-1")
+    assert scheduled.external_scope == tenant_admission_scope(
+        _TEST_TENANT_IDENTITY.to_persisted_reference(),
+        scope_for_scheduler("owner-1", "task-1"),
+    )
 
 
 @pytest.mark.anyio
@@ -691,7 +751,8 @@ async def test_system_task_scope_requires_explicit_system_ownership() -> None:
         state=SimpleNamespace(
             user=SimpleNamespace(id="internal", system_role="internal"),
             auth_source=AUTH_SOURCE_INTERNAL,
-        )
+        ),
+        app=SimpleNamespace(state=SimpleNamespace(tenant_identity=_TEST_TENANT_IDENTITY)),
     )
     normalizer = _GatewayLaunchNormalizer(request, trust_internal_launch_facts=True)
     common = dict(
@@ -707,7 +768,10 @@ async def test_system_task_scope_requires_explicit_system_ownership() -> None:
 
     identity = await normalizer.identify(InternalLaunchIntent(**common, scheduled_system_owned=True))
     assert identity is not None
-    assert identity.external_scope == scope_for_scheduler("__deerflow_system__", "task-1")
+    assert identity.external_scope == tenant_admission_scope(
+        _TEST_TENANT_IDENTITY.to_persisted_reference(),
+        scope_for_scheduler("__deerflow_system__", "task-1"),
+    )
 
 
 @pytest.mark.anyio
@@ -735,7 +799,10 @@ async def test_http_key_rejects_every_unclassified_request_container(request_bod
             user=SimpleNamespace(id="owner-1", system_role="user", oauth_provider=None, oauth_id=None),
         ),
         app=SimpleNamespace(
-            state=SimpleNamespace(runtime_readiness=_ReadyAdmissionFence()),
+            state=SimpleNamespace(
+                runtime_readiness=_ReadyAdmissionFence(),
+                tenant_identity=_TEST_TENANT_IDENTITY,
+            ),
         ),
     )
     request_body = request_body.model_copy(
@@ -752,7 +819,10 @@ async def test_empty_http_idempotency_key_is_422_before_admission() -> None:
         headers={"Idempotency-Key": ""},
         state=SimpleNamespace(),
         app=SimpleNamespace(
-            state=SimpleNamespace(runtime_readiness=_ReadyAdmissionFence()),
+            state=SimpleNamespace(
+                runtime_readiness=_ReadyAdmissionFence(),
+                tenant_identity=_TEST_TENANT_IDENTITY,
+            ),
         ),
     )
     with pytest.raises(Exception) as exc_info:
@@ -768,7 +838,7 @@ async def test_failed_normalization_discards_cached_admission_identity() -> None
             auth_source=AUTH_SOURCE_SESSION,
             user=SimpleNamespace(id="owner-1", system_role="user", oauth_provider=None, oauth_id=None),
         ),
-        app=SimpleNamespace(state=SimpleNamespace()),
+        app=SimpleNamespace(state=SimpleNamespace(tenant_identity=_TEST_TENANT_IDENTITY)),
     )
     normalizer = _GatewayLaunchNormalizer(request)
     intent = InternalLaunchIntent(thread_id="thread-1", external_key="request-1")
@@ -787,6 +857,7 @@ async def test_failed_preflight_lookup_discards_cached_admission_identity() -> N
             auth_source=AUTH_SOURCE_SESSION,
             user=SimpleNamespace(id="owner-1", system_role="user", oauth_provider=None, oauth_id=None),
         ),
+        app=SimpleNamespace(state=SimpleNamespace(tenant_identity=_TEST_TENANT_IDENTITY)),
     )
     normalizer = _GatewayLaunchNormalizer(request)
     runtime = InvocationRuntime(normalizer=normalizer, runs=_LookupFailureRuns())
@@ -803,7 +874,10 @@ async def test_http_replay_conflicts_when_retry_omits_original_thinking_option()
     from langgraph.store.memory import InMemoryStore
 
     store = InMemoryStore()
-    run_manager = RunManager(store=MemoryRunStore())
+    run_manager = RunManager(
+        store=MemoryRunStore(),
+        tenant=_TEST_TENANT,
+    )
     request = SimpleNamespace(
         headers={"Idempotency-Key": "request-removes-thinking"},
         state=SimpleNamespace(
@@ -820,6 +894,7 @@ async def test_http_replay_conflicts_when_retry_omits_original_thinking_option()
                 run_event_store=MemoryRunEventStore(),
                 run_events_config=None,
                 thread_store=MemoryThreadMetaStore(store),
+                tenant_identity=_TEST_TENANT_IDENTITY,
             )
         ),
     )
@@ -864,7 +939,7 @@ async def test_http_replay_returns_one_run_and_attaches_exactly_one_worker() -> 
 
     store = InMemoryStore()
     run_store = MemoryRunStore()
-    run_manager = RunManager(store=run_store)
+    run_manager = RunManager(store=run_store, tenant=_TEST_TENANT)
     request = SimpleNamespace(
         headers={"Idempotency-Key": "request-1"},
         state=SimpleNamespace(
@@ -881,6 +956,7 @@ async def test_http_replay_returns_one_run_and_attaches_exactly_one_worker() -> 
                 run_event_store=MemoryRunEventStore(),
                 run_events_config=None,
                 thread_store=MemoryThreadMetaStore(store),
+                tenant_identity=_TEST_TENANT_IDENTITY,
             )
         ),
     )
@@ -990,6 +1066,7 @@ async def test_simultaneous_stateless_http_retries_converge_after_thread_binding
                     run_event_store=MemoryRunEventStore(),
                     run_events_config=None,
                     thread_store=MemoryThreadMetaStore(graph_store),
+                    tenant_identity=_TEST_TENANT_IDENTITY,
                 )
             ),
         )
@@ -1013,8 +1090,22 @@ async def test_simultaneous_stateless_http_retries_converge_after_thread_binding
         ):
             body = RunCreateRequest(input={"messages": [{"role": "user", "content": "hello"}]})
             left, right = await asyncio.gather(
-                start_run(body, "generated-thread-left", request_for(RunManager(store=run_store)), thread_id_explicit=False),
-                start_run(body, "generated-thread-right", request_for(RunManager(store=run_store)), thread_id_explicit=False),
+                start_run(
+                    body,
+                    "generated-thread-left",
+                    request_for(
+                        RunManager(store=run_store, tenant=_TEST_TENANT),
+                    ),
+                    thread_id_explicit=False,
+                ),
+                start_run(
+                    body,
+                    "generated-thread-right",
+                    request_for(
+                        RunManager(store=run_store, tenant=_TEST_TENANT),
+                    ),
+                    thread_id_explicit=False,
+                ),
             )
 
             assert left.run_id == right.run_id
@@ -1038,7 +1129,7 @@ async def test_channel_redelivery_bypasses_ttl_and_converges_in_sql_store(
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     run_store = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
-    run_manager = RunManager(store=run_store)
+    run_manager = RunManager(store=run_store, tenant=_TEST_TENANT)
     store = InMemoryStore()
     app = SimpleNamespace(
         state=SimpleNamespace(
@@ -1050,6 +1141,7 @@ async def test_channel_redelivery_bypasses_ttl_and_converges_in_sql_store(
             run_event_store=MemoryRunEventStore(),
             run_events_config=None,
             thread_store=MemoryThreadMetaStore(store),
+            tenant_identity=_TEST_TENANT_IDENTITY,
         )
     )
 

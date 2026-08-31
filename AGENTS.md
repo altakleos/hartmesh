@@ -35,6 +35,7 @@ Nginx is the single public entry: it serves the frontend and proxies `/api/langg
 to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` routes; all
 other `/api/*` go straight to the Gateway REST routers. See
 [backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail.
+One tenant is frozen per Gateway; see [its contract](backend/docs/TENANT_IDENTITY.md).
 It compresses HTML and configured textual assets, while deliberately leaving SSE,
 fonts, images, audio, and video uncompressed at the proxy layer.
 

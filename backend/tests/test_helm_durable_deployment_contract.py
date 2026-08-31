@@ -73,6 +73,7 @@ def _workload(
 
 def _production_values() -> dict[str, object]:
     values = copy.deepcopy(_VALUES)
+    values["tenant"]["id"] = "acme"
     values["deployment"]["mode"] = "durable_one_replica"
     values["deployment"]["persistenceTier"] = "shared_durable"
     config = yaml.safe_load(values["config"])
@@ -84,6 +85,15 @@ def _production_values() -> dict[str, object]:
     values["postgresql"]["existingSecret"] = "production-postgres"
     values["redis"]["existingSecret"] = "production-redis"
     return values
+
+
+def test_durable_profile_requires_explicit_tenant_identity(tmp_path: Path) -> None:
+    values = _production_values()
+    values["tenant"]["id"] = ""
+
+    result = _render(tmp_path, values, expect_success=False)
+
+    assert "durable_one_replica requires tenant.id" in result.stderr
 
 
 def _set_config_value(

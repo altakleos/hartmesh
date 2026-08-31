@@ -19,6 +19,7 @@ from typing import NamedTuple
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_current_user
@@ -27,6 +28,7 @@ from deerflow.config.agents_config import list_custom_agents
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/console", tags=["console"])
@@ -126,6 +128,16 @@ def _session_factory_or_503():
             detail="Console requires a SQL database backend; set database.backend to sqlite or postgres in config.yaml.",
         )
     return sf
+
+
+def _tenant_run_clause(request: Request) -> ColumnElement[bool]:
+    identity = getattr(request.app.state, "tenant_identity", None)
+    if not isinstance(identity, TenantIdentityV1):
+        raise HTTPException(
+            status_code=503,
+            detail="Gateway tenant identity is not initialized.",
+        )
+    return RunRow.tenant_digest == identity.digest
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
@@ -286,7 +298,10 @@ async def console_stats(request: Request) -> ConsoleStatsResponse:
     """Return the dashboard's headline counters."""
     sf = _session_factory_or_503()
     user_id = await get_current_user(request)
-    run_where = (RunRow.operation_kind == "run",)
+    run_where = (
+        RunRow.operation_kind == "run",
+        _tenant_run_clause(request),
+    )
     if user_id:
         run_where += (RunRow.user_id == user_id,)
     thread_where = (ThreadMetaRow.user_id == user_id,) if user_id else ()
@@ -366,7 +381,10 @@ async def console_runs(
     stmt = (
         select(RunRow, ThreadMetaRow.display_name)
         .join(ThreadMetaRow, ThreadMetaRow.thread_id == RunRow.thread_id, isouter=True)
-        .where(RunRow.operation_kind == "run")
+        .where(
+            RunRow.operation_kind == "run",
+            _tenant_run_clause(request),
+        )
         .order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
         .limit(limit + 1)
         .offset(offset)
@@ -438,7 +456,11 @@ async def console_usage(
     start_local = today_local - timedelta(days=days - 1)
     window_start_utc = datetime.combine(start_local, time.min, tzinfo=UTC) - tz_delta
 
-    stmt = select(RunRow).where(RunRow.operation_kind == "run", RunRow.created_at >= window_start_utc)
+    stmt = select(RunRow).where(
+        RunRow.operation_kind == "run",
+        RunRow.created_at >= window_start_utc,
+        _tenant_run_clause(request),
+    )
     if user_id:
         stmt = stmt.where(RunRow.user_id == user_id)
 

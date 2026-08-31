@@ -8,7 +8,14 @@
 # ``sandbox.ownership.type == "redis"``.
 
 from .base import OwnershipBackendError, RenewOutcome, SandboxOwnershipStore
-from .factory import compute_lease_ttl, generate_owner_id, make_sandbox_ownership_store, resolve_ownership_config
+from .factory import (
+    bind_ownership_tenant_namespace,
+    compute_lease_ttl,
+    generate_owner_id,
+    make_sandbox_ownership_store,
+    resolve_ownership_config,
+    unbind_ownership_tenant_namespace,
+)
 from .memory import MemoryOwnershipStore
 
 __all__ = [
@@ -16,8 +23,10 @@ __all__ = [
     "OwnershipBackendError",
     "RenewOutcome",
     "SandboxOwnershipStore",
+    "bind_ownership_tenant_namespace",
     "compute_lease_ttl",
     "generate_owner_id",
     "make_sandbox_ownership_store",
     "resolve_ownership_config",
+    "unbind_ownership_tenant_namespace",
 ]

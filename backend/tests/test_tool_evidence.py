@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 from deerflow.runtime.tool_evidence import (
     DurableToolReceiptV1,
     ToolAttemptContextV1,
@@ -18,6 +19,8 @@ from deerflow.runtime.tool_evidence import (
     stable_subagent_task_id,
     tool_dispatch_generation_digest,
 )
+
+_TEST_TENANT = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
 
 
 def _context(**changes: object) -> ToolAttemptContextV1:
@@ -58,6 +61,22 @@ def test_stable_receipt_id_has_full_digest_and_is_order_independent() -> None:
 )
 def test_receipt_identity_changes_for_each_identity_component(field: str, value: object) -> None:
     assert stable_receipt_id(_context(**{field: value})) != stable_receipt_id(_context())
+
+
+def test_new_receipts_bind_tenant_into_context_and_durable_identity() -> None:
+    context = _context(
+        tenant=_TEST_TENANT,
+    )
+    receipt = DurableToolReceiptV1.started(
+        context=context,
+        tool_name="bash",
+        request_projection_digest="d" * 64,
+    )
+
+    assert receipt.version == 2
+    assert receipt.to_event_body()["context"]["tenant_ref"] == _TEST_TENANT.public_ref
+    assert receipt.to_event_body()["context"]["tenant_digest"] == _TEST_TENANT.digest
+    assert stable_receipt_id(context) != stable_receipt_id(_context())
 
 
 def test_request_projection_redacts_secrets_and_classifies_unsafe_strings_by_shape() -> None:

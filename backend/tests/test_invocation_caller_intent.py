@@ -27,8 +27,11 @@ from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1, Resolv
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.store.base import AdmissionOutcome
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 _INPUT = {"messages": [{"role": "user", "content": "hello"}]}
+_TEST_TENANT_IDENTITY = TenantIdentityV1.from_canonical_id("local")
+_TEST_TENANT = _TEST_TENANT_IDENTITY.to_persisted_reference()
 
 
 class _ReadyAdmissionFence:
@@ -40,7 +43,7 @@ class _ReadyAdmissionFence:
 def gateway_launch_harness():
     graph_store = InMemoryStore()
     run_store = MemoryRunStore()
-    manager = RunManager(store=run_store)
+    manager = RunManager(store=run_store, tenant=_TEST_TENANT)
     request = SimpleNamespace(
         headers={},
         state=SimpleNamespace(
@@ -57,6 +60,7 @@ def gateway_launch_harness():
                 run_event_store=MemoryRunEventStore(),
                 run_events_config=None,
                 thread_store=MemoryThreadMetaStore(graph_store),
+                tenant_identity=_TEST_TENANT_IDENTITY,
             )
         ),
     )
@@ -311,7 +315,10 @@ async def test_in_process_and_http_runtime_adapters_persist_the_same_caller_inte
 
     def host(service_id: str):
         graph_store = InMemoryStore()
-        manager = RunManager(store=MemoryRunStore())
+        manager = RunManager(
+            store=MemoryRunStore(),
+            tenant=_TEST_TENANT,
+        )
         app = SimpleNamespace(
             state=SimpleNamespace(
                 runtime_readiness=_ReadyAdmissionFence(),
@@ -322,6 +329,7 @@ async def test_in_process_and_http_runtime_adapters_persist_the_same_caller_inte
                 run_event_store=MemoryRunEventStore(),
                 run_events_config=None,
                 thread_store=MemoryThreadMetaStore(graph_store),
+                tenant_identity=_TEST_TENANT_IDENTITY,
             )
         )
         runtime = build_service_invocation_runtime(app, authenticated_service_id=service_id)

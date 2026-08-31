@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 from deerflow_extension_api import (
     InvocationIdentityV1,
+    TenantReferenceV1,
     TrustedRunContextV1,
     canonicalize_agent_identifier,
     validate_model_profile_identifier,
@@ -28,7 +29,7 @@ from deerflow_extension_api import (
 _DIGEST_VERSION = 1
 _AGENT_REVISION_VERSION = 1
 _DECISION_EVIDENCE_V1 = {"version": 1, "decisions": []}
-_TOOL_RECEIPT_EVIDENCE_V1 = {"version": 1}
+_TOOL_RECEIPT_EVIDENCE_V2 = {"version": 2}
 _SHA256_LENGTH = 64
 _EFFECTIVE_EXECUTION_PROJECTION_KEY = "__accepted_request_projection_v1"
 _REQUEST_DIGEST_VERSION = "sha256-canonical-json-v1"
@@ -413,6 +414,7 @@ class AcceptedInvocation:
 
     principal: PrincipalProjection
     origin: InvocationOrigin
+    tenant: TenantReferenceV1 | None
     thread_id: str
     context_references: Mapping[str, Any]
     agent_revision: ResolvedAgentRevision
@@ -432,6 +434,8 @@ class AcceptedInvocation:
         object.__setattr__(self, "execution_options", _frozen_json_mapping(self.execution_options))
         object.__setattr__(self, "normalized_input", _deep_freeze(_canonical_value(self.normalized_input)))
         object.__setattr__(self, "decision_evidence", _frozen_json_mapping(self.decision_evidence))
+        if self.tenant is not None and not isinstance(self.tenant, TenantReferenceV1):
+            raise TypeError("tenant must be TenantReferenceV1 or None")
         if self.trusted_context is not None and not isinstance(self.trusted_context, TrustedRunContextV1):
             raise TypeError("trusted_context must be TrustedRunContextV1 or None")
 
@@ -465,7 +469,8 @@ class AcceptedInvocation:
         evidence = decision_evidence.get("tool_receipts")
         if not isinstance(evidence, Mapping) or set(evidence) != {"version"}:
             return None
-        return 1 if evidence.get("version") == 1 else None
+        version = evidence.get("version")
+        return version if version in (1, 2) and type(version) is int else None
 
     @classmethod
     def seal(
@@ -481,12 +486,17 @@ class AcceptedInvocation:
         extension_generation: int,
         extension_manifest_digest: str | None = None,
         contributor_execution_digest: str,
+        tenant: TenantReferenceV1,
         trusted_context: TrustedRunContextV1 | None = None,
     ) -> AcceptedInvocation:
         thread_id = validate_thread_identifier(thread_id)
         if extension_manifest_digest is not None and (len(extension_manifest_digest) != 64 or any(character not in "0123456789abcdef" for character in extension_manifest_digest)):
             raise ValueError("extension_manifest_digest must be a lowercase SHA-256 digest")
+        if not isinstance(tenant, TenantReferenceV1):
+            raise TypeError("new accepted invocations require TenantReferenceV1")
         if trusted_context is not None:
+            if trusted_context.tenant != tenant:
+                raise ValueError("trusted context tenant must match the accepted tenant")
             if principal.identity != trusted_context.identity:
                 raise ValueError("trusted context identity must match the accepted principal")
             if origin.source_kind != trusted_context.origin.source_kind:
@@ -503,6 +513,7 @@ class AcceptedInvocation:
             {
                 "version": _DIGEST_VERSION,
                 "context": context_references,
+                "tenant_digest": tenant.digest,
                 "contributor_execution_digest": contributor_execution_digest,
                 "trusted_context_execution_digest": None if trusted_context is None else trusted_context.execution_digest,
             }
@@ -511,6 +522,7 @@ class AcceptedInvocation:
             {
                 "version": _DIGEST_VERSION,
                 "principal_digest": principal_digest,
+                "tenant_digest": tenant.digest,
                 "base_origin_digest": base_origin_digest,
                 "thread_id": thread_id,
                 "agent_revision_digest": agent_revision.digest,
@@ -522,7 +534,7 @@ class AcceptedInvocation:
             }
         )
         decision_evidence = copy.deepcopy(_DECISION_EVIDENCE_V1)
-        decision_evidence["tool_receipts"] = copy.deepcopy(_TOOL_RECEIPT_EVIDENCE_V1)
+        decision_evidence["tool_receipts"] = copy.deepcopy(_TOOL_RECEIPT_EVIDENCE_V2)
         if extension_manifest_digest is not None:
             decision_evidence["capability_manifest"] = {
                 "version": 1,
@@ -532,6 +544,7 @@ class AcceptedInvocation:
         return cls(
             principal=principal,
             origin=origin,
+            tenant=tenant,
             thread_id=thread_id,
             context_references=context_references,
             agent_revision=agent_revision,
@@ -552,6 +565,8 @@ class AcceptedInvocation:
         if self.trusted_context is not None:
             decision_evidence["trusted_run_context"] = self.trusted_context.to_persisted_json()
         return {
+            "tenant_ref": None if self.tenant is None else self.tenant.public_ref,
+            "tenant_digest": None if self.tenant is None else self.tenant.digest,
             "origin_json": self.origin.to_json(),
             "principal_projection_json": self.principal.to_json(),
             "principal_projection_digest": self.principal_digest,
@@ -565,6 +580,19 @@ class AcceptedInvocation:
 
     @classmethod
     def from_persisted(cls, row: Mapping[str, Any]) -> AcceptedInvocation | None:
+        tenant_ref = row.get("tenant_ref")
+        tenant_digest = row.get("tenant_digest")
+        if (tenant_ref is None) != (tenant_digest is None):
+            raise ValueError("persisted tenant evidence is incomplete")
+        tenant = (
+            None
+            if tenant_ref is None
+            else TenantReferenceV1(
+                version=1,
+                public_ref=tenant_ref,
+                digest=tenant_digest,
+            )
+        )
         revision_digest = row.get("agent_revision_digest")
         revision_json = row.get("agent_revision_json")
         origin_json = row.get("origin_json")
@@ -727,8 +755,11 @@ class AcceptedInvocation:
         if decision_evidence.get("version") != 1 or not isinstance(decision_evidence.get("decisions", []), (list, tuple)):
             raise ValueError("accepted decision evidence has an unsupported version or malformed decisions")
         tool_receipt_evidence = decision_evidence.get("tool_receipts")
-        if tool_receipt_evidence is not None and (not isinstance(tool_receipt_evidence, Mapping) or set(tool_receipt_evidence) != {"version"} or tool_receipt_evidence.get("version") != 1):
+        if tool_receipt_evidence is not None and (not isinstance(tool_receipt_evidence, Mapping) or set(tool_receipt_evidence) != {"version"} or tool_receipt_evidence.get("version") not in (1, 2)):
             raise ValueError("accepted tool receipt evidence is malformed")
+        tenant_bound_evidence = isinstance(tool_receipt_evidence, Mapping) and tool_receipt_evidence.get("version") == 2
+        if tenant_bound_evidence and tenant is None:
+            raise ValueError("tenant-bound accepted evidence is missing its tenant")
         trusted_json = decision_evidence.get("trusted_run_context")
         if "trusted_run_context" in decision_evidence and not isinstance(trusted_json, Mapping):
             raise ValueError("trusted run-context evidence is malformed")
@@ -745,6 +776,10 @@ class AcceptedInvocation:
                 field_name="extension manifest digest",
             )
         if trusted_context is not None:
+            if trusted_context.tenant is not None and trusted_context.tenant != tenant:
+                raise ValueError("trusted context tenant contradicts accepted evidence")
+            if tenant_bound_evidence and trusted_context.tenant is None:
+                raise ValueError("tenant-bound trusted context is missing its tenant")
             if principal.identity != trusted_context.identity:
                 raise ValueError("trusted context identity contradicts the accepted principal")
             if origin.source_kind != trusted_context.origin.source_kind:
@@ -823,6 +858,13 @@ class AcceptedInvocation:
             projection_fields = set(effective_projection)
             accepted_semantics = effective_projection.get("accepted_digest_semantics")
             expected_projection_fields = set(_EFFECTIVE_EXECUTION_FIELDS_V1)
+            projection_has_tenant = "tenant_digest" in projection_fields
+            if tenant_bound_evidence and not projection_has_tenant:
+                raise ValueError("tenant-bound accepted execution is missing its tenant")
+            if projection_has_tenant:
+                if tenant is None:
+                    raise ValueError("accepted execution tenant has no persisted tenant anchor")
+                expected_projection_fields.add("tenant_digest")
             if accepted_semantics == _CANONICAL_EXECUTION_SEMANTICS:
                 expected_projection_fields.add("accepted_digest_semantics")
             elif "accepted_digest_semantics" in projection_fields:
@@ -844,6 +886,9 @@ class AcceptedInvocation:
                 "accepted_context_digest": persisted_context_digest,
                 "extension_generation": extension_generation,
             }
+            if projection_has_tenant:
+                assert tenant is not None
+                expected_identities["tenant_digest"] = tenant.digest
             for field_name, expected in expected_identities.items():
                 if effective_projection.get(field_name) != expected:
                     raise ValueError(f"accepted effective execution {field_name} contradicts accepted evidence")
@@ -863,6 +908,7 @@ class AcceptedInvocation:
                 {
                     "version": _DIGEST_VERSION,
                     "context": context_references,
+                    **({"tenant_digest": tenant.digest} if projection_has_tenant and tenant is not None else {}),
                     "contributor_execution_digest": contributor_execution_digest,
                     "trusted_context_execution_digest": (None if trusted_context is None else trusted_context.execution_digest),
                 }
@@ -896,6 +942,7 @@ class AcceptedInvocation:
                     {
                         "version": _DIGEST_VERSION,
                         "principal_digest": persisted_principal_digest,
+                        **({"tenant_digest": tenant.digest} if projection_has_tenant and tenant is not None else {}),
                         "base_origin_digest": persisted_base_origin_digest,
                         "thread_id": thread_id,
                         "agent_revision_digest": revision.digest,
@@ -920,6 +967,7 @@ class AcceptedInvocation:
         return cls(
             principal=principal,
             origin=origin,
+            tenant=tenant,
             thread_id=thread_id,
             context_references={},
             agent_revision=revision,

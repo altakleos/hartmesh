@@ -493,6 +493,7 @@ def _make_gateway_app(saver: Any, mode: str, store: Any) -> Any:
     from app.gateway.authz import AuthContext, Permissions
     from app.gateway.routers import threads
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime.tenant_identity import TenantIdentityV1
     from deerflow.runtime.user_context import reset_current_user, set_current_user
 
     permissions = [Permissions.THREADS_READ, Permissions.THREADS_WRITE, Permissions.THREADS_DELETE]
@@ -517,6 +518,7 @@ def _make_gateway_app(saver: Any, mode: str, store: Any) -> Any:
     app.state.thread_store = MemoryThreadMetaStore(store)
     app.state.checkpoint_channel_mode = mode
     app.state.run_event_store = MagicMock()
+    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
     app.include_router(threads.router)
     return app
 

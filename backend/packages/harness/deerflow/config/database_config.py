@@ -135,7 +135,7 @@ class CheckpointCacheConfig(BaseModel):
     )
     key_prefix: str = Field(
         default="",
-        description="Optional override for the redis key prefix; defaults to a hash of the database identity.",
+        description=("Startup-only compatibility value. In Gateway tenant mode, a nonempty value (or DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX override) must exactly match the server-derived checkpoint-cache tenant projection."),
     )
 
 

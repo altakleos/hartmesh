@@ -299,6 +299,7 @@ def _invocation_runtime(provider, *, generation: int = 7, journal=None):
     )
     trusted_context = TrustedRunContextV1(
         identity=identity,
+        tenant=__import__("deerflow.runtime.tenant_identity", fromlist=["TenantIdentityV1"]).TenantIdentityV1.from_canonical_id("local").to_persisted_reference(),
         origin=origin,
         thread_id="thread-1",
         external_key_reference="raw:request-1",
@@ -1171,6 +1172,7 @@ def test_accepted_invocation_facts_are_pinned_and_caller_forgery_is_removed() ->
         execution_options={},
         extension_generation=12,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=__import__("deerflow.runtime.tenant_identity", fromlist=["TenantIdentityV1"]).TenantIdentityV1.from_canonical_id("local").to_persisted_reference(),
     )
     facts = McpInvocationFacts.from_accepted(accepted, run_id="run-1")
 

@@ -38,6 +38,7 @@ from starlette.types import ASGIApp
 
 from app.gateway.auth.models import User
 from app.gateway.authz import AuthContext, Permissions
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 # Default permission set granted to the stub user. Mirrors `_ALL_PERMISSIONS`
 # in authz.py — kept inline so the tests don't import a private symbol.
@@ -114,6 +115,7 @@ def make_authed_test_app(
     repo.check_access = AsyncMock(return_value=owner_check_passes)
     app.state.thread_store = repo
     app.state.runtime_readiness = _ReadyAdmissionFence()
+    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
 
     return app
 

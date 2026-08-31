@@ -13,6 +13,10 @@ import pytest
 from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+
+_TEST_TENANT_IDENTITY = TenantIdentityV1.from_canonical_id("local")
+_TEST_TENANT = _TEST_TENANT_IDENTITY.to_persisted_reference()
 
 
 class _ReadyAdmissionFence:
@@ -54,6 +58,7 @@ def _make_start_run_request(
                 run_event_store=MemoryRunEventStore(),
                 run_events_config=None,
                 thread_store=thread_store or MemoryThreadMetaStore(store),
+                tenant_identity=_TEST_TENANT_IDENTITY,
             )
         ),
     )
@@ -189,7 +194,7 @@ async def test_sse_consumer_emits_gap_without_cancelling_run():
     from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunManager, RunStatus
 
     bridge = MemoryStreamBridge(queue_maxsize=2)
-    run_manager = RunManager()
+    run_manager = RunManager(tenant=_TEST_TENANT)
     record = await run_manager.create("thread-gap", on_disconnect=DisconnectMode.cancel)
     await run_manager.set_status(record.run_id, RunStatus.running)
 
@@ -1410,7 +1415,7 @@ async def test_start_run_checkpoint_validation_failure_does_not_admit_run(_stub_
 
     thread_id = "thread-invalid-checkpoint"
     run_store = MemoryRunStore()
-    run_manager = RunManager(store=run_store)
+    run_manager = RunManager(store=run_store, tenant=_TEST_TENANT)
     request = _make_start_run_request(run_manager)
     invalid_body = _run_create_request(
         checkpoint_id="missing-checkpoint",
@@ -1448,7 +1453,7 @@ async def test_pending_cancel_bypasses_thread_metadata_and_redacts_failure(_stub
     async def fake_run_agent(*_args, **_kwargs):
         return None
 
-    run_manager = RunManager(store=MemoryRunStore())
+    run_manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
     body = _run_create_request()
     request = _make_start_run_request(
         run_manager,
@@ -1501,7 +1506,7 @@ async def test_owned_thread_metadata_timeout_fails_before_graph_start(
         run_agent_called.set()
 
     monkeypatch.setattr(services, "_THREAD_METADATA_SETUP_TIMEOUT_SECONDS", 0.01)
-    run_manager = RunManager(store=MemoryRunStore())
+    run_manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
     body = _run_create_request()
     request = _make_start_run_request(
         run_manager,
@@ -1562,7 +1567,7 @@ async def test_owned_thread_metadata_failure_closes_attached_stream_consumers(
     async def collect_frames(iterator):
         return [frame async for frame in iterator]
 
-    run_manager = RunManager(store=MemoryRunStore())
+    run_manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
     request = _make_start_run_request(
         run_manager,
         stream_bridge=bridge,
@@ -1642,7 +1647,10 @@ async def test_fenced_cancel_wins_metadata_failure_before_graph_start(
             return await super().fail_start_if_pending(run_id, error=error)
 
     store = MemoryRunStore()
-    run_manager = FailStartBarrierRunManager(store=store)
+    run_manager = FailStartBarrierRunManager(
+        store=store,
+        tenant=_TEST_TENANT,
+    )
     bridge = MemoryStreamBridge()
     request = _make_start_run_request(
         run_manager,
@@ -1743,7 +1751,7 @@ async def test_replacement_closes_pending_metadata_stream_without_graph_prefligh
         return [frame async for frame in iterator]
 
     store = MemoryRunStore()
-    run_manager = RunManager(store=store)
+    run_manager = RunManager(store=store, tenant=_TEST_TENANT)
     request = _make_start_run_request(
         run_manager,
         stream_bridge=bridge,
@@ -1856,7 +1864,7 @@ async def test_rival_owner_and_metadata_failure_cannot_reach_graph(
         run_agent_called.set()
 
     thread_store = RivalOwnerWinsThenStoreFails()
-    run_manager = RunManager(store=MemoryRunStore())
+    run_manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
     request = _make_start_run_request(
         run_manager,
         thread_store=thread_store,
@@ -2169,7 +2177,7 @@ async def _capture_start_run_graph_input(
     from deerflow.runtime import RunManager
     from deerflow.runtime.runs.store.memory import MemoryRunStore
 
-    run_manager = RunManager(store=MemoryRunStore())
+    run_manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
     state = SimpleNamespace(
         runtime_readiness=_ReadyAdmissionFence(),
         stream_bridge=SimpleNamespace(),
@@ -2179,6 +2187,7 @@ async def _capture_start_run_graph_input(
         run_event_store=MemoryRunEventStore(),
         run_events_config=None,
         thread_store=MemoryThreadMetaStore(InMemoryStore()),
+        tenant_identity=_TEST_TENANT_IDENTITY,
     )
     request = SimpleNamespace(
         headers={},
@@ -2225,7 +2234,7 @@ def _make_start_run_persistence_context():
     state = SimpleNamespace(
         runtime_readiness=_ReadyAdmissionFence(),
         stream_bridge=SimpleNamespace(),
-        run_manager=RunManager(store=run_store),
+        run_manager=RunManager(store=run_store, tenant=_TEST_TENANT),
         checkpointer=InMemorySaver(),
         store=InMemoryStore(),
         run_event_store=MemoryRunEventStore(),
@@ -2233,6 +2242,7 @@ def _make_start_run_persistence_context():
         thread_store=thread_store,
         checkpoint_channel_mode="full",
         scheduled_task_service=None,
+        tenant_identity=_TEST_TENANT_IDENTITY,
     )
     request = SimpleNamespace(
         headers={},
@@ -2483,7 +2493,7 @@ def test_start_run_rejects_internal_owner_thread_collision_without_transfer(
         run_store = MemoryRunStore()
         thread_store = MemoryThreadMetaStore(InMemoryStore())
         await thread_store.create("channel-thread", user_id="default", metadata={"legacy": True})
-        run_manager = RunManager(store=run_store)
+        run_manager = RunManager(store=run_store, tenant=_TEST_TENANT)
         state = SimpleNamespace(
             runtime_readiness=_ReadyAdmissionFence(),
             stream_bridge=SimpleNamespace(),
@@ -2493,6 +2503,7 @@ def test_start_run_rejects_internal_owner_thread_collision_without_transfer(
             run_event_store=MemoryRunEventStore(),
             run_events_config=None,
             thread_store=thread_store,
+            tenant_identity=_TEST_TENANT_IDENTITY,
         )
         request = SimpleNamespace(
             headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
@@ -2580,7 +2591,7 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
     async def _scenario():
         thread_store = MemoryThreadMetaStore(InMemoryStore())
         await thread_store.create("channel-thread", user_id="owner-1", metadata={})
-        run_manager = RunManager(store=MemoryRunStore())
+        run_manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
         state = SimpleNamespace(
             runtime_readiness=_ReadyAdmissionFence(),
             stream_bridge=SimpleNamespace(),
@@ -2590,6 +2601,7 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
             run_event_store=MemoryRunEventStore(),
             run_events_config=None,
             thread_store=thread_store,
+            tenant_identity=_TEST_TENANT_IDENTITY,
         )
         request = SimpleNamespace(
             headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
@@ -2663,7 +2675,7 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
     async def _scenario():
         thread_store = MemoryThreadMetaStore(InMemoryStore())
         await thread_store.create("thread-session-authz", user_id="u1", metadata={})
-        run_manager = RunManager(store=MemoryRunStore())
+        run_manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
         state = SimpleNamespace(
             runtime_readiness=_ReadyAdmissionFence(),
             stream_bridge=SimpleNamespace(),
@@ -2673,6 +2685,7 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
             run_event_store=MemoryRunEventStore(),
             run_events_config=None,
             thread_store=thread_store,
+            tenant_identity=_TEST_TENANT_IDENTITY,
         )
         request = SimpleNamespace(
             headers={},
@@ -2748,7 +2761,7 @@ def test_scheduled_invocation_runtime_materializes_trusted_execution_facts(_stub
             return True
 
     async def _scenario():
-        run_manager = RunManager()
+        run_manager = RunManager(tenant=_TEST_TENANT)
         app = _make_start_run_request(
             run_manager,
             thread_store=AllowThreadStore(),
@@ -2817,7 +2830,10 @@ def test_scheduled_invocation_runtime_rejects_legacy_auth_token():
     async def _scenario():
         runtime = build_scheduled_invocation_runtime(
             SimpleNamespace(
-                state=SimpleNamespace(runtime_readiness=_ReadyAdmissionFence()),
+                state=SimpleNamespace(
+                    runtime_readiness=_ReadyAdmissionFence(),
+                    tenant_identity=_TEST_TENANT_IDENTITY,
+                ),
             )
         )
         with pytest.raises(HTTPException) as exc_info:
@@ -3463,6 +3479,29 @@ class TestInjectAuthenticatedUserContextAuthz:
         assert "authz_attributes" not in config["configurable"]
 
     @pytest.mark.parametrize("section", ["context", "configurable"])
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "tenant",
+            "tenant_id",
+            "tenantId",
+            "tenant_ref",
+            "tenant_digest",
+            "x_tenant_id",
+            "x-tenant-id",
+            "X-Tenant-ID",
+            "__deerflow_tenant_reference",
+        ],
+    )
+    def test_clears_every_likely_client_tenant_spelling(self, section, key):
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config(
+            {section: {key: "forged-tenant"}},
+            request,
+        )
+        assert key not in config[section]
+
+    @pytest.mark.parametrize("section", ["context", "configurable"])
     @pytest.mark.parametrize("key", ["langgraph_auth_user", "langgraph_auth_user_id"])
     def test_clears_forged_langgraph_auth_identity(self, section, key):
         """Gateway clients cannot inject Agent Server's reserved auth fields."""
@@ -3572,7 +3611,7 @@ async def test_run_agent_invalid_stream_mode_finalizes_run_before_graph_invocati
     from deerflow.runtime.runs.schemas import RunStatus
     from deerflow.runtime.runs.worker import RunContext, run_agent
 
-    run_manager = RunManager()
+    run_manager = RunManager(tenant=_TEST_TENANT)
     record = await run_manager.create("thread-invalid-stream-mode")
     bridge = SimpleNamespace(
         publish=AsyncMock(),

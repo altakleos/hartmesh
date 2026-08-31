@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import re
@@ -230,8 +231,51 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
     }
 
 
+def _safe_tenant_config_projection(config: Any) -> Any:
+    """Replace the operator-readable tenant ID with its public projection."""
+
+    if not isinstance(config, dict):
+        return config
+    deployment = config.get("deployment")
+    if not isinstance(deployment, dict):
+        return config
+    tenant_id = deployment.pop("tenant_id", None)
+    if tenant_id is None:
+        deployment["tenant_identity"] = {"configured_in_yaml": False}
+        return config
+    if (
+        not isinstance(tenant_id, str)
+        or re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+            tenant_id,
+        )
+        is None
+    ):
+        deployment["tenant_identity"] = {
+            "configured_in_yaml": True,
+            "status": "invalid",
+        }
+        return config
+    canonical = json.dumps(
+        {"version": 1, "tenant_id": tenant_id},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    digest = hashlib.sha256(canonical).hexdigest()
+    deployment["tenant_identity"] = {
+        "configured_in_yaml": True,
+        "version": 1,
+        "public_ref": f"tenant-{digest[:16]}",
+        "digest": digest,
+        "prefix_schema_version": 1,
+    }
+    return config
+
+
 def collect_config_summary(config_path: Path) -> Any:
-    return redact_data(_read_yaml(config_path))
+    return redact_data(_safe_tenant_config_projection(_read_yaml(config_path)))
 
 
 def collect_extensions_summary(extensions_config_path: Path) -> Any:
@@ -243,7 +287,13 @@ def collect_git_summary(project_root: Path) -> dict[str, Any]:
     commands = {
         "branch": ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         "head": ["git", "rev-parse", "HEAD"],
-        "upstream": ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        "upstream": [
+            "git",
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{u}",
+        ],
         "status_short": ["git", "status", "--short", "--branch"],
         "diff_stat": ["git", "diff", "--stat"],
     }
@@ -261,7 +311,10 @@ def _candidate_thread_data_dirs(project_root: Path, thread_id: str) -> list[Path
         project_root / ".deer-flow" / "threads" / thread_id / "user-data",
         project_root / "backend" / ".deer-flow" / "threads" / thread_id / "user-data",
     ]
-    for base in (project_root / ".deer-flow" / "users", project_root / "backend" / ".deer-flow" / "users"):
+    for base in (
+        project_root / ".deer-flow" / "users",
+        project_root / "backend" / ".deer-flow" / "users",
+    ):
         if base.exists():
             candidates.extend(user_dir / "threads" / thread_id / "user-data" for user_dir in base.iterdir() if user_dir.is_dir())
     return candidates
@@ -324,7 +377,11 @@ def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]
 def collect_doctor_output(project_root: Path) -> dict[str, Any]:
     backend_dir = project_root / "backend"
     cwd = backend_dir if backend_dir.exists() else project_root
-    return _run_command([sys.executable, str(project_root / "scripts" / "doctor.py")], cwd=cwd, timeout_s=60)
+    return _run_command(
+        [sys.executable, str(project_root / "scripts" / "doctor.py")],
+        cwd=cwd,
+        timeout_s=60,
+    )
 
 
 def _command_output(command: dict[str, Any] | None) -> str | None:
@@ -362,7 +419,15 @@ def _git_stdout(git_summary: dict[str, Any], key: str) -> str | None:
 def _doctor_counts(doctor: dict[str, Any] | None) -> tuple[int | None, int | None]:
     if not doctor:
         return (None, None)
-    output = "\n".join(value for value in (_command_output(doctor), doctor.get("stdout"), doctor.get("stderr")) if isinstance(value, str))
+    output = "\n".join(
+        value
+        for value in (
+            _command_output(doctor),
+            doctor.get("stdout"),
+            doctor.get("stderr"),
+        )
+        if isinstance(value, str)
+    )
     match = DOCTOR_STATUS_RE.search(output)
     if not match:
         return (None, None)
@@ -476,9 +541,18 @@ def _reporter_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
 def _evidence_files(*, include_doctor: bool, include_thread_summary: bool) -> list[dict[str, str]]:
     files = [
         ("README.md", "Human-readable entrypoint for the support bundle."),
-        ("issue-summary.md", "Markdown summary intended to be pasted into a GitHub issue."),
-        ("ai-issue-draft.md", "GitHub issue draft for AI-assisted filing with required placeholders for unknown user facts."),
-        ("triage.json", "Stable machine-readable summary for AI or script-assisted triage."),
+        (
+            "issue-summary.md",
+            "Markdown summary intended to be pasted into a GitHub issue.",
+        ),
+        (
+            "ai-issue-draft.md",
+            "GitHub issue draft for AI-assisted filing with required placeholders for unknown user facts.",
+        ),
+        (
+            "triage.json",
+            "Stable machine-readable summary for AI or script-assisted triage.",
+        ),
         ("manifest.json", "Bundle schema, generation time, and privacy declaration."),
         ("environment.json", "OS, Python, and toolchain version probes."),
         ("config-summary.json", "Redacted config.yaml structure."),
@@ -486,7 +560,12 @@ def _evidence_files(*, include_doctor: bool, include_thread_summary: bool) -> li
         ("git.json", "Branch, commit, upstream, status, and diff-stat metadata."),
     ]
     if include_thread_summary:
-        files.append(("thread-summary.json", "Optional thread workspace/upload/output file manifests only."))
+        files.append(
+            (
+                "thread-summary.json",
+                "Optional thread workspace/upload/output file manifests only.",
+            )
+        )
     if include_doctor:
         files.append(("doctor.json", "Redacted make doctor output."))
     return [{"path": path, "description": description} for path, description in files]
@@ -554,7 +633,10 @@ def build_triage_report(
         },
         "reporter_next_steps": _reporter_next_steps(status, signals),
         "maintainer_next_steps": _maintainer_next_steps(status, signals),
-        "evidence_files": _evidence_files(include_doctor=doctor is not None, include_thread_summary=thread_summary is not None),
+        "evidence_files": _evidence_files(
+            include_doctor=doctor is not None,
+            include_thread_summary=thread_summary is not None,
+        ),
         "privacy": manifest["privacy"],
     }
 
@@ -607,7 +689,11 @@ def _os_label(platform_info: dict[str, Any]) -> str:
 
 
 def _platform_details(platform_info: dict[str, Any]) -> str:
-    details = [platform_info.get("machine"), platform_info.get("system"), platform_info.get("release")]
+    details = [
+        platform_info.get("machine"),
+        platform_info.get("system"),
+        platform_info.get("release"),
+    ]
     return ", ".join(str(item) for item in details if item) or "_No response_"
 
 
@@ -883,10 +969,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     repo_root = Path(__file__).resolve().parents[1]
     parser.add_argument("--project-root", type=Path, default=repo_root, help="DeerFlow project root")
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
-    parser.add_argument("--extensions-config", type=Path, default=None, help="Path to extensions_config.json")
-    parser.add_argument("--thread-id", default=None, help="Optional thread id to include file manifests for")
+    parser.add_argument(
+        "--extensions-config",
+        type=Path,
+        default=None,
+        help="Path to extensions_config.json",
+    )
+    parser.add_argument(
+        "--thread-id",
+        default=None,
+        help="Optional thread id to include file manifests for",
+    )
     parser.add_argument("--out", type=Path, default=None, help="Output zip path")
-    parser.add_argument("--include-doctor", action="store_true", help="Include redacted make doctor output")
+    parser.add_argument(
+        "--include-doctor",
+        action="store_true",
+        help="Include redacted make doctor output",
+    )
     return parser.parse_args(argv)
 
 

@@ -15,6 +15,7 @@ from deerflow.extensions import (
     reset_runtime_diagnostics,
 )
 from deerflow.extensions.registry import ExtensionRegistry
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 @pytest.fixture(autouse=True)
@@ -44,9 +45,9 @@ def _patch_runtime_resources(monkeypatch, events: list[str]) -> None:
     async def close_engine() -> None:
         events.append("engine_close")
 
-    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", lambda _config: _resource(object()))
+    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", lambda _config, **_kwargs: _resource(object()))
     monkeypatch.setattr("deerflow.runtime.make_store", lambda _config: _resource(object()))
-    monkeypatch.setattr("deerflow.runtime.checkpointer.async_provider.make_checkpointer", lambda _config: _resource(object()))
+    monkeypatch.setattr("deerflow.runtime.checkpointer.async_provider.make_checkpointer", lambda _config, **_kwargs: _resource(object()))
     monkeypatch.setattr("deerflow.persistence.engine.init_engine_from_config", init_engine)
     monkeypatch.setattr("deerflow.persistence.engine.close_engine", close_engine)
     monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", lambda: None)
@@ -65,13 +66,15 @@ async def test_runtime_owns_engine_cleanup_before_initialization(monkeypatch):
     async def close_engine() -> None:
         events.append("engine_close")
 
-    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", lambda _config: _resource(object()))
+    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", lambda _config, **_kwargs: _resource(object()))
     monkeypatch.setattr("deerflow.persistence.engine.init_engine_from_config", fail_engine_init)
     monkeypatch.setattr("deerflow.persistence.engine.close_engine", close_engine)
 
+    app = FastAPI()
+    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
     with pytest.raises(RuntimeError, match="schema bootstrap failed"):
         async with langgraph_runtime(
-            FastAPI(),
+            app,
             SimpleNamespace(database=_database_config()),
         ):
             pytest.fail("runtime must not yield")
@@ -122,6 +125,7 @@ async def test_later_startup_failure_stops_same_snapshot_and_appends_diagnostics
 
     app = FastAPI()
     app.state.extensions = snapshot
+    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
     live_diagnostics = initialize_runtime_diagnostics([])
     app.state.extension_diagnostics = live_diagnostics
 
@@ -180,6 +184,7 @@ async def test_cancellation_during_service_start_propagates_after_cleanup(monkey
     _patch_runtime_resources(monkeypatch, events)
     app = FastAPI()
     app.state.extensions = registry.build()
+    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
 
     async def run_runtime() -> None:
         async with langgraph_runtime(

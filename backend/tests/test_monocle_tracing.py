@@ -25,6 +25,7 @@ pytest.importorskip("monocle_apptrace")
 
 from deerflow.config import is_monocle_tracing_enabled
 from deerflow.config.tracing_config import get_tracing_config, reset_tracing_config
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 
 _TRACING_ENV = (
@@ -347,7 +348,9 @@ def test_gateway_lifespan_initializes_monocle():
     ):
 
         async def drive() -> None:
-            async with lifespan(FastAPI()):
+            app = FastAPI()
+            app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
+            async with lifespan(app):
                 pass
 
         asyncio.run(drive())
@@ -390,7 +393,9 @@ def test_gateway_lifespan_survives_monocle_setup_failure(caplog):
     ):
 
         async def drive() -> None:
-            async with lifespan(FastAPI()):
+            app = FastAPI()
+            app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
+            async with lifespan(app):
                 pass
 
         with caplog.at_level(logging.ERROR, logger="app.gateway.app"):

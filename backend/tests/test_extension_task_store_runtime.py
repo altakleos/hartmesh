@@ -21,6 +21,7 @@ from deerflow.extensions import (
 from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.worker import RunContext, _build_runtime_context, run_agent
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 def test_build_runtime_context_installs_the_extension_store():
@@ -84,6 +85,7 @@ def test_gateway_run_context_captures_the_app_extension_snapshot(monkeypatch):
                 run_events_config=None,
                 checkpoint_channel_mode="full",
                 checkpoint_snapshot_frequency=None,
+                tenant_identity=TenantIdentityV1.from_canonical_id("local"),
             )
         )
     )

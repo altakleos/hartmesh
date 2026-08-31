@@ -30,6 +30,7 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Any, Literal, cast
 
+from deerflow_extension_api import TenantReferenceV1
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
@@ -75,6 +76,7 @@ from deerflow.runtime.goal import (
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
+from deerflow.runtime.tenant_identity import TENANT_REFERENCE_CONTEXT_KEY
 from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
@@ -573,6 +575,7 @@ def _build_runtime_context(
     runtime_ctx.pop(INVOCATION_IDENTITY_CONTEXT_KEY, None)
     runtime_ctx.pop(INVOCATION_ORIGIN_CONTEXT_KEY, None)
     runtime_ctx.pop(TRUSTED_RUN_CONTEXT_KEY, None)
+    runtime_ctx.pop(TENANT_REFERENCE_CONTEXT_KEY, None)
     from deerflow.runtime.assembly_evidence import strip_assembly_evidence_requirement
 
     strip_assembly_evidence_requirement(runtime_ctx)
@@ -602,6 +605,10 @@ class RunContext:
     mcp_task_repo: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     authorization_provider: AuthorizationProvider | None = field(default=None)
+    # Server-owned identity resolved once at process startup. Recovery compares
+    # accepted evidence to this reference before resolving material or starting
+    # any model/tool work.
+    tenant: TenantReferenceV1 | None = field(default=None)
     extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
     # Delta snapshot cadence frozen at startup; ``None`` means "not frozen in
@@ -670,6 +677,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         for internal_key in (
             INVOCATION_CONSTRAINTS_CONTEXT_KEY,
             SUBAGENT_RESERVATION_CONTEXT_KEY,
+            TENANT_REFERENCE_CONTEXT_KEY,
         ):
             if internal_key in runtime_context:
                 existing_context[internal_key] = runtime_context[internal_key]
@@ -917,7 +925,7 @@ async def run_agent(
     accepted_constraints = None
     accepted_for_cleanup = record.accepted_invocation
     requires_assembly_evidence = accepted_for_cleanup is not None and run_manager.requires_assembly_evidence
-    requires_tool_receipt_evidence = accepted_for_cleanup is not None and accepted_for_cleanup.tool_receipt_evidence_version == 1
+    requires_tool_receipt_evidence = accepted_for_cleanup is not None and accepted_for_cleanup.tool_receipt_evidence_version in (1, 2)
     assembly_evidence_bound = False
     pinned_material_for_cleanup = accepted_for_cleanup.agent_revision.material if accepted_for_cleanup is not None else None
     skill_binding_user_id: str | None = None
@@ -1007,6 +1015,26 @@ async def run_agent(
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
+
+        accepted_tenant = accepted_for_cleanup.tenant if accepted_for_cleanup is not None else None
+        if accepted_for_cleanup is not None and accepted_tenant != ctx.tenant:
+            error = "Accepted invocation tenant does not match this deployment"
+            await run_manager.set_status_if_not_cancelled(
+                run_id,
+                RunStatus.error,
+                error=error,
+                stop_reason="tenant_identity_mismatch",
+                **terminal_status_kwargs,
+            )
+            await bridge.publish(
+                run_id,
+                "error",
+                {
+                    "message": error,
+                    "name": "TenantIdentityMismatchError",
+                },
+            )
+            return
 
         await run_manager.wait_for_prior_finalizing(
             thread_id,
@@ -1263,6 +1291,8 @@ async def run_agent(
             # Bind the exact object that passed the digest check. The factory
             # consumes it directly and never performs a second mutable read.
             runtime_ctx[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = pinned_material
+            if accepted.tenant is not None:
+                runtime_ctx[TENANT_REFERENCE_CONTEXT_KEY] = accepted.tenant
             runtime_ctx["accepted_agent_revision_digest"] = actual_revision.digest
             runtime_ctx["accepted_extension_generation"] = accepted.extension_generation
             if accepted.extension_manifest_digest is not None:
@@ -1521,6 +1551,7 @@ async def run_agent(
                         extension_generation=evidence.extension_generation,
                         subagent_catalog_digest=catalog.digest,
                         subagent_definition_digest=None,
+                        tenant=evidence.tenant,
                     ),
                     sink=RunEventToolReceiptSink(event_store),
                 )

@@ -66,7 +66,8 @@ _MANAGED_SUBAGENTS_MERGE_REVISION = "0021_merge_managed_subagents"
 _SCHEDULED_ENQUEUE_REVISION = "0015_scheduled_task_enqueue"
 _SCHEDULED_MERGE_REVISION = "0022_merge_scheduled_enqueue"
 _ASSEMBLY_EVIDENCE_REVISION = "0023_agent_assembly_evidence"
-_MERGE_HEAD_REVISION = "0024_tool_receipt_idempotency"
+_TOOL_RECEIPT_REVISION = "0024_tool_receipt_idempotency"
+_MERGE_HEAD_REVISION = "0025_tenant_identity"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
     "0012_invocation_idempotency",
@@ -137,6 +138,8 @@ _INBOUND_RECEIPT_COLUMNS = {
 }
 
 _ACCEPTED_COLUMNS = {
+    "tenant_ref": ("character varying", 23, True),
+    "tenant_digest": ("character varying", 64, True),
     "origin_json": ("json", None, True),
     "principal_projection_json": ("json", None, True),
     "principal_projection_digest": ("character varying", 64, True),
@@ -160,6 +163,7 @@ _ACCEPTED_COLUMNS = {
     "assembly_evidence_digest": ("character varying", 64, True),
 }
 _RUN_CHECKS = {
+    "ck_runs_tenant_pair",
     "ck_runs_state_version_nonnegative",
     "ck_runs_external_key_pair",
     "ck_runs_keyed_request_digest",
@@ -637,6 +641,53 @@ async def _assert_postgres_head_contract(engine: AsyncEngine, schema: str) -> No
     assert run_check_names == _RUN_CHECKS
     run_definitions = await _constraint_definitions(engine, schema, "runs")
     assert all(run_definitions[name][0] == "CHECK" for name in _RUN_CHECKS)
+    for table_name, constraint_name, index_name in (
+        (
+            "run_lifecycle_events",
+            "ck_run_lifecycle_event_tenant_pair",
+            "ix_run_lifecycle_events_tenant_digest",
+        ),
+        (
+            "run_events",
+            "ck_run_events_tenant_pair",
+            "ix_run_events_tenant_digest",
+        ),
+    ):
+        columns = await _column_contract(engine, schema, table_name)
+        assert columns["tenant_ref"][:3] == ("character varying", 23, True)
+        assert columns["tenant_digest"][:3] == (
+            "character varying",
+            64,
+            True,
+        )
+        assert constraint_name in constraints[table_name]
+        _assert_index_definition(indexes, index_name, ("tenant_digest",))
+    identity_columns = await _column_contract(
+        engine,
+        schema,
+        "hartmesh_deployment_identity",
+    )
+    assert identity_columns["singleton_key"][:3] == ("integer", None, False)
+    assert identity_columns["identity_version"][:3] == (
+        "integer",
+        None,
+        False,
+    )
+    assert identity_columns["tenant_ref"][:3] == (
+        "character varying",
+        23,
+        False,
+    )
+    assert identity_columns["tenant_digest"][:3] == (
+        "character varying",
+        64,
+        False,
+    )
+    assert identity_columns["legacy_redis_prefixes_json"][:3] == (
+        "json",
+        None,
+        True,
+    )
     _assert_index_definition(
         indexes,
         "uq_runs_thread_active",
@@ -990,6 +1041,7 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     managed_subagents_merge = script.get_revision(_MANAGED_SUBAGENTS_MERGE_REVISION)
     scheduled_merge = script.get_revision(_SCHEDULED_MERGE_REVISION)
     assembly_evidence = script.get_revision(_ASSEMBLY_EVIDENCE_REVISION)
+    tool_receipts = script.get_revision(_TOOL_RECEIPT_REVISION)
     merge_head = script.get_revision(_MERGE_HEAD_REVISION)
     assert mcp_results is not None
     assert mcp_results.down_revision == _PRE_FEATURE_REVISION
@@ -1010,8 +1062,10 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     }
     assert assembly_evidence is not None
     assert assembly_evidence.down_revision == _SCHEDULED_MERGE_REVISION
+    assert tool_receipts is not None
+    assert tool_receipts.down_revision == _ASSEMBLY_EVIDENCE_REVISION
     assert merge_head is not None
-    assert merge_head.down_revision == _ASSEMBLY_EVIDENCE_REVISION
+    assert merge_head.down_revision == _TOOL_RECEIPT_REVISION
     assert script.get_current_head() == _MERGE_HEAD_REVISION
 
 

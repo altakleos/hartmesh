@@ -19,6 +19,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+
+
+def _gateway_test_app() -> FastAPI:
+    app = FastAPI()
+    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
+    return app
+
 
 @asynccontextmanager
 async def _noop_langgraph_runtime(app, _startup_config):
@@ -40,7 +48,7 @@ async def _run_lifespan_with_hanging_stop() -> float:
     async def hang_forever() -> None:
         await asyncio.sleep(3600)
 
-    app = FastAPI()
+    app = _gateway_test_app()
     startup_config = MagicMock()
     startup_config.log_level = "INFO"
     # Keep this test focused on the channel-hang timing: skip the memory drain.
@@ -90,7 +98,7 @@ def test_shutdown_is_bounded_when_channel_stop_hangs():
 async def _run_lifespan_with_upload_staging_cleanup():
     from app.gateway.app import lifespan
 
-    app = FastAPI()
+    app = _gateway_test_app()
     startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char", enabled=False, shutdown_flush_timeout_seconds=30.0))
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
@@ -135,6 +143,7 @@ async def test_durable_gateway_startup_fails_when_receipt_channel_cannot_start(
 
     raw = AppConfig(sandbox=SandboxConfig(use="test")).model_dump(mode="python")
     raw["deployment"]["profile"] = "durable_production"
+    raw["deployment"]["tenant_id"] = "test-tenant"
     raw["database"]["backend"] = "postgres"
     raw["run_events"]["backend"] = "db"
     raw["channels"] = {"github": {"enabled": True}}
@@ -145,7 +154,7 @@ async def test_durable_gateway_startup_fails_when_receipt_channel_cannot_start(
         "DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS",
         raising=False,
     )
-    app = FastAPI()
+    app = _gateway_test_app()
 
     with (
         patch("app.gateway.app.get_app_config", return_value=startup_config),
@@ -180,7 +189,7 @@ async def _run_lifespan_with_mcp_task_config_snapshot() -> None:
     from deerflow.config.extensions_config import ExtensionsConfig
     from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, validate_mcp_task_config_snapshot
 
-    app = FastAPI()
+    app = _gateway_test_app()
     startup_config = SimpleNamespace(
         log_level="INFO",
         memory=SimpleNamespace(
@@ -252,7 +261,7 @@ async def _run_lifespan_with_memory_flush(
     """
     from app.gateway.app import lifespan
 
-    app = FastAPI()
+    app = _gateway_test_app()
     startup_config = SimpleNamespace(
         log_level="INFO",
         memory=SimpleNamespace(
@@ -365,7 +374,7 @@ async def _run_lifespan_with_warm_return(warm_return: bool | None) -> MagicMock:
     """
     from app.gateway.app import lifespan
 
-    app = FastAPI()
+    app = _gateway_test_app()
     startup_config = SimpleNamespace(
         log_level="INFO",
         memory=SimpleNamespace(
@@ -423,7 +432,7 @@ def test_lifespan_warns_when_warm_returns_false(caplog) -> None:
 async def _run_lifespan_with_slow_retrieval_warm() -> float:
     from app.gateway.app import lifespan
 
-    app = FastAPI()
+    app = _gateway_test_app()
     startup_config = SimpleNamespace(
         log_level="INFO",
         memory=SimpleNamespace(
@@ -471,7 +480,7 @@ def test_lifespan_does_not_wait_for_retrieval_rebuild_before_serving() -> None:
 async def _run_shutdown_with_blocked_retrieval_warm() -> tuple[float, MagicMock]:
     from app.gateway.app import lifespan
 
-    app = FastAPI()
+    app = _gateway_test_app()
     startup_config = SimpleNamespace(
         log_level="INFO",
         memory=SimpleNamespace(

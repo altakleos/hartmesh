@@ -63,6 +63,9 @@ class ScheduledTaskRunRepository:
         self._sf = session_factory
         self._run_repository = run_repository or RunRepository(session_factory)
 
+    def _scope_run_statement(self, statement: Any) -> Any:
+        return self._run_repository.scope_run_statement(statement)
+
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRunRow) -> dict[str, Any]:
         data = row.to_dict()
@@ -813,11 +816,15 @@ class ScheduledTaskRunRepository:
             await session.commit()
             return stale
 
-    @staticmethod
-    async def _find_underlying_run(session: AsyncSession, row: ScheduledTaskRunRow, task: ScheduledTaskRow | None) -> RunRow | None:
+    async def _find_underlying_run(
+        self,
+        session: AsyncSession,
+        row: ScheduledTaskRunRow,
+        task: ScheduledTaskRow | None,
+    ) -> RunRow | None:
         run_ids = [candidate for candidate in (row.run_id, task.last_run_id if task is not None else None) if candidate]
         for run_id in dict.fromkeys(run_ids):
-            candidate = await session.get(RunRow, run_id)
+            candidate = (await session.execute(self._scope_run_statement(select(RunRow).where(RunRow.run_id == run_id)))).scalar_one_or_none()
             if candidate is None:
                 continue
             linked_task_run_id = (candidate.metadata_json or {}).get("scheduled_task_run_id")
@@ -826,5 +833,5 @@ class ScheduledTaskRunRepository:
             if linked_task_run_id is None or linked_task_run_id == row.id:
                 return candidate
 
-        result = await session.execute(select(RunRow).where(RunRow.metadata_json["scheduled_task_run_id"].as_string() == row.id).order_by(RunRow.created_at.desc()).limit(1))
+        result = await session.execute(self._scope_run_statement(select(RunRow)).where(RunRow.metadata_json["scheduled_task_run_id"].as_string() == row.id).order_by(RunRow.created_at.desc()).limit(1))
         return result.scalars().first()

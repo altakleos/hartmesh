@@ -128,6 +128,12 @@ def test_create_app_mounts_extension_routers_after_all_host_routes(monkeypatch):
     assert client.get("/health").json() == {
         "status": "healthy",
         "service": "deer-flow-gateway",
+        "tenant_identity": {
+            "version": 1,
+            "public_ref": "tenant-fd1e0d1ead4a5e20",
+            "digest": "fd1e0d1ead4a5e206a1ada1acb0a795d78857d325ec031014cb9bb99dff2abb9",
+            "prefix_schema_version": 1,
+        },
     }
     assert client.get("/api/extension-test/ping").status_code == 401
 
@@ -305,6 +311,7 @@ async def test_full_gateway_reports_only_hmac_authenticated_postgres_ingress_as_
     raw = stub_app_config.model_dump(mode="python")
     raw["database"]["backend"] = "postgres"
     raw["deployment"]["profile"] = "durable_production"
+    raw["deployment"]["tenant_id"] = "test-tenant"
     raw["channels"] = {"github": {"enabled": True}}
     config = AppConfig.model_validate(raw)
     monkeypatch.setattr(app_module, "get_app_config", lambda: config)
@@ -340,6 +347,7 @@ async def test_full_gateway_downgrades_unverified_postgres_ingress_and_refuses_r
     raw = stub_app_config.model_dump(mode="python")
     raw["database"]["backend"] = "postgres"
     raw["deployment"]["profile"] = "durable_production"
+    raw["deployment"]["tenant_id"] = "test-tenant"
     raw["channels"] = {"github": {"enabled": True}}
     config = AppConfig.model_validate(raw)
     monkeypatch.setattr(app_module, "get_app_config", lambda: config)

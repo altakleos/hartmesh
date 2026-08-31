@@ -43,7 +43,12 @@ class SandboxOwnershipConfig(BaseModel):
     )
     key_prefix: str = Field(
         default="deerflow:sandbox:owner",
-        description="Redis key prefix for ownership leases. Only applies to the redis ownership type.",
+        description=(
+            "Startup-only compatibility value for Redis ownership leases. In "
+            "Gateway tenant mode, an explicitly configured value (or "
+            "DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX override) must exactly match "
+            "the server-derived sandbox-ownership projection."
+        ),
     )
 
 

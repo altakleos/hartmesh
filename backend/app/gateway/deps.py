@@ -35,6 +35,7 @@ from deerflow.persistence.mcp_tasks import McpTaskRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
 
 logger = logging.getLogger(__name__)
 
@@ -438,33 +439,100 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             stack.callback(reset_notify_loop_safely)
 
         config = startup_config
+        tenant_identity = getattr(app.state, "tenant_identity", None)
+        if not isinstance(tenant_identity, TenantIdentityV1):
+            raise RuntimeError("Gateway tenant identity was not resolved during application construction")
+        tenant_reference = tenant_identity.to_persisted_reference()
         app.state.checkpoint_channel_mode = freeze_checkpoint_channel_mode(config.database.checkpoint_channel_mode)
         app.state.checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(config.database.checkpoint_delta.snapshot_frequency)
+        redis_tenant_namespace = tenant_identity.namespace(TenantSubsystem.REDIS)
+        app.state.redis_tenant_namespace = redis_tenant_namespace
 
-        app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
-
-        # Initialize persistence engine BEFORE checkpointer so that
-        # auto-create-database logic runs first (postgres backend).
-        # Own cleanup before initialization so partial startup and host
-        # cancellation cannot strand an engine created along the way.
+        # Bind durable schema identity before constructing Redis consumers.
+        # A legacy prefix is authoritative only when the explicit migration
+        # command stored it alongside this schema's tenant binding.
         stack.push_async_callback(close_engine)
         await init_engine_from_config(config.database)
+        sf = get_session_factory()
+        from deerflow.runtime.tenant_identity import LegacyRedisPrefixRecordV1
 
-        app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
+        legacy_redis_prefixes = LegacyRedisPrefixRecordV1()
+        if sf is not None:
+            from deerflow.persistence.tenant_binding import (
+                ensure_schema_tenant_binding,
+            )
+
+            app.state.tenant_schema_binding = await ensure_schema_tenant_binding(
+                sf,
+                tenant_identity,
+            )
+            legacy_redis_prefixes = app.state.tenant_schema_binding.legacy_redis_prefixes
+
+        # Sandbox providers are lazy process singletons, so bind their Redis
+        # ownership factory before the first request can construct one. This is
+        # the same immutable namespace object used by eager Gateway factories.
+        from deerflow.community.aio_sandbox.ownership.factory import (
+            bind_ownership_tenant_namespace,
+            resolve_ownership_config,
+            resolve_ownership_key_prefix,
+            unbind_ownership_tenant_namespace,
+        )
+        from deerflow.runtime.checkpoint_cache.provider import (
+            checkpoint_cache_key_prefix,
+        )
+
+        bind_ownership_tenant_namespace(
+            redis_tenant_namespace,
+            legacy_redis_prefixes=legacy_redis_prefixes,
+        )
+        stack.callback(
+            unbind_ownership_tenant_namespace,
+            redis_tenant_namespace,
+        )
+        ownership_config = resolve_ownership_config(
+            getattr(getattr(config, "sandbox", None), "ownership", None),
+            stream_bridge=getattr(config, "stream_bridge", None),
+        )
+        if ownership_config.type == "redis":
+            resolve_ownership_key_prefix(
+                ownership_config,
+                tenant_namespace=redis_tenant_namespace,
+                legacy_redis_prefixes=legacy_redis_prefixes,
+            )
+        if getattr(config.database, "checkpoint_cache", None) is not None:
+            checkpoint_cache_key_prefix(
+                config,
+                redis_tenant_namespace,
+                legacy_redis_prefixes,
+            )
+        app.state.stream_bridge = await stack.enter_async_context(
+            make_stream_bridge(
+                config,
+                tenant_namespace=redis_tenant_namespace,
+                legacy_redis_prefixes=legacy_redis_prefixes,
+            )
+        )
+
+        app.state.checkpointer = await stack.enter_async_context(
+            make_checkpointer(
+                config,
+                tenant_namespace=redis_tenant_namespace,
+                legacy_redis_prefixes=legacy_redis_prefixes,
+            )
+        )
         app.state.store = await stack.enter_async_context(make_store(config))
 
         # Initialize repositories — one get_session_factory() call for all.
-        sf = get_session_factory()
         if sf is not None:
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.run import RunRepository
 
-            app.state.run_store = RunRepository(sf)
+            app.state.run_store = RunRepository(sf, tenant=tenant_reference)
             app.state.feedback_repo = FeedbackRepository(sf)
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
-            app.state.run_store = MemoryRunStore()
+            app.state.run_store = MemoryRunStore(tenant=tenant_reference)
             app.state.feedback_repo = None
         await app.state.run_store.initialize_lifecycle()
         deployment_reporter = getattr(app.state, "deployment_reporter", None)
@@ -537,6 +605,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.run_event_store = make_run_event_store(
             run_events_config,
             run_store=app.state.run_store,
+            tenant=tenant_reference,
         )
 
         # RunManager with store backing for persistence
@@ -565,6 +634,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             run_ownership_config=run_ownership_config,
             event_store=app.state.run_event_store,
             on_orphans_recovered=terminalize_recovered_runs,
+            tenant=tenant_reference,
         )
         # Startup recovery: mark inflight runs whose lease has expired as error.
         # In single-worker mode (SQLite / backend=memory), no run has a lease, so
@@ -772,6 +842,10 @@ def get_run_context(request: Request) -> RunContext:
             ),
         )
 
+    tenant_identity = getattr(request.app.state, "tenant_identity", None)
+    if not isinstance(tenant_identity, TenantIdentityV1):
+        raise RuntimeError("Gateway tenant identity was not resolved during application construction")
+
     return RunContext(
         checkpointer=get_checkpointer(request),
         store=get_store(request),
@@ -783,6 +857,7 @@ def get_run_context(request: Request) -> RunContext:
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=app_config,
         authorization_provider=authorization_provider,
+        tenant=tenant_identity.to_persisted_reference(),
         extensions=getattr(request.app.state, "extensions", None),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
         constraint_clock=getattr(

@@ -668,6 +668,7 @@ def test_task_tool_forwards_trusted_run_context_as_the_only_context_seam(monkeyp
     )
     trusted = TrustedRunContextV1(
         identity=InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="human", subject_id="owner-1", role="member")),
+        tenant=__import__("deerflow.runtime.tenant_identity", fromlist=["TenantIdentityV1"]).TenantIdentityV1.from_canonical_id("local").to_persisted_reference(),
         origin=SealedOriginV1(source_kind="http", digest="a" * 64),
         thread_id="thread-1",
         external_key_reference="raw:request-1",
