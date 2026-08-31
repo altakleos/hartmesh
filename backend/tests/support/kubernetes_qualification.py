@@ -46,6 +46,7 @@ from deerflow.runtime.tenant_identity import (
     TenantSubsystem,
     redis_component_key_prefix,
 )
+from deerflow.sandbox.accepted_material import AcceptedExecutionEvidenceV1
 
 _SAFE_CONTEXT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,252}\Z")
 _SAFE_NAMESPACE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?\Z")
@@ -1959,14 +1960,28 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
             raise QualificationCommandError(
                 "accepted-skill materialization digests are invalid",
             )
-        execution_evidence = self._run_execution_evidence(run_id)
+        try:
+            execution_evidence = AcceptedExecutionEvidenceV1.from_persisted(
+                self._run_execution_evidence(run_id),
+            )
+            ownership_epoch = int(
+                annotations["hartmesh.io/accepted-skill-generation"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise QualificationCommandError(
+                "accepted-skill ledger evidence is malformed",
+            ) from exc
         if (
-            execution_evidence.get("version") != 2
-            or execution_evidence.get("snapshot_id") != snapshot_id
-            or execution_evidence.get("pod_uid") != pod_uid
-            or execution_evidence.get("lease_uid") != lease_uid
-            or execution_evidence.get("materialization_evidence_digest") != materialization_digest
-            or execution_evidence.get("verifier_receipt_digest") != verifier_receipt_digest
+            execution_evidence.run_id != run_id
+            or execution_evidence.provider_kind != "aio_kubernetes"
+            or execution_evidence.provider_instance_ref != sandbox_id
+            or execution_evidence.ownership_epoch != ownership_epoch
+            or execution_evidence.runtime_image_digest != self.config.sandbox_image_digest.removeprefix("sha256:")
+            or execution_evidence.skill_snapshot_digest != snapshot_id
+            or execution_evidence.materialization_digest != materialization_digest
+            or execution_evidence.verifier_image_digest != self.config.verifier_image_digest.removeprefix("sha256:")
+            or execution_evidence.verifier_contract_version != "rwx_verified_copy_v2"
+            or execution_evidence.qualification_scope != ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2
         ):
             raise QualificationCommandError(
                 "accepted-skill ledger evidence does not match the live attempt",

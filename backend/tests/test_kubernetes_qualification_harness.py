@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from deerflow_extension_api import TenantReferenceV1
 from support.kubernetes_qualification import (
     KUBERNETES_OPT_IN_MESSAGE,
     KubernetesAcceptedSkillQualificationConfigV2,
@@ -40,6 +41,7 @@ from deerflow.qualification_evidence import (
     QualificationEvidenceExpectation,
     verify_qualification_evidence,
 )
+from deerflow.sandbox.accepted_material import AcceptedExecutionEvidenceV1
 
 
 def _accepted_skill_environment(tmp_path: Path) -> dict[str, str]:
@@ -279,6 +281,7 @@ def test_accepted_skill_attempt_binds_live_receipt_images_ledger_and_bytes(
             "annotations": {
                 "hartmesh.io/accepted-skill-run": "run-1",
                 "hartmesh.io/accepted-attempt-state": "materialized",
+                "hartmesh.io/accepted-skill-generation": "4",
                 "hartmesh.io/accepted-materialization-digest": materialization,
                 "hartmesh.io/accepted-verifier-receipt-digest": verifier_receipt,
             },
@@ -313,17 +316,30 @@ def test_accepted_skill_attempt_binds_live_receipt_images_ledger_and_bytes(
         raise AssertionError(arguments)
 
     monkeypatch.setattr(runner, "_kubectl", kubectl)
+    neutral_evidence = AcceptedExecutionEvidenceV1.build(
+        run_id="run-1",
+        attempt_id="attempt-ref",
+        tenant=TenantReferenceV1(
+            version=1,
+            public_ref="tenant-" + ("d" * 16),
+            digest="d" * 64,
+        ),
+        provider_kind="aio_kubernetes",
+        provider_instance_ref="attempt",
+        ownership_epoch=4,
+        runtime_image_digest="c" * 64,
+        skill_snapshot_digest=snapshot,
+        skill_scope_digest="4" * 64,
+        materialization_digest=materialization,
+        verifier_image_digest="b" * 64,
+        verifier_contract_version="rwx_verified_copy_v2",
+        read_only_proof_digest="5" * 64,
+        qualification_scope=ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+    )
     monkeypatch.setattr(
         runner,
         "_run_execution_evidence",
-        lambda _run_id: {
-            "version": 2,
-            "snapshot_id": snapshot,
-            "pod_uid": "pod-uid",
-            "lease_uid": "lease-uid",
-            "materialization_evidence_digest": materialization,
-            "verifier_receipt_digest": verifier_receipt,
-        },
+        lambda _run_id: neutral_evidence.to_persisted(),
     )
 
     attempt = runner._accepted_attempt(

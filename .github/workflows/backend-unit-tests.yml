@@ -94,7 +94,10 @@ jobs:
 
       - name: Install backend dependencies
         working-directory: backend
-        run: uv sync --group dev --extra postgres
+        # The Phase 0 feasibility probe byte-verifies the exact optional SDK.
+        # Keep it out of the documented default install job above, but present
+        # wherever the executable probe runs as part of the full suite.
+        run: uv sync --group dev --extra postgres --extra opensandbox
 
       - name: Qualify PostgreSQL invocation persistence
         working-directory: backend

@@ -22,6 +22,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 try:
@@ -43,6 +44,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, join_host_path
 from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATION_ID
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_LOCKS_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.accepted_material import AcceptedMaterializerSelection
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
     AcceptedSkillExecutionEvidence,
@@ -345,6 +347,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 sandbox_config,
                 "accepted_skill_projection_profile",
                 "disabled",
+            ),
+            "accepted_material_lease_duration_seconds": getattr(
+                sandbox_config,
+                "accepted_material_lease_duration_seconds",
+                300,
             ),
         }
 
@@ -2044,6 +2051,39 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return AcceptedSkillMaterialCapability.EMPTY_ONLY
         return AcceptedSkillMaterialCapability.IMMUTABLE_READ_ONLY
 
+    def provider_neutral_accepted_materialization_enabled(self) -> bool:
+        """Return whether this instance is the qualified remote AIO v2 adapter."""
+
+        return self._config.get("accepted_skill_projection_profile") == "rwx_verified_copy_v2" and isinstance(self._backend, RemoteSandboxBackend)
+
+    async def accepted_materializer_selection(
+        self,
+        *,
+        binding: AcceptedSkillSandboxBindingV1,
+        thread_id: str,
+        user_id: str,
+    ) -> AcceptedMaterializerSelection | None:
+        """Construct the qualified neutral adapter without exposing AIO to callers."""
+
+        if not self.provider_neutral_accepted_materialization_enabled():
+            return None
+        from .accepted_materializer import AioAcceptedMaterializer
+
+        runtime_image_digest = await self.accepted_material_runtime_image_digest_async()
+        lease_duration = timedelta(
+            seconds=self._config["accepted_material_lease_duration_seconds"],
+        )
+        return AcceptedMaterializerSelection(
+            materializer=AioAcceptedMaterializer(
+                provider=self,
+                binding_resolver=lambda _request: binding,
+                scope_resolver=lambda _request: (thread_id, user_id),
+                lease_duration=lease_duration,
+            ),
+            runtime_image_digest=runtime_image_digest,
+            lease_duration=lease_duration,
+        )
+
     def accepted_skill_execution_evidence(
         self,
         sandbox_id: str,
@@ -2119,6 +2159,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if info is None or not isinstance(self._backend, RemoteSandboxBackend):
             return False
         return await asyncio.to_thread(self._backend.renew_accepted_attempt, info)
+
+    async def accepted_material_runtime_image_digest_async(self) -> str:
+        """Read the pinned runtime digest from authenticated provisioner preflight."""
+
+        if self._config.get("accepted_skill_projection_profile") != "rwx_verified_copy_v2" or not isinstance(self._backend, RemoteSandboxBackend):
+            raise AcceptedSkillSandboxBindingError(
+                "accepted_skill_snapshot_immutability_unsupported",
+            )
+        return await asyncio.to_thread(
+            self._backend.accepted_material_runtime_image_digest,
+        )
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment without blocking the event loop.

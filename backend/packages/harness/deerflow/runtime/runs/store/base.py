@@ -246,6 +246,18 @@ def build_lifecycle_payload(transition: LifecycleTransition) -> dict[str, Any]:
         if transition.lifecycle_type is not LifecycleType.started:
             raise ValueError("execution evidence is supported only for started")
         evidence = transition.execution_evidence_json
+        neutral_evidence_digest: str | None = None
+        if isinstance(evidence, dict):
+            from deerflow.sandbox.accepted_material import (
+                AcceptedExecutionEvidenceV1,
+            )
+
+            try:
+                neutral_evidence_digest = AcceptedExecutionEvidenceV1.from_persisted(
+                    evidence,
+                ).digest
+            except (TypeError, ValueError):
+                pass
         v1_fields = {
             "version",
             "profile",
@@ -270,7 +282,13 @@ def build_lifecycle_payload(transition: LifecycleTransition) -> dict[str, Any]:
             "sandbox_image_digest",
             "accepted_skill_runtime_image_digest",
         }
-        if not isinstance(evidence, dict) or (evidence.get("version") == 1 and set(evidence) != v1_fields or evidence.get("version") == 2 and set(evidence) != v2_fields or evidence.get("version") not in {1, 2}):
+        evidence_fields = frozenset(evidence) if isinstance(evidence, dict) else frozenset()
+        allowed_fields = {
+            frozenset(v1_fields),
+            frozenset(v2_fields),
+        }
+        legacy_evidence = evidence_fields in allowed_fields and type(evidence.get("version")) is int and evidence.get("version") in {1, 2}
+        if not isinstance(evidence, dict) or (neutral_evidence_digest is None and not legacy_evidence):
             raise ValueError("execution evidence has invalid fields")
         encoded_evidence = json.dumps(
             evidence,
@@ -279,7 +297,7 @@ def build_lifecycle_payload(transition: LifecycleTransition) -> dict[str, Any]:
         ).encode("utf-8")
         if len(encoded_evidence) > 4096:
             raise ValueError("execution evidence exceeds 4096 UTF-8 bytes")
-        evidence_digest = hashlib.sha256(encoded_evidence).hexdigest()
+        evidence_digest = neutral_evidence_digest or hashlib.sha256(encoded_evidence).hexdigest()
         if evidence_digest != transition.execution_evidence_digest:
             raise ValueError("execution evidence digest mismatch")
         payload["execution_evidence_digest"] = evidence_digest

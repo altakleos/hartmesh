@@ -30,6 +30,24 @@ guessable for a small identifier space. Redis principals should be restricted
 with both key/stream and pub/sub channel ACL patterns derived from the same
 identity. See [the deployment and migration guide](backend/docs/TENANT_IDENTITY.md).
 
+## External Sandbox Material Trust
+
+An external sandbox service is not an authority for accepted durable material.
+Production evidence must bind the tenant, run, attempt, accepted snapshot and
+scope, resolved runtime and verifier image digests, materialization proof,
+read-only proof, remote identity, and ownership epoch before model work. A
+requested image tag or digest echoed by a provider is not resolved-image proof.
+Gateway memory, owner-controlled permission bits, and an ordinary command run as
+the final sandbox user are not immutability boundaries.
+
+OpenSandbox remains `empty_only` for accepted material because its pinned
+server/SDK contract cannot provide atomic process-recovery ownership or resolved
+image readback; candidate trusted-setup surfaces remain live-unqualified. Its SDK adapter replaces raw
+provider exceptions with bounded codes and correlation IDs; API keys, headers,
+uploaded bytes, and provider response bodies must never enter evidence, labels,
+logs, or support bundles. See the
+[feasibility decision](backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md).
+
 ## Durable MCP Task Lineage
 
 Durable MCP task lineage contains only server-owned correlation evidence: the

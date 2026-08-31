@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import secrets
 import threading
 from pathlib import Path
@@ -38,6 +39,7 @@ from .sandbox_info import (
 )
 
 _ACCEPTED_SKILL_PROFILE = "rwx_verified_copy_v2"
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 
 logger = logging.getLogger(__name__)
 
@@ -219,9 +221,7 @@ class RemoteSandboxBackend(SandboxBackend):
             raise RuntimeError("provisioner_service_account_token_invalid")
         return {"Authorization": f"Bearer {token}"}
 
-    def accepted_skill_projection_ready(self) -> bool:
-        """Authenticate and require exact provisioner profile advertisement."""
-
+    def _accepted_skill_projection_capabilities(self) -> dict[str, object]:
         try:
             readiness = requests.get(
                 f"{self._provisioner_url}/ready",
@@ -230,7 +230,9 @@ class RemoteSandboxBackend(SandboxBackend):
             )
             readiness.raise_for_status()
             if readiness.json() != {"status": "ready"}:
-                return False
+                raise RuntimeError(
+                    "accepted_skill_projection_preflight_unavailable",
+                )
             response = requests.get(
                 f"{self._provisioner_url}/api/capabilities",
                 headers=self._auth_headers(),
@@ -238,11 +240,54 @@ class RemoteSandboxBackend(SandboxBackend):
             )
             response.raise_for_status()
             payload = response.json()
-        except (requests.RequestException, RuntimeError, ValueError):
-            return False
-        return isinstance(payload, dict) and payload.get(
+        except (requests.RequestException, RuntimeError, ValueError) as exc:
+            raise RuntimeError("accepted_skill_projection_preflight_unavailable") from exc
+        if not isinstance(payload, dict) or payload.get(
             "accepted_skill_projection_profiles",
-        ) == [_ACCEPTED_SKILL_PROFILE]
+        ) != [_ACCEPTED_SKILL_PROFILE]:
+            raise RuntimeError("accepted_skill_projection_preflight_unavailable")
+        return payload
+
+    def accepted_skill_projection_ready(self) -> bool:
+        """Authenticate and require exact provisioner profile advertisement."""
+
+        try:
+            self._runtime_image_digest_from_capabilities(
+                self._accepted_skill_projection_capabilities(),
+            )
+        except RuntimeError:
+            return False
+        return True
+
+    @staticmethod
+    def _runtime_image_digest_from_capabilities(
+        payload: dict[str, object],
+    ) -> str:
+        accepted = payload.get("accepted_skill_projection")
+        if not isinstance(accepted, dict) or set(accepted) != {
+            "profile",
+            "sandbox_image_digest",
+            "accepted_skill_runtime_image_digest",
+        }:
+            raise RuntimeError("accepted_skill_projection_preflight_unavailable")
+        sandbox_digest = accepted.get("sandbox_image_digest")
+        verifier_digest = accepted.get("accepted_skill_runtime_image_digest")
+        if (
+            accepted.get("profile") != _ACCEPTED_SKILL_PROFILE
+            or not isinstance(sandbox_digest, str)
+            or _SHA256_PATTERN.fullmatch(sandbox_digest) is None
+            or not isinstance(verifier_digest, str)
+            or _SHA256_PATTERN.fullmatch(verifier_digest) is None
+        ):
+            raise RuntimeError("accepted_skill_projection_preflight_unavailable")
+        return sandbox_digest
+
+    def accepted_material_runtime_image_digest(self) -> str:
+        """Return the exact sandbox image digest advertised by qualified preflight."""
+
+        return self._runtime_image_digest_from_capabilities(
+            self._accepted_skill_projection_capabilities(),
+        )
 
     # ── SandboxBackend interface ──────────────────────────────────────────
 

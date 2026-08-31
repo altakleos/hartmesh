@@ -2310,7 +2310,8 @@ class RunManager:
                 evidence_json = None
                 evidence_digest = None
                 if execution_evidence is not None:
-                    from deerflow.sandbox.sandbox_provider import (
+                    from deerflow.sandbox.accepted_material import (
+                        AcceptedExecutionEvidenceV1,
                         AcceptedSkillExecutionEvidenceV1,
                         AcceptedSkillExecutionEvidenceV2,
                     )
@@ -2318,6 +2319,7 @@ class RunManager:
                     if not isinstance(
                         execution_evidence,
                         (
+                            AcceptedExecutionEvidenceV1,
                             AcceptedSkillExecutionEvidenceV1,
                             AcceptedSkillExecutionEvidenceV2,
                         ),

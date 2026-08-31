@@ -133,6 +133,17 @@ offline command is in the [Helm deployment guide](deploy/helm/deer-flow/README.m
 The verifier performs no network fetch and does not validate signatures. Its current proof is
 the canonical artifact SHA-256 plus exact subject and complete passing-scenario match.
 
+OpenSandbox is not an accepted-material release target. Its committed Phase 0
+artifact is a deterministic `no_go`, not a qualification artifact: server
+0.1.14 / SDK 0.1.15 lack atomic ownership claims and independently resolved image
+digest readback; candidate trusted-setup surfaces remain live-unqualified. A release must keep
+`accepted_materialization_profile: disabled`, must not publish the scope
+`durable_one_replica_opensandbox_immutable_skills_v1`, and must not reinterpret
+the SDK-surface artifact, a skipped live test, or an operator reference as a
+pass. See
+[`OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md`](backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md)
+and upstream [issue #1690](https://github.com/opensandbox-group/OpenSandbox/issues/1690).
+
 ## What CI publishes on a `v*` tag
 
 - `.github/workflows/container.yaml` — builds and pushes `backend`,

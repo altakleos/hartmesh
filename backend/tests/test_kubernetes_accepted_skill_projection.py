@@ -548,6 +548,11 @@ def test_remote_preflight_uses_and_rereads_projected_service_account_token(
                 "accepted_skill_projection_profiles": [
                     "rwx_verified_copy_v2",
                 ],
+                "accepted_skill_projection": {
+                    "profile": "rwx_verified_copy_v2",
+                    "sandbox_image_digest": "a" * 64,
+                    "accepted_skill_runtime_image_digest": "b" * 64,
+                },
             },
         )
 
@@ -558,14 +563,36 @@ def test_remote_preflight_uses_and_rereads_projected_service_account_token(
     )
 
     assert backend.accepted_skill_projection_ready() is True
+    assert backend.accepted_material_runtime_image_digest() == "a" * 64
     (tmp_path / "token").write_text("token-two", encoding="utf-8")
     assert backend.accepted_skill_projection_ready() is True
     assert observed_headers == [
         {"Authorization": "Bearer token-one"},
         {"Authorization": "Bearer token-one"},
+        {"Authorization": "Bearer token-one"},
+        {"Authorization": "Bearer token-one"},
         {"Authorization": "Bearer token-two"},
         {"Authorization": "Bearer token-two"},
     ]
+
+
+def test_remote_preflight_treats_unexpected_readiness_payload_as_unready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"status": "starting"}
+
+    monkeypatch.setattr("requests.get", lambda *_args, **_kwargs: Response())
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002",
+        api_key="test-key",
+    )
+
+    assert backend.accepted_skill_projection_ready() is False
 
 
 def test_remote_empty_accepted_set_still_requests_an_isolated_pod(

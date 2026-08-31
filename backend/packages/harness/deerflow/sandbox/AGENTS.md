@@ -6,6 +6,30 @@ tree, but it must not expose mutable live skill roots. Remote materialization is
 fenced and verified before the run enters `started`; unsupported nonempty
 accepted material fails before graph/model work.
 
+**Accepted-material deep module**: `accepted_material.py` owns the canonical
+provider-neutral V1 file manifest, request, lease, execution evidence,
+capability, and `AcceptedMaterializer` protocol. Provider SDK objects,
+credentials, and opaque renewal handles never enter persisted evidence. A lease
+is valid only for its exact provider instance and monotonically fenced ownership
+epoch; stale workers must not validate, renew, execute, or destroy a newer
+epoch. Duplicate requests are idempotent only when their canonical digest is
+identical. The in-memory adapter and OpenSandbox stateful control-plane fake are
+contract-test tools, never production proof.
+
+Adapters are opt-in rather than methods every ordinary `SandboxProvider` must
+fake. `resolve_accepted_materializer` discovers only the optional provider
+selection hook and returns the neutral port plus its pinned runtime/lease
+inputs; the worker never imports a concrete adapter. No adapter means
+`empty_only`. `AioAcceptedMaterializer` delegates to the
+existing `rwx_verified_copy_v2` acquisition/revalidation/renewal tuple and keeps
+its qualification scope unchanged. The OpenSandbox SDK boundary offloads sync
+calls, validates bounded responses, and maps failures to secret-free codes, but
+its accepted adapter is intentionally unavailable because SDK 0.1.15 has no
+atomic metadata claim and cannot report a separately resolved image digest;
+candidate trusted-setup surfaces remain live-unqualified. Never replace those controls with process-local locks,
+ordinary owner-controlled `chmod`, or echoed requested-image metadata. See
+`backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md`.
+
 **Interface**: Abstract `Sandbox` with `execute_command(command, env=None)`, `read_file`, `write_file`, `list_dir`, `glob`, and `grep`. `grep` accepts either one text file or a directory tree. The optional `env` injects per-call environment variables (request-scoped secrets — see Request-Scoped Secrets below); `LocalSandbox` merges it via `subprocess.run(env=...)` and `AioSandbox` routes env-bearing commands through the `bash.exec(env=...)` API on a fresh session.
 **Provider Pattern**: `SandboxProvider` with `acquire`, `acquire_async`, `get`, `release` lifecycle. Async agent/tool paths call async sandbox lifecycle hooks so Docker sandbox creation, discovery, cross-process locking, readiness polling, and release stay off the event loop.
 **Authorization gate** (`sandbox:execute`, RFC #4063 Phase 3): every sandbox acquisition passes through `authorize_sandbox_execution` (`deerflow/authz/sandbox_authz.py`) - a binary `authorize(principal, "sandbox", "execute", target="*")` check before `provider.acquire`. The gate lives at the single acquisition entry point (`ensure_sandbox_initialized` / `_acquire_sandbox_async` in `tools.py`, and `SandboxMiddleware.before_agent` / `abefore_agent`), so it cannot be bypassed regardless of which sandbox-dependent tool triggers it; the reuse path (sandbox already in state) skips the re-check. Deny raises `SandboxAuthorizationError` (`sandbox/exceptions.py`), which propagates out of tool execution as a friendly error `ToolMessage` ("sandbox execution is not permitted for your role") - the eager path catches it and skips acquisition instead, deferring the deny to the first sandbox-touching tool call so both paths share the same semantics. Provider errors (both `authorize()` and provider resolution) follow `authorization.fail_closed` / `fail_open`; no readable `config.yaml` or `authorization.enabled: false` makes the gate a no-op (`safe_app_config` tolerates missing config). Gateway auxiliary sync paths (uploads/artifacts routers) call `try_acquire_sandbox_for_request` (`app/gateway/authz.py`), which gates via `authorize_sandbox_for_request` and skips the sync on deny - the upload/artifact edit itself still succeeds. Tests: `tests/test_sandbox_authorization.py`.

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from deerflow.config import get_app_config
+from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -270,6 +271,18 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 self._destroy_quietly(sandbox, context="created during shutdown")
                 raise RuntimeError("OpenSandboxProvider shut down during acquire")
             return sandbox_id
+
+    def acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
+        """Reject nonempty durable material before any remote is created.
+
+        OpenSandbox 0.1.15 metadata updates have no compare-and-set primitive,
+        so a process-recoverable ownership lease cannot be established.
+        """
+
+        del thread_id, user_id
+        raise AcceptedSkillSandboxBindingError(
+            "opensandbox_immutable_material_unsupported",
+        )
 
     def _create_sandbox(self, sandbox_id: str, *, thread_id: str | None, user_id: str | None) -> OpenSandboxSandbox:
         replicas, total = self._replica_count()

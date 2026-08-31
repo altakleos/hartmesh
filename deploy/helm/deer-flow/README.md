@@ -229,7 +229,7 @@ they resolve from the selected Secret):
 
 ```yaml
 config: |
-  config_version: 44
+  config_version: 45
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -702,6 +702,16 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   receipts are readable compatibility records but also remain empty-skill-only. Fake-Kubernetes
   and rendered-chart tests prove the contract and drift fences, not live cross-node CNI/RWX;
   exact-artifact Kubernetes qualification remains a separate opt-in release gate.
+
+- **OpenSandbox accepted material remains unavailable.** The chart does not
+  expose `durable_one_replica_opensandbox_immutable_skills_v1` or render a way
+  around Gateway startup validation. OpenSandbox server 0.1.14 / SDK 0.1.15
+  lacks the atomic ownership and resolved-image readback required by the profile;
+  candidate trusted-setup surfaces remain live-unqualified. An ordinary OpenSandbox provider config
+  is therefore empty-skill-only; a non-disabled accepted-material profile is a
+  startup error even when its requested image uses an OCI digest. SDK-surface
+  evidence and operator assertions are not live qualification. See the
+  [Phase 0 decision](../../../backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md).
 
 ## Upgrading existing values
 

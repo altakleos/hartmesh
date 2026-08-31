@@ -24,6 +24,10 @@ import pytest
 
 from deerflow.community.opensandbox.provider import OpenSandboxProvider, _import_sdk
 from deerflow.community.opensandbox.sandbox import OpenSandboxSandbox
+from deerflow.sandbox.accepted_material import (
+    AcceptedMaterialCapability,
+    AcceptedSkillSandboxBindingError,
+)
 
 
 @dataclass
@@ -234,6 +238,23 @@ def _install(monkeypatch: pytest.MonkeyPatch, *, sdk: _FakeSandboxClass | None =
         lambda: (fake_sdk, _FakeConnectionConfig, _FakeRunCommandOpts),
     )
     return OpenSandboxProvider(), fake_sdk
+
+
+def test_accepted_nonempty_material_is_explicitly_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, sdk = _install(monkeypatch)
+
+    assert provider.accepted_skill_material_capability("not-created") is AcceptedMaterialCapability.EMPTY_ONLY
+    with pytest.raises(
+        AcceptedSkillSandboxBindingError,
+        match="opensandbox_immutable_material_unsupported",
+    ) as exc_info:
+        provider.acquire_accepted_skills("thread-1", user_id="user-1")
+
+    assert exc_info.value.code == "opensandbox_immutable_material_unsupported"
+    assert sdk.create_calls == []
+    provider.shutdown()
 
 
 def _box(

@@ -349,6 +349,22 @@ async def test_auth_middleware_accepts_only_bound_gateway_service_account_token(
         "PROVISIONER_GATEWAY_SERVICE_ACCOUNT",
         "gateway",
     )
+    monkeypatch.setattr(
+        provisioner_module,
+        "ACCEPTED_SKILL_PROJECTION_PROFILE",
+        "rwx_verified_copy_v2",
+    )
+    monkeypatch.setattr(provisioner_module, "USERDATA_PVC_NAME", "userdata")
+    monkeypatch.setattr(
+        provisioner_module,
+        "SANDBOX_IMAGE",
+        "registry.example/sandbox@sha256:" + "a" * 64,
+    )
+    monkeypatch.setattr(
+        provisioner_module,
+        "ACCEPTED_SKILL_RUNTIME_IMAGE",
+        "registry.example/verifier@sha256:" + "b" * 64,
+    )
     reviewed: list[object] = []
 
     class Authentication:
@@ -381,6 +397,11 @@ async def test_auth_middleware_accepts_only_bound_gateway_service_account_token(
             headers={"Authorization": "Bearer projected-token"},
         )
         assert response.status_code == 200
+        assert response.json()["accepted_skill_projection"] == {
+            "profile": "rwx_verified_copy_v2",
+            "sandbox_image_digest": "a" * 64,
+            "accepted_skill_runtime_image_digest": "b" * 64,
+        }
         response = await client.get(
             "/api/capabilities",
             headers={"Authorization": "Bearer "},
