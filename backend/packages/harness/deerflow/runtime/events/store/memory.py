@@ -15,11 +15,12 @@ from deerflow.runtime.tool_evidence import (
     TOOL_RECEIPT_CATEGORY,
     TOOL_RECEIPT_STARTED_EVENT,
     DurableToolReceiptV1,
-    ToolEvidenceRuntimeBinding,
     ToolReceiptIntegrityError,
     canonical_digest,
+    parse_tool_receipt_event,
     receipt_event_metadata,
     require_started_transition,
+    require_tool_attempt_binding_fence,
     reserve_attempt_from_events,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
@@ -164,17 +165,25 @@ class MemoryRunEventStore(RunEventStore):
         if existing is not None:
             if canonical_digest(existing["content"]) != canonical_digest(detached):
                 raise ToolReceiptIntegrityError("receipt_idempotency_conflict")
+            parse_tool_receipt_event(existing)
             return AppendOutcome(event=copy.deepcopy(existing), created=False)
         receipt = DurableToolReceiptV1.from_event_body(detached, occurred_at=datetime.now(UTC))
         if receipt.phase != "started":
-            require_started_transition(self._events_by_run.get(run["thread_id"], {}).get(run_id, []), receipt)
+            require_started_transition(
+                self._events_by_run.get(run["thread_id"], {}).get(run_id, []),
+                receipt,
+            )
         record = self._put_one(
             thread_id=run["thread_id"],
             run_id=run_id,
             event_type=event_type,
             category=TOOL_RECEIPT_CATEGORY,
             content=detached,
-            metadata=receipt_event_metadata(receipt),
+            metadata=receipt_event_metadata(
+                receipt,
+                writer_owner_id=owner_id,
+                writer_lease_epoch=lease_epoch,
+            ),
         )
         record["idempotency_key"] = idempotency_key
         self._idempotency[key] = record
@@ -188,11 +197,17 @@ class MemoryRunEventStore(RunEventStore):
         tool_call_id,
         tool_name,
         request_projection_digest,
+        observed_node_attempt,
+        expected_attempt,
         owner_id,
         lease_epoch,
     ) -> AppendOutcome:
-        if not isinstance(binding, ToolEvidenceRuntimeBinding) or binding.run_id != run_id:
-            raise ToolReceiptIntegrityError("receipt_attempt_binding_invalid")
+        binding = require_tool_attempt_binding_fence(
+            binding,
+            run_id=run_id,
+            owner_id=owner_id,
+            lease_epoch=lease_epoch,
+        )
         run = await resolve_owned_run(
             self._run_store,
             run_id,
@@ -200,15 +215,21 @@ class MemoryRunEventStore(RunEventStore):
             lease_epoch=lease_epoch,
         )
         events = self._events_by_run.get(run["thread_id"], {}).get(run_id, [])
-        receipt, existing = reserve_attempt_from_events(
+        receipt, existing, terminal = reserve_attempt_from_events(
             events,
             binding=binding,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             request_projection_digest=request_projection_digest,
+            observed_node_attempt=observed_node_attempt,
+            expected_attempt=expected_attempt,
         )
         if existing is not None:
-            return AppendOutcome(event=copy.deepcopy(dict(existing)), created=False)
+            return AppendOutcome(
+                event=copy.deepcopy(dict(existing)),
+                created=False,
+                terminal_event=(copy.deepcopy(dict(terminal)) if terminal is not None else None),
+            )
         body = validate_idempotent_append(
             event_type=TOOL_RECEIPT_STARTED_EVENT,
             idempotency_key=receipt.idempotency_key,
@@ -220,7 +241,11 @@ class MemoryRunEventStore(RunEventStore):
             event_type=TOOL_RECEIPT_STARTED_EVENT,
             category=TOOL_RECEIPT_CATEGORY,
             content=body,
-            metadata=receipt_event_metadata(receipt),
+            metadata=receipt_event_metadata(
+                receipt,
+                writer_owner_id=owner_id,
+                writer_lease_epoch=lease_epoch,
+            ),
         )
         record["idempotency_key"] = receipt.idempotency_key
         self._idempotency[(run_id, TOOL_RECEIPT_STARTED_EVENT, receipt.idempotency_key)] = record

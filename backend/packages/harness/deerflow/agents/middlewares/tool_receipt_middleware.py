@@ -30,18 +30,21 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.runtime import ExecutionInfo
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages, is_genuine_user_message
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, extract_tool_receipts, make_tool_receipt, render_tool_receipts
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
-from deerflow.authz.outcome import pop_policy_outcomes
+from deerflow.authz.outcome import peek_policy_outcomes, pop_policy_outcomes
 from deerflow.runtime.tool_evidence import (
+    ToolAttemptReservation,
+    ToolDispatchObservationV1,
     ToolEvidenceError,
-    ToolReceiptOwnershipLost,
     build_request_projection,
     digest_request_projection,
     digest_result_projection,
+    observe_tool_dispatch,
     resolve_tool_evidence_context,
 )
 
@@ -69,6 +72,12 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
             raise ValueError(f"Unknown render_mode: {render_mode}")
         self._render_mode = render_mode
         self._display_enabled = display_enabled
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {
+            "render_mode": self._render_mode,
+            "display_enabled": self._display_enabled,
+        }
 
     def _stamp_message(self, message: ToolMessage, request: ToolCallRequest) -> None:
         try:
@@ -132,6 +141,7 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
             return self._stamp(result, request) if self._display_enabled else result
 
         tool_call_id = str(request.tool_call.get("id") or "")
+        dispatch = self._dispatch_observation(request)
         async with binding.serialize_dispatch(tool_call_id):
             tool_name = str(request.tool_call.get("name") or "")
             arguments = request.tool_call.get("args")
@@ -145,12 +155,31 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
             # Reservation and append are one fenced store operation. This await
             # is the side-effect boundary: no inner authorization, provider,
             # guardrail, or tool code runs before the start is durable.
-            started = await sink.reserve_started(
+            reservation = await sink.reserve_started(
                 binding=binding,
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 request_projection_digest=digest_request_projection(projection),
+                dispatch=dispatch,
             )
+            if not isinstance(reservation, ToolAttemptReservation):
+                raise ToolEvidenceError("tool_attempt_reservation_invalid")
+            started = reservation.started
+            replayed_outcome = reservation.replayed_outcome
+            if replayed_outcome is not None:
+                result = ToolMessage(
+                    content=(f"This tool call already reached durable status '{replayed_outcome.phase}' before recovery, but its prior result is unavailable. The tool was not executed again."),
+                    tool_call_id=tool_call_id,
+                    name=tool_name,
+                    status="error",
+                    additional_kwargs={
+                        TOOL_META_KEY: {
+                            "status": "error",
+                            "error_type": "internal_error",
+                        }
+                    },
+                )
+                return self._stamp(result, request) if self._display_enabled else result
             try:
                 result = await handler(request)
             except asyncio.CancelledError:
@@ -165,10 +194,12 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                             **policy,
                         )
                     )
-                except ToolReceiptOwnershipLost:
-                    # A stale worker is forbidden to append, but ownership loss
-                    # must not replace the host's cancellation signal.
+                except asyncio.CancelledError:
                     pass
+                except Exception:
+                    # Cancellation is the caller's primary control signal. A
+                    # failed best-effort terminal write must never replace it.
+                    logger.warning("Failed to record durable tool cancellation outcome")
                 raise
             except Exception:
                 policy = self._policy_references(context, tool_call_id)
@@ -212,6 +243,21 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
         return context if isinstance(context, dict) else {}
 
     @staticmethod
+    def _dispatch_observation(
+        request: ToolCallRequest,
+    ) -> ToolDispatchObservationV1:
+        runtime = getattr(request, "runtime", None)
+        execution_info = getattr(runtime, "execution_info", None)
+        if not isinstance(execution_info, ExecutionInfo):
+            raise ToolEvidenceError("tool_dispatch_generation_unavailable")
+        return observe_tool_dispatch(
+            checkpoint_id=execution_info.checkpoint_id,
+            checkpoint_ns=execution_info.checkpoint_ns,
+            task_id=execution_info.task_id,
+            node_attempt=execution_info.node_attempt,
+        )
+
+    @staticmethod
     def _evidence_safe_fields(request: ToolCallRequest) -> frozenset[str]:
         """Read only server-registered schema markers; arguments cannot opt in."""
 
@@ -220,7 +266,14 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
         json_schema = getattr(schema, "model_json_schema", None)
         if not callable(json_schema):
             return frozenset()
-        declared = json_schema()
+        try:
+            declared = json_schema()
+        except Exception:
+            # Some valid LangChain tools contain injected callable fields that
+            # Pydantic deliberately cannot represent as JSON Schema. Evidence
+            # projection must remain fail-closed: an unreadable schema opts no
+            # arguments into plaintext evidence, but does not block the tool.
+            return frozenset()
         properties = declared.get("properties") if isinstance(declared, dict) else None
         if not isinstance(properties, dict):
             return frozenset()
@@ -266,7 +319,10 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
             statuses.append(str(meta.get("status") or message.status or "success"))
             if isinstance(meta.get("error_type"), str):
                 error_types.append(meta["error_type"])
-        outcomes = tuple(item for item in (context.get("__authorization_outcome") or {}).get(str(request.tool_call.get("id") or ""), ()) if hasattr(item, "decision")) if isinstance(context.get("__authorization_outcome"), dict) else ()
+        outcomes = peek_policy_outcomes(
+            context,
+            str(request.tool_call.get("id") or ""),
+        )
         denied = [item for item in outcomes if item.decision == "denied"]
         result_kind = "tool_message" if isinstance(result, ToolMessage) else "command"
         model_visible: object

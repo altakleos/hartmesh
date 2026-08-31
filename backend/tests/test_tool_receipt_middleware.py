@@ -302,3 +302,13 @@ def test_factory_keeps_inert_durable_observer_when_display_receipts_disabled():
     middlewares = _build({"sandbox": {"use": "test"}, "verification": {"receipts_enabled": False}})
     receipt = next(middleware for middleware in middlewares if type(middleware).__name__ == "ToolReceiptMiddleware")
     assert receipt._display_enabled is False
+
+
+def test_release_policy_declares_display_and_render_behavior() -> None:
+    assert ToolReceiptMiddleware(
+        render_mode="delegation_only",
+        display_enabled=False,
+    ).release_policy_parameters() == {
+        "render_mode": "delegation_only",
+        "display_enabled": False,
+    }

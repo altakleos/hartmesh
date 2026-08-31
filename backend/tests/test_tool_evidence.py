@@ -13,8 +13,10 @@ from deerflow.runtime.tool_evidence import (
     build_request_projection,
     digest_request_projection,
     digest_result_projection,
+    observe_tool_dispatch,
     stable_receipt_id,
     stable_subagent_task_id,
+    tool_dispatch_generation_digest,
 )
 
 
@@ -100,6 +102,74 @@ def test_evidence_safe_values_are_explicit_bounded_policy() -> None:
     assert "private place" not in json.dumps(projection)
     with pytest.raises(ToolEvidenceError, match="evidence_safe_field_unknown"):
         build_request_projection("weather", {"units": "metric"}, evidence_safe_fields=frozenset({"missing"}))
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "accessToken",
+        "clientSecret",
+        "dbPassword",
+        "apiKey",
+        "AWSAccessKeyId",
+        "apikey",
+        "accesskey",
+        "clientsecret",
+        "dbpassword",
+        "authtoken",
+        "accesstoken",
+        "authorizationheader",
+        "headers",
+        "requestheaders",
+        "tokenvalue",
+        "clientsecretvalue",
+    ],
+)
+def test_secret_field_detection_overrides_camel_case_evidence_safe_policy(
+    field_name: str,
+) -> None:
+    raw_secret = "must-never-enter-evidence"
+    projection = build_request_projection(
+        "provider_call",
+        {field_name: raw_secret},
+        evidence_safe_fields=frozenset({field_name}),
+    )
+
+    assert projection["arguments"][field_name] == {
+        "classification": "secret_handle",
+        "type": "string",
+    }
+    assert raw_secret not in json.dumps(projection)
+
+
+def test_dispatch_observation_keeps_lineage_when_local_retry_changes() -> None:
+    first = observe_tool_dispatch(
+        checkpoint_id="checkpoint-1",
+        checkpoint_ns="",
+        task_id="task-1",
+        node_attempt=1,
+    )
+    replay = observe_tool_dispatch(
+        checkpoint_id="checkpoint-1",
+        checkpoint_ns="",
+        task_id="task-1",
+        node_attempt=1,
+    )
+    retry = observe_tool_dispatch(
+        checkpoint_id="checkpoint-1",
+        checkpoint_ns="",
+        task_id="task-1",
+        node_attempt=2,
+    )
+
+    assert first == replay
+    assert first.lineage_digest == retry.lineage_digest
+    assert retry.node_attempt == 2
+
+
+def test_durable_dispatch_generation_is_derived_from_store_attempt() -> None:
+    assert tool_dispatch_generation_digest(_context()) == tool_dispatch_generation_digest(_context())
+    assert tool_dispatch_generation_digest(_context()) != tool_dispatch_generation_digest(_context(attempt=2))
 
 
 def test_subagent_task_identity_is_stable_and_parent_scoped() -> None:

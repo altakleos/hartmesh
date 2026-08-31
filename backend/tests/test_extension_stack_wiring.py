@@ -134,9 +134,9 @@ def test_lead_system_middlewares_capture_the_explicit_build_snapshot():
     assert title._extensions is extensions
 
 
-def test_tool_visible_lands_at_the_outermost_position():
+def test_tool_visible_lands_immediately_inside_the_durable_receipt_boundary():
     stack = _lead_stack(_extensions(MiddlewarePlacement(_Probe("visible"), Placement.TOOL_VISIBLE)))
-    assert _tags(stack)[0] == "visible"
+    assert _tags(stack)[:2] == ["ToolReceiptMiddleware", "visible"]
 
 
 def test_model_logical_lands_outside_the_retry_middleware():

@@ -244,7 +244,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
     monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
-    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
+    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
     async with gateway_deps.langgraph_runtime(app, config):
         pass
@@ -282,7 +282,7 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
     monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: _FakeThreadStore())
-    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
+    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
     monkeypatch.setattr(
         "deerflow.persistence.run.sql.RunRepository.initialize_lifecycle",
@@ -322,7 +322,7 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
     monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
-    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
+    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 
     async with gateway_deps.langgraph_runtime(app, config):

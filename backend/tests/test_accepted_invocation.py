@@ -38,6 +38,7 @@ from deerflow.runtime.agent_revision import (
     assert_agent_config_projection_complete,
     assert_app_config_projection_complete,
 )
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager, ThreadOperationKind
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -93,7 +94,17 @@ def test_material_and_accepted_digests_are_stable_and_mutation_safe() -> None:
     assert len(accepted.base_origin_digest) == 64
     assert len(accepted.runtime_identity_digest) == 64
     assert accepted.agent_revision.digest == revision.digest
-    assert accepted.to_persisted()["decision_evidence_json"] == {"version": 1, "decisions": []}
+    assert accepted.to_persisted()["decision_evidence_json"] == {
+        "version": 1,
+        "decisions": [],
+        "tool_receipts": {"version": 1},
+    }
+    assert accepted.tool_receipt_evidence_version == 1
+    legacy = replace(
+        accepted,
+        decision_evidence={"version": 1, "decisions": []},
+    )
+    assert legacy.tool_receipt_evidence_version is None
 
 
 def test_persisted_effective_execution_restores_frozen_execution_options() -> None:
@@ -716,7 +727,10 @@ async def test_accepted_durable_evidence_is_bound_before_checkpoint_access_and_a
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=object()),
+        ctx=RunContext(
+            checkpointer=object(),
+            event_store=MemoryRunEventStore(run_store=store),
+        ),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -730,6 +744,46 @@ async def test_accepted_durable_evidence_is_bound_before_checkpoint_access_and_a
     assert row["status"] == "success"
     assert row["assembly_evidence_json"] == record.assembly_evidence_json
     assert row["assembly_evidence_digest"] == record.assembly_evidence_digest
+
+
+@pytest.mark.asyncio
+async def test_legacy_accepted_run_binds_assembly_without_starting_receipt_tail() -> None:
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+
+    material = _material()
+    legacy = replace(
+        _accepted(material),
+        decision_evidence={"version": 1, "decisions": []},
+    )
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-legacy-receipts")
+    record = await manager.create_or_reject(
+        "thread-worker-legacy-receipts",
+        accepted_invocation=legacy,
+    )
+    astream_calls = 0
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            nonlocal astream_calls
+            astream_calls += 1
+            yield {"messages": []}
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=None),
+        agent_factory=lambda **_kwargs: LeadAgentAssembly(
+            graph=Agent(),
+            descriptor=_durable_test_descriptor(material),
+        ),
+        graph_input={},
+        config={},
+    )
+
+    assert astream_calls == 1
+    assert record.status is RunStatus.success
 
 
 @pytest.mark.asyncio
@@ -764,7 +818,10 @@ async def test_worker_retains_bound_evidence_on_terminal_outcome(
             _bridge(),
             manager,
             record,
-            ctx=RunContext(checkpointer=None),
+            ctx=RunContext(
+                checkpointer=None,
+                event_store=MemoryRunEventStore(run_store=store),
+            ),
             agent_factory=lambda **_kwargs: LeadAgentAssembly(
                 graph=Agent(),
                 descriptor=_durable_test_descriptor(material),
@@ -919,7 +976,10 @@ async def test_recovered_assembly_must_match_original_before_astream(
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=MemoryRunEventStore(run_store=store),
+        ),
         agent_factory=lambda **_kwargs: LeadAgentAssembly(
             graph=Agent(),
             descriptor=changed_descriptor,
@@ -980,7 +1040,11 @@ async def test_broken_assembly_observer_is_fail_open_and_evidence_still_binds() 
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None, extensions=extensions),
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=MemoryRunEventStore(run_store=store),
+            extensions=extensions,
+        ),
         agent_factory=factory,
         graph_input={},
         config={},

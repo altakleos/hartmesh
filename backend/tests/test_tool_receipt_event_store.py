@@ -11,9 +11,19 @@ from deerflow.runtime.tool_evidence import (
     DurableToolReceiptV1,
     RunEventToolReceiptSink,
     ToolAttemptContextV1,
+    ToolDispatchObservationV1,
     ToolEvidenceRuntimeBinding,
     ToolReceiptIntegrityError,
     ToolReceiptOwnershipLost,
+)
+
+_DISPATCH_1 = ToolDispatchObservationV1(
+    lineage_digest="1" * 64,
+    node_attempt=1,
+)
+_DISPATCH_2 = ToolDispatchObservationV1(
+    lineage_digest="1" * 64,
+    node_attempt=2,
 )
 
 
@@ -80,7 +90,13 @@ def _body(phase: str = "started") -> dict[str, object]:
     ).to_event_body()
 
 
-async def _append(store, *, event_type: str = "tool_receipt.started.v1", key: str | None = None, body: dict | None = None):
+async def _append(
+    store,
+    *,
+    event_type: str = "tool_receipt.started.v1",
+    key: str | None = None,
+    body: dict | None = None,
+):
     logical_body = dict(body or _body())
     key = key or str(logical_body["idempotency_key"])
     return await store.append_idempotent(
@@ -146,6 +162,30 @@ async def test_stale_or_expired_owner_cannot_append(local_store) -> None:
 
 
 @pytest.mark.anyio
+async def test_attempt_reservation_rejects_binding_from_another_fence(
+    local_store,
+) -> None:
+    store, runs = local_store
+    stale_binding = _binding(runs)
+    runs.row["owner_worker_id"] = "worker-2"
+    runs.row["state_version"] = 6
+
+    with pytest.raises(ToolReceiptIntegrityError, match="receipt_attempt_binding_invalid"):
+        await store.reserve_tool_attempt(
+            "run-1",
+            binding=stale_binding,
+            tool_call_id="call-mixed-fence",
+            tool_name="web_search",
+            request_projection_digest="e" * 64,
+            observed_node_attempt=1,
+            expected_attempt=None,
+            owner_id="worker-2",
+            lease_epoch=6,
+        )
+    assert await store.list_events("thread-1", "run-1") == []
+
+
+@pytest.mark.anyio
 async def test_start_then_terminal_are_monotonic_and_terminals_conflict(local_store) -> None:
     store, _ = local_store
     started = await _append(store)
@@ -191,6 +231,81 @@ async def test_jsonl_reopen_rebuilds_dedupe_index(tmp_path) -> None:
 
 
 @pytest.mark.anyio
+async def test_jsonl_ownership_transfer_during_read_cannot_commit_receipt(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runs = _OwnedRunStore()
+    store = JsonlRunEventStore(base_dir=tmp_path / "events", run_store=runs)
+    original_read = store._read_run_events
+
+    def transfer_then_read(thread_id: str, run_id: str) -> list[dict]:
+        events = original_read(thread_id, run_id)
+        runs.row["owner_worker_id"] = "worker-2"
+        runs.row["state_version"] = 6
+        return events
+
+    monkeypatch.setattr(store, "_read_run_events", transfer_then_read)
+
+    with pytest.raises(ToolReceiptOwnershipLost, match="tool_receipt_ownership_lost"):
+        await _append(store)
+    assert await store.list_events("thread-1", "run-1") == []
+
+
+@pytest.mark.anyio
+async def test_jsonl_ownership_transfer_during_prepare_cannot_commit_receipt(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runs = _OwnedRunStore()
+    store = JsonlRunEventStore(base_dir=tmp_path / "events", run_store=runs)
+    original_prepare = store._prepare_record_replace
+
+    def prepare_then_transfer(record: dict) -> tuple:
+        prepared = original_prepare(record)
+        runs.row["owner_worker_id"] = "worker-2"
+        runs.row["state_version"] = 6
+        return prepared
+
+    monkeypatch.setattr(store, "_prepare_record_replace", prepare_then_transfer)
+
+    with pytest.raises(ToolReceiptOwnershipLost, match="tool_receipt_ownership_lost"):
+        await _append(store)
+    assert await store.list_events("thread-1", "run-1") == []
+    assert list((tmp_path / "events").rglob("*.tmp")) == []
+
+
+@pytest.mark.anyio
+async def test_jsonl_bounded_dedupe_cache_falls_back_to_run_scan(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "deerflow.runtime.events.store.jsonl.MAX_JSONL_RECEIPT_DEDUPE_ENTRIES",
+        2,
+    )
+    runs = _OwnedRunStore()
+    store = JsonlRunEventStore(base_dir=tmp_path / "events", run_store=runs)
+    first = await _append(store)
+    sink = RunEventToolReceiptSink(store)
+    for index in (2, 3):
+        await sink.reserve_started(
+            binding=_binding(runs),
+            tool_call_id=f"call-cache-{index}",
+            tool_name="web_search",
+            request_projection_digest="e" * 64,
+            dispatch=_DISPATCH_1,
+        )
+
+    assert len(store._dedupe_index) == 2
+    duplicate = await _append(store)
+    assert duplicate.created is False
+    assert duplicate.event == first.event
+    assert len(store._dedupe_index) == 2
+    assert len(await store.list_events("thread-1", "run-1")) == 3
+
+
+@pytest.mark.anyio
 async def test_jsonl_reopen_reuses_unfinished_attempt_reservation(tmp_path) -> None:
     runs = _OwnedRunStore()
     first_store = JsonlRunEventStore(base_dir=tmp_path / "events", run_store=runs)
@@ -199,6 +314,7 @@ async def test_jsonl_reopen_reuses_unfinished_attempt_reservation(tmp_path) -> N
         tool_call_id="call-reopen",
         tool_name="web_search",
         request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
     )
 
     reopened = JsonlRunEventStore(base_dir=tmp_path / "events", run_store=runs)
@@ -207,9 +323,10 @@ async def test_jsonl_reopen_reuses_unfinished_attempt_reservation(tmp_path) -> N
         tool_call_id="call-reopen",
         tool_name="web_search",
         request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
     )
 
-    assert replay.receipt_id == first.receipt_id
+    assert replay.started.receipt_id == first.started.receipt_id
     assert len(await reopened.list_events("thread-1", "run-1")) == 1
 
 
@@ -222,6 +339,7 @@ async def test_attempt_reservation_reuses_crash_gap_across_store_restart(local_s
         tool_call_id="call-recovery",
         tool_name="web_search",
         request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
     )
 
     # Simulate a new worker process taking ownership after the first worker
@@ -229,20 +347,22 @@ async def test_attempt_reservation_reuses_crash_gap_across_store_restart(local_s
     runs.row["owner_worker_id"] = "worker-2"
     runs.row["state_version"] = 6
     recovered_sink = RunEventToolReceiptSink(store)
+    recovered_binding = _binding(runs)
     recovered = await recovered_sink.reserve_started(
-        binding=_binding(runs),
+        binding=recovered_binding,
         tool_call_id="call-recovery",
         tool_name="web_search",
         request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
     )
 
-    assert recovered.receipt_id == first.receipt_id
-    assert recovered.context.attempt == 1
-    assert recovered.context.owner_id == "worker-1"
+    assert recovered.started.receipt_id == first.started.receipt_id
+    assert recovered.started.context.attempt == 1
+    assert recovered.started.context.owner_id == "worker-1"
     assert len(await store.list_events("thread-1", "run-1")) == 1
 
     await recovered_sink.record_outcome(
-        recovered.outcome(
+        recovered.started.outcome(
             phase="succeeded",
             result_projection_digest="f" * 64,
             result_kind="tool_message",
@@ -250,13 +370,203 @@ async def test_attempt_reservation_reuses_crash_gap_across_store_restart(local_s
         )
     )
     next_attempt = await recovered_sink.reserve_started(
-        binding=_binding(runs),
+        binding=recovered_binding,
         tool_call_id="call-recovery",
         tool_name="web_search",
         request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_2,
     )
-    assert next_attempt.context.attempt == 2
-    assert next_attempt.receipt_id != first.receipt_id
+    assert next_attempt.started.context.attempt == 2
+    assert next_attempt.started.receipt_id != first.started.receipt_id
+
+
+@pytest.mark.anyio
+async def test_completed_attempt_replay_under_new_fence_does_not_reserve_again(
+    local_store,
+) -> None:
+    store, runs = local_store
+    first_sink = RunEventToolReceiptSink(store)
+    first = await first_sink.reserve_started(
+        binding=_binding(runs),
+        tool_call_id="call-completed-replay",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
+    )
+    await first_sink.record_outcome(
+        first.started.outcome(
+            phase="succeeded",
+            result_projection_digest="f" * 64,
+            result_kind="tool_message",
+            safe_error_code=None,
+        )
+    )
+
+    runs.row["owner_worker_id"] = "worker-2"
+    runs.row["state_version"] = 6
+    replay = await RunEventToolReceiptSink(store).reserve_started(
+        binding=_binding(runs),
+        tool_call_id="call-completed-replay",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
+    )
+
+    assert replay.started.receipt_id == first.started.receipt_id
+    assert replay.replayed_outcome is not None
+    assert replay.replayed_outcome.phase == "succeeded"
+    assert len(await store.list_events("thread-1", "run-1")) == 2
+
+
+@pytest.mark.anyio
+async def test_recovery_retry_reset_reuses_latest_unfinished_attempt(
+    local_store,
+) -> None:
+    store, runs = local_store
+    original_sink = RunEventToolReceiptSink(store)
+    original_binding = _binding(runs)
+    first = await original_sink.reserve_started(
+        binding=original_binding,
+        tool_call_id="call-retry-reset-gap",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
+    )
+    await original_sink.record_outcome(
+        first.started.outcome(
+            phase="failed",
+            result_projection_digest=None,
+            result_kind=None,
+            safe_error_code="tool_error",
+        )
+    )
+    second = await original_sink.reserve_started(
+        binding=original_binding,
+        tool_call_id="call-retry-reset-gap",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_2,
+    )
+    assert second.started.context.attempt == 2
+
+    runs.row["owner_worker_id"] = "worker-2"
+    runs.row["state_version"] = 6
+    recovered_sink = RunEventToolReceiptSink(store)
+    recovered_binding = _binding(runs)
+    recovered = await recovered_sink.reserve_started(
+        binding=recovered_binding,
+        tool_call_id="call-retry-reset-gap",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
+    )
+
+    assert recovered.started.context.attempt == 2
+    assert recovered.replayed_outcome is None
+    await recovered_sink.record_outcome(
+        recovered.started.outcome(
+            phase="failed",
+            result_projection_digest=None,
+            result_kind=None,
+            safe_error_code="tool_error",
+        )
+    )
+    next_retry = await recovered_sink.reserve_started(
+        binding=recovered_binding,
+        tool_call_id="call-retry-reset-gap",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_2,
+    )
+    assert next_retry.started.context.attempt == 3
+
+
+@pytest.mark.anyio
+async def test_recovery_retry_reset_replays_latest_completed_attempt(
+    local_store,
+) -> None:
+    store, runs = local_store
+    original_sink = RunEventToolReceiptSink(store)
+    original_binding = _binding(runs)
+    first = await original_sink.reserve_started(
+        binding=original_binding,
+        tool_call_id="call-retry-reset-terminal",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
+    )
+    await original_sink.record_outcome(
+        first.started.outcome(
+            phase="failed",
+            result_projection_digest=None,
+            result_kind=None,
+            safe_error_code="tool_error",
+        )
+    )
+    second = await original_sink.reserve_started(
+        binding=original_binding,
+        tool_call_id="call-retry-reset-terminal",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_2,
+    )
+    await original_sink.record_outcome(
+        second.started.outcome(
+            phase="failed",
+            result_projection_digest=None,
+            result_kind=None,
+            safe_error_code="tool_error",
+        )
+    )
+
+    runs.row["owner_worker_id"] = "worker-2"
+    runs.row["state_version"] = 6
+    recovered = await RunEventToolReceiptSink(store).reserve_started(
+        binding=_binding(runs),
+        tool_call_id="call-retry-reset-terminal",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
+    )
+
+    assert recovered.started.context.attempt == 2
+    assert recovered.replayed_outcome is not None
+
+
+@pytest.mark.anyio
+async def test_completed_attempt_replay_under_same_fence_does_not_reserve_again(
+    local_store,
+) -> None:
+    store, runs = local_store
+    sink = RunEventToolReceiptSink(store)
+    binding = _binding(runs)
+    first = await sink.reserve_started(
+        binding=binding,
+        tool_call_id="call-same-fence-completed",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
+    )
+    await sink.record_outcome(
+        first.started.outcome(
+            phase="succeeded",
+            result_projection_digest="f" * 64,
+            result_kind="tool_message",
+            safe_error_code=None,
+        )
+    )
+
+    replay = await sink.reserve_started(
+        binding=binding,
+        tool_call_id="call-same-fence-completed",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
+    )
+
+    assert replay.started.receipt_id == first.started.receipt_id
+    assert replay.replayed_outcome is not None
+    assert len(await store.list_events("thread-1", "run-1")) == 2
 
 
 @pytest.mark.anyio
@@ -270,13 +580,39 @@ async def test_concurrent_attempt_reservations_share_one_durable_start(local_sto
                 tool_call_id="call-concurrent",
                 tool_name="web_search",
                 request_projection_digest="e" * 64,
+                dispatch=_DISPATCH_1,
             )
             for sink in sinks
         )
     )
 
-    assert {receipt.receipt_id for receipt in receipts} == {receipts[0].receipt_id}
+    assert {receipt.started.receipt_id for receipt in receipts} == {receipts[0].started.receipt_id}
     assert len(await store.list_events("thread-1", "run-1")) == 1
+
+
+@pytest.mark.anyio
+async def test_reconstructed_dispatch_cannot_skip_durable_attempts(local_store) -> None:
+    store, runs = local_store
+    sink = RunEventToolReceiptSink(store)
+    await sink.reserve_started(
+        binding=_binding(runs),
+        tool_call_id="call-gap",
+        tool_name="web_search",
+        request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
+    )
+
+    with pytest.raises(ToolReceiptIntegrityError, match="receipt_attempt_history_invalid"):
+        await sink.reserve_started(
+            binding=_binding(runs),
+            tool_call_id="call-gap",
+            tool_name="web_search",
+            request_projection_digest="e" * 64,
+            dispatch=ToolDispatchObservationV1(
+                lineage_digest=_DISPATCH_1.lineage_digest,
+                node_attempt=3,
+            ),
+        )
 
 
 @pytest.mark.anyio
@@ -288,6 +624,7 @@ async def test_attempt_reservation_rejects_changed_recovery_projection(local_sto
         tool_call_id="call-conflict",
         tool_name="web_search",
         request_projection_digest="e" * 64,
+        dispatch=_DISPATCH_1,
     )
 
     with pytest.raises(ToolReceiptIntegrityError, match="receipt_attempt_replay_conflict"):
@@ -296,6 +633,7 @@ async def test_attempt_reservation_rejects_changed_recovery_projection(local_sto
             tool_call_id="call-conflict",
             tool_name="web_search",
             request_projection_digest="f" * 64,
+            dispatch=_DISPATCH_1,
         )
 
     with pytest.raises(ToolReceiptIntegrityError, match="receipt_attempt_replay_conflict"):
@@ -316,6 +654,7 @@ async def test_attempt_reservation_rejects_changed_recovery_projection(local_sto
             tool_call_id="call-conflict",
             tool_name="web_search",
             request_projection_digest="e" * 64,
+            dispatch=_DISPATCH_1,
         )
 
 
@@ -370,6 +709,7 @@ async def test_database_append_is_fenced_idempotent_and_recoverable(tmp_path) ->
             tool_call_id="call-db-recovery",
             tool_name="web_search",
             request_projection_digest="e" * 64,
+            dispatch=_DISPATCH_1,
         )
         replay_sink = RunEventToolReceiptSink(reopened)
         replay = await replay_sink.reserve_started(
@@ -377,23 +717,34 @@ async def test_database_append_is_fenced_idempotent_and_recoverable(tmp_path) ->
             tool_call_id="call-db-recovery",
             tool_name="web_search",
             request_projection_digest="e" * 64,
+            dispatch=_DISPATCH_1,
         )
-        assert replay.receipt_id == reserved.receipt_id
+        assert replay.started.receipt_id == reserved.started.receipt_id
         await replay_sink.record_outcome(
-            replay.outcome(
+            replay.started.outcome(
                 phase="succeeded",
                 result_projection_digest="f" * 64,
                 result_kind="tool_message",
                 safe_error_code=None,
             )
         )
+        completed_replay = await RunEventToolReceiptSink(reopened).reserve_started(
+            binding=reservation_binding,
+            tool_call_id="call-db-recovery",
+            tool_name="web_search",
+            request_projection_digest="e" * 64,
+            dispatch=_DISPATCH_1,
+        )
+        assert completed_replay.started.receipt_id == reserved.started.receipt_id
+        assert completed_replay.replayed_outcome is not None
         next_attempt = await replay_sink.reserve_started(
             binding=reservation_binding,
             tool_call_id="call-db-recovery",
             tool_name="web_search",
             request_projection_digest="e" * 64,
+            dispatch=_DISPATCH_2,
         )
-        assert next_attempt.context.attempt == 2
+        assert next_attempt.started.context.attempt == 2
 
         with pytest.raises(ToolReceiptIntegrityError):
             await _append(reopened, body={**_body(), "tool_name": "conflict"})

@@ -65,6 +65,7 @@ _MANAGED_SUBAGENTS_REVISION = "0014_managed_subagents"
 _MANAGED_SUBAGENTS_MERGE_REVISION = "0021_merge_managed_subagents"
 _SCHEDULED_ENQUEUE_REVISION = "0015_scheduled_task_enqueue"
 _SCHEDULED_MERGE_REVISION = "0022_merge_scheduled_enqueue"
+_ASSEMBLY_EVIDENCE_REVISION = "0023_agent_assembly_evidence"
 _MERGE_HEAD_REVISION = "0024_tool_receipt_idempotency"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
@@ -988,6 +989,7 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     mcp_merge = script.get_revision(_MCP_MERGE_REVISION)
     managed_subagents_merge = script.get_revision(_MANAGED_SUBAGENTS_MERGE_REVISION)
     scheduled_merge = script.get_revision(_SCHEDULED_MERGE_REVISION)
+    assembly_evidence = script.get_revision(_ASSEMBLY_EVIDENCE_REVISION)
     merge_head = script.get_revision(_MERGE_HEAD_REVISION)
     assert mcp_results is not None
     assert mcp_results.down_revision == _PRE_FEATURE_REVISION
@@ -1006,8 +1008,10 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
         _MANAGED_SUBAGENTS_MERGE_REVISION,
         _SCHEDULED_ENQUEUE_REVISION,
     }
+    assert assembly_evidence is not None
+    assert assembly_evidence.down_revision == _SCHEDULED_MERGE_REVISION
     assert merge_head is not None
-    assert merge_head.down_revision == _SCHEDULED_MERGE_REVISION
+    assert merge_head.down_revision == _ASSEMBLY_EVIDENCE_REVISION
     assert script.get_current_head() == _MERGE_HEAD_REVISION
 
 

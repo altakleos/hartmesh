@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import ToolMessage
+from langgraph.runtime import ExecutionInfo
 
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, extract_tool_receipts
 from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
@@ -13,6 +14,9 @@ from deerflow.authz.outcome import AuthorizationOutcome, put_authorization_outco
 from deerflow.runtime.tool_evidence import (
     TOOL_EVIDENCE_CONTEXT_KEY,
     TOOL_EVIDENCE_SINK_KEY,
+    DurableToolReceiptV1,
+    ToolAttemptReservation,
+    ToolDispatchObservationV1,
     ToolEvidenceError,
     ToolEvidenceRuntimeBinding,
     ToolReceiptOwnershipLost,
@@ -37,7 +41,9 @@ class _RecordingSink:
         tool_call_id: str,
         tool_name: str,
         request_projection_digest: str,
+        dispatch: ToolDispatchObservationV1,
     ):
+        assert dispatch.node_attempt == 1
         receipt = binding.make_attempt(tool_call_id, len(self.started) + 1)
         from deerflow.runtime.tool_evidence import DurableToolReceiptV1
 
@@ -47,7 +53,7 @@ class _RecordingSink:
             request_projection_digest=request_projection_digest,
         )
         await self.record_started(started)
-        return started
+        return ToolAttemptReservation(started=started)
 
     async def record_outcome(self, receipt) -> None:
         self.order.append(receipt.phase)
@@ -80,7 +86,17 @@ def _request(sink: _RecordingSink, binding: ToolEvidenceRuntimeBinding | None = 
     return SimpleNamespace(
         tool_call={"name": "web_search", "id": call_id, "args": {"query": "private query", "api_token": "secret"}},
         tool=None,
-        runtime=SimpleNamespace(context=context),
+        runtime=SimpleNamespace(
+            context=context,
+            execution_info=ExecutionInfo(
+                checkpoint_id="checkpoint-1",
+                checkpoint_ns="",
+                task_id="node-task-1",
+                thread_id="thread-1",
+                run_id="run-1",
+                node_attempt=1,
+            ),
+        ),
     )
 
 
@@ -133,6 +149,74 @@ async def test_start_storage_failure_prevents_tool_dispatch() -> None:
         await ToolReceiptMiddleware().awrap_tool_call(request, handler)
 
     assert called is False
+
+
+@pytest.mark.anyio
+async def test_unrenderable_tool_schema_fails_closed_without_blocking_dispatch() -> None:
+    class _UnrenderableSchema:
+        @staticmethod
+        def model_json_schema():
+            raise TypeError("callable fields have no JSON Schema")
+
+    sink = _RecordingSink()
+    request = _request(sink)
+    request.tool = SimpleNamespace(args_schema=_UnrenderableSchema)
+    called = False
+
+    async def handler(req):
+        nonlocal called
+        called = True
+        return _success(req)
+
+    await ToolReceiptMiddleware().awrap_tool_call(request, handler)
+
+    assert called is True
+    assert len(sink.started) == 1
+    assert "private query" not in str(sink.started[0].to_event_body())
+
+
+@pytest.mark.anyio
+async def test_completed_recovery_replay_does_not_dispatch_tool_again() -> None:
+    class _CompletedReplaySink(_RecordingSink):
+        async def reserve_started(
+            self,
+            *,
+            binding,
+            tool_call_id: str,
+            tool_name: str,
+            request_projection_digest: str,
+            dispatch: ToolDispatchObservationV1,
+        ):
+            assert dispatch.node_attempt == 1
+            started = DurableToolReceiptV1.started(
+                context=binding.make_attempt(tool_call_id, 1),
+                tool_name=tool_name,
+                request_projection_digest=request_projection_digest,
+            )
+            return ToolAttemptReservation(
+                started=started,
+                replayed_outcome=started.outcome(
+                    phase="succeeded",
+                    result_projection_digest="f" * 64,
+                    result_kind="tool_message",
+                    safe_error_code=None,
+                ),
+            )
+
+    called = False
+    request = _request(_CompletedReplaySink())
+
+    async def handler(req):
+        nonlocal called
+        called = True
+        return _success(req)
+
+    result = await ToolReceiptMiddleware().awrap_tool_call(request, handler)
+
+    assert called is False
+    assert result.status == "error"
+    assert "not executed again" in str(result.content)
+    assert TOOL_RECEIPT_KEY in result.additional_kwargs
 
 
 @pytest.mark.anyio
@@ -242,6 +326,44 @@ async def test_host_cancellation_still_propagates_after_ownership_loss() -> None
 
     with pytest.raises(asyncio.CancelledError):
         await ToolReceiptMiddleware().awrap_tool_call(request, handler)
+
+
+@pytest.mark.anyio
+async def test_host_cancellation_still_propagates_after_terminal_store_failure() -> None:
+    class _BrokenSink(_RecordingSink):
+        async def record_outcome(self, receipt) -> None:
+            del receipt
+            raise RuntimeError("store unavailable with sensitive detail")
+
+    request = _request(_BrokenSink())
+
+    async def handler(_req):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await ToolReceiptMiddleware().awrap_tool_call(request, handler)
+
+
+@pytest.mark.anyio
+async def test_bare_receipt_reservation_is_rejected_before_dispatch() -> None:
+    class _LegacySink(_RecordingSink):
+        async def reserve_started(self, **kwargs):
+            return DurableToolReceiptV1.started(
+                context=kwargs["binding"].make_attempt(kwargs["tool_call_id"], 1),
+                tool_name=kwargs["tool_name"],
+                request_projection_digest=kwargs["request_projection_digest"],
+            )
+
+    called = False
+
+    async def handler(req):
+        nonlocal called
+        called = True
+        return _success(req)
+
+    with pytest.raises(ToolEvidenceError, match="tool_attempt_reservation_invalid"):
+        await ToolReceiptMiddleware().awrap_tool_call(_request(_LegacySink()), handler)
+    assert called is False
 
 
 def test_sync_durable_call_fails_before_side_effect() -> None:

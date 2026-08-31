@@ -18,9 +18,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from deerflow.runtime.events.catalog import TOOL_RECEIPT_RUN_EVENT_DEFINITIONS
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
-_RECEIPT_EVENT_TYPES = frozenset({"tool_receipt.started.v1", "tool_receipt.outcome.v1"})
+_RECEIPT_EVENT_TYPES = frozenset(definition.event_type for definition in TOOL_RECEIPT_RUN_EVENT_DEFINITIONS)
 _MAX_IDEMPOTENCY_KEY_BYTES = 128
 _MAX_IDEMPOTENT_BODY_BYTES = 8 * 1024
 
@@ -31,6 +32,7 @@ class AppendOutcome:
 
     event: dict
     created: bool
+    terminal_event: dict | None = None
 
 
 async def resolve_owned_run(
@@ -197,17 +199,20 @@ class RunEventStore(abc.ABC):
         tool_call_id: str,
         tool_name: str,
         request_projection_digest: str,
+        observed_node_attempt: int,
+        expected_attempt: int | None,
         owner_id: str,
         lease_epoch: int,
     ) -> AppendOutcome:
         """Atomically reserve and append the durable start for one attempt.
 
-        An unmatched prior start is a recovery replay and is returned as-is.
-        A prior terminal causes the next attempt number to be reserved. Stores
-        must choose and append while holding the same ownership/write fence.
+        The store reconciles a process-local retry observation against its
+        contiguous durable history, returning an existing start and terminal
+        on recovery or reserving the next attempt. Stores must decide and
+        append while holding the same ownership/write fence.
         """
 
-        del run_id, binding, tool_call_id, tool_name, request_projection_digest, owner_id, lease_epoch
+        del run_id, binding, tool_call_id, tool_name, request_projection_digest, observed_node_attempt, expected_attempt, owner_id, lease_epoch
         from deerflow.runtime.tool_evidence import ToolReceiptOwnershipLost
 
         raise ToolReceiptOwnershipLost("tool_receipt_store_unfenced")

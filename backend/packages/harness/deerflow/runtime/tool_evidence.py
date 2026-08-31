@@ -47,9 +47,60 @@ _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _RECEIPT_ID_RE = re.compile(r"^tr_[0-9a-f]{64}$")
 _DECISION_REF_RE = re.compile(r"^pd_[0-9a-f]{64}$")
 _SAFE_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:/-]+$")
-_SECRET_FIELD_RE = re.compile(
-    r"(?:^|[_-])(?:api[_-]?key|auth|authorization|credential|cookie|password|passwd|secret|session|token)(?:$|[_-])",
-    re.IGNORECASE,
+_CAMEL_ACRONYM_BOUNDARY_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CAMEL_WORD_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+_NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]+")
+_SECRET_FIELD_TOKENS = frozenset(
+    {
+        "auth",
+        "authorization",
+        "cookie",
+        "credential",
+        "credentials",
+        "header",
+        "headers",
+        "passwd",
+        "password",
+        "pwd",
+        "secret",
+        "session",
+        "token",
+    }
+)
+_SECRET_FIELD_TOKEN_PAIRS = frozenset(
+    {
+        ("access", "key"),
+        ("api", "key"),
+        ("private", "key"),
+        ("secret", "key"),
+        ("session", "key"),
+    }
+)
+_SECRET_FIELD_COMPOUNDS = frozenset(
+    {
+        "accesskey",
+        "apikey",
+        "privatekey",
+        "secretkey",
+        "sessionkey",
+    }
+)
+_SECRET_FIELD_COMPACT_TERMS = frozenset(
+    {
+        "auth",
+        "authorization",
+        "cookie",
+        "credential",
+        "credentials",
+        "header",
+        "headers",
+        "passwd",
+        "password",
+        "pwd",
+        "secret",
+        "session",
+        "token",
+    }
 )
 
 SAFE_ERROR_CODES = frozenset(
@@ -108,6 +159,53 @@ def canonical_digest(value: object) -> str:
     return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class ToolDispatchObservationV1:
+    """One process-local observation of a LangGraph tool dispatch."""
+
+    lineage_digest: str
+    node_attempt: int
+
+    def __post_init__(self) -> None:
+        _require_digest(self.lineage_digest, "dispatch_lineage_digest_invalid")
+        if type(self.node_attempt) is not int or self.node_attempt < 1:
+            raise ToolEvidenceError("node_attempt_invalid")
+
+
+def observe_tool_dispatch(
+    *,
+    checkpoint_id: str,
+    checkpoint_ns: str,
+    task_id: str,
+    node_attempt: int,
+) -> ToolDispatchObservationV1:
+    """Validate public LangGraph retry information as a local observation.
+
+    ``node_attempt`` may restart when execution is reconstructed. Durable
+    attempt numbering therefore remains store-owned; the lineage and counter
+    only let one live binding translate subsequent local retries.
+    """
+
+    if not isinstance(checkpoint_id, str) or len(checkpoint_id.encode("utf-8")) > 256:
+        raise ToolEvidenceError("checkpoint_id_invalid")
+    if not isinstance(checkpoint_ns, str) or len(checkpoint_ns.encode("utf-8")) > 512:
+        raise ToolEvidenceError("checkpoint_ns_invalid")
+    _require_nonempty(task_id, "dispatch_task_id_invalid", max_bytes=256)
+    if type(node_attempt) is not int or node_attempt < 1:
+        raise ToolEvidenceError("node_attempt_invalid")
+    return ToolDispatchObservationV1(
+        lineage_digest=canonical_digest(
+            {
+                "version": 1,
+                "checkpoint_id": checkpoint_id,
+                "checkpoint_ns": checkpoint_ns,
+                "task_id": task_id,
+            }
+        ),
+        node_attempt=node_attempt,
+    )
+
+
 def _require_nonempty(value: object, code: str, *, max_bytes: int) -> str:
     if not isinstance(value, str) or not value or len(value.encode("utf-8")) > max_bytes:
         raise ToolEvidenceError(code)
@@ -125,6 +223,21 @@ def _validate_tool_name(value: object) -> str:
     if _SAFE_TOOL_NAME_RE.fullmatch(name) is None:
         raise ToolEvidenceError("tool_name_invalid")
     return name
+
+
+def _is_secret_field_name(field_name: str) -> bool:
+    """Recognize delimited, camelCase, and collapsed secret field names."""
+
+    separated = _CAMEL_ACRONYM_BOUNDARY_RE.sub(r"\1_\2", field_name)
+    separated = _CAMEL_WORD_BOUNDARY_RE.sub(r"\1_\2", separated)
+    tokens = tuple(token for token in _NON_ALNUM_RE.split(separated.lower()) if token)
+    if any(token in _SECRET_FIELD_TOKENS for token in tokens):
+        return True
+    adjacent = set(zip(tokens, tokens[1:], strict=False))
+    if not adjacent.isdisjoint(_SECRET_FIELD_TOKEN_PAIRS):
+        return True
+    compact = "".join(tokens)
+    return any(compound in compact for compound in _SECRET_FIELD_COMPOUNDS) or any(term in compact for term in _SECRET_FIELD_COMPACT_TERMS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +329,23 @@ def stable_receipt_id(context: ToolAttemptContextV1) -> str:
     return f"tr_{canonical_digest(identity)}"
 
 
+def tool_dispatch_generation_digest(context: ToolAttemptContextV1) -> str:
+    """Derive the store-owned generation token for one durable attempt."""
+
+    if not isinstance(context, ToolAttemptContextV1):
+        raise ToolEvidenceError("attempt_context_invalid")
+    return canonical_digest(
+        {
+            "version": 1,
+            "domain": "durable_tool_dispatch_generation",
+            "run_id": context.run_id,
+            "execution_task_id": context.execution_task_id,
+            "tool_call_id": context.tool_call_id,
+            "attempt": context.attempt,
+        }
+    )
+
+
 def stable_subagent_task_id(
     parent: ToolEvidenceRuntimeBinding,
     *,
@@ -280,7 +410,7 @@ def _project_value(
     if depth > MAX_PROJECTION_DEPTH:
         raise ToolEvidenceError("projection_too_deep")
     value_type = _json_type(value)
-    if _SECRET_FIELD_RE.search(field_name):
+    if _is_secret_field_name(field_name):
         return {"classification": "secret_handle", "type": value_type}
     if path in evidence_safe_fields:
         return {
@@ -585,6 +715,36 @@ class DurableToolReceiptV1:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ToolAttemptReservation:
+    """A durable start plus any completed-attempt recovery replay."""
+
+    started: DurableToolReceiptV1
+    replayed_outcome: DurableToolReceiptV1 | None = None
+
+    def __post_init__(self) -> None:
+        if self.started.phase != "started":
+            raise ToolEvidenceError("reservation_start_invalid")
+        outcome = self.replayed_outcome
+        if outcome is not None and (
+            outcome.phase == "started"
+            or outcome.receipt_id != self.started.receipt_id
+            or outcome.context != self.started.context
+            or outcome.tool_name != self.started.tool_name
+            or outcome.request_projection_digest != self.started.request_projection_digest
+        ):
+            raise ToolEvidenceError("reservation_outcome_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedToolReceiptEventV1:
+    """Validated receipt payload plus its store-owned join metadata."""
+
+    receipt: DurableToolReceiptV1
+    writer_fence_digest: str
+    dispatch_generation_digest: str
+
+
 def _event_timestamp(event: Mapping[str, object]) -> datetime:
     value = event.get("created_at")
     if isinstance(value, datetime):
@@ -599,8 +759,10 @@ def _event_timestamp(event: Mapping[str, object]) -> datetime:
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
 
 
-def receipt_from_event(event: Mapping[str, object]) -> DurableToolReceiptV1:
-    """Validate one persisted receipt event and restore its store timestamp."""
+def parse_tool_receipt_event(
+    event: Mapping[str, object],
+) -> ParsedToolReceiptEventV1:
+    """Validate one persisted receipt event through the receipt boundary."""
 
     body = event.get("content")
     if not isinstance(body, Mapping):
@@ -612,7 +774,47 @@ def receipt_from_event(event: Mapping[str, object]) -> DurableToolReceiptV1:
     expected_type = TOOL_RECEIPT_STARTED_EVENT if receipt.phase == "started" else TOOL_RECEIPT_OUTCOME_EVENT
     if event.get("event_type") != expected_type or event.get("category") != TOOL_RECEIPT_CATEGORY or event.get("run_id") != receipt.context.run_id or event.get("idempotency_key") != receipt.idempotency_key:
         raise ToolReceiptIntegrityError("receipt_event_envelope_invalid")
-    return receipt
+    writer_fence_digest, dispatch_generation_digest = _validated_receipt_event_metadata(
+        event,
+        receipt,
+    )
+    return ParsedToolReceiptEventV1(
+        receipt=receipt,
+        writer_fence_digest=writer_fence_digest,
+        dispatch_generation_digest=dispatch_generation_digest,
+    )
+
+
+def receipt_from_event(event: Mapping[str, object]) -> DurableToolReceiptV1:
+    """Compatibility projection of a fully validated receipt event."""
+
+    return parse_tool_receipt_event(event).receipt
+
+
+def _validated_receipt_event_metadata(
+    event: Mapping[str, object],
+    receipt: DurableToolReceiptV1,
+) -> tuple[str, str]:
+    metadata = event.get("metadata")
+    context = receipt.context
+    if not isinstance(metadata, Mapping):
+        raise ToolReceiptIntegrityError("receipt_event_metadata_invalid")
+    attempt = metadata.get("attempt")
+    if metadata.get("receipt_id") != receipt.receipt_id or metadata.get("task_id") != context.execution_task_id or metadata.get("tool_call_id") != context.tool_call_id or type(attempt) is not int or attempt != context.attempt:
+        raise ToolReceiptIntegrityError("receipt_event_metadata_invalid")
+    writer_fence_digest = metadata.get("writer_fence_digest")
+    dispatch_generation_digest = metadata.get("dispatch_generation_digest")
+    if not isinstance(writer_fence_digest, str) or _DIGEST_RE.fullmatch(writer_fence_digest) is None or not isinstance(dispatch_generation_digest, str) or _DIGEST_RE.fullmatch(dispatch_generation_digest) is None:
+        raise ToolReceiptIntegrityError("receipt_event_metadata_invalid")
+    if dispatch_generation_digest != tool_dispatch_generation_digest(context):
+        raise ToolReceiptIntegrityError("receipt_event_metadata_invalid")
+    return writer_fence_digest, dispatch_generation_digest
+
+
+def receipt_dispatch_generation_from_event(event: Mapping[str, object]) -> str:
+    """Return one fully validated receipt event's dispatch generation."""
+
+    return parse_tool_receipt_event(event).dispatch_generation_digest
 
 
 def reserve_attempt_from_events(
@@ -622,39 +824,51 @@ def reserve_attempt_from_events(
     tool_call_id: str,
     tool_name: str,
     request_projection_digest: str,
-) -> tuple[DurableToolReceiptV1, Mapping[str, object] | None]:
-    """Choose an existing crash-gap attempt or create the next identity.
+    observed_node_attempt: int,
+    expected_attempt: int | None,
+) -> tuple[
+    DurableToolReceiptV1,
+    Mapping[str, object] | None,
+    Mapping[str, object] | None,
+]:
+    """Replay the selected durable attempt or reserve the next identity.
 
     Callers must invoke this while holding their durable write/fence lock. The
-    returned event is non-null only when an unmatched start is being replayed.
+    second item is a reused start. The third is a terminal written under an
+    already-completed attempt, which tells middleware not to redispatch.
+
+    The durable history owns numbering. A fresh process has no translated
+    ``expected_attempt`` and conservatively binds a reset local counter to the
+    latest persisted attempt. Once bound, the local offset permits only the
+    latest attempt or its immediate successor.
     """
 
     _require_nonempty(tool_call_id, "tool_call_id_invalid", max_bytes=256)
     _validate_tool_name(tool_name)
     _require_digest(request_projection_digest, "request_projection_digest_invalid")
+    if type(observed_node_attempt) is not int or observed_node_attempt < 1:
+        raise ToolEvidenceError("node_attempt_invalid")
+    if expected_attempt is not None and (type(expected_attempt) is not int or expected_attempt < 1):
+        raise ToolEvidenceError("expected_attempt_invalid")
     starts: list[tuple[DurableToolReceiptV1, Mapping[str, object]]] = []
-    outcomes: dict[str, DurableToolReceiptV1] = {}
+    outcomes: dict[str, tuple[DurableToolReceiptV1, Mapping[str, object]]] = {}
     for event in events:
         if event.get("event_type") not in (TOOL_RECEIPT_STARTED_EVENT, TOOL_RECEIPT_OUTCOME_EVENT):
             continue
-        body = event.get("content")
-        context = body.get("context") if isinstance(body, Mapping) else None
-        if not isinstance(context, Mapping):
-            continue
-        if context.get("execution_task_id") != binding.execution_task_id or context.get("tool_call_id") != tool_call_id:
-            continue
-        receipt = receipt_from_event(event)
+        receipt = parse_tool_receipt_event(event).receipt
         if receipt.context.run_id != binding.run_id:
             raise ToolReceiptIntegrityError("receipt_attempt_history_invalid")
+        if receipt.context.execution_task_id != binding.execution_task_id or receipt.context.tool_call_id != tool_call_id:
+            continue
         if receipt.phase == "started":
             starts.append((receipt, event))
         elif receipt.receipt_id in outcomes:
             raise ToolReceiptIntegrityError("receipt_attempt_history_invalid")
         else:
-            outcomes[receipt.receipt_id] = receipt
+            outcomes[receipt.receipt_id] = (receipt, event)
 
     if not starts:
-        if outcomes:
+        if outcomes or expected_attempt not in (None, 1):
             raise ToolReceiptIntegrityError("receipt_attempt_history_invalid")
         context = binding.make_attempt(tool_call_id, 1)
         return (
@@ -663,6 +877,7 @@ def reserve_attempt_from_events(
                 tool_name=tool_name,
                 request_projection_digest=request_projection_digest,
             ),
+            None,
             None,
         )
 
@@ -675,28 +890,43 @@ def reserve_attempt_from_events(
     if unknown_outcomes:
         raise ToolReceiptIntegrityError("receipt_attempt_history_invalid")
     for started, _event in starts:
-        outcome = outcomes.get(started.receipt_id)
+        outcome_entry = outcomes.get(started.receipt_id)
+        outcome = outcome_entry[0] if outcome_entry is not None else None
         if outcome is not None and (outcome.context != started.context or outcome.tool_name != started.tool_name or outcome.request_projection_digest != started.request_projection_digest):
             raise ToolReceiptIntegrityError("receipt_attempt_history_invalid")
-    if any(started.receipt_id not in outcomes for started, _event in starts[:-1]):
-        raise ToolReceiptIntegrityError("receipt_attempt_history_invalid")
-    expected = binding.make_attempt(tool_call_id, latest.context.attempt)
-    if (
-        latest.context.execution_kind != expected.execution_kind
-        or latest.context.subagent_name != expected.subagent_name
-        or latest.context.agent_revision_digest != expected.agent_revision_digest
-        or latest.context.assembly_fingerprint != expected.assembly_fingerprint
-        or latest.context.extension_generation != expected.extension_generation
-        or latest.context.subagent_catalog_digest != expected.subagent_catalog_digest
-        or latest.context.subagent_definition_digest != expected.subagent_definition_digest
-        or latest.tool_name != tool_name
-        or latest.request_projection_digest != request_projection_digest
-    ):
-        raise ToolReceiptIntegrityError("receipt_attempt_replay_conflict")
-    if latest.receipt_id not in outcomes:
-        return latest, latest_event
+        expected = binding.make_attempt(tool_call_id, started.context.attempt)
+        if (
+            started.context.execution_kind != expected.execution_kind
+            or started.context.subagent_name != expected.subagent_name
+            or started.context.agent_revision_digest != expected.agent_revision_digest
+            or started.context.assembly_fingerprint != expected.assembly_fingerprint
+            or started.context.extension_generation != expected.extension_generation
+            or started.context.subagent_catalog_digest != expected.subagent_catalog_digest
+            or started.context.subagent_definition_digest != expected.subagent_definition_digest
+            or started.tool_name != tool_name
+            or started.request_projection_digest != request_projection_digest
+        ):
+            raise ToolReceiptIntegrityError("receipt_attempt_replay_conflict")
 
-    context = binding.make_attempt(tool_call_id, latest.context.attempt + 1)
+    latest_attempt = latest.context.attempt
+    if expected_attempt is None:
+        if observed_node_attempt > latest_attempt + 1:
+            raise ToolReceiptIntegrityError("receipt_attempt_history_invalid")
+        selected_attempt = latest_attempt + 1 if observed_node_attempt == latest_attempt + 1 else latest_attempt
+    elif expected_attempt in (latest_attempt, latest_attempt + 1):
+        selected_attempt = expected_attempt
+    else:
+        raise ToolReceiptIntegrityError("receipt_attempt_history_invalid")
+
+    if selected_attempt == latest_attempt:
+        outcome_entry = outcomes.get(latest.receipt_id)
+        return (
+            latest,
+            latest_event,
+            outcome_entry[1] if outcome_entry is not None else None,
+        )
+
+    context = binding.make_attempt(tool_call_id, selected_attempt)
     return (
         DurableToolReceiptV1.started(
             context=context,
@@ -704,10 +934,31 @@ def reserve_attempt_from_events(
             request_projection_digest=request_projection_digest,
         ),
         None,
+        None,
     )
 
 
-def receipt_event_metadata(receipt: DurableToolReceiptV1) -> dict[str, object]:
+def tool_writer_fence_digest(owner_id: str, lease_epoch: int) -> str:
+    """Commit to the fence that physically appended an event."""
+
+    _require_nonempty(owner_id, "owner_id_invalid", max_bytes=128)
+    if type(lease_epoch) is not int or lease_epoch < 0:
+        raise ToolEvidenceError("lease_epoch_invalid")
+    return canonical_digest(
+        {
+            "version": 1,
+            "owner_id": owner_id,
+            "lease_epoch": lease_epoch,
+        }
+    )
+
+
+def receipt_event_metadata(
+    receipt: DurableToolReceiptV1,
+    *,
+    writer_owner_id: str,
+    writer_lease_epoch: int,
+) -> dict[str, object]:
     """Return bounded join metadata for receipt-store indexes."""
 
     return {
@@ -715,6 +966,11 @@ def receipt_event_metadata(receipt: DurableToolReceiptV1) -> dict[str, object]:
         "task_id": receipt.context.execution_task_id,
         "tool_call_id": receipt.context.tool_call_id,
         "attempt": receipt.context.attempt,
+        "writer_fence_digest": tool_writer_fence_digest(
+            writer_owner_id,
+            writer_lease_epoch,
+        ),
+        "dispatch_generation_digest": tool_dispatch_generation_digest(receipt.context),
     }
 
 
@@ -726,18 +982,21 @@ def require_started_transition(
 
     if outcome.phase == "started":
         raise ToolReceiptIntegrityError("receipt_outcome_expected")
-    matching: list[DurableToolReceiptV1] = []
+    matching: list[ParsedToolReceiptEventV1] = []
     for event in events:
         if event.get("event_type") != TOOL_RECEIPT_STARTED_EVENT:
             continue
         body = event.get("content")
         if not isinstance(body, Mapping) or body.get("receipt_id") != outcome.receipt_id:
             continue
-        matching.append(receipt_from_event(event))
+        matching.append(parse_tool_receipt_event(event))
     if len(matching) != 1:
         raise ToolReceiptIntegrityError("receipt_start_missing" if not matching else "receipt_attempt_history_invalid")
-    started = matching[0]
+    started_event = matching[0]
+    started = started_event.receipt
     if started.context != outcome.context or started.tool_name != outcome.tool_name or started.request_projection_digest != outcome.request_projection_digest:
+        raise ToolReceiptIntegrityError("receipt_outcome_start_mismatch")
+    if started_event.dispatch_generation_digest != tool_dispatch_generation_digest(outcome.context):
         raise ToolReceiptIntegrityError("receipt_outcome_start_mismatch")
 
 
@@ -750,7 +1009,8 @@ class DurableToolReceiptSink(Protocol):
         tool_call_id: str,
         tool_name: str,
         request_projection_digest: str,
-    ) -> DurableToolReceiptV1: ...
+        dispatch: ToolDispatchObservationV1,
+    ) -> ToolAttemptReservation: ...
 
     async def record_started(self, receipt: DurableToolReceiptV1) -> None: ...
 
@@ -767,11 +1027,17 @@ class NullDurableToolReceiptSink:
         tool_call_id: str,
         tool_name: str,
         request_projection_digest: str,
-    ) -> DurableToolReceiptV1:
-        return DurableToolReceiptV1.started(
-            context=binding.make_attempt(tool_call_id, 1),
-            tool_name=tool_name,
-            request_projection_digest=request_projection_digest,
+        dispatch: ToolDispatchObservationV1,
+    ) -> ToolAttemptReservation:
+        expected_attempt = binding.expected_dispatch_attempt(tool_call_id, dispatch)
+        attempt = expected_attempt if expected_attempt is not None else 1
+        binding.bind_dispatch_attempt(tool_call_id, dispatch, attempt)
+        return ToolAttemptReservation(
+            started=DurableToolReceiptV1.started(
+                context=binding.make_attempt(tool_call_id, attempt),
+                tool_name=tool_name,
+                request_projection_digest=request_projection_digest,
+            )
         )
 
     async def record_started(self, receipt: DurableToolReceiptV1) -> None:
@@ -795,25 +1061,50 @@ class RunEventToolReceiptSink:
         tool_call_id: str,
         tool_name: str,
         request_projection_digest: str,
-    ) -> DurableToolReceiptV1:
+        dispatch: ToolDispatchObservationV1,
+    ) -> ToolAttemptReservation:
+        expected_attempt = binding.expected_dispatch_attempt(tool_call_id, dispatch)
         outcome = await self._event_store.reserve_tool_attempt(
             binding.run_id,
             binding=binding,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             request_projection_digest=request_projection_digest,
+            observed_node_attempt=dispatch.node_attempt,
+            expected_attempt=expected_attempt,
             owner_id=binding.owner_id,
             lease_epoch=binding.lease_epoch,
         )
-        receipt = receipt_from_event(outcome.event)
-        self._active_fences[receipt.receipt_id] = (binding.owner_id, binding.lease_epoch)
-        return receipt
-
-    async def _record(self, receipt: DurableToolReceiptV1, *, event_type: str) -> None:
-        owner_id, lease_epoch = self._active_fences.get(
-            receipt.receipt_id,
-            (receipt.context.owner_id, receipt.context.lease_epoch),
+        receipt = parse_tool_receipt_event(outcome.event).receipt
+        replayed_outcome = parse_tool_receipt_event(outcome.terminal_event).receipt if outcome.terminal_event is not None else None
+        binding.bind_dispatch_attempt(
+            tool_call_id,
+            dispatch,
+            receipt.context.attempt,
         )
+        if replayed_outcome is None:
+            self._active_fences[receipt.receipt_id] = (
+                binding.owner_id,
+                binding.lease_epoch,
+            )
+        return ToolAttemptReservation(
+            started=receipt,
+            replayed_outcome=replayed_outcome,
+        )
+
+    async def _record(
+        self,
+        receipt: DurableToolReceiptV1,
+        *,
+        event_type: str,
+    ) -> None:
+        active = self._active_fences.get(receipt.receipt_id)
+        if active is None:
+            active = (
+                receipt.context.owner_id,
+                receipt.context.lease_epoch,
+            )
+        owner_id, lease_epoch = active
         await self._event_store.append_idempotent(
             receipt.context.run_id,
             event_type=event_type,
@@ -826,10 +1117,13 @@ class RunEventToolReceiptSink:
     async def record_started(self, receipt: DurableToolReceiptV1) -> None:
         if receipt.phase != "started":
             raise ToolEvidenceError("started_receipt_phase_invalid")
-        await self._record(receipt, event_type=TOOL_RECEIPT_STARTED_EVENT)
         self._active_fences[receipt.receipt_id] = (
             receipt.context.owner_id,
             receipt.context.lease_epoch,
+        )
+        await self._record(
+            receipt,
+            event_type=TOOL_RECEIPT_STARTED_EVENT,
         )
 
     async def record_outcome(self, receipt: DurableToolReceiptV1) -> None:
@@ -855,6 +1149,7 @@ class ToolEvidenceRuntimeBinding:
         "subagent_catalog_digest",
         "subagent_definition_digest",
         "_dispatch_locks",
+        "_dispatch_offsets",
         "_dispatch_locks_guard",
     )
 
@@ -901,6 +1196,7 @@ class ToolEvidenceRuntimeBinding:
         self.subagent_catalog_digest = subagent_catalog_digest
         self.subagent_definition_digest = subagent_definition_digest
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
+        self._dispatch_offsets: dict[tuple[str, str], int] = {}
         self._dispatch_locks_guard = threading.Lock()
 
     def make_attempt(self, tool_call_id: str, attempt: int) -> ToolAttemptContextV1:
@@ -920,6 +1216,47 @@ class ToolEvidenceRuntimeBinding:
             subagent_catalog_digest=self.subagent_catalog_digest,
             subagent_definition_digest=self.subagent_definition_digest,
         )
+
+    def expected_dispatch_attempt(
+        self,
+        tool_call_id: str,
+        dispatch: ToolDispatchObservationV1,
+    ) -> int | None:
+        """Translate a live retry counter after its durable offset is known."""
+
+        _require_nonempty(tool_call_id, "tool_call_id_invalid", max_bytes=256)
+        if not isinstance(dispatch, ToolDispatchObservationV1):
+            raise ToolEvidenceError("tool_dispatch_observation_invalid")
+        key = (tool_call_id, dispatch.lineage_digest)
+        with self._dispatch_locks_guard:
+            offset = self._dispatch_offsets.get(key)
+        if offset is None:
+            return None
+        expected = dispatch.node_attempt + offset
+        if expected < 1:
+            raise ToolReceiptIntegrityError("receipt_attempt_history_invalid")
+        return expected
+
+    def bind_dispatch_attempt(
+        self,
+        tool_call_id: str,
+        dispatch: ToolDispatchObservationV1,
+        durable_attempt: int,
+    ) -> None:
+        """Remember the local-to-durable retry offset for this live binding."""
+
+        _require_nonempty(tool_call_id, "tool_call_id_invalid", max_bytes=256)
+        if not isinstance(dispatch, ToolDispatchObservationV1):
+            raise ToolEvidenceError("tool_dispatch_observation_invalid")
+        if type(durable_attempt) is not int or durable_attempt < 1:
+            raise ToolEvidenceError("attempt_invalid")
+        key = (tool_call_id, dispatch.lineage_digest)
+        offset = durable_attempt - dispatch.node_attempt
+        with self._dispatch_locks_guard:
+            existing = self._dispatch_offsets.get(key)
+            if existing is not None and existing != offset:
+                raise ToolReceiptIntegrityError("receipt_attempt_history_invalid")
+            self._dispatch_offsets[key] = offset
 
     @asynccontextmanager
     async def serialize_dispatch(self, tool_call_id: str) -> AsyncIterator[None]:
@@ -953,6 +1290,20 @@ class ToolEvidenceRuntimeBinding:
         )
 
 
+def require_tool_attempt_binding_fence(
+    binding: object,
+    *,
+    run_id: str,
+    owner_id: str,
+    lease_epoch: int,
+) -> ToolEvidenceRuntimeBinding:
+    """Require one reservation request to use a single immutable fence."""
+
+    if not isinstance(binding, ToolEvidenceRuntimeBinding) or binding.run_id != run_id or binding.owner_id != owner_id or binding.lease_epoch != lease_epoch:
+        raise ToolReceiptIntegrityError("receipt_attempt_binding_invalid")
+    return binding
+
+
 class CrossLoopDurableToolReceiptSink:
     """Schedule child-loop receipt writes onto the parent run's owner loop."""
 
@@ -960,13 +1311,18 @@ class CrossLoopDurableToolReceiptSink:
         self._sink = sink
         self._owner_loop = owner_loop
 
-    async def _run(self, receipt: DurableToolReceiptV1, *, outcome: bool) -> None:
+    async def _run(
+        self,
+        receipt: DurableToolReceiptV1,
+        *,
+        outcome: bool,
+    ) -> None:
         current = asyncio.get_running_loop()
-        operation = self._sink.record_outcome if outcome else self._sink.record_started
+        operation = self._sink.record_outcome(receipt) if outcome else self._sink.record_started(receipt)
         if current is self._owner_loop:
-            await operation(receipt)
+            await operation
             return
-        future = asyncio.run_coroutine_threadsafe(operation(receipt), self._owner_loop)
+        future = asyncio.run_coroutine_threadsafe(operation, self._owner_loop)
         await asyncio.wrap_future(future)
 
     async def reserve_started(
@@ -976,12 +1332,14 @@ class CrossLoopDurableToolReceiptSink:
         tool_call_id: str,
         tool_name: str,
         request_projection_digest: str,
-    ) -> DurableToolReceiptV1:
+        dispatch: ToolDispatchObservationV1,
+    ) -> ToolAttemptReservation:
         operation = self._sink.reserve_started(
             binding=binding,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             request_projection_digest=request_projection_digest,
+            dispatch=dispatch,
         )
         if asyncio.get_running_loop() is self._owner_loop:
             return await operation

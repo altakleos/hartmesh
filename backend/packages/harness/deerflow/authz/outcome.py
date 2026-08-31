@@ -10,6 +10,8 @@ strips any caller-supplied forgery, matching ``__run_journal`` /
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Literal
 
@@ -36,9 +38,7 @@ class AuthorizationOutcome:
     def decision_ref(self) -> str:
         """Return a stable bounded reference without provider payload text."""
 
-        from deerflow.runtime.tool_evidence import canonical_digest
-
-        return "pd_" + canonical_digest(
+        encoded = json.dumps(
             {
                 "version": 1,
                 "kind": self.kind,
@@ -46,8 +46,13 @@ class AuthorizationOutcome:
                 "policy_id": self.policy_id,
                 "policy_version": self.policy_version,
                 "reason_codes": list(self.reason_codes),
-            }
-        )
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "pd_" + hashlib.sha256(encoded).hexdigest()
 
 
 def put_authorization_outcome(context: object, tool_call_id: object, outcome: AuthorizationOutcome) -> None:
@@ -87,6 +92,25 @@ def pop_policy_outcomes(context: object, tool_call_id: object) -> tuple[Authoriz
     if not isinstance(store, dict):
         return ()
     value = store.pop(tool_call_id, None)
+    if isinstance(value, AuthorizationOutcome):
+        return (value,)
+    if isinstance(value, tuple) and all(isinstance(item, AuthorizationOutcome) for item in value):
+        return value
+    return ()
+
+
+def peek_policy_outcomes(
+    context: object,
+    tool_call_id: object,
+) -> tuple[AuthorizationOutcome, ...]:
+    """Read ordered decisions for one call without exposing storage shape."""
+
+    if not isinstance(context, dict) or not tool_call_id:
+        return ()
+    store = context.get(AUTHORIZATION_OUTCOME_CONTEXT_KEY)
+    if not isinstance(store, dict):
+        return ()
+    value = store.get(tool_call_id)
     if isinstance(value, AuthorizationOutcome):
         return (value,)
     if isinstance(value, tuple) and all(isinstance(item, AuthorizationOutcome) for item in value):

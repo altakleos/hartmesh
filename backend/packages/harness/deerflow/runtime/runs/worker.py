@@ -917,6 +917,7 @@ async def run_agent(
     accepted_constraints = None
     accepted_for_cleanup = record.accepted_invocation
     requires_assembly_evidence = accepted_for_cleanup is not None and run_manager.requires_assembly_evidence
+    requires_tool_receipt_evidence = accepted_for_cleanup is not None and accepted_for_cleanup.tool_receipt_evidence_version == 1
     assembly_evidence_bound = False
     pinned_material_for_cleanup = accepted_for_cleanup.agent_revision.material if accepted_for_cleanup is not None else None
     skill_binding_user_id: str | None = None
@@ -1492,37 +1493,38 @@ async def run_agent(
                 record.ownership_lost = True
                 raise AssemblyEvidenceError("assembly_evidence_fence_lost")
 
-            if event_store is None:
-                raise AssemblyEvidenceError("tool_receipt_sink_unavailable")
-            from deerflow.runtime.tool_evidence import (
-                RunEventToolReceiptSink,
-                ToolEvidenceRuntimeBinding,
-                install_tool_evidence_context,
-            )
+            if requires_tool_receipt_evidence:
+                if event_store is None:
+                    raise AssemblyEvidenceError("tool_receipt_sink_unavailable")
+                from deerflow.runtime.tool_evidence import (
+                    RunEventToolReceiptSink,
+                    ToolEvidenceRuntimeBinding,
+                    install_tool_evidence_context,
+                )
 
-            owner_id = record.owner_worker_id
-            lease_epoch = record.state_version
-            if not isinstance(owner_id, str) or not owner_id or type(lease_epoch) is not int:
-                raise AssemblyEvidenceError("tool_receipt_fence_unavailable")
-            catalog = pinned_material_for_cleanup.subagent_catalog
-            install_tool_evidence_context(
-                runtime_ctx,
-                binding=ToolEvidenceRuntimeBinding(
-                    run_id=run_id,
-                    execution_task_id=run_id,
-                    execution_kind="lead",
-                    subagent_name=None,
-                    owner_id=owner_id,
-                    lease_epoch=lease_epoch,
-                    agent_revision_digest=evidence.accepted_agent_revision_digest,
-                    assembly_fingerprint=evidence.fingerprint,
-                    extension_generation=evidence.extension_generation,
-                    subagent_catalog_digest=catalog.digest,
-                    subagent_definition_digest=None,
-                ),
-                sink=RunEventToolReceiptSink(event_store),
-            )
-            _install_runtime_context(config, runtime_ctx)
+                owner_id = record.owner_worker_id
+                lease_epoch = record.state_version
+                if not isinstance(owner_id, str) or not owner_id or type(lease_epoch) is not int:
+                    raise AssemblyEvidenceError("tool_receipt_fence_unavailable")
+                catalog = pinned_material_for_cleanup.subagent_catalog
+                install_tool_evidence_context(
+                    runtime_ctx,
+                    binding=ToolEvidenceRuntimeBinding(
+                        run_id=run_id,
+                        execution_task_id=run_id,
+                        execution_kind="lead",
+                        subagent_name=None,
+                        owner_id=owner_id,
+                        lease_epoch=lease_epoch,
+                        agent_revision_digest=evidence.accepted_agent_revision_digest,
+                        assembly_fingerprint=evidence.fingerprint,
+                        extension_generation=evidence.extension_generation,
+                        subagent_catalog_digest=catalog.digest,
+                        subagent_definition_digest=None,
+                    ),
+                    sink=RunEventToolReceiptSink(event_store),
+                )
+                _install_runtime_context(config, runtime_ctx)
 
             if checkpointer is not None:
                 for preflight_config in checkpoint_preflight_configs:

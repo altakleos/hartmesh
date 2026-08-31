@@ -23,12 +23,13 @@ from deerflow.runtime.tool_evidence import (
     TOOL_RECEIPT_OUTCOME_EVENT,
     TOOL_RECEIPT_STARTED_EVENT,
     DurableToolReceiptV1,
-    ToolEvidenceRuntimeBinding,
     ToolReceiptIntegrityError,
     ToolReceiptOwnershipLost,
     canonical_digest,
+    parse_tool_receipt_event,
     receipt_event_metadata,
     require_started_transition,
+    require_tool_attempt_binding_fence,
     reserve_attempt_from_events,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
@@ -316,6 +317,7 @@ class DbRunEventStore(RunEventStore):
                         record = self._row_to_dict(existing)
                         if canonical_digest(record["content"]) != canonical_digest(detached):
                             raise ToolReceiptIntegrityError("receipt_idempotency_conflict")
+                        parse_tool_receipt_event(record)
                         return AppendOutcome(event=record, created=False)
                     receipt = DurableToolReceiptV1.from_event_body(detached, occurred_at=datetime.now(UTC))
                     if receipt.phase != "started":
@@ -338,7 +340,15 @@ class DbRunEventStore(RunEventStore):
                         idempotency_key=idempotency_key,
                         category=TOOL_RECEIPT_CATEGORY,
                         content=json.dumps(detached, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                        event_metadata={"content_is_json": True, "content_is_dict": True, **receipt_event_metadata(receipt)},
+                        event_metadata={
+                            "content_is_json": True,
+                            "content_is_dict": True,
+                            **receipt_event_metadata(
+                                receipt,
+                                writer_owner_id=owner_id,
+                                writer_lease_epoch=lease_epoch,
+                            ),
+                        },
                         seq=(max_seq or 0) + 1,
                         created_at=datetime.now(UTC),
                     )
@@ -353,11 +363,17 @@ class DbRunEventStore(RunEventStore):
         tool_call_id,
         tool_name,
         request_projection_digest,
+        observed_node_attempt,
+        expected_attempt,
         owner_id,
         lease_epoch,
     ) -> AppendOutcome:
-        if not isinstance(binding, ToolEvidenceRuntimeBinding) or binding.run_id != run_id:
-            raise ToolReceiptIntegrityError("receipt_attempt_binding_invalid")
+        binding = require_tool_attempt_binding_fence(
+            binding,
+            run_id=run_id,
+            owner_id=owner_id,
+            lease_epoch=lease_epoch,
+        )
         async with self._sf() as lookup_session:
             thread_id = await lookup_session.scalar(select(RunRow.thread_id).where(RunRow.run_id == run_id))
         if not isinstance(thread_id, str):
@@ -379,15 +395,21 @@ class DbRunEventStore(RunEventStore):
                         .order_by(RunEventRow.seq.asc())
                     )
                     events = [self._row_to_dict(event_row) for event_row in result.scalars()]
-                    receipt, existing = reserve_attempt_from_events(
+                    receipt, existing, terminal = reserve_attempt_from_events(
                         events,
                         binding=binding,
                         tool_call_id=tool_call_id,
                         tool_name=tool_name,
                         request_projection_digest=request_projection_digest,
+                        observed_node_attempt=observed_node_attempt,
+                        expected_attempt=expected_attempt,
                     )
                     if existing is not None:
-                        return AppendOutcome(event=dict(existing), created=False)
+                        return AppendOutcome(
+                            event=dict(existing),
+                            created=False,
+                            terminal_event=(dict(terminal) if terminal is not None else None),
+                        )
                     body = validate_idempotent_append(
                         event_type=TOOL_RECEIPT_STARTED_EVENT,
                         idempotency_key=receipt.idempotency_key,
@@ -404,7 +426,11 @@ class DbRunEventStore(RunEventStore):
                         event_metadata={
                             "content_is_json": True,
                             "content_is_dict": True,
-                            **receipt_event_metadata(receipt),
+                            **receipt_event_metadata(
+                                receipt,
+                                writer_owner_id=owner_id,
+                                writer_lease_epoch=lease_epoch,
+                            ),
                         },
                         seq=(max_seq or 0) + 1,
                         created_at=datetime.now(UTC),

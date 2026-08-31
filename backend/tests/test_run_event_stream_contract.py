@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -27,6 +28,11 @@ from deerflow.runtime.events.catalog import (
 )
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
+from deerflow.runtime.tool_evidence import (
+    DurableToolReceiptV1,
+    ToolAttemptContextV1,
+    receipt_event_metadata,
+)
 from deerflow.subagents.step_events import SUBAGENT_STEP_MAX_CHARS, capture_step_message, subagent_run_event
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -65,6 +71,75 @@ def _make_llm_response(content: str = "answer", usage: dict | None = None) -> LL
         usage_metadata=usage,
     )
     return LLMResult(generations=[[ChatGeneration(message=message)]])
+
+
+def _tool_receipt_event(*, outcome: bool) -> dict:
+    started = DurableToolReceiptV1.started(
+        context=ToolAttemptContextV1(
+            run_id="run-receipt",
+            execution_task_id="run-receipt",
+            execution_kind="lead",
+            subagent_name=None,
+            tool_call_id="call-1",
+            attempt=1,
+            owner_id="worker-1",
+            lease_epoch=4,
+            agent_revision_digest="a" * 64,
+            assembly_fingerprint="b" * 64,
+            extension_generation=3,
+            subagent_catalog_digest="c" * 64,
+            subagent_definition_digest=None,
+        ),
+        tool_name="web_search",
+        request_projection_digest="d" * 64,
+        occurred_at=datetime(2026, 8, 30, tzinfo=UTC),
+    )
+    receipt = (
+        started.outcome(
+            phase="succeeded",
+            result_projection_digest="e" * 64,
+            result_kind="tool_message",
+            safe_error_code=None,
+        )
+        if outcome
+        else started
+    )
+    return {
+        "thread_id": "thread-receipt",
+        "run_id": "run-receipt",
+        "event_type": ("tool_receipt.outcome.v1" if outcome else "tool_receipt.started.v1"),
+        "category": "tool",
+        "content": receipt.to_event_body(),
+        "metadata": receipt_event_metadata(
+            receipt,
+            writer_owner_id="worker-1",
+            writer_lease_epoch=4,
+        ),
+        "idempotency_key": receipt.idempotency_key,
+        "seq": 1 if not outcome else 2,
+        "created_at": "2026-08-30T00:00:00+00:00",
+    }
+
+
+def test_tool_receipt_contract_matches_runtime_strictness() -> None:
+    started = _tool_receipt_event(outcome=False)
+    outcome = _tool_receipt_event(outcome=True)
+    _assert_fixed_event_valid(started, persisted=True)
+    _assert_fixed_event_valid(outcome, persisted=True)
+
+    started_schema = _contract_events()[started["event_type"]]["content_schema"]
+    missing_nullable = dict(started["content"])
+    missing_nullable.pop("result_kind")
+    assert list(Draft202012Validator(started_schema).iter_errors(missing_nullable))
+
+    outcome_schema = _contract_events()[outcome["event_type"]]["content_schema"]
+    unsafe_code = {**outcome["content"], "safe_error_code": "raw_exception"}
+    assert list(Draft202012Validator(outcome_schema).iter_errors(unsafe_code))
+    loose_context = {
+        **outcome["content"],
+        "context": {**outcome["content"]["context"], "unknown": "field"},
+    }
+    assert list(Draft202012Validator(outcome_schema).iter_errors(loose_context))
 
 
 def _subagent_batch() -> list[dict]:

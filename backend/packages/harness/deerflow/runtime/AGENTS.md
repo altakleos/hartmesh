@@ -39,8 +39,10 @@ policy settings, source records, and user identifiers never enter that projectio
 It owns the V1 context/receipt schemas, canonical full SHA-256 identities and
 projections, bounded redaction policy, state transitions, trusted runtime keys,
 and the sink port/adapters. Attempt reservation belongs to `RunEventStore`, not
-process memory: recovery reuses an unfinished start, a new dispatch after a
-terminal outcome increments the attempt, and conflicting immutable anchors fail
+process memory: public LangGraph checkpoint/task data is only a local retry
+observation. The store owns contiguous attempt numbering; a reconstructed
+counter reuses the latest durable start and terminal, then a binding-local
+offset maps its next live retry to the immediate successor. Conflicting immutable anchors fail
 closed. `ToolReceiptMiddleware` is only the observation point; do not duplicate
 receipt identity, redaction, transition, or event parsing logic in middleware,
 subagents, or lifecycle consumers. The accepted lead binding is propagated to a

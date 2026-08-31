@@ -14,7 +14,11 @@ from deerflow.runtime.runs.lifecycle_query import (
     encode_tool_receipt_cursor,
 )
 from deerflow.runtime.runs.manager import RunManager
-from deerflow.runtime.tool_evidence import DurableToolReceiptV1, ToolAttemptContextV1
+from deerflow.runtime.tool_evidence import (
+    DurableToolReceiptV1,
+    ToolAttemptContextV1,
+    receipt_event_metadata,
+)
 
 
 def _context(call: str, *, attempt: int = 1) -> ToolAttemptContextV1:
@@ -50,7 +54,11 @@ def _events(call: str, seq: int, *, terminal: str | None = "succeeded") -> list[
             "idempotency_key": started.idempotency_key,
             "category": "tool",
             "content": started.to_event_body(),
-            "metadata": {},
+            "metadata": receipt_event_metadata(
+                started,
+                writer_owner_id="worker-1",
+                writer_lease_epoch=3,
+            ),
             "seq": seq,
             "created_at": "2026-08-30T00:00:00+00:00",
         }
@@ -71,7 +79,11 @@ def _events(call: str, seq: int, *, terminal: str | None = "succeeded") -> list[
                 "idempotency_key": outcome.idempotency_key,
                 "category": "tool",
                 "content": outcome.to_event_body(),
-                "metadata": {},
+                "metadata": receipt_event_metadata(
+                    outcome,
+                    writer_owner_id="worker-1",
+                    writer_lease_epoch=3,
+                ),
                 "seq": seq + 1,
                 "created_at": "2026-08-30T00:00:01+00:00",
             }
@@ -149,6 +161,36 @@ def test_corrupt_events_are_contained_without_raw_payload_echo() -> None:
     assert "never echo me" not in str(page)
 
 
+@pytest.mark.parametrize(
+    "metadata_change",
+    [
+        {"tool_call_id": "different-call"},
+        {"dispatch_generation_digest": "0" * 64},
+    ],
+)
+def test_mismatched_receipt_metadata_is_contained_as_invalid(
+    metadata_change: dict[str, object],
+) -> None:
+    events = _events("call-1", 1)
+    events[0]["metadata"] = {
+        **events[0]["metadata"],
+        **metadata_change,
+    }
+
+    page = build_tool_receipt_page(
+        events,
+        run_id="run-1",
+        thread_id="thread-1",
+        cursor=None,
+        limit=100,
+        legacy_unavailable=False,
+    )
+
+    assert page.items == ()
+    assert page.evidence_status == "invalid"
+    assert page.invalid_event_count == 2
+
+
 def test_old_run_reports_legacy_unavailable() -> None:
     page = build_tool_receipt_page(
         [],
@@ -163,13 +205,30 @@ def test_old_run_reports_legacy_unavailable() -> None:
     assert page.pruned_before is None
 
 
+def test_old_run_never_projects_partial_tail_receipts() -> None:
+    page = build_tool_receipt_page(
+        _events("call-tail", 1),
+        run_id="run-1",
+        thread_id="thread-1",
+        cursor=None,
+        limit=100,
+        legacy_unavailable=True,
+    )
+
+    assert page.items == ()
+    assert page.evidence_status == "legacy_unavailable"
+    assert page.invalid_event_count == 0
+
+
 def test_receipt_cursor_encoder_rejects_invalid_scope() -> None:
     token = encode_tool_receipt_cursor(run_id="run-1", thread_id="thread-1", after_seq=5)
     assert decode_tool_receipt_cursor(token, run_id="run-1", thread_id="thread-1") == 5
 
 
 @pytest.mark.anyio
-async def test_run_manager_attaches_receipts_only_for_an_explicit_exact_run_query() -> None:
+async def test_run_manager_attaches_receipts_only_for_an_explicit_exact_run_query(
+    monkeypatch,
+) -> None:
     class Store:
         durable_lifecycle = True
 
@@ -199,6 +258,7 @@ async def test_run_manager_attaches_receipts_only_for_an_explicit_exact_run_quer
                 "status": "success",
                 "state_version": 2,
                 "operation_kind": "run",
+                "decision_evidence_json": {"tool_receipts": {"version": 1}},
             }
 
     class EventStore:
@@ -207,6 +267,10 @@ async def test_run_manager_attaches_receipts_only_for_an_explicit_exact_run_quer
             assert kwargs["user_id"] is None
             return _events("call-1", 1)
 
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.lifecycle_query.build_invocation_summary",
+        lambda _row: {"assembly_evidence_status": "verified"},
+    )
     manager = RunManager(store=Store(), event_store=EventStore())  # type: ignore[arg-type]
 
     page = await manager.query_lifecycle(
@@ -222,7 +286,9 @@ async def test_run_manager_attaches_receipts_only_for_an_explicit_exact_run_quer
 
 
 @pytest.mark.anyio
-async def test_manager_receipt_cursor_ignores_a_prior_page_terminal() -> None:
+async def test_manager_receipt_cursor_ignores_a_prior_page_terminal(
+    monkeypatch,
+) -> None:
     all_events = [*_events("call-1", 1), *_events("call-2", 3), *_events("call-3", 5)]
 
     class Store:
@@ -253,6 +319,7 @@ async def test_manager_receipt_cursor_ignores_a_prior_page_terminal() -> None:
                 "status": "success",
                 "state_version": 2,
                 "operation_kind": "run",
+                "decision_evidence_json": {"tool_receipts": {"version": 1}},
             }
 
     class EventStore:
@@ -260,6 +327,10 @@ async def test_manager_receipt_cursor_ignores_a_prior_page_terminal() -> None:
             after_seq = kwargs.get("after_seq")
             return [event for event in all_events if after_seq is None or event["seq"] > after_seq]
 
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.lifecycle_query.build_invocation_summary",
+        lambda _row: {"assembly_evidence_status": "verified"},
+    )
     manager = RunManager(store=Store(), event_store=EventStore())  # type: ignore[arg-type]
     first = await manager.query_lifecycle(LifecycleQuery(run_id="run-1", include_tool_receipts=True, tool_receipt_limit=1))
     assert first.tool_receipts is not None and first.tool_receipts.next_cursor is not None
@@ -303,3 +374,52 @@ async def test_manager_does_not_read_receipts_without_a_visible_snapshot() -> No
     )
 
     assert page.tool_receipts is None
+
+
+@pytest.mark.anyio
+async def test_verified_pre_receipt_run_is_still_legacy_unavailable(
+    monkeypatch,
+) -> None:
+    class Store:
+        durable_lifecycle = True
+
+        async def query_lifecycle(self, _query):
+            cursor = encode_lifecycle_cursor(0)
+            return LifecyclePage(
+                snapshots=(
+                    {
+                        "run_id": "run-1",
+                        "thread_id": "thread-1",
+                        "status": "success",
+                        "state_version": 2,
+                    },
+                ),
+                events=(),
+                next_cursor=cursor,
+                minimum_available_cursor=cursor,
+                read_fence_cursor=cursor,
+            )
+
+        async def get(self, _run_id, *, user_id=None):
+            assert user_id is None
+            return {
+                "run_id": "run-1",
+                "thread_id": "thread-1",
+                "decision_evidence_json": {"version": 1, "decisions": []},
+            }
+
+    class EventStore:
+        async def list_events(self, *_args, **_kwargs):
+            raise AssertionError("legacy runs must not read or project tail receipts")
+
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.lifecycle_query.build_invocation_summary",
+        lambda _row: {"assembly_evidence_status": "verified"},
+    )
+    page = await RunManager(  # type: ignore[arg-type]
+        store=Store(),
+        event_store=EventStore(),
+    ).query_lifecycle(LifecycleQuery(run_id="run-1", include_tool_receipts=True))
+
+    assert page.tool_receipts is not None
+    assert page.tool_receipts.evidence_status == "legacy_unavailable"

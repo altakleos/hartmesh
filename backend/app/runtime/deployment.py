@@ -243,7 +243,7 @@ def validate_deployment_profile(
         raise ValueError("durable_production requires a finite PostgreSQL command_timeout")
     run_events = getattr(config, "run_events", None)
     run_events_backend = getattr(run_events, "backend", None)
-    if profile is DeploymentProfile.durable_production and run_events is not None and run_events_backend != "db":
+    if profile is DeploymentProfile.durable_production and run_events_backend != "db":
         raise ValueError("durable_production requires run_events.backend='db' for fenced idempotent tool receipts")
     ingress = describe_native_ingress(
         config,

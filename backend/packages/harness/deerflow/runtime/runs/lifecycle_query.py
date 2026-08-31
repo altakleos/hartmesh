@@ -258,47 +258,43 @@ def build_tool_receipt_page(
     """Pair bounded start/outcome evidence without exposing corrupt payloads."""
 
     from deerflow.runtime.tool_evidence import (
-        TOOL_RECEIPT_OUTCOME_EVENT,
-        TOOL_RECEIPT_STARTED_EVENT,
         ToolEvidenceError,
-        receipt_from_event,
+        parse_tool_receipt_event,
     )
 
     if type(limit) is not int or not 1 <= limit <= MAX_TOOL_RECEIPT_PAGE_SIZE:
         raise ValueError("tool receipt limit must be between 1 and 100")
     after_seq = 0 if cursor is None else decode_tool_receipt_cursor(cursor, run_id=run_id, thread_id=thread_id)
-    starts: list[tuple[int, Any, str]] = []
-    outcomes: dict[str, tuple[Any, str]] = {}
+    if legacy_unavailable:
+        return ToolReceiptPage(
+            items=(),
+            next_cursor=None,
+            pruned_before=None,
+            evidence_status="legacy_unavailable",
+            invalid_event_count=0,
+        )
+    starts: list[tuple[int, Any, str, str]] = []
+    outcomes: dict[str, tuple[Any, str, str]] = {}
     invalid = 0
     for event in sorted(events, key=lambda item: item.get("seq", -1)):
         try:
             if event.get("run_id") != run_id or event.get("thread_id") != thread_id:
                 raise ToolEvidenceError("receipt_event_scope_invalid")
             seq = event.get("seq")
-            event_type = event.get("event_type")
-            if (
-                type(seq) is not int
-                or seq < 1
-                or event.get("category") != "tool"
-                or event_type
-                not in {
-                    TOOL_RECEIPT_STARTED_EVENT,
-                    TOOL_RECEIPT_OUTCOME_EVENT,
-                }
-            ):
+            if type(seq) is not int or seq < 1:
                 raise ToolEvidenceError("receipt_event_invalid")
-            receipt = receipt_from_event(event)
+            parsed = parse_tool_receipt_event(event)
+            receipt = parsed.receipt
             if receipt.context.run_id != run_id:
                 raise ToolEvidenceError("receipt_event_scope_invalid")
             timestamp = str(event["created_at"])
-            if event_type == TOOL_RECEIPT_STARTED_EVENT:
-                if receipt.phase != "started":
-                    raise ToolEvidenceError("receipt_event_phase_invalid")
-                starts.append((seq, receipt, timestamp))
+            generation = parsed.dispatch_generation_digest
+            if receipt.phase == "started":
+                starts.append((seq, receipt, timestamp, generation))
             else:
-                if receipt.phase == "started" or receipt.receipt_id in outcomes:
+                if receipt.receipt_id in outcomes:
                     raise ToolEvidenceError("receipt_event_phase_invalid")
-                outcomes[receipt.receipt_id] = (receipt, timestamp)
+                outcomes[receipt.receipt_id] = (receipt, timestamp, generation)
         except (ToolEvidenceError, KeyError, TypeError, ValueError):
             invalid += 1
 
@@ -307,7 +303,7 @@ def build_tool_receipt_page(
     selected_starts = selected_starts[:limit]
     items: list[ToolReceiptLifecycleItem] = []
     selected_ids: set[str] = set()
-    for _seq, started, started_at in selected_starts:
+    for _seq, started, started_at, started_generation in selected_starts:
         if started.receipt_id in selected_ids:
             invalid += 1
             continue
@@ -316,6 +312,10 @@ def build_tool_receipt_page(
         outcome = outcome_entry[0] if outcome_entry is not None else None
         finished_at = outcome_entry[1] if outcome_entry is not None else None
         if outcome is not None and (outcome.context != started.context or outcome.tool_name != started.tool_name or outcome.request_projection_digest != started.request_projection_digest):
+            invalid += 1
+            outcome = None
+            finished_at = None
+        elif outcome_entry is not None and outcome_entry[2] != started_generation:
             invalid += 1
             outcome = None
             finished_at = None
@@ -349,7 +349,7 @@ def build_tool_receipt_page(
     # read, so only a complete-prefix projection may classify an unmatched
     # outcome as corrupt.
     if events_include_prefix:
-        orphan_outcomes = set(outcomes) - {receipt.receipt_id for _, receipt, _ in starts}
+        orphan_outcomes = set(outcomes) - {receipt.receipt_id for _, receipt, _, _ in starts}
         invalid += len(orphan_outcomes)
     next_cursor = None
     if has_more and selected_starts:
@@ -361,8 +361,6 @@ def build_tool_receipt_page(
     status: Literal["available", "legacy_unavailable", "invalid"]
     if invalid:
         status = "invalid"
-    elif legacy_unavailable and not starts:
-        status = "legacy_unavailable"
     else:
         status = "available"
     return ToolReceiptPage(

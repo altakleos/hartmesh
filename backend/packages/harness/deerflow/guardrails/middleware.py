@@ -82,6 +82,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         return {
             "fail_closed": self.fail_closed,
             "passport": self.passport,
+            "decision_kind": self.decision_kind,
             "policy": {"id": policy_id, "version": policy_version},
             "provider_parameters": provider_parameters,
         }

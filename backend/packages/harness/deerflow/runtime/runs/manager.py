@@ -2103,11 +2103,13 @@ class RunManager:
         )
 
         summary = build_invocation_summary(row)
-        legacy_unavailable = summary is None or summary.get("assembly_evidence_status") != "verified"
-        if self._event_store is None:
-            if not legacy_unavailable:
-                raise RuntimeError("durable tool receipt event storage is unavailable")
+        from deerflow.runtime.accepted_invocation import AcceptedInvocation
+
+        legacy_unavailable = summary is None or summary.get("assembly_evidence_status") != "verified" or AcceptedInvocation.tool_receipt_evidence_version_from_persisted(row) != 1
+        if legacy_unavailable:
             events: list[dict] = []
+        elif self._event_store is None:
+            raise RuntimeError("durable tool receipt event storage is unavailable")
         else:
             after_seq = (
                 decode_tool_receipt_cursor(

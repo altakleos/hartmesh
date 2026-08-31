@@ -307,6 +307,10 @@ outcome. A process-loss gap remains visible as `indeterminate`; compact `r1`,
 one-run observation exposes an opt-in, cursor-paged receipt projection without
 raw arguments, results, credentials, or exception messages.
 
+Recovery binds replay to store-owned durable attempt history: a reconstructed
+local retry counter reuses the latest start and any terminal, while its next
+live retry reserves the next attempt.
+
 A durable receipt records HartMesh's observation of a tool attempt. It does not
 guarantee an external side effect occurred exactly once or that the tool result
 was correct.

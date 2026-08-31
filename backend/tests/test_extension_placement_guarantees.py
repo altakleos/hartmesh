@@ -199,11 +199,11 @@ def test_the_tool_raw_carve_out_is_actually_needed():
 
 
 def test_tool_visible_sees_the_final_result():
-    """Nothing outer of TOOL_VISIBLE may wrap tool calls."""
+    """Only the transparent host evidence envelope may wrap TOOL_VISIBLE."""
     stack = _stack_with(MiddlewarePlacement(_Probe("visible"), Placement.TOOL_VISIBLE))
     index = _index_of_probe(stack, "visible")
     offenders = [type(_unwrap(m)).__name__ for m in stack[:index] if middleware_implements(_unwrap(m), "wrap_tool_call")]
-    assert offenders == [], f"these middlewares sit outer of TOOL_VISIBLE and wrap tool calls: {offenders}"
+    assert offenders == ["ToolReceiptMiddleware"]
 
 
 def test_model_logical_is_outer_of_the_retry_loop():

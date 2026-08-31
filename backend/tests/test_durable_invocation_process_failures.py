@@ -54,6 +54,7 @@ from deerflow.runtime.accepted_invocation import (
     ResolvedAgentRevision,
     canonical_digest,
 )
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.lifecycle_query import LifecycleQuery
 from deerflow.runtime.runs.manager import (
     ORPHAN_RECOVERY_STOP_REASON,
@@ -857,6 +858,7 @@ async def test_process_restart_completes_with_frozen_catalog_after_managed_edit_
         recovered,
         ctx=RunContext(
             checkpointer=None,
+            event_store=MemoryRunEventStore(run_store=store),
             app_config=app_config,
             agent_revision_resolver=lambda record, config: agent_revision.resolve_agent_revision(
                 config,
@@ -923,7 +925,10 @@ async def test_process_loss_during_execution_is_fenced_before_stale_completion()
             _bridge(),
             owner,
             record,
-            ctx=RunContext(checkpointer=None),
+            ctx=RunContext(
+                checkpointer=None,
+                event_store=MemoryRunEventStore(run_store=store),
+            ),
             agent_factory=factory,
             graph_input={},
             config={},
@@ -960,7 +965,8 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
 
     material = _material()
     ordinary = _accepted(material)
-    manager = RunManager(store=MemoryRunStore())
+    ordinary_store = MemoryRunStore()
+    manager = RunManager(store=ordinary_store)
     ordinary_record = await manager.create_or_reject("thread-success", accepted_invocation=ordinary)
 
     def factory(*, config):
@@ -972,7 +978,11 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
         _bridge(),
         manager,
         ordinary_record,
-        ctx=RunContext(checkpointer=None, constraint_clock=lambda: now),
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=MemoryRunEventStore(run_store=ordinary_store),
+            constraint_clock=lambda: now,
+        ),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -981,7 +991,8 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
     assert counts == {"graph": 1, "astream": 1, "model": 0}
 
     drifted = replace(ordinary, agent_revision=replace(ordinary.agent_revision, material=None))
-    drift_manager = RunManager(store=MemoryRunStore())
+    drift_store = MemoryRunStore()
+    drift_manager = RunManager(store=drift_store)
     drift_record = await drift_manager.create_or_reject("thread-drift", accepted_invocation=drifted)
     await run_agent(
         _bridge(),
@@ -989,6 +1000,7 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
         drift_record,
         ctx=RunContext(
             checkpointer=None,
+            event_store=MemoryRunEventStore(run_store=drift_store),
             agent_revision_resolver=lambda _record, _config: ResolvedAgentRevision.from_material(_material(soul="changed")),
             constraint_clock=lambda: now,
         ),
@@ -1014,13 +1026,18 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
         constrained,
         decision_evidence=InternalConstraintDecision.projected(projection).evidence or {},
     )
-    expiry_manager = RunManager(store=MemoryRunStore())
+    expiry_store = MemoryRunStore()
+    expiry_manager = RunManager(store=expiry_store)
     expiry_record = await expiry_manager.create_or_reject("thread-expired", accepted_invocation=constrained)
     await run_agent(
         _bridge(),
         expiry_manager,
         expiry_record,
-        ctx=RunContext(checkpointer=None, constraint_clock=lambda: now + timedelta(seconds=6)),
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=MemoryRunEventStore(run_store=expiry_store),
+            constraint_clock=lambda: now + timedelta(seconds=6),
+        ),
         agent_factory=factory,
         graph_input={},
         config={},
