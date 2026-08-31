@@ -788,6 +788,8 @@ class AcceptedInvocation:
 
         runtime_identity_digest = ""
         contributor_execution_digest = ""
+        normalized_input: Any = {}
+        execution_options: dict[str, Any] = {}
         kwargs = row.get("kwargs")
         effective_projection = kwargs.get(_EFFECTIVE_EXECUTION_PROJECTION_KEY) if isinstance(kwargs, Mapping) else None
         if effective_projection is not None:
@@ -849,6 +851,22 @@ class AcceptedInvocation:
                 checkpoint = effective_projection.get("checkpoint")
                 if not isinstance(checkpoint, Mapping):
                     raise ValueError("accepted effective checkpoint is malformed")
+                normalized_input = effective_projection.get("input")
+                execution_options = {
+                    "multitask_strategy": effective_projection.get(
+                        "multitask_strategy",
+                    ),
+                    "interrupt_before": effective_projection.get(
+                        "interrupt_before",
+                    ),
+                    "interrupt_after": effective_projection.get(
+                        "interrupt_after",
+                    ),
+                    "checkpoint_id": checkpoint.get("checkpoint_id"),
+                    "recursion_limit": effective_projection.get(
+                        "recursion_limit",
+                    ),
+                }
                 expected_runtime_identity_digest = canonical_digest(
                     {
                         "version": _DIGEST_VERSION,
@@ -880,8 +898,8 @@ class AcceptedInvocation:
             thread_id=thread_id,
             context_references={},
             agent_revision=revision,
-            normalized_input={},
-            execution_options={},
+            normalized_input=normalized_input,
+            execution_options=execution_options,
             extension_generation=extension_generation,
             principal_digest=persisted_principal_digest,
             base_origin_digest=persisted_base_origin_digest,

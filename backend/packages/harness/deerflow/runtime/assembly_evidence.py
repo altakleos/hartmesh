@@ -17,9 +17,19 @@ from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, fields
 from typing import Literal, Self
 
-from deerflow_extension_api import AgentAssemblyDescriptor, MiddlewareDescriptor, ToolDescriptor
+from deerflow_extension_api import (
+    AgentAssemblyDescriptor,
+    ConstraintProjectionV1,
+    ConstraintProjectionV2,
+    MiddlewareDescriptor,
+    ToolDescriptor,
+)
 
-from deerflow.runtime.accepted_invocation import canonical_digest
+from deerflow.runtime.accepted_invocation import (
+    AcceptedInvocation,
+    ResolvedAgentMaterialV1,
+    canonical_digest,
+)
 
 REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY = "__deerflow_require_assembly_evidence"
 
@@ -66,6 +76,26 @@ _SUMMARIZED_DESCRIPTOR_FIELDS = frozenset(
     }
 )
 _EXCLUDED_DESCRIPTOR_FIELDS = frozenset({"requested_model", "build"})
+_FINGERPRINTED_TOOL_FIELDS = frozenset(
+    {
+        "name",
+        "description_hash",
+        "schema_hash",
+        "source",
+        "mcp_server",
+        "mcp_transport",
+    }
+)
+_EXCLUDED_TOOL_FIELDS: frozenset[str] = frozenset()
+_FINGERPRINTED_MIDDLEWARE_FIELDS = frozenset(
+    {
+        "name",
+        "module",
+        "policy_parameters",
+        "extension",
+    }
+)
+_EXCLUDED_MIDDLEWARE_FIELDS: frozenset[str] = frozenset()
 
 _DURABLE_POLICY_FIELDS = (
     "bootstrap",
@@ -203,12 +233,30 @@ def _canonical_size(value: object) -> int:
 def assert_descriptor_projection_complete() -> None:
     """Fail when a descriptor field has no deliberate evidence treatment."""
 
-    actual = {field.name for field in fields(AgentAssemblyDescriptor)}
-    classified = _FINGERPRINTED_DESCRIPTOR_FIELDS | _EXCLUDED_DESCRIPTOR_FIELDS
-    if actual != classified:
-        missing = sorted(actual - classified)
-        stale = sorted(classified - actual)
-        raise AssertionError(f"AgentAssemblyDescriptor evidence classification drifted; missing={missing}, stale={stale}")
+    classifications = (
+        (
+            AgentAssemblyDescriptor,
+            _FINGERPRINTED_DESCRIPTOR_FIELDS,
+            _EXCLUDED_DESCRIPTOR_FIELDS,
+        ),
+        (
+            ToolDescriptor,
+            _FINGERPRINTED_TOOL_FIELDS,
+            _EXCLUDED_TOOL_FIELDS,
+        ),
+        (
+            MiddlewareDescriptor,
+            _FINGERPRINTED_MIDDLEWARE_FIELDS,
+            _EXCLUDED_MIDDLEWARE_FIELDS,
+        ),
+    )
+    for descriptor_type, fingerprinted, excluded in classifications:
+        actual = {field.name for field in fields(descriptor_type)}
+        classified = fingerprinted | excluded
+        if actual != classified:
+            missing = sorted(actual - classified)
+            stale = sorted(classified - actual)
+            raise AssertionError(f"{descriptor_type.__name__} evidence classification drifted; missing={missing}, stale={stale}")
     if not _SUMMARIZED_DESCRIPTOR_FIELDS <= _FINGERPRINTED_DESCRIPTOR_FIELDS:
         raise AssertionError("summarized descriptor fields must also be fingerprinted")
 
@@ -306,6 +354,8 @@ def canonical_durable_policy_digest(effective_policies: Mapping[str, object]) ->
 
 @dataclass(frozen=True)
 class AcceptedAssemblyAnchors:
+    """Immutable accepted-run facts an actual descriptor must satisfy."""
+
     run_id: str
     expected_namespace: str
     expected_agent_name: str
@@ -314,8 +364,6 @@ class AcceptedAssemblyAnchors:
     expected_policy_digest: str
     agent_revision_digest: str
     extension_generation: int
-    extension_manifest_digest: str | None
-    trusted_context_execution_digest: str | None
 
     def __post_init__(self) -> None:
         _validate_identifier(self.run_id)
@@ -327,14 +375,87 @@ class AcceptedAssemblyAnchors:
         _validate_digest(self.agent_revision_digest)
         if type(self.extension_generation) is not int or self.extension_generation < 0:
             _invalid()
-        if self.extension_manifest_digest is not None:
-            _validate_digest(self.extension_manifest_digest)
-        if self.trusted_context_execution_digest is not None:
-            _validate_digest(self.trusted_context_execution_digest)
+
+
+def build_accepted_assembly_anchors(
+    *,
+    run_id: str,
+    accepted: AcceptedInvocation,
+    material: ResolvedAgentMaterialV1,
+    app_config: object | None,
+    accepted_constraints: ConstraintProjectionV1 | ConstraintProjectionV2 | None = None,
+) -> AcceptedAssemblyAnchors:
+    """Derive authoritative descriptor expectations from accepted material."""
+
+    from deerflow.agents.assembly_descriptor import (
+        skill_catalog_digest_from_snapshot,
+        subagent_release_policy,
+    )
+
+    defaults = material.runtime_defaults
+    is_bootstrap = bool(defaults.get("is_bootstrap", False))
+    agent_name = "bootstrap" if is_bootstrap else str(defaults.get("agent_name") or "lead-agent")
+    effective_model = material.model_profile.get("name")
+    if not isinstance(effective_model, str):
+        effective_model = ""
+
+    enabled_skills = list(material.enabled_skill_objects)
+    if is_bootstrap:
+        enabled_skills = [skill for skill in enabled_skills if getattr(skill, "name", None) == "bootstrap"]
+    skill_names = tuple(str(getattr(skill, "name", "")) for skill in enabled_skills)
+    expected_skillset_digest = canonical_skillset_digest(
+        skill_names,
+        catalog_digest=skill_catalog_digest_from_snapshot(
+            enabled_skills,
+            material.skills,
+        ),
+    )
+
+    requested_subagents = bool(defaults.get("subagent_enabled", False))
+    allowed_subagents = getattr(
+        material.agent_config_object,
+        "allowed_subagents",
+        None,
+    )
+    max_total = int(defaults.get("max_total_subagents", 6))
+    if accepted_constraints is not None and accepted_constraints.max_total_subagents is not None:
+        max_total = accepted_constraints.max_total_subagents
+    durable_policies = {
+        "bootstrap": is_bootstrap,
+        "non_interactive": bool(defaults.get("non_interactive", False)),
+        "plan_mode": bool(defaults.get("is_plan_mode", False)),
+        "recursion_limit": accepted.execution_options.get(
+            "recursion_limit",
+            "framework-default",
+        ),
+        "subagents": subagent_release_policy(
+            material.app_config or app_config,
+            enabled=requested_subagents and allowed_subagents != [],
+            max_concurrent=int(
+                defaults.get("max_concurrent_subagents", 3),
+            ),
+            max_total=max_total,
+            resolved_subagent_catalog=material.subagent_catalog,
+        ),
+    }
+    return AcceptedAssemblyAnchors(
+        run_id=run_id,
+        expected_namespace="deerflow",
+        expected_agent_name=agent_name,
+        expected_effective_model=effective_model,
+        expected_skillset_digest=expected_skillset_digest,
+        expected_policy_digest=canonical_durable_policy_digest(
+            durable_policies,
+        ),
+        agent_revision_digest=accepted.agent_revision.digest,
+        extension_generation=accepted.extension_generation,
+    )
 
 
 @dataclass(frozen=True)
 class AssemblyEvidenceV1:
+    """Bounded persisted proof of one validated lead-agent assembly."""
+
     version: Literal[1]
     fingerprint: str
     descriptor_version: int
@@ -474,6 +595,25 @@ def verify_bound_assembly(
         raise AssemblyEvidenceError("assembly_evidence_mismatch")
 
 
+def assembly_evidence_binding_matches(
+    actual: AssemblyEvidenceV1,
+    *,
+    actual_digest: str,
+    persisted_json: Mapping[str, object],
+    persisted_digest: str,
+) -> bool:
+    """Return whether persisted bytes are the same valid evidence binding."""
+
+    if assembly_evidence_digest(actual) != actual_digest:
+        return False
+    try:
+        persisted = AssemblyEvidenceV1.from_persisted_json(persisted_json)
+        verify_bound_assembly(actual, persisted=persisted)
+    except AssemblyEvidenceError:
+        return False
+    return persisted_digest == actual_digest and assembly_evidence_digest(persisted) == persisted_digest
+
+
 __all__ = [
     "ASSEMBLY_DESCRIPTOR_VERSION",
     "ASSEMBLY_EVIDENCE_VERSION",
@@ -482,9 +622,11 @@ __all__ = [
     "AcceptedAssemblyAnchors",
     "AssemblyEvidenceError",
     "AssemblyEvidenceV1",
+    "assembly_evidence_binding_matches",
     "assembly_evidence_digest",
     "assembly_evidence_is_required",
     "assert_descriptor_projection_complete",
+    "build_accepted_assembly_anchors",
     "build_assembly_evidence",
     "canonical_durable_policy_digest",
     "canonical_skillset_digest",

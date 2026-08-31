@@ -31,6 +31,7 @@ from deerflow.runtime.accepted_invocation import (
     ResolvedAgentMaterialV1,
     ResolvedAgentRevision,
     canonical_digest,
+    canonical_effective_execution_digest,
 )
 from deerflow.runtime.agent_revision import (
     RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
@@ -93,6 +94,65 @@ def test_material_and_accepted_digests_are_stable_and_mutation_safe() -> None:
     assert len(accepted.runtime_identity_digest) == 64
     assert accepted.agent_revision.digest == revision.digest
     assert accepted.to_persisted()["decision_evidence_json"] == {"version": 1, "decisions": []}
+
+
+def test_persisted_effective_execution_restores_frozen_execution_options() -> None:
+    execution_options = {
+        "multitask_strategy": "reject",
+        "interrupt_before": None,
+        "interrupt_after": None,
+        "checkpoint_id": None,
+        "recursion_limit": 1000,
+    }
+    accepted = AcceptedInvocation.seal(
+        principal=PrincipalProjection(user_id="u1", role="member"),
+        origin=InvocationOrigin(source_kind="http"),
+        thread_id="thread-persisted-options",
+        context_references={},
+        agent_revision=ResolvedAgentRevision.from_material(_material()),
+        normalized_input={},
+        execution_options=execution_options,
+        extension_generation=7,
+        contributor_execution_digest=canonical_digest(
+            {"version": 1, "execution": []},
+        ),
+    )
+    effective_projection = {
+        "accepted_digest_semantics": "canonical_execution_v2",
+        "thread_id": accepted.thread_id,
+        "agent_selector": "default",
+        "agent_revision_digest": accepted.agent_revision.digest,
+        "principal_digest": accepted.principal_digest,
+        "base_origin_digest": accepted.base_origin_digest,
+        "accepted_context_digest": accepted.accepted_context_digest,
+        "runtime_identity_digest": accepted.runtime_identity_digest,
+        "contributor_execution_digest": accepted.contributor_execution_digest,
+        "extension_generation": accepted.extension_generation,
+        "input": {},
+        "command": None,
+        "multitask_strategy": "reject",
+        "checkpoint": {},
+        "interrupt_before": None,
+        "interrupt_after": None,
+        "execution_context": {},
+        "recursion_limit": 1000,
+    }
+    persisted = {
+        **accepted.to_persisted(),
+        "thread_id": accepted.thread_id,
+        "kwargs": {
+            "__accepted_request_projection_v1": effective_projection,
+        },
+        "request_digest": canonical_effective_execution_digest(
+            effective_projection,
+        ),
+        "request_digest_version": "sha256-canonical-json-v1",
+    }
+
+    restored = AcceptedInvocation.from_persisted(persisted)
+
+    assert restored is not None
+    assert dict(restored.execution_options) == execution_options
 
 
 def test_revision_digest_changes_with_execution_material_and_storage_version() -> None:
@@ -537,8 +597,10 @@ async def test_pinned_material_replaces_mutated_factory_context_after_digest_che
 
 
 def _durable_test_descriptor(material: ResolvedAgentMaterialV1, *, prompt: str = "accepted prompt"):
-    from deerflow.agents.assembly_descriptor import build_assembly_descriptor
-    from deerflow.agents.lead_agent.agent import _subagent_release_policy
+    from deerflow.agents.assembly_descriptor import (
+        build_assembly_descriptor,
+        subagent_release_policy,
+    )
 
     defaults = material.runtime_defaults
     return build_assembly_descriptor(
@@ -559,7 +621,7 @@ def _durable_test_descriptor(material: ResolvedAgentMaterialV1, *, prompt: str =
             "non_interactive": bool(defaults.get("non_interactive", False)),
             "plan_mode": bool(defaults.get("is_plan_mode", False)),
             "recursion_limit": "framework-default",
-            "subagents": _subagent_release_policy(
+            "subagents": subagent_release_policy(
                 material.app_config,
                 enabled=False,
                 max_concurrent=int(defaults.get("max_concurrent_subagents", 3)),
@@ -818,8 +880,6 @@ async def test_recovered_assembly_must_match_original_before_astream(
             expected_policy_digest=canonical_durable_policy_digest(original_descriptor.effective_policies),
             agent_revision_digest=accepted.agent_revision.digest,
             extension_generation=accepted.extension_generation,
-            extension_manifest_digest=None,
-            trusted_context_execution_digest=None,
         ),
     )
 

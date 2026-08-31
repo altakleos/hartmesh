@@ -20,6 +20,7 @@ from deerflow_extension_api import (
 from deerflow.runtime.assembly_evidence import (
     AssemblyEvidenceError,
     AssemblyEvidenceV1,
+    assembly_evidence_binding_matches,
     assembly_evidence_digest,
 )
 from deerflow.runtime.runs.lifecycle_query import (
@@ -371,11 +372,12 @@ class MemoryRunStore(RunStore):
             return BindAssemblyEvidenceOutcome.bound
         if stored_json is None or stored_digest is None:
             return BindAssemblyEvidenceOutcome.mismatch
-        try:
-            persisted = AssemblyEvidenceV1.from_persisted_json(stored_json)
-        except AssemblyEvidenceError:
-            return BindAssemblyEvidenceOutcome.mismatch
-        if stored_digest == evidence_digest and assembly_evidence_digest(persisted) == stored_digest and persisted.to_persisted_json() == normalized:
+        if assembly_evidence_binding_matches(
+            actual,
+            actual_digest=evidence_digest,
+            persisted_json=stored_json,
+            persisted_digest=stored_digest,
+        ):
             return BindAssemblyEvidenceOutcome.already_matching
         return BindAssemblyEvidenceOutcome.mismatch
 

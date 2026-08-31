@@ -153,8 +153,11 @@ def _accepted(revision) -> AcceptedInvocation:
 def _assembled_agent_for_revision(revision: ResolvedAgentRevision, graph: object):
     """Build the minimal authoritative descriptor needed by durable worker tests."""
 
-    from deerflow.agents.assembly_descriptor import build_assembly_descriptor
-    from deerflow.agents.lead_agent.agent import LeadAgentAssembly, _subagent_release_policy
+    from deerflow.agents.assembly_descriptor import (
+        build_assembly_descriptor,
+        subagent_release_policy,
+    )
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
 
     material = revision.material
     assert material is not None
@@ -184,7 +187,7 @@ def _assembled_agent_for_revision(revision: ResolvedAgentRevision, graph: object
             "non_interactive": bool(defaults.get("non_interactive", False)),
             "plan_mode": bool(defaults.get("is_plan_mode", False)),
             "recursion_limit": "framework-default",
-            "subagents": _subagent_release_policy(
+            "subagents": subagent_release_policy(
                 material.app_config,
                 enabled=requested_subagents and allowed_subagents != [],
                 max_concurrent=max_concurrent,
