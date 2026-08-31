@@ -6,15 +6,22 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import get_paths
 from deerflow.constants import MCP_TMP_SUBDIR
+from deerflow.extensions.mcp import get_required_mcp_tool_interceptor
 from deerflow.mcp.client import build_server_params
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.session_pool import get_session_pool
+from deerflow.mcp.tasks.lineage import (
+    McpTaskLineageError,
+    McpTaskLineageV1,
+    require_current_credential_selector,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +81,33 @@ class McpTaskToolCaller:
         arguments: dict[str, Any],
         user_id: str,
         thread_id: str,
+        lineage: McpTaskLineageV1 | None = None,
+        operation: str = "status",
     ) -> Any:
         server_config = self._extensions_config.get_enabled_mcp_servers().get(server_name)
         if server_config is None:
             raise LookupError(f"MCP task server {server_name!r} is missing or disabled in the startup configuration")
+        if lineage is not None:
+            if lineage.mcp_server_name != server_name:
+                raise McpTaskLineageError("mcp_task_lineage_invalid")
+            require_current_credential_selector(lineage, server_config)
+        runtime: object = SimpleNamespace(context={"user_id": user_id})
+        interceptors = self._interceptors
+        if operation == "submit" and lineage is not None:
+            if lineage.kind == "agent_tool":
+                try:
+                    from langgraph.runtime import get_runtime
+
+                    active_runtime = get_runtime()
+                except Exception:
+                    active_runtime = None
+                if active_runtime is not None:
+                    runtime = active_runtime
+            required = get_required_mcp_tool_interceptor(
+                compatibility_interceptors=tuple(self._interceptors),
+            )
+            if required is not None:
+                interceptors = [required]
         connection = build_server_params(server_name, server_config)
         transport = connection.get("transport", "stdio")
         scope_key = mcp_task_session_scope_key(user_id=user_id, thread_id=thread_id)
@@ -116,6 +146,8 @@ class McpTaskToolCaller:
                     timeout_seconds=server_config.tool_call_timeout,
                     session_init_timeout_seconds=None,
                     persistent_session=True,
+                    runtime=runtime,
+                    interceptors=interceptors,
                 )
             except Exception:
                 # A dead pooled subprocess must not poison every later status
@@ -137,6 +169,8 @@ class McpTaskToolCaller:
             timeout_seconds=server_config.tool_call_timeout,
             session_init_timeout_seconds=server_config.session_init_timeout,
             persistent_session=False,
+            runtime=runtime,
+            interceptors=interceptors,
         )
 
     async def _invoke(
@@ -150,6 +184,8 @@ class McpTaskToolCaller:
         timeout_seconds: float | None,
         session_init_timeout_seconds: float | None,
         persistent_session: bool,
+        runtime: object,
+        interceptors: list[Any],
     ) -> Any:
         from langchain_mcp_adapters.interceptors import MCPToolCallRequest
         from langchain_mcp_adapters.sessions import create_session
@@ -209,7 +245,7 @@ class McpTaskToolCaller:
             return call_result
 
         handler = execute
-        for interceptor in reversed(self._interceptors):
+        for interceptor in reversed(interceptors):
             inner = handler
 
             async def wrapped(request: Any, _interceptor: Any = interceptor, _inner: Any = inner) -> Any:
@@ -222,6 +258,6 @@ class McpTaskToolCaller:
                 name=tool_name,
                 args=arguments,
                 server_name=server_name,
-                runtime=None,
+                runtime=runtime,
             )
         )

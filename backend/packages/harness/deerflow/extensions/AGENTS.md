@@ -9,6 +9,15 @@ malformed authoritative contributions fail startup, while optional contributor
 diagnostics remain bounded and redacted. One frozen extension generation is
 bound to each accepted durable invocation and cannot change mid-run.
 
+Required MCP preparation remains additive to host-owned durable task lineage.
+The Capability Host may attach transient headers and record bounded accepted
+decision/evidence references, but an extension cannot construct, replace, or
+rewrite `McpTaskLineageV1`. For an Agent-created durable task, the core binder
+still requires the active host-reserved tool receipt plus the accepted tenant,
+principal, run, revision, assembly, catalog, extension generation/manifest, and
+Origin anchors. The remote submit runs only after required preparation succeeds,
+and the task row is created only after that submit returns a handle.
+
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in
 `config.yaml`. Keep this list out of `extensions_config.json`: the latter is writable

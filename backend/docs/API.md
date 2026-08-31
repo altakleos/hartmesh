@@ -796,7 +796,7 @@ container, while each `to_dict()` call returns a new mutable JSON wire copy.
 | `GET /capabilities` | Administrator-only strict `runtime.capabilities`; reports only portable ensure, invocation/context observation, cancel control, and unsupported context export/retirement. |
 | `GET /deployment` | Administrator-only `deerflow.deployment/v1` report with extension manifest/health, latest safe admission-readiness reason codes/correlation, bounded image/source provenance when supplied, persistence facts, and an operator-asserted qualification reference or explicit `unqualified` state. This is not part of `DurableInvocationPort` and is not remote attestation. |
 | `POST /invocations/ensure` | Exact `invocation.ensure` body. `external_key` is required; the server derives its scope from the authenticated principal or service. |
-| `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. Optional `include_tool_receipts=true` adds an independently paged receipt projection; `tool_receipt_limit` is 1–100 and `tool_receipt_cursor` is scoped to this run. |
+| `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. Optional `include_tool_receipts=true` adds an independently paged receipt projection; `tool_receipt_limit` is 1–100 and `tool_receipt_cursor` is scoped to this run. Optional `include_mcp_tasks=true` adds an independently paged bounded child-task projection; `mcp_task_limit` is 1–100 and `mcp_task_cursor` is scoped to this tenant, owner, and parent run. |
 | `GET /contexts/{thread_id}/invocations` | Access-filtered normal-run lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500; optional `source_kind` is `http|scheduled_task|native_channel|service`. |
 | `POST /invocations/{run_id}/control` | Exact `invocation.cancel` body with required `expected_state_version`; body and path run IDs must match. |
 
@@ -842,9 +842,11 @@ null. Observation is represented by `invocation.query` (`run_id`) or
 `include_snapshot`, and strict nullable `source_kind`. HTTP supplies the path
 identity and fixes `include_snapshot=true`; invocation paging accepts `cursor`
 and `limit`, plus additive `include_tool_receipts`, `tool_receipt_cursor`, and
-`tool_receipt_limit` fields. HTTP accepts exact lowercase `true|false`; a
-receipt cursor without inclusion, duplicate parameters, an empty cursor, or a
-limit outside 1–100 is `422 invalid_request`. Context paging additionally
+`tool_receipt_limit` fields and additive `include_mcp_tasks`, `mcp_task_cursor`,
+and `mcp_task_limit` fields. HTTP accepts exact lowercase `true|false`; a receipt
+or MCP-task cursor without its matching inclusion flag, duplicate parameters,
+an empty cursor, or an auxiliary limit outside 1–100 is `422 invalid_request`.
+Context paging additionally
 accepts `source_kind` but cannot request receipts. Control accepts exactly:
 
 ```json
@@ -889,6 +891,33 @@ comparison commitments, not encryption, confidentiality, or truth evidence.
 A durable receipt records HartMesh's observation of a tool attempt. It does not
 guarantee an external side effect occurred exactly once or that the tool result
 was correct.
+
+When explicitly requested for one visible invocation, `mcp_tasks` is a separate
+page containing only task ID, lineage digest, submitting execution-task/receipt
+IDs, safe server/tool names, status and safe terminal code, notification run ID,
+timestamps, `next_cursor`, and `pruning_status`. The join is one bounded indexed
+query after parent visibility and current observation authorization succeed; it
+does not fetch one row per task. Cursors cannot be moved between tenants, owners,
+or parent runs. Parent cancellation does not cancel these remote tasks.
+
+The thread-scoped durable-task API is outside the `/api/runtime/v1` base:
+
+| Route | Contract |
+|---|---|
+| `GET /api/threads/{thread_id}/mcp-tasks` | Owner-authorized bounded current-task list with a safe lineage summary. |
+| `POST /api/threads/{thread_id}/mcp-tasks` | Owner-authorized standalone task creation. Accepts server/task-toolset names, arguments, and idempotency key; provenance-shaped extras are ignored and all lineage fields are server-derived. |
+| `GET /api/threads/{thread_id}/mcp-tasks/{task_id}` | Owner-authorized detail with bounded lineage and result fields. Parent/notification links are included only after independent run authorization. |
+| `POST /api/threads/{thread_id}/mcp-tasks/{task_id}/cancel` | Durably requests remote cancellation; it does not modify immutable lineage, and the first request records separate pseudonymous actor attribution plus a fixed reason code. |
+
+Agent-created lineage is classified `agent_tool` and binds the accepted parent
+run/task/receipt/evidence anchors. HTTP-created lineage is `standalone_api` and
+has no parent fields. Existing pre-lineage rows report `legacy_unavailable`.
+Both submission paths use configured MCP call preparation; required preparation
+that depends on accepted Agent invocation facts fails standalone submission closed
+before network dispatch because standalone lineage deliberately has no parent run.
+Unknown or unauthorized task/thread/tenant combinations use the existing
+not-found behavior, and an unauthorized linked run is omitted rather than
+reported as an error.
 
 Accepted durable summaries include a nullable `assembly_evidence` object with
 only `version`, `fingerprint`, `effective_model`, `prompt_digest`,

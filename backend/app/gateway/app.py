@@ -418,6 +418,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
 
         task_extensions_config = ExtensionsConfig.from_file()
+        app.state.mcp_task_extensions_config = task_extensions_config
         mcp_tasks_config = getattr(startup_config, "mcp_tasks", McpTasksConfig())
         mcp_task_repo = getattr(app.state, "mcp_task_repo", None)
         app.state.mcp_tasks_available = False

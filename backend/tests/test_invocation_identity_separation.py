@@ -775,3 +775,4 @@ def test_mcp_facts_retain_effective_subject_actor_and_origin() -> None:
     assert facts.principal.is_internal is False
     assert facts.origin.source_kind == "native_channel"
     assert facts.origin.digest == accepted.base_origin_digest
+    assert facts.extension_manifest_digest == accepted.extension_manifest_digest

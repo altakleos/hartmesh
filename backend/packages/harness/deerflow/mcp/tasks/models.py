@@ -9,6 +9,7 @@ from deerflow.constants import (
     MCP_TASK_NAME_MAX_LENGTH,
     MCP_TASK_SERVER_NAME_MAX_LENGTH,
 )
+from deerflow.mcp.tasks.lineage import McpTaskLineageV1
 
 
 def _validate_storage_text(value: str, *, field_name: str, max_length: int) -> None:
@@ -93,9 +94,12 @@ class TaskReference:
     server_name: str
     remote_task_id: str
     driver_data: dict[str, Any] = field(default_factory=dict)
+    lineage: McpTaskLineageV1 | None = None
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> TaskReference:
+        raw_lineage = record.get("lineage")
+        lineage = McpTaskLineageV1.from_persisted_json(raw_lineage) if isinstance(raw_lineage, dict) else None
         return cls(
             local_task_id=record["id"],
             user_id=record["user_id"],
@@ -103,6 +107,7 @@ class TaskReference:
             server_name=record["server_name"],
             remote_task_id=record["remote_task_id"],
             driver_data=dict(record.get("driver_data") or {}),
+            lineage=lineage,
         )
 
 
@@ -112,17 +117,17 @@ class TaskSubmitRequest:
 
     user_id: str
     thread_id: str
-    run_id: str | None
-    tool_call_id: str | None
-    server_name: str
+    lineage: McpTaskLineageV1
     task_name: str
     arguments: dict[str, Any]
     driver_data: dict[str, Any] = field(default_factory=dict)
     local_task_id: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.lineage, McpTaskLineageV1):
+            raise TypeError("lineage must be McpTaskLineageV1")
         _validate_storage_text(
-            self.server_name,
+            self.lineage.mcp_server_name,
             field_name="server_name",
             max_length=MCP_TASK_SERVER_NAME_MAX_LENGTH,
         )
@@ -131,6 +136,10 @@ class TaskSubmitRequest:
             field_name="task_name",
             max_length=MCP_TASK_NAME_MAX_LENGTH,
         )
+
+    @property
+    def server_name(self) -> str:
+        return self.lineage.mcp_server_name
 
 
 @dataclass(frozen=True, slots=True)

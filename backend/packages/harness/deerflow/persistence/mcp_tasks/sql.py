@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from deerflow_extension_api import TenantReferenceV1
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.constants import MCP_TASK_CANCEL_ACTOR_REF_LENGTH, MCP_TASK_CANCEL_REASON_CODES
 from deerflow.mcp.tasks import ATTENTION_TASK_STATUSES, POLLABLE_TASK_STATUSES, TERMINAL_TASK_STATUSES
+from deerflow.mcp.tasks.lineage import McpTaskLineageError, McpTaskLineageV1
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.utils.time import coerce_iso
 
@@ -30,6 +34,9 @@ _TIMESTAMP_FIELDS = (
 )
 
 _INFLIGHT_NOTIFICATION_STATUSES = frozenset({"claimed", "dispatched", "retry"})
+MCP_TASK_SCHEMA_WRITER_VERSION = 2
+_MCP_TASK_CURSOR_VERSION = "deerflow.mcp-task-lineage.cursor/v1"
+MAX_MCP_TASK_LINEAGE_PAGE_SIZE = 100
 
 
 def _notification_event(row: McpTaskRow, *, tracking_degraded: bool) -> dict[str, Any] | None:
@@ -72,7 +79,6 @@ def _record_event_if_changed(row: McpTaskRow, *, tracking_degraded: bool, now: d
         row.dispatch_version = None
         row.dispatch_attempt = 0
         row.dispatch_event = None
-        row.notification_run_id = None
     return True
 
 
@@ -80,27 +86,127 @@ class DuplicateMcpRemoteTaskError(RuntimeError):
     """The current user already tracks this server's remote task handle."""
 
 
+class DuplicateMcpTaskLineageError(RuntimeError):
+    """The tenant already tracks a task for this immutable lineage."""
+
+
+class DuplicateMcpTaskIdError(RuntimeError):
+    """A deterministic local task identifier was inserted concurrently."""
+
+
+class McpTaskRepositoryError(RuntimeError):
+    """A safe, stable repository boundary failure."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
 def _is_remote_task_unique_conflict(exc: IntegrityError) -> bool:
     original = exc.orig
     diagnostic = getattr(original, "diag", None)
-    if getattr(diagnostic, "constraint_name", None) == "uq_mcp_tasks_user_server_remote":
+    if getattr(diagnostic, "constraint_name", None) == "uq_mcp_tasks_tenant_user_server_remote":
         return True
     message = str(original)
-    return "uq_mcp_tasks_user_server_remote" in message or "mcp_tasks.user_id, mcp_tasks.server_name, mcp_tasks.remote_task_id" in message
+    return "uq_mcp_tasks_tenant_user_server_remote" in message or "mcp_tasks.tenant_digest, mcp_tasks.user_id, mcp_tasks.server_name, mcp_tasks.remote_task_id" in message
+
+
+def _is_lineage_unique_conflict(exc: IntegrityError) -> bool:
+    original = exc.orig
+    diagnostic = getattr(original, "diag", None)
+    if getattr(diagnostic, "constraint_name", None) == "uq_mcp_tasks_tenant_lineage":
+        return True
+    message = str(original)
+    return "uq_mcp_tasks_tenant_lineage" in message or "mcp_tasks.tenant_digest, mcp_tasks.lineage_digest" in message
+
+
+def _is_task_id_unique_conflict(exc: IntegrityError) -> bool:
+    original = exc.orig
+    diagnostic = getattr(original, "diag", None)
+    if getattr(diagnostic, "constraint_name", None) == "mcp_tasks_pkey":
+        return True
+    message = str(original)
+    return "mcp_tasks_pkey" in message or "UNIQUE constraint failed: mcp_tasks.id" in message
 
 
 class McpTaskRepository:
     """Durable source of truth for long-running MCP task lifecycle state."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        tenant: TenantReferenceV1,
+    ) -> None:
+        if not isinstance(tenant, TenantReferenceV1):
+            raise TypeError("tenant must be TenantReferenceV1")
         self._sf = session_factory
+        self._tenant = tenant
 
-    @staticmethod
-    def _row_to_dict(row: McpTaskRow) -> dict[str, Any]:
+    @property
+    def tenant(self) -> TenantReferenceV1:
+        """Return the immutable tenant scope for every repository operation."""
+
+        return self._tenant
+
+    async def verify_schema_writer_compatibility(self) -> None:
+        """Refuse mutation when a newer binary has written task rows."""
+
+        async with self._sf() as session:
+            maximum = (await session.execute(select(func.max(McpTaskRow.schema_writer_version)))).scalar_one_or_none()
+        if maximum is not None and int(maximum) > MCP_TASK_SCHEMA_WRITER_VERSION:
+            raise McpTaskRepositoryError("mcp_task_schema_writer_unsupported")
+
+    def _tenant_digest(self, value: str) -> str:
+        if not isinstance(value, str) or value != self._tenant.digest:
+            raise McpTaskRepositoryError("mcp_task_tenant_mismatch")
+        return value
+
+    def _tenant_scope(self, value: str):
+        digest = self._tenant_digest(value)
+        # Rows written before Project 05 have no tenant columns. Project 04's
+        # schema binding permits only this process tenant to finish those rows;
+        # no repository bound to another tenant can see them.
+        return or_(
+            McpTaskRow.tenant_digest == digest,
+            and_(
+                McpTaskRow.tenant_digest.is_(None),
+                McpTaskRow.tenant_ref.is_(None),
+            ),
+        )
+
+    def _row_to_dict(self, row: McpTaskRow) -> dict[str, Any]:
+        writer_version = int(row.schema_writer_version or 1)
+        if writer_version > MCP_TASK_SCHEMA_WRITER_VERSION:
+            raise McpTaskRepositoryError("mcp_task_schema_writer_unsupported")
+        lineage: McpTaskLineageV1 | None = None
+        if row.lineage_json is None and row.lineage_digest is None:
+            if writer_version >= MCP_TASK_SCHEMA_WRITER_VERSION:
+                raise McpTaskRepositoryError("mcp_task_lineage_invalid")
+            lineage_status = "legacy_unavailable"
+        elif row.lineage_json is None or row.lineage_digest is None:
+            raise McpTaskRepositoryError("mcp_task_lineage_invalid")
+        else:
+            try:
+                lineage = McpTaskLineageV1.from_persisted_json(row.lineage_json)
+            except McpTaskLineageError as exc:
+                raise McpTaskRepositoryError("mcp_task_lineage_invalid") from exc
+            if (
+                lineage.digest != row.lineage_digest
+                or lineage.tenant.public_ref != row.tenant_ref
+                or lineage.tenant.digest != row.tenant_digest
+                or lineage.parent_run_id != row.parent_run_id
+                or lineage.parent_tool_receipt_id != row.parent_tool_receipt_id
+                or lineage.mcp_server_name != row.server_name
+            ):
+                raise McpTaskRepositoryError("mcp_task_lineage_invalid")
+            lineage_status = "verified"
         data = row.to_dict()
         for key in _TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
+        data["lineage_status"] = lineage_status
+        data["lineage"] = None if lineage is None else lineage.to_persisted_json()
         return data
 
     async def create(
@@ -109,9 +215,8 @@ class McpTaskRepository:
         task_id: str,
         user_id: str,
         thread_id: str,
-        run_id: str | None,
-        tool_call_id: str | None,
-        server_name: str,
+        lineage: McpTaskLineageV1,
+        tenant_digest: str,
         driver_name: str,
         remote_task_id: str,
         task_name: str,
@@ -125,14 +230,26 @@ class McpTaskRepository:
         next_poll_at: datetime | None,
         driver_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._tenant_digest(tenant_digest)
+        if not isinstance(lineage, McpTaskLineageV1):
+            raise TypeError("lineage must be McpTaskLineageV1")
+        if lineage.tenant != self._tenant:
+            raise McpTaskRepositoryError("mcp_task_tenant_mismatch")
         now = datetime.now(UTC)
         row = McpTaskRow(
             id=task_id,
+            schema_writer_version=MCP_TASK_SCHEMA_WRITER_VERSION,
+            tenant_ref=lineage.tenant.public_ref,
+            tenant_digest=lineage.tenant.digest,
+            lineage_json=lineage.to_persisted_json(),
+            lineage_digest=lineage.digest,
+            parent_run_id=lineage.parent_run_id,
+            parent_tool_receipt_id=lineage.parent_tool_receipt_id,
             user_id=user_id,
             thread_id=thread_id,
-            run_id=run_id,
-            tool_call_id=tool_call_id,
-            server_name=server_name,
+            run_id=lineage.parent_run_id,
+            tool_call_id=lineage.parent_tool_receipt_id,
+            server_name=lineage.mcp_server_name,
             driver_name=driver_name,
             remote_task_id=remote_task_id,
             task_name=task_name,
@@ -157,18 +274,54 @@ class McpTaskRepository:
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
+                if _is_lineage_unique_conflict(exc):
+                    raise DuplicateMcpTaskLineageError("MCP task lineage is already tracked for this tenant") from exc
                 if _is_remote_task_unique_conflict(exc):
-                    raise DuplicateMcpRemoteTaskError(f"Remote MCP task {remote_task_id!r} is already tracked for server {server_name!r} by this user") from exc
+                    raise DuplicateMcpRemoteTaskError("Remote MCP task is already tracked for this tenant, server, and principal") from exc
+                if _is_task_id_unique_conflict(exc):
+                    raise DuplicateMcpTaskIdError("MCP task identifier is already tracked") from exc
                 raise
             await session.refresh(row)
             return self._row_to_dict(row)
 
-    async def get(self, task_id: str, *, user_id: str) -> dict[str, Any] | None:
+    async def get(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        tenant_digest: str,
+    ) -> dict[str, Any] | None:
         async with self._sf() as session:
-            row = await session.get(McpTaskRow, task_id)
-            if row is None or row.user_id != user_id:
+            row = (
+                await session.execute(
+                    select(McpTaskRow).where(
+                        McpTaskRow.id == task_id,
+                        McpTaskRow.user_id == user_id,
+                        self._tenant_scope(tenant_digest),
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
                 return None
             return self._row_to_dict(row)
+
+    async def get_by_lineage_digest(
+        self,
+        lineage_digest: str,
+        *,
+        user_id: str,
+        tenant_digest: str,
+    ) -> dict[str, Any] | None:
+        """Find an owner-visible task by its immutable lineage commitment."""
+
+        stmt = select(McpTaskRow).where(
+            McpTaskRow.lineage_digest == lineage_digest,
+            McpTaskRow.user_id == user_id,
+            McpTaskRow.tenant_digest == self._tenant_digest(tenant_digest),
+        )
+        async with self._sf() as session:
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            return None if row is None else self._row_to_dict(row)
 
     async def list_by_thread(
         self,
@@ -177,10 +330,12 @@ class McpTaskRepository:
         user_id: str,
         limit: int = 50,
         active_only: bool = False,
+        tenant_digest: str,
     ) -> list[dict[str, Any]]:
         stmt = select(McpTaskRow).where(
             McpTaskRow.thread_id == thread_id,
             McpTaskRow.user_id == user_id,
+            self._tenant_scope(tenant_digest),
         )
         if active_only:
             stmt = stmt.where(McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES))
@@ -189,6 +344,179 @@ class McpTaskRepository:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
+    def _parent_cursor_scope(
+        self,
+        *,
+        parent_run_id: str,
+        user_id: str,
+    ) -> str:
+        return hashlib.sha256((_MCP_TASK_CURSOR_VERSION + "\0" + self._tenant.digest + "\0" + parent_run_id + "\0" + user_id).encode("utf-8")).hexdigest()
+
+    def _encode_parent_cursor(
+        self,
+        *,
+        parent_run_id: str,
+        user_id: str,
+        created_at: datetime,
+        task_id: str,
+    ) -> str:
+        core = {
+            "version": _MCP_TASK_CURSOR_VERSION,
+            "scope": self._parent_cursor_scope(
+                parent_run_id=parent_run_id,
+                user_id=user_id,
+            ),
+            "created_at": created_at.isoformat(),
+            "task_id": task_id,
+        }
+        checksum = hashlib.sha256(json.dumps(core, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(
+                {**core, "checksum": checksum},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).rstrip(b"=")
+        return "mtc1." + encoded.decode("ascii")
+
+    def _decode_parent_cursor(
+        self,
+        cursor: str,
+        *,
+        parent_run_id: str,
+        user_id: str,
+    ) -> tuple[datetime, str]:
+        if not isinstance(cursor, str) or len(cursor.encode("utf-8")) > 4096 or not cursor.startswith("mtc1."):
+            raise McpTaskRepositoryError("mcp_task_cursor_invalid")
+        try:
+            encoded = cursor[5:]
+            payload = json.loads(
+                base64.b64decode(
+                    encoded + "=" * (-len(encoded) % 4),
+                    altchars=b"-_",
+                    validate=True,
+                )
+            )
+            expected = {
+                "version",
+                "scope",
+                "created_at",
+                "task_id",
+                "checksum",
+            }
+            if not isinstance(payload, dict) or set(payload) != expected:
+                raise ValueError
+            core = {key: payload[key] for key in expected - {"checksum"}}
+            checksum = hashlib.sha256(
+                json.dumps(
+                    core,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if (
+                payload["version"] != _MCP_TASK_CURSOR_VERSION
+                or payload["scope"]
+                != self._parent_cursor_scope(
+                    parent_run_id=parent_run_id,
+                    user_id=user_id,
+                )
+                or payload["checksum"] != checksum
+                or not isinstance(payload["task_id"], str)
+                or not payload["task_id"]
+            ):
+                raise ValueError
+            created_at = datetime.fromisoformat(payload["created_at"])
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            return created_at, payload["task_id"]
+        except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+            raise McpTaskRepositoryError("mcp_task_cursor_invalid") from exc
+
+    async def list_by_parent_run(
+        self,
+        parent_run_id: str,
+        *,
+        user_id: str,
+        limit: int = 50,
+        cursor: str | None = None,
+        tenant_digest: str,
+    ) -> dict[str, Any]:
+        """Return one bounded, indexed child projection for an authorized run."""
+
+        if type(limit) is not int or not 1 <= limit <= MAX_MCP_TASK_LINEAGE_PAGE_SIZE:
+            raise ValueError("MCP task lineage limit must be between 1 and 100")
+        stmt = select(McpTaskRow).where(
+            McpTaskRow.tenant_digest == self._tenant_digest(tenant_digest),
+            McpTaskRow.parent_run_id == parent_run_id,
+            McpTaskRow.user_id == user_id,
+            McpTaskRow.lineage_digest.is_not(None),
+        )
+        if cursor is not None:
+            # The cursor is a bounded position token, never an authorization
+            # credential. Tenant, owner, and parent visibility remain enforced
+            # by the SQL predicates above even if a caller alters its position.
+            created_at, task_id = self._decode_parent_cursor(
+                cursor,
+                parent_run_id=parent_run_id,
+                user_id=user_id,
+            )
+            stmt = stmt.where(
+                or_(
+                    McpTaskRow.created_at < created_at,
+                    and_(
+                        McpTaskRow.created_at == created_at,
+                        McpTaskRow.id < task_id,
+                    ),
+                )
+            )
+        stmt = stmt.order_by(
+            McpTaskRow.created_at.desc(),
+            McpTaskRow.id.desc(),
+        ).limit(limit + 1)
+        async with self._sf() as session:
+            rows = list((await session.execute(stmt)).scalars())
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            record = self._row_to_dict(row)
+            lineage = record.get("lineage")
+            if not isinstance(lineage, dict):
+                continue
+            status = str(record.get("status") or "")
+            terminal_code = "remote_failed" if status == "failed" else ("cancelled" if status == "cancelled" else None)
+            items.append(
+                {
+                    "task_id": record["id"],
+                    "lineage_digest": lineage["digest"],
+                    "submitting_task_id": lineage["parent_execution_task_id"],
+                    "receipt_id": lineage["parent_tool_receipt_id"],
+                    "server_name": lineage["mcp_server_name"],
+                    "tool_name": lineage["mcp_tool_name"],
+                    "status": status,
+                    "safe_terminal_code": terminal_code,
+                    "notification_run_id": record.get("notification_run_id"),
+                    "created_at": record["created_at"],
+                    "updated_at": record["updated_at"],
+                    "completed_at": record.get("completed_at"),
+                }
+            )
+        next_cursor = None
+        if has_more and rows:
+            tail = rows[-1]
+            next_cursor = self._encode_parent_cursor(
+                parent_run_id=parent_run_id,
+                user_id=user_id,
+                created_at=tail.created_at,
+                task_id=tail.id,
+            )
+        return {
+            "items": items,
+            "next_cursor": next_cursor,
+            "pruning_status": "not_pruned",
+        }
+
     async def claim_due_tasks(
         self,
         *,
@@ -196,11 +524,13 @@ class McpTaskRepository:
         lease_owner: str,
         lease_seconds: int,
         limit: int,
+        tenant_digest: str,
     ) -> list[dict[str, Any]]:
         lease_expires_at = now + timedelta(seconds=lease_seconds)
         stmt = (
             select(McpTaskRow)
             .where(
+                self._tenant_scope(tenant_digest),
                 McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES),
                 McpTaskRow.cancel_requested_at.is_(None),
                 McpTaskRow.next_poll_at.is_not(None),
@@ -239,12 +569,14 @@ class McpTaskRepository:
         input_required: dict[str, Any] | None,
         next_poll_at: datetime | None,
         polled_at: datetime,
+        tenant_digest: str,
     ) -> bool:
         async with self._sf() as session:
             stmt = (
                 select(McpTaskRow)
                 .where(
                     McpTaskRow.id == task_id,
+                    self._tenant_scope(tenant_digest),
                     McpTaskRow.lease_owner == lease_owner,
                     McpTaskRow.lease_expires_at >= polled_at,
                     McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES),
@@ -283,9 +615,18 @@ class McpTaskRepository:
         next_poll_at: datetime,
         error: str,
         tracking_degraded_after_errors: int = 3,
+        tenant_digest: str,
     ) -> bool:
         async with self._sf() as session:
-            stmt = select(McpTaskRow).where(McpTaskRow.id == task_id, McpTaskRow.lease_owner == lease_owner).with_for_update()
+            stmt = (
+                select(McpTaskRow)
+                .where(
+                    McpTaskRow.id == task_id,
+                    McpTaskRow.lease_owner == lease_owner,
+                    self._tenant_scope(tenant_digest),
+                )
+                .with_for_update()
+            )
             row = (await session.execute(stmt)).scalar_one_or_none()
             if row is None:
                 return False
@@ -311,8 +652,20 @@ class McpTaskRepository:
         user_id: str,
         thread_id: str,
         requested_at: datetime,
+        actor_ref: str,
+        reason_code: str,
+        tenant_digest: str,
     ) -> dict[str, Any] | None:
         """Persist a user-scoped cancellation request without exposing the remote id."""
+        self._tenant_digest(tenant_digest)
+        if (
+            not isinstance(actor_ref, str)
+            or len(actor_ref) != MCP_TASK_CANCEL_ACTOR_REF_LENGTH
+            or any(character not in "0123456789abcdef" for character in actor_ref)
+            or not isinstance(reason_code, str)
+            or reason_code not in MCP_TASK_CANCEL_REASON_CODES
+        ):
+            raise McpTaskRepositoryError("mcp_task_cancel_intent_invalid")
         async with self._sf() as session:
             stmt = (
                 select(McpTaskRow)
@@ -320,6 +673,7 @@ class McpTaskRepository:
                     McpTaskRow.id == task_id,
                     McpTaskRow.user_id == user_id,
                     McpTaskRow.thread_id == thread_id,
+                    self._tenant_scope(tenant_digest),
                 )
                 .with_for_update()
             )
@@ -328,6 +682,8 @@ class McpTaskRepository:
                 return None
             if row.status not in _TERMINAL_STATUS_VALUES and row.cancel_requested_at is None:
                 row.cancel_requested_at = requested_at
+                row.cancel_actor_ref = actor_ref
+                row.cancel_reason_code = reason_code
                 if row.next_cancel_at is None:
                     row.next_cancel_at = requested_at
                 # A cancel request fences any in-flight poll result, so its
@@ -348,8 +704,10 @@ class McpTaskRepository:
         lease_seconds: int,
         limit: int,
         task_id: str | None = None,
+        tenant_digest: str,
     ) -> list[dict[str, Any]]:
         stmt = select(McpTaskRow).where(
+            self._tenant_scope(tenant_digest),
             McpTaskRow.cancel_requested_at.is_not(None),
             McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES),
             McpTaskRow.next_cancel_at.is_not(None),
@@ -383,6 +741,7 @@ class McpTaskRepository:
         error: str | None,
         input_required: dict[str, Any] | None,
         completed_at: datetime,
+        tenant_digest: str,
     ) -> bool:
         if status not in _TERMINAL_STATUS_VALUES:
             raise ValueError("A cancellation response must report a terminal task status")
@@ -391,6 +750,7 @@ class McpTaskRepository:
                 select(McpTaskRow)
                 .where(
                     McpTaskRow.id == task_id,
+                    self._tenant_scope(tenant_digest),
                     McpTaskRow.lease_owner == lease_owner,
                     McpTaskRow.lease_expires_at >= completed_at,
                     McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES),
@@ -425,10 +785,15 @@ class McpTaskRepository:
         lease_owner: str,
         next_cancel_at: datetime,
         error: str,
+        tenant_digest: str,
     ) -> bool:
         stmt = (
             update(McpTaskRow)
-            .where(McpTaskRow.id == task_id, McpTaskRow.lease_owner == lease_owner)
+            .where(
+                McpTaskRow.id == task_id,
+                McpTaskRow.lease_owner == lease_owner,
+                self._tenant_scope(tenant_digest),
+            )
             .values(
                 next_cancel_at=next_cancel_at,
                 last_cancel_error=error,
@@ -450,11 +815,13 @@ class McpTaskRepository:
         lease_seconds: int,
         limit: int,
         tracking_degraded_after_errors: int,
+        tenant_digest: str,
     ) -> list[dict[str, Any]]:
         statuses = ("pending", "claimed", "retry", "dispatched")
         stmt = (
             select(McpTaskRow)
             .where(
+                self._tenant_scope(tenant_digest),
                 McpTaskRow.event_version > McpTaskRow.notified_version,
                 McpTaskRow.notification_status.in_(statuses),
                 or_(McpTaskRow.next_notification_at.is_(None), McpTaskRow.next_notification_at <= now),
@@ -480,7 +847,6 @@ class McpTaskRepository:
                         row,
                         tracking_degraded=int(row.consecutive_poll_error_count or 0) >= tracking_degraded_after_errors,
                     )
-                    row.notification_run_id = None
                     row.notification_status = "claimed"
                 row.updated_at = now
             await session.commit()
@@ -494,11 +860,13 @@ class McpTaskRepository:
         dispatch_version: int,
         run_id: str,
         now: datetime,
+        tenant_digest: str,
     ) -> bool:
         stmt = (
             update(McpTaskRow)
             .where(
                 McpTaskRow.id == task_id,
+                self._tenant_scope(tenant_digest),
                 McpTaskRow.notification_lease_owner == lease_owner,
                 McpTaskRow.notification_lease_expires_at >= now,
                 McpTaskRow.dispatch_version == dispatch_version,
@@ -528,6 +896,7 @@ class McpTaskRepository:
         error: str,
         replace_with_latest: bool,
         count_failure: bool = False,
+        tenant_digest: str,
     ) -> bool:
         values: dict[str, Any] = {
             "notification_status": "pending" if replace_with_latest else "retry",
@@ -540,11 +909,18 @@ class McpTaskRepository:
         if replace_with_latest:
             values.update(
                 dispatch_event=None,
-                notification_run_id=None,
             )
         if count_failure:
             values["notification_attempt_count"] = McpTaskRow.notification_attempt_count + 1
-        stmt = update(McpTaskRow).where(McpTaskRow.id == task_id, McpTaskRow.notification_lease_owner == lease_owner).values(**values)
+        stmt = (
+            update(McpTaskRow)
+            .where(
+                McpTaskRow.id == task_id,
+                McpTaskRow.notification_lease_owner == lease_owner,
+                self._tenant_scope(tenant_digest),
+            )
+            .values(**values)
+        )
         async with self._sf() as session:
             result = await session.execute(stmt)
             await session.commit()
@@ -560,12 +936,14 @@ class McpTaskRepository:
         next_notification_at: datetime | None,
         error: str | None,
         now: datetime,
+        tenant_digest: str,
     ) -> bool:
         async with self._sf() as session:
             stmt = (
                 select(McpTaskRow)
                 .where(
                     McpTaskRow.id == task_id,
+                    self._tenant_scope(tenant_digest),
                     McpTaskRow.notification_lease_owner == lease_owner,
                     McpTaskRow.notification_lease_expires_at >= now,
                     McpTaskRow.dispatch_version == dispatch_version,
@@ -582,7 +960,6 @@ class McpTaskRepository:
                 row.dispatch_version = None
                 row.dispatch_attempt = 0
                 row.dispatch_event = None
-                row.notification_run_id = None
                 row.notification_error = None
                 row.notification_attempt_count = 0
                 row.next_notification_at = now if row.event_version > dispatch_version else None
@@ -590,7 +967,6 @@ class McpTaskRepository:
                 row.notification_status = "retry"
                 row.dispatch_attempt = int(row.dispatch_attempt or 0) + 1
                 row.notification_attempt_count = int(row.notification_attempt_count or 0) + 1
-                row.notification_run_id = None
                 row.notification_error = error
                 row.next_notification_at = next_notification_at
             row.notification_lease_owner = None
@@ -607,6 +983,7 @@ class McpTaskRepository:
         next_notification_at: datetime,
         error: str,
         count_failure: bool = False,
+        tenant_digest: str,
     ) -> bool:
         """Release unexpected notification work without changing its phase."""
         values: dict[str, Any] = {
@@ -623,6 +1000,7 @@ class McpTaskRepository:
             .where(
                 McpTaskRow.id == task_id,
                 McpTaskRow.notification_lease_owner == lease_owner,
+                self._tenant_scope(tenant_digest),
             )
             .values(**values)
         )
@@ -640,10 +1018,12 @@ class McpTaskRepository:
         error: str,
         count_failure: bool,
         now: datetime,
+        tenant_digest: str,
     ) -> bool:
         """Stop one failed snapshot, preserving any newer event for delivery."""
         base_filters = (
             McpTaskRow.id == task_id,
+            self._tenant_scope(tenant_digest),
             McpTaskRow.notification_lease_owner == lease_owner,
             McpTaskRow.notification_lease_expires_at >= now,
             McpTaskRow.dispatch_version == dispatch_version,
@@ -658,7 +1038,6 @@ class McpTaskRepository:
             "dispatch_version": None,
             "dispatch_attempt": 0,
             "dispatch_event": None,
-            "notification_run_id": None,
             "updated_at": now,
         }
         if count_failure:
@@ -683,7 +1062,6 @@ class McpTaskRepository:
                     dispatch_version=None,
                     dispatch_attempt=0,
                     dispatch_event=None,
-                    notification_run_id=None,
                     updated_at=now,
                 )
             )
@@ -698,12 +1076,14 @@ class McpTaskRepository:
         dispatch_version: int,
         next_notification_at: datetime,
         now: datetime,
+        tenant_digest: str,
     ) -> bool:
         """Release a notification lease while its Agent run is still active."""
         stmt = (
             update(McpTaskRow)
             .where(
                 McpTaskRow.id == task_id,
+                self._tenant_scope(tenant_digest),
                 McpTaskRow.notification_lease_owner == lease_owner,
                 McpTaskRow.notification_lease_expires_at >= now,
                 McpTaskRow.dispatch_version == dispatch_version,

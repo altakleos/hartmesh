@@ -116,14 +116,25 @@ class InternalLaunchIntent:
     thread_id_explicit: bool = True
     require_existing_thread: bool = False
     trusted_notification: bool = False
+    trusted_notification_source: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        for name in ("input", "command", "metadata", "config", "context", "checkpoint"):
+        for name in (
+            "input",
+            "command",
+            "metadata",
+            "config",
+            "context",
+            "checkpoint",
+            "trusted_notification_source",
+        ):
             value = getattr(self, name)
             if value is not None:
                 if not isinstance(value, Mapping):
                     raise TypeError(f"{name} must be a mapping or None")
                 object.__setattr__(self, name, _freeze_host_value(value))
+        if self.trusted_notification_source is not None and not self.trusted_notification:
+            raise ValueError("trusted_notification_source requires trusted_notification")
         for name in ("interrupt_before", "interrupt_after", "stream_mode"):
             value = getattr(self, name)
             if isinstance(value, (list, tuple)):
@@ -370,6 +381,9 @@ class InternalInvocationLifecycleQuery:
     include_tool_receipts: bool = False
     tool_receipt_cursor: str | None = None
     tool_receipt_limit: int = 100
+    include_mcp_tasks: bool = False
+    mcp_task_cursor: str | None = None
+    mcp_task_limit: int = 100
 
 
 @dataclass(frozen=True)
@@ -387,12 +401,33 @@ class InternalLifecycleObservation:
     record: RunRecord | None
     page: LifecyclePage
     authoritative_snapshot: Mapping[str, Any] | None = None
+    mcp_tasks: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.authoritative_snapshot is not None:
             if not isinstance(self.authoritative_snapshot, Mapping):
                 raise TypeError("authoritative_snapshot must be a mapping or None")
             object.__setattr__(self, "authoritative_snapshot", _freeze_host_value(self.authoritative_snapshot))
+        if self.mcp_tasks is not None:
+            if not isinstance(self.mcp_tasks, Mapping):
+                raise TypeError("mcp_tasks must be a mapping or None")
+            object.__setattr__(self, "mcp_tasks", _freeze_host_value(self.mcp_tasks))
+
+
+class McpTaskLineageReader(Protocol):
+    """Owner-scoped child-task query used by lifecycle observation."""
+
+    tenant: Any
+
+    async def list_by_parent_run(
+        self,
+        parent_run_id: str,
+        *,
+        user_id: str,
+        limit: int,
+        cursor: str | None,
+        tenant_digest: str,
+    ) -> Mapping[str, Any]: ...
 
 
 class LaunchNormalizer(Protocol):
@@ -569,6 +604,7 @@ class InvocationRuntime:
         constraints: InvocationConstraints | None = None,
         admission_fence: InvocationAdmissionFence | None = None,
         visibility: ObservationVisibilityResolver | None = None,
+        mcp_tasks: McpTaskLineageReader | None = None,
         task_factory: TaskFactory = asyncio.create_task,
     ) -> None:
         self._normalizer = normalizer
@@ -577,6 +613,7 @@ class InvocationRuntime:
         self._constraints = constraints or _AbsentInvocationConstraints()
         self._admission_fence = admission_fence
         self._visibility = visibility
+        self._mcp_tasks = mcp_tasks
         self._task_factory = task_factory
 
     async def _observation_grant(
@@ -909,10 +946,29 @@ class InvocationRuntime:
             return NotFoundOrInvisible.not_found_or_invisible
         if not query.include_snapshot:
             page = replace(page, snapshots=(), summaries=())
+        mcp_tasks: Mapping[str, Any] | None = None
+        if query.include_mcp_tasks and self._mcp_tasks is not None and record.user_id is not None:
+            tenant = getattr(self._mcp_tasks, "tenant", None)
+            tenant_digest = getattr(tenant, "digest", None)
+            if not isinstance(tenant_digest, str):
+                raise RuntimeError("MCP task repository has no tenant binding")
+            try:
+                mcp_tasks = await self._mcp_tasks.list_by_parent_run(
+                    query.run_id,
+                    user_id=record.user_id,
+                    limit=query.mcp_task_limit,
+                    cursor=query.mcp_task_cursor,
+                    tenant_digest=tenant_digest,
+                )
+            except Exception as exc:
+                if getattr(exc, "code", None) == "mcp_task_cursor_invalid":
+                    raise ValueError("invalid MCP task cursor") from exc
+                raise
         return InternalLifecycleObservation(
             record=record,
             page=page,
             authoritative_snapshot=authoritative_snapshot,
+            mcp_tasks=mcp_tasks,
         )
 
     async def observe_context_lifecycle(

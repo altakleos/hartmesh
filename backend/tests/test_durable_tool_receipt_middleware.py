@@ -21,6 +21,7 @@ from deerflow.runtime.tool_evidence import (
     ToolEvidenceRuntimeBinding,
     ToolReceiptOwnershipLost,
     digest_result_projection,
+    get_active_tool_receipt,
 )
 
 
@@ -129,6 +130,50 @@ async def test_start_is_acknowledged_before_tool_side_effect_and_success_is_term
     assert TOOL_RECEIPT_KEY in result.additional_kwargs
     serialized = str(sink.started[0].to_event_body())
     assert "private query" not in serialized and "secret" not in serialized
+
+
+@pytest.mark.anyio
+async def test_started_receipt_is_task_local_during_inner_tool_execution() -> None:
+    sink = _RecordingSink()
+    request = _request(sink)
+    observed: DurableToolReceiptV1 | None = None
+
+    async def handler(req):
+        nonlocal observed
+        observed = get_active_tool_receipt()
+        assert observed is sink.started[0]
+        assert observed.phase == "started"
+        return _success(req)
+
+    assert get_active_tool_receipt() is None
+    await ToolReceiptMiddleware().awrap_tool_call(request, handler)
+
+    assert observed is not None
+    assert get_active_tool_receipt() is None
+
+
+@pytest.mark.anyio
+async def test_started_receipt_cannot_escape_in_a_spawned_child_task() -> None:
+    sink = _RecordingSink()
+    request = _request(sink)
+    released = asyncio.Event()
+    child: asyncio.Task[DurableToolReceiptV1 | None] | None = None
+
+    async def observe_after_release() -> DurableToolReceiptV1 | None:
+        await released.wait()
+        return get_active_tool_receipt()
+
+    async def handler(req):
+        nonlocal child
+        assert get_active_tool_receipt() is sink.started[0]
+        child = asyncio.create_task(observe_after_release())
+        return _success(req)
+
+    await ToolReceiptMiddleware().awrap_tool_call(request, handler)
+    released.set()
+
+    assert child is not None
+    assert await child is None
 
 
 @pytest.mark.anyio

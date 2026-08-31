@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import multiprocessing
 import os
 import uuid
 from contextlib import asynccontextmanager, nullcontext
@@ -21,11 +22,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from deerflow_extension_api import ConstraintProjectionV1
+from deerflow_extension_api import ConstraintProjectionV1, EffectiveSubjectV1, InvocationIdentityV1
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from support.postgres import postgres_async_url
 
+from app.mcp_tasks import McpTaskService
 from app.runtime.idempotency import REQUEST_DIGEST_VERSION, CanonicalCallerIntent, canonical_request_digest, normalize_external_key, scope_for_http
 from app.runtime.invocation import (
     DurableAdmission,
@@ -37,7 +39,17 @@ from app.runtime.invocation import (
     PreparedLaunch,
 )
 from deerflow.config.run_ownership_config import RunOwnershipConfig
+from deerflow.mcp.tasks import (
+    CredentialSelector,
+    McpTaskDriverRegistry,
+    McpTaskLineageBinder,
+    TaskSnapshot,
+    TaskStatus,
+    TaskSubmission,
+    TaskSubmitRequest,
+)
 from deerflow.persistence.base import Base
+from deerflow.persistence.mcp_tasks import McpTaskRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime import (
@@ -72,6 +84,7 @@ from deerflow.runtime.runs.store.base import (
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.runtime.tenant_identity import TenantIdentityV1
+from deerflow.runtime.tool_evidence import build_request_projection
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
 _TEST_TENANT = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
@@ -236,6 +249,117 @@ class _ProcessLostAfterAdmission(BaseException):
     """Simulate a process-fatal exit that bypasses application cleanup."""
 
 
+_PROCESS_MCP_DRIVER = "process-test"
+
+
+def _process_mcp_request() -> TaskSubmitRequest:
+    arguments = {"job": "process-recovery"}
+    return TaskSubmitRequest(
+        user_id="owner-1",
+        thread_id="thread-mcp-process-loss",
+        lineage=McpTaskLineageBinder().for_standalone_api(
+            tenant=_TEST_TENANT,
+            principal_identity=InvocationIdentityV1(
+                effective_subject=EffectiveSubjectV1(
+                    kind="human",
+                    subject_id="owner-1",
+                    role="member",
+                )
+            ),
+            extension_generation=7,
+            extension_manifest_digest="a" * 64,
+            accepted_origin_digest="b" * 64,
+            server_name="reports",
+            tool_name="submit_report",
+            safe_request_projection=build_request_projection(
+                "submit_report",
+                arguments,
+                evidence_safe_fields=frozenset({"job"}),
+            ),
+            credential_selector=CredentialSelector(
+                binding_id="process-recovery-binding",
+                version=7,
+            ),
+        ),
+        task_name="Process recovery report",
+        arguments=arguments,
+    )
+
+
+class _ProcessMcpSubmissionDriver:
+    async def submit(self, request: TaskSubmitRequest) -> TaskSubmission:
+        assert request.lineage.credential_selector_ref is not None
+        assert request.lineage.credential_selector_version == 7
+        return TaskSubmission(
+            remote_task_id="remote-process-task",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+        )
+
+    async def get_status(self, _task):
+        raise AssertionError("the submission process must be killed before polling")
+
+    async def cancel(self, _task):
+        raise AssertionError("the submission process must not cancel the task")
+
+
+async def _persist_mcp_task_before_process_kill(database_path: str, connection) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    repository = McpTaskRepository(factory, tenant=_TEST_TENANT)
+    registry = McpTaskDriverRegistry()
+    registry.register(_PROCESS_MCP_DRIVER, _ProcessMcpSubmissionDriver())
+    service = McpTaskService(
+        repository=repository,
+        drivers=registry,
+        poll_interval_seconds=1,
+        lease_seconds=30,
+        max_concurrent_polls=1,
+    )
+    record = await service.submit(
+        driver_name=_PROCESS_MCP_DRIVER,
+        request=_process_mcp_request(),
+        now=datetime.now(UTC) - timedelta(seconds=5),
+    )
+    lineage = record["lineage"]
+    connection.send(
+        {
+            "task_id": record["id"],
+            "lineage_digest": record["lineage_digest"],
+            "credential_selector_ref": lineage["credential_selector_ref"],
+            "credential_selector_version": lineage["credential_selector_version"],
+        }
+    )
+    connection.close()
+    await asyncio.Event().wait()
+
+
+def _mcp_submission_process(database_path: str, connection) -> None:
+    asyncio.run(_persist_mcp_task_before_process_kill(database_path, connection))
+
+
+class _ProcessMcpRecoveryDriver:
+    def __init__(self, submitted: dict[str, object]) -> None:
+        self._submitted = submitted
+        self.status_calls = []
+
+    async def submit(self, _request):
+        raise AssertionError("recovery must not submit a second remote task")
+
+    async def get_status(self, task):
+        self.status_calls.append(task)
+        assert task.lineage is not None
+        assert task.lineage.digest == self._submitted["lineage_digest"]
+        assert task.lineage.credential_selector_ref == self._submitted["credential_selector_ref"]
+        assert task.lineage.credential_selector_version == self._submitted["credential_selector_version"]
+        return TaskSnapshot(
+            status=TaskStatus.COMPLETED,
+            result={"recovered": True},
+        )
+
+    async def cancel(self, _task):
+        raise AssertionError("recovery must not cancel the remote task")
+
+
 class _LoseAfterAdmissionRuns(_DurableRuns):
     def __init__(self, manager: RunManager) -> None:
         super().__init__(manager)
@@ -281,6 +405,69 @@ class _PreflightBarrierRepository(RunRepository):
             assert row is None
             await self._barrier.arrive()
         return row
+
+
+@pytest.mark.anyio
+async def test_mcp_task_survives_real_process_kill_and_reuses_lineage_selector(tmp_path) -> None:
+    database_path = tmp_path / "mcp-process-loss.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await engine.dispose()
+
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_mcp_submission_process,
+        args=(str(database_path), sender),
+        name="mcp-task-process-loss",
+    )
+    process.start()
+    sender.close()
+    try:
+        ready = await asyncio.to_thread(receiver.poll, 20)
+        assert ready, f"submission process exited before persistence: {process.exitcode}"
+        submitted = await asyncio.to_thread(receiver.recv)
+        assert process.is_alive()
+        process.kill()
+        await asyncio.to_thread(process.join, 10)
+        assert not process.is_alive()
+        assert process.exitcode not in (None, 0)
+    finally:
+        receiver.close()
+        if process.is_alive():
+            process.kill()
+            await asyncio.to_thread(process.join, 10)
+        process.close()
+
+    recovery_engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    recovery_factory = async_sessionmaker(recovery_engine, expire_on_commit=False)
+    repository = McpTaskRepository(recovery_factory, tenant=_TEST_TENANT)
+    recovery_driver = _ProcessMcpRecoveryDriver(submitted)
+    registry = McpTaskDriverRegistry()
+    registry.register(_PROCESS_MCP_DRIVER, recovery_driver)
+    service = McpTaskService(
+        repository=repository,
+        drivers=registry,
+        poll_interval_seconds=1,
+        lease_seconds=30,
+        max_concurrent_polls=1,
+    )
+    try:
+        await service.run_once(now=datetime.now(UTC) + timedelta(seconds=1))
+        recovered = await repository.get(
+            submitted["task_id"],
+            user_id="owner-1",
+            tenant_digest=repository.tenant.digest,
+        )
+
+        assert recovered is not None
+        assert recovered["status"] == "completed"
+        assert recovered["result"] == {"recovered": True}
+        assert recovered["lineage_digest"] == submitted["lineage_digest"]
+        assert len(recovery_driver.status_calls) == 1
+    finally:
+        await recovery_engine.dispose()
 
 
 @pytest.mark.anyio

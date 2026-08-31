@@ -24,13 +24,24 @@ from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import get_session_pool
-from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
+from deerflow.mcp.tasks import (
+    ORDINARY_MCP_TASK_DRIVER,
+    McpTaskLineageBinder,
+    McpTaskLineageError,
+    TaskSubmitRequest,
+    TrustedMcpSubmissionContext,
+    configured_credential_selector,
+)
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
     get_mcp_task_submitter,
     validate_mcp_task_config_snapshot,
 )
 from deerflow.reflection import resolve_variable
+from deerflow.runtime.tool_evidence import (
+    build_request_projection,
+    evidence_safe_fields_from_tool,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
@@ -639,6 +650,7 @@ def _make_background_submit_tool(
     submit_tool: str,
     status_tool: str,
     cancel_tool: str,
+    server_config: McpServerConfig,
 ) -> BaseTool:
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
@@ -647,19 +659,41 @@ def _make_background_submit_tool(
         **arguments: Any,
     ) -> dict[str, Any]:
         submitter = get_mcp_task_submitter()
-        thread_id = _extract_thread_id(runtime)
-        user_id = resolve_runtime_user_id(runtime)
         context = runtime.context if runtime is not None and runtime.context else {}
-        run_id = context.get("run_id")
-        tool_call_id = getattr(runtime, "tool_call_id", None) if runtime is not None else None
+        trusted_runtime = TrustedMcpSubmissionContext.from_runtime_context(
+            context,
+            expected_tool_name=tool.name,
+        )
+        from deerflow.extensions.mcp import mcp_invocation_facts_from_context
+
+        invocation_facts = mcp_invocation_facts_from_context(context)
+        if invocation_facts is None or not isinstance(invocation_facts.principal.user_id, str) or not invocation_facts.principal.user_id:
+            raise McpTaskLineageError("mcp_task_lineage_unavailable")
+        projection = build_request_projection(
+            submit_tool,
+            arguments,
+            evidence_safe_fields=evidence_safe_fields_from_tool(tool),
+        )
+        projection["task_mode"] = {
+            "notification_requested": True,
+            "task_name": task_name,
+        }
+        lineage = McpTaskLineageBinder().for_agent_tool(
+            trusted_runtime=trusted_runtime,
+            server_name=server_name,
+            tool_name=submit_tool,
+            safe_request_projection=projection,
+            credential_selector=configured_credential_selector(
+                server_name,
+                server_config,
+            ),
+        )
         created = await submitter.submit(
             driver_name=ORDINARY_MCP_TASK_DRIVER,
             request=TaskSubmitRequest(
-                user_id=user_id,
-                thread_id=thread_id,
-                run_id=str(run_id) if run_id is not None else None,
-                tool_call_id=str(tool_call_id) if tool_call_id is not None else None,
-                server_name=server_name,
+                user_id=invocation_facts.principal.user_id,
+                thread_id=invocation_facts.thread_id,
+                lineage=lineage,
                 task_name=task_name,
                 arguments=arguments,
                 driver_data={
@@ -740,6 +774,7 @@ def _configure_task_tools_for_server(
                 submit_tool=toolset.submit_tool,
                 status_tool=toolset.status_tool,
                 cancel_tool=toolset.cancel_tool,
+                server_config=server_config,
             )
         )
     return configured

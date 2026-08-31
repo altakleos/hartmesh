@@ -174,6 +174,17 @@ class McpServerConfig(BaseModel):
         default=None,
         description="Per-user credential injection (for sse or http type): map DeerFlow user ids to per-user credential header values",
     )
+    credential_binding_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description=("Non-secret stable identity for the credential binding used by durable MCP tasks; credential material is never persisted in task lineage"),
+    )
+    credential_version: int = Field(
+        default=1,
+        ge=1,
+        description=("Operator-managed version for the durable MCP credential binding; increment when recovery must reject tasks created under an unavailable binding"),
+    )
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")

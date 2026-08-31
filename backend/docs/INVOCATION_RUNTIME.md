@@ -776,9 +776,11 @@ the real durable-invocation predecessor `0011_mcp_tasks` with representative
 normal, auxiliary, and MCP-task rows. It applies every invocation revision through
 `0019_inbound_event_identity`, joins the result, managed-subagent, and scheduled-enqueue
 branches through `0022_merge_scheduled_enqueue`, and verifies the single
-`0025_tenant_identity` head plus accepted/idempotency/caller-intent/assembly/tenant columns,
-the schema-identity singleton, and the nullable run-event receipt idempotency key/partial unique index,
-checks and partial indexes, validates lifecycle singleton/journal/index/retained-cardinality
+`0026_mcp_task_lineage` head plus accepted/idempotency/caller-intent/assembly/tenant
+and MCP-task lineage columns, the schema-identity singleton, the nullable run-event
+receipt idempotency key/partial unique index, and tenant-scoped MCP-task lineage,
+parent, notification, and due-work indexes and checks, validates lifecycle
+singleton/journal/index/retained-cardinality
 and inbound receipt arbitration, and then uses `RunRepository` for
 replay, cancellation, orphan recovery, lifecycle, and summary reads/writes. The
 same CI marker suite retains the independent-session equal/unequal admission,

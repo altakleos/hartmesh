@@ -112,6 +112,7 @@ def _paging_values(
     *,
     allow_source_kind: bool = False,
     allow_tool_receipts: bool = False,
+    allow_mcp_tasks: bool = False,
 ) -> tuple[str | None, int, str | None] | JSONResponse:
     items = list(request.query_params.multi_items())
     allowed = {"cursor", "limit"}
@@ -123,6 +124,14 @@ def _paging_values(
                 "include_tool_receipts",
                 "tool_receipt_cursor",
                 "tool_receipt_limit",
+            }
+        )
+    if allow_mcp_tasks:
+        allowed.update(
+            {
+                "include_mcp_tasks",
+                "mcp_task_cursor",
+                "mcp_task_limit",
             }
         )
     if any(key not in allowed for key, _value in items):
@@ -151,6 +160,24 @@ def _tool_receipt_paging(request: Request) -> tuple[bool, str | None, int] | JSO
     if cursor == "" or (cursor is not None and not include):
         return runtime_error_response(422, FailureCode.invalid_request)
     raw_limit = request.query_params.get("tool_receipt_limit", "100")
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        return runtime_error_response(422, FailureCode.invalid_request)
+    if str(limit) != raw_limit or not 1 <= limit <= 100:
+        return runtime_error_response(422, FailureCode.invalid_request)
+    return include, cursor, limit
+
+
+def _mcp_task_paging(request: Request) -> tuple[bool, str | None, int] | JSONResponse:
+    raw_include = request.query_params.get("include_mcp_tasks", "false")
+    if raw_include not in {"true", "false"}:
+        return runtime_error_response(422, FailureCode.invalid_request)
+    include = raw_include == "true"
+    cursor = request.query_params.get("mcp_task_cursor")
+    if cursor == "" or (cursor is not None and not include):
+        return runtime_error_response(422, FailureCode.invalid_request)
+    raw_limit = request.query_params.get("mcp_task_limit", "100")
     try:
         limit = int(raw_limit)
     except (TypeError, ValueError):
@@ -253,7 +280,11 @@ async def observe_invocation(
 
     if error := _permission_error(request, "runs", "read"):
         return error
-    paging = _paging_values(request, allow_tool_receipts=True)
+    paging = _paging_values(
+        request,
+        allow_tool_receipts=True,
+        allow_mcp_tasks=True,
+    )
     if isinstance(paging, JSONResponse):
         return paging
     cursor, limit, _source_kind = paging
@@ -261,6 +292,10 @@ async def observe_invocation(
     if isinstance(receipt_paging, JSONResponse):
         return receipt_paging
     include_tool_receipts, tool_receipt_cursor, tool_receipt_limit = receipt_paging
+    mcp_task_paging = _mcp_task_paging(request)
+    if isinstance(mcp_task_paging, JSONResponse):
+        return mcp_task_paging
+    include_mcp_tasks, mcp_task_cursor, mcp_task_limit = mcp_task_paging
     try:
         query = InvocationQuery(
             run_id=run_id,
@@ -269,6 +304,9 @@ async def observe_invocation(
             include_tool_receipts=include_tool_receipts,
             tool_receipt_cursor=tool_receipt_cursor,
             tool_receipt_limit=tool_receipt_limit,
+            include_mcp_tasks=include_mcp_tasks,
+            mcp_task_cursor=mcp_task_cursor,
+            mcp_task_limit=mcp_task_limit,
         )
     except (TypeError, ValueError):
         return runtime_error_response(422, FailureCode.invalid_request)

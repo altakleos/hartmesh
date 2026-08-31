@@ -1,9 +1,17 @@
 from types import SimpleNamespace
 
 import pytest
+from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 
-from deerflow.mcp.tasks import TaskReference, TaskStatus, TaskSubmitRequest
+from deerflow.mcp.tasks import (
+    McpTaskLineageBinder,
+    TaskReference,
+    TaskStatus,
+    TaskSubmitRequest,
+)
 from deerflow.mcp.tasks.ordinary import McpTaskProtocolError, OrdinaryMcpTaskDriver
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+from deerflow.runtime.tool_evidence import build_request_projection
 
 
 class FakeCaller:
@@ -25,14 +33,33 @@ def _result(structured_content, *, text="ignored", is_error=False):
 
 
 def _request() -> TaskSubmitRequest:
+    arguments = {"topic": "MCP"}
+    lineage = McpTaskLineageBinder().for_standalone_api(
+        tenant=TenantIdentityV1.from_canonical_id("test").to_persisted_reference(),
+        principal_identity=InvocationIdentityV1(
+            effective_subject=EffectiveSubjectV1(
+                kind="human",
+                subject_id="user-1",
+                role="member",
+            )
+        ),
+        extension_generation=1,
+        extension_manifest_digest="a" * 64,
+        accepted_origin_digest="b" * 64,
+        server_name="reports",
+        tool_name="submit_report",
+        safe_request_projection=build_request_projection(
+            "submit_report",
+            arguments,
+        ),
+        credential_selector=None,
+    )
     return TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
-        run_id="run-1",
-        tool_call_id="call-1",
-        server_name="reports",
+        lineage=lineage,
         task_name="report-generation",
-        arguments={"topic": "MCP"},
+        arguments=arguments,
         driver_data={
             "submit_tool": "submit_report",
             "status_tool": "get_report_status",
@@ -67,15 +94,14 @@ async def test_submit_uses_structured_content_and_keeps_remote_id_out_of_driver_
     assert submission.remote_task_id == "remote-1"
     assert submission.snapshot.status == TaskStatus.SUBMITTED
     assert "remote_task_id" not in submission.driver_data
-    assert caller.calls == [
-        {
-            "server_name": "reports",
-            "tool_name": "submit_report",
-            "arguments": {"topic": "MCP"},
-            "user_id": "user-1",
-            "thread_id": "thread-1",
-        }
-    ]
+    call = caller.calls[0]
+    assert call["server_name"] == "reports"
+    assert call["tool_name"] == "submit_report"
+    assert call["arguments"] == {"topic": "MCP"}
+    assert call["user_id"] == "user-1"
+    assert call["thread_id"] == "thread-1"
+    assert call["lineage"] == _request().lineage
+    assert call["operation"] == "submit"
 
 
 @pytest.mark.asyncio
