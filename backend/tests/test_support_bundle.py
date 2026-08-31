@@ -356,6 +356,26 @@ def test_create_support_bundle_masks_provider_config_secret_shaped_keys(tmp_path
         assert secret not in all_text
 
 
+def test_config_summary_replaces_raw_tenant_id_with_safe_projection(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "config_version: 44\ndeployment:\n  tenant_id: customer-readable-name\n",
+        encoding="utf-8",
+    )
+
+    summary = support_bundle.collect_config_summary(config_path)
+
+    assert summary["deployment"]["tenant_identity"] == {
+        "configured_in_yaml": True,
+        "version": 1,
+        "public_ref": "tenant-d25d6d3e435cafee",
+        "digest": "d25d6d3e435cafee9cbb0925350695cf31a9f2316658a580babf91f06bf1a6d9",
+        "prefix_schema_version": 1,
+    }
+    assert "tenant_id" not in summary["deployment"]
+    assert "customer-readable-name" not in str(summary)
+
+
 def test_create_support_bundle_masks_hardcoded_env_secret(tmp_path):
     project_root = tmp_path / "project"
     project_root.mkdir()

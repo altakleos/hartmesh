@@ -55,8 +55,11 @@ from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.base import LifecycleType
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.tenant_identity import TenantIdentityV1, tenant_admission_scope
 
 _SECRET = "verified-binding-test-secret"
+_TEST_TENANT_IDENTITY = TenantIdentityV1.from_canonical_id("local")
+_TEST_TENANT = _TEST_TENANT_IDENTITY.to_persisted_reference()
 
 
 def _verified_request(
@@ -185,7 +188,10 @@ async def test_real_normalizer_accepts_keyed_verified_webhook_route(monkeypatch)
             state=SimpleNamespace(
                 user=SimpleNamespace(id="internal", system_role="internal"),
                 auth_source=AUTH_SOURCE_INTERNAL,
-            )
+            ),
+            app=SimpleNamespace(
+                state=SimpleNamespace(tenant_identity=_TEST_TENANT_IDENTITY),
+            ),
         ),
         trust_internal_launch_facts=True,
     )
@@ -221,12 +227,15 @@ async def test_real_normalizer_accepts_keyed_verified_webhook_route(monkeypatch)
     )
 
     assert identity is not None
-    assert identity.external_scope == scope_for_channel(
-        "github",
-        binding.reference,
-        "acme/widgets",
-        "acme/widgets",
-        binding_kind=InternalVerifiedNativeBindingKind.webhook_route,
+    assert identity.external_scope == tenant_admission_scope(
+        _TEST_TENANT_IDENTITY.to_persisted_reference(),
+        scope_for_channel(
+            "github",
+            binding.reference,
+            "acme/widgets",
+            "acme/widgets",
+            binding_kind=InternalVerifiedNativeBindingKind.webhook_route,
+        ),
     )
 
 
@@ -431,7 +440,10 @@ async def test_real_normalizer_rejects_missing_or_conflicting_binding(monkeypatc
             state=SimpleNamespace(
                 user=SimpleNamespace(id="internal", system_role="internal"),
                 auth_source=AUTH_SOURCE_INTERNAL,
-            )
+            ),
+            app=SimpleNamespace(
+                state=SimpleNamespace(tenant_identity=_TEST_TENANT_IDENTITY),
+            ),
         ),
         trust_internal_launch_facts=True,
     )
@@ -499,8 +511,9 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
     _write_github_agent(tmp_path, owner="bob")
 
     graph_store = InMemoryStore()
-    run_manager = RunManager(store=MemoryRunStore())
+    run_manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
     app = FastAPI()
+    app.state.tenant_identity = _TEST_TENANT_IDENTITY
     app.include_router(github_webhooks.router)
     app.state.runtime_readiness = _ReadyAdmissionFence()
     app.state.stream_bridge = SimpleNamespace()
@@ -730,8 +743,9 @@ async def test_buffered_followup_uses_its_own_delivery_key_through_real_runtime(
     )
     bridge = MemoryStreamBridge()
     graph_store = InMemoryStore()
-    run_manager = RunManager(store=MemoryRunStore())
+    run_manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
     app = FastAPI()
+    app.state.tenant_identity = _TEST_TENANT_IDENTITY
     app.state.runtime_readiness = _ReadyAdmissionFence()
     app.state.stream_bridge = bridge
     app.state.run_manager = run_manager
@@ -1038,6 +1052,7 @@ async def test_authenticated_github_request_without_delivery_id_is_rejected_befo
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", _SECRET)
     body = json.dumps(_github_payload()).encode()
     app = FastAPI()
+    app.state.tenant_identity = _TEST_TENANT_IDENTITY
     app.include_router(github_webhooks.router)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -1079,7 +1094,10 @@ async def test_legacy_connection_origin_replays_with_redundant_verified_binding(
             state=SimpleNamespace(
                 user=SimpleNamespace(id="internal", system_role="internal"),
                 auth_source=AUTH_SOURCE_INTERNAL,
-            )
+            ),
+            app=SimpleNamespace(
+                state=SimpleNamespace(tenant_identity=_TEST_TENANT_IDENTITY),
+            ),
         ),
         trust_internal_launch_facts=True,
     )

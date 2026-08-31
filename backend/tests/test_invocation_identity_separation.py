@@ -50,6 +50,7 @@ from deerflow.runtime.accepted_invocation import (
     ResolvedAgentRevision,
     canonical_digest,
 )
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 def test_channel_human_cannot_be_promoted_by_internal_transport() -> None:
@@ -447,6 +448,7 @@ async def test_accepted_channel_identity_is_shared_with_contributors(monkeypatch
                 extensions=SimpleNamespace(generation=7),
                 capability_manifest=None,
                 contributor_host=contributor,
+                tenant_identity=TenantIdentityV1.from_canonical_id("local"),
             )
         ),
     )
@@ -483,6 +485,8 @@ async def test_accepted_channel_identity_is_shared_with_contributors(monkeypatch
     assert accepted.principal.is_internal is False
     assert contributor.origin_request.identity is accepted.principal.identity
     assert contributor.context_request.principal.identity is accepted.principal.identity
+    assert contributor.origin_request.tenant is accepted.tenant
+    assert contributor.context_request.tenant is accepted.tenant
     persisted = accepted.to_persisted()
     assert persisted["principal_projection_json"]["version"] == 2
     assert persisted["principal_projection_json"]["identity"] == accepted.principal.identity.to_json()
@@ -504,6 +508,7 @@ async def test_start_observe_and_cancel_share_effective_subject_and_actor() -> N
     )
     trusted_context = TrustedRunContextV1(
         identity=identity,
+        tenant=__import__("deerflow.runtime.tenant_identity", fromlist=["TenantIdentityV1"]).TenantIdentityV1.from_canonical_id("local").to_persisted_reference(),
         origin=SealedOriginV1(source_kind="native_channel", digest="c" * 64),
         thread_id="thread-1",
         external_key_reference=None,
@@ -531,6 +536,7 @@ async def test_start_observe_and_cancel_share_effective_subject_and_actor() -> N
         execution_options={},
         extension_generation=1,
         contributor_execution_digest="b" * 64,
+        tenant=trusted_context.tenant,
         trusted_context=trusted_context,
     )
 
@@ -671,6 +677,7 @@ async def test_constraint_projection_receives_identity_and_final_origin() -> Non
     )
     trusted_context = TrustedRunContextV1(
         identity=identity,
+        tenant=__import__("deerflow.runtime.tenant_identity", fromlist=["TenantIdentityV1"]).TenantIdentityV1.from_canonical_id("local").to_persisted_reference(),
         origin=SealedOriginV1(source_kind="scheduled_task", digest="d" * 64),
         thread_id="thread-1",
         external_key_reference="raw:occurrence-1",
@@ -698,6 +705,7 @@ async def test_constraint_projection_receives_identity_and_final_origin() -> Non
         execution_options={},
         extension_generation=1,
         contributor_execution_digest="b" * 64,
+        tenant=trusted_context.tenant,
         trusted_context=trusted_context,
     )
 
@@ -758,6 +766,7 @@ def test_mcp_facts_retain_effective_subject_actor_and_origin() -> None:
         execution_options={},
         extension_generation=4,
         contributor_execution_digest="b" * 64,
+        tenant=__import__("deerflow.runtime.tenant_identity", fromlist=["TenantIdentityV1"]).TenantIdentityV1.from_canonical_id("local").to_persisted_reference(),
     )
 
     facts = McpInvocationFacts.from_accepted(accepted, run_id="run-1")

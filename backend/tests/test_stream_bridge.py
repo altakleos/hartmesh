@@ -5,10 +5,12 @@ import os
 import re
 import uuid
 from collections import defaultdict
+from types import MappingProxyType
 
 import anyio
 import pytest
 
+from deerflow.config.deployment_config import DeploymentConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, set_stream_bridge_config
 from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamGap, make_stream_bridge
 
@@ -16,6 +18,12 @@ from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridg
 # optional extra; see the NOTE in runtime/stream_bridge/__init__.py). Import it
 # directly from the submodule.
 from deerflow.runtime.stream_bridge.redis import RedisStreamBridge
+from deerflow.runtime.tenant_identity import (
+    RedisTenantComponent,
+    TenantIdentityV1,
+    TenantSubsystem,
+    redis_component_key_prefix,
+)
 
 
 def _stream_id_gt(left: str, right: str) -> bool:
@@ -1280,6 +1288,34 @@ async def test_make_stream_bridge_key_prefix_env_overrides_config(
     }
 
 
+@pytest.mark.anyio
+async def test_make_stream_bridge_uses_server_tenant_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.runtime.stream_bridge.redis as redis_module
+
+    fake = _FakeRedis()
+    monkeypatch.setattr(
+        redis_module.Redis,
+        "from_url",
+        staticmethod(lambda _url, **_kwargs: fake),
+    )
+    identity = TenantIdentityV1.resolve(
+        deployment_config=DeploymentConfig(tenant_id="tenant-a"),
+        environ=MappingProxyType({}),
+    )
+    set_stream_bridge_config(StreamBridgeConfig(type="redis", redis_url="redis://fake:6379/0"))
+    try:
+        async with make_stream_bridge(
+            tenant_namespace=identity.namespace(TenantSubsystem.REDIS),
+        ) as bridge:
+            await bridge.publish("same-run", "metadata", {})
+    finally:
+        set_stream_bridge_config(None)
+
+    assert set(fake.streams) == {f"{identity.namespace(TenantSubsystem.REDIS).key_prefix.rstrip(':')}:deerflow:stream_bridge:same-run"}
+
+
 # ---------------------------------------------------------------------------
 # Integration tests against a real Redis server
 # ---------------------------------------------------------------------------
@@ -1355,16 +1391,37 @@ async def test_redis_integration_publish_subscribe_and_id_format(real_redis_brid
 @requires_redis
 @pytest.mark.anyio
 async def test_redis_acl_confines_bridge_and_denies_cross_tenant_commands():
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+    from redis import Redis as SyncRedis
     from redis.asyncio import Redis
     from redis.exceptions import NoPermissionError
 
-    tenant_prefix = "tA"
+    from deerflow.community.aio_sandbox.ownership.base import RenewOutcome
+    from deerflow.community.aio_sandbox.ownership.redis import RedisOwnershipStore
+    from deerflow.community.e2b_sandbox.capacity.redis import (
+        RedisE2BCapacityStore,
+        ReserveStatus,
+    )
+    from deerflow.runtime.checkpoint_cache.base import make_history_key
+    from deerflow.runtime.checkpoint_cache.redis import RedisCheckpointHistoryCache
+
+    tenant_a_namespace = TenantIdentityV1.from_canonical_id("tenant-a").namespace(TenantSubsystem.REDIS)
+    tenant_b_namespace = TenantIdentityV1.from_canonical_id("tenant-b").namespace(TenantSubsystem.REDIS)
+    components = (
+        RedisTenantComponent.STREAM_BRIDGE,
+        RedisTenantComponent.CHECKPOINT_CACHE,
+        RedisTenantComponent.SANDBOX_OWNERSHIP,
+    )
+    tenant_a_prefixes = {component: redis_component_key_prefix(tenant_a_namespace, component) for component in components}
+    tenant_b_prefixes = {component: redis_component_key_prefix(tenant_b_namespace, component) for component in components}
+    tenant_a_prefix = tenant_a_prefixes[RedisTenantComponent.STREAM_BRIDGE]
     run_id = f"acl-{uuid.uuid4().hex}"
-    stream_key = f"{tenant_prefix}:deerflow:stream_bridge:{run_id}"
     username = f"deerflow-test-{uuid.uuid4().hex}"
     password = uuid.uuid4().hex
     admin = Redis.from_url(REDIS_TEST_URL, decode_responses=True)
     tenant = None
+    checkpoint_tenant = None
+    sync_tenant = None
 
     try:
         await admin.execute_command(
@@ -1374,11 +1431,14 @@ async def test_redis_acl_confines_bridge_and_denies_cross_tenant_commands():
             "reset",
             "on",
             f">{password}",
-            f"~{tenant_prefix}:*",
-            f"&{tenant_prefix}:*",
+            f"~{tenant_a_prefix}*",
+            f"&{tenant_a_prefix}*",
             "+@read",
             "+@write",
             "+@transaction",
+            "+@scripting",
+            "+time",
+            "+publish",
             "+select",
         )
         tenant = Redis.from_url(
@@ -1389,7 +1449,7 @@ async def test_redis_acl_confines_bridge_and_denies_cross_tenant_commands():
         )
         bridge = RedisStreamBridge(
             redis_url=REDIS_TEST_URL,
-            namespace_prefix=tenant_prefix,
+            namespace_prefix=tenant_a_prefix,
             client=tenant,
         )
 
@@ -1399,17 +1459,106 @@ async def test_redis_acl_confines_bridge_and_denies_cross_tenant_commands():
 
         assert received[0].event == "metadata"
         assert received[1] is END_SENTINEL
+        assert await tenant.publish(f"{tenant_a_prefix}:events", "ok") == 0
+
+        checkpoint_tenant = Redis.from_url(
+            REDIS_TEST_URL,
+            username=username,
+            password=password,
+            decode_responses=False,
+        )
+        checkpoint_prefix = tenant_a_prefixes[RedisTenantComponent.CHECKPOINT_CACHE]
+        checkpoint_key = make_history_key(
+            checkpoint_prefix,
+            "thread-acl",
+            "",
+            "checkpoint-acl",
+            "messages",
+        )
+        checkpoint_cache = RedisCheckpointHistoryCache(
+            REDIS_TEST_URL,
+            serde=JsonPlusSerializer(),
+            ttl_seconds=60,
+            client=checkpoint_tenant,
+        )
+        await checkpoint_cache.aset_many({checkpoint_key: {"writes": []}})
+        assert checkpoint_key in await checkpoint_cache.aget_many([checkpoint_key])
+        await checkpoint_cache.adelete_thread(checkpoint_prefix, "thread-acl")
+        assert await checkpoint_tenant.exists(checkpoint_key) == 0
+
+        sync_tenant = SyncRedis.from_url(
+            REDIS_TEST_URL,
+            username=username,
+            password=password,
+            decode_responses=True,
+        )
+        ownership_prefix = tenant_a_prefixes[RedisTenantComponent.SANDBOX_OWNERSHIP]
+        ownership = RedisOwnershipStore(
+            owner_id="acl-owner",
+            redis_url=REDIS_TEST_URL,
+            ttl_seconds=60,
+            key_prefix=ownership_prefix,
+            client=sync_tenant,
+        )
+        assert await asyncio.to_thread(ownership.take, "sandbox-acl") is True
+        assert await asyncio.to_thread(ownership.owner, "sandbox-acl") == "acl-owner"
+        assert await asyncio.to_thread(ownership.renew, "sandbox-acl") is RenewOutcome.RENEWED
+        await asyncio.to_thread(ownership.release, "sandbox-acl")
+
+        capacity = RedisE2BCapacityStore(
+            redis_url=REDIS_TEST_URL,
+            hard_limit=1,
+            key_prefix=ownership_prefix,
+            client=sync_tenant,
+        )
+        assert await asyncio.to_thread(
+            capacity.reconcile,
+            expected_revision=0,
+            remote_sandboxes={},
+            complete=True,
+            reservation_max_age_ms=60_000,
+        )
+        assert await asyncio.to_thread(capacity.reserve, "reservation-acl") is ReserveStatus.GRANTED
+        await asyncio.to_thread(
+            capacity.track,
+            "sandbox-capacity-acl",
+            reservation_token="reservation-acl",
+        )
+        await asyncio.to_thread(capacity.release, "sandbox-capacity-acl")
+
         with pytest.raises(NoPermissionError):
-            await tenant.xadd("tB:stream", {"kind": "event"})
+            await tenant.xadd(
+                f"{tenant_b_prefixes[RedisTenantComponent.STREAM_BRIDGE]}:stream",
+                {"kind": "event"},
+            )
         with pytest.raises(NoPermissionError):
-            await tenant.xread({"tB:stream": "0-0"})
+            await tenant.xread({f"{tenant_b_prefixes[RedisTenantComponent.STREAM_BRIDGE]}:stream": "0-0"})
         with pytest.raises(NoPermissionError):
-            await tenant.get("tB:value")
+            await tenant.set(
+                f"{tenant_b_prefixes[RedisTenantComponent.CHECKPOINT_CACHE]}:value",
+                "denied",
+            )
+        with pytest.raises(NoPermissionError):
+            await tenant.set(
+                f"{tenant_b_prefixes[RedisTenantComponent.SANDBOX_OWNERSHIP]}:value",
+                "denied",
+            )
+        with pytest.raises(NoPermissionError):
+            await tenant.publish(
+                f"{tenant_b_prefixes[RedisTenantComponent.STREAM_BRIDGE]}:events",
+                "denied",
+            )
     finally:
         if tenant is not None:
             await tenant.aclose()
+        if checkpoint_tenant is not None:
+            await checkpoint_tenant.aclose()
+        if sync_tenant is not None:
+            await asyncio.to_thread(sync_tenant.close)
         try:
-            await admin.delete(stream_key)
+            keys = [key async for key in admin.scan_iter(f"{tenant_a_namespace.key_prefix.rstrip(':')}*")]
+            if keys:
+                await admin.delete(*keys)
         finally:
             try:
                 await admin.execute_command("ACL", "DELUSER", username)

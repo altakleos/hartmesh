@@ -34,6 +34,7 @@ from deerflow.extensions.capabilities import (
 )
 from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.runtime import PostCommitObligationStatus
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 def _admin_user() -> User:
@@ -75,6 +76,7 @@ class _Readiness:
 
 
 def _reporter(*, backend: str, profile: DeploymentProfile):
+    tenant = TenantIdentityV1.from_canonical_id("customer-readable-name")
     return GatewayDeploymentReporter(
         profile=profile,
         database_backend=backend,
@@ -87,6 +89,7 @@ def _reporter(*, backend: str, profile: DeploymentProfile):
             image_digest="sha256:" + ("a" * 64),
             source_revision="b" * 40,
         ),
+        tenant_supplier=lambda: tenant.to_persisted_reference(),
     )
 
 
@@ -146,6 +149,13 @@ def test_admin_deployment_report_is_versioned_truthful_and_redacted() -> None:
     assert payload["api_version"] == "deerflow.deployment/v1"
     assert payload["kind"] == "runtime.deployment.report"
     assert payload["profile"] == "durable_production"
+    assert payload["tenant_identity"] == {
+        "version": 1,
+        "public_ref": "tenant-d25d6d3e435cafee",
+        "digest": "d25d6d3e435cafee9cbb0925350695cf31a9f2316658a580babf91f06bf1a6d9",
+        "prefix_schema_version": 1,
+    }
+    assert "customer-readable-name" not in str(payload)
     assert payload["extension_manifest"]["extension_generation"] == 7
     assert payload["persistence"] == {
         "version": 1,

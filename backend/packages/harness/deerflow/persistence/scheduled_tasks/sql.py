@@ -62,6 +62,9 @@ class ScheduledTaskRepository:
         self._sf = session_factory
         self._run_repository = run_repository or RunRepository(session_factory)
 
+    def _scope_run_statement(self, statement: Any) -> Any:
+        return self._run_repository.scope_run_statement(statement)
+
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRow) -> dict[str, Any]:
         data = row.to_dict()
@@ -560,11 +563,15 @@ class ScheduledTaskRepository:
             await session.commit()
             return cancelled
 
-    @staticmethod
-    async def _find_underlying_run(session: AsyncSession, task_run: ScheduledTaskRunRow | None, task: ScheduledTaskRow) -> RunRow | None:
+    async def _find_underlying_run(
+        self,
+        session: AsyncSession,
+        task_run: ScheduledTaskRunRow | None,
+        task: ScheduledTaskRow,
+    ) -> RunRow | None:
         run_ids = [candidate for candidate in (task_run.run_id if task_run is not None else None, task.last_run_id) if candidate]
         for run_id in dict.fromkeys(run_ids):
-            candidate = await session.get(RunRow, run_id)
+            candidate = (await session.execute(self._scope_run_statement(select(RunRow).where(RunRow.run_id == run_id)))).scalar_one_or_none()
             if candidate is None:
                 continue
             linked_task_run_id = (candidate.metadata_json or {}).get("scheduled_task_run_id")
@@ -574,5 +581,5 @@ class ScheduledTaskRepository:
         metadata_filter = RunRow.metadata_json["scheduled_task_id"].as_string() == task.id
         if task_run is not None:
             metadata_filter = RunRow.metadata_json["scheduled_task_run_id"].as_string() == task_run.id
-        result = await session.execute(select(RunRow).where(metadata_filter).order_by(RunRow.created_at.desc()).limit(1))
+        result = await session.execute(self._scope_run_statement(select(RunRow)).where(metadata_filter).order_by(RunRow.created_at.desc()).limit(1))
         return result.scalars().first()

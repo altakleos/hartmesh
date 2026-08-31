@@ -32,6 +32,10 @@ from deerflow.runtime.checkpointer.provider import (
     SQLITE_INSTALL,
 )
 from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
+from deerflow.runtime.tenant_identity import (
+    LegacyRedisPrefixRecordV1,
+    TenantNamespaceV1,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +217,12 @@ async def _select_inner_checkpointer(app_config: AppConfig) -> AsyncIterator[Che
 
 
 @contextlib.asynccontextmanager
-async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterator[Checkpointer]:
+async def make_checkpointer(
+    app_config: AppConfig | None = None,
+    *,
+    tenant_namespace: TenantNamespaceV1 | None = None,
+    legacy_redis_prefixes: LegacyRedisPrefixRecordV1 | None = None,
+) -> AsyncIterator[Checkpointer]:
     """Async context manager that yields a checkpointer for the caller's lifetime.
     Resources are opened on enter and closed on exit -- no global state::
 
@@ -247,7 +256,20 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
             )
             from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
 
-            async with make_checkpoint_cache(app_config, serde=saver.serde) as cache:
-                yield CachedHistorySaver(saver, cache, key_prefix=checkpoint_cache_key_prefix(app_config))
+            async with make_checkpoint_cache(
+                app_config,
+                serde=saver.serde,
+                tenant_namespace=tenant_namespace,
+                legacy_redis_prefixes=legacy_redis_prefixes,
+            ) as cache:
+                yield CachedHistorySaver(
+                    saver,
+                    cache,
+                    key_prefix=checkpoint_cache_key_prefix(
+                        app_config,
+                        tenant_namespace,
+                        legacy_redis_prefixes,
+                    ),
+                )
         else:
             yield saver

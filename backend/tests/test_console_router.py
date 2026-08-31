@@ -27,6 +27,7 @@ from app.gateway.routers import console
 from deerflow.persistence.base import Base
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 # Pinned to noon UTC so hour-level seed offsets (NOW - 1h, NOW - 2h) never cross
 # the midnight boundary into the previous calendar day, which would otherwise
@@ -35,6 +36,8 @@ from deerflow.persistence.thread_meta.model import ThreadMetaRow
 # `datetime.now` to this same instant, keeping the router's view of "today"
 # (and active-run durations) aligned with these seed timestamps.
 NOW = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+TENANT_IDENTITY = TenantIdentityV1.from_canonical_id("tenant-a")
+TENANT_REFERENCE = TENANT_IDENTITY.to_persisted_reference()
 
 
 class _FrozenDatetime(datetime):
@@ -137,6 +140,22 @@ def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
             updated_at=NOW - timedelta(minutes=29),
         ),
     ]
+    for row in runs:
+        row.tenant_ref = TENANT_REFERENCE.public_ref
+        row.tenant_digest = TENANT_REFERENCE.digest
+    runs.append(
+        RunRow(
+            run_id="foreign-tenant-run",
+            thread_id="t1",
+            user_id="user-a",
+            status="success",
+            total_tokens=50_000,
+            created_at=NOW - timedelta(minutes=10),
+            updated_at=NOW - timedelta(minutes=9),
+            tenant_ref=TenantIdentityV1.from_canonical_id("tenant-b").public_ref,
+            tenant_digest=TenantIdentityV1.from_canonical_id("tenant-b").digest,
+        )
+    )
     return threads, runs
 
 
@@ -171,6 +190,7 @@ def client(session_factory, monkeypatch):
     _FrozenDatetime._frozen = NOW
     monkeypatch.setattr(console, "datetime", _FrozenDatetime)
     app = make_authed_test_app()
+    app.state.tenant_identity = TENANT_IDENTITY
     app.include_router(console.router)
     return TestClient(app)
 
@@ -189,6 +209,11 @@ class TestConsoleStats:
 
 
 class TestConsoleRuns:
+    def test_listing_excludes_another_tenants_row(self, client):
+        data = client.get("/api/console/runs", params={"limit": 50}).json()
+
+        assert "foreign-tenant-run" not in {run["run_id"] for run in data["runs"]}
+
     def test_listing_orders_paginates_and_joins_titles(self, client):
         resp = client.get("/api/console/runs", params={"limit": 3})
         assert resp.status_code == 200

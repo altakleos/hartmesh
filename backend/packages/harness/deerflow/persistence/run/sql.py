@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from deerflow_extension_api import (
+    TenantReferenceV1,
     validate_model_profile_identifier,
     validate_thread_identifier,
 )
@@ -60,8 +61,10 @@ from deerflow.runtime.runs.store.base import (
     build_lifecycle_payload,
     lifecycle_owner_scope,
     lifecycle_type_for_status,
+    tenant_store_columns,
     validate_execution_evidence_run,
 )
+from deerflow.runtime.tenant_identity import TenantIdentityError
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -119,8 +122,45 @@ def _is_run_primary_key_violation(exc: IntegrityError) -> bool:
 class RunRepository(RunStore):
     durable_lifecycle = True
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        tenant: TenantReferenceV1 | None = None,
+    ) -> None:
+        if tenant is not None and not isinstance(tenant, TenantReferenceV1):
+            raise TypeError("tenant must be TenantReferenceV1 or None")
         self._sf = session_factory
+        self._tenant = tenant
+
+    def _run_tenant_clause(self) -> Any:
+        if self._tenant is None:
+            return None
+        return RunRow.tenant_digest == self._tenant.digest
+
+    def _event_tenant_clause(self) -> Any:
+        if self._tenant is None:
+            return None
+        return RunLifecycleEventRow.tenant_digest == self._tenant.digest
+
+    def _scope_run(self, statement: Any) -> Any:
+        clause = self._run_tenant_clause()
+        return statement.where(clause) if clause is not None else statement
+
+    def scope_run_statement(self, statement: Any) -> Any:
+        """Apply this repository's tenant boundary to a related SQL query.
+
+        Scheduler persistence occasionally needs to inspect the underlying
+        ``runs`` row in the same transaction as its own bookkeeping. Keeping
+        that predicate here prevents those repositories from re-deriving the
+        process tenant or reaching into private state.
+        """
+
+        return self._scope_run(statement)
+
+    def _scope_event(self, statement: Any) -> Any:
+        clause = self._event_tenant_clause()
+        return statement.where(clause) if clause is not None else statement
 
     async def _begin_lifecycle_write(self, session: AsyncSession) -> None:
         bind = session.get_bind()
@@ -138,7 +178,7 @@ class RunRepository(RunStore):
         state = (await session.execute(stmt)).scalar_one_or_none()
         if state is not None:
             return state
-        event_count = await session.scalar(select(func.count()).select_from(RunLifecycleEventRow))
+        event_count = await session.scalar(self._scope_event(select(func.count()).select_from(RunLifecycleEventRow)))
         if event_count:
             raise RuntimeError("lifecycle events exist without cursor singleton; ordering state is corrupt")
         state = RunLifecycleCursorStateRow(
@@ -181,8 +221,8 @@ class RunRepository(RunStore):
                 )
             expected_retained_count = state.last_cursor - state.pruned_through
 
-            first = tuple((await session.execute(select(RunLifecycleEventRow.cursor).order_by(RunLifecycleEventRow.cursor).limit(2))).scalars().all())
-            last = tuple((await session.execute(select(RunLifecycleEventRow.cursor).order_by(RunLifecycleEventRow.cursor.desc()).limit(2))).scalars().all())
+            first = tuple((await session.execute(self._scope_event(select(RunLifecycleEventRow.cursor)).order_by(RunLifecycleEventRow.cursor).limit(2))).scalars().all())
+            last = tuple((await session.execute(self._scope_event(select(RunLifecycleEventRow.cursor)).order_by(RunLifecycleEventRow.cursor.desc()).limit(2))).scalars().all())
             if not first:
                 if state.pruned_through != state.last_cursor:
                     return LifecycleReadiness(
@@ -238,6 +278,8 @@ class RunRepository(RunStore):
             "run_id": row.run_id,
             "thread_id": row.thread_id,
             "owner_scope": row.owner_scope,
+            "tenant_ref": row.tenant_ref,
+            "tenant_digest": row.tenant_digest,
             "lifecycle_type": LifecycleType(row.lifecycle_type),
             "state_version": row.state_version,
             "status": row.status,
@@ -261,6 +303,8 @@ class RunRepository(RunStore):
             run_id=row.run_id,
             thread_id=row.thread_id,
             owner_scope=lifecycle_owner_scope(row.user_id),
+            tenant_ref=row.tenant_ref,
+            tenant_digest=row.tenant_digest,
             lifecycle_type=transition.lifecycle_type.value,
             state_version=row.state_version,
             status=row.status,
@@ -276,7 +320,7 @@ class RunRepository(RunStore):
         run_id: str | None = None,
         thread_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        stmt = select(RunLifecycleEventRow)
+        stmt = self._scope_event(select(RunLifecycleEventRow))
         if run_id is not None:
             stmt = stmt.where(RunLifecycleEventRow.run_id == run_id)
         if thread_id is not None:
@@ -292,7 +336,7 @@ class RunRepository(RunStore):
 
             cursor_state = await session.get(RunLifecycleCursorStateRow, 1)
             if cursor_state is None:
-                event_count = await session.scalar(select(func.count()).select_from(RunLifecycleEventRow))
+                event_count = await session.scalar(self._scope_event(select(func.count()).select_from(RunLifecycleEventRow)))
                 await session.rollback()
                 detail = "events exist without cursor metadata" if event_count else "cursor metadata is missing"
                 raise LifecycleOrderingCorruption(detail)
@@ -310,6 +354,7 @@ class RunRepository(RunStore):
                 RunLifecycleEventRow.cursor > requested,
                 RunLifecycleEventRow.cursor <= fence,
             )
+            event_stmt = self._scope_event(event_stmt)
             if query.run_id is not None:
                 event_stmt = event_stmt.where(RunLifecycleEventRow.run_id == query.run_id)
             else:
@@ -325,6 +370,7 @@ class RunRepository(RunStore):
                     RunRow.operation_kind == "run",
                     RunRow.origin_json["source_kind"].as_string() == query.source_kind,
                 )
+                event_stmt = self._scope_run(event_stmt)
                 joined_run = True
             if query.visibility_scope is not None and not query.visibility_scope.allow_context:
                 scope = query.visibility_scope
@@ -339,6 +385,7 @@ class RunRepository(RunStore):
                             RunRow,
                             RunRow.run_id == RunLifecycleEventRow.run_id,
                         ).where(RunRow.operation_kind == "run")
+                        event_stmt = self._scope_run(event_stmt)
                         joined_run = True
                     visibility.append(RunRow.origin_json["source_kind"].as_string().in_(scope.source_kinds))
                 event_stmt = event_stmt.where(or_(*visibility))
@@ -394,7 +441,7 @@ class RunRepository(RunStore):
     ) -> bool:
         if scope.thread_id != thread_id:
             raise ValueError("lifecycle visibility scope is bound to another context")
-        stmt = select(RunRow.run_id).where(
+        stmt = self._scope_run(select(RunRow.run_id)).where(
             RunRow.thread_id == thread_id,
             RunRow.operation_kind == "run",
         )
@@ -420,7 +467,7 @@ class RunRepository(RunStore):
 
         if not run_ids:
             return []
-        stmt = select(RunRow).where(
+        stmt = self._scope_run(select(RunRow)).where(
             RunRow.run_id.in_(run_ids),
             RunRow.operation_kind == "run",
         )
@@ -436,7 +483,13 @@ class RunRepository(RunStore):
                 await session.rollback()
                 raise CursorAhead(fence)
             if requested > cursor_state.pruned_through:
-                await session.execute(delete(RunLifecycleEventRow).where(RunLifecycleEventRow.cursor <= requested))
+                await session.execute(
+                    self._scope_event(
+                        delete(RunLifecycleEventRow).where(
+                            RunLifecycleEventRow.cursor <= requested,
+                        )
+                    )
+                )
                 cursor_state.pruned_through = requested
             result = encode_lifecycle_cursor(cursor_state.pruned_through)
             await session.commit()
@@ -494,7 +547,7 @@ class RunRepository(RunStore):
         payload = build_lifecycle_payload(transition)
         async with self._sf() as session:
             await self._begin_lifecycle_write(session)
-            stmt = select(RunRow).where(RunRow.run_id == run_id, RunRow.operation_kind == "run")
+            stmt = self._scope_run(select(RunRow)).where(RunRow.run_id == run_id, RunRow.operation_kind == "run")
             if user_id is not None:
                 stmt = stmt.where(RunRow.user_id == user_id)
             if session.get_bind().dialect.name == "postgresql":
@@ -596,7 +649,7 @@ class RunRepository(RunStore):
             raise ValueError(f"Unsupported cancellation action: {action}")
         async with self._sf() as session:
             await self._begin_lifecycle_write(session)
-            stmt = select(RunRow).where(RunRow.run_id == run_id, RunRow.operation_kind == "run")
+            stmt = self._scope_run(select(RunRow)).where(RunRow.run_id == run_id, RunRow.operation_kind == "run")
             if user_id is not None:
                 stmt = stmt.where(RunRow.user_id == user_id)
             if session.get_bind().dialect.name == "postgresql":
@@ -687,7 +740,7 @@ class RunRepository(RunStore):
 
         async with self._sf() as session:
             await self._begin_lifecycle_write(session)
-            statement = select(RunRow).where(
+            statement = self._scope_run(select(RunRow)).where(
                 RunRow.run_id == run_id,
                 RunRow.operation_kind == "run",
             )
@@ -804,6 +857,7 @@ class RunRepository(RunStore):
         principal_projection_digest: str | None = None,
         base_origin_digest: str | None = None,
         accepted_context_digest: str | None = None,
+        tenant: TenantReferenceV1 | None = None,
         agent_revision_json: dict[str, Any] | None = None,
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
@@ -825,6 +879,7 @@ class RunRepository(RunStore):
         """
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.put")
         thread_id = validate_thread_identifier(thread_id)
+        tenant_ref, tenant_digest = tenant_store_columns(self._tenant, tenant)
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
@@ -849,6 +904,8 @@ class RunRepository(RunStore):
             "follow_up_to_run_id": follow_up_to_run_id,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
+            "tenant_ref": tenant_ref,
+            "tenant_digest": tenant_digest,
             "origin_json": self._safe_json(origin_json) if operation_kind == "run" else None,
             "principal_projection_json": self._safe_json(principal_projection_json) if operation_kind == "run" else None,
             "principal_projection_digest": principal_projection_digest if operation_kind == "run" else None,
@@ -874,6 +931,12 @@ class RunRepository(RunStore):
             if session.get_bind().dialect.name == "postgresql":
                 row_stmt = row_stmt.with_for_update()
             row = (await session.execute(row_stmt)).scalar_one_or_none()
+            if self._tenant is not None and row is not None and row.tenant_digest != self._tenant.digest:
+                await session.rollback()
+                raise TenantIdentityError(
+                    "tenant_identity_mismatch",
+                    "run identity is already bound to a different tenant",
+                )
             if row is None:
                 row = RunRow(
                     run_id=run_id,
@@ -932,7 +995,7 @@ class RunRepository(RunStore):
     ) -> dict[str, Any] | None:
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get")
         async with self._sf() as session:
-            row = await session.get(RunRow, run_id)
+            row = (await session.execute(self._scope_run(select(RunRow)).where(RunRow.run_id == run_id))).scalar_one_or_none()
             if row is None:
                 return None
             if resolved_user_id is not None and row.user_id != resolved_user_id:
@@ -943,7 +1006,7 @@ class RunRepository(RunStore):
         """Return one row by primary identity without applying owner scope."""
 
         async with self._sf() as session:
-            row = await session.get(RunRow, run_id)
+            row = (await session.execute(self._scope_run(select(RunRow)).where(RunRow.run_id == run_id))).scalar_one_or_none()
             return self._row_to_dict(row) if row is not None else None
 
     async def get_by_external_identity(
@@ -953,7 +1016,7 @@ class RunRepository(RunStore):
     ) -> dict[str, Any] | None:
         async with self._sf() as session:
             result = await session.execute(
-                select(RunRow).where(
+                self._scope_run(select(RunRow)).where(
                     RunRow.external_scope == external_scope,
                     RunRow.external_key == external_key,
                     RunRow.operation_kind == "run",
@@ -970,7 +1033,7 @@ class RunRepository(RunStore):
         limit=100,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_by_thread")
-        stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run")
+        stmt = self._scope_run(select(RunRow)).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run")
         if resolved_user_id is not None:
             stmt = stmt.where(RunRow.user_id == resolved_user_id)
         stmt = stmt.order_by(RunRow.created_at.desc()).limit(limit)
@@ -986,7 +1049,7 @@ class RunRepository(RunStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_successful_regenerate_sources")
         source = RunRow.metadata_json["regenerate_from_run_id"].as_string()
-        stmt = select(source).where(
+        stmt = self._scope_run(select(source)).where(
             RunRow.thread_id == thread_id,
             RunRow.operation_kind == "run",
             RunRow.status == "success",
@@ -1008,7 +1071,7 @@ class RunRepository(RunStore):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_edit_regenerate_runs")
         replay_kind = RunRow.metadata_json["replay_kind"].as_string()
         source = RunRow.metadata_json["regenerate_from_run_id"].as_string()
-        stmt = select(RunRow).where(
+        stmt = self._scope_run(select(RunRow)).where(
             RunRow.thread_id == thread_id,
             replay_kind == "edit",
             source.is_not(None),
@@ -1031,7 +1094,7 @@ class RunRepository(RunStore):
         if not run_ids:
             return {}
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get_many_by_thread")
-        stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run", RunRow.run_id.in_(run_ids))
+        stmt = self._scope_run(select(RunRow)).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run", RunRow.run_id.in_(run_ids))
         if resolved_user_id is not None:
             stmt = stmt.where(RunRow.user_id == resolved_user_id)
         async with self._sf() as session:
@@ -1050,7 +1113,7 @@ class RunRepository(RunStore):
                 values["stop_reason"] = stop_reason
             async with self._sf() as session:
                 result = await session.execute(
-                    update(RunRow)
+                    self._scope_run(update(RunRow))
                     .where(
                         RunRow.run_id == run_id,
                         RunRow.operation_kind != "run",
@@ -1106,7 +1169,14 @@ class RunRepository(RunStore):
 
     async def update_model_name(self, run_id, model_name):
         async with self._sf() as session:
-            await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(model_name=self._normalize_model_name(model_name), updated_at=datetime.now(UTC)))
+            await session.execute(
+                self._scope_run(update(RunRow))
+                .where(RunRow.run_id == run_id)
+                .values(
+                    model_name=self._normalize_model_name(model_name),
+                    updated_at=datetime.now(UTC),
+                )
+            )
             await session.commit()
 
     async def delete(
@@ -1117,7 +1187,7 @@ class RunRepository(RunStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.delete")
         async with self._sf() as session:
-            row = await session.get(RunRow, run_id)
+            row = (await session.execute(self._scope_run(select(RunRow)).where(RunRow.run_id == run_id))).scalar_one_or_none()
             if row is None:
                 return
             if resolved_user_id is not None and row.user_id != resolved_user_id:
@@ -1143,7 +1213,7 @@ class RunRepository(RunStore):
 
         async with self._sf() as session:
             await self._begin_lifecycle_write(session)
-            statement = select(RunRow).where(RunRow.run_id == run_id)
+            statement = self._scope_run(select(RunRow)).where(RunRow.run_id == run_id)
             if session.get_bind().dialect.name == "postgresql":
                 statement = statement.with_for_update()
             row = (await session.execute(statement)).scalar_one_or_none()
@@ -1200,7 +1270,7 @@ class RunRepository(RunStore):
             before_dt = before
         else:
             before_dt = datetime.fromisoformat(before)
-        stmt = select(RunRow).where(RunRow.operation_kind == "run", RunRow.status == "pending", RunRow.created_at <= before_dt).order_by(RunRow.created_at.asc())
+        stmt = self._scope_run(select(RunRow)).where(RunRow.operation_kind == "run", RunRow.status == "pending", RunRow.created_at <= before_dt).order_by(RunRow.created_at.asc())
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
@@ -1214,7 +1284,7 @@ class RunRepository(RunStore):
         else:
             before_dt = datetime.fromisoformat(before)
         stmt = (
-            select(RunRow)
+            self._scope_run(select(RunRow))
             .where(
                 RunRow.status.in_(("pending", "running")),
                 RunRow.created_at <= before_dt,
@@ -1291,7 +1361,7 @@ class RunRepository(RunStore):
             values["error"] = error
         async with self._sf() as session:
             result = await session.execute(
-                update(RunRow)
+                self._scope_run(update(RunRow))
                 .where(
                     RunRow.run_id == run_id,
                     RunRow.status == status,
@@ -1339,7 +1409,7 @@ class RunRepository(RunStore):
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
         async with self._sf() as session:
-            await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
+            await session.execute(self._scope_run(update(RunRow)).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
             await session.commit()
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
@@ -1361,15 +1431,17 @@ class RunRepository(RunStore):
         _thread = RunRow.thread_id == thread_id
         _run_operation = RunRow.operation_kind == "run"
 
-        stmt = select(
-            RunRow.model_name,
-            RunRow.total_tokens,
-            RunRow.total_input_tokens,
-            RunRow.total_output_tokens,
-            RunRow.lead_agent_tokens,
-            RunRow.subagent_tokens,
-            RunRow.middleware_tokens,
-            RunRow.token_usage_by_model,
+        stmt = self._scope_run(
+            select(
+                RunRow.model_name,
+                RunRow.total_tokens,
+                RunRow.total_input_tokens,
+                RunRow.total_output_tokens,
+                RunRow.lead_agent_tokens,
+                RunRow.subagent_tokens,
+                RunRow.middleware_tokens,
+                RunRow.token_usage_by_model,
+            )
         ).where(_thread, _run_operation, _completed)
 
         async with self._sf() as session:
@@ -1433,7 +1505,15 @@ class RunRepository(RunStore):
             "updated_at": datetime.now(UTC),
         }
         async with self._sf() as session:
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.owner_worker_id == owner_worker_id, RunRow.status.in_(("pending", "running"))).values(**values))
+            result = await session.execute(
+                self._scope_run(update(RunRow))
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.status.in_(("pending", "running")),
+                )
+                .values(**values)
+            )
             await session.commit()
             return result.rowcount != 0
 
@@ -1448,7 +1528,7 @@ class RunRepository(RunStore):
         lease_dt = datetime.fromisoformat(lease_expires_at)
         async with self._sf() as session:
             result = await session.execute(
-                update(RunRow)
+                self._scope_run(update(RunRow))
                 .where(
                     RunRow.run_id == run_id,
                     RunRow.owner_worker_id == owner_worker_id,
@@ -1525,7 +1605,7 @@ class RunRepository(RunStore):
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
         async with self._sf() as session:
             await self._begin_lifecycle_write(session)
-            stmt = select(RunRow).where(
+            stmt = self._scope_run(select(RunRow)).where(
                 RunRow.run_id == run_id,
                 RunRow.status.in_(("pending", "running")),
                 _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
@@ -1579,7 +1659,7 @@ class RunRepository(RunStore):
             before_dt = datetime.fromisoformat(before)
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
         stmt = (
-            select(RunRow)
+            self._scope_run(select(RunRow))
             .where(
                 RunRow.status.in_(("pending", "running")),
                 RunRow.created_at <= before_dt,
@@ -1612,6 +1692,7 @@ class RunRepository(RunStore):
         principal_projection_digest: str | None = None,
         base_origin_digest: str | None = None,
         accepted_context_digest: str | None = None,
+        tenant: TenantReferenceV1 | None = None,
         agent_revision_json: dict[str, Any] | None = None,
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
@@ -1641,6 +1722,7 @@ class RunRepository(RunStore):
         from deerflow.runtime.runs.manager import ConflictError
 
         thread_id = validate_thread_identifier(thread_id)
+        tenant_ref, tenant_digest = tenant_store_columns(self._tenant, tenant)
         resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
@@ -1662,6 +1744,8 @@ class RunRepository(RunStore):
             "idempotency_key": idempotency_key,
             "created_at": created,
             "updated_at": now,
+            "tenant_ref": tenant_ref,
+            "tenant_digest": tenant_digest,
             "origin_json": self._safe_json(origin_json) if operation_kind == "run" else None,
             "principal_projection_json": self._safe_json(principal_projection_json) if operation_kind == "run" else None,
             "principal_projection_digest": principal_projection_digest if operation_kind == "run" else None,
@@ -1690,7 +1774,7 @@ class RunRepository(RunStore):
 
             if multitask_strategy in ("interrupt", "rollback"):
                 stmt = (
-                    select(RunRow)
+                    self._scope_run(select(RunRow))
                     .where(
                         RunRow.thread_id == thread_id,
                         RunRow.status.in_(("pending", "running")),
@@ -1765,12 +1849,18 @@ class RunRepository(RunStore):
                 if _is_run_primary_key_violation(exc):
                     raise DuplicateRunIdentityError(run_id) from None
                 if idempotency_key is not None:
-                    existing = (await session.execute(select(RunRow).where(RunRow.idempotency_key == idempotency_key))).scalar_one_or_none()
+                    existing = (
+                        await session.execute(
+                            self._scope_run(select(RunRow)).where(
+                                RunRow.idempotency_key == idempotency_key,
+                            )
+                        )
+                    ).scalar_one_or_none()
                     if existing is not None:
                         raise RunIdempotencyConflict(self._row_to_dict(existing)) from exc
                 raise
 
-            new_row = await session.get(RunRow, run_id)
+            new_row = (await session.execute(self._scope_run(select(RunRow)).where(RunRow.run_id == run_id))).scalar_one()
             return self._row_to_dict(new_row), claimed
 
     async def ensure_run_atomic(

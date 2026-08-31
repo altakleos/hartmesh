@@ -54,7 +54,7 @@ def test_invocation_operation_config_is_operator_only_and_versioned() -> None:
     root = Path(__file__).parents[2]
     example = yaml.safe_load((root / "config.example.yaml").read_text())
 
-    assert example["config_version"] == 43
+    assert example["config_version"] == 44
     assert example["authorization"]["invocation_operations"] == {
         "start_enabled": False,
         "observe_enabled": False,
@@ -451,7 +451,7 @@ async def test_allowed_start_evidence_is_attached_before_durable_admission() -> 
             assert launch.accepted_invocation is not accepted
             assert launch.accepted_invocation.to_persisted()["decision_evidence_json"] == {
                 **evidence,
-                "tool_receipts": {"version": 1},
+                "tool_receipts": {"version": 2},
             }
             self.record.run_id = candidate_run_id
             return DurableAdmission(self.record, AdmissionOutcome.created)
@@ -500,6 +500,7 @@ def _accepted(
         execution_options={"multitask_strategy": "reject"},
         extension_generation=9,
         contributor_execution_digest="e" * 64,
+        tenant=__import__("deerflow.runtime.tenant_identity", fromlist=["TenantIdentityV1"]).TenantIdentityV1.from_canonical_id("local").to_persisted_reference(),
     )
 
 

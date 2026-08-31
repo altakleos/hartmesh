@@ -642,11 +642,23 @@ async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
     assert liveness.json() == {
         "status": "healthy",
         "service": "deer-flow-gateway",
+        "tenant_identity": {
+            "version": 1,
+            "public_ref": "tenant-fd1e0d1ead4a5e20",
+            "digest": "fd1e0d1ead4a5e206a1ada1acb0a795d78857d325ec031014cb9bb99dff2abb9",
+            "prefix_schema_version": 1,
+        },
     }
     assert readiness.status_code == 503
-    assert readiness.json() == {"status": "not_ready"}
+    assert readiness.json() == {
+        "status": "not_ready",
+        "tenant_identity": liveness.json()["tenant_identity"],
+    }
     assert recovered.status_code == 200
-    assert recovered.json() == {"status": "ready"}
+    assert recovered.json() == {
+        "status": "ready",
+        "tenant_identity": liveness.json()["tenant_identity"],
+    }
 
 
 @pytest.mark.asyncio

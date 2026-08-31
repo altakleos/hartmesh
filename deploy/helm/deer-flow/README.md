@@ -13,6 +13,12 @@ hostPath mode. The validated production mode is still exactly one Gateway
 replica; it does not claim high availability, rolling zero downtime, or live
 pod-loss qualification.
 
+Each chart release owns one server identity configured by `tenant.id`.
+Tenant identity is selected by the operator at service startup. It cannot be selected by an API caller and does not replace per-user authorization.
+The chart never derives it from the Helm release or Kubernetes namespace.
+`durable_one_replica` requires an explicit non-`local` lowercase DNS label;
+local evaluation may leave it empty and the application resolves `local`.
+
 ## Prerequisites
 
 - A Kubernetes cluster (Docker Desktop K8s, OrbStack, kind, k3d, or a real cluster).
@@ -82,6 +88,9 @@ documentation only and is not appended:
 deployment:
   mode: durable_one_replica
   persistenceTier: shared_durable
+
+tenant:
+  id: customer-a
 
 gateway:
   image:
@@ -178,6 +187,10 @@ image:
   pullSecrets:
     - { name: regcred }
 
+# Stable operator-selected identity; never derive it from the release name.
+tenant:
+  id: customer-a
+
 # Kubernetes installs should fail closed unless both sandbox claims resolve.
 sandbox:
   volumeMode: pvc
@@ -216,7 +229,7 @@ they resolve from the selected Secret):
 
 ```yaml
 config: |
-  config_version: 43
+  config_version: 44
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -275,26 +288,32 @@ unset omits the environment variable and keeps SQLAlchemy's default of 10.
 `stream_bridge.type: redis` supplies bounded reconnect replay through the
 bundled Redis StatefulSet (or `redis.external`).
 
-For a shared multi-tenant Redis, give each Helm release one tenant prefix:
+For a Redis shared by tenant releases, give each release one server-owned
+identity:
 
 ```yaml
-redis:
-  tenantPrefix: acme
+tenant:
+  id: customer-a
 ```
 
-The chart derives `acme`, `acme:ckpt-hist:v1`, and
-`acme:deerflow:sandbox:owner` for the stream bridge, checkpoint cache, and
-sandbox ownership overrides respectively. The replace-style cache and
-ownership overrides retain their subsystem namespaces instead of flattening all
-three stores under the bare tenant string. Every emitted name still matches
-`acme:*`, so an ACL user can be limited with key and stream-channel patterns
-`~acme:* &acme:*`.
+The chart computes the canonical tenant digest and public reference, then
+derives all three covered Redis component prefixes under
+`hm:v1:tenant-<digest-prefix>:redis`. Restrict the release's Redis user with
+both key/stream and pub/sub channel patterns:
+`~hm:v1:tenant-<digest-prefix>:redis*` and
+`&hm:v1:tenant-<digest-prefix>:redis*`.
 
-`redis.keyPrefixes.streamBridge`, `checkpointCache`, and `sandboxOwnership` are
-advanced per-subsystem overrides. A non-empty value wins over the derived value
-for that subsystem and must include any desired subsystem namespace for the two
-replace-style overrides. Adding or changing the stream-bridge prefix starts
-fresh per-run streams; retained legacy names are not migrated.
+`redis.tenantPrefix` and `redis.keyPrefixes.{streamBridge,checkpointCache,sandboxOwnership}`
+are compatibility selectors for the first feature release containing
+server-owned tenant identity. A nonempty value must exactly equal its canonical
+projection or the matching `tenant.legacyRedisPrefixes.*` declaration produced
+from the `bind-tenant` migration command. Gateway startup then verifies the
+same value against the database binding record before opening Redis; a Helm
+declaration alone cannot authorize a legacy prefix. The conflicting field is
+named during render or startup failure. The following feature release removes
+these legacy fields. Existing keys are not searched or copied automatically;
+follow the stop/backup/inventory/offline-copy procedure in
+[the tenant migration guide](../../../backend/docs/TENANT_IDENTITY.md#database-binding-and-migration).
 Because `config:` is a single override blob, a partial `config:` replaces the
 chart default entirely - keep the `tools:`/`tool_groups:` block (or the agent
 will have no tools) and the `sandbox:`/`database:`/`checkpointer:`/`stream_bridge:`
@@ -315,6 +334,9 @@ helm install deer-flow deploy/helm/deer-flow -n acme -f my-values.yaml
 ```yaml
 namespace: ""              # use `helm -n acme`
 sandboxNamespace: acme-sbx # must already exist
+
+tenant:
+  id: customer-a            # independent of either Kubernetes namespace
 
 sandbox:
   volumeMode: pvc
@@ -586,7 +608,10 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   automatically on gateway startup (alembic `create_all` + `stamp head`).
   The local-evaluation profile can generate its own Secret. The validated
   production profile requires a separately managed Secret, whether PostgreSQL
-  is bundled or external. To use a managed database:
+  is bundled or external. The application binds each schema to exactly one
+  tenant reference. Different tenant releases must use separate databases or
+  PostgreSQL schemas; the tenant columns are not a claim of shared-schema
+  row-level multi-tenancy. To use a managed database:
   ```yaml
   postgresql:
     enabled: false
@@ -622,11 +647,14 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   redis` by default. Production validation rejects inline passwords and URLs;
   set `redis.existingSecret` for bundled Redis or
   `redis.external.existingSecret` for managed Redis (key `redis-url`). For a
-  Redis shared by tenant releases, set `redis.tenantPrefix` to the release's
-  tenant prefix and restrict that release's Redis user to
-  `~<tenant>:* &<tenant>:*`. The chart preserves the cache and ownership
-  subsystem namespaces when deriving their replace-style overrides. Use
-  `redis.keyPrefixes.*` only for explicit per-subsystem replacements. These
+  Redis shared by tenant releases, set `tenant.id`; the chart derives all
+  component names under `hm:v1:tenant-<digest-prefix>:redis`. Restrict that
+  release's Redis user with both
+  `~hm:v1:tenant-<digest-prefix>:redis*` and
+  `&hm:v1:tenant-<digest-prefix>:redis*`. Legacy `redis.tenantPrefix` and
+  `redis.keyPrefixes.*` fields select only a canonical projection or an exact
+  `tenant.legacyRedisPrefixes.*` value recorded by the migration command;
+  Gateway startup verifies the database record. These
   environment variables are injected only into the Gateway; the provisioner
   does not run any of the three Redis-backed subsystems.
 - **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`

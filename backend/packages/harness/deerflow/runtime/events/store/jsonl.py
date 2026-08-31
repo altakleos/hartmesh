@@ -36,6 +36,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from deerflow_extension_api import TenantReferenceV1
+
 from deerflow.runtime.events.store.base import AppendOutcome, RunEventStore, resolve_owned_run, validate_idempotent_append
 from deerflow.runtime.tool_evidence import (
     TOOL_RECEIPT_CATEGORY,
@@ -60,15 +62,27 @@ MAX_JSONL_RECEIPT_DEDUPE_ENTRIES = 1024
 
 
 class JsonlRunEventStore(RunEventStore):
-    def __init__(self, base_dir: str | Path | None = None, *, run_store: object | None = None):
+    def __init__(
+        self,
+        base_dir: str | Path | None = None,
+        *,
+        run_store: object | None = None,
+        tenant: TenantReferenceV1 | None = None,
+    ):
+        if tenant is not None and not isinstance(tenant, TenantReferenceV1):
+            raise TypeError("tenant must be TenantReferenceV1 or None")
         self._base_dir = Path(base_dir) if base_dir else Path(".deer-flow")
         self._run_store = run_store
+        self._tenant = tenant
         self._seq_counters: dict[str, int] = {}  # thread_id -> current max seq
         # Per-thread asyncio.Lock — serialises concurrent writes within one process.
         self._write_locks: dict[str, asyncio.Lock] = {}
         # Best-effort LRU acceleration only. Correctness always falls back to
         # scanning the run file while holding its thread write lock.
         self._dedupe_index: OrderedDict[tuple[str, str, str], dict] = OrderedDict()
+
+    def _tenant_visible(self, event: dict) -> bool:
+        return self._tenant is None or event.get("tenant_digest") == self._tenant.digest
 
     def _cache_dedupe(self, key: tuple[str, str, str], event: dict) -> None:
         self._dedupe_index[key] = event
@@ -233,6 +247,29 @@ class JsonlRunEventStore(RunEventStore):
         if path.exists():
             path.unlink()
 
+    def _replace_run_events(self, thread_id: str, run_id: str, events: list[dict]) -> None:
+        path = self._run_file(thread_id, run_id)
+        if not events:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+                for event in events:
+                    destination.write(json.dumps(event, default=str, ensure_ascii=False) + "\n")
+                destination.flush()
+                os.fsync(destination.fileno())
+            os.replace(temp_path, path)
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
+
     async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):
         async with self._get_write_lock(thread_id):
             await self._ensure_seq_loaded(thread_id)
@@ -240,6 +277,8 @@ class JsonlRunEventStore(RunEventStore):
             record = {
                 "thread_id": thread_id,
                 "run_id": run_id,
+                "tenant_ref": None if self._tenant is None else self._tenant.public_ref,
+                "tenant_digest": None if self._tenant is None else self._tenant.digest,
                 "event_type": event_type,
                 "category": category,
                 "content": content,
@@ -291,12 +330,14 @@ class JsonlRunEventStore(RunEventStore):
         async with self._get_write_lock(thread_id):
             existing = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
             for event in existing:
-                if event.get("event_type") == event_type:
+                if self._tenant_visible(event) and event.get("event_type") == event_type:
                     return event, False
             await self._ensure_seq_loaded(thread_id)
             record = {
                 "thread_id": thread_id,
                 "run_id": run_id,
+                "tenant_ref": None if self._tenant is None else self._tenant.public_ref,
+                "tenant_digest": None if self._tenant is None else self._tenant.digest,
                 "event_type": event_type,
                 "category": category,
                 "content": content,
@@ -338,7 +379,7 @@ class JsonlRunEventStore(RunEventStore):
                 owner_id=owner_id,
                 lease_epoch=lease_epoch,
             )
-            persisted = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+            persisted = [event for event in await asyncio.to_thread(self._read_run_events, thread_id, run_id) if self._tenant_visible(event)]
             key = (run_id, event_type, idempotency_key)
             existing = self._dedupe_index.get(key)
             if existing is None:
@@ -346,6 +387,8 @@ class JsonlRunEventStore(RunEventStore):
                     (event for event in persisted if event.get("event_type") == event_type and event.get("idempotency_key") == idempotency_key),
                     None,
                 )
+            if existing is not None and not self._tenant_visible(existing):
+                existing = None
             if existing is not None:
                 if canonical_digest(existing.get("content")) != canonical_digest(detached):
                     raise ToolReceiptIntegrityError("receipt_idempotency_conflict")
@@ -369,6 +412,8 @@ class JsonlRunEventStore(RunEventStore):
             record = {
                 "thread_id": thread_id,
                 "run_id": run_id,
+                "tenant_ref": None if self._tenant is None else self._tenant.public_ref,
+                "tenant_digest": None if self._tenant is None else self._tenant.digest,
                 "event_type": event_type,
                 "category": TOOL_RECEIPT_CATEGORY,
                 "content": detached,
@@ -422,7 +467,7 @@ class JsonlRunEventStore(RunEventStore):
                 owner_id=owner_id,
                 lease_epoch=lease_epoch,
             )
-            events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+            events = [event for event in await asyncio.to_thread(self._read_run_events, thread_id, run_id) if self._tenant_visible(event)]
             receipt, existing, terminal = reserve_attempt_from_events(
                 events,
                 binding=binding,
@@ -454,6 +499,8 @@ class JsonlRunEventStore(RunEventStore):
             record = {
                 "thread_id": thread_id,
                 "run_id": run_id,
+                "tenant_ref": None if self._tenant is None else self._tenant.public_ref,
+                "tenant_digest": None if self._tenant is None else self._tenant.digest,
                 "event_type": TOOL_RECEIPT_STARTED_EVENT,
                 "category": TOOL_RECEIPT_CATEGORY,
                 "content": body,
@@ -486,6 +533,8 @@ class JsonlRunEventStore(RunEventStore):
                 record = {
                     "thread_id": thread_id,
                     "run_id": ev["run_id"],
+                    "tenant_ref": None if self._tenant is None else self._tenant.public_ref,
+                    "tenant_digest": None if self._tenant is None else self._tenant.digest,
                     "event_type": ev["event_type"],
                     "category": ev["category"],
                     "content": ev.get("content", ""),
@@ -533,7 +582,7 @@ class JsonlRunEventStore(RunEventStore):
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
-        messages = [e for e in all_events if e.get("category") == "message"]
+        messages = [event for event in all_events if self._tenant_visible(event) and event.get("category") == "message"]
 
         if before_seq is not None:
             messages = [e for e in messages if e["seq"] < before_seq]
@@ -545,7 +594,7 @@ class JsonlRunEventStore(RunEventStore):
             return messages[-limit:]
 
     async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
-        events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+        events = [event for event in await asyncio.to_thread(self._read_run_events, thread_id, run_id) if self._tenant_visible(event)]
         if event_types is not None:
             events = [e for e in events if e.get("event_type") in event_types]
         if task_id is not None:
@@ -556,7 +605,7 @@ class JsonlRunEventStore(RunEventStore):
 
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None):
         events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
-        filtered = [e for e in events if e.get("category") == "message"]
+        filtered = [event for event in events if self._tenant_visible(event) and event.get("category") == "message"]
         if before_seq is not None:
             filtered = [e for e in filtered if e.get("seq", 0) < before_seq]
         if after_seq is not None:
@@ -571,6 +620,8 @@ class JsonlRunEventStore(RunEventStore):
             result: dict[str, int] = {}
             for run_id in run_ids:
                 for event in reversed(self._read_run_events(thread_id, run_id)):
+                    if not self._tenant_visible(event):
+                        continue
                     caller = str((event.get("metadata") or {}).get("caller", ""))
                     if event.get("category") == "message" and event.get("event_type") in {"llm.ai.response", "ai_message"} and not caller.startswith("middleware:"):
                         result[run_id] = event["seq"]
@@ -581,16 +632,23 @@ class JsonlRunEventStore(RunEventStore):
 
     async def count_messages(self, thread_id):
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
-        return sum(1 for e in all_events if e.get("category") == "message")
+        return sum(1 for event in all_events if self._tenant_visible(event) and event.get("category") == "message")
 
     async def delete_by_thread(self, thread_id):
         async with self._get_write_lock(thread_id):
             all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
-            count = len(all_events)
-            await asyncio.to_thread(self._delete_thread_files, thread_id)
-            self._seq_counters.pop(thread_id, None)
-            run_ids = {event.get("run_id") for event in all_events}
-            self._dedupe_index = OrderedDict((key, value) for key, value in self._dedupe_index.items() if key[0] not in run_ids)
+            visible = [event for event in all_events if self._tenant_visible(event)]
+            count = len(visible)
+            run_ids = {event.get("run_id") for event in visible}
+            for run_id in {event.get("run_id") for event in all_events}:
+                if not isinstance(run_id, str):
+                    continue
+                run_events = [event for event in all_events if event.get("run_id") == run_id]
+                remaining = [event for event in run_events if not self._tenant_visible(event)]
+                await asyncio.to_thread(self._replace_run_events, thread_id, run_id, remaining)
+            if not any(not self._tenant_visible(event) for event in all_events):
+                self._seq_counters.pop(thread_id, None)
+            self._dedupe_index = OrderedDict((key, value) for key, value in self._dedupe_index.items() if not (key[0] in run_ids and self._tenant_visible(value)))
             # Pop the lock inside the held scope to minimise the window where a new caller
             # could obtain a fresh lock while a waiting coroutine still holds the old one.
             # Note: coroutines that already acquired a reference to this lock before the
@@ -601,7 +659,9 @@ class JsonlRunEventStore(RunEventStore):
     async def delete_by_run(self, thread_id, run_id):
         async with self._get_write_lock(thread_id):
             events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
-            count = len(events)
-            await asyncio.to_thread(self._delete_run_file, thread_id, run_id)
-            self._dedupe_index = OrderedDict((key, value) for key, value in self._dedupe_index.items() if key[0] != run_id)
+            visible = [event for event in events if self._tenant_visible(event)]
+            remaining = [event for event in events if not self._tenant_visible(event)]
+            count = len(visible)
+            await asyncio.to_thread(self._replace_run_events, thread_id, run_id, remaining)
+            self._dedupe_index = OrderedDict((key, value) for key, value in self._dedupe_index.items() if not (key[0] == run_id and self._tenant_visible(value)))
             return count

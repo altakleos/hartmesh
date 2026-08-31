@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from deerflow_extension_api import validate_thread_identifier
+from deerflow_extension_api import TenantReferenceV1, validate_thread_identifier
 
 from deerflow.runtime.assembly_evidence import (
     AssemblyEvidenceError,
@@ -541,6 +541,18 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
         # legacy lifecycle snapshot/event fields, but cannot prove a source.
         return None
     try:
+        tenant_ref = row.get("tenant_ref")
+        tenant_digest = row.get("tenant_digest")
+        if tenant_ref is None and tenant_digest is None:
+            tenant = None
+        elif isinstance(tenant_ref, str) and isinstance(tenant_digest, str):
+            tenant = TenantReferenceV1(
+                version=1,
+                public_ref=tenant_ref,
+                digest=tenant_digest,
+            )
+        else:
+            return None
         references: list[dict[str, Any]] = []
         base = origin.get("references") or {}
         if not isinstance(base, Mapping):
@@ -609,6 +621,7 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
             "assembly_evidence_status": assembly_evidence_status,
             "subagent_catalog": subagent_catalog,
             "subagent_catalog_status": subagent_catalog_status,
+            "tenant_identity": tenant.to_json() if tenant is not None else None,
         }
         encoded = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
         return summary if len(encoded) <= MAX_INVOCATION_SUMMARY_BYTES else None

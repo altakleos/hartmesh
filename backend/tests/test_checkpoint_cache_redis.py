@@ -1,17 +1,20 @@
 """Redis backend and provider factory for the checkpoint history cache."""
 
 import asyncio
+from types import MappingProxyType
 from typing import Any
 
 import pytest
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from deerflow.config.app_config import AppConfig
+from deerflow.config.deployment_config import DeploymentConfig
 from deerflow.runtime.checkpoint_cache.provider import (
     checkpoint_cache_db_hash,
     checkpoint_cache_key_prefix,
     make_checkpoint_cache,
 )
+from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
 
 
 class _FakeRedis:
@@ -358,3 +361,35 @@ def test_key_prefix_env_override_wins(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert checkpoint_cache_key_prefix(app_config) == "from-env"
+
+
+def test_key_prefix_is_derived_from_server_tenant_namespace() -> None:
+    identity = TenantIdentityV1.resolve(
+        deployment_config=DeploymentConfig(tenant_id="tenant-a"),
+        environ=MappingProxyType({}),
+    )
+    app_config = _app_config({"backend": "sqlite"})
+
+    assert checkpoint_cache_key_prefix(
+        app_config,
+        identity.namespace(TenantSubsystem.REDIS),
+    ) == (f"{identity.namespace(TenantSubsystem.REDIS).key_prefix}ckpt-hist:v1")
+
+
+def test_tenant_bound_cache_rejects_conflicting_legacy_prefix() -> None:
+    identity = TenantIdentityV1.resolve(
+        deployment_config=DeploymentConfig(tenant_id="tenant-a"),
+        environ=MappingProxyType({}),
+    )
+    app_config = _app_config(
+        {
+            "backend": "sqlite",
+            "checkpoint_cache": {"key_prefix": "another-tenant"},
+        }
+    )
+
+    with pytest.raises(ValueError, match="database.checkpoint_cache.key_prefix"):
+        checkpoint_cache_key_prefix(
+            app_config,
+            identity.namespace(TenantSubsystem.REDIS),
+        )

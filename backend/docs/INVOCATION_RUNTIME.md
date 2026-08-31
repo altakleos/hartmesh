@@ -57,6 +57,33 @@ an ordinary unit test.
 | Live Kubernetes pod recovery | The opt-in harness emits one strict canonical artifact; the report exposes only an operator assertion, while the offline verifier independently matches its digest, run/namespace, image, chart, config, schema, scope, and complete scenario set. | `backend/packages/harness/deerflow/qualification_evidence.py`; `backend/tests/support/kubernetes_qualification.py`; `backend/app/runtime/deployment.py`; `backend/scripts/verify_qualification_evidence.py` | `test_exact_external_evidence_verifies_against_declared_reference_and_subjects`; `test_real_one_replica_pod_recovery_contract` | `kubernetes_contract` artifact plus a successful exact-subject offline verification | Unqualified when absent; operator-asserted when declared; externally verified only after the offline verifier succeeds |
 | Legacy compatibility and native execution | Existing LangGraph/REST facades retain their responses and native lead-agent, skill, memory, subagent, sandbox, and thread behavior. | `backend/app/gateway/routers/runs.py`; `backend/app/gateway/routers/thread_runs.py`; `backend/packages/harness/deerflow/agents/lead_agent/agent.py`; `backend/packages/harness/deerflow/agents/memory`; `backend/packages/harness/deerflow/subagents/executor.py`; `backend/packages/harness/deerflow/sandbox/middleware.py` | `test_gateway_mounts_runtime_routes_without_replacing_legacy_runs`; `test_full_chain_order`; `test_make_lead_agent_custom_skill_allowlist_does_not_activate_tool_policy`; `test_after_agent_queues_memory_under_runtime_user`; `test_aexecute_propagates_one_trusted_run_context_without_free_form_attributes`; `test_sandbox_middleware_state_matches_thread_state_sandbox_field` | Full offline compatibility suite | Implemented; synchronous client durability remains deferred |
 
+## Server-owned tenant boundary
+
+Tenant identity is selected by the operator at service startup. It cannot be selected by an API caller and does not replace per-user authorization.
+
+Application construction resolves one immutable `TenantIdentityV1`; admission,
+stores, recovery, extensions, and deployment reporting reuse the same object.
+All ingress paths inherit it after caller context is scrubbed. Newly accepted
+records bind only the pseudonymous `TenantReferenceV1` into their canonical
+accepted/trusted-context digests, assembly evidence, and durable tool receipts.
+The tenant digest also scopes external-key admission identity and every
+run/event/lifecycle read or mutation.
+
+One `hartmesh_deployment_identity` singleton binds the configured database
+schema. Empty schemas bind atomically; legacy nonempty schemas require explicit
+operator migration; a different binding fails before scheduler/workers start.
+This is one tenant per database schema/release, not row-level shared-schema
+multi-tenancy. Recovery compares accepted and process identity before ownership
+acquisition and stops with `tenant_identity_mismatch` before graph/model/tool
+work on disagreement.
+
+Extension contributor requests receive the same immutable safe reference and
+cannot replace it. Provider-specific consumers accept a typed
+`TenantNamespaceV1`; they never derive tenancy from user, thread, request,
+release name, namespace, or a free-form prefix. Configuration, migration,
+Redis ACL, and rollback details live in
+[TENANT_IDENTITY.md](TENANT_IDENTITY.md).
+
 ## Trust and sealing
 
 Every source constructs an internal launch intent, but caller thread, assistant, agent,
@@ -73,14 +100,14 @@ body context, headers, queries, and metadata remain hints. Before admission the 
 5. seals an immutable `AcceptedInvocation` and admits it with the normal active-thread
    conflict rule before attaching one worker.
 
-The accepted object contains a minimal split identity projection, sealed Origin, bound
+The accepted object contains a minimal split identity projection, safe tenant reference, sealed Origin, bound
 thread/context references, resolved agent revision, normalized input/options, immutable
 extension generation, and versioned principal, base-Origin, accepted-context,
 runtime-identity, and contributor-execution digests. Contributors cannot replace host-owned
 principal, thread, agent, source kind, or base-source fields.
 
 After contributor validation the Gateway also seals one `TrustedRunContextV1`: split
-identity, final Origin including contributor references, thread/external-key binding,
+identity, safe tenant reference, final Origin including contributor references, thread/external-key binding,
 agent/profile revisions, extension generation/manifest digest, approved persistable
 references, runtime-only execution references, and stable secret handles. Its digest is part
 of the committed evidence. A separate execution digest feeds accepted-context identity and
@@ -294,7 +321,7 @@ same provider snapshot used by route, resource, tool, model, skill, and agent as
 
 ## Restrictive invocation constraints
 
-`deerflow-extension-api` 0.12.0 defines one optional, singular constraints provider with
+`deerflow-extension-api` 0.12.1 defines one optional, singular constraints provider with
 separate v1 and v2 contracts. Gateway invokes it only for a genuinely absent invocation,
 after invocation-start authorization allows and before atomic acceptance. V2 receives only
 the sealed split identity and final Origin, bounded namespaced correlation lookup references,
@@ -749,8 +776,8 @@ the real durable-invocation predecessor `0011_mcp_tasks` with representative
 normal, auxiliary, and MCP-task rows. It applies every invocation revision through
 `0019_inbound_event_identity`, joins the result, managed-subagent, and scheduled-enqueue
 branches through `0022_merge_scheduled_enqueue`, and verifies the single
-`0024_tool_receipt_idempotency` head plus accepted/idempotency/caller-intent/assembly columns
-and the nullable run-event receipt idempotency key/partial unique index,
+`0025_tenant_identity` head plus accepted/idempotency/caller-intent/assembly/tenant columns,
+the schema-identity singleton, and the nullable run-event receipt idempotency key/partial unique index,
 checks and partial indexes, validates lifecycle singleton/journal/index/retained-cardinality
 and inbound receipt arbitration, and then uses `RunRepository` for
 replay, cancellation, orphan recovery, lifecycle, and summary reads/writes. The

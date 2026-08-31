@@ -93,7 +93,7 @@ def test_install_registers_all_five_contribution_kinds() -> None:
     assert len(registry.services) == 1
     assert len(registry.contributed_routers) == 1
     assert [route.path for route in registry.contributed_routers[0].routes] == ["/api/extension-example/stats"]
-    assert install.__deerflow_api__ == "0.12.0"
+    assert install.__deerflow_api__ == "0.12.1"
     assert install.__deerflow_name__ == "example"
 
 

@@ -487,9 +487,10 @@ service, not SQLite: it installs an empty schema to head, then upgrades
 representative normal, auxiliary, and MCP-task rows from the real predecessor
 `0011_mcp_tasks` through HartMesh's `0019_inbound_event_identity` tail, the
 upstream result/managed-subagent/scheduled-enqueue branches, and their merges to
-the single `0024_tool_receipt_idempotency` head. It checks exact constraints and
-indexes (including lifecycle integrity, leased inbound receipts, and run-event
-tool-receipt idempotency) and runs concurrent admission/assembly/lifecycle/receipt contracts. The marked
+the single `0025_tenant_identity` head. It checks exact constraints and
+indexes (including lifecycle integrity, leased inbound receipts, run-event
+tool-receipt idempotency, safe tenant anchors, and the one-row deployment
+identity binding) and runs concurrent admission/assembly/lifecycle/receipt contracts. The marked
 suite must not skip when `DEERFLOW_TEST_POSTGRES_URL` is configured and prints
 the PostgreSQL version and Alembic head in job output.
 
@@ -501,6 +502,14 @@ evidence, including agent assembly and durable tool-receipt evidence. Re-upgrade
 `0010_run_cancel_request` invokes the unrelated MCP-task downgrade and destroys
 MCP-task data; it is not the supported invocation rollback. Stop writers and take
 a database backup before any rollback.
+
+Each Gateway resolves one server-owned `TenantIdentityV1` at application
+construction. New accepted work, evidence, recovery, schema binding, extension
+facts, and Redis factories share its pseudonymous reference. A nonempty legacy
+schema requires the explicit `deerflow deployment bind-tenant` operator flow;
+separate tenant releases require separate databases or PostgreSQL schemas. See
+[`docs/TENANT_IDENTITY.md`](docs/TENANT_IDENTITY.md) for configuration,
+migration, ACL, and rollback instructions.
 
 ### Code Style
 

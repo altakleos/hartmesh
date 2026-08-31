@@ -155,6 +155,10 @@ spec:
               value: 0.0.0.0
             - name: GATEWAY_PORT
               value: "8001"
+            {{- with (include "deer-flow.tenantId" .) }}
+            - name: DEER_FLOW_TENANT_ID
+              value: {{ . | quote }}
+            {{- end }}
             - name: DEER_FLOW_INTERNAL_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:

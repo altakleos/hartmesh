@@ -20,6 +20,8 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from deerflow_extension_api import TenantReferenceV1
+
 from deerflow.runtime.events.catalog import (
     TOOL_RECEIPT_OUTCOME_EVENT as _TOOL_RECEIPT_OUTCOME_DEFINITION,
 )
@@ -255,6 +257,7 @@ class ToolAttemptContextV1:
     extension_generation: int
     subagent_catalog_digest: str
     subagent_definition_digest: str | None
+    tenant: TenantReferenceV1 | None = None
 
     def __post_init__(self) -> None:
         _require_nonempty(self.run_id, "run_id_invalid", max_bytes=64)
@@ -278,9 +281,14 @@ class ToolAttemptContextV1:
         _require_digest(self.agent_revision_digest, "agent_revision_digest_invalid")
         _require_digest(self.assembly_fingerprint, "assembly_fingerprint_invalid")
         _require_digest(self.subagent_catalog_digest, "subagent_catalog_digest_invalid")
+        if self.tenant is not None and not isinstance(
+            self.tenant,
+            TenantReferenceV1,
+        ):
+            raise ToolEvidenceError("tenant_anchor_invalid")
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "run_id": self.run_id,
             "execution_task_id": self.execution_task_id,
             "execution_kind": self.execution_kind,
@@ -295,6 +303,10 @@ class ToolAttemptContextV1:
             "subagent_catalog_digest": self.subagent_catalog_digest,
             "subagent_definition_digest": self.subagent_definition_digest,
         }
+        if self.tenant is not None:
+            result["tenant_ref"] = self.tenant.public_ref
+            result["tenant_digest"] = self.tenant.digest
+        return result
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> ToolAttemptContextV1:
@@ -313,19 +325,33 @@ class ToolAttemptContextV1:
             "subagent_catalog_digest",
             "subagent_definition_digest",
         }
-        if set(value) != expected:
+        tenant_fields = {"tenant_ref", "tenant_digest"}
+        if set(value) not in (expected, expected | tenant_fields):
             raise ToolEvidenceError("attempt_context_fields_invalid")
-        return cls(**dict(value))  # type: ignore[arg-type]
+        fields = dict(value)
+        tenant = None
+        if set(value) == expected | tenant_fields:
+            try:
+                tenant = TenantReferenceV1(
+                    version=1,
+                    public_ref=fields.pop("tenant_ref"),  # type: ignore[arg-type]
+                    digest=fields.pop("tenant_digest"),  # type: ignore[arg-type]
+                )
+            except (TypeError, ValueError) as exc:
+                raise ToolEvidenceError("tenant_anchor_invalid") from exc
+        return cls(**fields, tenant=tenant)  # type: ignore[arg-type]
 
 
 def stable_receipt_id(context: ToolAttemptContextV1) -> str:
     identity = {
-        "version": 1,
+        "version": 2 if context.tenant is not None else 1,
         "run_id": context.run_id,
         "execution_task_id": context.execution_task_id,
         "tool_call_id": context.tool_call_id,
         "attempt": context.attempt,
     }
+    if context.tenant is not None:
+        identity["tenant_digest"] = context.tenant.digest
     return f"tr_{canonical_digest(identity)}"
 
 
@@ -334,16 +360,17 @@ def tool_dispatch_generation_digest(context: ToolAttemptContextV1) -> str:
 
     if not isinstance(context, ToolAttemptContextV1):
         raise ToolEvidenceError("attempt_context_invalid")
-    return canonical_digest(
-        {
-            "version": 1,
-            "domain": "durable_tool_dispatch_generation",
-            "run_id": context.run_id,
-            "execution_task_id": context.execution_task_id,
-            "tool_call_id": context.tool_call_id,
-            "attempt": context.attempt,
-        }
-    )
+    projection = {
+        "version": 2 if context.tenant is not None else 1,
+        "domain": "durable_tool_dispatch_generation",
+        "run_id": context.run_id,
+        "execution_task_id": context.execution_task_id,
+        "tool_call_id": context.tool_call_id,
+        "attempt": context.attempt,
+    }
+    if context.tenant is not None:
+        projection["tenant_digest"] = context.tenant.digest
+    return canonical_digest(projection)
 
 
 def stable_subagent_task_id(
@@ -358,15 +385,16 @@ def stable_subagent_task_id(
         raise ToolEvidenceError("tool_evidence_parent_binding_invalid")
     _require_nonempty(parent_tool_call_id, "tool_call_id_invalid", max_bytes=256)
     _require_nonempty(subagent_name, "subagent_name_invalid", max_bytes=128)
-    return "st_" + canonical_digest(
-        {
-            "version": 1,
-            "run_id": parent.run_id,
-            "parent_execution_task_id": parent.execution_task_id,
-            "parent_tool_call_id": parent_tool_call_id,
-            "subagent_name": subagent_name,
-        }
-    )
+    projection = {
+        "version": 2 if parent.tenant is not None else 1,
+        "run_id": parent.run_id,
+        "parent_execution_task_id": parent.execution_task_id,
+        "parent_tool_call_id": parent_tool_call_id,
+        "subagent_name": subagent_name,
+    }
+    if parent.tenant is not None:
+        projection["tenant_digest"] = parent.tenant.digest
+    return "st_" + canonical_digest(projection)
 
 
 def _json_type(value: object) -> str:
@@ -542,7 +570,7 @@ def digest_result_projection(result: object, *, result_kind: str, status: str) -
 
 @dataclass(frozen=True, slots=True)
 class DurableToolReceiptV1:
-    version: Literal[1]
+    version: Literal[1, 2]
     receipt_id: str
     idempotency_key: str
     phase: ToolReceiptPhase
@@ -557,7 +585,8 @@ class DurableToolReceiptV1:
     context: ToolAttemptContextV1
 
     def __post_init__(self) -> None:
-        if self.version != 1:
+        expected_version = 2 if self.context.tenant is not None else 1
+        if self.version != expected_version:
             raise ToolEvidenceError("receipt_version_invalid")
         if _RECEIPT_ID_RE.fullmatch(self.receipt_id) is None or self.receipt_id != stable_receipt_id(self.context):
             raise ToolEvidenceError("receipt_id_invalid")
@@ -676,7 +705,7 @@ class DurableToolReceiptV1:
     ) -> DurableToolReceiptV1:
         receipt_id = stable_receipt_id(context)
         return cls(
-            version=1,
+            version=2 if context.tenant is not None else 1,
             receipt_id=receipt_id,
             idempotency_key=f"{receipt_id}:start",
             phase="started",
@@ -1148,6 +1177,7 @@ class ToolEvidenceRuntimeBinding:
         "extension_generation",
         "subagent_catalog_digest",
         "subagent_definition_digest",
+        "tenant",
         "_dispatch_locks",
         "_dispatch_offsets",
         "_dispatch_locks_guard",
@@ -1167,6 +1197,7 @@ class ToolEvidenceRuntimeBinding:
         extension_generation: int,
         subagent_catalog_digest: str,
         subagent_definition_digest: str | None,
+        tenant: TenantReferenceV1 | None = None,
     ) -> None:
         # Validate all static anchors through the public context type.
         ToolAttemptContextV1(
@@ -1183,6 +1214,7 @@ class ToolEvidenceRuntimeBinding:
             extension_generation=extension_generation,
             subagent_catalog_digest=subagent_catalog_digest,
             subagent_definition_digest=subagent_definition_digest,
+            tenant=tenant,
         )
         self.run_id = run_id
         self.execution_task_id = execution_task_id
@@ -1195,6 +1227,7 @@ class ToolEvidenceRuntimeBinding:
         self.extension_generation = extension_generation
         self.subagent_catalog_digest = subagent_catalog_digest
         self.subagent_definition_digest = subagent_definition_digest
+        self.tenant = tenant
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
         self._dispatch_offsets: dict[tuple[str, str], int] = {}
         self._dispatch_locks_guard = threading.Lock()
@@ -1215,6 +1248,7 @@ class ToolEvidenceRuntimeBinding:
             extension_generation=self.extension_generation,
             subagent_catalog_digest=self.subagent_catalog_digest,
             subagent_definition_digest=self.subagent_definition_digest,
+            tenant=self.tenant,
         )
 
     def expected_dispatch_attempt(
@@ -1287,6 +1321,7 @@ class ToolEvidenceRuntimeBinding:
             extension_generation=self.extension_generation,
             subagent_catalog_digest=self.subagent_catalog_digest,
             subagent_definition_digest=subagent_definition_digest,
+            tenant=self.tenant,
         )
 
 

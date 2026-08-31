@@ -20,6 +20,14 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from deerflow.qualification_evidence import QUALIFICATION_SCENARIOS
+from deerflow.runtime.tenant_identity import (
+    RedisTenantComponent,
+    TenantNamespaceV1,
+    TenantReferenceV1,
+    TenantSubsystem,
+    redis_component_key_prefix,
+    tenant_namespace_from_reference,
+)
 
 _SCENARIOS = frozenset(QUALIFICATION_SCENARIOS)
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -60,6 +68,14 @@ def _point_matches(point: str, scenario: str) -> bool:
     }
 
 
+def _tenant_namespace_for_record(record: object) -> TenantNamespaceV1:
+    accepted = getattr(record, "accepted_invocation", None)
+    reference = getattr(accepted, "tenant", None)
+    if not isinstance(reference, TenantReferenceV1):
+        raise RuntimeError("kubernetes_qualification_tenant_missing")
+    return tenant_namespace_from_reference(reference, TenantSubsystem.REDIS)
+
+
 class KubernetesQualificationHooks:
     """Redis-backed bounded barriers for one qualification run."""
 
@@ -70,12 +86,13 @@ class KubernetesQualificationHooks:
         redis_client: Any,
         timeout_seconds: float,
         poll_seconds: float = 0.1,
+        tenant_namespace: TenantNamespaceV1,
     ) -> None:
         if _SAFE_ID.fullmatch(qualification_id) is None:
             raise ValueError("qualification id is invalid")
         if not 0 < timeout_seconds <= 300 or not 0 <= poll_seconds <= 5:
             raise ValueError("qualification barrier timing is invalid")
-        self._prefix = f"deerflow:kubernetes-qualification:{qualification_id}"
+        self._prefix = f"{redis_component_key_prefix(tenant_namespace, RedisTenantComponent.QUALIFICATION)}:{qualification_id}"
         self._redis = redis_client
         self._timeout_seconds = timeout_seconds
         self._poll_seconds = poll_seconds
@@ -146,6 +163,7 @@ def _runtime_configuration() -> tuple[str, str, float] | None:
 
 
 async def _with_async_hooks(
+    record: object,
     operation: Callable[[KubernetesQualificationHooks], Awaitable[bool]],
 ) -> bool:
     configuration = _runtime_configuration()
@@ -160,6 +178,7 @@ async def _with_async_hooks(
             qualification_id=qualification_id,
             redis_client=client,
             timeout_seconds=timeout_seconds,
+            tenant_namespace=_tenant_namespace_for_record(record),
         )
         return await operation(hooks)
     finally:
@@ -169,13 +188,19 @@ async def _with_async_hooks(
 async def qualification_barrier(point: str, record: object) -> bool:
     """Reach one runtime barrier only in the explicit qualification process."""
 
-    return await _with_async_hooks(lambda hooks: hooks.barrier(point, record))
+    return await _with_async_hooks(
+        record,
+        lambda hooks: hooks.barrier(point, record),
+    )
 
 
 async def qualification_counter(name: str, record: object) -> bool:
     """Increment shared execution evidence only in qualification mode."""
 
-    return await _with_async_hooks(lambda hooks: hooks.counter(name, record))
+    return await _with_async_hooks(
+        record,
+        lambda hooks: hooks.counter(name, record),
+    )
 
 
 class KubernetesQualificationChatModel(BaseChatModel):
@@ -204,27 +229,35 @@ class KubernetesQualificationChatModel(BaseChatModel):
 
         client = Redis.from_url(redis_url, decode_responses=False)
         try:
-            await client.incr(f"deerflow:kubernetes-qualification:{qualification_id}:{scenario}:model_starts")
             hooks = KubernetesQualificationHooks(
                 qualification_id=qualification_id,
                 redis_client=client,
                 timeout_seconds=configuration[2],
+                tenant_namespace=_tenant_namespace_for_record(record),
             )
+            await client.incr(f"{hooks._prefix}:{scenario}:model_starts")
             await hooks.barrier("during_model_execution", record)
         finally:
             await client.aclose()
 
     def _record_model_start_sync(self) -> None:
         scenario = _ACTIVE_SCENARIO.get()
+        record = _ACTIVE_RECORD.get()
         configuration = _runtime_configuration()
-        if scenario is None or configuration is None:
+        if scenario is None or record is None or configuration is None:
             raise RuntimeError("qualification_model_missing_scenario")
         qualification_id, redis_url, _timeout = configuration
         from redis import Redis
 
         client = Redis.from_url(redis_url, decode_responses=False)
         try:
-            client.incr(f"deerflow:kubernetes-qualification:{qualification_id}:{scenario}:model_starts")
+            hooks = KubernetesQualificationHooks(
+                qualification_id=qualification_id,
+                redis_client=client,
+                timeout_seconds=configuration[2],
+                tenant_namespace=_tenant_namespace_for_record(record),
+            )
+            client.incr(f"{hooks._prefix}:{scenario}:model_starts")
         finally:
             client.close()
 

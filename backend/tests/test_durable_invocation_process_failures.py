@@ -71,8 +71,10 @@ from deerflow.runtime.runs.store.base import (
 )
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
+_TEST_TENANT = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
 
 
 class _TemporarilyUnavailableRunRepository:
@@ -433,6 +435,7 @@ def _accepted(
         execution_options=execution_options or {},
         extension_generation=7,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=_TEST_TENANT,
     )
 
 
@@ -443,7 +446,7 @@ async def test_worker_rejects_policy_drift_from_frozen_execution_options() -> No
         material,
         execution_options={"recursion_limit": 1000},
     )
-    manager = RunManager(store=MemoryRunStore())
+    manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-policy-anchor-drift",
         accepted_invocation=accepted,
@@ -473,7 +476,7 @@ async def test_worker_rejects_policy_drift_from_frozen_execution_options() -> No
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=factory,
         graph_input={},
         config={"recursion_limit": 999},
@@ -486,7 +489,7 @@ async def test_worker_rejects_policy_drift_from_frozen_execution_options() -> No
 @pytest.mark.anyio
 async def test_worker_rejects_subagent_limit_drift_from_frozen_material() -> None:
     material = _material()
-    manager = RunManager(store=MemoryRunStore())
+    manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-subagent-policy-anchor-drift",
         accepted_invocation=_accepted(material),
@@ -524,7 +527,7 @@ async def test_worker_rejects_subagent_limit_drift_from_frozen_material() -> Non
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=factory,
         graph_input={},
         config={"context": {}},
@@ -553,7 +556,7 @@ async def test_worker_accepts_validated_subagent_constraint_override() -> None:
         accepted,
         decision_evidence=(InternalConstraintDecision.projected(projection).evidence or {}),
     )
-    manager = RunManager(store=MemoryRunStore())
+    manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-accepted-subagent-constraint",
         accepted_invocation=accepted,
@@ -585,7 +588,11 @@ async def test_worker_accepts_validated_subagent_constraint_override() -> None:
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None, constraint_clock=lambda: now),
+        ctx=RunContext(
+            checkpointer=None,
+            constraint_clock=lambda: now,
+            tenant=_TEST_TENANT,
+        ),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -634,7 +641,7 @@ async def test_worker_rejects_skill_drift_from_frozen_snapshot(
         enabled_skill_objects=(skill,),
         all_skill_objects=(skill,),
     )
-    manager = RunManager(store=MemoryRunStore())
+    manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
     record = await manager.create_or_reject(
         "thread-skill-anchor-drift",
         accepted_invocation=_accepted(material),
@@ -657,7 +664,7 @@ async def test_worker_rejects_skill_drift_from_frozen_snapshot(
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -797,6 +804,7 @@ async def test_process_restart_completes_with_frozen_catalog_after_managed_edit_
     store = MemoryRunStore()
     first_process = RunManager(
         store=store,
+        tenant=_TEST_TENANT,
         worker_id="catalog-recovery-worker",
     )
     admitted = await first_process.create_or_reject(
@@ -822,6 +830,7 @@ async def test_process_restart_completes_with_frozen_catalog_after_managed_edit_
     )
     restarted = RunManager(
         store=store,
+        tenant=_TEST_TENANT,
         worker_id="catalog-recovery-worker",
     )
     persisted_row = await store.get(run_id)
@@ -859,6 +868,7 @@ async def test_process_restart_completes_with_frozen_catalog_after_managed_edit_
         ctx=RunContext(
             checkpointer=None,
             event_store=MemoryRunEventStore(run_store=store),
+            tenant=_TEST_TENANT,
             app_config=app_config,
             agent_revision_resolver=lambda record, config: agent_revision.resolve_agent_revision(
                 config,
@@ -889,11 +899,13 @@ async def test_process_loss_during_execution_is_fenced_before_stale_completion()
     )
     owner = RunManager(
         store=store,
+        tenant=_TEST_TENANT,
         worker_id="worker-owner",
         run_ownership_config=ownership,
     )
     peer = RunManager(
         store=store,
+        tenant=_TEST_TENANT,
         worker_id="worker-peer",
         run_ownership_config=ownership,
     )
@@ -928,6 +940,7 @@ async def test_process_loss_during_execution_is_fenced_before_stale_completion()
             ctx=RunContext(
                 checkpointer=None,
                 event_store=MemoryRunEventStore(run_store=store),
+                tenant=_TEST_TENANT,
             ),
             agent_factory=factory,
             graph_input={},
@@ -966,7 +979,7 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
     material = _material()
     ordinary = _accepted(material)
     ordinary_store = MemoryRunStore()
-    manager = RunManager(store=ordinary_store)
+    manager = RunManager(store=ordinary_store, tenant=_TEST_TENANT)
     ordinary_record = await manager.create_or_reject("thread-success", accepted_invocation=ordinary)
 
     def factory(*, config):
@@ -982,6 +995,7 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
             checkpointer=None,
             event_store=MemoryRunEventStore(run_store=ordinary_store),
             constraint_clock=lambda: now,
+            tenant=_TEST_TENANT,
         ),
         agent_factory=factory,
         graph_input={},
@@ -992,7 +1006,7 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
 
     drifted = replace(ordinary, agent_revision=replace(ordinary.agent_revision, material=None))
     drift_store = MemoryRunStore()
-    drift_manager = RunManager(store=drift_store)
+    drift_manager = RunManager(store=drift_store, tenant=_TEST_TENANT)
     drift_record = await drift_manager.create_or_reject("thread-drift", accepted_invocation=drifted)
     await run_agent(
         _bridge(),
@@ -1003,6 +1017,7 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
             event_store=MemoryRunEventStore(run_store=drift_store),
             agent_revision_resolver=lambda _record, _config: ResolvedAgentRevision.from_material(_material(soul="changed")),
             constraint_clock=lambda: now,
+            tenant=_TEST_TENANT,
         ),
         agent_factory=factory,
         graph_input={},
@@ -1027,7 +1042,7 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
         decision_evidence=InternalConstraintDecision.projected(projection).evidence or {},
     )
     expiry_store = MemoryRunStore()
-    expiry_manager = RunManager(store=expiry_store)
+    expiry_manager = RunManager(store=expiry_store, tenant=_TEST_TENANT)
     expiry_record = await expiry_manager.create_or_reject("thread-expired", accepted_invocation=constrained)
     await run_agent(
         _bridge(),
@@ -1037,6 +1052,7 @@ async def test_worker_graph_and_first_astream_counts_hold_across_success_drift_a
             checkpointer=None,
             event_store=MemoryRunEventStore(run_store=expiry_store),
             constraint_clock=lambda: now + timedelta(seconds=6),
+            tenant=_TEST_TENANT,
         ),
         agent_factory=factory,
         graph_input={},

@@ -1,7 +1,5 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with code in this repository. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
-
 ## Project Overview
 
 DeerFlow is a LangGraph-based AI super agent system with a full-stack architecture. The backend provides a "super agent" with sandbox execution, persistent memory, subagent delegation, and extensible tool integration - all operating in per-thread isolated environments.
@@ -13,6 +11,8 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 - **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
 
 **Runtime**:
+- One server-owned tenant is frozen at startup and reused across all durable
+  boundaries; see [docs/TENANT_IDENTITY.md](docs/TENANT_IDENTITY.md).
 - HartMesh durable launches from HTTP, Scheduled Tasks, signed native channels,
   and embedded services all enter the application-owned `InvocationRuntime`.
   Admission seals identity, Origin, trusted context, constraints, agent revision,

@@ -52,6 +52,7 @@ from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 def _trusted_context(
@@ -119,6 +120,7 @@ def _trusted_context(
     )
     return TrustedRunContextV1(
         identity=identity,
+        tenant=TenantIdentityV1.from_canonical_id("local").to_persisted_reference(),
         origin=SealedOriginV1(
             source_kind="native_channel",
             references=safe_origin_references,
@@ -231,6 +233,7 @@ def test_correlation_is_evidence_bound_without_changing_execution_identity() -> 
             extension_generation=context.extension_generation,
             extension_manifest_digest=context.extension_manifest_digest,
             contributor_execution_digest="f" * 64,
+            tenant=context.tenant,
             trusted_context=context,
         )
 
@@ -258,6 +261,7 @@ def test_accepted_invocation_persists_trusted_safe_evidence_and_recovers_fail_cl
         extension_generation=trusted.extension_generation,
         extension_manifest_digest=trusted.extension_manifest_digest,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=trusted.tenant,
         trusted_context=trusted,
     )
 
@@ -326,6 +330,7 @@ def test_accepted_invocation_hydration_rejects_contradictory_evidence(
         extension_generation=trusted.extension_generation,
         extension_manifest_digest=trusted.extension_manifest_digest,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=trusted.tenant,
         trusted_context=trusted,
     )
     persisted = {"thread_id": trusted.thread_id, **accepted.to_persisted()}
@@ -363,6 +368,7 @@ def _accepted_row_with_effective_projection() -> dict[str, object]:
         extension_generation=trusted.extension_generation,
         extension_manifest_digest=trusted.extension_manifest_digest,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=trusted.tenant,
         trusted_context=trusted,
     )
     effective = {
@@ -372,6 +378,7 @@ def _accepted_row_with_effective_projection() -> dict[str, object]:
         "agent_revision_digest": accepted.agent_revision.digest,
         "principal_digest": accepted.principal_digest,
         "base_origin_digest": accepted.base_origin_digest,
+        "tenant_digest": accepted.tenant.digest,
         "accepted_context_digest": accepted.accepted_context_digest,
         "runtime_identity_digest": accepted.runtime_identity_digest,
         "contributor_execution_digest": accepted.contributor_execution_digest,
@@ -490,6 +497,7 @@ def _worker_accepted(*, persisted_recovery: bool = False) -> tuple[AcceptedInvoc
         extension_generation=trusted.extension_generation,
         extension_manifest_digest=trusted.extension_manifest_digest,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=trusted.tenant,
         trusted_context=trusted,
     )
     if persisted_recovery:
@@ -506,7 +514,7 @@ def _bridge() -> SimpleNamespace:
 @pytest.mark.asyncio
 async def test_worker_carries_one_trusted_context_without_parallel_attributes_path() -> None:
     accepted, _material = _worker_accepted()
-    manager = RunManager()
+    manager = RunManager(tenant=accepted.tenant)
     record = await manager.create_or_reject(accepted.thread_id, accepted_invocation=accepted)
     seen: dict[str, object] = {}
 
@@ -522,7 +530,7 @@ async def test_worker_carries_one_trusted_context_without_parallel_attributes_pa
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None),
+        ctx=RunContext(checkpointer=None, tenant=accepted.tenant),
         agent_factory=factory,
         graph_input={},
         config={"context": {"authz_attributes": {"forged": True}}},
@@ -539,7 +547,7 @@ async def test_worker_carries_one_trusted_context_without_parallel_attributes_pa
 @pytest.mark.asyncio
 async def test_process_recovery_without_ephemeral_context_fails_before_graph_start() -> None:
     accepted, material = _worker_accepted(persisted_recovery=True)
-    manager = RunManager()
+    manager = RunManager(tenant=accepted.tenant)
     record = await manager.create_or_reject(accepted.thread_id, accepted_invocation=accepted)
     factory_called = False
 
@@ -555,6 +563,7 @@ async def test_process_recovery_without_ephemeral_context_fails_before_graph_sta
         record,
         ctx=RunContext(
             checkpointer=None,
+            tenant=accepted.tenant,
             agent_revision_resolver=lambda _record, _config: ResolvedAgentRevision.from_material(material),
         ),
         agent_factory=factory,
@@ -573,7 +582,7 @@ async def test_runtime_only_values_never_enter_store_lifecycle_or_public_respons
 
     accepted, _material = _worker_accepted()
     store = MemoryRunStore()
-    manager = RunManager(store=store)
+    manager = RunManager(store=store, tenant=accepted.tenant)
 
     record = await manager.create_or_reject(
         accepted.thread_id,
@@ -602,7 +611,7 @@ async def test_runtime_only_values_never_enter_sql_store_or_lifecycle(tmp_path) 
         await connection.run_sync(Base.metadata.create_all)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     store = RunRepository(session_factory)
-    manager = RunManager(store=store)
+    manager = RunManager(store=store, tenant=accepted.tenant)
     try:
         record = await manager.create_or_reject(
             accepted.thread_id,
@@ -830,6 +839,7 @@ async def test_gateway_logs_only_redacted_contributor_diagnostic(
                 extensions=SimpleNamespace(generation=7),
                 capability_manifest=SimpleNamespace(digest="d" * 64),
                 contributor_host=ContributorHost(registry.build()),
+                tenant_identity=TenantIdentityV1.from_canonical_id("local"),
             )
         ),
     )

@@ -21,6 +21,10 @@ from deerflow.extensions.capabilities import (
     capability_manifest_to_dict,
 )
 from deerflow.runtime.runs.manager import PostCommitObligationStatus
+from deerflow.runtime.tenant_identity import (
+    TenantReferenceV1,
+    tenant_observability_projection,
+)
 
 DEPLOYMENT_API_VERSION = "deerflow.deployment/v1"
 _SHA256_RE = re.compile(r"(?:sha256:)?[0-9a-f]{64}\Z")
@@ -446,6 +450,7 @@ class DeploymentReport:
     qualification: DeploymentQualification = field(default_factory=DeploymentQualification)
     native_ingress: NativeIngressReport = field(default_factory=NativeIngressReport)
     post_commit_obligations: PostCommitObligationReport | None = None
+    tenant: TenantReferenceV1 | None = None
     api_version: Literal["deerflow.deployment/v1"] = field(
         default=DEPLOYMENT_API_VERSION,
         init=False,
@@ -462,6 +467,11 @@ class DeploymentReport:
             PostCommitObligationReport,
         ):
             raise TypeError("post_commit_obligations must use PostCommitObligationReport")
+        if self.tenant is not None and not isinstance(
+            self.tenant,
+            TenantReferenceV1,
+        ):
+            raise TypeError("tenant must use TenantReferenceV1")
 
     def to_dict(self) -> dict[str, object]:
         """Return a fresh safe wire projection; no plugin configuration is included."""
@@ -487,6 +497,7 @@ class DeploymentReport:
             "persistence": self.persistence.to_dict(),
             "native_ingress": self.native_ingress.to_dict(),
             "qualification": self.qualification.to_dict(),
+            "tenant_identity": (tenant_observability_projection(self.tenant) if self.tenant is not None else None),
         }
         if self.post_commit_obligations is not None:
             payload["post_commit_obligations"] = self.post_commit_obligations.to_dict()
@@ -520,6 +531,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         native_ingress: NativeIngressReport | None = None,
         native_ingress_supplier: Callable[[], NativeIngressReport] | None = None,
         post_commit_obligations_supplier: (Callable[[], PostCommitObligationReport | None] | None) = None,
+        tenant_supplier: Callable[[], TenantReferenceV1 | None] | None = None,
     ) -> None:
         self._profile = DeploymentProfile(profile)
         self._persistence = describe_persistence(
@@ -536,6 +548,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         static_native_ingress = native_ingress or NativeIngressReport()
         self._native_ingress_supplier = native_ingress_supplier or (lambda: static_native_ingress)
         self._post_commit_obligations_supplier = post_commit_obligations_supplier or (lambda: None)
+        self._tenant_supplier = tenant_supplier or (lambda: None)
 
     @property
     def persistence_ready(self) -> bool:
@@ -575,6 +588,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             qualification=self._qualification,
             native_ingress_supplier=self._native_ingress_supplier,
             post_commit_obligations_supplier=(self._post_commit_obligations_supplier),
+            tenant_supplier=self._tenant_supplier,
         )
 
     async def deployment_report(self) -> DeploymentReport:
@@ -588,6 +602,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             qualification=self._qualification,
             native_ingress=self._native_ingress_supplier(),
             post_commit_obligations=self._post_commit_obligations_supplier(),
+            tenant=self._tenant_supplier(),
         )
 
 

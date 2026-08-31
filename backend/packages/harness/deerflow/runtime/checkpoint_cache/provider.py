@@ -12,6 +12,12 @@ from typing import Any
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.checkpoint_cache.base import CACHE_FORMAT_VERSION, CheckpointHistoryCache
 from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCache
+from deerflow.runtime.tenant_identity import (
+    LegacyRedisPrefixRecordV1,
+    RedisTenantComponent,
+    TenantNamespaceV1,
+    redis_component_key_prefix,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +60,25 @@ def checkpoint_cache_db_hash(db_config: Any) -> str:
     return hashlib.sha256(identity.encode()).hexdigest()[:12]
 
 
-def checkpoint_cache_key_prefix(app_config: AppConfig) -> str:
+def checkpoint_cache_key_prefix(
+    app_config: AppConfig,
+    tenant_namespace: TenantNamespaceV1 | None = None,
+    legacy_redis_prefixes: LegacyRedisPrefixRecordV1 | None = None,
+) -> str:
     env_prefix = os.getenv(_ENV_KEY_PREFIX)
-    if env_prefix is not None:
-        return env_prefix
     cache_config = app_config.database.checkpoint_cache
-    if cache_config.key_prefix:
-        return cache_config.key_prefix
+    configured = env_prefix if env_prefix is not None else cache_config.key_prefix
+    if tenant_namespace is not None:
+        field = _ENV_KEY_PREFIX if env_prefix is not None else "database.checkpoint_cache.key_prefix"
+        return redis_component_key_prefix(
+            tenant_namespace,
+            RedisTenantComponent.CHECKPOINT_CACHE,
+            configured_prefix=configured or None,
+            configured_field=field,
+            legacy_record=legacy_redis_prefixes,
+        )
+    if configured:
+        return configured
     return f"ckpt-hist:v{CACHE_FORMAT_VERSION}:{checkpoint_cache_db_hash(app_config.database)}"
 
 
@@ -69,6 +87,8 @@ async def make_checkpoint_cache(
     app_config: AppConfig | None = None,
     *,
     serde: Any,
+    tenant_namespace: TenantNamespaceV1 | None = None,
+    legacy_redis_prefixes: LegacyRedisPrefixRecordV1 | None = None,
 ) -> AsyncIterator[CheckpointHistoryCache]:
     """Yield a history cache for the caller's lifetime.
 
@@ -89,6 +109,14 @@ async def make_checkpoint_cache(
 
     if config.type == "redis":
         from deerflow.runtime.checkpoint_cache.redis import RedisCheckpointHistoryCache
+
+        # Validate any compatibility prefix even though the wrapper owns the
+        # actual key construction.
+        checkpoint_cache_key_prefix(
+            app_config,
+            tenant_namespace,
+            legacy_redis_prefixes,
+        )
 
         cache = RedisCheckpointHistoryCache(
             _resolve_redis_url(config),

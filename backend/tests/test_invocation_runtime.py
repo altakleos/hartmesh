@@ -27,6 +27,7 @@ from deerflow.runtime import CancelOutcome, ConflictError, DisconnectMode, RunMa
 from deerflow.runtime.runs.manager import PersistenceRetryPolicy
 from deerflow.runtime.runs.store.base import LifecycleType
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 def _record() -> RunRecord:
@@ -265,7 +266,10 @@ async def test_gateway_runtime_builder_installs_application_admission_fence() ->
     fence = _AdmissionFence(ready=False)
     request = SimpleNamespace(
         app=SimpleNamespace(
-            state=SimpleNamespace(runtime_readiness=fence),
+            state=SimpleNamespace(
+                runtime_readiness=fence,
+                tenant_identity=TenantIdentityV1.from_canonical_id("local"),
+            ),
         ),
         state=SimpleNamespace(user=None),
         headers={},
@@ -300,7 +304,11 @@ def test_gateway_runtime_builders_require_application_admission_fence() -> None:
         build_service_invocation_runtime,
     )
 
-    app = SimpleNamespace(state=SimpleNamespace())
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            tenant_identity=TenantIdentityV1.from_canonical_id("local"),
+        )
+    )
     request = SimpleNamespace(
         app=app,
         state=SimpleNamespace(user=None),

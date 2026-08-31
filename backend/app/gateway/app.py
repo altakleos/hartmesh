@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -46,6 +47,10 @@ from app.gateway.runtime_http import install_runtime_error_handlers
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.runtime.tenant_identity import (
+    TenantIdentityV1,
+    tenant_observability_projection,
+)
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
@@ -214,6 +219,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
 
         startup_deployment = getattr(startup_config, "deployment", None)
+        tenant_identity = getattr(app.state, "tenant_identity", None)
+        if not isinstance(tenant_identity, TenantIdentityV1):
+            raise RuntimeError("Gateway tenant identity was not resolved during application construction")
         startup_profile = getattr(
             startup_deployment,
             "profile",
@@ -239,7 +247,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         durable_native_ingress_required = startup_profile == DeploymentProfile.durable_production and bool(startup_native_ingress.sources)
         app.state.deployment_profile = startup_profile
-        logger.info("Configuration loaded successfully")
+        logger.info(
+            "Configuration loaded successfully tenant_ref=%s tenant_digest_prefix=%s",
+            tenant_identity.public_ref,
+            tenant_identity.digest[:16],
+        )
         warn_if_auth_disabled_enabled()
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
@@ -772,6 +784,14 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         construction_deployment = DeploymentConfig()
         construction_database_backend = "memory"
 
+    # Application construction is the Gateway's service-construction boundary.
+    # Resolve exactly once here; lifespan and every dependency reuse this same
+    # immutable object rather than consulting hot-reloaded/request state.
+    app.state.tenant_identity = TenantIdentityV1.resolve(
+        deployment_config=construction_deployment,
+        environ=os.environ,
+    )
+
     try:
         loaded_extensions, extension_diagnostics = load_extensions(configured_plugins)
     except ExtensionLoadError:
@@ -976,6 +996,14 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         qualification=deployment_qualification,
         native_ingress_supplier=current_native_ingress,
         post_commit_obligations_supplier=current_post_commit_obligations,
+        tenant_supplier=lambda: (
+            app.state.tenant_identity.to_persisted_reference()
+            if isinstance(
+                getattr(app.state, "tenant_identity", None),
+                TenantIdentityV1,
+            )
+            else None
+        ),
     )
     from app.runtime.readiness import RuntimeReadinessCoordinator
 
@@ -1115,13 +1143,18 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         logger.warning("GitHub webhooks route NOT mounted: GITHUB_WEBHOOK_SECRET unset and DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS not set. /api/webhooks/github will respond 404. Configure either env var to enable the route.")
 
     @app.get("/health", tags=["health"])
-    async def health_check() -> dict[str, str]:
+    async def health_check() -> dict[str, object]:
         """Health check endpoint.
 
         Returns:
             Service health status information.
         """
-        return {"status": "healthy", "service": "deer-flow-gateway"}
+        tenant_identity = app.state.tenant_identity
+        return {
+            "status": "healthy",
+            "service": "deer-flow-gateway",
+            "tenant_identity": tenant_observability_projection(tenant_identity.to_persisted_reference()),
+        }
 
     @app.get("/ready", tags=["health"])
     async def readiness_check() -> JSONResponse:
@@ -1131,7 +1164,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         ready = readiness.status == "ready"
         return JSONResponse(
             status_code=200 if ready else 503,
-            content={"status": "ready" if ready else "not_ready"},
+            content={
+                "status": "ready" if ready else "not_ready",
+                "tenant_identity": tenant_observability_projection(app.state.tenant_identity.to_persisted_reference()),
+            },
         )
 
     # Extension routes are deliberately last: FastAPI/Starlette dispatches in

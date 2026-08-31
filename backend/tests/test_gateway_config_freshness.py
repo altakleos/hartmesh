@@ -30,6 +30,7 @@ from deerflow.config.app_config import (
     set_app_config,
 )
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 @pytest.fixture(autouse=True)
@@ -148,6 +149,7 @@ def test_run_context_app_config_reflects_yaml_edit(tmp_path, monkeypatch):
     app.state.run_event_store = MagicMock()
     app.state.run_events_config = {"frozen": "startup"}
     app.state.thread_store = MagicMock()
+    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
 
     @app.get("/run-ctx-log-level")
     def probe(ctx=Depends(get_run_context)):
@@ -186,6 +188,7 @@ def test_run_context_freezes_checkpoint_channel_mode_at_startup(tmp_path, monkey
     request.app.state.run_events_config = {"frozen": "startup"}
     request.app.state.thread_store = MagicMock()
     request.app.state.checkpoint_channel_mode = "full"
+    request.app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
 
     ctx = get_run_context(request)
     assert ctx.app_config.database.checkpoint_channel_mode == "delta"

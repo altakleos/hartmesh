@@ -58,7 +58,7 @@ def test_empty_manifest_is_deterministic_and_bound_to_extension_generation() -> 
 
     assert first == second
     assert first.extension_generation == 7
-    assert first.extension_api_version == "0.12.0"
+    assert first.extension_api_version == "0.12.1"
     assert first.digest == second.digest
     assert first.digest != next_generation.digest
     assert len(first.digest) == 64
@@ -213,6 +213,7 @@ def test_accepted_invocation_pins_rollout_generation_and_manifest_digest() -> No
         extension_generation=first.extension_generation,
         extension_manifest_digest=first.digest,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=__import__("deerflow.runtime.tenant_identity", fromlist=["TenantIdentityV1"]).TenantIdentityV1.from_canonical_id("local").to_persisted_reference(),
     )
     persisted = accepted.to_persisted()
 

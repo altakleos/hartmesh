@@ -46,6 +46,10 @@ class DeploymentConfig(BaseModel):
         default="local_development",
         description=("Deployment promise. local_development permits process-local state; durable_production requires restart-durable authoritative invocation storage."),
     )
+    tenant_id: str | None = Field(
+        default=None,
+        description=("Startup-only operator-selected tenant identity. DEER_FLOW_TENANT_ID takes precedence; local development defaults to 'local' only when both sources are absent."),
+    )
     readiness: ReadinessConfig = Field(
         default_factory=ReadinessConfig,
         description=("Startup-only health cache, admission freshness, and bounded probe timing settings."),

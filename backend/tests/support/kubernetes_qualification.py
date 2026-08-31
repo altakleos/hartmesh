@@ -40,6 +40,12 @@ from deerflow.qualification_evidence import (
     qualification_evidence_digest,
     verify_qualification_evidence,
 )
+from deerflow.runtime.tenant_identity import (
+    RedisTenantComponent,
+    TenantIdentityV1,
+    TenantSubsystem,
+    redis_component_key_prefix,
+)
 
 _SAFE_CONTEXT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,252}\Z")
 _SAFE_NAMESPACE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?\Z")
@@ -55,6 +61,10 @@ KUBERNETES_OPT_IN_MESSAGE = "Kubernetes qualification is opt-in; set DEERFLOW_TE
 
 _QUALIFICATION_SKILL_NAME = "qualification-skill"
 _QUALIFICATION_ACCEPTED_ATTEMPT_LEASE_SECONDS = 120
+_QUALIFICATION_REDIS_PREFIX = redis_component_key_prefix(
+    TenantIdentityV1.from_canonical_id("qualification").namespace(TenantSubsystem.REDIS),
+    RedisTenantComponent.QUALIFICATION,
+)
 _QUALIFICATION_SKILL_FILES = {
     "SKILL.md": (b"---\nname: qualification-skill\ndescription: Deterministic accepted-skill qualification fixture.\nallowed-tools:\n  - read_file\n---\nRead resources/proof.txt only from the accepted immutable snapshot.\n"),
     "resources/proof.txt": b"hartmesh accepted skill qualification v2\n",
@@ -666,6 +676,7 @@ class KubernetesQualificationRunner:
         )
         return {
             "namespace": self.config.namespace,
+            "tenant": {"id": "qualification"},
             "deployment": {
                 "mode": "durable_one_replica",
                 "persistenceTier": "shared_durable",
@@ -900,7 +911,7 @@ class KubernetesQualificationRunner:
         )
 
     def _barrier_key(self, scenario: str, suffix: str) -> str:
-        return f"deerflow:kubernetes-qualification:{self.config.qualification_id}:{scenario}:{suffix}"
+        return f"{_QUALIFICATION_REDIS_PREFIX}:{self.config.qualification_id}:{scenario}:{suffix}"
 
     def _wait_for_barrier(self, scenario: str) -> str:
         run_id = ""

@@ -20,7 +20,7 @@ class StreamBridgeConfig(BaseModel):
     )
     key_prefix: str = Field(
         default="",
-        description="Optional outer Redis key prefix. DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX overrides this value; empty preserves legacy stream names.",
+        description=("Startup-only compatibility value. In Gateway tenant mode, a nonempty value (or DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX override) must exactly match the server-derived stream-bridge tenant projection."),
     )
     queue_maxsize: int = Field(
         default=256,

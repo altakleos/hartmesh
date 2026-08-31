@@ -31,6 +31,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 # Module-level so langgraph's get_type_hints (which resolves annotations against
@@ -163,7 +164,7 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     events: list[str] = []
 
     @asynccontextmanager
-    async def probe_checkpointer(_config):
+    async def probe_checkpointer(_config, **_kwargs):
         try:
             yield object()
         finally:
@@ -171,7 +172,7 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
             raise RuntimeError("simulated close failure")
 
     @asynccontextmanager
-    async def fake_stream_bridge(_config):
+    async def fake_stream_bridge(_config, **_kwargs):
         try:
             yield object()
         finally:
@@ -217,6 +218,7 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     monkeypatch.setattr("deerflow.extensions.notify.reset_extension_notify_loop", spy_reset_extension_notify_loop)
 
     app = FastAPI()
+    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
     registry = ExtensionRegistry()
 
     class _Service:
@@ -254,7 +256,9 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     assert events.index("service_stopped") < events.index("store_closed")
     assert events.index("store_closed") < events.index("checkpointer_closed")
     assert events.index("checkpointer_closed") < events.index("engine_closed")
-    assert events.index("engine_closed") < events.index("stream_bridge_closed")
+    # Schema tenant binding must be read before Redis-backed resources are
+    # constructed, so the database now outlives the stream bridge on teardown.
+    assert events.index("stream_bridge_closed") < events.index("engine_closed")
     assert events[0] == "extension_loop_set"
     assert events.index("stream_bridge_closed") < events.index("extension_loop_reset"), f"extension loop reset must be the final runtime teardown; got order {events}"
 
@@ -271,14 +275,14 @@ async def test_langgraph_runtime_fallback_does_not_close_after_unproven_run_drai
     events: list[str] = []
 
     @asynccontextmanager
-    async def probe_checkpointer(_config):
+    async def probe_checkpointer(_config, **_kwargs):
         try:
             yield object()
         finally:
             events.append("checkpointer_closed")
 
     @asynccontextmanager
-    async def fake_resource(_config):
+    async def fake_resource(_config, **_kwargs):
         yield object()
 
     async def fake_close_engine():
@@ -312,6 +316,7 @@ async def test_langgraph_runtime_fallback_does_not_close_after_unproven_run_drai
     )
 
     app = FastAPI()
+    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
     startup_config = SimpleNamespace(
         database=SimpleNamespace(
             backend="memory",
@@ -352,7 +357,7 @@ async def test_langgraph_runtime_resets_extension_loop_when_startup_exits_early(
     events: list[str] = []
 
     @asynccontextmanager
-    async def failing_stream_bridge(_config):
+    async def failing_stream_bridge(_config, **_kwargs):
         raise startup_error
         yield  # pragma: no cover - makes this an async context manager
 
@@ -368,6 +373,7 @@ async def test_langgraph_runtime_resets_extension_loop_when_startup_exits_early(
     monkeypatch.setattr("deerflow.extensions.notify.reset_extension_notify_loop", spy_reset_extension_notify_loop)
 
     app = FastAPI()
+    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
     startup_config = SimpleNamespace(
         database=SimpleNamespace(
             backend="memory",

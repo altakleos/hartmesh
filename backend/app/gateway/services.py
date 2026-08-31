@@ -157,6 +157,11 @@ from deerflow.runtime.secret_context import (
     validate_run_metadata_secrets,
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
+from deerflow.runtime.tenant_identity import (
+    TENANT_REFERENCE_CONTEXT_KEY,
+    TenantIdentityV1,
+    tenant_admission_scope,
+)
 from deerflow.runtime.user_context import DEFAULT_USER_ID, reset_current_user, set_current_user
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
@@ -668,6 +673,15 @@ _SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
         INVOCATION_IDENTITY_CONTEXT_KEY,
         INVOCATION_ORIGIN_CONTEXT_KEY,
         TRUSTED_RUN_CONTEXT_KEY,
+        TENANT_REFERENCE_CONTEXT_KEY,
+        "tenant",
+        "tenant_id",
+        "tenantId",
+        "tenant_ref",
+        "tenant_digest",
+        "x_tenant_id",
+        "x-tenant-id",
+        "X-Tenant-ID",
     }
 )
 
@@ -1778,6 +1792,7 @@ def _effective_execution_projection(
             "agent_revision_digest": accepted.agent_revision.digest,
             "principal_digest": accepted.principal_digest,
             "base_origin_digest": accepted.base_origin_digest,
+            "tenant_digest": (accepted.tenant.digest if accepted.tenant is not None else None),
             "accepted_context_digest": accepted.accepted_context_digest,
             "runtime_identity_digest": accepted.runtime_identity_digest,
             "contributor_execution_digest": accepted.contributor_execution_digest,
@@ -2030,6 +2045,11 @@ async def _seal_accepted_invocation(
     )
     base_references = _base_origin_references(intent)
     app_state = getattr(getattr(request, "app", None), "state", None)
+    app_config = run_ctx.app_config or get_app_config()
+    tenant_identity = getattr(app_state, "tenant_identity", None)
+    if not isinstance(tenant_identity, TenantIdentityV1):
+        raise RuntimeError("Gateway tenant identity was not resolved during application construction")
+    tenant_reference = tenant_identity.to_persisted_reference()
     contributor_host = getattr(app_state, "contributor_host", None)
     empty_contributor_digest = canonical_digest({"version": 1, "execution": []})
     if contributor_host is None:
@@ -2047,6 +2067,7 @@ async def _seal_accepted_invocation(
                 authenticated_subject_reference=principal.user_id,
                 source_references=_origin_request_references(base_references),
                 identity=principal.identity,
+                tenant=tenant_reference,
             )
         )
     for diagnostic in origin_contributions.diagnostics:
@@ -2068,7 +2089,6 @@ async def _seal_accepted_invocation(
         contributor_references=_contribution_json(origin_contributions),
     )
 
-    app_config = run_ctx.app_config or get_app_config()
     revision = await _resolve_agent_revision_cancellation_safe(
         config,
         app_config=app_config,
@@ -2139,6 +2159,7 @@ async def _seal_accepted_invocation(
                         digest=revision.digest,
                     ),
                     external_key_reference=(normalize_external_key(intent.external_key) if intent.external_key is not None else None),
+                    tenant=tenant_reference,
                 )
             )
         except (Exception, asyncio.CancelledError):
@@ -2190,6 +2211,7 @@ async def _seal_accepted_invocation(
     external_key_reference = normalize_external_key(intent.external_key) if intent.external_key is not None else None
     trusted_context = TrustedRunContextV1(
         identity=principal.identity,
+        tenant=tenant_reference,
         origin=public_origin,
         thread_id=intent.thread_id,
         external_key_reference=external_key_reference,
@@ -2224,12 +2246,14 @@ async def _seal_accepted_invocation(
         extension_generation=extension_generation,
         extension_manifest_digest=extension_manifest_digest,
         contributor_execution_digest=contributor_execution_digest,
+        tenant=tenant_reference,
         trusted_context=trusted_context,
     )
     # These objects are server-owned and installed after all caller context is
     # scrubbed. The worker and delegated subagents inherit the same accepted
     # revision/generation for construction and audit.
     runtime_context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = revision.material
+    runtime_context[TENANT_REFERENCE_CONTEXT_KEY] = tenant_reference
     runtime_context["accepted_agent_revision_digest"] = revision.digest
     runtime_context["accepted_extension_generation"] = extension_generation
     if extension_manifest_digest is not None:
@@ -2259,6 +2283,14 @@ class _GatewayLaunchNormalizer:
         self._request = request
         self._trust_internal_launch_facts = trust_internal_launch_facts
         self._identified: dict[int, tuple[InternalLaunchIntent, InternalAdmissionIdentity]] = {}
+        tenant_identity = getattr(
+            getattr(getattr(request, "app", None), "state", None),
+            "tenant_identity",
+            None,
+        )
+        if not isinstance(tenant_identity, TenantIdentityV1):
+            raise RuntimeError("Gateway tenant identity was not resolved during application construction")
+        self._tenant = tenant_identity.to_persisted_reference()
 
     def _owner_user_id(self, intent: InternalLaunchIntent) -> str | None:
         if self._trust_internal_launch_facts and intent.source_kind in {
@@ -2375,6 +2407,11 @@ class _GatewayLaunchNormalizer:
                 external_scope = scope_for_service(intent.trusted_service_id)
             else:  # pragma: no cover - closed enum
                 raise ValueError(f"unsupported invocation source {intent.source_kind}")
+            if self._tenant is not None:
+                external_scope = tenant_admission_scope(
+                    self._tenant,
+                    external_scope,
+                )
         except ValueError as exc:
             if intent.source_kind is InternalSourceKind.http:
                 raise _keyed_request_error(str(exc)) from exc

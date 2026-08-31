@@ -49,6 +49,9 @@ from deerflow.runtime.runs.store.base import (
     build_lifecycle_payload,
 )
 from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+
+_TEST_TENANT = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
 
 
 def _material() -> ResolvedAgentMaterialV1:
@@ -78,6 +81,7 @@ def _accepted() -> AcceptedInvocation:
         execution_options={},
         extension_generation=4,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=_TEST_TENANT,
     )
 
 
@@ -729,7 +733,7 @@ async def test_construction_fence_rejects_evidence_mismatch_before_graph_work() 
     tampered_constraints["evidence_id"] = "forged"
     tampered["constraints"] = tampered_constraints
     accepted = replace(accepted, decision_evidence=tampered)
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject("thread-1", accepted_invocation=accepted)
     factory_calls = 0
 
@@ -742,7 +746,11 @@ async def test_construction_fence_rejects_evidence_mismatch_before_graph_work() 
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None, constraint_clock=lambda: now),
+        ctx=RunContext(
+            checkpointer=None,
+            constraint_clock=lambda: now,
+            tenant=_TEST_TENANT,
+        ),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -760,7 +768,7 @@ async def test_queue_expiry_fails_before_graph_construction() -> None:
         now=issued,
         valid_until=issued + timedelta(seconds=10),
     )
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject("thread-1", accepted_invocation=accepted)
     factory_calls = 0
 
@@ -776,6 +784,7 @@ async def test_queue_expiry_fails_before_graph_construction() -> None:
         ctx=RunContext(
             checkpointer=None,
             constraint_clock=lambda: issued + timedelta(seconds=11),
+            tenant=_TEST_TENANT,
         ),
         agent_factory=factory,
         graph_input={},
@@ -794,7 +803,7 @@ async def test_expiry_between_construction_and_astream_starts_no_graph() -> None
         now=issued,
         valid_until=issued + timedelta(seconds=10),
     )
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject("thread-1", accepted_invocation=accepted)
     stream_calls = 0
 
@@ -812,7 +821,11 @@ async def test_expiry_between_construction_and_astream_starts_no_graph() -> None
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None, constraint_clock=lambda: current[0]),
+        ctx=RunContext(
+            checkpointer=None,
+            constraint_clock=lambda: current[0],
+            tenant=_TEST_TENANT,
+        ),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -834,7 +847,7 @@ async def test_ordinary_projection_installs_effective_limit_and_starts_once() ->
         now=now,
         valid_until=now + timedelta(minutes=5),
     )
-    manager = RunManager()
+    manager = RunManager(tenant=_TEST_TENANT)
     record = await manager.create_or_reject("thread-1", accepted_invocation=accepted)
     stream_calls = 0
     seen = {}
@@ -853,7 +866,11 @@ async def test_ordinary_projection_installs_effective_limit_and_starts_once() ->
         _bridge(),
         manager,
         record,
-        ctx=RunContext(checkpointer=None, constraint_clock=lambda: now),
+        ctx=RunContext(
+            checkpointer=None,
+            constraint_clock=lambda: now,
+            tenant=_TEST_TENANT,
+        ),
         agent_factory=factory,
         graph_input={},
         config={},

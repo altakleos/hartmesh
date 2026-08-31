@@ -65,6 +65,10 @@ from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import CancelOutcome, RunRecord
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+
+_TEST_TENANT_IDENTITY = TenantIdentityV1.from_canonical_id("local")
+_TEST_TENANT = _TEST_TENANT_IDENTITY.to_persisted_reference()
 
 
 class _ReadyAdmissionFence:
@@ -169,6 +173,7 @@ def _make_start_request(run_manager: RunManager):
                 thread_store=MemoryThreadMetaStore(store),
                 checkpoint_channel_mode="full",
                 scheduled_task_service=None,
+                tenant_identity=_TEST_TENANT_IDENTITY,
             )
         ),
     )
@@ -182,7 +187,7 @@ async def test_gateway_admits_durably_before_worker_attachment_and_rejects_confl
     from app.gateway import services
 
     run_store = MemoryRunStore()
-    run_manager = RunManager(store=run_store)
+    run_manager = RunManager(store=run_store, tenant=_TEST_TENANT)
     request = _make_start_request(run_manager)
     body = RunCreateRequest(
         input={"messages": [{"role": "user", "content": "hello"}]},

@@ -10,6 +10,21 @@ namespace: ""
 #    resolved release namespace. A non-empty namespace must already exist.
 sandboxNamespace: ""
 
+# -- Server-owned tenant identity. durable_one_replica requires an explicit
+#    non-local lowercase DNS label. Empty local renders omit the identity env
+#    override; the application and Redis projections use the documented local
+#    identity. Never derive this value from a Helm release or namespace.
+tenant:
+  id: ""
+  # -- Exact legacy prefixes recorded by `deerflow deployment bind-tenant`.
+  #    These declarations never select a prefix by themselves: the matching
+  #    redis.keyPrefixes field must also request it, and Gateway startup checks
+  #    the database binding record before opening Redis.
+  legacyRedisPrefixes:
+    streamBridge: ""
+    checkpointCache: ""
+    sandboxOwnership: ""
+
 # -- Legacy shared image settings. Existing values files using registry/tag and
 #    the three image-name keys remain supported. New deployments should use the
 #    per-workload repository/tag/digest values below.
@@ -285,12 +300,12 @@ postgresql:
 redis:
   # -- Deploy a bundled redis StatefulSet. Disable to use an external Redis.
   enabled: true
-  # -- One outer Redis ACL namespace for this tenant. When set, empty subsystem
-  #    overrides below derive names that preserve each subsystem namespace.
+  # -- Compatibility-only outer prefix for the first tenant-identity release.
+  #    It must equal the canonical projection or the exact recorded legacy
+  #    stream-bridge projection declared under tenant.legacyRedisPrefixes.
   tenantPrefix: ""
-  # -- Optional per-subsystem overrides. These replace the derived values;
-  #    leave them empty to use tenantPrefix, or omit all prefix env vars when
-  #    tenantPrefix is also empty.
+  # -- Compatibility-only subsystem prefixes. Each nonempty value must equal
+  #    its canonical projection or exact operator-recorded legacy projection.
   keyPrefixes:
     streamBridge: ""
     checkpointCache: ""
@@ -377,7 +392,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 43
+  config_version: 44
   log_level: info
 
   models: []

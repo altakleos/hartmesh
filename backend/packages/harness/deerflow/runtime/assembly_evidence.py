@@ -22,6 +22,7 @@ from deerflow_extension_api import (
     ConstraintProjectionV1,
     ConstraintProjectionV2,
     MiddlewareDescriptor,
+    TenantReferenceV1,
     ToolDescriptor,
 )
 
@@ -33,7 +34,7 @@ from deerflow.runtime.accepted_invocation import (
 
 REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY = "__deerflow_require_assembly_evidence"
 
-ASSEMBLY_EVIDENCE_VERSION = 1
+ASSEMBLY_EVIDENCE_VERSION = 2
 ASSEMBLY_DESCRIPTOR_VERSION = 1
 MAX_ASSEMBLY_IDENTIFIER_BYTES = 128
 MAX_ASSEMBLY_EVIDENCE_BYTES = 8 * 1024
@@ -364,6 +365,7 @@ class AcceptedAssemblyAnchors:
     expected_policy_digest: str
     agent_revision_digest: str
     extension_generation: int
+    tenant: TenantReferenceV1 | None = None
 
     def __post_init__(self) -> None:
         _validate_identifier(self.run_id)
@@ -374,6 +376,8 @@ class AcceptedAssemblyAnchors:
         _validate_digest(self.expected_policy_digest)
         _validate_digest(self.agent_revision_digest)
         if type(self.extension_generation) is not int or self.extension_generation < 0:
+            _invalid()
+        if self.tenant is not None and not isinstance(self.tenant, TenantReferenceV1):
             _invalid()
 
 
@@ -449,6 +453,7 @@ def build_accepted_assembly_anchors(
         ),
         agent_revision_digest=accepted.agent_revision.digest,
         extension_generation=accepted.extension_generation,
+        tenant=accepted.tenant,
     )
 
 
@@ -456,7 +461,7 @@ def build_accepted_assembly_anchors(
 class AssemblyEvidenceV1:
     """Bounded persisted proof of one validated lead-agent assembly."""
 
-    version: Literal[1]
+    version: Literal[1, 2]
     fingerprint: str
     descriptor_version: int
     namespace: str
@@ -469,9 +474,10 @@ class AssemblyEvidenceV1:
     policy_digest: str
     accepted_agent_revision_digest: str
     extension_generation: int
+    tenant: TenantReferenceV1 | None = None
 
     def __post_init__(self) -> None:
-        if self.version != ASSEMBLY_EVIDENCE_VERSION or type(self.version) is not int:
+        if self.version not in (1, ASSEMBLY_EVIDENCE_VERSION) or type(self.version) is not int:
             _invalid()
         if self.descriptor_version != ASSEMBLY_DESCRIPTOR_VERSION or type(self.descriptor_version) is not int:
             _invalid()
@@ -490,11 +496,16 @@ class AssemblyEvidenceV1:
         _validate_identifier(self.effective_model)
         if type(self.extension_generation) is not int or self.extension_generation < 0:
             _invalid()
+        if self.version == 1:
+            if self.tenant is not None:
+                _invalid()
+        elif not isinstance(self.tenant, TenantReferenceV1):
+            _invalid()
         if _canonical_size(self._projection()) > MAX_ASSEMBLY_EVIDENCE_BYTES:
             _invalid()
 
     def _projection(self) -> dict[str, object]:
-        return {
+        projection: dict[str, object] = {
             "version": self.version,
             "fingerprint": self.fingerprint,
             "descriptor_version": self.descriptor_version,
@@ -509,6 +520,11 @@ class AssemblyEvidenceV1:
             "accepted_agent_revision_digest": self.accepted_agent_revision_digest,
             "extension_generation": self.extension_generation,
         }
+        if self.version >= 2:
+            assert self.tenant is not None
+            projection["tenant_ref"] = self.tenant.public_ref
+            projection["tenant_digest"] = self.tenant.digest
+        return projection
 
     def to_persisted_json(self) -> dict[str, object]:
         return self._projection()
@@ -517,11 +533,36 @@ class AssemblyEvidenceV1:
     def from_persisted_json(cls, value: Mapping[str, object]) -> Self:
         if not isinstance(value, Mapping):
             _invalid()
-        expected = {field.name for field in fields(cls)}
+        version = value.get("version")
+        expected = {
+            "version",
+            "fingerprint",
+            "descriptor_version",
+            "namespace",
+            "agent_name",
+            "effective_model",
+            "prompt_digest",
+            "toolset_digest",
+            "middleware_digest",
+            "skillset_digest",
+            "policy_digest",
+            "accepted_agent_revision_digest",
+            "extension_generation",
+        }
+        if version == ASSEMBLY_EVIDENCE_VERSION:
+            expected |= {"tenant_ref", "tenant_digest"}
         if set(value) != expected:
             _invalid()
         try:
-            return cls(**dict(value))
+            fields = dict(value)
+            tenant = None
+            if version == ASSEMBLY_EVIDENCE_VERSION:
+                tenant = TenantReferenceV1(
+                    version=1,
+                    public_ref=fields.pop("tenant_ref"),  # type: ignore[arg-type]
+                    digest=fields.pop("tenant_digest"),  # type: ignore[arg-type]
+                )
+            return cls(**fields, tenant=tenant)  # type: ignore[arg-type]
         except AssemblyEvidenceError:
             raise
         except (TypeError, ValueError):
@@ -568,7 +609,7 @@ def build_assembly_evidence(
         "deferred_tool_names": projection["deferred_tool_names"],
     }
     return AssemblyEvidenceV1(
-        version=ASSEMBLY_EVIDENCE_VERSION,
+        version=ASSEMBLY_EVIDENCE_VERSION if anchors.tenant is not None else 1,
         fingerprint=canonical_digest(projection),
         descriptor_version=ASSEMBLY_DESCRIPTOR_VERSION,
         namespace=descriptor.namespace,
@@ -581,6 +622,7 @@ def build_assembly_evidence(
         policy_digest=canonical_digest(policies),
         accepted_agent_revision_digest=anchors.agent_revision_digest,
         extension_generation=anchors.extension_generation,
+        tenant=anchors.tenant,
     )
 
 

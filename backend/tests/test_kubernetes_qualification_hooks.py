@@ -13,6 +13,10 @@ from deerflow.runtime.kubernetes_qualification import (
     qualification_barrier,
     scenario_from_external_key,
 )
+from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
+
+_TENANT_NAMESPACE = TenantIdentityV1.from_canonical_id("qualification").namespace(TenantSubsystem.REDIS)
+_QUALIFICATION_PREFIX = "hm:v1:tenant-e08e79269b9e0fde:redis:qualification"
 
 
 class _RedisDouble:
@@ -62,6 +66,7 @@ async def test_fault_hook_records_and_releases_only_the_selected_barrier() -> No
         qualification_id="qual-1",
         redis_client=redis,
         timeout_seconds=1,
+        tenant_namespace=_TENANT_NAMESPACE,
     )
     record = SimpleNamespace(
         run_id="run-1",
@@ -73,8 +78,8 @@ async def test_fault_hook_records_and_releases_only_the_selected_barrier() -> No
 
     assert reached is True
     assert ignored is False
-    assert redis.increments == ["deerflow:kubernetes-qualification:qual-1:accepted_before_worker_start:barrier_hits"]
-    assert redis.values["deerflow:kubernetes-qualification:qual-1:accepted_before_worker_start:reached"] == b"run-1"
+    assert redis.increments == [f"{_QUALIFICATION_PREFIX}:qual-1:accepted_before_worker_start:barrier_hits"]
+    assert redis.values[f"{_QUALIFICATION_PREFIX}:qual-1:accepted_before_worker_start:reached"] == b"run-1"
 
 
 @pytest.mark.anyio
@@ -85,6 +90,7 @@ async def test_fault_hook_timeout_is_bounded_and_does_not_include_redis_details(
         redis_client=redis,
         timeout_seconds=0.001,
         poll_seconds=0,
+        tenant_namespace=_TENANT_NAMESPACE,
     )
     record = SimpleNamespace(
         run_id="run-1",
@@ -103,6 +109,7 @@ async def test_forced_kill_barrier_survives_graceful_task_cancellation() -> None
         redis_client=redis,
         timeout_seconds=1,
         poll_seconds=0.001,
+        tenant_namespace=_TENANT_NAMESPACE,
     )
     record = SimpleNamespace(
         run_id="run-1",

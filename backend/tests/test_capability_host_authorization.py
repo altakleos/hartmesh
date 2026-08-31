@@ -10,15 +10,15 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_extension_api_0120_is_exactly_pinned_by_host_packages():
+def test_extension_api_0121_is_exactly_pinned_by_host_packages():
     backend_root = Path(__file__).parents[1]
     extension_project = tomllib.loads((backend_root / "packages/extension-api/pyproject.toml").read_text())
     harness_project = tomllib.loads((backend_root / "packages/harness/pyproject.toml").read_text())
     application_project = tomllib.loads((backend_root / "pyproject.toml").read_text())
 
-    assert extension_project["project"]["version"] == "0.12.0"
-    assert "deerflow-extension-api==0.12.0" in harness_project["project"]["dependencies"]
-    assert "deerflow-extension-api==0.12.0" in application_project["project"]["dependencies"]
+    assert extension_project["project"]["version"] == "0.12.1"
+    assert "deerflow-extension-api==0.12.1" in harness_project["project"]["dependencies"]
+    assert "deerflow-extension-api==0.12.1" in application_project["project"]["dependencies"]
 
 
 def test_extension_authorization_contracts_are_legacy_import_identities():
@@ -220,6 +220,7 @@ async def test_gateway_authorization_paths_share_one_provider_at_a_generation(mo
     from deerflow.config.sandbox_config import SandboxConfig
     from deerflow.extensions.registry import ExtensionRegistry
     from deerflow.runtime.runs.worker import _build_runtime_context
+    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
     authorization = _legacy_config(label="coherent")
     app_config = AppConfig(
@@ -269,6 +270,7 @@ async def test_gateway_authorization_paths_share_one_provider_at_a_generation(mo
             state=SimpleNamespace(
                 authorization_provider_resolver=resolver,
                 extensions=ExtensionRegistry().build(generation=11),
+                tenant_identity=TenantIdentityV1.from_canonical_id("local"),
             )
         )
     )

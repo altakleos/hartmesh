@@ -4,7 +4,9 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
-Version 0.12.0 owns the authorization contracts `Principal`, `AuthzRequest`,
+Version 0.12.1 adds the immutable, pseudonymous `TenantReferenceV1` to trusted
+run-context contributor requests. Version 0.12.0 introduced the authorization
+contracts `Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthzReason`, and `AuthorizationProvider`. Existing host code may keep
 using `deerflow.authz.provider`; those names are compatibility re-exports of the same
 objects. It also owns the versioned Origin and run-context contributor contracts described
@@ -58,6 +60,29 @@ less privilege, never an end user promoted by transport trust. Existing accepted
 the v1 legacy principal JSON remain readable under that conservative rule; new rows store
 principal projection version 2 with the nested v1 identity and a digest bound atomically to
 admission.
+
+## Server-owned tenant reference
+
+`TenantReferenceV1` is the only tenant shape exposed by the host-independent
+extension API. It contains `version=1`, a bounded `tenant-<16 hex>`
+`public_ref`, and the full lowercase SHA-256 digest. It is frozen and contains
+no operator-readable canonical identifier. The reference is pseudonymous, not
+secret or unguessable.
+
+The host supplies the same reference on `OriginContributionRequestV1.tenant`,
+`RunContextContributionRequestV1.tenant`, and `TrustedRunContextV1.tenant` for
+newly accepted work. The optional default on request/context contracts preserves
+source compatibility for extensions and legacy persisted context, but a current
+Gateway always supplies it. A contributor may observe the value and include its
+own derived safe evidence; it cannot replace the host's accepted tenant anchor.
+
+Tenant identity is selected by the operator at service startup. It cannot be selected by an API caller and does not replace per-user authorization.
+
+Extensions must not derive tenancy from principal/user IDs, thread IDs,
+request fields, release names, Kubernetes namespaces, or extension
+configuration. An extension needing provider-specific names should receive a
+host adapter backed by the appropriate typed `TenantNamespaceV1`; the public
+package deliberately does not expose the canonical config object.
 
 Every authoritative factory descriptor also has an optional `health_probe`. Existing
 plugins may omit it; a successfully initialized capability without a probe is healthy.
@@ -142,10 +167,11 @@ Trusted plugins may register typed `OriginContributorFactory` and
 provenance, initializes each factory once at startup, invokes contributors concurrently,
 and composes valid results deterministically by stable `contribution_id`.
 
-Origin contributors receive only source kind, the canonical invocation identity, an
+Origin contributors receive only source kind, the canonical invocation identity, the
+immutable safe tenant reference, an
 authenticated subject reference,
 and host-selected safe source references. Run-context contributors receive an immutable
-split principal projection, sealed Origin, bound thread, resolved agent revision reference, and
+split principal projection, safe tenant reference, sealed Origin, bound thread, resolved agent revision reference, and
 an optional external-key reference. Neither contract receives Gateway objects, raw
 credentials, or caller request metadata.
 
@@ -163,7 +189,8 @@ Runtime-only values are redacted from persistence while their safe execution agg
 included in the accepted-context digest.
 
 The host combines both contributor phases into one immutable `TrustedRunContextV1` after
-validation. It carries the effective subject/acting service, final `SealedOriginV1`, bound
+validation. It carries the effective subject/acting service, safe tenant reference,
+final `SealedOriginV1`, bound
 thread and external-key reference, agent/profile revisions, extension generation/manifest,
 and three finite namespaced products: persistable references, runtime-only execution
 references, and stable secret handles. Per-result limits also apply to the aggregate across

@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import FastAPI
 
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+
 
 @pytest.mark.asyncio
 async def test_shutdown_orders_producers_runs_memory_and_dependencies() -> None:
@@ -377,6 +379,7 @@ def test_real_lifespan_drives_every_shutdown_state_in_order(run_state: str) -> N
 
     async def drive() -> None:
         app = FastAPI()
+        app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
         if run_state == "channel-delivery":
 
             async def finish_delivery() -> None:

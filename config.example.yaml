@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 43
+config_version: 44
 
 # ============================================================================
 # Logging
@@ -1335,7 +1335,9 @@ sandbox:
 #   #                                # owner). Liveness is deliberately independent
 #   #                                # of idle_timeout: renewal keeps running even
 #   #                                # at idle_timeout: 0.
-#   #   key_prefix: deerflow:sandbox:owner  # overridden by DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX
+#   #   key_prefix: ""              # compatibility-only; a nonempty value (or
+#   #                               # DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX)
+#   #                               # must equal the canonical tenant projection
 #   #
 #   # NOTE: the redis ownership store is fail-closed, matching the stream bridge's
 #   # fail-hard policy. Redis.from_url is lazy so a down Redis does not block
@@ -2091,8 +2093,9 @@ database:
   #   ttl_seconds: 86400      # redis leak safety net; bounds residual copies if a
   #                           # thread-delete purge fails (purge itself is immediate).
   #                           # 0 explicitly disables expiry (redis maxmemory only)
-  #   key_prefix: ""          # default: hash of the database identity;
-  #                           # DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX overrides
+  #   key_prefix: ""          # compatibility-only; a nonempty value (or the
+  #                           # DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX env value)
+  #                           # must equal the tenant-derived canonical prefix
 
 # Deployment promise checked once at Gateway startup. The local profile keeps
 # process-local memory convenient for development. durable_production refuses
@@ -2100,6 +2103,10 @@ database:
 # idempotent tool receipts, and also participates in /ready.
 deployment:
   profile: local_development
+  # Startup-only operator identity. DEER_FLOW_TENANT_ID takes precedence.
+  # durable_production requires an explicit non-local DNS-label value; local
+  # development defaults to "local" when both sources are absent.
+  tenant_id: local
   readiness:
     # Successful required-capability health evidence may be cached for this
     # long. It never outlives the admission freshness window below.
@@ -2281,9 +2288,9 @@ run_ownership:
 # stream_bridge:
 #   type: redis                  # recommended for Docker / multi-worker gateway
 #   redis_url: redis://redis:6379/0
-#   key_prefix: ""              # optional outer namespace; overridden by
-#                                # DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX. Enabling
-#                                # one starts fresh streams; no migration occurs.
+#   key_prefix: ""              # compatibility-only; a nonempty value (or the
+#                                # DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX env value)
+#                                # must equal the tenant-derived canonical prefix.
 #   queue_maxsize: 256           # data events retained per run (Redis MAXLEN).
 #                                # Older valid cursors receive SSE `gap`.
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.

@@ -10,6 +10,8 @@ import bisect
 import copy
 from datetime import UTC, datetime
 
+from deerflow_extension_api import TenantReferenceV1
+
 from deerflow.runtime.events.store.base import AppendOutcome, RunEventStore, resolve_owned_run, validate_idempotent_append
 from deerflow.runtime.tool_evidence import (
     TOOL_RECEIPT_CATEGORY,
@@ -27,8 +29,16 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
 
 class MemoryRunEventStore(RunEventStore):
-    def __init__(self, *, run_store: object | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        run_store: object | None = None,
+        tenant: TenantReferenceV1 | None = None,
+    ) -> None:
+        if tenant is not None and not isinstance(tenant, TenantReferenceV1):
+            raise TypeError("tenant must be TenantReferenceV1 or None")
         self._run_store = run_store
+        self._tenant = tenant
         self._events: dict[str, list[dict]] = {}  # thread_id -> seq-sorted event list
         # Messages-only projection of ``_events`` (same dict objects, no copies),
         # kept in seq order so message pagination is O(log m + page) via bisect
@@ -44,6 +54,9 @@ class MemoryRunEventStore(RunEventStore):
         self._messages_by_run: dict[str, dict[str, list[dict]]] = {}  # thread_id -> run_id -> seq-sorted messages
         self._seq_counters: dict[str, int] = {}  # thread_id -> last assigned seq
         self._idempotency: dict[tuple[str, str, str], dict] = {}
+
+    def _tenant_visible(self, event: dict) -> bool:
+        return self._tenant is None or event.get("tenant_digest") == self._tenant.digest
 
     def _next_seq(self, thread_id: str) -> int:
         current = self._seq_counters.get(thread_id, 0)
@@ -66,6 +79,8 @@ class MemoryRunEventStore(RunEventStore):
         record = {
             "thread_id": thread_id,
             "run_id": run_id,
+            "tenant_ref": None if self._tenant is None else self._tenant.public_ref,
+            "tenant_digest": None if self._tenant is None else self._tenant.digest,
             "event_type": event_type,
             "category": category,
             "content": content,
@@ -122,7 +137,7 @@ class MemoryRunEventStore(RunEventStore):
         # No await occurs between the lookup and append, so this is atomic for
         # the backend's documented single-event-loop concurrency model.
         for event in self._events_by_run.get(thread_id, {}).get(run_id, []):
-            if event["event_type"] == event_type:
+            if self._tenant_visible(event) and event["event_type"] == event_type:
                 return event, False
         return (
             self._put_one(
@@ -162,7 +177,7 @@ class MemoryRunEventStore(RunEventStore):
         )
         key = (run_id, event_type, idempotency_key)
         existing = self._idempotency.get(key)
-        if existing is not None:
+        if existing is not None and self._tenant_visible(existing):
             if canonical_digest(existing["content"]) != canonical_digest(detached):
                 raise ToolReceiptIntegrityError("receipt_idempotency_conflict")
             parse_tool_receipt_event(existing)
@@ -170,7 +185,7 @@ class MemoryRunEventStore(RunEventStore):
         receipt = DurableToolReceiptV1.from_event_body(detached, occurred_at=datetime.now(UTC))
         if receipt.phase != "started":
             require_started_transition(
-                self._events_by_run.get(run["thread_id"], {}).get(run_id, []),
+                [event for event in self._events_by_run.get(run["thread_id"], {}).get(run_id, []) if self._tenant_visible(event)],
                 receipt,
             )
         record = self._put_one(
@@ -214,7 +229,7 @@ class MemoryRunEventStore(RunEventStore):
             owner_id=owner_id,
             lease_epoch=lease_epoch,
         )
-        events = self._events_by_run.get(run["thread_id"], {}).get(run_id, [])
+        events = [event for event in self._events_by_run.get(run["thread_id"], {}).get(run_id, []) if self._tenant_visible(event)]
         receipt, existing, terminal = reserve_attempt_from_events(
             events,
             binding=binding,
@@ -254,7 +269,7 @@ class MemoryRunEventStore(RunEventStore):
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         # ``messages`` is messages-only and seq-sorted, so the seq window is a
         # contiguous slice located with bisect (O(log m)) rather than a full scan.
-        messages = self._messages.get(thread_id, [])
+        messages = [event for event in self._messages.get(thread_id, []) if self._tenant_visible(event)]
 
         if before_seq is not None:
             # Records with seq < before_seq, then the last `limit` of them.
@@ -271,7 +286,7 @@ class MemoryRunEventStore(RunEventStore):
     async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         # ``_events_by_run`` is already scoped to this run and seq-ordered, so we
         # touch only this run's events instead of scanning the whole thread.
-        run_events = self._events_by_run.get(thread_id, {}).get(run_id, [])
+        run_events = [event for event in self._events_by_run.get(thread_id, {}).get(run_id, []) if self._tenant_visible(event)]
         if event_types is not None:
             run_events = [e for e in run_events if e["event_type"] in event_types]
         if task_id is not None:
@@ -284,7 +299,7 @@ class MemoryRunEventStore(RunEventStore):
         # Per-run, messages-only, seq-sorted: the seq window is a contiguous
         # slice located with bisect (O(log m_run)) over only this run's
         # messages, instead of re-scanning the whole thread's event log.
-        messages = self._messages_by_run.get(thread_id, {}).get(run_id, [])
+        messages = [event for event in self._messages_by_run.get(thread_id, {}).get(run_id, []) if self._tenant_visible(event)]
         lo = 0 if after_seq is None else bisect.bisect_right(messages, after_seq, key=lambda e: e["seq"])
         hi = len(messages) if before_seq is None else bisect.bisect_left(messages, before_seq, key=lambda e: e["seq"])
         window = messages[lo:hi]
@@ -300,6 +315,8 @@ class MemoryRunEventStore(RunEventStore):
         messages_by_run = self._messages_by_run.get(thread_id, {})
         for run_id in run_ids:
             for event in reversed(messages_by_run.get(run_id, [])):
+                if not self._tenant_visible(event):
+                    continue
                 caller = str((event.get("metadata") or {}).get("caller", ""))
                 if event.get("category") == "message" and event.get("event_type") in {"llm.ai.response", "ai_message"} and not caller.startswith("middleware:"):
                     result[run_id] = event["seq"]
@@ -307,29 +324,49 @@ class MemoryRunEventStore(RunEventStore):
         return result
 
     async def count_messages(self, thread_id):
-        return len(self._messages.get(thread_id, []))
+        return sum(1 for event in self._messages.get(thread_id, []) if self._tenant_visible(event))
 
     async def delete_by_thread(self, thread_id):
-        events = self._events.pop(thread_id, [])
-        self._messages.pop(thread_id, None)
-        self._events_by_run.pop(thread_id, None)
-        self._messages_by_run.pop(thread_id, None)
-        self._seq_counters.pop(thread_id, None)
-        run_ids = {event["run_id"] for event in events}
-        self._idempotency = {key: value for key, value in self._idempotency.items() if key[0] not in run_ids}
-        return len(events)
+        events = self._events.get(thread_id, [])
+        removed = [event for event in events if self._tenant_visible(event)]
+        remaining = [event for event in events if not self._tenant_visible(event)]
+        if remaining:
+            self._events[thread_id] = remaining
+            self._messages[thread_id] = [event for event in remaining if event["category"] == "message"]
+            by_run: dict[str, list[dict]] = {}
+            messages_by_run: dict[str, list[dict]] = {}
+            for event in remaining:
+                by_run.setdefault(event["run_id"], []).append(event)
+                if event["category"] == "message":
+                    messages_by_run.setdefault(event["run_id"], []).append(event)
+            self._events_by_run[thread_id] = by_run
+            self._messages_by_run[thread_id] = messages_by_run
+        else:
+            self._events.pop(thread_id, None)
+            self._messages.pop(thread_id, None)
+            self._events_by_run.pop(thread_id, None)
+            self._messages_by_run.pop(thread_id, None)
+            self._seq_counters.pop(thread_id, None)
+        self._idempotency = {key: value for key, value in self._idempotency.items() if not (value.get("thread_id") == thread_id and self._tenant_visible(value))}
+        return len(removed)
 
     async def delete_by_run(self, thread_id, run_id):
         all_events = self._events.get(thread_id, [])
         if not all_events:
             return 0
-        remaining = [e for e in all_events if e["run_id"] != run_id]
+        remaining = [event for event in all_events if event["run_id"] != run_id or not self._tenant_visible(event)]
         removed = len(all_events) - len(remaining)
         self._events[thread_id] = remaining
         # Keep the message projection in lockstep (same surviving dict objects).
         self._messages[thread_id] = [e for e in remaining if e["category"] == "message"]
-        # Drop the deleted run from the run-keyed projections.
-        self._events_by_run.get(thread_id, {}).pop(run_id, None)
-        self._messages_by_run.get(thread_id, {}).pop(run_id, None)
-        self._idempotency = {key: value for key, value in self._idempotency.items() if key[0] != run_id}
+        # Rebuild the run projection because another tenant can legitimately
+        # retain events for the same public run identifier in migration tests.
+        retained_for_run = [event for event in remaining if event["run_id"] == run_id]
+        if retained_for_run:
+            self._events_by_run.setdefault(thread_id, {})[run_id] = retained_for_run
+            self._messages_by_run.setdefault(thread_id, {})[run_id] = [event for event in retained_for_run if event["category"] == "message"]
+        else:
+            self._events_by_run.get(thread_id, {}).pop(run_id, None)
+            self._messages_by_run.get(thread_id, {}).pop(run_id, None)
+        self._idempotency = {key: value for key, value in self._idempotency.items() if not (key[0] == run_id and self._tenant_visible(value))}
         return removed

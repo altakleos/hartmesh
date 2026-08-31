@@ -19,6 +19,7 @@ import os
 import threading
 import time
 import uuid
+from types import MappingProxyType
 
 import pytest
 
@@ -31,8 +32,13 @@ from deerflow.community.aio_sandbox.ownership import (
     make_sandbox_ownership_store,
     resolve_ownership_config,
 )
+from deerflow.community.aio_sandbox.ownership.factory import (
+    resolve_ownership_key_prefix,
+)
+from deerflow.config.deployment_config import DeploymentConfig
 from deerflow.config.sandbox_config import SandboxOwnershipConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig
+from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
 
 REDIS_TEST_URL = os.environ.get("DEER_FLOW_TEST_REDIS_URL", "redis://localhost:6379/15")
 
@@ -443,6 +449,32 @@ def test_ownership_key_prefix_env_overrides_config(
     )
 
     assert captured["key_prefix"] == "from-env"
+
+
+def test_ownership_prefix_is_derived_from_server_tenant_namespace() -> None:
+    identity = TenantIdentityV1.resolve(
+        deployment_config=DeploymentConfig(tenant_id="tenant-a"),
+        environ=MappingProxyType({}),
+    )
+    config = SandboxOwnershipConfig(type="redis")
+
+    assert resolve_ownership_key_prefix(
+        config,
+        tenant_namespace=identity.namespace(TenantSubsystem.REDIS),
+    ) == (f"{identity.namespace(TenantSubsystem.REDIS).key_prefix}deerflow:sandbox:owner")
+
+
+def test_ownership_prefix_rejects_conflicting_explicit_value() -> None:
+    identity = TenantIdentityV1.resolve(
+        deployment_config=DeploymentConfig(tenant_id="tenant-a"),
+        environ=MappingProxyType({}),
+    )
+
+    with pytest.raises(ValueError, match="sandbox.ownership.key_prefix"):
+        resolve_ownership_key_prefix(
+            SandboxOwnershipConfig(type="redis", key_prefix="another-tenant"),
+            tenant_namespace=identity.namespace(TenantSubsystem.REDIS),
+        )
 
 
 # ── Redis-specific: failure surfaces as OwnershipBackendError ───────────────

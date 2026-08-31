@@ -25,9 +25,12 @@ from deerflow.runtime.subagent_snapshot import (
     resolved_subagent_definition,
     snapshot_effective_subagents,
 )
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import SkillCategory
 from deerflow.subagents import registry
+
+_TEST_TENANT = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
 
 
 def _definition(name: str, *, prompt: str):
@@ -774,6 +777,7 @@ def _persisted_accepted_row(catalog: ResolvedSubagentCatalogV1) -> dict[str, obj
         execution_options={},
         extension_generation=1,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+        tenant=_TEST_TENANT,
     )
     return {**accepted.to_persisted(), "thread_id": accepted.thread_id}
 

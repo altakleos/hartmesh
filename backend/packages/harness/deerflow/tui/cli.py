@@ -224,6 +224,10 @@ def _run_overrides(plan: LaunchPlan) -> dict[str, int]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "deployment":
+        from deerflow.deployment.cli import main as deployment_main
+
+        return deployment_main(argv[1:])
     if argv and argv[0] == "extensions":
         from deerflow.extensions.cli import main as extensions_main
 
