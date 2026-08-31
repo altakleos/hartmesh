@@ -283,6 +283,69 @@ def test_invocation_observation_opts_into_independent_receipt_paging() -> None:
     assert response.json()["tool_receipts"]["evidence_status"] == "available"
 
 
+def test_invocation_observation_opts_into_independent_mcp_task_paging() -> None:
+    page = {
+        "items": [
+            {
+                "task_id": "task-1",
+                "lineage_digest": "a" * 64,
+                "submitting_task_id": "run-1",
+                "receipt_id": "tr_" + "b" * 64,
+                "server_name": "reports",
+                "tool_name": "submit_report",
+                "status": "completed",
+                "safe_terminal_code": None,
+                "notification_run_id": "run-notification",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:01:00+00:00",
+                "completed_at": "2026-01-01T00:01:00+00:00",
+            }
+        ],
+        "next_cursor": "mtc1.next",
+        "pruning_status": "not_pruned",
+    }
+
+    class Adapter:
+        async def observe(self, query):
+            assert query == InvocationQuery(
+                run_id="run-1",
+                limit=20,
+                include_mcp_tasks=True,
+                mcp_task_cursor="mtc1.opaque",
+                mcp_task_limit=7,
+            )
+            return InvocationObservation(
+                run_id="run-1",
+                thread_id="thread-1",
+                status="running",
+                state_version=2,
+                snapshots=(),
+                events=(),
+                next_cursor="lc1.Mg",
+                minimum_available_cursor="lc1.MA",
+                read_fence_cursor="lc1.Mg",
+                mcp_tasks=page,
+            )
+
+    app = make_authed_test_app()
+    app.include_router(runtime_api.router)
+    app.dependency_overrides[runtime_api.get_runtime_api] = lambda: Adapter()
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/runtime/v1/invocations/run-1",
+            params={
+                "limit": 20,
+                "include_mcp_tasks": "true",
+                "mcp_task_cursor": "mtc1.opaque",
+                "mcp_task_limit": 7,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["mcp_tasks"] == page
+
+
 @pytest.mark.parametrize(
     "query",
     [

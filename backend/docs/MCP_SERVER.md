@@ -246,6 +246,8 @@ the server's raw names, before DeerFlow adds any `<server_name>_` prefix:
       "enabled": true,
       "type": "http",
       "url": "https://reports.example.com/mcp",
+      "credential_binding_id": "reports-production",
+      "credential_version": 1,
       "session_init_timeout": 60,
       "tool_call_timeout": 60,
       "task_toolsets": [
@@ -275,8 +277,8 @@ are never parsed as a task protocol:
   actual terminal status: `cancelled`, `completed`, or `failed`.
 
 For the status tool, `isError: true` means that the status call itself failed;
-DeerFlow records a bounded snippet of its first text content block and retries
-with capped exponential backoff. It does not infer that the remote task failed,
+DeerFlow replaces provider text with a stable safe error code and retries with
+capped exponential backoff. It does not infer that the remote task failed,
 because MCP tool errors do not distinguish transient from permanent conditions.
 A server must report a permanent remote-task failure through a normal tool
 result (`isError: false` or omitted) whose `structuredContent` contains
@@ -303,7 +305,61 @@ Only submit remains in the Agent's normal tool list. Status and cancel are
 runtime-internal. Query the current thread through:
 
 - `GET /api/threads/{thread_id}/mcp-tasks`
+- `POST /api/threads/{thread_id}/mcp-tasks`
 - `GET /api/threads/{thread_id}/mcp-tasks/{task_id}`
+
+The Agent-facing submit wrapper creates `agent_tool` lineage. It requires the
+currently active durable `started` tool receipt and the parent invocation's
+accepted tenant, authenticated principal, run, lead-or-frozen-subagent task,
+agent revision, assembly, catalog/definition, extension generation/manifest,
+and Origin commitments. If any anchor is missing or disagrees, submission fails
+with `mcp_task_lineage_unavailable` before the MCP server is called.
+
+Authenticated callers can instead create a `standalone_api` task with the POST
+route. Its body contains `server_name`, configured task-toolset `task_name`,
+`arguments`, and an `idempotency_key`; unknown fields are ignored. Tenant,
+principal reference, lineage, parent IDs, accepted evidence, tool name, and
+credential selector are always server-derived. Standalone lineage has null parent
+run/task/receipt fields rather than invented invocation IDs. Replaying the same
+key and request returns the same task and lineage; reusing it for different input
+fails before another remote submit.
+
+Both submission paths traverse configured compatibility and required MCP call
+preparation. Standalone requests intentionally have no accepted Agent invocation
+or tool-authorization receipt, so a deployment that requires those facts fails a
+standalone submit closed before network dispatch instead of bypassing the required
+capability. Agent submissions supply the accepted runtime and receipt normally.
+
+List/detail responses return a bounded lineage summary. Detail responses include
+`links.parent_run_id` and `links.notification_run_id` only when the caller can
+also observe those exact runs. A caller authorized for the task but not a linked
+run still receives the task with that link omitted, so the API does not reveal
+whether an inaccessible run exists. The parent runtime endpoint can opt into the
+inverse indexed page with
+`GET /api/runtime/v1/invocations/{run_id}?include_mcp_tasks=true`; its independent
+`mcp_task_limit` is 1–100 and `mcp_task_cursor` is bound to the tenant, owner, and
+parent run.
+
+Lineage is immutable after insertion. Poll, cancellation, recovery, result, and
+notification updates mutate lifecycle columns only. Parent-run cancellation does
+not request remote-task cancellation; use the task cancel route or task management
+tool explicitly. The first task cancellation intent separately records a
+tenant-scoped pseudonymous actor reference and the fixed `user_api` or `agent_tool`
+reason code; retries preserve that original attribution. A completion
+notification is a new accepted invocation, not a continuation of the parent. Its
+stable admission key commits to tenant, task, event version, and notification
+kind, while its accepted Origin contains only the task/lineage/parent-receipt and
+result digest/status references. Raw task results remain outside that Origin.
+
+MCP task lineage records who submitted a task and how its completion was correlated. It does not guarantee exactly-once execution by the remote MCP server.
+
+The schema writer marker also fences rollback. Before any lineage-v2 task has
+been written, revision 0026 may downgrade while leaving its additive nullable
+columns and tenant constraints in place and restoring the predecessor
+user/server/remote-task uniqueness rule. Once a v2 row exists, the downgrade
+aborts with `mcp_task_schema_writer_rollback_blocked`; a pre-0026 binary then
+rejects the unknown database revision at startup instead of mutating newer task
+rows.
 
 Task toolsets require `database.backend: sqlite` or `postgres`; startup fails
 instead of falling back to a synchronous submit when persistence or the task
@@ -312,16 +368,45 @@ the task alive and recognize its ID after DeerFlow reconnects. A stdio server
 must therefore persist its own tasks; multi-instance deployments should
 normally use an independently running HTTP/SSE service.
 
-Server-level OAuth works during background polling and refreshes normally.
-Request-scoped secrets from a particular Agent run are not durable task
-credentials and are unavailable to later background polls; use server-level
-authentication for a task toolset. Restart DeerFlow after changing
+Configured OAuth, per-user authentication, and static server authentication work
+during background polling under their existing policies. Request-scoped secrets
+from a particular Agent run are not durable task credentials and are unavailable
+to later polls. `credential_binding_id` is an optional non-secret stable name for
+the configured binding; `credential_version` defaults to `1` and should be
+incremented when an older binding must no longer satisfy recovery. Lineage stores
+only that numeric version and a tenant/principal/server/binding/version commitment. It never stores the
+binding ID, token, key, header, environment variable name, scope, refresh state,
+or failure text. If the current binding/version does not reproduce the stored
+commitment after restart, status and cancellation fail safely with
+`mcp_task_credential_binding_unavailable` rather than selecting another identity.
+Restart DeerFlow after changing
 `mcp_tasks`, `task_toolsets`, `mcpInterceptors`, or any connection,
 authentication, transport, or timeout setting on a task-enabled server.
 DeerFlow rejects task-tool reloads that no longer match the Gateway's startup
 snapshot instead of discovering tools with new settings while the background
 poller still calls the old endpoint. Agent-facing description/routing changes
 and changes to servers without task toolsets remain hot-reloadable.
+
+### Operator correlation and troubleshooting
+
+Start with the task detail route and record its safe task ID plus lineage digest.
+When authorized, follow `links.parent_run_id` to the parent invocation and request
+`include_tool_receipts=true`; the lineage's `parent_tool_receipt_id` identifies the
+exact submit attempt. Request `include_mcp_tasks=true` on that parent to verify the
+inverse child page. After a notification is admitted, follow
+`links.notification_run_id` and inspect its accepted Origin references for the
+same task ID, lineage digest, parent receipt, event version, result digest/status,
+and notification kind.
+
+`legacy_unavailable` means the task predates durable lineage; do not fabricate a
+parent. `mcp_task_tenant_mismatch` indicates a process/schema binding mismatch.
+`mcp_task_credential_binding_unavailable` means the configured credential selector
+or version drifted and requires an operator decision; do not rotate silently and
+claim the old lineage. `mcp_task_notification_lineage_conflict` means a stable
+notification admission key was replayed with different source evidence. Logs and
+support bundles intentionally contain safe IDs, digest prefixes, and stable codes,
+not MCP arguments, results, remote handles, credentials, principal identities, or
+provider exception text.
 
 ## OAuth Support (HTTP/SSE MCP Servers)
 

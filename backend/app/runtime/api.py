@@ -181,6 +181,9 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                         include_tool_receipts=request.include_tool_receipts,
                         tool_receipt_cursor=request.tool_receipt_cursor,
                         tool_receipt_limit=request.tool_receipt_limit,
+                        include_mcp_tasks=request.include_mcp_tasks,
+                        mcp_task_cursor=request.mcp_task_cursor,
+                        mcp_task_limit=request.mcp_task_limit,
                     )
                 )
                 thread_id = None
@@ -300,6 +303,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                 read_fence_cursor=result.page.read_fence_cursor,
                 summaries=summaries,
                 tool_receipts=(result.page.tool_receipts.to_dict() if result.page.tool_receipts is not None else None),
+                mcp_tasks=(dict(result.mcp_tasks) if result.mcp_tasks is not None else None),
             )
         except (KeyError, TypeError, ValueError):
             return unexpected_adapter_failure("observe", exc_info=False)

@@ -54,6 +54,7 @@ _SUBAGENT_CATALOG_FIELDS = (
 )
 MAX_OBSERVATION_PAGE_SIZE = 500
 MAX_TOOL_RECEIPT_PAGE_SIZE = 100
+MAX_MCP_TASK_PAGE_SIZE = 100
 MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES = 4 * 1024
 MAX_OBSERVATION_PAYLOAD_BYTES = 12 * 1024 * 1024
 _SAFE_TOOL_RECEIPT_ERROR_CODES = frozenset(
@@ -432,6 +433,7 @@ class InvocationQuery(_Record):
 
     ``cursor`` is opaque and ``include_snapshot`` controls snapshot inclusion;
     events remain ordered after the cursor through the adapter's read fence.
+    Tool receipts and MCP child tasks use independent opt-in bounded pages.
     """
 
     KIND: ClassVar[str] = "invocation.query"
@@ -442,6 +444,9 @@ class InvocationQuery(_Record):
     include_tool_receipts: bool = False
     tool_receipt_cursor: str | None = None
     tool_receipt_limit: int = 100
+    include_mcp_tasks: bool = False
+    mcp_task_cursor: str | None = None
+    mcp_task_limit: int = 100
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["invocation.query"] = field(default=KIND, init=False)
 
@@ -459,6 +464,13 @@ class InvocationQuery(_Record):
             raise ValueError("tool_receipt_cursor requires include_tool_receipts")
         if type(self.tool_receipt_limit) is not int or not 1 <= self.tool_receipt_limit <= MAX_TOOL_RECEIPT_PAGE_SIZE:
             raise ValueError("tool_receipt_limit must be between 1 and 100")
+        if type(self.include_mcp_tasks) is not bool:
+            raise TypeError("include_mcp_tasks must be a boolean")
+        _optional_nonempty(self.mcp_task_cursor, "mcp_task_cursor")
+        if self.mcp_task_cursor is not None and not self.include_mcp_tasks:
+            raise ValueError("mcp_task_cursor requires include_mcp_tasks")
+        if type(self.mcp_task_limit) is not int or not 1 <= self.mcp_task_limit <= MAX_MCP_TASK_PAGE_SIZE:
+            raise ValueError("mcp_task_limit must be between 1 and 100")
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> Self:
@@ -471,7 +483,14 @@ class InvocationQuery(_Record):
         missing = expected - set(payload)
         if unknown:
             raise ValueError(f"unknown fields for {cls.KIND}: {', '.join(sorted(unknown))}")
-        optional = {"include_tool_receipts", "tool_receipt_cursor", "tool_receipt_limit"}
+        optional = {
+            "include_tool_receipts",
+            "tool_receipt_cursor",
+            "tool_receipt_limit",
+            "include_mcp_tasks",
+            "mcp_task_cursor",
+            "mcp_task_limit",
+        }
         if missing - optional:
             raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(missing - optional))}")
         if payload["api_version"] != API_VERSION or payload["kind"] != cls.KIND:
@@ -482,6 +501,9 @@ class InvocationQuery(_Record):
         values.setdefault("include_tool_receipts", False)
         values.setdefault("tool_receipt_cursor", None)
         values.setdefault("tool_receipt_limit", 100)
+        values.setdefault("include_mcp_tasks", False)
+        values.setdefault("mcp_task_cursor", None)
+        values.setdefault("mcp_task_limit", 100)
         return cls(**values)
 
 
@@ -853,6 +875,97 @@ def _tool_receipt_page(value: Any) -> Mapping[str, ImmutableJsonValue]:
     return frozen
 
 
+_MCP_TASK_PAGE_FIELDS = {"items", "next_cursor", "pruning_status"}
+_MCP_TASK_ITEM_FIELDS = {
+    "task_id",
+    "lineage_digest",
+    "submitting_task_id",
+    "receipt_id",
+    "server_name",
+    "tool_name",
+    "status",
+    "safe_terminal_code",
+    "notification_run_id",
+    "created_at",
+    "updated_at",
+    "completed_at",
+}
+_MCP_TASK_STATUSES = frozenset(
+    {
+        "submitted",
+        "working",
+        "input_required",
+        "completed",
+        "failed",
+        "cancelled",
+    }
+)
+_MCP_TASK_TERMINAL_CODES = frozenset(
+    {
+        "remote_failed",
+        "cancelled",
+        "mcp_task_credential_binding_unavailable",
+        "mcp_task_tenant_mismatch",
+    }
+)
+
+
+def _mcp_task_page(value: Any) -> Mapping[str, ImmutableJsonValue]:
+    if not isinstance(value, Mapping) or set(value) != _MCP_TASK_PAGE_FIELDS:
+        raise ValueError("MCP task page fields are invalid")
+    items = value.get("items")
+    if not isinstance(items, (list, tuple)) or len(items) > MAX_MCP_TASK_PAGE_SIZE:
+        raise ValueError("MCP task items must be a list of at most 100")
+    for item in items:
+        if not isinstance(item, Mapping) or set(item) != _MCP_TASK_ITEM_FIELDS:
+            raise ValueError("MCP task item fields are invalid")
+        for name, maximum in (
+            ("task_id", 64),
+            ("submitting_task_id", 128),
+            ("notification_run_id", 64),
+        ):
+            identifier = item.get(name)
+            if identifier is None and name != "task_id":
+                continue
+            if not isinstance(identifier, str) or not identifier or len(identifier.encode("utf-8")) > maximum:
+                raise ValueError(f"MCP task {name} is invalid")
+        lineage_digest = item.get("lineage_digest")
+        if not isinstance(lineage_digest, str) or _SHA256_RE.fullmatch(lineage_digest) is None:
+            raise ValueError("MCP task lineage digest is invalid")
+        receipt_id = item.get("receipt_id")
+        if receipt_id is not None and (not isinstance(receipt_id, str) or _RECEIPT_ID_RE.fullmatch(receipt_id) is None):
+            raise ValueError("MCP task receipt id is invalid")
+        for name in ("server_name", "tool_name"):
+            safe_name = item.get(name)
+            if not isinstance(safe_name, str) or len(safe_name.encode("utf-8")) > 128 or _TOOL_NAME_RE.fullmatch(safe_name) is None:
+                raise ValueError(f"MCP task {name} is invalid")
+        if item.get("status") not in _MCP_TASK_STATUSES:
+            raise ValueError("MCP task status is invalid")
+        terminal_code = item.get("safe_terminal_code")
+        if terminal_code is not None and terminal_code not in _MCP_TASK_TERMINAL_CODES:
+            raise ValueError("MCP task safe terminal code is invalid")
+        for name in ("created_at", "updated_at", "completed_at"):
+            timestamp = item.get(name)
+            if timestamp is None and name == "completed_at":
+                continue
+            if not isinstance(timestamp, str) or len(timestamp.encode("utf-8")) > 64:
+                raise ValueError(f"MCP task {name} is invalid")
+            try:
+                parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"MCP task {name} is invalid") from exc
+            if parsed.tzinfo is None:
+                raise ValueError(f"MCP task {name} is invalid")
+    next_cursor = value.get("next_cursor")
+    if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor or len(next_cursor.encode("utf-8")) > 4096):
+        raise ValueError("MCP task next cursor is invalid")
+    if value.get("pruning_status") != "not_pruned":
+        raise ValueError("MCP task pruning status is invalid")
+    frozen = _json_value(value, object_only=True)
+    assert isinstance(frozen, Mapping)
+    return frozen
+
+
 def _fixed_public_rows(
     rows: Any,
     *,
@@ -932,6 +1045,7 @@ class InvocationObservation(_Record):
     read_fence_cursor: str
     summaries: tuple[InvocationSummaryV1, ...] = ()
     tool_receipts: Mapping[str, ImmutableJsonValue] | None = None
+    mcp_tasks: Mapping[str, ImmutableJsonValue] | None = None
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["invocation.observation"] = field(default=KIND, init=False)
 
@@ -989,6 +1103,10 @@ class InvocationObservation(_Record):
             if self.run_id is None:
                 raise ValueError("tool receipts require a singular invocation observation")
             object.__setattr__(self, "tool_receipts", _tool_receipt_page(self.tool_receipts))
+        if self.mcp_tasks is not None:
+            if self.run_id is None:
+                raise ValueError("MCP tasks require a singular invocation observation")
+            object.__setattr__(self, "mcp_tasks", _mcp_task_page(self.mcp_tasks))
         encoded = json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
         if len(encoded) > MAX_OBSERVATION_PAYLOAD_BYTES:
             raise ValueError("an invocation observation is limited to 12 MiB canonical JSON")
@@ -1004,7 +1122,7 @@ class InvocationObservation(_Record):
         missing = expected - set(payload)
         if unknown:
             raise ValueError(f"unknown fields for {cls.KIND}: {', '.join(sorted(unknown))}")
-        optional = {"summaries", "tool_receipts"}
+        optional = {"summaries", "tool_receipts", "mcp_tasks"}
         if missing - optional:
             raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(missing - optional))}")
         if payload["api_version"] != API_VERSION:
@@ -1016,6 +1134,7 @@ class InvocationObservation(_Record):
         values.pop("kind")
         values.setdefault("summaries", ())
         values.setdefault("tool_receipts", None)
+        values.setdefault("mcp_tasks", None)
         return cls._from_wire(values)
 
     @classmethod
@@ -1253,6 +1372,7 @@ __all__ = [
     "ImmutableJsonValue",
     "JsonValue",
     "MAX_OBSERVATION_PAGE_SIZE",
+    "MAX_MCP_TASK_PAGE_SIZE",
     "MAX_TOOL_RECEIPT_PAGE_SIZE",
     "MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES",
     "MAX_OBSERVATION_PAYLOAD_BYTES",

@@ -30,6 +30,69 @@ def test_runtime_api_records_are_versioned_and_frozen() -> None:
         request.thread_id = "forged"  # type: ignore[misc]
 
 
+def test_invocation_query_and_observation_bound_optional_mcp_task_lineage_page() -> None:
+    from deerflow_runtime_api import InvocationObservation, InvocationQuery
+
+    query = InvocationQuery(
+        run_id="run-1",
+        include_mcp_tasks=True,
+        mcp_task_cursor="mtc1.opaque",
+        mcp_task_limit=7,
+    )
+    assert InvocationQuery.from_dict(query.to_dict()) == query
+    with pytest.raises(ValueError, match="requires include_mcp_tasks"):
+        InvocationQuery(run_id="run-1", mcp_task_cursor="mtc1.opaque")
+
+    page = {
+        "items": [
+            {
+                "task_id": "task-1",
+                "lineage_digest": "a" * 64,
+                "submitting_task_id": "run-1",
+                "receipt_id": "tr_" + "b" * 64,
+                "server_name": "reports",
+                "tool_name": "submit_report",
+                "status": "completed",
+                "safe_terminal_code": None,
+                "notification_run_id": "run-notification",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:01:00+00:00",
+                "completed_at": "2026-01-01T00:01:00+00:00",
+            }
+        ],
+        "next_cursor": None,
+        "pruning_status": "not_pruned",
+    }
+    observation = InvocationObservation(
+        run_id="run-1",
+        thread_id="thread-1",
+        status="success",
+        state_version=2,
+        snapshots=(),
+        events=(),
+        next_cursor="lc1.Mg",
+        minimum_available_cursor="lc1.MA",
+        read_fence_cursor="lc1.Mg",
+        mcp_tasks=page,
+    )
+    assert observation.to_dict()["mcp_tasks"] == page
+    assert InvocationObservation.from_dict(observation.to_dict()) == observation
+
+    with pytest.raises(ValueError, match="singular invocation"):
+        InvocationObservation(
+            run_id=None,
+            thread_id="thread-1",
+            status=None,
+            state_version=None,
+            snapshots=(),
+            events=(),
+            next_cursor="lc1.Mg",
+            minimum_available_cursor="lc1.MA",
+            read_fence_cursor="lc1.Mg",
+            mcp_tasks=page,
+        )
+
+
 def test_runtime_api_nested_values_are_immutable_defensive_snapshots() -> None:
     from deerflow_runtime_api import (
         GraphInputV1,

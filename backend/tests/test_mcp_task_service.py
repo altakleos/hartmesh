@@ -5,21 +5,77 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 
 import app.mcp_tasks.service as service_module
 from app.mcp_tasks.errors import PermanentNotificationError
 from app.mcp_tasks.service import McpTaskService
 from deerflow.mcp.tasks import (
     McpTaskDriverRegistry,
+    McpTaskLineageBinder,
+    McpTaskLineageError,
     TaskSnapshot,
     TaskStatus,
     TaskSubmission,
     TaskSubmitRequest,
 )
 from deerflow.mcp.tasks.ordinary import McpTaskProtocolError
-from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
+from deerflow.persistence.mcp_tasks import (
+    DuplicateMcpRemoteTaskError,
+    DuplicateMcpTaskIdError,
+    DuplicateMcpTaskLineageError,
+)
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+from deerflow.runtime.tool_evidence import build_request_projection
+
+_TENANT = TenantIdentityV1.from_canonical_id("test").to_persisted_reference()
+
+
+def _lineage(*, user_id: str = "user-1", arguments=None):
+    arguments = dict(arguments or {})
+    return McpTaskLineageBinder().for_standalone_api(
+        tenant=_TENANT,
+        principal_identity=InvocationIdentityV1(
+            effective_subject=EffectiveSubjectV1(
+                kind="human",
+                subject_id=user_id,
+                role="member",
+            )
+        ),
+        extension_generation=1,
+        extension_manifest_digest="a" * 64,
+        accepted_origin_digest="b" * 64,
+        server_name="reports",
+        tool_name="submit",
+        safe_request_projection=build_request_projection("submit", arguments),
+        credential_selector=None,
+    )
+
+
+def _request(
+    *,
+    user_id: str = "user-1",
+    thread_id: str = "thread-1",
+    arguments=None,
+    driver_data=None,
+    local_task_id: str | None = None,
+) -> TaskSubmitRequest:
+    arguments = dict(arguments or {})
+    return TaskSubmitRequest(
+        user_id=user_id,
+        thread_id=thread_id,
+        lineage=_lineage(user_id=user_id, arguments=arguments),
+        task_name="Generate report",
+        arguments=arguments,
+        driver_data=dict(driver_data or {}),
+        local_task_id=local_task_id,
+    )
+
+
+def _repo(**values):
+    return SimpleNamespace(tenant=_TENANT, **values)
 
 
 class FakeRepository:
@@ -29,10 +85,22 @@ class FakeRepository:
         self.applied = []
         self.released = []
         self.created = []
+        self.tenant = _TENANT
+
+    async def get_by_lineage_digest(self, *_args, **_kwargs):
+        return None
+
+    async def get(self, *_args, **_kwargs):
+        return None
 
     async def create(self, **kwargs):
         self.created.append(kwargs)
-        return {"id": kwargs["task_id"], **kwargs}
+        return {
+            "id": kwargs["task_id"],
+            **kwargs,
+            "server_name": kwargs["lineage"].mcp_server_name,
+            "lineage": kwargs["lineage"].to_persisted_json(),
+        }
 
     async def claim_due_tasks(self, **_kwargs):
         if self.claimed:
@@ -77,6 +145,44 @@ class DuplicateCreateRepository(FakeRepository):
     async def create(self, **kwargs):
         self.created.append(kwargs)
         raise DuplicateMcpRemoteTaskError("already tracked")
+
+
+class RacyLineageRepository(FakeRepository):
+    def __init__(self):
+        super().__init__()
+        self.persisted = None
+        self.duplicate_observed = False
+
+    async def get_by_lineage_digest(self, *_args, **_kwargs):
+        return self.persisted if self.duplicate_observed else None
+
+    async def create(self, **kwargs):
+        self.created.append(kwargs)
+        if self.persisted is None:
+            self.persisted = {
+                "id": kwargs["task_id"],
+                **kwargs,
+                "server_name": kwargs["lineage"].mcp_server_name,
+                "lineage": kwargs["lineage"].to_persisted_json(),
+            }
+            return self.persisted
+        self.duplicate_observed = True
+        raise DuplicateMcpTaskLineageError("already tracked")
+
+
+class RacyTaskIdRepository(RacyLineageRepository):
+    async def create(self, **kwargs):
+        self.created.append(kwargs)
+        if self.persisted is None:
+            self.persisted = {
+                "id": kwargs["task_id"],
+                **kwargs,
+                "server_name": kwargs["lineage"].mcp_server_name,
+                "lineage": kwargs["lineage"].to_persisted_json(),
+            }
+            return self.persisted
+        self.duplicate_observed = True
+        raise DuplicateMcpTaskIdError("already tracked")
 
 
 class FakeDriver:
@@ -191,13 +297,7 @@ async def test_submit_persists_remote_handle_before_returning():
         lease_seconds=120,
         max_concurrent_polls=3,
     )
-    request = TaskSubmitRequest(
-        user_id="user-1",
-        thread_id="thread-1",
-        run_id="run-1",
-        tool_call_id="call-1",
-        server_name="reports",
-        task_name="Generate report",
+    request = _request(
         arguments={"topic": "MCP"},
         driver_data={"submit_tool": "submit"},
     )
@@ -230,13 +330,7 @@ async def test_submit_cancels_remote_task_when_persistence_fails():
         lease_seconds=120,
         max_concurrent_polls=3,
     )
-    request = TaskSubmitRequest(
-        user_id="user-1",
-        thread_id="thread-1",
-        run_id="run-1",
-        tool_call_id="call-1",
-        server_name="reports",
-        task_name="Generate report",
+    request = _request(
         arguments={"topic": "MCP"},
         driver_data={"submit_tool": "submit"},
         local_task_id="task-1",
@@ -275,13 +369,7 @@ async def test_submit_cancellation_during_persistence_cancels_remote_task():
         lease_seconds=120,
         max_concurrent_polls=3,
     )
-    request = TaskSubmitRequest(
-        user_id="user-1",
-        thread_id="thread-1",
-        run_id="run-1",
-        tool_call_id="call-1",
-        server_name="reports",
-        task_name="Generate report",
+    request = _request(
         arguments={"topic": "MCP"},
         local_task_id="task-1",
     )
@@ -318,13 +406,7 @@ async def test_submit_repeated_cancellation_does_not_interrupt_compensation():
         lease_seconds=120,
         max_concurrent_polls=3,
     )
-    request = TaskSubmitRequest(
-        user_id="user-1",
-        thread_id="thread-1",
-        run_id="run-1",
-        tool_call_id="call-1",
-        server_name="reports",
-        task_name="Generate report",
+    request = _request(
         arguments={"topic": "MCP"},
         local_task_id="task-1",
     )
@@ -365,13 +447,7 @@ async def test_submit_stops_waiting_for_hung_compensation_without_cancelling_it(
         lease_seconds=120,
         max_concurrent_polls=3,
     )
-    request = TaskSubmitRequest(
-        user_id="user-1",
-        thread_id="thread-1",
-        run_id="run-1",
-        tool_call_id="call-1",
-        server_name="reports",
-        task_name="Generate report",
+    request = _request(
         arguments={"topic": "MCP"},
         local_task_id="task-1",
     )
@@ -415,14 +491,7 @@ async def test_submit_cancellation_preserves_cancelled_error_when_compensation_f
         lease_seconds=120,
         max_concurrent_polls=3,
     )
-    request = TaskSubmitRequest(
-        user_id="user-1",
-        thread_id="thread-1",
-        run_id="run-1",
-        tool_call_id="call-1",
-        server_name="reports",
-        task_name="Generate report",
-        arguments={},
+    request = _request(
         local_task_id="task-1",
     )
 
@@ -435,7 +504,8 @@ async def test_submit_cancellation_preserves_cancelled_error_when_compensation_f
 
     assert len(driver.cancel_calls) == 1
     assert "Failed to cancel untracked MCP task" in caplog.text
-    assert "cancel unavailable" in caplog.text
+    assert "mcp_task_compensation_failed" in caplog.text
+    assert "cancel unavailable" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -461,14 +531,7 @@ async def test_submit_cancels_remote_task_when_its_id_exceeds_storage_limit():
     with pytest.raises(McpTaskProtocolError, match="remote_task_id.*255"):
         await service.submit(
             driver_name="fake",
-            request=TaskSubmitRequest(
-                user_id="user-1",
-                thread_id="thread-1",
-                run_id="run-1",
-                tool_call_id="call-1",
-                server_name="reports",
-                task_name="Generate report",
-                arguments={},
+            request=_request(
                 local_task_id="task-1",
             ),
         )
@@ -501,14 +564,8 @@ async def test_duplicate_remote_handle_is_rejected_without_cancelling_existing_t
     with pytest.raises(DuplicateMcpRemoteTaskError, match="already tracked"):
         await service.submit(
             driver_name="fake",
-            request=TaskSubmitRequest(
-                user_id="user-1",
+            request=_request(
                 thread_id="thread-2",
-                run_id="run-2",
-                tool_call_id="call-2",
-                server_name="reports",
-                task_name="Generate report",
-                arguments={},
             ),
         )
 
@@ -516,9 +573,110 @@ async def test_duplicate_remote_handle_is_rejected_without_cancelling_existing_t
 
 
 @pytest.mark.asyncio
+async def test_racing_identical_lineage_replay_returns_the_committed_task() -> None:
+    repo = RacyLineageRepository()
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="same-idempotent-remote",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    request = _request(arguments={"topic": "MCP"})
+
+    first = await service.submit(driver_name="fake", request=request)
+    second = await service.submit(driver_name="fake", request=request)
+
+    assert second == first
+    assert len(driver.submit_calls) == 2
+    assert driver.cancel_calls == []
+
+
+@pytest.mark.asyncio
+async def test_racing_identical_local_id_replay_returns_the_committed_task() -> None:
+    repo = RacyTaskIdRepository()
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="same-idempotent-remote",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    request = _request(arguments={"topic": "MCP"})
+
+    first = await service.submit(driver_name="fake", request=request)
+    second = await service.submit(driver_name="fake", request=request)
+
+    assert second == first
+    assert len(driver.submit_calls) == 2
+    assert driver.cancel_calls == []
+
+
+@pytest.mark.asyncio
+async def test_conflicting_idempotency_replay_fails_before_remote_submit() -> None:
+    original = _request(
+        arguments={"topic": "first"},
+        local_task_id="mcp-task-stable-key",
+    )
+    conflicting = _request(
+        arguments={"topic": "different"},
+        local_task_id="mcp-task-stable-key",
+    )
+    existing = {
+        "id": "mcp-task-stable-key",
+        "user_id": original.user_id,
+        "thread_id": original.thread_id,
+        "driver_name": "fake",
+        "task_name": original.task_name,
+        "lineage": original.lineage.to_persisted_json(),
+    }
+    repo = _repo(
+        get_by_lineage_digest=AsyncMock(return_value=None),
+        get=AsyncMock(return_value=existing),
+    )
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="must-not-submit",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    with pytest.raises(McpTaskLineageError) as exc_info:
+        await service.submit(driver_name="fake", request=conflicting)
+
+    assert exc_info.value.code == "mcp_task_lineage_invalid"
+    assert driver.submit_calls == []
+
+
+@pytest.mark.asyncio
 async def test_cancel_task_persists_request_without_calling_remote():
     record = {**_claimed_row(), "cancel_requested_at": datetime.now(UTC).isoformat()}
-    repo = SimpleNamespace(
+    repo = _repo(
         request_cancel=AsyncMock(return_value=record),
         claim_cancel_requests=AsyncMock(return_value=[{**record, "cancel_attempt_count": 1}]),
         apply_cancel_snapshot=AsyncMock(return_value=True),
@@ -540,9 +698,14 @@ async def test_cancel_task_persists_request_without_calling_remote():
         task_id="task-1",
         thread_id="thread-1",
         user_id="user-1",
+        reason_code="user_api",
     )
 
     assert result == record
+    request = repo.request_cancel.await_args
+    assert request.kwargs["reason_code"] == "user_api"
+    assert len(request.kwargs["actor_ref"]) == 64
+    int(request.kwargs["actor_ref"], 16)
     assert driver.cancel_calls == []
     repo.claim_cancel_requests.assert_not_awaited()
     repo.apply_cancel_snapshot.assert_not_awaited()
@@ -553,7 +716,7 @@ async def test_cancel_task_persists_request_without_calling_remote():
 @pytest.mark.asyncio
 async def test_cancel_failure_schedules_retry_from_call_completion_time():
     record = {**_claimed_row(), "cancel_attempt_count": 1}
-    repo = SimpleNamespace(
+    repo = _repo(
         claim_cancel_requests=AsyncMock(return_value=[record]),
         release_cancel_claim=AsyncMock(return_value=True),
         claim_due_tasks=AsyncMock(return_value=[]),
@@ -588,7 +751,7 @@ async def test_cancel_recovery_failures_are_isolated_and_later_phases_continue(c
             raise RuntimeError("cancel recovery store unavailable")
         return True
 
-    repo = SimpleNamespace(
+    repo = _repo(
         claim_cancel_requests=AsyncMock(return_value=records),
         release_cancel_claim=AsyncMock(side_effect=release_cancel_claim),
         claim_due_tasks=AsyncMock(return_value=[]),
@@ -613,12 +776,13 @@ async def test_cancel_recovery_failures_are_isolated_and_later_phases_continue(c
     repo.claim_due_tasks.assert_awaited_once()
     repo.claim_notification_work.assert_awaited_once()
     assert "task-broken" in caplog.text
-    assert "cancel recovery store unavailable" in caplog.text
+    assert "mcp_task_cancel_persistence_failed" in caplog.text
+    assert "cancel recovery store unavailable" not in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_notification_delivery_waits_for_successful_agent_run():
-    repo = SimpleNamespace(
+    repo = _repo(
         mark_notification_dispatched=AsyncMock(return_value=True),
         finish_notification_run=AsyncMock(return_value=True),
         release_notification_claim=AsyncMock(return_value=True),
@@ -642,12 +806,32 @@ async def test_notification_delivery_waits_for_successful_agent_run():
         "dispatch_version": 2,
         "dispatch_attempt": 0,
         "dispatch_event": {"status": "completed"},
+        "tenant_digest": _TENANT.digest,
+        "lineage_digest": "b" * 64,
+        "parent_run_id": "run-parent",
+        "parent_tool_receipt_id": "tr_" + "c" * 64,
+        "event_fingerprint": "d" * 64,
     }
 
     await service._notify_one(claimed, now=now)
 
     repo.mark_notification_dispatched.assert_awaited_once()
     repo.finish_notification_run.assert_not_awaited()
+    source = launch.await_args.kwargs["source"]
+    assert source == {
+        "version": 1,
+        "tenant_digest": _TENANT.digest,
+        "task_id": claimed["id"],
+        "task_lineage_digest": "b" * 64,
+        "lineage_status": "legacy_unavailable",
+        "parent_run_id": "run-parent",
+        "parent_tool_receipt_id": "tr_" + "c" * 64,
+        "terminal_result_version": 2,
+        "notification_kind": "terminal",
+        "result_digest": "d" * 64,
+        "result_status": "completed",
+    }
+    assert "dispatch_attempt" not in launch.await_args.kwargs
 
     get_run.return_value = SimpleNamespace(status=RunStatus.success)
     await service._notify_one(
@@ -664,7 +848,7 @@ async def test_notification_delivery_waits_for_successful_agent_run():
 
 @pytest.mark.asyncio
 async def test_missing_dispatched_notification_run_retries_delivery():
-    repo = SimpleNamespace(
+    repo = _repo(
         finish_notification_run=AsyncMock(return_value=True),
         defer_dispatched_notification=AsyncMock(return_value=True),
     )
@@ -716,7 +900,7 @@ async def test_notification_failures_are_isolated_and_release_their_lease(caplog
             "dispatch_version": 3,
         },
     ]
-    repo = SimpleNamespace(
+    repo = _repo(
         claim_notification_work=AsyncMock(return_value=records),
         finish_notification_run=AsyncMock(return_value=True),
         defer_dispatched_notification=AsyncMock(return_value=True),
@@ -748,13 +932,14 @@ async def test_notification_failures_are_isolated_and_release_their_lease(caplog
     released = repo.release_notification_lease.await_args
     assert released.args[0] == "task-broken"
     assert released.kwargs["next_notification_at"] == now + timedelta(seconds=5)
-    assert "run store unavailable" in released.kwargs["error"]
+    assert released.kwargs["error"] == "mcp_task_notification_processing_failed"
+    assert "run store unavailable" not in caplog.text
     assert "task-broken" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_notification_busy_thread_replaces_claim_with_latest_event():
-    repo = SimpleNamespace(
+    repo = _repo(
         release_notification_claim=AsyncMock(return_value=True),
     )
     service = McpTaskService(
@@ -786,7 +971,7 @@ async def test_notification_busy_thread_replaces_claim_with_latest_event():
 
 @pytest.mark.asyncio
 async def test_notification_launch_failure_backs_off_and_replaces_with_latest_event():
-    repo = SimpleNamespace(
+    repo = _repo(
         release_notification_claim=AsyncMock(return_value=True),
     )
     service = McpTaskService(
@@ -821,7 +1006,7 @@ async def test_notification_launch_failure_backs_off_and_replaces_with_latest_ev
 
 @pytest.mark.asyncio
 async def test_permanently_rejected_notification_is_dead_lettered():
-    repo = SimpleNamespace(
+    repo = _repo(
         dead_letter_notification=AsyncMock(return_value=True),
         release_notification_claim=AsyncMock(return_value=True),
     )
@@ -851,14 +1036,14 @@ async def test_permanently_rejected_notification_is_dead_lettered():
     repo.dead_letter_notification.assert_awaited_once()
     dead_lettered = repo.dead_letter_notification.await_args.kwargs
     assert dead_lettered["dispatch_version"] == 2
-    assert "not found" in dead_lettered["error"]
+    assert dead_lettered["error"] == "mcp_task_notification_permanent_failure"
     assert dead_lettered["count_failure"] is True
     repo.release_notification_claim.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_notification_retry_budget_dead_letters_before_creating_another_run():
-    repo = SimpleNamespace(
+    repo = _repo(
         dead_letter_notification=AsyncMock(return_value=True),
     )
     launch_notification = AsyncMock()
@@ -892,12 +1077,12 @@ async def test_notification_retry_budget_dead_letters_before_creating_another_ru
     dead_lettered = repo.dead_letter_notification.await_args.kwargs
     assert dead_lettered["dispatch_version"] == 2
     assert dead_lettered["count_failure"] is False
-    assert "5 failed attempts" in dead_lettered["error"]
+    assert dead_lettered["error"] == "mcp_task_notification_retry_exhausted"
 
 
 @pytest.mark.asyncio
 async def test_dispatched_notification_retry_budget_dead_letters_before_hydrating_run():
-    repo = SimpleNamespace(
+    repo = _repo(
         dead_letter_notification=AsyncMock(return_value=True),
     )
     get_run = AsyncMock()
@@ -928,7 +1113,7 @@ async def test_dispatched_notification_retry_budget_dead_letters_before_hydratin
     dead_lettered = repo.dead_letter_notification.await_args.kwargs
     assert dead_lettered["dispatch_version"] == 2
     assert dead_lettered["count_failure"] is False
-    assert "5 failed attempts" in dead_lettered["error"]
+    assert dead_lettered["error"] == "mcp_task_notification_retry_exhausted"
 
 
 @pytest.mark.asyncio
@@ -950,13 +1135,7 @@ async def test_submit_preserves_persistence_error_when_compensation_cancel_fails
         lease_seconds=120,
         max_concurrent_polls=3,
     )
-    request = TaskSubmitRequest(
-        user_id="user-1",
-        thread_id="thread-1",
-        run_id="run-1",
-        tool_call_id="call-1",
-        server_name="reports",
-        task_name="Generate report",
+    request = _request(
         arguments={"topic": "MCP"},
         local_task_id="task-1",
     )
@@ -965,7 +1144,8 @@ async def test_submit_preserves_persistence_error_when_compensation_cancel_fails
         await service.submit(driver_name="fake", request=request)
 
     assert "Failed to cancel untracked MCP task" in caplog.text
-    assert "cancel unavailable" in caplog.text
+    assert "mcp_task_compensation_failed" in caplog.text
+    assert "cancel unavailable" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1091,6 +1271,79 @@ async def test_run_once_uses_exponential_backoff_and_caps_transient_errors():
 
 
 @pytest.mark.asyncio
+async def test_provider_failure_text_is_absent_from_logs_and_operational_state(
+    caplog,
+) -> None:
+    repo = FakeRepository([_claimed_row()])
+    registry = McpTaskDriverRegistry()
+    registry.register(
+        "fake",
+        FakeDriver(error=RuntimeError("Bearer credential-and-provider-detail")),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await service.run_once(now=datetime.now(UTC))
+
+    assert repo.released[0][1]["error"] == "mcp_task_remote_poll_failed"
+    assert "credential-and-provider-detail" not in caplog.text
+    assert "Bearer" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_provider_cannot_smuggle_failure_text_through_code_attribute(
+    caplog,
+) -> None:
+    class ProviderError(RuntimeError):
+        code = "mcp_task_Bearer-secret-provider-detail"
+
+    repo = FakeRepository([_claimed_row()])
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", FakeDriver(error=ProviderError("also-secret")))
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await service.run_once(now=datetime.now(UTC))
+
+    assert repo.released[0][1]["error"] == "mcp_task_remote_poll_failed"
+    assert "secret-provider-detail" not in caplog.text
+    assert "also-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_recovery_preserves_safe_credential_binding_failure_code() -> None:
+    repo = FakeRepository([_claimed_row()])
+    registry = McpTaskDriverRegistry()
+    registry.register(
+        "fake",
+        FakeDriver(error=McpTaskLineageError("mcp_task_credential_binding_unavailable")),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    assert repo.released[0][1]["error"] == ("mcp_task_credential_binding_unavailable")
+
+
+@pytest.mark.asyncio
 async def test_protocol_error_terminalizes_instead_of_retrying_forever():
     repo = FakeRepository([_claimed_row()])
     registry = McpTaskDriverRegistry()
@@ -1108,7 +1361,7 @@ async def test_protocol_error_terminalizes_instead_of_retrying_forever():
     assert repo.released == []
     _, applied = repo.applied[0]
     assert applied["status"] == "failed"
-    assert applied["error"] == "missing structuredContent"
+    assert applied["error"] == "mcp_task_remote_protocol_invalid"
     assert applied["next_poll_at"] is None
 
 
@@ -1130,7 +1383,7 @@ async def test_protocol_error_message_is_bounded_before_terminal_persistence():
 
     _, applied = repo.applied[0]
     assert applied["status"] == "failed"
-    assert applied["error"] == oversized_error[:4_000]
+    assert applied["error"] == "mcp_task_remote_protocol_invalid"
 
 
 @pytest.mark.asyncio
@@ -1155,18 +1408,10 @@ async def test_persisted_snapshot_errors_are_bounded_on_submit_and_poll():
 
     await submit_service.submit(
         driver_name="fake",
-        request=TaskSubmitRequest(
-            user_id="user-1",
-            thread_id="thread-1",
-            run_id="run-1",
-            tool_call_id="call-1",
-            server_name="reports",
-            task_name="Generate report",
-            arguments={},
-        ),
+        request=_request(),
     )
 
-    assert submit_repo.created[0]["error"] == oversized_error[:4_000]
+    assert submit_repo.created[0]["error"] == "mcp_task_remote_failed"
 
     poll_repo = FakeRepository([_claimed_row()])
     poll_registry = McpTaskDriverRegistry()
@@ -1185,7 +1430,36 @@ async def test_persisted_snapshot_errors_are_bounded_on_submit_and_poll():
     await poll_service.run_once(now=datetime.now(UTC))
 
     _, applied = poll_repo.applied[0]
-    assert applied["error"] == oversized_error[:4_000]
+    assert applied["error"] == "mcp_task_remote_failed"
+
+
+@pytest.mark.asyncio
+async def test_provider_snapshot_cannot_smuggle_prefixed_error_code() -> None:
+    provider_error = "mcp_task_Bearer-secret-provider-detail"
+    repo = FakeRepository()
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="remote-1",
+            snapshot=TaskSnapshot(
+                status=TaskStatus.FAILED,
+                error=provider_error,
+            ),
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.submit(driver_name="fake", request=_request())
+
+    assert repo.created[0]["error"] == "mcp_task_remote_failed"
+    assert provider_error not in str(repo.created[0])
 
 
 @pytest.mark.asyncio
@@ -1217,7 +1491,7 @@ async def test_oversized_input_required_payload_terminalizes_without_persisting_
     _, applied = repo.applied[0]
     assert applied["status"] == "failed"
     assert applied["input_required"] is None
-    assert "input_required payload exceeds the 65536-byte limit" in applied["error"]
+    assert applied["error"] == "mcp_task_remote_protocol_invalid"
     assert applied["next_poll_at"] is None
 
 
@@ -1291,7 +1565,7 @@ async def test_oversized_result_artifact_terminalizes_without_persisting_it():
     _, applied = repo.applied[0]
     assert applied["status"] == "failed"
     assert applied["result_artifact"] is None
-    assert "result_artifact payload exceeds the 65536-byte limit" in applied["error"]
+    assert applied["error"] == "mcp_task_remote_protocol_invalid"
 
 
 @pytest.mark.asyncio
@@ -1322,7 +1596,7 @@ async def test_non_json_numeric_result_is_a_permanent_protocol_failure():
     assert repo.released == []
     _, applied = repo.applied[0]
     assert applied["status"] == "failed"
-    assert "not valid JSON" in applied["error"]
+    assert applied["error"] == "mcp_task_remote_protocol_invalid"
 
 
 @pytest.mark.asyncio
@@ -1343,8 +1617,8 @@ async def test_run_once_releases_claim_when_driver_is_missing_or_fails():
     await service.run_once(now=now)
 
     released = {task_id: update for task_id, update in repo.released}
-    assert "No MCP task driver registered" in released["task-1"]["error"]
-    assert released["task-2"]["error"] == "network down"
+    assert released["task-1"]["error"] == "mcp_task_driver_unavailable"
+    assert released["task-2"]["error"] == "mcp_task_remote_poll_failed"
     assert released["task-1"]["next_poll_at"] == now + timedelta(seconds=5)
     assert released["task-2"]["next_poll_at"] > now + timedelta(seconds=5)
 
@@ -1374,7 +1648,8 @@ async def test_run_once_isolates_unexpected_failure_to_its_claimed_task(caplog):
 
     assert [task_id for task_id, _update in repo.applied] == ["task-2"]
     assert "task_id=task-1" in caplog.text
-    assert "database unavailable" in caplog.text
+    assert "mcp_task_poll_persistence_failed" in caplog.text
+    assert "database unavailable" not in caplog.text
 
 
 @pytest.mark.asyncio

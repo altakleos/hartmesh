@@ -940,6 +940,7 @@ async def run_agent(
                 thread_id,
                 user_id=record.user_id,
                 limit=20,
+                tenant_digest=ctx.mcp_task_repo.tenant.digest,
             )
             graph_input = {
                 **graph_input,

@@ -7,9 +7,75 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.task_tool_caller import McpTaskToolCaller, mcp_task_session_scope_key
+from deerflow.mcp.tasks import (
+    McpTaskLineageBinder,
+    McpTaskLineageError,
+    TrustedMcpSubmissionContext,
+    configured_credential_selector,
+)
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+from deerflow.runtime.tool_evidence import build_request_projection
+
+
+def _lineage(config: ExtensionsConfig):
+    server = config.mcp_servers["reports"]
+    return McpTaskLineageBinder().for_standalone_api(
+        tenant=TenantIdentityV1.from_canonical_id("test").to_persisted_reference(),
+        principal_identity=InvocationIdentityV1(
+            effective_subject=EffectiveSubjectV1(
+                kind="human",
+                subject_id="user-1",
+                role="member",
+            )
+        ),
+        extension_generation=1,
+        extension_manifest_digest="a" * 64,
+        accepted_origin_digest="b" * 64,
+        server_name="reports",
+        tool_name="submit_report",
+        safe_request_projection=build_request_projection("submit_report", {}),
+        credential_selector=configured_credential_selector("reports", server),
+    )
+
+
+def _agent_lineage(config: ExtensionsConfig):
+    tenant = TenantIdentityV1.from_canonical_id("test").to_persisted_reference()
+    identity = InvocationIdentityV1(
+        effective_subject=EffectiveSubjectV1(
+            kind="human",
+            subject_id="user-1",
+            role="member",
+        )
+    )
+    return McpTaskLineageBinder().for_agent_tool(
+        trusted_runtime=TrustedMcpSubmissionContext(
+            tenant=tenant,
+            principal_identity=identity,
+            parent_run_id="run-1",
+            parent_execution_task_id="run-1",
+            parent_execution_kind="lead",
+            parent_subagent_name=None,
+            parent_tool_receipt_id="tr_" + "b" * 64,
+            agent_revision_digest="c" * 64,
+            assembly_fingerprint="d" * 64,
+            subagent_catalog_digest="e" * 64,
+            subagent_definition_digest=None,
+            extension_generation=3,
+            extension_manifest_digest="f" * 64,
+            accepted_origin_digest="1" * 64,
+        ),
+        server_name="reports",
+        tool_name="submit_report",
+        safe_request_projection=build_request_projection("submit_report", {}),
+        credential_selector=configured_credential_selector(
+            "reports",
+            config.mcp_servers["reports"],
+        ),
+    )
 
 
 def _config() -> ExtensionsConfig:
@@ -74,6 +140,132 @@ async def _assert_configured_timeout(awaitable: Coroutine[Any, Any, Any]) -> Non
 
 def test_task_session_scope_includes_user_and_thread() -> None:
     assert mcp_task_session_scope_key(user_id="user-1", thread_id="thread-1") == "user-1:thread-1"
+
+
+@pytest.mark.asyncio
+async def test_task_call_rejects_unavailable_stored_credential_version_before_network() -> None:
+    config = _remote_config()
+    lineage = _lineage(config)
+    config.mcp_servers["reports"].credential_version = 2
+    caller = McpTaskToolCaller(
+        config,
+        oauth_token_manager=SimpleNamespace(
+            has_oauth_servers=lambda: False,
+            get_authorization_header=AsyncMock(return_value=None),
+        ),
+    )
+
+    with pytest.raises(McpTaskLineageError) as exc_info:
+        await caller.call_tool(
+            server_name="reports",
+            tool_name="status_report",
+            arguments={"task_id": "remote-1"},
+            user_id="user-1",
+            thread_id="thread-1",
+            lineage=lineage,
+        )
+
+    assert exc_info.value.code == "mcp_task_credential_binding_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_agent_submit_runs_required_preparation_with_active_accepted_runtime() -> None:
+    config = _config()
+    lineage = _agent_lineage(config)
+    result = SimpleNamespace(
+        structuredContent={"task_id": "remote-1", "status": "submitted"},
+        isError=False,
+    )
+    session = SimpleNamespace(call_tool=AsyncMock(return_value=result))
+    pool = MagicMock()
+    pool.get_session = AsyncMock(return_value=session)
+    pool.close_session = AsyncMock()
+    active_runtime = SimpleNamespace(
+        context={
+            "accepted_extension_generation": lineage.extension_generation,
+            "accepted_extension_manifest_digest": lineage.extension_manifest_digest,
+        }
+    )
+    observed: list[object] = []
+
+    async def required_interceptor(request, handler):
+        observed.append(request.runtime)
+        assert request.runtime.context["accepted_extension_generation"] == 3
+        assert request.runtime.context["accepted_extension_manifest_digest"] == "f" * 64
+        return await handler(request)
+
+    caller = McpTaskToolCaller(config)
+    with (
+        patch("deerflow.mcp.task_tool_caller.get_session_pool", return_value=pool),
+        patch(
+            "deerflow.mcp.task_tool_caller._prepare_stdio_connection",
+            return_value={"transport": "stdio", "command": "report-mcp"},
+        ),
+        patch(
+            "deerflow.mcp.task_tool_caller.get_required_mcp_tool_interceptor",
+            return_value=required_interceptor,
+        ),
+        patch("langgraph.runtime.get_runtime", return_value=active_runtime),
+    ):
+        actual = await caller.call_tool(
+            server_name="reports",
+            tool_name="submit_report",
+            arguments={},
+            user_id="user-1",
+            thread_id="thread-1",
+            lineage=lineage,
+            operation="submit",
+        )
+
+    assert actual is result
+    assert observed == [active_runtime]
+    session.call_tool.assert_awaited_once_with("submit_report", {})
+
+
+@pytest.mark.asyncio
+async def test_standalone_submit_cannot_bypass_required_preparation() -> None:
+    config = _config()
+    lineage = _lineage(config)
+    result = SimpleNamespace(
+        structuredContent={"task_id": "remote-1", "status": "submitted"},
+        isError=False,
+    )
+    session = SimpleNamespace(call_tool=AsyncMock(return_value=result))
+    pool = MagicMock()
+    pool.get_session = AsyncMock(return_value=session)
+    pool.close_session = AsyncMock()
+    observed: list[object] = []
+
+    async def required_interceptor(request, _handler):
+        observed.append(request.runtime)
+        raise RuntimeError("accepted_invocation_missing")
+
+    caller = McpTaskToolCaller(config)
+    with (
+        patch("deerflow.mcp.task_tool_caller.get_session_pool", return_value=pool),
+        patch(
+            "deerflow.mcp.task_tool_caller._prepare_stdio_connection",
+            return_value={"transport": "stdio", "command": "report-mcp"},
+        ),
+        patch(
+            "deerflow.mcp.task_tool_caller.get_required_mcp_tool_interceptor",
+            return_value=required_interceptor,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="accepted_invocation_missing"):
+            await caller.call_tool(
+                server_name="reports",
+                tool_name="submit_report",
+                arguments={},
+                user_id="user-1",
+                thread_id="thread-1",
+                lineage=lineage,
+                operation="submit",
+            )
+
+    assert len(observed) == 1
+    assert observed[0].context == {"user_id": "user-1"}
+    session.call_tool.assert_not_awaited()
 
 
 @pytest.mark.asyncio

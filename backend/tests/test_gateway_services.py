@@ -3085,6 +3085,7 @@ def test_launch_mcp_task_notification_run_hides_internal_prompt(_stub_app_config
             idempotency_key=None,
             require_existing_thread=False,
             trusted_notification=False,
+            trusted_notification_source=None,
         ):
             captured["body"] = body
             captured["thread_id"] = thread_id
@@ -3092,6 +3093,7 @@ def test_launch_mcp_task_notification_run_hides_internal_prompt(_stub_app_config
             captured["idempotency_key"] = idempotency_key
             captured["require_existing_thread"] = require_existing_thread
             captured["trusted_notification"] = trusted_notification
+            captured["trusted_notification_source"] = trusted_notification_source
             return SimpleNamespace(run_id="run-notification", thread_id=thread_id)
 
         with patch("app.gateway.services.start_run", side_effect=fake_start_run):
@@ -3102,7 +3104,19 @@ def test_launch_mcp_task_notification_run_hides_internal_prompt(_stub_app_config
                 owner_user_id="user-1",
                 task_id="task-1",
                 dispatch_version=2,
-                dispatch_attempt=3,
+                source={
+                    "version": 1,
+                    "tenant_digest": "a" * 64,
+                    "task_id": "task-1",
+                    "task_lineage_digest": "b" * 64,
+                    "lineage_status": "verified",
+                    "parent_run_id": "run-parent",
+                    "parent_tool_receipt_id": "tr_" + "c" * 64,
+                    "terminal_result_version": 2,
+                    "notification_kind": "terminal",
+                    "result_digest": "d" * 64,
+                    "result_status": "completed",
+                },
                 event={"status": "completed", "result": "done"},
             )
         return captured, result
@@ -3112,16 +3126,36 @@ def test_launch_mcp_task_notification_run_hides_internal_prompt(_stub_app_config
     body = captured["body"]
     assert body.input["messages"][0]["additional_kwargs"] == {"hide_from_ui": True}
     assert captured["thread_id"] == "thread-notification"
-    assert captured["idempotency_key"] == "mcp-task:task-1:2:3"
+    assert str(captured["idempotency_key"]).startswith("mcp-task-notification:")
+    assert ":3" not in str(captured["idempotency_key"])
     assert captured["require_existing_thread"] is True
     assert captured["trusted_notification"] is True
+    assert captured["trusted_notification_source"] == {
+        "version": 1,
+        "tenant_digest": "a" * 64,
+        "task_id": "task-1",
+        "task_lineage_digest": "b" * 64,
+        "lineage_status": "verified",
+        "parent_run_id": "run-parent",
+        "parent_tool_receipt_id": "tr_" + "c" * 64,
+        "terminal_result_version": 2,
+        "notification_kind": "terminal",
+        "result_digest": "d" * 64,
+        "result_status": "completed",
+    }
     assert body.metadata == {
         "mcp_task_notification": {
             "task_id": "task-1",
-            "dispatch_version": 2,
-            "dispatch_attempt": 3,
+            "task_lineage_digest": "b" * 64,
+            "lineage_status": "verified",
+            "terminal_result_version": 2,
+            "notification_kind": "terminal",
+            "result_digest": "d" * 64,
+            "result_status": "completed",
         }
     }
+    assert "done" not in repr(body.metadata)
+    assert "done" not in repr(captured["trusted_notification_source"])
     assert result == {"run_id": "run-notification", "thread_id": "thread-notification"}
 
 
@@ -3150,7 +3184,19 @@ def test_launch_mcp_task_notification_run_restores_busy_thread_conflict(_stub_ap
                 owner_user_id="user-1",
                 task_id="task-1",
                 dispatch_version=2,
-                dispatch_attempt=3,
+                source={
+                    "version": 1,
+                    "tenant_digest": "a" * 64,
+                    "task_id": "task-1",
+                    "task_lineage_digest": "b" * 64,
+                    "lineage_status": "verified",
+                    "parent_run_id": None,
+                    "parent_tool_receipt_id": None,
+                    "terminal_result_version": 2,
+                    "notification_kind": "terminal",
+                    "result_digest": "d" * 64,
+                    "result_status": "completed",
+                },
                 event={"status": "completed", "result": "done"},
             )
 
@@ -3182,11 +3228,103 @@ def test_launch_mcp_task_notification_run_dead_letters_missing_thread(_stub_app_
                 owner_user_id="user-1",
                 task_id="task-1",
                 dispatch_version=2,
-                dispatch_attempt=3,
+                source={
+                    "version": 1,
+                    "tenant_digest": "a" * 64,
+                    "task_id": "task-1",
+                    "task_lineage_digest": "b" * 64,
+                    "lineage_status": "verified",
+                    "parent_run_id": None,
+                    "parent_tool_receipt_id": None,
+                    "terminal_result_version": 2,
+                    "notification_kind": "terminal",
+                    "result_digest": "d" * 64,
+                    "result_status": "completed",
+                },
                 event={"status": "completed", "result": "done"},
             )
 
     asyncio.run(_scenario())
+
+
+def test_mcp_task_notification_replay_conflict_has_safe_lineage_code(
+    _stub_app_config,
+):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import launch_mcp_task_notification_run
+    from app.mcp_tasks.errors import McpTaskNotificationLineageConflictError
+    from deerflow.runtime.runs.manager import IdempotencyConflictError
+
+    source = {
+        "version": 1,
+        "tenant_digest": "a" * 64,
+        "task_id": "task-1",
+        "task_lineage_digest": "b" * 64,
+        "lineage_status": "verified",
+        "parent_run_id": "run-parent",
+        "parent_tool_receipt_id": "tr_" + "c" * 64,
+        "terminal_result_version": 2,
+        "notification_kind": "terminal",
+        "result_digest": "d" * 64,
+        "result_status": "completed",
+    }
+    conflict = HTTPException(status_code=409, detail="must-not-leak")
+    conflict.__cause__ = IdempotencyConflictError("contradictory source")
+
+    async def _scenario():
+        with (
+            patch("app.gateway.services.start_run", side_effect=conflict),
+            pytest.raises(McpTaskNotificationLineageConflictError) as exc_info,
+        ):
+            await launch_mcp_task_notification_run(
+                app=SimpleNamespace(state=SimpleNamespace()),
+                thread_id="thread-notification",
+                assistant_id="lead_agent",
+                owner_user_id="user-1",
+                task_id="task-1",
+                dispatch_version=2,
+                source=source,
+                event={"status": "completed", "result": "secret-result"},
+            )
+        assert str(exc_info.value) == "mcp_task_notification_lineage_conflict"
+
+    asyncio.run(_scenario())
+
+
+def test_mcp_task_notification_source_becomes_safe_accepted_origin_references(
+    _stub_app_config,
+):
+    from app.gateway.run_models import RunCreateRequest
+    from app.gateway.services import _base_origin_references, _launch_intent
+
+    source = {
+        "version": 1,
+        "tenant_digest": "a" * 64,
+        "task_id": "task-1",
+        "task_lineage_digest": "b" * 64,
+        "lineage_status": "verified",
+        "parent_run_id": "run-parent",
+        "parent_tool_receipt_id": "tr_" + "c" * 64,
+        "terminal_result_version": 2,
+        "notification_kind": "terminal",
+        "result_digest": "d" * 64,
+        "result_status": "completed",
+    }
+    intent = _launch_intent(
+        RunCreateRequest(input={"messages": []}),
+        "thread-1",
+        external_key="stable-key",
+        trusted_notification=True,
+        trusted_notification_source=source,
+    )
+
+    assert _base_origin_references(intent) == {key: value for key, value in source.items() if key not in {"version", "tenant_digest"}}
+    assert "secret-result" not in repr(_base_origin_references(intent))
 
 
 def test_start_run_strict_mode_rejects_missing_thread(_stub_app_config):

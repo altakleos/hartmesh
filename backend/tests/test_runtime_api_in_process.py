@@ -200,6 +200,74 @@ async def test_observe_maps_only_fixed_public_snapshot_and_event_fields() -> Non
 
 
 @pytest.mark.anyio
+async def test_observe_propagates_bounded_mcp_task_lineage_page() -> None:
+    from app.runtime.api import InProcessInvocationRuntime
+    from app.runtime.invocation import InternalLifecycleObservation
+    from deerflow.runtime.runs.lifecycle_query import LifecyclePage, encode_lifecycle_cursor
+
+    page = {
+        "items": [
+            {
+                "task_id": "task-1",
+                "lineage_digest": "a" * 64,
+                "submitting_task_id": "run-1",
+                "receipt_id": "tr_" + "b" * 64,
+                "server_name": "reports",
+                "tool_name": "submit_report",
+                "status": "completed",
+                "safe_terminal_code": None,
+                "notification_run_id": None,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:01:00+00:00",
+                "completed_at": "2026-01-01T00:01:00+00:00",
+            }
+        ],
+        "next_cursor": None,
+        "pruning_status": "not_pruned",
+    }
+
+    class Runtime(_Runtime):
+        async def observe_invocation_lifecycle(self, query):
+            self.query = query
+            return InternalLifecycleObservation(
+                record=_record(),
+                page=LifecyclePage(
+                    snapshots=(
+                        {
+                            "run_id": "run-1",
+                            "thread_id": "thread-1",
+                            "status": "pending",
+                            "state_version": 1,
+                        },
+                    ),
+                    events=(),
+                    next_cursor=encode_lifecycle_cursor(1),
+                    minimum_available_cursor=encode_lifecycle_cursor(0),
+                    read_fence_cursor=encode_lifecycle_cursor(1),
+                ),
+                mcp_tasks=page,
+            )
+
+    runtime = Runtime()
+    observation = await InProcessInvocationRuntime(
+        runtime,
+        authenticated_service_id="service-1",
+    ).observe(
+        InvocationQuery(
+            run_id="run-1",
+            include_mcp_tasks=True,
+            mcp_task_cursor="mtc1.opaque",
+            mcp_task_limit=7,
+        )
+    )
+
+    assert runtime.query.include_mcp_tasks is True
+    assert runtime.query.mcp_task_cursor == "mtc1.opaque"
+    assert runtime.query.mcp_task_limit == 7
+    assert observation.to_dict()["mcp_tasks"] == page
+
+
+@pytest.mark.anyio
 async def test_observe_fails_safely_when_internal_page_crosses_the_requested_run() -> None:
     from app.runtime.api import InProcessInvocationRuntime
     from app.runtime.invocation import InternalLifecycleObservation
@@ -561,6 +629,95 @@ async def test_visible_policy_denial_precedes_lifecycle_read_and_cancel_mutation
 
 
 @pytest.mark.anyio
+async def test_authorized_parent_lineage_uses_one_bounded_owner_scoped_query() -> None:
+    from types import SimpleNamespace
+
+    from app.runtime.invocation import (
+        InternalAuthorizationDecision,
+        InternalInvocationLifecycleQuery,
+        InvocationPrincipal,
+        InvocationRuntime,
+    )
+    from deerflow.runtime.runs.lifecycle_query import LifecyclePage, encode_lifecycle_cursor
+
+    calls: list[object] = []
+
+    class Runs:
+        async def observe(self, _run_id, _principal):
+            calls.append("visibility")
+            return _record()
+
+        async def query_lifecycle(self, _query):
+            calls.append("lifecycle")
+            return LifecyclePage(
+                snapshots=(
+                    {
+                        "run_id": "run-1",
+                        "thread_id": "thread-1",
+                        "status": "pending",
+                        "state_version": 1,
+                    },
+                ),
+                events=(),
+                next_cursor=encode_lifecycle_cursor(1),
+                minimum_available_cursor=encode_lifecycle_cursor(0),
+                read_fence_cursor=encode_lifecycle_cursor(1),
+            )
+
+    class Authorization:
+        async def authorize_observe(self, *_args, **_kwargs):
+            calls.append("policy")
+            return InternalAuthorizationDecision.allowed()
+
+    class Tasks:
+        tenant = SimpleNamespace(digest="a" * 64)
+
+        async def list_by_parent_run(self, parent_run_id, **kwargs):
+            calls.append((parent_run_id, kwargs))
+            return {
+                "items": [],
+                "next_cursor": None,
+                "pruning_status": "not_pruned",
+            }
+
+    runtime = InvocationRuntime(
+        normalizer=object(),
+        runs=Runs(),
+        authorization=Authorization(),
+        mcp_tasks=Tasks(),
+    )
+    observation = await runtime.observe_invocation_lifecycle(
+        InternalInvocationLifecycleQuery(
+            run_id="run-1",
+            principal=InvocationPrincipal(user_id="service-1", role="service"),
+            include_mcp_tasks=True,
+            mcp_task_cursor="mtc1.opaque",
+            mcp_task_limit=7,
+        )
+    )
+
+    assert observation.mcp_tasks == {
+        "items": (),
+        "next_cursor": None,
+        "pruning_status": "not_pruned",
+    }
+    assert calls == [
+        "visibility",
+        "policy",
+        "lifecycle",
+        (
+            "run-1",
+            {
+                "user_id": "service-1",
+                "limit": 7,
+                "cursor": "mtc1.opaque",
+                "tenant_digest": "a" * 64,
+            },
+        ),
+    ]
+
+
+@pytest.mark.anyio
 async def test_service_scope_is_derived_from_the_authenticated_host_identity() -> None:
     from types import SimpleNamespace
 
@@ -702,9 +859,29 @@ async def test_in_process_observe_and_cancel_use_the_durable_manager_ports() -> 
             )
         )
     )
+
+    class Tasks:
+        tenant = SimpleNamespace(digest="a" * 64)
+
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+
+        async def list_by_parent_run(self, *_args, **_kwargs):
+            return {
+                "items": [],
+                "next_cursor": None,
+                "pruning_status": "not_pruned",
+            }
+
+        async def request_cancel(self, *_args, **_kwargs):
+            self.cancel_calls += 1
+            raise AssertionError("parent cancellation must not cancel MCP tasks")
+
+    tasks = Tasks()
     runtime = InvocationRuntime(
         normalizer=object(),
         runs=_GatewayDurableRuns(request),
+        mcp_tasks=tasks,
     )
     api = InProcessInvocationRuntime(runtime, authenticated_service_id="service-1")
 
@@ -719,4 +896,5 @@ async def test_in_process_observe_and_cancel_use_the_durable_manager_ports() -> 
     assert hidden.code is FailureCode.not_found_or_invisible
     assert cancellation.disposition == "requested"
     assert cancellation.state_version == 2
+    assert tasks.cancel_calls == 0
     assert [event["lifecycle_type"] for event in await store.list_lifecycle_events(run_id="run-1")] == [LifecycleType.accepted, LifecycleType.cancellation_requested]

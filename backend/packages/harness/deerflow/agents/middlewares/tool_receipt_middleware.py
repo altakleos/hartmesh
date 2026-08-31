@@ -41,9 +41,11 @@ from deerflow.runtime.tool_evidence import (
     ToolAttemptReservation,
     ToolDispatchObservationV1,
     ToolEvidenceError,
+    active_tool_receipt_context,
     build_request_projection,
     digest_request_projection,
     digest_result_projection,
+    evidence_safe_fields_from_tool,
     observe_tool_dispatch,
     resolve_tool_evidence_context,
 )
@@ -150,7 +152,7 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
             projection = build_request_projection(
                 tool_name,
                 arguments,
-                evidence_safe_fields=self._evidence_safe_fields(request),
+                evidence_safe_fields=evidence_safe_fields_from_tool(getattr(request, "tool", None)),
             )
             # Reservation and append are one fenced store operation. This await
             # is the side-effect boundary: no inner authorization, provider,
@@ -181,7 +183,8 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                 )
                 return self._stamp(result, request) if self._display_enabled else result
             try:
-                result = await handler(request)
+                with active_tool_receipt_context(started):
+                    result = await handler(request)
             except asyncio.CancelledError:
                 policy = self._policy_references(context, tool_call_id)
                 try:
@@ -256,37 +259,6 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
             task_id=execution_info.task_id,
             node_attempt=execution_info.node_attempt,
         )
-
-    @staticmethod
-    def _evidence_safe_fields(request: ToolCallRequest) -> frozenset[str]:
-        """Read only server-registered schema markers; arguments cannot opt in."""
-
-        tool = getattr(request, "tool", None)
-        schema = getattr(tool, "args_schema", None)
-        json_schema = getattr(schema, "model_json_schema", None)
-        if not callable(json_schema):
-            return frozenset()
-        try:
-            declared = json_schema()
-        except Exception:
-            # Some valid LangChain tools contain injected callable fields that
-            # Pydantic deliberately cannot represent as JSON Schema. Evidence
-            # projection must remain fail-closed: an unreadable schema opts no
-            # arguments into plaintext evidence, but does not block the tool.
-            return frozenset()
-        properties = declared.get("properties") if isinstance(declared, dict) else None
-        if not isinstance(properties, dict):
-            return frozenset()
-        safe: set[str] = set()
-        for name, field_schema in properties.items():
-            if not isinstance(name, str) or not isinstance(field_schema, dict):
-                continue
-            marker = field_schema.get("x-deerflow-evidence-safe", field_schema.get("evidence_safe"))
-            if marker is True:
-                safe.add(name)
-            elif marker not in (None, False):
-                raise ToolEvidenceError("evidence_safe_policy_invalid")
-        return frozenset(safe)
 
     @staticmethod
     def _matching_messages(result: ToolMessage | Command, request: ToolCallRequest) -> list[ToolMessage]:

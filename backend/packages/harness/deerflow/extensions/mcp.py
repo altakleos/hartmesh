@@ -56,6 +56,7 @@ class McpInvocationFacts:
     run_id: str
     agent_revision: ResolvedAgentRevisionReferenceV1
     extension_generation: int
+    extension_manifest_digest: str | None = None
     trusted_context: TrustedRunContextV1 | None = None
 
     @classmethod
@@ -99,6 +100,11 @@ class McpInvocationFacts:
                 digest=revision.digest,
             ),
             extension_generation=accepted.extension_generation,
+            extension_manifest_digest=getattr(
+                accepted,
+                "extension_manifest_digest",
+                None,
+            ),
             trusted_context=trusted_context,
         )
 

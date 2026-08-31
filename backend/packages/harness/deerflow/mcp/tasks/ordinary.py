@@ -7,6 +7,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from deerflow.constants import MCP_TASK_REMOTE_ID_MAX_LENGTH
+from deerflow.mcp.tasks.lineage import McpTaskLineageV1
 from deerflow.mcp.tasks.models import (
     TaskReference,
     TaskSnapshot,
@@ -32,6 +33,8 @@ class McpTaskToolCaller(Protocol):
         arguments: dict[str, Any],
         user_id: str,
         thread_id: str,
+        lineage: McpTaskLineageV1 | None = None,
+        operation: str = "status",
     ) -> Any: ...
 
 
@@ -158,6 +161,8 @@ class OrdinaryMcpTaskDriver:
             arguments=request.arguments,
             user_id=request.user_id,
             thread_id=request.thread_id,
+            lineage=request.lineage,
+            operation="submit",
         )
         payload = _parse(
             _SubmitPayload,
@@ -179,6 +184,8 @@ class OrdinaryMcpTaskDriver:
             arguments={"task_id": task.remote_task_id},
             user_id=task.user_id,
             thread_id=task.thread_id,
+            lineage=task.lineage,
+            operation="status",
         )
         payload = _parse(
             _StatusPayload,
@@ -197,6 +204,8 @@ class OrdinaryMcpTaskDriver:
             arguments={"task_id": task.remote_task_id},
             user_id=task.user_id,
             thread_id=task.thread_id,
+            lineage=task.lineage,
+            operation="cancel",
         )
         payload = _parse(
             _CancelPayload,

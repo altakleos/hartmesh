@@ -3,17 +3,24 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 
 from app.mcp_tasks import McpTaskService
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.mcp.tasks import (
     ORDINARY_MCP_TASK_DRIVER,
+    CredentialSelector,
     McpTaskDriverRegistry,
+    McpTaskLineageBinder,
     OrdinaryMcpTaskDriver,
     TaskSubmitRequest,
 )
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.mcp_tasks import McpTaskRepository
+from deerflow.runtime.tenant_identity import TenantIdentityV1
+from deerflow.runtime.tool_evidence import build_request_projection
+
+_TENANT = TenantIdentityV1.from_canonical_id("test").to_persisted_reference()
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -25,8 +32,10 @@ async def _close_persistence_engine():
 class FakeMcpServer:
     def __init__(self):
         self.status_results = []
+        self.calls = []
 
-    async def call_tool(self, *, tool_name, arguments, **_scope):
+    async def call_tool(self, *, tool_name, arguments, **scope):
+        self.calls.append((tool_name, dict(arguments), scope))
         if tool_name == "submit_report":
             return SimpleNamespace(
                 structuredContent={"task_id": arguments["remote_id"], "status": "running"},
@@ -64,14 +73,36 @@ def _service(repo, fake_server) -> McpTaskService:
 
 
 def _request(remote_id: str) -> TaskSubmitRequest:
+    arguments = {"remote_id": remote_id}
     return TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
-        run_id="run-1",
-        tool_call_id="call-1",
-        server_name="reports",
+        lineage=McpTaskLineageBinder().for_standalone_api(
+            tenant=_TENANT,
+            principal_identity=InvocationIdentityV1(
+                effective_subject=EffectiveSubjectV1(
+                    kind="human",
+                    subject_id="user-1",
+                    role="member",
+                )
+            ),
+            extension_generation=1,
+            extension_manifest_digest="a" * 64,
+            accepted_origin_digest="b" * 64,
+            server_name="reports",
+            tool_name="submit_report",
+            safe_request_projection=build_request_projection(
+                "submit_report",
+                arguments,
+                evidence_safe_fields=frozenset({"remote_id"}),
+            ),
+            credential_selector=CredentialSelector(
+                binding_id="reports-binding",
+                version=1,
+            ),
+        ),
         task_name="report-generation",
-        arguments={"remote_id": remote_id},
+        arguments=arguments,
         driver_data={
             "submit_tool": "submit_report",
             "status_tool": "status_report",
@@ -85,7 +116,7 @@ async def test_submit_poll_restart_recovery_complete_and_fail(tmp_path) -> None:
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     session_factory = get_session_factory()
     assert session_factory is not None
-    repo = McpTaskRepository(session_factory)
+    repo = McpTaskRepository(session_factory, tenant=_TENANT)
     fake_server = FakeMcpServer()
     submitted_at = datetime.now(UTC)
     fake_server.status_results.extend(
@@ -116,10 +147,19 @@ async def test_submit_poll_restart_recovery_complete_and_fail(tmp_path) -> None:
     restarted_process = _service(repo, fake_server)
     await restarted_process.run_once(now=datetime.now(UTC) + timedelta(seconds=2))
 
-    completed = await repo.get(created["id"], user_id="user-1")
+    completed = await repo.get(
+        created["id"],
+        user_id="user-1",
+        tenant_digest=repo.tenant.digest,
+    )
     assert completed is not None
     assert completed["status"] == "completed"
     assert completed["result"] == {"report": "ready"}
+    assert completed["lineage_status"] == "verified"
+    assert completed["lineage_digest"] == created["lineage_digest"]
+    recovered_status_calls = [scope for tool_name, _arguments, scope in fake_server.calls if tool_name == "status_report"]
+    assert recovered_status_calls
+    assert all(scope["lineage"].digest == created["lineage_digest"] for scope in recovered_status_calls)
 
     fake_server.status_results.append(
         {
@@ -135,10 +175,14 @@ async def test_submit_poll_restart_recovery_complete_and_fail(tmp_path) -> None:
     )
     await restarted_process.run_once(now=datetime.now(UTC))
 
-    failed = await repo.get(failed_created["id"], user_id="user-1")
+    failed = await repo.get(
+        failed_created["id"],
+        user_id="user-1",
+        tenant_digest=repo.tenant.digest,
+    )
     assert failed is not None
     assert failed["status"] == "failed"
-    assert failed["error"] == "report generation failed"
+    assert failed["error"] == "mcp_task_remote_failed"
 
 
 @pytest.mark.asyncio
@@ -146,7 +190,7 @@ async def test_status_tool_error_retries_with_detail_before_structured_failure_t
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     session_factory = get_session_factory()
     assert session_factory is not None
-    repo = McpTaskRepository(session_factory)
+    repo = McpTaskRepository(session_factory, tenant=_TENANT)
     fake_server = FakeMcpServer()
     service = _service(repo, fake_server)
     submitted_at = datetime.now(UTC)
@@ -172,18 +216,26 @@ async def test_status_tool_error_retries_with_detail_before_structured_failure_t
 
     await service.run_once(now=submitted_at + timedelta(seconds=2))
 
-    retrying = await repo.get(created["id"], user_id="user-1")
+    retrying = await repo.get(
+        created["id"],
+        user_id="user-1",
+        tenant_digest=repo.tenant.digest,
+    )
     assert retrying is not None
     assert retrying["status"] == "submitted"
     assert retrying["consecutive_poll_error_count"] == 1
-    assert retrying["last_poll_error"] == ("MCP task tool 'status_report' returned an error: upstream temporarily unavailable")
+    assert retrying["last_poll_error"] == "mcp_task_remote_poll_failed"
     assert retrying["next_poll_at"] is not None
 
     await service.run_once(now=datetime.now(UTC) + timedelta(seconds=10))
 
-    failed = await repo.get(created["id"], user_id="user-1")
+    failed = await repo.get(
+        created["id"],
+        user_id="user-1",
+        tenant_digest=repo.tenant.digest,
+    )
     assert failed is not None
     assert failed["status"] == "failed"
-    assert failed["error"] == "report generation failed"
+    assert failed["error"] == "mcp_task_remote_failed"
     assert failed["consecutive_poll_error_count"] == 0
     assert failed["next_poll_at"] is None

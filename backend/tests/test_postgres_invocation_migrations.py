@@ -68,6 +68,7 @@ _SCHEDULED_MERGE_REVISION = "0022_merge_scheduled_enqueue"
 _ASSEMBLY_EVIDENCE_REVISION = "0023_agent_assembly_evidence"
 _TOOL_RECEIPT_REVISION = "0024_tool_receipt_idempotency"
 _MERGE_HEAD_REVISION = "0025_tenant_identity"
+_MCP_TASK_LINEAGE_REVISION = "0026_mcp_task_lineage"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
     "0012_invocation_idempotency",
@@ -204,6 +205,58 @@ _LIFECYCLE_CURSOR_COLUMNS = {
     "last_cursor": ("bigint", None, False),
     "pruned_through": ("bigint", None, False),
     "retained_count": ("bigint", None, False),
+}
+_MCP_TASK_LINEAGE_COLUMNS = {
+    "schema_writer_version": ("integer", None, False),
+    "tenant_ref": ("character varying", 23, True),
+    "tenant_digest": ("character varying", 64, True),
+    "lineage_json": ("json", None, True),
+    "lineage_digest": ("character varying", 64, True),
+    "parent_run_id": ("character varying", 64, True),
+    "parent_tool_receipt_id": ("character varying", 67, True),
+}
+_MCP_TASK_LINEAGE_CONSTRAINTS = {
+    "ck_mcp_tasks_tenant_pair",
+    "ck_mcp_tasks_lineage_pair",
+    "ck_mcp_tasks_legacy_parent_null",
+    "ck_mcp_tasks_schema_writer_version",
+    "ck_mcp_tasks_writer_lineage_required",
+    "ck_mcp_tasks_lineage_lengths",
+    "uq_mcp_tasks_tenant_user_server_remote",
+    "uq_mcp_tasks_tenant_lineage",
+}
+_MCP_TASK_LINEAGE_INDEXES = {
+    "ix_mcp_tasks_tenant_thread_created": (
+        "tenant_digest",
+        "thread_id",
+        "created_at",
+        "id",
+    ),
+    "ix_mcp_tasks_tenant_due": ("tenant_digest", "status", "next_poll_at"),
+    "ix_mcp_tasks_tenant_notification_due": (
+        "tenant_digest",
+        "notification_status",
+        "next_notification_at",
+    ),
+    "ix_mcp_tasks_tenant_cancel_due": (
+        "tenant_digest",
+        "cancel_requested_at",
+        "next_cancel_at",
+    ),
+    "ix_mcp_tasks_tenant_parent_run": (
+        "tenant_digest",
+        "parent_run_id",
+        "created_at",
+        "id",
+    ),
+    "ix_mcp_tasks_tenant_parent_receipt": (
+        "tenant_digest",
+        "parent_tool_receipt_id",
+    ),
+    "ix_mcp_tasks_tenant_notification_run": (
+        "tenant_digest",
+        "notification_run_id",
+    ),
 }
 _LEGACY_COLUMNS = (
     "run_id",
@@ -703,6 +756,39 @@ async def _assert_postgres_head_contract(engine: AsyncEngine, schema: str) -> No
     assert mcp_task_columns["result_preview"][:3] == ("text", None, True)
     assert mcp_task_columns["result_truncated"][:3] == ("boolean", None, False)
     assert mcp_task_columns["result_artifact"][:3] == ("json", None, True)
+    for name, expected in _MCP_TASK_LINEAGE_COLUMNS.items():
+        assert mcp_task_columns[name][:3] == expected
+    assert mcp_task_columns["schema_writer_version"][3] == "1"
+    assert _MCP_TASK_LINEAGE_CONSTRAINTS <= constraints["mcp_tasks"]
+    for name, columns in _MCP_TASK_LINEAGE_INDEXES.items():
+        _assert_index_definition(indexes, name, columns)
+
+    async with engine.connect() as connection:
+        async with connection.begin():
+            await connection.execute(sa.text("SET LOCAL enable_seqscan = off"))
+            plan = await connection.scalar(
+                sa.text(
+                    """
+                    EXPLAIN (FORMAT JSON)
+                    SELECT id, lineage_digest, parent_tool_receipt_id,
+                           server_name, status, notification_run_id,
+                           created_at, updated_at, completed_at
+                    FROM mcp_tasks
+                    WHERE tenant_digest = :tenant_digest
+                      AND parent_run_id = :parent_run_id
+                      AND user_id = :user_id
+                      AND lineage_digest IS NOT NULL
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 101
+                    """
+                ),
+                {
+                    "tenant_digest": "a" * 64,
+                    "parent_run_id": "run-parent",
+                    "user_id": "owner",
+                },
+            )
+    assert "ix_mcp_tasks_tenant_parent_run" in str(plan)
 
 
 async def _assert_postgres_checks_reject_invalid_rows(engine: AsyncEngine) -> None:
@@ -1043,6 +1129,7 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     assembly_evidence = script.get_revision(_ASSEMBLY_EVIDENCE_REVISION)
     tool_receipts = script.get_revision(_TOOL_RECEIPT_REVISION)
     merge_head = script.get_revision(_MERGE_HEAD_REVISION)
+    mcp_task_lineage = script.get_revision(_MCP_TASK_LINEAGE_REVISION)
     assert mcp_results is not None
     assert mcp_results.down_revision == _PRE_FEATURE_REVISION
     assert mcp_merge is not None
@@ -1066,7 +1153,9 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     assert tool_receipts.down_revision == _ASSEMBLY_EVIDENCE_REVISION
     assert merge_head is not None
     assert merge_head.down_revision == _TOOL_RECEIPT_REVISION
-    assert script.get_current_head() == _MERGE_HEAD_REVISION
+    assert mcp_task_lineage is not None
+    assert mcp_task_lineage.down_revision == _MERGE_HEAD_REVISION
+    assert script.get_current_head() == _MCP_TASK_LINEAGE_REVISION
 
 
 def test_intermediate_revision_contracts_exclude_future_schema() -> None:

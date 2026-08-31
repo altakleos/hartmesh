@@ -57,7 +57,10 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
-from app.mcp_tasks.errors import PermanentNotificationError
+from app.mcp_tasks.errors import (
+    McpTaskNotificationLineageConflictError,
+    PermanentNotificationError,
+)
 from app.runtime.authorization import ProviderInvocationAuthorization
 from app.runtime.constraints import ProviderInvocationConstraints
 from app.runtime.idempotency import (
@@ -1497,6 +1500,24 @@ def _base_origin_references(
     *,
     include_verified_binding: bool = True,
 ) -> dict[str, str | int | bool | None]:
+    if intent.trusted_notification:
+        source = intent.trusted_notification_source
+        if source is None:
+            return {}
+        return {
+            key: _bounded_source_value(source.get(key))
+            for key in (
+                "task_id",
+                "task_lineage_digest",
+                "lineage_status",
+                "parent_run_id",
+                "parent_tool_receipt_id",
+                "terminal_result_version",
+                "notification_kind",
+                "result_digest",
+                "result_status",
+            )
+        }
     if intent.source_kind is InternalSourceKind.scheduled_task:
         return {
             "task_id": _bounded_source_value(intent.trusted_task_id),
@@ -3262,6 +3283,7 @@ def build_invocation_runtime(request: Request) -> InvocationRuntime:
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
         visibility=_observation_visibility(request),
+        mcp_tasks=getattr(request.app.state, "mcp_task_repo", None),
         admission_fence=request.app.state.runtime_readiness,
     )
 
@@ -3286,6 +3308,7 @@ def build_scheduled_invocation_runtime(app: Any) -> InvocationRuntime:
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
         visibility=_observation_visibility(request),
+        mcp_tasks=getattr(app.state, "mcp_task_repo", None),
         admission_fence=app.state.runtime_readiness,
     )
 
@@ -3310,6 +3333,7 @@ def build_channel_invocation_runtime(app: Any) -> InvocationRuntime:
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
         visibility=_observation_visibility(request),
+        mcp_tasks=getattr(app.state, "mcp_task_repo", None),
         admission_fence=app.state.runtime_readiness,
     )
 
@@ -3346,6 +3370,7 @@ def build_service_invocation_runtime(
         authorization=_build_invocation_authorization(request),
         constraints=_build_invocation_constraints(request),
         visibility=_observation_visibility(request),
+        mcp_tasks=getattr(app.state, "mcp_task_repo", None),
         admission_fence=app.state.runtime_readiness,
     )
 
@@ -3358,6 +3383,7 @@ def _launch_intent(
     thread_id_explicit: bool = True,
     require_existing_thread: bool = False,
     trusted_notification: bool = False,
+    trusted_notification_source: Mapping[str, Any] | None = None,
 ) -> InternalLaunchIntent:
     return InternalLaunchIntent(
         thread_id=thread_id,
@@ -3379,6 +3405,7 @@ def _launch_intent(
         thread_id_explicit=thread_id_explicit,
         require_existing_thread=require_existing_thread,
         trusted_notification=trusted_notification,
+        trusted_notification_source=trusted_notification_source,
     )
 
 
@@ -3399,6 +3426,7 @@ async def start_run(
     idempotency_key: str | None = None,
     require_existing_thread: bool = False,
     trusted_notification: bool = False,
+    trusted_notification_source: Mapping[str, Any] | None = None,
 ) -> RunRecord:
     """FastAPI compatibility adapter for application-owned invocation launch."""
     try:
@@ -3422,6 +3450,7 @@ async def start_run(
                 thread_id_explicit=thread_id_explicit,
                 require_existing_thread=require_existing_thread,
                 trusted_notification=trusted_notification,
+                trusted_notification_source=trusted_notification_source,
             )
         )
     except ConflictError as exc:
@@ -3511,10 +3540,73 @@ async def launch_mcp_task_notification_run(
     owner_user_id: str,
     task_id: str,
     dispatch_version: int,
-    dispatch_attempt: int,
+    source: dict[str, Any],
     event: dict[str, Any],
 ) -> dict[str, Any]:
     """Idempotently launch the Agent run that delivers one task event."""
+    expected_source_fields = {
+        "version",
+        "tenant_digest",
+        "task_id",
+        "task_lineage_digest",
+        "lineage_status",
+        "parent_run_id",
+        "parent_tool_receipt_id",
+        "terminal_result_version",
+        "notification_kind",
+        "result_digest",
+        "result_status",
+    }
+    if set(source) != expected_source_fields:
+        raise ValueError("invalid MCP task notification source")
+    if source["version"] != 1 or source["task_id"] != task_id or source["terminal_result_version"] != dispatch_version:
+        raise ValueError("invalid MCP task notification source binding")
+    if not isinstance(task_id, str) or not task_id or len(task_id.encode("utf-8")) > 64:
+        raise ValueError("invalid MCP task notification task id")
+    for field in ("tenant_digest", "result_digest"):
+        value = source[field]
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError("invalid MCP task notification source digest")
+    lineage_digest = source["task_lineage_digest"]
+    if lineage_digest is not None and (not isinstance(lineage_digest, str) or re.fullmatch(r"[0-9a-f]{64}", lineage_digest) is None):
+        raise ValueError("invalid MCP task notification lineage digest")
+    lineage_status = source["lineage_status"]
+    if lineage_status not in {"verified", "legacy_unavailable"}:
+        raise ValueError("invalid MCP task notification lineage status")
+    if lineage_status == "verified" and lineage_digest is None:
+        raise ValueError("verified MCP task notification requires lineage")
+    if lineage_status == "legacy_unavailable" and (lineage_digest is not None or source["parent_run_id"] is not None or source["parent_tool_receipt_id"] is not None):
+        raise ValueError("legacy MCP task notification cannot claim parent lineage")
+    parent_run_id = source["parent_run_id"]
+    if parent_run_id is not None and (not isinstance(parent_run_id, str) or not parent_run_id or len(parent_run_id.encode("utf-8")) > 64):
+        raise ValueError("invalid MCP task notification parent run")
+    parent_receipt_id = source["parent_tool_receipt_id"]
+    if parent_receipt_id is not None and (not isinstance(parent_receipt_id, str) or re.fullmatch(r"tr_[0-9a-f]{64}", parent_receipt_id) is None):
+        raise ValueError("invalid MCP task notification parent receipt")
+    if source["notification_kind"] not in {
+        "terminal",
+        "input_required",
+        "tracking_degraded",
+    }:
+        raise ValueError("invalid MCP task notification kind")
+    if source["result_status"] not in {
+        "submitted",
+        "working",
+        "input_required",
+        "completed",
+        "failed",
+        "cancelled",
+    }:
+        raise ValueError("invalid MCP task notification result status")
+    safe_metadata = {
+        "task_id": task_id,
+        "task_lineage_digest": lineage_digest,
+        "lineage_status": source["lineage_status"],
+        "terminal_result_version": dispatch_version,
+        "notification_kind": source["notification_kind"],
+        "result_digest": source["result_digest"],
+        "result_status": source["result_status"],
+    }
     request = SimpleNamespace(
         app=app,
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
@@ -3534,11 +3626,7 @@ async def launch_mcp_task_notification_run(
         },
         command=None,
         metadata={
-            "mcp_task_notification": {
-                "task_id": task_id,
-                "dispatch_version": dispatch_version,
-                "dispatch_attempt": dispatch_attempt,
-            }
+            "mcp_task_notification": safe_metadata,
         },
         config=None,
         context={"non_interactive": True, "user_id": owner_user_id},
@@ -3557,7 +3645,16 @@ async def launch_mcp_task_notification_run(
         if_not_exists="create",
         feedback_keys=None,
     )
-    idempotency_key = f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
+    notification_key_digest = canonical_digest(
+        {
+            "version": 1,
+            "tenant_digest": source["tenant_digest"],
+            "mcp_task_id": task_id,
+            "terminal_result_version": dispatch_version,
+            "notification_kind": source["notification_kind"],
+        }
+    )
+    idempotency_key = f"mcp-task-notification:{notification_key_digest}"
     try:
         record = await start_run(
             body,
@@ -3566,9 +3663,12 @@ async def launch_mcp_task_notification_run(
             idempotency_key=idempotency_key,
             require_existing_thread=True,
             trusted_notification=True,
+            trusted_notification_source=source,
         )
     except HTTPException as exc:
         if exc.status_code == 409:
+            if isinstance(exc.__cause__, IdempotencyConflictError):
+                raise McpTaskNotificationLineageConflictError() from exc
             raise ConflictError(str(exc.detail)) from exc
         if exc.status_code == 404:
             raise PermanentNotificationError(str(exc.detail)) from exc

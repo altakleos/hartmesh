@@ -14,8 +14,9 @@ import json
 import math
 import re
 import threading
-from collections.abc import AsyncIterator, Iterable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -531,6 +532,38 @@ def build_request_projection(
     return result
 
 
+def evidence_safe_fields_from_tool(tool: object) -> frozenset[str]:
+    """Read only host-registered schema markers; arguments cannot opt in."""
+
+    schema = getattr(tool, "args_schema", None)
+    json_schema = getattr(schema, "model_json_schema", None)
+    if not callable(json_schema):
+        return frozenset()
+    try:
+        declared = json_schema()
+    except Exception:
+        # Some valid tools contain injected callable fields that Pydantic
+        # deliberately cannot render. An unreadable schema opts no arguments
+        # into plaintext evidence without blocking the call.
+        return frozenset()
+    properties = declared.get("properties") if isinstance(declared, dict) else None
+    if not isinstance(properties, dict):
+        return frozenset()
+    safe: set[str] = set()
+    for name, field_schema in properties.items():
+        if not isinstance(name, str) or not isinstance(field_schema, dict):
+            continue
+        marker = field_schema.get(
+            "x-deerflow-evidence-safe",
+            field_schema.get("evidence_safe"),
+        )
+        if marker is True:
+            safe.add(name)
+        elif marker not in (None, False):
+            raise ToolEvidenceError("evidence_safe_policy_invalid")
+    return frozenset(safe)
+
+
 def digest_request_projection(projection: Mapping[str, object]) -> str:
     return canonical_digest(projection)
 
@@ -742,6 +775,52 @@ class DurableToolReceiptV1:
             guardrail_decision_refs=guardrail_decision_refs,
             occurred_at=occurred_at or datetime.now(UTC),
         )
+
+
+@dataclass(slots=True)
+class _ActiveToolReceiptBinding:
+    receipt: DurableToolReceiptV1
+    active: bool = True
+
+
+_ACTIVE_TOOL_RECEIPT: ContextVar[_ActiveToolReceiptBinding | None] = ContextVar(
+    "deerflow_active_tool_receipt",
+    default=None,
+)
+
+
+def get_active_tool_receipt() -> DurableToolReceiptV1 | None:
+    """Return the durable ``started`` receipt for the current tool task.
+
+    The receipt is bound only after its durable reservation has been
+    acknowledged and is reset before control leaves the inner tool call.
+    ``ContextVar`` scoping keeps concurrent lead/subagent calls isolated.
+    """
+
+    binding = _ACTIVE_TOOL_RECEIPT.get()
+    if not isinstance(binding, _ActiveToolReceiptBinding) or not binding.active:
+        return None
+    return binding.receipt
+
+
+@contextmanager
+def active_tool_receipt_context(
+    receipt: DurableToolReceiptV1,
+) -> Iterator[None]:
+    """Bind one server-reserved receipt around its inner tool execution."""
+
+    if not isinstance(receipt, DurableToolReceiptV1) or receipt.phase != "started":
+        raise ToolEvidenceError("active_tool_receipt_invalid")
+    binding = _ActiveToolReceiptBinding(receipt=receipt)
+    token = _ACTIVE_TOOL_RECEIPT.set(binding)
+    try:
+        yield
+    finally:
+        # Child asyncio tasks inherit a copy of the ContextVar mapping. They
+        # still reference this same binding object, so invalidating it closes
+        # the receipt after the synchronous tool scope ends there as well.
+        binding.active = False
+        _ACTIVE_TOOL_RECEIPT.reset(token)
 
 
 @dataclass(frozen=True, slots=True)

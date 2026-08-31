@@ -16,6 +16,8 @@ object.
 - `InvocationQuery` and `ContextInvocationsQuery` /
   `InvocationObservation` for access-filtered lifecycle pages;
 - an opt-in strict durable tool-receipt page on one-invocation observations;
+- an independently paged, opt-in MCP child-task lineage projection on
+  one-invocation observations;
 - `InvocationSummaryV1` and `InvocationCorrelationReferenceV1` for bounded,
   source-aware accepted evidence joined to those pages;
 - `CancelInvocationRequest` / `InvocationControlReceipt` for version-fenced
@@ -78,6 +80,16 @@ coherence, and bounded decision references. Its `evidence_status` is
 `available`, `legacy_unavailable`, or `invalid`; a start without an outcome is
 `indeterminate`. Legacy v1 query/observation wires without receipt fields remain
 readable and default to no receipt request/page.
+
+`InvocationQuery` may also set `include_mcp_tasks=True`, an independent opaque
+`mcp_task_cursor`, and `mcp_task_limit` (1–100). The optional
+`InvocationObservation.mcp_tasks` page contains only bounded task IDs, immutable
+lineage and submission-receipt references, safe server/tool names, lifecycle
+status and terminal code, notification run ID, and timestamps. It is valid only
+for an exact visible parent invocation; the host scopes its indexed query and
+cursor to the authenticated owner and process tenant. Context observations do
+not enumerate MCP tasks. Legacy wires omit these additive fields and default to
+no MCP task request/page.
 
 The host stores only bounded safe request/result projection digests, never raw
 arguments, results, provider messages, headers, stack traces, or credentials.
