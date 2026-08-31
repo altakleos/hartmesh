@@ -46,6 +46,7 @@ buzz = ["coincurve>=20.0.0"]
 monocle = ["deerflow-harness[monocle]"]
 browser = ["deerflow-harness[browser]"]
 memory-zh = ["deerflow-harness[memory-zh]"]
+opensandbox = ["deerflow-harness[opensandbox]"]
 
 [dependency-groups]
 # Managed extension packages are added here by `deerflow extensions install`.

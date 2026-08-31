@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -99,3 +100,28 @@ def test_committed_phase_zero_evidence_is_canonical_and_still_no_go() -> None:
 
     assert artifact.decision == "no_go"
     assert raw_bytes == artifact.canonical_bytes() + b"\n"
+
+
+def test_backend_ci_installs_the_optional_sdk_for_the_executable_probe() -> None:
+    workflow = (Path(__file__).resolve().parents[2] / ".github" / "workflows" / "backend-unit-tests.yml").read_text(encoding="utf-8")
+    default_install_job = workflow.split(
+        "\n  default-install-collection:",
+        maxsplit=1,
+    )[1].split("\n  backend-unit-tests:", maxsplit=1)[0]
+    full_suite_job = workflow.split("\n  backend-unit-tests:", maxsplit=1)[1]
+    install_step = full_suite_job.split(
+        "\n      - name: Qualify PostgreSQL invocation persistence",
+        maxsplit=1,
+    )[0]
+
+    assert "--extra opensandbox" not in default_install_job
+    assert "--extra opensandbox" in install_step
+
+
+def test_root_project_exports_the_optional_sdk_extra() -> None:
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+
+    assert pyproject["project"]["optional-dependencies"]["opensandbox"] == [
+        "deerflow-harness[opensandbox]",
+    ]
