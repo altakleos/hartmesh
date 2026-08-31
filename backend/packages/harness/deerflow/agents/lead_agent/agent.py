@@ -34,6 +34,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.assembly_descriptor import subagent_release_policy
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
@@ -69,7 +70,6 @@ from deerflow.runtime.checkpoint_mode import (
     frozen_checkpoint_channel_mode,
     inject_checkpoint_mode,
 )
-from deerflow.runtime.subagent_snapshot import ResolvedSubagentCatalogV1
 from deerflow.skills.types import Skill
 from deerflow.tracing import build_tracing_callbacks
 
@@ -134,58 +134,6 @@ def split_agent_factory_result(agent_result: Any) -> tuple[Any, Any | None]:
 def _default_max_total_subagents(app_config: object) -> int:
     subagents_config = getattr(app_config, "subagents", None)
     return getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
-
-
-def _subagent_release_policy(
-    app_config: AppConfig,
-    *,
-    enabled: bool,
-    max_concurrent: int,
-    max_total: int,
-    resolved_subagent_catalog: ResolvedSubagentCatalogV1 | None = None,
-) -> dict[str, object]:
-    """Delegation limits as the run will actually enforce them.
-
-    The per-type turn/timeout caps are read here rather than left implicit
-    because a subagent config edit changes what the lead agent can spend
-    without changing anything visible in the lead's own configuration.
-    """
-    policy: dict[str, object] = {
-        "enabled": enabled,
-        "max_concurrent": max_concurrent,
-        "max_total": max_total,
-        "type_allowlist": [],
-        "runtime_limits": {},
-    }
-    if resolved_subagent_catalog is not None:
-        policy["catalog_digest"] = resolved_subagent_catalog.digest
-        policy["type_allowlist"] = list(resolved_subagent_catalog.allowed_names)
-        policy["runtime_limits"] = {
-            entry.name: {
-                "max_turns": entry.max_turns,
-                "timeout_seconds": entry.timeout_seconds,
-            }
-            for entry in resolved_subagent_catalog.entries
-        }
-        return policy
-    if not enabled:
-        return policy
-
-    from deerflow.subagents import get_available_subagent_names, get_subagent_config
-
-    type_allowlist = sorted(set(get_available_subagent_names(app_config=app_config)))
-    runtime_limits: dict[str, object] = {}
-    for name in type_allowlist:
-        subagent_config = get_subagent_config(name, app_config=app_config)
-        if subagent_config is None:
-            continue
-        runtime_limits[name] = {
-            "max_turns": subagent_config.max_turns,
-            "timeout_seconds": subagent_config.timeout_seconds,
-        }
-    policy["type_allowlist"] = type_allowlist
-    policy["runtime_limits"] = runtime_limits
-    return policy
 
 
 def _resolve_runtime_option(cfg: dict, key: str, agent_value, default):
@@ -1114,7 +1062,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                 "bootstrap": True,
                 "non_interactive": non_interactive,
                 "plan_mode": is_plan_mode,
-                "subagents": _subagent_release_policy(
+                "subagents": subagent_release_policy(
                     resolved_app_config,
                     enabled=subagent_enabled,
                     max_concurrent=max_concurrent_subagents,
@@ -1236,7 +1184,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             "bootstrap": False,
             "non_interactive": non_interactive,
             "plan_mode": is_plan_mode,
-            "subagents": _subagent_release_policy(
+            "subagents": subagent_release_policy(
                 resolved_app_config,
                 enabled=subagent_enabled,
                 max_concurrent=max_concurrent_subagents,

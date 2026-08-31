@@ -158,8 +158,11 @@ class _ScriptedAgent:
 
 def _make_agent_factory(controller: _RunController, **agent_kwargs):
     def factory(*, config):
-        from deerflow.agents.assembly_descriptor import build_assembly_descriptor
-        from deerflow.agents.lead_agent.agent import LeadAgentAssembly, _subagent_release_policy
+        from deerflow.agents.assembly_descriptor import (
+            build_assembly_descriptor,
+            subagent_release_policy,
+        )
+        from deerflow.agents.lead_agent.agent import LeadAgentAssembly
         from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
 
         runtime_context = config.get("context") or {}
@@ -200,7 +203,7 @@ def _make_agent_factory(controller: _RunController, **agent_kwargs):
                 "non_interactive": bool(defaults.get("non_interactive", False)),
                 "plan_mode": bool(defaults.get("is_plan_mode", False)),
                 "recursion_limit": config.get("recursion_limit", "framework-default"),
-                "subagents": _subagent_release_policy(
+                "subagents": subagent_release_policy(
                     material.app_config,
                     enabled=subagents_enabled,
                     max_concurrent=max_concurrent,

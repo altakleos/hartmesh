@@ -758,76 +758,6 @@ def _split_agent_factory_result(agent_result: Any) -> tuple[Any, Any | None]:
     return split_agent_factory_result(agent_result)
 
 
-def _accepted_assembly_anchors(
-    record: RunRecord,
-    material: Any,
-    *,
-    config: dict[str, Any],
-    app_config: AppConfig | None,
-) -> Any:
-    """Derive descriptor expectations exclusively from accepted material."""
-
-    from deerflow.agents.assembly_descriptor import skill_catalog_digest
-    from deerflow.agents.lead_agent.agent import _subagent_release_policy
-    from deerflow.runtime.assembly_evidence import (
-        AcceptedAssemblyAnchors,
-        canonical_durable_policy_digest,
-        canonical_skillset_digest,
-    )
-
-    accepted = record.accepted_invocation
-    if accepted is None:
-        raise RuntimeError("accepted invocation missing")
-    defaults = material.runtime_defaults
-    is_bootstrap = bool(defaults.get("is_bootstrap", False))
-    agent_name = "bootstrap" if is_bootstrap else str(defaults.get("agent_name") or "lead-agent")
-    effective_model = material.model_profile.get("name")
-    if not isinstance(effective_model, str):
-        effective_model = ""
-
-    enabled_skills = list(material.enabled_skill_objects)
-    if is_bootstrap:
-        enabled_skills = [skill for skill in enabled_skills if getattr(skill, "name", None) == "bootstrap"]
-    skill_names = tuple(str(getattr(skill, "name", "")) for skill in enabled_skills)
-    expected_skillset_digest = canonical_skillset_digest(
-        skill_names,
-        catalog_digest=skill_catalog_digest(enabled_skills),
-    )
-
-    requested_subagents = bool(defaults.get("subagent_enabled", False))
-    allowed_subagents = getattr(material.agent_config_object, "allowed_subagents", None)
-    subagents_enabled = requested_subagents and allowed_subagents != []
-    runtime_context = config.get("context") if isinstance(config.get("context"), dict) else {}
-    max_concurrent = int(runtime_context.get("max_concurrent_subagents", defaults.get("max_concurrent_subagents", 3)))
-    max_total = int(runtime_context.get("max_total_subagents", defaults.get("max_total_subagents", 6)))
-    durable_policies = {
-        "bootstrap": is_bootstrap,
-        "non_interactive": bool(defaults.get("non_interactive", False)),
-        "plan_mode": bool(defaults.get("is_plan_mode", False)),
-        "recursion_limit": config.get("recursion_limit", "framework-default"),
-        "subagents": _subagent_release_policy(
-            material.app_config or app_config,
-            enabled=subagents_enabled,
-            max_concurrent=max_concurrent,
-            max_total=max_total,
-            resolved_subagent_catalog=material.subagent_catalog,
-        ),
-    }
-    trusted_context = accepted.trusted_context
-    return AcceptedAssemblyAnchors(
-        run_id=record.run_id,
-        expected_namespace="deerflow",
-        expected_agent_name=agent_name,
-        expected_effective_model=effective_model,
-        expected_skillset_digest=expected_skillset_digest,
-        expected_policy_digest=canonical_durable_policy_digest(durable_policies),
-        agent_revision_digest=accepted.agent_revision.digest,
-        extension_generation=accepted.extension_generation,
-        extension_manifest_digest=accepted.extension_manifest_digest,
-        trusted_context_execution_digest=(trusted_context.execution_digest if trusted_context is not None else None),
-    )
-
-
 class _SubagentEventBuffer:
     """Buffer subagent ``task_*`` step events and flush them in one locked batch (#3779).
 
@@ -1491,6 +1421,22 @@ async def run_agent(
                     thread_id,
                 )
 
+        assembly_anchors = None
+        if requires_assembly_evidence:
+            from deerflow.runtime.assembly_evidence import (
+                build_accepted_assembly_anchors,
+            )
+
+            if accepted is None or pinned_material_for_cleanup is None:
+                raise AssemblyEvidenceError("assembly_descriptor_missing")
+            assembly_anchors = build_accepted_assembly_anchors(
+                run_id=record.run_id,
+                accepted=accepted,
+                material=pinned_material_for_cleanup,
+                app_config=ctx.app_config,
+                accepted_constraints=accepted_constraints,
+            )
+
         agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent_factory_kwargs["app_config"] = ctx.app_config
@@ -1507,14 +1453,11 @@ async def run_agent(
 
             if assembly_descriptor is None:
                 raise AssemblyEvidenceError("assembly_descriptor_missing")
+            if assembly_anchors is None:
+                raise AssemblyEvidenceError("assembly_descriptor_missing")
             evidence = build_assembly_evidence(
                 assembly_descriptor,
-                anchors=_accepted_assembly_anchors(
-                    record,
-                    pinned_material_for_cleanup,
-                    config=config,
-                    app_config=ctx.app_config,
-                ),
+                anchors=assembly_anchors,
             )
             bind_outcome = await run_manager.bind_assembly_evidence(run_id, evidence)
             if bind_outcome in (

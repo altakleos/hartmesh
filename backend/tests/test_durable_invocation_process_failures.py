@@ -11,6 +11,7 @@ operate a cluster.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import uuid
 from contextlib import asynccontextmanager, nullcontext
@@ -416,7 +417,11 @@ def _material(*, soul: str = "steady") -> ResolvedAgentMaterialV1:
     )
 
 
-def _accepted(material: ResolvedAgentMaterialV1) -> AcceptedInvocation:
+def _accepted(
+    material: ResolvedAgentMaterialV1,
+    *,
+    execution_options: dict[str, object] | None = None,
+) -> AcceptedInvocation:
     return AcceptedInvocation.seal(
         principal=PrincipalProjection(user_id="owner-1"),
         origin=InvocationOrigin(source_kind="http"),
@@ -424,10 +429,241 @@ def _accepted(material: ResolvedAgentMaterialV1) -> AcceptedInvocation:
         context_references={},
         agent_revision=ResolvedAgentRevision.from_material(material),
         normalized_input={},
-        execution_options={},
+        execution_options=execution_options or {},
         extension_generation=7,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
     )
+
+
+@pytest.mark.anyio
+async def test_worker_rejects_policy_drift_from_frozen_execution_options() -> None:
+    material = _material()
+    accepted = _accepted(
+        material,
+        execution_options={"recursion_limit": 1000},
+    )
+    manager = RunManager(store=MemoryRunStore())
+    record = await manager.create_or_reject(
+        "thread-policy-anchor-drift",
+        accepted_invocation=accepted,
+    )
+    counts = {"astream": 0}
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            counts["astream"] += 1
+            yield {"messages": []}
+
+    def factory(*, config):
+        assembled = _assembled_graph(material, Agent())
+        assert assembled.descriptor is not None
+        return replace(
+            assembled,
+            descriptor=replace(
+                assembled.descriptor,
+                effective_policies={
+                    **assembled.descriptor.effective_policies,
+                    "recursion_limit": config["recursion_limit"],
+                },
+            ),
+        )
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={"recursion_limit": 999},
+    )
+
+    assert record.stop_reason == "agent_assembly_drift"
+    assert counts == {"astream": 0}
+
+
+@pytest.mark.anyio
+async def test_worker_rejects_subagent_limit_drift_from_frozen_material() -> None:
+    material = _material()
+    manager = RunManager(store=MemoryRunStore())
+    record = await manager.create_or_reject(
+        "thread-subagent-policy-anchor-drift",
+        accepted_invocation=_accepted(material),
+    )
+    counts = {"astream": 0}
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            counts["astream"] += 1
+            yield {"messages": []}
+
+    def factory(*, config):
+        assert config["context"]["max_concurrent_subagents"] == 1
+        assert config["context"]["max_total_subagents"] == 2
+        config["context"]["max_concurrent_subagents"] = 4
+        config["context"]["max_total_subagents"] = 5
+        assembled = _assembled_graph(material, Agent())
+        assert assembled.descriptor is not None
+        policies = dict(assembled.descriptor.effective_policies)
+        subagent_policy = dict(policies["subagents"])
+        subagent_policy.update(
+            max_concurrent=config["context"]["max_concurrent_subagents"],
+            max_total=config["context"]["max_total_subagents"],
+        )
+        policies["subagents"] = subagent_policy
+        return replace(
+            assembled,
+            descriptor=replace(
+                assembled.descriptor,
+                effective_policies=policies,
+            ),
+        )
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={"context": {}},
+    )
+
+    assert record.stop_reason == "agent_assembly_drift"
+    assert counts == {"astream": 0}
+
+
+@pytest.mark.anyio
+async def test_worker_accepts_validated_subagent_constraint_override() -> None:
+    now = datetime(2026, 8, 30, 12, tzinfo=UTC)
+    material = _material()
+    accepted = _accepted(material)
+    projection = ConstraintProjectionV1(
+        request_digest="a" * 64,
+        agent_revision_digest=accepted.agent_revision.digest,
+        projection_revision="assembly-policy-v1",
+        issued_at=now,
+        valid_until=now + timedelta(minutes=5),
+        evidence_id="assembly-policy-evidence",
+        evidence_digest="d" * 64,
+        max_total_subagents=1,
+    )
+    accepted = replace(
+        accepted,
+        decision_evidence=(InternalConstraintDecision.projected(projection).evidence or {}),
+    )
+    manager = RunManager(store=MemoryRunStore())
+    record = await manager.create_or_reject(
+        "thread-accepted-subagent-constraint",
+        accepted_invocation=accepted,
+    )
+    record.request_digest = projection.request_digest
+    counts = {"astream": 0}
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            counts["astream"] += 1
+            yield {"messages": []}
+
+    def factory(*, config):
+        assembled = _assembled_graph(material, Agent())
+        assert assembled.descriptor is not None
+        policies = dict(assembled.descriptor.effective_policies)
+        subagent_policy = dict(policies["subagents"])
+        subagent_policy["max_total"] = config["context"]["max_total_subagents"]
+        policies["subagents"] = subagent_policy
+        return replace(
+            assembled,
+            descriptor=replace(
+                assembled.descriptor,
+                effective_policies=policies,
+            ),
+        )
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, constraint_clock=lambda: now),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    assert record.status is RunStatus.success
+    assert counts == {"astream": 1}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mutation", ["edit", "delete"])
+async def test_worker_rejects_skill_drift_from_frozen_snapshot(
+    tmp_path,
+    mutation: str,
+) -> None:
+    from deerflow.skills.types import Skill, SkillCategory
+
+    original_content = "---\nname: review\ndescription: Original\n---\nOriginal body\n"
+    drifted_content = "---\nname: review\ndescription: Original\n---\nDrifted body\n"
+    skill_dir = tmp_path / "review"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(original_content, encoding="utf-8")
+    skill = Skill(
+        name="review",
+        description="Original",
+        license=None,
+        skill_dir=skill_dir,
+        skill_file=skill_file,
+        relative_path=skill_dir.relative_to(tmp_path),
+        category=SkillCategory.CUSTOM,
+        allowed_tools=("bash",),
+        enabled=True,
+    )
+    material = replace(
+        _material(),
+        skills=(
+            {
+                "name": skill.name,
+                "manifest_digest": hashlib.sha256(
+                    original_content.encode("utf-8"),
+                ).hexdigest(),
+                "content_digest": "c" * 64,
+            },
+        ),
+        enabled_skill_objects=(skill,),
+        all_skill_objects=(skill,),
+    )
+    manager = RunManager(store=MemoryRunStore())
+    record = await manager.create_or_reject(
+        "thread-skill-anchor-drift",
+        accepted_invocation=_accepted(material),
+    )
+    counts = {"astream": 0}
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            counts["astream"] += 1
+            yield {"messages": []}
+
+    def factory(*, config):
+        if mutation == "edit":
+            skill_file.write_text(drifted_content, encoding="utf-8")
+        else:
+            skill_file.unlink()
+        return _assembled_graph(material, Agent())
+
+    await run_agent(
+        _bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    assert record.stop_reason == "agent_assembly_drift"
+    assert counts == {"astream": 0}
 
 
 def _bridge() -> SimpleNamespace:
@@ -435,11 +671,11 @@ def _bridge() -> SimpleNamespace:
 
 
 def _assembled_graph(material: ResolvedAgentMaterialV1, graph: object):
-    from deerflow.agents.assembly_descriptor import build_assembly_descriptor
-    from deerflow.agents.lead_agent.agent import (
-        LeadAgentAssembly,
-        _subagent_release_policy,
+    from deerflow.agents.assembly_descriptor import (
+        build_assembly_descriptor,
+        subagent_release_policy,
     )
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
 
     defaults = material.runtime_defaults
     allowed_subagents = getattr(
@@ -466,7 +702,7 @@ def _assembled_graph(material: ResolvedAgentMaterialV1, graph: object):
             "non_interactive": False,
             "plan_mode": bool(defaults.get("is_plan_mode", False)),
             "recursion_limit": "framework-default",
-            "subagents": _subagent_release_policy(
+            "subagents": subagent_release_policy(
                 material.app_config,
                 enabled=subagents_enabled,
                 max_concurrent=int(defaults.get("max_concurrent_subagents", 3)),

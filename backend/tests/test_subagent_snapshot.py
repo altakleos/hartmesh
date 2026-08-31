@@ -857,7 +857,7 @@ def test_lead_prompt_uses_only_frozen_catalog_descriptions(monkeypatch) -> None:
 
 
 def test_lead_policy_anchors_frozen_catalog_without_live_reads(monkeypatch) -> None:
-    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.agents.assembly_descriptor import subagent_release_policy
 
     catalog = ResolvedSubagentCatalogV1.from_entries(
         (_definition("planner", prompt="Accepted prompt"),),
@@ -878,7 +878,7 @@ def test_lead_policy_anchors_frozen_catalog_without_live_reads(monkeypatch) -> N
         live_read_forbidden,
     )
 
-    policy = lead_agent_module._subagent_release_policy(
+    policy = subagent_release_policy(
         _app_config(),
         enabled=True,
         max_concurrent=3,

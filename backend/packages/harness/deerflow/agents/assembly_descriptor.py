@@ -19,8 +19,10 @@ Two rules shape the projection:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+from collections.abc import Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -32,6 +34,7 @@ from deerflow_extension_api import (
     collect_release_policies,
 )
 
+from deerflow.runtime.subagent_snapshot import ResolvedSubagentCatalogV1
 from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.tools.mcp_metadata import get_mcp_source, is_mcp_tool
 
@@ -415,7 +418,7 @@ def _model_parameters(model_config: object, model_overrides: dict[str, object] |
 
 
 def _skill_content_hash(skill: object) -> str | None:
-    """Digest of a skill's ``SKILL.md`` body.
+    """SHA-256 digest of the exact ``SKILL.md`` execution bytes.
 
     ``SkillActivationMiddleware`` injects this body as current-turn context
     (see ``skill_activation_middleware._read_skill_content``), so it is what
@@ -426,36 +429,139 @@ def _skill_content_hash(skill: object) -> str | None:
     cached-content field the rest of the system does not have. A skill whose
     file has gone missing or become unreadable is recorded as undescribable
     (``None``) rather than raising — assembly must not fail because a skill
-    file disappeared out from under it.
+    file disappeared out from under it. The raw-byte digest intentionally
+    matches ``SkillSnapshotProjection.manifest_digest`` so accepted evidence
+    can be anchored without reopening the immutable snapshot.
     """
     skill_file = getattr(skill, "skill_file", None)
     if not isinstance(skill_file, Path):
         return None
     try:
-        content = skill_file.read_text(encoding="utf-8")
+        content = skill_file.read_bytes()
     except OSError:
         return None
-    return canonical_hash(content)
+    return hashlib.sha256(content).hexdigest()
 
 
-def _skill_catalog(enabled_skills: list[object]) -> list[dict[str, object]]:
-    return [
-        {
-            "name": str(getattr(skill, "name", "")),
-            "description": str(getattr(skill, "description", "")),
-            "allowed_tools": sorted(str(item) for item in (getattr(skill, "allowed_tools", None) or ())),
-            "content_hash": _skill_content_hash(skill),
-            "secrets_autonomous": bool(getattr(skill, "secrets_autonomous", True)),
-            "required_secrets": sorted(f"{getattr(requirement, 'name', '')}:{bool(getattr(requirement, 'optional', False))}" for requirement in (getattr(skill, "required_secrets", None) or ())),
-        }
-        for skill in enabled_skills
-    ]
+def _skill_catalog(
+    enabled_skills: list[object],
+    *,
+    content_hashes_by_name: Mapping[str, str] | None = None,
+) -> list[dict[str, object]]:
+    catalog: list[dict[str, object]] = []
+    for skill in enabled_skills:
+        name = str(getattr(skill, "name", ""))
+        content_hash = _skill_content_hash(skill) if content_hashes_by_name is None else content_hashes_by_name.get(name)
+        catalog.append(
+            {
+                "name": name,
+                "description": str(getattr(skill, "description", "")),
+                "allowed_tools": sorted(str(item) for item in (getattr(skill, "allowed_tools", None) or ())),
+                "content_hash": content_hash,
+                "secrets_autonomous": bool(getattr(skill, "secrets_autonomous", True)),
+                "required_secrets": sorted(f"{getattr(requirement, 'name', '')}:{bool(getattr(requirement, 'optional', False))}" for requirement in (getattr(skill, "required_secrets", None) or ())),
+            }
+        )
+    return catalog
 
 
-def skill_catalog_digest(enabled_skills: list[object]) -> str:
+def skill_catalog_digest(
+    enabled_skills: list[object],
+    *,
+    content_hashes_by_name: Mapping[str, str] | None = None,
+) -> str:
     """Digest accepted immutable skill objects exactly as assembly does."""
 
-    return canonical_hash(sorted(_skill_catalog(enabled_skills), key=lambda item: item["name"]))
+    return canonical_hash(
+        sorted(
+            _skill_catalog(
+                enabled_skills,
+                content_hashes_by_name=content_hashes_by_name,
+            ),
+            key=lambda item: item["name"],
+        )
+    )
+
+
+def skill_catalog_digest_from_snapshot(
+    enabled_skills: list[object],
+    skill_projections: Sequence[Mapping[str, object]],
+) -> str:
+    """Digest skill metadata against manifest hashes frozen at acceptance."""
+
+    expected_names = {str(getattr(skill, "name", "")) for skill in enabled_skills}
+    if len(expected_names) != len(enabled_skills):
+        raise ValueError("accepted skill names must be unique")
+    content_hashes: dict[str, str] = {}
+    for projection in skill_projections:
+        name = projection.get("name")
+        if name not in expected_names:
+            continue
+        digest = projection.get("manifest_digest")
+        if not isinstance(name, str) or name in content_hashes or not isinstance(digest, str) or len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise ValueError("accepted skill snapshot manifest is malformed")
+        content_hashes[name] = digest
+    if set(content_hashes) != expected_names:
+        raise ValueError("accepted skill snapshot manifest is incomplete")
+    return skill_catalog_digest(
+        enabled_skills,
+        content_hashes_by_name=content_hashes,
+    )
+
+
+def subagent_release_policy(
+    app_config: object,
+    *,
+    enabled: bool,
+    max_concurrent: int,
+    max_total: int,
+    resolved_subagent_catalog: ResolvedSubagentCatalogV1 | None = None,
+) -> dict[str, object]:
+    """Project the delegation limits the assembled graph will enforce."""
+
+    policy: dict[str, object] = {
+        "enabled": enabled,
+        "max_concurrent": max_concurrent,
+        "max_total": max_total,
+        "type_allowlist": [],
+        "runtime_limits": {},
+    }
+    if resolved_subagent_catalog is not None:
+        policy["catalog_digest"] = resolved_subagent_catalog.digest
+        policy["type_allowlist"] = list(
+            resolved_subagent_catalog.allowed_names,
+        )
+        policy["runtime_limits"] = {
+            entry.name: {
+                "max_turns": entry.max_turns,
+                "timeout_seconds": entry.timeout_seconds,
+            }
+            for entry in resolved_subagent_catalog.entries
+        }
+        return policy
+    if not enabled:
+        return policy
+
+    from deerflow.subagents import (
+        get_available_subagent_names,
+        get_subagent_config,
+    )
+
+    type_allowlist = sorted(
+        set(get_available_subagent_names(app_config=app_config)),
+    )
+    runtime_limits: dict[str, object] = {}
+    for name in type_allowlist:
+        subagent_config = get_subagent_config(name, app_config=app_config)
+        if subagent_config is None:
+            continue
+        runtime_limits[name] = {
+            "max_turns": subagent_config.max_turns,
+            "timeout_seconds": subagent_config.timeout_seconds,
+        }
+    policy["type_allowlist"] = type_allowlist
+    policy["runtime_limits"] = runtime_limits
+    return policy
 
 
 def build_assembly_descriptor(
@@ -518,4 +624,6 @@ __all__ = [
     "describe_model_identity",
     "describe_tool",
     "skill_catalog_digest",
+    "skill_catalog_digest_from_snapshot",
+    "subagent_release_policy",
 ]

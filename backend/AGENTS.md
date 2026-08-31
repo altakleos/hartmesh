@@ -19,15 +19,15 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   extension generation, and effective skill material before worker/model work;
   keyed replay, lifecycle observation, and fenced cancellation use that same
   accepted record. Fail closed rather than falling back to a less durable path.
-- Durable lead order: verify material; rebuild trusted context with the
-  server-owned `__deerflow_require_assembly_evidence` sentinel; materialize skills;
-  fence start; assemble/validate `AssemblyEvidenceV1`; bind; only then access
-  checkpoints or graph/model/tools. Proceed only on `bound`/`already_matching`.
-  Missing/unreadable evidence: `assembly_evidence_unavailable`; invalid/changed:
-  `agent_assembly_drift`; ownership loss cannot terminalize its successor. V1
-  hashes sorted skills/catalog and `bootstrap`, `non_interactive`, `plan_mode`,
-  `recursion_limit`, and frozen `subagents` catalog policy. Retain V1 unless
-  incompatible. Evidence is execution, not source attestation.
+- Durable lead order: verify accepted material/context; install the opaque
+  `__deerflow_require_assembly_evidence` sentinel; materialize skills; fence
+  start; derive accepted anchors; assemble, validate, and bind
+  `AssemblyEvidenceV1`; only then touch checkpoints or graph/model/tools.
+  Continue only on `bound`/`already_matching`; drift fails closed and ownership
+  loss cannot terminalize its successor. Expected skill hashes use accepted
+  snapshot manifests while actual hashes use assembled bytes. Policy anchors
+  use accepted options/material plus validated constraints. Evidence is an
+  execution record, not source attestation.
 - `packages/runtime-api/` is the stdlib-only portable contract; Gateway HTTP and
   in-process adapters must remain behaviorally identical. The synchronous
   `DeerFlowClient` is a legacy local graph client and does not enter `InvocationRuntime`;

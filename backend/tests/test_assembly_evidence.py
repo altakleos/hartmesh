@@ -88,8 +88,6 @@ def _anchors(descriptor: AgentAssemblyDescriptor | None = None) -> AcceptedAssem
         expected_policy_digest=canonical_durable_policy_digest(descriptor.effective_policies),
         agent_revision_digest="4" * 64,
         extension_generation=9,
-        extension_manifest_digest="5" * 64,
-        trusted_context_execution_digest="6" * 64,
     )
 
 
@@ -134,7 +132,6 @@ def test_evidence_is_stable_across_mapping_order_and_process_restart():
             expected_skillset_digest=canonical_skillset_digest(descriptor.enabled_skills, catalog_digest={"7" * 64!r}),
             expected_policy_digest=canonical_durable_policy_digest(policies),
             agent_revision_digest={"4" * 64!r}, extension_generation=9,
-            extension_manifest_digest={"5" * 64!r}, trusted_context_execution_digest={"6" * 64!r},
         )
         print(build_assembly_evidence(descriptor, anchors=anchors).fingerprint)
         """
@@ -150,6 +147,36 @@ def test_evidence_is_stable_across_mapping_order_and_process_restart():
 
 def test_every_descriptor_field_has_an_explicit_evidence_classification():
     assert_descriptor_projection_complete()
+
+
+@pytest.mark.parametrize(
+    ("classification_name", "removed_field", "descriptor_name"),
+    [
+        ("_FINGERPRINTED_TOOL_FIELDS", "source", "ToolDescriptor"),
+        (
+            "_FINGERPRINTED_MIDDLEWARE_FIELDS",
+            "module",
+            "MiddlewareDescriptor",
+        ),
+    ],
+)
+def test_nested_descriptor_fields_require_explicit_classification(
+    monkeypatch,
+    classification_name: str,
+    removed_field: str,
+    descriptor_name: str,
+) -> None:
+    from deerflow.runtime import assembly_evidence
+
+    classified = getattr(assembly_evidence, classification_name)
+    monkeypatch.setattr(
+        assembly_evidence,
+        classification_name,
+        classified - {removed_field},
+    )
+
+    with pytest.raises(AssertionError, match=descriptor_name):
+        assert_descriptor_projection_complete()
 
 
 @pytest.mark.parametrize(
