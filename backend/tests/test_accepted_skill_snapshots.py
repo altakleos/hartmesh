@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import os
@@ -49,8 +50,16 @@ from deerflow.runtime.skill_snapshot import (
     cleanup_abandoned_skill_snapshots,
     snapshot_effective_skills,
 )
-from deerflow.runtime.tenant_identity import TenantIdentityV1
+from deerflow.runtime.tenant_identity import (
+    TENANT_REFERENCE_CONTEXT_KEY,
+    TenantIdentityV1,
+)
 from deerflow.sandbox import tools as sandbox_tools
+from deerflow.sandbox.accepted_material import (
+    AcceptedExecutionEvidenceV1,
+    AcceptedMaterialCapability,
+    AcceptedSkillExecutionEvidenceV2,
+)
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox_provider import AcceptedSkillExecutionEvidenceV1
 from deerflow.skills.parser import parse_skill_file
@@ -1689,6 +1698,154 @@ async def test_remote_materialization_failure_precedes_running_and_graph(
     assert record.status is RunStatus.error
     events = await store.list_lifecycle_events(run_id=record.run_id)
     assert [event["lifecycle_type"] for event in events] == ["accepted", "failed"]
+
+
+@pytest.mark.asyncio
+async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.community.aio_sandbox.aio_sandbox_provider import (
+        AioSandboxProvider,
+    )
+    from deerflow.runtime.runs.worker import (
+        _materialize_accepted_skill_projection,
+    )
+    from deerflow.runtime.skill_projection import (
+        SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
+        get_skill_projection_coordinator,
+    )
+
+    skill_file = _write_skill(tmp_path, body="Neutral adapter worker path")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    material = revision.material
+    assert material is not None and material.skill_snapshot is not None
+
+    class QualifiedAioProvider(AioSandboxProvider):
+        def __init__(self) -> None:
+            self.sandbox = SimpleNamespace(id="sandbox-neutral")
+            self.evidence = None
+            self.acquired_scope = None
+            self.destroyed = []
+            self._config = {
+                "accepted_material_lease_duration_seconds": 300,
+            }
+
+        def provider_neutral_accepted_materialization_enabled(self) -> bool:
+            return True
+
+        async def accepted_material_runtime_image_digest_async(self) -> str:
+            return "5" * 64
+
+        async def acquire_bound_accepted_skills_async(
+            self,
+            thread_id,
+            *,
+            user_id,
+            binding,
+        ) -> str:
+            self.acquired_scope = (thread_id, user_id)
+            wire = {
+                "profile": "rwx_verified_copy_v2",
+                "attempt_id": "provider-attempt",
+                "snapshot_id": binding.snapshot_id,
+                "run_id": binding.run_id,
+                "generation": binding.generation,
+                "pod_uid": "pod-uid",
+                "pod_isolation_digest": "6" * 64,
+                "lease_uid": "lease-uid",
+                "network_policy_uid": "network-policy-uid",
+                "network_policy_spec_digest": "7" * 64,
+                "evidence_secret_uid": "evidence-secret-uid",
+                "evidence_secret_digest": "8" * 64,
+                "capability_secret_uid": "capability-secret-uid",
+                "capability_secret_digest": "9" * 64,
+                "sandbox_image_digest": "5" * 64,
+                "accepted_skill_runtime_image_digest": "a" * 64,
+                "runtime_image_ids_digest": "b" * 64,
+                "verifier_receipt_digest": "c" * 64,
+            }
+            materialization_wire = {
+                "version": 2,
+                **wire,
+                "content_digest": binding.snapshot_id,
+            }
+            wire["materialization_evidence_digest"] = hashlib.sha256(
+                json.dumps(
+                    materialization_wire,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode(),
+            ).hexdigest()
+            self.evidence = AcceptedSkillExecutionEvidenceV2(**wire)
+            return self.sandbox.id
+
+        def get(self, sandbox_id):
+            return self.sandbox if sandbox_id == self.sandbox.id else None
+
+        def accepted_skill_execution_evidence(self, sandbox_id):
+            return self.evidence if sandbox_id == self.sandbox.id else None
+
+        def has_accepted_skill_isolation(self, sandbox_id):
+            return sandbox_id == self.sandbox.id
+
+        def accepted_skill_material_capability(self, sandbox_id):
+            assert sandbox_id == self.sandbox.id
+            return AcceptedMaterialCapability.IMMUTABLE_READ_ONLY
+
+        async def bind_accepted_skill_snapshot_async(self, *_args, **_kwargs):
+            return None
+
+        async def validate_accepted_skill_execution_async(
+            self,
+            sandbox_id,
+            evidence,
+        ):
+            return sandbox_id == self.sandbox.id and evidence == self.evidence
+
+        async def renew_accepted_skill_execution_async(
+            self,
+            sandbox_id,
+            evidence,
+        ):
+            return sandbox_id == self.sandbox.id and evidence == self.evidence
+
+        def destroy(self, sandbox_id):
+            self.destroyed.append(sandbox_id)
+
+    provider = QualifiedAioProvider()
+    monkeypatch.setattr("deerflow.sandbox.get_sandbox_provider", lambda: provider)
+    runtime = SimpleNamespace(
+        context={
+            "thread_id": "thread-neutral",
+            "run_id": "run-neutral",
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
+            TENANT_REFERENCE_CONTEXT_KEY: _TEST_TENANT,
+            "accepted_agent_revision_digest": revision.digest,
+        },
+    )
+
+    result = await _materialize_accepted_skill_projection(
+        runtime,
+        user_id="user-1",
+    )
+    try:
+        assert provider.acquired_scope == ("thread-neutral", "user-1")
+        assert isinstance(result.evidence, AcceptedExecutionEvidenceV1)
+        assert result.evidence.attempt_id != provider.evidence.attempt_id
+        assert await result.validate()
+    finally:
+        await result.release()
+        token = runtime.context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
+        if token is not None:
+            coordinator = get_skill_projection_coordinator()
+            clear = coordinator.release(token)
+            if clear is not None:
+                coordinator.finalize_release(clear)
+        material.release_process_material()
+
+    assert provider.destroyed == ["sandbox-neutral"]
 
 
 @pytest.mark.asyncio

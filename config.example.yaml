@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 44
+config_version: 45
 
 # ============================================================================
 # Logging
@@ -1444,6 +1444,21 @@ sandbox:
 #   # idle_timeout: 600               # warm seconds before destroy; 0 disables
 #   # environment:                    # create-time and per-command defaults
 #   #   PYTHONUNBUFFERED: "1"
+#   # Accepted durable material is intentionally unavailable for OpenSandbox
+#   # server 0.1.14 / SDK 0.1.15; trusted setup also remains live-unqualified.
+#   # Any non-disabled value fails startup before remote or model work; see
+#   # backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md.
+#   accepted_materialization_profile: disabled
+#   # Reserved together for a future independently live-qualified profile:
+#   # opensandbox_control_plane_contract_version: "0.1.15"
+#   # accepted_material_verifier_digest: <64-lowercase-hex>
+#   # accepted_material_lease_duration_seconds: 300
+#   # accepted_material_renew_interval_seconds: 60  # strictly less than half the lease
+#   # accepted_material_reconcile_grace_seconds: 600  # at least the lease duration
+#   # accepted_material_max_files: 2048
+#   # accepted_material_max_bytes: 33554432
+#   # accepted_material_max_path_depth: 32
+#   # accepted_material_qualification_evidence: <independently-verified-artifact-ref>
 
 # ============================================================================
 # Subagents Configuration

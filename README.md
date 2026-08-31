@@ -285,7 +285,15 @@ One immutable accepted skill tree contains the transitive union needed by the le
 
 Nonempty accepted skills use a supported accepted-only profile: local container-backed AIO or Kubernetes with the fenced `rwx_verified_copy_v2` projection.
 
-`LocalSandboxProvider`, E2B, custom, and other remote profiles remain empty-only. Offline projection evidence does not establish live cross-node qualification.
+OpenSandbox support for ordinary execution is distinct from HartMesh-qualified immutable accepted material. Nonempty durable skills are supported only for the exact live-qualified profile and artifact.
+
+OpenSandbox has no such qualified profile in this release: its pinned control
+plane lacks atomic ownership claims and resolved-image digest readback, while
+candidate trusted-setup surfaces remain live-unqualified. Configuration and acquisition reject nonempty
+accepted material before model work. `LocalSandboxProvider`, E2B, custom, and
+other remote profiles also remain empty-only. Offline projection or SDK-surface
+evidence does not establish live qualification. See the
+[OpenSandbox Phase 0 decision](backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md).
 
 Evidence: accepted-execution sources in [`runtime/`](backend/packages/harness/deerflow/runtime/) — `accepted_invocation.py`, `agent_revision.py`, and `skill_snapshot.py`.
 

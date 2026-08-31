@@ -1,3 +1,4 @@
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -234,9 +235,102 @@ class SandboxConfig(BaseModel):
         default="disabled",
         description=("Remote AIO accepted-skill profile required by Gateway readiness. rwx_verified_copy_v2 requires an authenticated provisioner preflight; v1 is compatibility-only and cannot advertise nonempty immutable material."),
     )
+    accepted_materialization_profile: Literal[
+        "disabled",
+        "durable_one_replica_opensandbox_immutable_skills_v1",
+    ] = Field(
+        default="disabled",
+        description=("Provider-neutral immutable accepted-material profile. OpenSandbox selection is unavailable until its control plane passes the live ownership and trusted-setup feasibility gate."),
+    )
+    opensandbox_control_plane_contract_version: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Pinned OpenSandbox server/SDK contract version for a qualified profile.",
+    )
+    accepted_material_verifier_digest: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description="SHA-256 digest of the verifier embedded in the pinned runtime image.",
+    )
+    accepted_material_lease_duration_seconds: int = Field(
+        default=300,
+        ge=60,
+        le=3600,
+        description="Bounded accepted-material ownership lease duration.",
+    )
+    accepted_material_renew_interval_seconds: int = Field(
+        default=60,
+        ge=10,
+        le=1200,
+        description="Accepted-material ownership renewal interval.",
+    )
+    accepted_material_reconcile_grace_seconds: int = Field(
+        default=600,
+        ge=60,
+        le=86400,
+        description="Conservative expiry grace before an accepted remote may be reconciled.",
+    )
+    accepted_material_max_files: int = Field(
+        default=2048,
+        ge=1,
+        le=10000,
+        description="Maximum entries of all types in one accepted material manifest.",
+    )
+    accepted_material_max_bytes: int = Field(
+        default=32 * 1024 * 1024,
+        ge=1,
+        le=1024 * 1024 * 1024,
+        description="Maximum total accepted material bytes.",
+    )
+    accepted_material_max_path_depth: int = Field(
+        default=32,
+        ge=1,
+        le=128,
+        description="Maximum accepted material relative path depth.",
+    )
+    accepted_material_qualification_evidence: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="Reference to the exact scoped live qualification artifact.",
+    )
 
     @model_validator(mode="after")
     def _validate_provisioner_auth(self) -> "SandboxConfig":
+        if self.accepted_material_renew_interval_seconds * 2 >= self.accepted_material_lease_duration_seconds:
+            raise ValueError(
+                "accepted material renew interval must be less than half the lease duration",
+            )
+        if self.accepted_material_reconcile_grace_seconds < self.accepted_material_lease_duration_seconds:
+            raise ValueError(
+                "accepted material reconcile grace must be at least the lease duration",
+            )
+        is_opensandbox = self.use in {
+            "deerflow.community.opensandbox:OpenSandboxProvider",
+            "deerflow.community.opensandbox.provider:OpenSandboxProvider",
+        }
+        if self.accepted_materialization_profile != "disabled" and not is_opensandbox:
+            raise ValueError(
+                "opensandbox_qualification_unavailable: the reserved OpenSandbox accepted-material profile cannot be selected for another provider",
+            )
+        if is_opensandbox and self.accepted_materialization_profile != "disabled":
+            if (
+                not isinstance(self.image, str)
+                or re.fullmatch(
+                    r"[^\s@]+@sha256:[0-9a-f]{64}",
+                    self.image,
+                )
+                is None
+            ):
+                raise ValueError(
+                    "opensandbox_image_unpinned: accepted material requires a full OCI digest",
+                )
+            raise ValueError(
+                "opensandbox_qualification_unavailable: OpenSandbox 0.1.15 has no compare-and-set ownership primitive; immutable accepted material remains disabled",
+            )
+        if is_opensandbox and self.accepted_skill_projection_profile != "disabled":
+            raise ValueError(
+                "opensandbox_qualification_unavailable: the AIO accepted-skill projection profile cannot be selected for OpenSandbox",
+            )
         if self.provisioner_api_key and self.provisioner_service_account_token_file:
             raise ValueError(
                 "provisioner_api_key and provisioner_service_account_token_file are mutually exclusive",

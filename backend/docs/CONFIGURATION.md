@@ -641,6 +641,7 @@ sandbox:
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
    idle_timeout: 600                  # warm seconds before destroy; 0 disables
+   accepted_materialization_profile: disabled  # only supported value today
    environment:
       PYTHONUNBUFFERED: "1"
 ```
@@ -665,6 +666,20 @@ horizon. File transfer uses OpenSandbox's native filesystem API; bounded
 Downloads are restricted to `/mnt/user-data` and all file paths reject
 traversal. Multi-process discovery and ownership coordination are not yet
 implemented, so `replicas` is a per-Gateway-process soft cap.
+
+OpenSandbox support for ordinary execution is distinct from HartMesh-qualified immutable accepted material. Nonempty durable skills are supported only for the exact live-qualified profile and artifact.
+
+No OpenSandbox immutable-material profile is qualified in this release. Server
+0.1.14 / SDK 0.1.15 do not expose atomic ownership compare-and-set or independently
+resolved image-digest readback. Candidate read-only-volume and per-command-identity
+surfaces remain live-unqualified as a trusted setup boundary.
+Any non-disabled `accepted_materialization_profile` is rejected at configuration
+validation (a mutable image reports `opensandbox_image_unpinned`; a digest-pinned
+request reports `opensandbox_qualification_unavailable`). The lease, verifier,
+limit, contract-version, and evidence-reference fields in `config.example.yaml`
+are reserved together for a future fully live-qualified profile and do not
+enable it. See the
+[Phase 0 decision](OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md).
 
 Choose between local execution or Docker-based isolation:
 

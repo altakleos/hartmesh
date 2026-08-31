@@ -1,204 +1,31 @@
 import asyncio
-import hashlib
-import json
-import re
 import threading
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
+from deerflow.sandbox.accepted_material import (
+    AcceptedMaterialCapability,
+    AcceptedSkillExecutionEvidence,
+    AcceptedSkillSandboxBindingError,
+    AcceptedSkillSandboxBindingV1,
+)
+from deerflow.sandbox.accepted_material import (
+    AcceptedSkillExecutionEvidenceV1 as AcceptedSkillExecutionEvidenceV1,
+)
+from deerflow.sandbox.accepted_material import (
+    AcceptedSkillExecutionEvidenceV2 as AcceptedSkillExecutionEvidenceV2,
+)
 from deerflow.sandbox.sandbox import Sandbox
 
 if TYPE_CHECKING:
-    from deerflow.runtime.skill_projection import (
-        SkillProjectionClear,
-        SkillProjectionConsumerToken,
-    )
-
-_SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+    from deerflow.runtime.skill_projection import SkillProjectionClear
 
 
-class AcceptedSkillSandboxBindingError(RuntimeError):
-    """Fail-closed error for an unavailable accepted-skill projection."""
-
-    def __init__(self, code: str) -> None:
-        self.code = code
-        super().__init__(code)
-
-
-class AcceptedSkillMaterialCapability(Enum):
-    """Strongest accepted-skill material boundary a sandbox can prove."""
-
-    EMPTY_ONLY = "empty_only"
-    IMMUTABLE_READ_ONLY = "immutable_read_only"
-
-
-@dataclass(frozen=True, slots=True)
-class AcceptedSkillExecutionEvidenceV1:
-    """Bounded non-secret proof of the exact accepted sandbox attempt."""
-
-    profile: str
-    attempt_id: str
-    snapshot_id: str
-    run_id: str
-    generation: int
-    pod_uid: str
-    lease_uid: str
-    runtime_image_ids_digest: str
-    verifier_receipt_digest: str
-    materialization_evidence_digest: str
-
-    def __post_init__(self) -> None:
-        if self.profile != "rwx_verified_copy_v1":
-            raise ValueError("accepted skill profile is invalid")
-        for value, field_name, maximum in (
-            (self.attempt_id, "attempt_id", 128),
-            (self.run_id, "run_id", 512),
-            (self.pod_uid, "pod_uid", 128),
-            (self.lease_uid, "lease_uid", 128),
-        ):
-            if not isinstance(value, str) or not value or len(value.encode("utf-8")) > maximum or any(ord(character) < 32 for character in value):
-                raise ValueError(f"accepted skill {field_name} is invalid")
-        for value, field_name in (
-            (self.snapshot_id, "snapshot_id"),
-            (
-                self.runtime_image_ids_digest,
-                "runtime_image_ids_digest",
-            ),
-            (
-                self.verifier_receipt_digest,
-                "verifier_receipt_digest",
-            ),
-            (
-                self.materialization_evidence_digest,
-                "materialization_evidence_digest",
-            ),
-        ):
-            if _SNAPSHOT_ID_PATTERN.fullmatch(value) is None:
-                raise ValueError(f"accepted skill {field_name} is invalid")
-        if type(self.generation) is not int or self.generation < 0:
-            raise ValueError("accepted skill generation is invalid")
-
-    def to_persisted(self) -> dict[str, object]:
-        return {
-            "version": 1,
-            "profile": self.profile,
-            "attempt_id": self.attempt_id,
-            "snapshot_id": self.snapshot_id,
-            "run_id": self.run_id,
-            "generation": self.generation,
-            "pod_uid": self.pod_uid,
-            "lease_uid": self.lease_uid,
-            "runtime_image_ids_digest": self.runtime_image_ids_digest,
-            "verifier_receipt_digest": self.verifier_receipt_digest,
-            "materialization_evidence_digest": (self.materialization_evidence_digest),
-        }
-
-    @property
-    def digest(self) -> str:
-        return hashlib.sha256(
-            json.dumps(
-                self.to_persisted(),
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8"),
-        ).hexdigest()
-
-
-@dataclass(frozen=True, slots=True)
-class AcceptedSkillExecutionEvidenceV2:
-    """Complete non-secret proof of one v2 Kubernetes execution tuple."""
-
-    profile: str
-    attempt_id: str
-    snapshot_id: str
-    run_id: str
-    generation: int
-    pod_uid: str
-    pod_isolation_digest: str
-    lease_uid: str
-    network_policy_uid: str
-    network_policy_spec_digest: str
-    evidence_secret_uid: str
-    evidence_secret_digest: str
-    capability_secret_uid: str
-    capability_secret_digest: str
-    sandbox_image_digest: str
-    accepted_skill_runtime_image_digest: str
-    runtime_image_ids_digest: str
-    verifier_receipt_digest: str
-    materialization_evidence_digest: str
-
-    def __post_init__(self) -> None:
-        if self.profile != "rwx_verified_copy_v2":
-            raise ValueError("accepted skill profile is invalid")
-        for value, field_name, maximum in (
-            (self.attempt_id, "attempt_id", 128),
-            (self.run_id, "run_id", 512),
-            (self.pod_uid, "pod_uid", 128),
-            (self.lease_uid, "lease_uid", 128),
-            (self.network_policy_uid, "network_policy_uid", 128),
-            (self.evidence_secret_uid, "evidence_secret_uid", 128),
-            (self.capability_secret_uid, "capability_secret_uid", 128),
-        ):
-            if not isinstance(value, str) or not value or len(value.encode("utf-8")) > maximum or any(ord(character) < 32 for character in value):
-                raise ValueError(f"accepted skill {field_name} is invalid")
-        for field_name in (
-            "snapshot_id",
-            "pod_isolation_digest",
-            "network_policy_spec_digest",
-            "evidence_secret_digest",
-            "capability_secret_digest",
-            "sandbox_image_digest",
-            "accepted_skill_runtime_image_digest",
-            "runtime_image_ids_digest",
-            "verifier_receipt_digest",
-            "materialization_evidence_digest",
-        ):
-            value = getattr(self, field_name)
-            if not isinstance(value, str) or _SNAPSHOT_ID_PATTERN.fullmatch(value) is None:
-                raise ValueError(f"accepted skill {field_name} is invalid")
-        if type(self.generation) is not int or self.generation < 0:
-            raise ValueError("accepted skill generation is invalid")
-        materialization_wire = {
-            "version": 2,
-            **{name: getattr(self, name) for name in self.__dataclass_fields__ if name != "materialization_evidence_digest"},
-            "content_digest": self.snapshot_id,
-        }
-        expected_materialization_digest = hashlib.sha256(
-            json.dumps(
-                materialization_wire,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8"),
-        ).hexdigest()
-        if self.materialization_evidence_digest != expected_materialization_digest:
-            raise ValueError(
-                "accepted skill materialization evidence digest is invalid",
-            )
-
-    def to_persisted(self) -> dict[str, object]:
-        return {
-            "version": 2,
-            **{name: getattr(self, name) for name in self.__dataclass_fields__},
-        }
-
-    @property
-    def digest(self) -> str:
-        return hashlib.sha256(
-            json.dumps(
-                self.to_persisted(),
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8"),
-        ).hexdigest()
-
-
-AcceptedSkillExecutionEvidence = AcceptedSkillExecutionEvidenceV1 | AcceptedSkillExecutionEvidenceV2
+AcceptedSkillMaterialCapability = AcceptedMaterialCapability
+"""Compatibility name for the provider-neutral accepted-material capability."""
 
 
 def reject_writable_accepted_skill_aliases(
@@ -227,45 +54,6 @@ def reject_writable_accepted_skill_aliases(
         raise AcceptedSkillSandboxBindingError(
             "accepted_skill_snapshot_writable_alias",
         ) from exc
-
-
-@dataclass(frozen=True, slots=True)
-class AcceptedSkillSandboxBindingV1:
-    """Exact accepted skill snapshot visible to one sandboxed invocation.
-
-    ``snapshot_id=None`` is an explicit accepted empty skill set.  A missing
-    binding object, by contrast, is the legacy execution path with no durable
-    accepted-material contract.
-    """
-
-    snapshot_id: str | None
-    run_id: str = "legacy"
-    generation: int = 0
-    evidence: object | None = None
-
-    def __post_init__(self) -> None:
-        if self.snapshot_id is not None and _SNAPSHOT_ID_PATTERN.fullmatch(self.snapshot_id) is None:
-            raise ValueError("accepted skill snapshot_id must be a lowercase SHA-256 digest")
-        if not isinstance(self.run_id, str) or not self.run_id:
-            raise ValueError("accepted skill run_id must be non-empty")
-        if type(self.generation) is not int or self.generation < 0:
-            raise ValueError("accepted skill generation must be a non-negative integer")
-
-    @classmethod
-    def from_consumer_token(
-        cls,
-        token: "SkillProjectionConsumerToken",
-    ) -> "AcceptedSkillSandboxBindingV1":
-        from deerflow.runtime.skill_projection import SkillProjectionConsumerToken
-
-        if not isinstance(token, SkillProjectionConsumerToken):
-            raise TypeError("accepted skill projection token is invalid")
-        return cls(
-            snapshot_id=token.snapshot_id,
-            run_id=token.run_id,
-            generation=token.generation,
-            evidence=token.evidence,
-        )
 
 
 def accepted_skill_binding_from_runtime(runtime: object) -> AcceptedSkillSandboxBindingV1 | None:

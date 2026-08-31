@@ -238,12 +238,21 @@ reconciler deletes expired Lease UIDs, letting Kubernetes garbage collection rem
 Process restart does not adopt such a Pod because the capability is intentionally unrecoverable;
 the corresponding lost worker follows the existing orphan-terminalization contract.
 
+The provider-neutral `AcceptedMaterializer` refactor does not change this
+provisioner protocol or qualification scope. `AioAcceptedMaterializer` retains
+the exact v2 Pod/Lease/Secret/NetworkPolicy/verifier receipt for live fencing and
+cryptographically commits that tuple into the neutral execution-evidence
+envelope. The neutral in-memory adapter and OpenSandbox control-plane fake are
+test-only and cannot satisfy this Kubernetes qualification.
+
 Gateway management calls use a distinct projected ServiceAccount token. The token is audience
 bound, reread on every request for rotation, and checked with TokenReview against the exact Gateway
 namespace and ServiceAccount. This identity namespace can differ from `K8S_NAMESPACE`; accepted
 NetworkPolicy peers use the Gateway namespace selector so split deployments stay fail closed without
 blocking the capability gate. The Gateway's readiness path authenticates to `/api/capabilities`
-and requires the configured projection profile before it admits new work. The per-attempt bearer
+and requires the configured projection profile plus the exact sandbox/verifier image digests
+before it admits new work. The worker binds the advertised sandbox digest into its
+provider-neutral request, then requires the materialization receipt to match it. The per-attempt bearer
 capability remains narrower and is accepted only by that attempt's in-Pod gate.
 
 Both `SANDBOX_IMAGE` and `ACCEPTED_SKILL_RUNTIME_IMAGE` must be SHA-256 digest references. The
