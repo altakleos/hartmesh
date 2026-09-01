@@ -22,6 +22,9 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+from fastapi import HTTPException
+
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunRecord, RunStatus
 from deerflow.runtime.runs.schemas import DisconnectMode
 from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
@@ -81,6 +84,27 @@ class _FastHeartbeatBridge(MemoryStreamBridge):
             last_event_id=last_event_id,
             heartbeat_interval=0.01,
         )
+
+
+def test_stream_transport_preflight_returns_bounded_retryable_failure() -> None:
+    from app.gateway.services import ensure_stream_transport_available
+
+    class UnavailableBridge(_MissingStreamBridge):
+        async def stream_exists(self, run_id: str) -> bool:
+            raise OSError("redis connection refused")
+
+    async def run() -> None:
+        with pytest.raises(HTTPException) as exc_info:
+            await ensure_stream_transport_available(
+                UnavailableBridge(),
+                "run-transport-outage",
+                timeout_seconds=0.1,
+            )
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.headers == {"Retry-After": "1"}
+        assert "redis" not in str(exc_info.value.detail).lower()
+
+    asyncio.run(run())
 
 
 async def _create_running_record(mgr: RunManager, *, on_disconnect: DisconnectMode) -> Any:

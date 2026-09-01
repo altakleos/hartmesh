@@ -132,6 +132,12 @@ class McpTaskService:
     def tracking_degraded_after_errors(self) -> int:
         return self._tracking_degraded_after_errors
 
+    @property
+    def running(self) -> bool:
+        """Return whether this replica's durable MCP poller is live."""
+
+        return self._task is not None and not self._task.done()
+
     async def submit(
         self,
         *,
@@ -704,6 +710,16 @@ class McpTaskService:
             )
             return
 
+        from deerflow.runtime.kubernetes_qualification import (
+            qualification_service_barrier,
+        )
+
+        await qualification_service_barrier(
+            scenario="mcp_task_notification",
+            point="poll_claimed",
+            subject_id=str(record["id"]),
+        )
+
         try:
             snapshot = self._normalize_snapshot(await driver.get_status(TaskReference.from_record(record)))
         except McpTaskProtocolError:
@@ -738,6 +754,11 @@ class McpTaskService:
             return
 
         polled_at = datetime.now(UTC)
+        await qualification_service_barrier(
+            scenario="mcp_task_notification",
+            point="polled_before_apply",
+            subject_id=str(record["id"]),
+        )
         await self._apply_snapshot(record, snapshot, polled_at=polled_at)
 
     async def _apply_snapshot(

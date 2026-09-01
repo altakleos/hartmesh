@@ -14,6 +14,10 @@ from deerflow.agents.memory.backends.honcho.config import (
     HonchoConfigError,
     HonchoIdentityResolver,
 )
+from deerflow.deployment.topology import (
+    DeploymentProfile,
+    coerce_deployment_profile,
+)
 from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
 
 logger = logging.getLogger(__name__)
@@ -31,13 +35,6 @@ class HonchoTenantProjectionV1:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
-
-
-def _profile_value(profile: object) -> str:
-    value = getattr(profile, "value", profile)
-    if not isinstance(value, str):
-        raise TypeError("deployment_profile must be a string or string enum")
-    return value
 
 
 def _projection(
@@ -78,9 +75,7 @@ def project_honcho_backend_config(
         config.pop(HARTMESH_TENANT_CONFIG_KEY, None)
         logger.warning("Ignoring caller-configured reserved Honcho tenant projection; the Gateway injects its server-owned value")
 
-    profile = _profile_value(deployment_profile)
-    if profile not in {"local_development", "durable_production"}:
-        raise ValueError("unknown deployment profile")
+    profile = coerce_deployment_profile(deployment_profile)
     allow_local_shared_value = config.get("allow_local_shared_workspaces", False)
     if type(allow_local_shared_value) is not bool:
         raise HonchoConfigError(
@@ -110,7 +105,7 @@ def project_honcho_backend_config(
 
     isolation_mode: Literal["tenant_user", "local_explicit_shared"] = "tenant_user"
     if custom_override:
-        if profile != "local_development" or not allow_local_shared:
+        if profile is not DeploymentProfile.local_development or not allow_local_shared:
             raise HonchoConfigError(
                 "honcho_shared_workspace_forbidden",
                 "shared or namespace-escaping workspaces are forbidden outside the explicit local-development opt-in",
@@ -119,7 +114,7 @@ def project_honcho_backend_config(
         logger.warning("Honcho local explicit shared-workspace mode is enabled; workspace-scoped search results may be visible to every configured sharing user")
 
     configured_scheme = urlsplit(str(config.get("base_url", "http://localhost:8000"))).scheme.lower()
-    if profile == "durable_production" and config.get("api_key") and configured_scheme == "http":
+    if profile.is_durable and config.get("api_key") and configured_scheme == "http":
         raise HonchoConfigError(
             "honcho_tenant_projection_invalid",
             "durable production requires HTTPS when a Honcho API key is configured",

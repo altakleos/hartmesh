@@ -13,6 +13,13 @@ from enum import StrEnum
 from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
 from app.runtime.readiness import RuntimeReadinessSnapshot
+from deerflow.deployment.topology import (
+    DeploymentProfile,
+    TopologyStatusV1,
+    coerce_deployment_profile,
+    validate_extension_replica_safety,
+    validate_multi_gateway_config,
+)
 from deerflow.extensions.capabilities import (
     CapabilityHealthMonitor,
     CapabilityHealthSnapshot,
@@ -43,13 +50,6 @@ _POST_COMMIT_OBLIGATION_COUNT_FIELDS = (
     "resolved_admission_since_start",
     "resolved_thread_operation_release_since_start",
 )
-
-
-class DeploymentProfile(StrEnum):
-    """Operator-selected deployment promise enforced at startup/readiness."""
-
-    local_development = "local_development"
-    durable_production = "durable_production"
 
 
 class PersistenceTier(StrEnum):
@@ -147,6 +147,61 @@ class PostCommitObligationReport:
         }
 
 
+@dataclass(frozen=True)
+class SchedulerLeaseStatsReport:
+    """Bounded per-replica scheduler lease telemetry since process start."""
+
+    cycles: int = 0
+    database_clock_reads: int = 0
+    due_occurrences_claimed: int = 0
+    launch_claims_acquired: int = 0
+    recovery_transitions: int = 0
+    stale_write_rejections: int = 0
+    dependency_failures: int = 0
+    last_database_time: datetime | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "cycles",
+            "database_clock_reads",
+            "due_occurrences_claimed",
+            "launch_claims_acquired",
+            "recovery_transitions",
+            "stale_write_rejections",
+            "dependency_failures",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError("scheduler lease count must be a non-negative integer")
+            object.__setattr__(
+                self,
+                field_name,
+                min(value, _MAX_POST_COMMIT_OBLIGATION_COUNT),
+            )
+        if self.last_database_time is not None:
+            if self.last_database_time.tzinfo is None or self.last_database_time.utcoffset() is None:
+                raise ValueError("scheduler database time must be timezone-aware")
+            object.__setattr__(
+                self,
+                "last_database_time",
+                self.last_database_time.astimezone(UTC),
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "scope": "replica_since_start",
+            "cycles": self.cycles,
+            "database_clock_reads": self.database_clock_reads,
+            "due_occurrences_claimed": self.due_occurrences_claimed,
+            "launch_claims_acquired": self.launch_claims_acquired,
+            "recovery_transitions": self.recovery_transitions,
+            "stale_write_rejections": self.stale_write_rejections,
+            "dependency_failures": self.dependency_failures,
+            "last_database_time": (self.last_database_time.isoformat().replace("+00:00", "Z") if self.last_database_time is not None else None),
+        }
+
+
 def describe_native_ingress(
     config: Any,
     *,
@@ -223,38 +278,51 @@ def validate_deployment_profile(
     config: Any,
     *,
     verified_sources: frozenset[str] = frozenset(),
+    qualification: DeploymentQualification | None = None,
+    webhook_route_enabled: bool = False,
+    loaded_extensions: object | None = None,
+    tenant_identity: object | None = None,
 ) -> None:
     """Reject a production durability promise backed by process-local state."""
 
     deployment = getattr(config, "deployment", None)
     database = getattr(config, "database", None)
-    raw_profile = getattr(deployment, "profile", "local_development")
-    if not isinstance(raw_profile, (str, DeploymentProfile)):
-        raw_profile = "local_development"
+    raw_profile = getattr(deployment, "profile", None)
     raw_backend = getattr(database, "backend", "memory")
     if not isinstance(raw_backend, str):
         raw_backend = "memory"
-    profile = DeploymentProfile(raw_profile)
+    profile = coerce_deployment_profile(raw_profile)
     persistence = describe_persistence(
         raw_backend,
         atomic_lifecycle=False,
     )
-    if profile is DeploymentProfile.durable_production and persistence.tier is PersistenceTier.process_local:
-        raise ValueError("durable_production cannot use process-local invocation state")
+    if profile.is_durable and persistence.tier is PersistenceTier.process_local:
+        raise ValueError(f"{profile.value} cannot use process-local invocation state")
     command_timeout = getattr(database, "command_timeout", 30)
     finite_command_timeout = isinstance(command_timeout, (int, float)) and not isinstance(command_timeout, bool) and math.isfinite(command_timeout) and command_timeout > 0
-    if profile is DeploymentProfile.durable_production and raw_backend == "postgres" and not finite_command_timeout:
-        raise ValueError("durable_production requires a finite PostgreSQL command_timeout")
+    if profile.is_durable and raw_backend == "postgres" and not finite_command_timeout:
+        raise ValueError(f"{profile.value} requires a finite PostgreSQL command_timeout")
     run_events = getattr(config, "run_events", None)
     run_events_backend = getattr(run_events, "backend", None)
-    if profile is DeploymentProfile.durable_production and run_events_backend != "db":
-        raise ValueError("durable_production requires run_events.backend='db' for fenced idempotent tool receipts")
+    if profile.is_durable and run_events_backend != "db":
+        raise ValueError(f"{profile.value} requires run_events.backend='db' for fenced idempotent tool receipts")
     ingress = describe_native_ingress(
         config,
         verified_sources=verified_sources,
     )
-    if profile is DeploymentProfile.durable_production and any(guarantee is not IngressDeliveryGuarantee.durable for _source, guarantee in ingress.sources):
-        raise ValueError("durable_production requires verified durable native ingress with PostgreSQL inbound receipt storage for every enabled native source")
+    if profile.is_durable and any(guarantee is not IngressDeliveryGuarantee.durable for _source, guarantee in ingress.sources):
+        raise ValueError(f"{profile.value} requires verified durable native ingress with PostgreSQL inbound receipt storage for every enabled native source")
+    if profile is DeploymentProfile.durable_two_gateway_v1:
+        evidence = qualification or DeploymentQualification.from_environment()
+        validate_multi_gateway_config(
+            config,
+            qualification_scopes=frozenset(item.scope for item in evidence.evidence),
+            webhook_route_enabled=webhook_route_enabled,
+            tenant_identity=tenant_identity,
+            qualification_candidate=(os.getenv("DEER_FLOW_QUALIFICATION_CANDIDATE") == "1" and os.getenv("DEERFLOW_TEST_KUBERNETES_RUNTIME") == "1"),
+        )
+        if loaded_extensions is not None:
+            validate_extension_replica_safety(loaded_extensions)
 
 
 def _bounded_optional(value: str | None, *, field_name: str, limit: int) -> str | None:
@@ -452,6 +520,8 @@ class DeploymentReport:
     post_commit_obligations: PostCommitObligationReport | None = None
     tenant: TenantReferenceV1 | None = None
     contextual_memory: Mapping[str, object] | None = None
+    topology: TopologyStatusV1 | None = None
+    scheduler_lease_stats: SchedulerLeaseStatsReport | None = None
     api_version: Literal["deerflow.deployment/v1"] = field(
         default=DEPLOYMENT_API_VERSION,
         init=False,
@@ -490,6 +560,16 @@ class DeploymentReport:
             if len(encoded) > 8 * 1024 or not isinstance(detached, dict):
                 raise ValueError("contextual_memory exceeds its bounded mapping contract")
             object.__setattr__(self, "contextual_memory", detached)
+        if self.topology is not None and not isinstance(
+            self.topology,
+            TopologyStatusV1,
+        ):
+            raise TypeError("topology must use TopologyStatusV1")
+        if self.scheduler_lease_stats is not None and not isinstance(
+            self.scheduler_lease_stats,
+            SchedulerLeaseStatsReport,
+        ):
+            raise TypeError("scheduler_lease_stats must use SchedulerLeaseStatsReport")
 
     def to_dict(self) -> dict[str, object]:
         """Return a fresh safe wire projection; no plugin configuration is included."""
@@ -521,6 +601,10 @@ class DeploymentReport:
             payload["post_commit_obligations"] = self.post_commit_obligations.to_dict()
         if self.contextual_memory is not None:
             payload["contextual_memory"] = dict(self.contextual_memory)
+        if self.topology is not None:
+            payload["topology"] = self.topology.to_dict()
+        if self.scheduler_lease_stats is not None:
+            payload["scheduler_lease_stats"] = self.scheduler_lease_stats.to_dict()
         return payload
 
 
@@ -553,6 +637,8 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         post_commit_obligations_supplier: (Callable[[], PostCommitObligationReport | None] | None) = None,
         tenant_supplier: Callable[[], TenantReferenceV1 | None] | None = None,
         contextual_memory_supplier: Callable[[], Mapping[str, object] | None] | None = None,
+        topology_supplier: Callable[[], TopologyStatusV1 | None] | None = None,
+        scheduler_lease_stats_supplier: (Callable[[], SchedulerLeaseStatsReport | None] | None) = None,
     ) -> None:
         self._profile = DeploymentProfile(profile)
         self._persistence = describe_persistence(
@@ -571,6 +657,8 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         self._post_commit_obligations_supplier = post_commit_obligations_supplier or (lambda: None)
         self._tenant_supplier = tenant_supplier or (lambda: None)
         self._contextual_memory_supplier = contextual_memory_supplier or (lambda: None)
+        self._topology_supplier = topology_supplier or (lambda: None)
+        self._scheduler_lease_stats_supplier = scheduler_lease_stats_supplier or (lambda: None)
 
     @property
     def persistence_ready(self) -> bool:
@@ -612,6 +700,8 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             post_commit_obligations_supplier=(self._post_commit_obligations_supplier),
             tenant_supplier=self._tenant_supplier,
             contextual_memory_supplier=self._contextual_memory_supplier,
+            topology_supplier=self._topology_supplier,
+            scheduler_lease_stats_supplier=(self._scheduler_lease_stats_supplier),
         )
 
     async def deployment_report(self) -> DeploymentReport:
@@ -627,6 +717,8 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             post_commit_obligations=self._post_commit_obligations_supplier(),
             tenant=self._tenant_supplier(),
             contextual_memory=self._contextual_memory_supplier(),
+            topology=self._topology_supplier(),
+            scheduler_lease_stats=self._scheduler_lease_stats_supplier(),
         )
 
 
@@ -644,6 +736,7 @@ __all__ = [
     "PersistenceTier",
     "PostCommitObligationReport",
     "QualificationEvidence",
+    "SchedulerLeaseStatsReport",
     "describe_persistence",
     "describe_native_ingress",
     "validate_deployment_profile",

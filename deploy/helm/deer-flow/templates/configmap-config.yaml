@@ -1,15 +1,3 @@
-{{- $renderedConfig := ((.Values.config | default "") | fromYaml) | default dict -}}
-{{- $sandboxConfig := (index $renderedConfig "sandbox") | default dict -}}
-{{- $_ := set $sandboxConfig "accepted_skill_projection_profile" (.Values.provisioner.acceptedSkillProjectionProfile | default "disabled") -}}
-{{- if .Values.provisioner.enabled -}}
-{{- $_ := set $sandboxConfig "provisioner_service_account_token_file" "/var/run/secrets/hartmesh-provisioner/token" -}}
-{{- end -}}
-{{- if eq (.Values.provisioner.acceptedSkillProjectionProfile | default "disabled") "rwx_verified_copy_v2" -}}
-{{- $runOwnership := (index $renderedConfig "run_ownership") | default dict -}}
-{{- $_ := set $runOwnership "heartbeat_enabled" true -}}
-{{- $_ := set $renderedConfig "run_ownership" $runOwnership -}}
-{{- end -}}
-{{- $_ := set $renderedConfig "sandbox" $sandboxConfig -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -19,4 +7,4 @@ metadata:
     {{- include "deer-flow.labels" . | nindent 4 }}
 data:
   config.yaml: |
-{{ toYaml $renderedConfig | indent 4 }}
+{{ include "deer-flow.renderedConfig" . | indent 4 }}

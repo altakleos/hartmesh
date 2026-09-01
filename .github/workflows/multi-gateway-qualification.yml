@@ -1,0 +1,168 @@
+name: Exact Two-Gateway Kubernetes Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualification_subjects_json:
+        description: Exact bounded JSON subject manifest documented by the qualification guide
+        required: true
+        type: string
+      kube_context:
+        description: Explicit disposable-cluster context to confirm
+        required: true
+        type: string
+      namespace:
+        description: Fresh namespace beginning hartmesh-qualification-
+        required: true
+        type: string
+      qualification_id:
+        description: Stable safe identifier for this qualification run
+        required: true
+        type: string
+      cluster_driver:
+        description: Optional operator-reported cluster driver
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  qualify-exact-two-gateway-profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      DEERFLOW_TEST_KUBERNETES: "1"
+      DEERFLOW_TEST_KUBERNETES_RUNTIME: "1"
+      DEERFLOW_TEST_KUBERNETES_FAULT_INJECTION: "1"
+      DEERFLOW_TEST_KUBERNETES_SCOPE: durable_two_gateway_v1_postgres_redis_aio_rwx
+      DEERFLOW_TEST_KUBERNETES_CONTEXT: ${{ inputs.kube_context }}
+      DEERFLOW_TEST_KUBERNETES_CONFIRM_CONTEXT: ${{ inputs.kube_context }}
+      DEERFLOW_TEST_KUBERNETES_NAMESPACE: ${{ inputs.namespace }}
+      DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID: ${{ inputs.qualification_id }}
+      DEERFLOW_TEST_KUBERNETES_DRIVER: ${{ inputs.cluster_driver }}
+      DEERFLOW_TEST_KUBERNETES_EVIDENCE: ${{ github.workspace }}/artifacts/multi-gateway-qualification.json
+
+    steps:
+      - name: Checkout exact chart and harness
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.1"
+
+      - name: Install Helm CLI
+        uses: azure/setup-helm@v4.3.1
+
+      - name: Install kubectl CLI
+        uses: azure/setup-kubectl@v4.0.1
+
+      - name: Validate and export the exact qualification subjects
+        env:
+          QUALIFICATION_SUBJECTS_JSON: ${{ inputs.qualification_subjects_json }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+
+          raw = os.environ["QUALIFICATION_SUBJECTS_JSON"]
+          if not raw or len(raw.encode("utf-8")) > 16_384:
+              raise SystemExit("qualification subject manifest must be nonempty and at most 16 KiB")
+          try:
+              subjects = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              raise SystemExit("qualification subject manifest must be valid JSON") from exc
+
+          names = {
+              "gateway_image_repository": "DEERFLOW_TEST_GATEWAY_IMAGE_REPOSITORY",
+              "gateway_image_digest": "DEERFLOW_TEST_GATEWAY_IMAGE_DIGEST",
+              "predecessor_gateway_image_repository": "DEERFLOW_TEST_PREDECESSOR_GATEWAY_IMAGE_REPOSITORY",
+              "predecessor_gateway_image_digest": "DEERFLOW_TEST_PREDECESSOR_GATEWAY_IMAGE_DIGEST",
+              "incompatible_gateway_image_repository": "DEERFLOW_TEST_INCOMPATIBLE_GATEWAY_IMAGE_REPOSITORY",
+              "incompatible_gateway_image_digest": "DEERFLOW_TEST_INCOMPATIBLE_GATEWAY_IMAGE_DIGEST",
+              "frontend_image_repository": "DEERFLOW_TEST_FRONTEND_IMAGE_REPOSITORY",
+              "frontend_image_digest": "DEERFLOW_TEST_FRONTEND_IMAGE_DIGEST",
+              "nginx_image_repository": "DEERFLOW_TEST_NGINX_IMAGE_REPOSITORY",
+              "nginx_image_digest": "DEERFLOW_TEST_NGINX_IMAGE_DIGEST",
+              "provisioner_image_repository": "DEERFLOW_TEST_PROVISIONER_IMAGE_REPOSITORY",
+              "provisioner_image_digest": "DEERFLOW_TEST_PROVISIONER_IMAGE_DIGEST",
+              "sandbox_image_repository": "DEERFLOW_TEST_SANDBOX_IMAGE_REPOSITORY",
+              "sandbox_image_digest": "DEERFLOW_TEST_SANDBOX_IMAGE_DIGEST",
+              "postgres_image_repository": "DEERFLOW_TEST_POSTGRES_IMAGE_REPOSITORY",
+              "postgres_image_digest": "DEERFLOW_TEST_POSTGRES_IMAGE_DIGEST",
+              "redis_image_repository": "DEERFLOW_TEST_REDIS_IMAGE_REPOSITORY",
+              "redis_image_digest": "DEERFLOW_TEST_REDIS_IMAGE_DIGEST",
+              "rwx_storage_class": "DEERFLOW_TEST_KUBERNETES_RWX_STORAGE_CLASS",
+              "extension_artifact_digest": "DEERFLOW_TEST_EXTENSION_ARTIFACT_DIGEST",
+              "extension_configuration_digest": "DEERFLOW_TEST_EXTENSION_CONFIGURATION_DIGEST",
+              "capability_manifest_digest": "DEERFLOW_TEST_CAPABILITY_MANIFEST_DIGEST",
+              "database_schema_ref": "DEERFLOW_TEST_DATABASE_SCHEMA_REF",
+          }
+          if not isinstance(subjects, dict) or set(subjects) != set(names):
+              raise SystemExit("qualification subject manifest has missing or unknown fields")
+
+          repository = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,511}\Z")
+          digest = re.compile(r"sha256:[0-9a-f]{64}\Z")
+          storage_class = re.compile(r"[a-z0-9](?:[-.a-z0-9]{0,251}[a-z0-9])?\Z")
+          schema_ref = re.compile(r"schema:sha256:[0-9a-f]{64}\Z")
+          for key, value in subjects.items():
+              if not isinstance(value, str):
+                  raise SystemExit(f"qualification subject {key} must be a string")
+              pattern = (
+                  repository
+                  if key.endswith("_repository")
+                  else storage_class
+                  if key == "rwx_storage_class"
+                  else schema_ref
+                  if key == "database_schema_ref"
+                  else digest
+              )
+              if pattern.fullmatch(value) is None:
+                  raise SystemExit(f"qualification subject {key} is invalid")
+          if subjects["incompatible_gateway_image_digest"] == subjects["gateway_image_digest"]:
+              raise SystemExit("incompatible Gateway digest must differ from the qualified digest")
+          if subjects["predecessor_gateway_image_digest"] == subjects["gateway_image_digest"]:
+              raise SystemExit("predecessor Gateway digest must differ from the qualified digest")
+          if subjects["predecessor_gateway_image_digest"] == subjects["incompatible_gateway_image_digest"]:
+              raise SystemExit("predecessor and incompatible Gateway digests must differ")
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as destination:
+              for key, environment_name in names.items():
+                  destination.write(f"{environment_name}={subjects[key]}\n")
+          PY
+
+      - name: Configure isolated kubeconfig path
+        run: printf 'KUBECONFIG=%s\n' "$RUNNER_TEMP/multi-gateway-kubeconfig" >> "$GITHUB_ENV"
+
+      - name: Materialize the explicitly supplied disposable-cluster config
+        env:
+          QUALIFICATION_KUBECONFIG_B64: ${{ secrets.QUALIFICATION_KUBECONFIG_B64 }}
+        run: |
+          test -n "$QUALIFICATION_KUBECONFIG_B64"
+          umask 077
+          printf '%s' "$QUALIFICATION_KUBECONFIG_B64" | base64 --decode > "$KUBECONFIG"
+
+      - name: Install backend qualification dependencies
+        working-directory: backend
+        run: uv sync --group dev --extra postgres
+
+      - name: Run all 16 exact-profile live scenarios
+        working-directory: backend
+        run: PYTHONPATH=. uv run pytest -m kubernetes_contract -v -s tests/kubernetes/test_multi_gateway_qualification.py
+
+      - name: Publish verified evidence or bounded failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: multi-gateway-qualification-${{ inputs.qualification_id }}
+          if-no-files-found: error
+          path: |
+            artifacts/multi-gateway-qualification.json
+            artifacts/multi-gateway-qualification.failure-artifacts/

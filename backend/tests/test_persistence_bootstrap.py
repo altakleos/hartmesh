@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0026_mcp_task_lineage"
+HEAD = "0027_multi_gateway_topology"
 BASELINE = "0001_baseline"
 
 

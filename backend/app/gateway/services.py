@@ -528,6 +528,39 @@ async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecor
         return False
 
 
+async def ensure_stream_transport_available(
+    bridge: StreamBridge,
+    run_id: str,
+    *,
+    timeout_seconds: float = 5.0,
+) -> None:
+    """Probe a remote stream transport before committing SSE response headers.
+
+    A Redis-backed subscription performs its first I/O only after Starlette has
+    started the streaming response.  Without this preflight, a Redis outage
+    looks like a successful HTTP 200 followed by a truncated body, leaving
+    reconnecting clients without a bounded retry signal.
+    """
+
+    stream_exists = getattr(bridge, "stream_exists", None)
+    if stream_exists is None:
+        return
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            await stream_exists(run_id)
+    except Exception:
+        logger.warning(
+            "Run stream transport preflight failed for %s",
+            sanitize_log_param(run_id),
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Run stream transport temporarily unavailable",
+            headers={"Retry-After": "1"},
+        ) from None
+
+
 async def _orphan_recovery_observed_after_heartbeat(
     record: RunRecord,
     run_mgr: RunManager,

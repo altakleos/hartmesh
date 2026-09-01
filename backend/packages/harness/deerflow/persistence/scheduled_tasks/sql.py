@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, exists, or_, select, update
+from sqlalchemy import and_, exists, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run import RunRepository
@@ -16,6 +16,7 @@ from deerflow.utils.time import coerce_iso
 logger = logging.getLogger(__name__)
 
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+_SCHEDULE_DEFINITION_FIELDS: frozenset[str] = frozenset({"schedule_type", "schedule_spec", "timezone", "next_run_at"})
 
 
 class ActiveScheduledTaskMutationConflict(Exception):
@@ -61,6 +62,27 @@ class ScheduledTaskRepository:
     ) -> None:
         self._sf = session_factory
         self._run_repository = run_repository or RunRepository(session_factory)
+
+    async def authority_now(self, *, fallback: datetime) -> datetime:
+        """Return PostgreSQL time for multi-instance lease decisions.
+
+        SQLite remains a single-process development adapter and uses the
+        caller's aware clock. PostgreSQL is the exact multi-Gateway authority,
+        so scheduler claims, expiries, and global slots never compare pod
+        clocks.
+        """
+
+        if fallback.tzinfo is None or fallback.utcoffset() is None:
+            raise ValueError("scheduler fallback clock must be timezone-aware")
+        async with self._sf() as session:
+            if session.get_bind().dialect.name != "postgresql":
+                return fallback.astimezone(UTC)
+            value = await session.scalar(text("SELECT CURRENT_TIMESTAMP"))
+        if not isinstance(value, datetime):
+            raise RuntimeError("scheduler_database_time_unavailable")
+        if value.tzinfo is None or value.utcoffset() is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
     def _scope_run_statement(self, statement: Any) -> Any:
         return self._run_repository.scope_run_statement(statement)
@@ -194,6 +216,7 @@ class ScheduledTaskRepository:
                 run.lease_owner = None
                 run.lease_expires_at = None
             task.status = "paused"
+            task.schedule_version += 1
             task.lease_owner = None
             task.lease_expires_at = None
             task.updated_at = now
@@ -269,9 +292,14 @@ class ScheduledTaskRepository:
                 if active_status is not None:
                     await session.rollback()
                     raise ActiveScheduledTaskMutationConflict(active_status)
+            previous_status = row.status
             for key, value in updates.items():
                 if hasattr(row, key):
                     setattr(row, key, value)
+            definition_changed = bool(_SCHEDULE_DEFINITION_FIELDS & updates.keys())
+            resumed = updates.get("status") == "enabled" and previous_status != "enabled"
+            if definition_changed or resumed:
+                row.schedule_version += 1
             row.updated_at = datetime.now(UTC)
             await session.commit()
             await session.refresh(row)

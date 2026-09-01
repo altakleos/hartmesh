@@ -20,6 +20,10 @@ from typing import Any, Literal
 from deerflow_extension_api import API_VERSION
 from pydantic import BaseModel, ConfigDict, Field
 
+from deerflow.deployment.topology import (
+    DeploymentProfile,
+    coerce_deployment_profile,
+)
 from deerflow.diagnostics import BoundedDiagnostic, bounded_diagnostic
 from deerflow.extensions.artifacts import (
     UNVERIFIED_EXTENSION_ARTIFACT_MANIFEST_DIGEST,
@@ -172,18 +176,15 @@ class _VerifiedArtifactContext:
     source_entries_by_plugin: Mapping[tuple[str, str, str], str]
 
 
-def _profile_value(value: object | None) -> str:
+def _profile_value(value: object | None) -> DeploymentProfile:
     if value is not None:
-        raw = getattr(value, "value", value)
-        if raw not in {"local_development", "durable_production"}:
-            raise ValueError("unknown deployment profile")
-        return str(raw)
+        return coerce_deployment_profile(value)
     try:
         from deerflow.config.app_config import get_app_config
 
-        return get_app_config().deployment.profile
+        return coerce_deployment_profile(get_app_config().deployment.profile)
     except (FileNotFoundError, OSError, ValueError):
-        return "local_development"
+        return DeploymentProfile.local_development
 
 
 def _default_provenance_paths() -> tuple[Path, Path]:
@@ -265,7 +266,7 @@ def _verify_artifacts_before_import(
             expected_extension_api_version=API_VERSION,
         )
     except ExtensionArtifactVerificationError as exc:
-        if profile == "durable_production" or configured_expected_artifact is not None:
+        if profile.is_durable or configured_expected_artifact is not None:
             raise
         if not _missing_manifest_warning_emitted:
             logger.warning(
@@ -289,7 +290,7 @@ def _verify_artifacts_before_import(
         if not spec.enabled:
             continue
         if spec.package is None or spec.name is None:
-            if profile == "durable_production":
+            if profile.is_durable:
                 raise ExtensionArtifactVerificationError("extension_artifact_manifest_invalid")
             continue
         identity = (normalize_distribution_name(spec.package), spec.name, spec.use)

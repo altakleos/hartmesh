@@ -48,6 +48,7 @@ from app.gateway.github.webhook_auth import (
     GitHubWebhookAuthMode,
     resolve_github_webhook_auth,
 )
+from deerflow.deployment import DeploymentProfile
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,10 @@ def _unverified_webhooks_allowed() -> bool:
     return resolve_github_webhook_auth().mode is GitHubWebhookAuthMode.unverified_development
 
 
-def is_route_enabled(*, deployment_profile: object = "local_development") -> bool:
+def is_route_enabled(
+    *,
+    deployment_profile: object = DeploymentProfile.local_development,
+) -> bool:
     """Return True iff the GitHub webhook route should be mounted.
 
     Mounted when either:
@@ -218,7 +222,7 @@ async def receive_github_webhook(
     deployment_profile = getattr(
         request.app.state,
         "deployment_profile",
-        "local_development",
+        DeploymentProfile.local_development,
     )
     authentication = resolve_github_webhook_auth(
         deployment_profile=deployment_profile,

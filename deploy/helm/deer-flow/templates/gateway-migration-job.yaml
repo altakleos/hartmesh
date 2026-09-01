@@ -1,0 +1,71 @@
+{{- include "deer-flow.validate" . -}}
+{{- if eq .Values.deployment.mode "durable_two_gateway_v1" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-migration
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway-migration
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "deer-flow.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway-migration
+    spec:
+      {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "deer-flow.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: {{ include "deer-flow.gatewayImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          workingDir: /app
+          command: ["sh", "-c"]
+          args:
+            - cd backend && PYTHONPATH=. uv run --no-sync python -m deerflow.persistence.migration_job
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: UV_CACHE_DIR
+              value: /tmp
+            - name: DEER_FLOW_PROJECT_ROOT
+              value: /app
+            - name: DEER_FLOW_HOME
+              value: /tmp/deer-flow
+            - name: DEER_FLOW_CONFIG_PATH
+              value: /app/backend/config.yaml
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.databaseUrlSecret" . }}
+                  key: database-url
+          volumeMounts:
+            - name: config
+              mountPath: /app/backend/config.yaml
+              subPath: config.yaml
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "deer-flow.fullname" . }}-migration-config
+{{- end }}

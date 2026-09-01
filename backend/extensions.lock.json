@@ -1,6 +1,19 @@
 {
   "version": 1,
   "extension_api_version": "0.13.0",
-  "entries": [],
-  "digest": "sha256:36e11560586b9253041cc0abadb0f721d378e6845f060f876d7fc7c9a868726c"
+  "entries": [
+    {
+      "distribution": "hartmesh-governance-extension",
+      "distribution_version": "0.1.0",
+      "entry_point_name": "governance",
+      "entry_point_value": "hartmesh_governance_extension:install",
+      "source_kind": "local_snapshot",
+      "source_reference": "extensions/sources/hartmesh-governance-extension",
+      "source_revision": null,
+      "locked_artifact_hashes": [],
+      "local_tree_digest": "sha256:4a369f03d27be7a9818cb90ae99df242248126e1bbdd12640ba41b63586b2661",
+      "entry_digest": "sha256:8bc8e891dce61b8f6728095de22eb75615be8e15e55c9ef2aa577baf0216cc5e"
+    }
+  ],
+  "digest": "sha256:deb385cdb50c97573856f40ea4e2933a97afa8de48da3337548d45fc6afbdb0c"
 }

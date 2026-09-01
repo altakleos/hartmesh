@@ -53,6 +53,10 @@ from app.gateway.routers import (
 from app.gateway.runtime_http import install_runtime_error_handlers
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
+from deerflow.deployment.topology import (
+    DeploymentProfile,
+    coerce_deployment_profile,
+)
 from deerflow.logging_config import (
     DEFAULT_LOG_DATE_FORMAT,
     DEFAULT_LOG_FORMAT,
@@ -243,6 +247,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         from app.runtime.deployment import (
             DeploymentProfile,
+            DeploymentQualification,
             describe_native_ingress,
             validate_deployment_profile,
         )
@@ -251,10 +256,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         tenant_identity = getattr(app.state, "tenant_identity", None)
         if not isinstance(tenant_identity, TenantIdentityV1):
             raise RuntimeError("Gateway tenant identity was not resolved during application construction")
-        startup_profile = getattr(
-            startup_deployment,
-            "profile",
-            DeploymentProfile.local_development,
+        startup_profile = coerce_deployment_profile(
+            getattr(
+                startup_deployment,
+                "profile",
+                DeploymentProfile.local_development,
+            ),
         )
         webhook_auth = resolve_github_webhook_auth(
             deployment_profile=startup_profile,
@@ -273,8 +280,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         validate_deployment_profile(
             startup_config,
             verified_sources=verified_sources,
+            qualification=DeploymentQualification.from_environment(),
+            webhook_route_enabled=webhook_auth.route_enabled,
+            loaded_extensions=getattr(app.state, "extensions", None),
+            tenant_identity=tenant_identity,
         )
-        durable_native_ingress_required = startup_profile == DeploymentProfile.durable_production and bool(startup_native_ingress.sources)
+        startup_profile_value = getattr(startup_profile, "value", startup_profile)
+        durable_native_ingress_required = startup_profile_value in {
+            DeploymentProfile.durable_production.value,
+            DeploymentProfile.durable_two_gateway_v1.value,
+        } and bool(startup_native_ingress.sources)
         app.state.deployment_profile = startup_profile
         logger.info(
             "Configuration loaded successfully tenant_ref=%s tenant_digest_prefix=%s",
@@ -327,6 +342,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     startup_memory_enabled = bool(getattr(startup_config.memory, "enabled", False))
     resolved_memory_manager: MemoryManager | None = None
+    # The topology inventory treats an explicit disabled sentinel as the
+    # constructed state for this optional process-local cache.
+    app.state.memory_manager = None
 
     async def resolve_memory_manager() -> MemoryManager:
         """Construct this lifespan's manager at most once."""
@@ -444,12 +462,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     queue_timeout_seconds=startup_config.scheduler.queue_timeout_seconds,
                     multi_instance=startup_config.scheduler.multi_instance,
                     run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
+                    tenant_digest=app.state.tenant_identity.digest,
                 )
                 app.state.scheduled_task_service = scheduled_task_service
                 if startup_config.scheduler.enabled:
                     await scheduled_task_service.start()
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to initialize scheduled task service")
+            if startup_profile is DeploymentProfile.durable_two_gateway_v1:
+                raise RuntimeError("topology_dependency_not_shared") from exc
 
         from app.gateway.services import launch_mcp_task_notification_run
         from app.mcp_tasks import McpTaskService
@@ -480,6 +501,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             extensions_config=task_extensions_config,
             repository_available=mcp_task_repo is not None,
         )
+        if startup_profile is DeploymentProfile.durable_two_gateway_v1 and configured_task_toolset_count(task_extensions_config) < 1:
+            raise RuntimeError("topology_dependency_not_shared")
         if mcp_task_repo is not None:
             mcp_task_drivers = McpTaskDriverRegistry()
             if configured_task_toolset_count(task_extensions_config):
@@ -612,6 +635,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             close_runtime=close_runtime,
         )
         app.state.shutdown_coordinator = coordinator
+        if startup_profile is DeploymentProfile.durable_two_gateway_v1:
+            from app.gateway.deps import (
+                build_multi_gateway_topology_service_registry,
+            )
+            from deerflow.deployment.topology import (
+                validate_topology_inventory_runtime_state,
+            )
+
+            app.state.topology_service_registry = build_multi_gateway_topology_service_registry()
+            validate_topology_inventory_runtime_state(app.state)
         try:
             yield
         finally:
@@ -994,6 +1027,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         GatewayDeploymentReporter,
         NativeIngressReport,
         PostCommitObligationReport,
+        SchedulerLeaseStatsReport,
         describe_native_ingress,
     )
 
@@ -1021,6 +1055,13 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             return None
         return PostCommitObligationReport.from_status(run_manager.post_commit_obligation_status())
 
+    def current_scheduler_lease_stats() -> SchedulerLeaseStatsReport | None:
+        service = getattr(app.state, "scheduled_task_service", None)
+        if service is None:
+            return None
+        stats = getattr(service, "lease_stats", None)
+        return stats if isinstance(stats, SchedulerLeaseStatsReport) else None
+
     try:
         deployment_provenance = DeploymentProvenance.from_environment()
     except ValueError:
@@ -1046,6 +1087,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         qualification=deployment_qualification,
         native_ingress_supplier=current_native_ingress,
         post_commit_obligations_supplier=current_post_commit_obligations,
+        scheduler_lease_stats_supplier=current_scheduler_lease_stats,
         tenant_supplier=lambda: (
             app.state.tenant_identity.to_persisted_reference()
             if isinstance(
@@ -1055,6 +1097,11 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             else None
         ),
         contextual_memory_supplier=lambda: _memory_backend_diagnostics(app),
+        topology_supplier=lambda: getattr(
+            getattr(app.state, "runtime_readiness", None),
+            "last_topology_status",
+            None,
+        ),
     )
     from app.runtime.readiness import RuntimeReadinessCoordinator
 
@@ -1083,6 +1130,63 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 provisioner_readiness_backend.accepted_skill_projection_ready,
             )
 
+    topology_status = None
+    topology_dependencies_ready = None
+    if construction_deployment.profile is DeploymentProfile.durable_two_gateway_v1:
+
+        async def topology_status():
+            supervisor = getattr(app.state, "topology_supervisor", None)
+            if supervisor is None:
+                from deerflow.deployment.topology import TopologyStatusV1
+
+                return TopologyStatusV1(
+                    replica_id=None,
+                    topology_digest=None,
+                    ready=False,
+                    live_compatible_replicas=0,
+                    degraded_replicas=2,
+                    qualification_ready=False,
+                    reason_code="topology_registration_missing",
+                )
+            return await supervisor.status()
+
+        async def topology_dependencies_ready() -> bool:
+            from deerflow.runtime.tenant_identity import (
+                TenantIdentityV1,
+                TenantSubsystem,
+            )
+
+            registration = getattr(app.state, "topology_registration", None)
+            bridge = getattr(app.state, "stream_bridge", None)
+            probe = getattr(bridge, "topology_readiness_probe", None)
+            scheduler_service = getattr(
+                app.state,
+                "scheduled_task_service",
+                None,
+            )
+            mcp_task_service = getattr(app.state, "mcp_task_service", None)
+            if (
+                registration is None
+                or not callable(probe)
+                or getattr(scheduler_service, "running", False) is not True
+                or getattr(mcp_task_service, "running", False) is not True
+                or getattr(app.state, "mcp_tasks_available", False) is not True
+            ):
+                return False
+            return await probe(
+                replica_id=registration.replica_id,
+                timeout_seconds=min(
+                    5.0,
+                    construction_deployment.readiness.capability_probe_timeout_seconds,
+                ),
+                additional_key_prefixes=getattr(
+                    app.state,
+                    "topology_redis_key_prefixes",
+                    (),
+                ),
+                forbidden_key_prefix=(TenantIdentityV1.from_canonical_id("topology-acl-negative-control").namespace(TenantSubsystem.REDIS).key_prefix),
+            )
+
     app.state.runtime_readiness = RuntimeReadinessCoordinator(
         health_monitor=capability_health_monitor,
         lifecycle_store=lambda: getattr(app.state, "run_store", None),
@@ -1097,6 +1201,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         overall_timeout_seconds=(construction_deployment.readiness.overall_timeout_seconds),
         sandbox_projection_ready=sandbox_projection_ready,
         post_commit_obligations_ready=lambda: bool(getattr(app.state, "run_manager", None) is None or app.state.run_manager.post_commit_obligations_ready()),
+        topology_status=topology_status,
+        topology_dependencies_ready=topology_dependencies_ready,
     )
 
     # Include routers
@@ -1231,6 +1337,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         memory_diagnostics = _memory_backend_diagnostics(app)
         if memory_diagnostics is not None:
             payload["contextual_memory"] = memory_diagnostics
+        topology = app.state.runtime_readiness.last_topology_status
+        if topology is not None:
+            payload["topology"] = topology.to_dict()
         return JSONResponse(
             status_code=200 if ready else 503,
             content=payload,

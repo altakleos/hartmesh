@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
 import re
+import secrets
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 _KIND_EVENT = "event"
 _KIND_END = "end"
 _REDIS_STREAM_ID_RE = re.compile(r"\d+(-\d+)?")
+_TOPOLOGY_REPLICA_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 # Batch size for ``XREAD``. Reading more than one entry per round-trip collapses
 # a large ``Last-Event-ID`` replay into far fewer calls; live tailing still
@@ -190,6 +193,112 @@ class RedisStreamBridge(StreamBridge):
     async def stream_exists(self, run_id: str) -> bool:
         """Return whether Redis still has retained stream data for *run_id*."""
         return bool(await self._redis.exists(self._key(run_id)))
+
+    async def topology_readiness_probe(
+        self,
+        *,
+        replica_id: str,
+        timeout_seconds: float,
+        additional_key_prefixes: tuple[str, ...] = (),
+        forbidden_key_prefix: str | None = None,
+    ) -> bool:
+        """Prove the tenant Redis ACL permits required key and channel work.
+
+        The probe uses an ephemeral, replica-hashed name beneath the same
+        tenant namespace as stream data. It checks PING, key write/read/delete,
+        and pub/sub subscribe/publish. The random token and raw Redis errors
+        are never returned through readiness output.
+        """
+
+        if not isinstance(replica_id, str) or _TOPOLOGY_REPLICA_ID_RE.fullmatch(replica_id) is None:
+            raise ValueError("topology replica_id is invalid")
+        if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool) or not 0 < float(timeout_seconds) <= 30:
+            raise ValueError("topology Redis probe timeout must be in (0, 30]")
+        if (
+            not isinstance(additional_key_prefixes, tuple)
+            or len(additional_key_prefixes) > 8
+            or any(not isinstance(prefix, str) or not prefix or len(prefix.encode("utf-8")) > 512 or any(character.isspace() for character in prefix) for prefix in additional_key_prefixes)
+        ):
+            raise ValueError("topology Redis key prefixes are invalid")
+        if forbidden_key_prefix is not None and (
+            not isinstance(forbidden_key_prefix, str)
+            or not forbidden_key_prefix
+            or len(forbidden_key_prefix.encode("utf-8")) > 512
+            or any(character.isspace() for character in forbidden_key_prefix)
+            or any(prefix.startswith(forbidden_key_prefix) or forbidden_key_prefix.startswith(prefix.rstrip(":")) for prefix in (self._namespace_prefix, *additional_key_prefixes) if prefix)
+        ):
+            raise ValueError("topology Redis forbidden prefix is invalid")
+
+        probe_id = hashlib.sha256(replica_id.encode("utf-8")).hexdigest()[:24]
+        base = self._key(f"__topology_readiness__:{probe_id}")
+        keys = (f"{base}:key",) + tuple(f"{prefix.rstrip(':')}:__topology_readiness__:{probe_id}:key" for prefix in additional_key_prefixes)
+        channel = f"{base}:channel"
+        token = secrets.token_hex(16)
+        pubsub = self._redis.pubsub()
+        cleanup_error: BaseException | None = None
+        try:
+            async with asyncio.timeout(float(timeout_seconds)):
+                if await self._redis.ping() is not True:
+                    raise RuntimeError("redis_topology_ping_failed")
+                for key in keys:
+                    if await self._redis.set(key, token, ex=5) is not True:
+                        raise RuntimeError("redis_topology_key_probe_failed")
+                    stored = await self._redis.get(key)
+                    if self._decode(stored) != token:
+                        raise RuntimeError("redis_topology_key_probe_failed")
+
+                await pubsub.subscribe(channel)
+                acknowledgement = await pubsub.get_message(
+                    timeout=float(timeout_seconds),
+                )
+                if not isinstance(acknowledgement, Mapping) or self._decode(acknowledgement.get("type")) != "subscribe":
+                    raise RuntimeError("redis_topology_channel_probe_failed")
+                if await self._redis.publish(channel, token) < 1:
+                    raise RuntimeError("redis_topology_channel_probe_failed")
+                message = await pubsub.get_message(
+                    timeout=float(timeout_seconds),
+                )
+                if not isinstance(message, Mapping) or self._decode(message.get("type")) != "message" or self._decode(message.get("data")) != token:
+                    raise RuntimeError("redis_topology_channel_probe_failed")
+                if forbidden_key_prefix is not None:
+                    forbidden_key = f"{forbidden_key_prefix.rstrip(':')}:__topology_forbidden__:{probe_id}:key"
+                    forbidden_channel = f"{forbidden_key_prefix.rstrip(':')}:__topology_forbidden__:{probe_id}:channel"
+                    try:
+                        allowed = await self._redis.set(
+                            forbidden_key,
+                            token,
+                            ex=5,
+                        )
+                    except Exception:  # Redis ACL denial is provider-specific
+                        allowed = False
+                    if allowed:
+                        await self._redis.delete(forbidden_key)
+                        raise RuntimeError("redis_topology_acl_isolation_failed")
+                    try:
+                        await self._redis.publish(forbidden_channel, token)
+                    except Exception:  # Redis ACL denial is provider-specific
+                        pass
+                    else:
+                        raise RuntimeError("redis_topology_acl_isolation_failed")
+        finally:
+            try:
+                for key in keys:
+                    await self._redis.delete(key)
+                await pubsub.unsubscribe(channel)
+                close = getattr(pubsub, "aclose", None) or getattr(
+                    pubsub,
+                    "close",
+                    None,
+                )
+                if close is not None:
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+            except BaseException as exc:  # cleanup is part of the ACL proof
+                cleanup_error = exc
+            if cleanup_error is not None:
+                raise RuntimeError("redis_topology_cleanup_probe_failed") from None
+        return True
 
     async def _resolve_start_stream_id(self, key: str, last_event_id: str | None) -> str:
         if last_event_id is None:

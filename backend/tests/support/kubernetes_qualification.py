@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from deerflow.deployment.topology import MULTI_GATEWAY_QUALIFICATION_SCOPE
 from deerflow.qualification_evidence import (
     ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2,
     ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
@@ -149,6 +150,7 @@ def validate_kubernetes_prerequisites(
     if scope not in {
         KubernetesQualificationEvidence.SCOPE,
         ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+        MULTI_GATEWAY_QUALIFICATION_SCOPE,
     }:
         raise QualificationPrerequisiteError(
             "enabled Kubernetes qualification has an unsupported scope",
@@ -162,6 +164,28 @@ def validate_kubernetes_prerequisites(
             "DEERFLOW_TEST_SANDBOX_IMAGE_REPOSITORY",
             "DEERFLOW_TEST_SANDBOX_IMAGE_DIGEST",
             "DEERFLOW_TEST_KUBERNETES_RWX_STORAGE_CLASS",
+        )
+    if scope == MULTI_GATEWAY_QUALIFICATION_SCOPE:
+        required_environment += (
+            "DEERFLOW_TEST_INCOMPATIBLE_GATEWAY_IMAGE_REPOSITORY",
+            "DEERFLOW_TEST_INCOMPATIBLE_GATEWAY_IMAGE_DIGEST",
+            "DEERFLOW_TEST_FRONTEND_IMAGE_REPOSITORY",
+            "DEERFLOW_TEST_FRONTEND_IMAGE_DIGEST",
+            "DEERFLOW_TEST_NGINX_IMAGE_REPOSITORY",
+            "DEERFLOW_TEST_NGINX_IMAGE_DIGEST",
+            "DEERFLOW_TEST_PROVISIONER_IMAGE_REPOSITORY",
+            "DEERFLOW_TEST_PROVISIONER_IMAGE_DIGEST",
+            "DEERFLOW_TEST_SANDBOX_IMAGE_REPOSITORY",
+            "DEERFLOW_TEST_SANDBOX_IMAGE_DIGEST",
+            "DEERFLOW_TEST_POSTGRES_IMAGE_REPOSITORY",
+            "DEERFLOW_TEST_POSTGRES_IMAGE_DIGEST",
+            "DEERFLOW_TEST_REDIS_IMAGE_REPOSITORY",
+            "DEERFLOW_TEST_REDIS_IMAGE_DIGEST",
+            "DEERFLOW_TEST_KUBERNETES_RWX_STORAGE_CLASS",
+            "DEERFLOW_TEST_EXTENSION_ARTIFACT_DIGEST",
+            "DEERFLOW_TEST_EXTENSION_CONFIGURATION_DIGEST",
+            "DEERFLOW_TEST_CAPABILITY_MANIFEST_DIGEST",
+            "DEERFLOW_TEST_DATABASE_SCHEMA_REF",
         )
     missing.extend(name for name in required_environment if not environment.get(name))
     missing.extend(name for name in ("kubectl", "helm") if executable_lookup(name) is None)
@@ -520,9 +544,14 @@ class _PortForward(AbstractContextManager["_PortForward"]):
         self,
         config: KubernetesQualificationConfig,
         service_name: str,
+        *,
+        resource_kind: Literal["service", "pod"] = "service",
+        remote_port: int = 8001,
     ) -> None:
         self._config = config
         self._service_name = service_name
+        self._resource_kind = resource_kind
+        self._remote_port = remote_port
         self._process: subprocess.Popen[str] | None = None
         self.port = 0
 
@@ -532,8 +561,8 @@ class _PortForward(AbstractContextManager["_PortForward"]):
             self.port = listener.getsockname()[1]
         command = self._config.kubectl(
             "port-forward",
-            f"service/{self._service_name}",
-            f"{self.port}:8001",
+            f"{self._resource_kind}/{self._service_name}",
+            f"{self.port}:{self._remote_port}",
         )
         self._process = subprocess.Popen(
             command,
@@ -823,6 +852,7 @@ class KubernetesQualificationRunner:
                 "metadata": {"name": self.runtime_config_map},
                 "data": {
                     "DEERFLOW_TEST_KUBERNETES_RUNTIME": "1",
+                    "DEERFLOW_TEST_KUBERNETES_FAULT_INJECTION": "1",
                     "DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID": self.config.qualification_id,
                     "DEERFLOW_TEST_KUBERNETES_REDIS_URL": redis_url,
                     "DEERFLOW_TEST_KUBERNETES_BARRIER_TIMEOUT_SECONDS": "180",
@@ -929,6 +959,25 @@ class KubernetesQualificationRunner:
             interval_seconds=1,
         )
         return run_id
+
+    def _arm_barrier(self, scenario: str) -> None:
+        self._redis(
+            "DEL",
+            self._barrier_key(scenario, "reached"),
+            self._barrier_key(scenario, "release"),
+            self._barrier_key(scenario, "owner_replica_id"),
+        )
+        if (
+            self._redis(
+                "SET",
+                self._barrier_key(scenario, "arm"),
+                "1",
+                "EX",
+                "300",
+            )
+            != "OK"
+        ):
+            raise QualificationCommandError("qualification barrier arm failed")
 
     def _counter(self, scenario: str, name: str) -> int:
         value = self._redis("GET", self._barrier_key(scenario, name))
@@ -1149,6 +1198,7 @@ class KubernetesQualificationRunner:
     ) -> tuple[ScenarioEvidence, tuple[str, str]]:
         payload = self._ensure_payload(scenario)
         request_result: dict[str, object] = {}
+        self._arm_barrier(scenario)
 
         def ensure_request() -> None:
             try:

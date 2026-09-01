@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
@@ -95,6 +96,7 @@ async def init_engine(
     command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS,
     sqlite_dir: str = "",
     postgres_schema: str = "",
+    migration_mode: Literal["upgrade", "verify"] = "upgrade",
 ) -> None:
     """Create the async engine and session factory, then auto-create tables.
 
@@ -113,6 +115,11 @@ async def init_engine(
             before tables are auto-created. Ignored for non-postgres.
     """
     global _engine, _session_factory
+
+    if migration_mode not in {"upgrade", "verify"}:
+        raise ValueError("migration_mode must be 'upgrade' or 'verify'")
+    if migration_mode == "verify" and backend != "postgres":
+        raise ValueError("verify-only migration mode requires PostgreSQL")
 
     if backend == "memory":
         logger.info("Persistence backend=memory -- ORM engine not initialized")
@@ -199,7 +206,7 @@ async def init_engine(
     # alembic's own connections in env.py) -- multi-process SQLite bootstrap
     # is best-effort, gated by SQLite's natural file-level write lock.
     # See deerflow.persistence.bootstrap for the full state machine.
-    from deerflow.persistence.bootstrap import bootstrap_schema
+    from deerflow.persistence.bootstrap import bootstrap_schema, verify_schema_head
 
     async def _ensure_postgres_schema() -> None:
         # CREATE SCHEMA is DDL and is unaffected by search_path, so it is
@@ -214,10 +221,17 @@ async def init_engine(
                 await conn.execute(CreateSchema(postgres_schema, if_not_exists=True))
 
     try:
-        await _ensure_postgres_schema()
-        await bootstrap_schema(_engine, backend=backend, postgres_schema=postgres_schema)
+        if migration_mode == "upgrade":
+            await _ensure_postgres_schema()
+            await bootstrap_schema(
+                _engine,
+                backend=backend,
+                postgres_schema=postgres_schema,
+            )
+        else:
+            await verify_schema_head(_engine)
     except Exception as exc:
-        if backend == "postgres" and "does not exist" in str(exc):
+        if migration_mode == "upgrade" and backend == "postgres" and "does not exist" in str(exc):
             # Database not yet created -- attempt to auto-create it, then retry.
             await _auto_create_postgres_db(url)
             # Rebuild engine against the now-existing database. The rebuilt
@@ -244,7 +258,11 @@ async def init_engine(
     logger.info("Persistence engine initialized: backend=%s", backend)
 
 
-async def init_engine_from_config(config) -> None:
+async def init_engine_from_config(
+    config,
+    *,
+    migration_mode: Literal["upgrade", "verify"] = "upgrade",
+) -> None:
     """Convenience: init engine from a DatabaseConfig object."""
     if config.backend == "memory":
         await init_engine("memory")
@@ -259,6 +277,7 @@ async def init_engine_from_config(config) -> None:
         command_timeout=config.command_timeout,
         sqlite_dir=config.sqlite_dir if config.backend == "sqlite" else "",
         postgres_schema=config.postgres_schema if config.backend == "postgres" else "",
+        migration_mode=migration_mode,
     )
 
 

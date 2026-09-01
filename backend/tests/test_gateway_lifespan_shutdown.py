@@ -51,6 +51,7 @@ async def _run_lifespan_with_hanging_stop() -> float:
     app = _gateway_test_app()
     startup_config = MagicMock()
     startup_config.log_level = "INFO"
+    startup_config.deployment.profile = "local_development"
     # Keep this test focused on the channel-hang timing: skip the memory drain.
     startup_config.memory.enabled = False
     startup_config.memory.shutdown_flush_timeout_seconds = 5.0
@@ -307,7 +308,9 @@ async def _run_lifespan_with_memory_flush(
         patch("deerflow.extensions.notify.suspend_extension_system_observations", suspend_system_observations),
     ):
         async with lifespan(app):
-            pass
+            if not enabled:
+                assert hasattr(app.state, "memory_manager")
+                assert app.state.memory_manager is None
 
     return manager
 

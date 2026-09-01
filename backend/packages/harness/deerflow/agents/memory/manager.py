@@ -856,15 +856,12 @@ def _validate_cached_manager_tenant(
 
     if not isinstance(manager, HonchoMemoryManager):
         return
-    profile_value = getattr(deployment_profile, "value", deployment_profile)
-    if profile_value is not None and profile_value not in {
-        "local_development",
-        "durable_production",
-    }:
-        raise ValueError("unknown deployment profile")
+    from deerflow.deployment.topology import coerce_deployment_profile
+
+    profile = coerce_deployment_profile(deployment_profile)
     manager.validate_tenant_binding(
         expected_tenant_digest=getattr(tenant_identity, "digest", None),
-        required=profile_value == "durable_production" or tenant_identity is not None,
+        required=profile.is_durable or tenant_identity is not None,
     )
 
 
@@ -913,14 +910,11 @@ def get_memory_manager(
         )
 
         if issubclass(cls, HonchoMemoryManager):
-            profile_value = getattr(deployment_profile, "value", deployment_profile)
-            if profile_value is not None and profile_value not in {
-                "local_development",
-                "durable_production",
-            }:
-                raise ValueError("unknown deployment profile")
+            from deerflow.deployment.topology import coerce_deployment_profile
+
+            profile = coerce_deployment_profile(deployment_profile)
             if tenant_identity is None:
-                if profile_value == "durable_production":
+                if profile.is_durable:
                     raise ValueError("honcho_tenant_projection_required: durable production Honcho requires the Gateway's frozen tenant identity")
                 # Direct/embedded local use remains backward compatible. The
                 # Gateway always supplies its frozen tenant identity below.

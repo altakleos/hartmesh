@@ -10,7 +10,7 @@ namespace: ""
 #    resolved release namespace. A non-empty namespace must already exist.
 sandboxNamespace: ""
 
-# -- Server-owned tenant identity. durable_one_replica requires an explicit
+# -- Server-owned tenant identity. Durable profiles require an explicit
 #    non-local lowercase DNS label. Empty local renders omit the identity env
 #    override; the application and Redis projections use the documented local
 #    identity. Never derive this value from a Helm release or namespace.
@@ -44,12 +44,16 @@ image:
   provisionerImage: deer-flow-provisioner
 
 # -- Helm-side deployment declaration. local_evaluation keeps tag-based images
-#    and explicit unqualified state convenient. durable_one_replica enables
-#    fail-closed render validation for image pinning, storage, config profile,
-#    replica count, and shutdown/probe relationships.
+#    and explicit unqualified state convenient. Durable modes enable
+#    fail-closed render validation for their exact topology contracts.
 deployment:
-  mode: local_evaluation       # local_evaluation | durable_one_replica
+  mode: local_evaluation       # local_evaluation | durable_one_replica | durable_two_gateway_v1
   persistenceTier: shared_durable  # process_local | node_durable | shared_durable
+  topology:
+    # -- Credential-free reference to the exact PostgreSQL database/schema.
+    #    Required only for durable_two_gateway_v1. Generate this outside Helm
+    #    as schema:sha256:<64 lowercase hex>; never put a DSN or schema name here.
+    databaseSchemaRef: ""
   provenance:
     # -- Optional lowercase source commit/revision (7-64 hex characters).
     sourceRevision: ""
@@ -62,11 +66,22 @@ deployment:
   #   completedAt: "2026-08-08T12:00:00Z"
   #   scope: durable_one_replica_pod_recovery
   #   status: passed
+  # - qualificationId: two-gateway-2026-09
+  #   artifactDigest: sha256:<64 lowercase hex characters>
+  #   completedAt: "2026-09-01T12:00:00Z"
+  #   scope: durable_two_gateway_v1_postgres_redis_aio_rwx
+  #   status: passed
+  # -- Qualification harness escape hatch. This does not assert qualification,
+  #    accepts no production namespace, and must never receive user traffic.
+  qualificationCandidate:
+    enabled: false
+    id: ""
 
 # -- Expected non-secret extension provenance for the pinned Gateway image and
 #    ordered plugins configuration. Calculate configurationDigest with
 #    `deerflow extensions config-digest --config <path>`. Both values are
-#    required in durable_one_replica when any plugin is enabled.
+#    required in durable_one_replica when any plugin is enabled and always
+#    required as an exact tuple in durable_two_gateway_v1.
 extensions:
   artifactManifestDigest: ""
   configurationDigest: ""
@@ -92,8 +107,11 @@ gateway:
   # The chart probes /ready for traffic readiness and keeps /health for
   # process liveness. Required authoritative capability health participates
   # only in readiness; manifest/plugin changes require a pod restart.
-  replicas: 1               # The only supported chart topology for this phase.
-                            # durable_one_replica rejects any other value.
+  replicas: 1               # Two replicas are opt-in only through the exact
+                            # evidence-gated durable_two_gateway_v1 mode.
+  autoscaling:
+    # -- HPA is outside both qualified durable topology contracts.
+    enabled: false
   # Optional explicit override. null derives the grace period from all
   # deployment.shutdown phase budgets + memory flush + preStop + headroom.
   terminationGracePeriodSeconds: null
@@ -378,6 +396,9 @@ skills:
   enabled: false
   existingClaim: ""
   configMap: ""
+  # -- Operator declaration for an existing claim. The chart cannot inspect
+  #    its StorageClass; durable_two_gateway_v1 verifies the claim live too.
+  accessMode: ""
 
 # -- Local-evaluation convenience for provider/channel/search secrets injected
 #    as environment variables. Production values should leave this empty and
@@ -400,7 +421,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 46
+  config_version: 47
   log_level: info
 
   models: []

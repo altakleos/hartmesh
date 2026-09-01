@@ -23,11 +23,13 @@ from app.runtime.deployment import (
     NativeIngressReport,
     PersistenceTier,
     PostCommitObligationReport,
+    SchedulerLeaseStatsReport,
     describe_native_ingress,
     describe_persistence,
     validate_deployment_profile,
 )
 from app.runtime.readiness import RuntimeReadinessSnapshot
+from deerflow.deployment.topology import TopologyStatusV1
 from deerflow.extensions.capabilities import (
     CapabilityHealthSnapshot,
     build_capability_manifest,
@@ -221,6 +223,68 @@ async def test_admin_report_exposes_bounded_process_local_post_commit_counts() -
             "admission": 5,
             "thread_operation_release": 7,
         },
+    }
+
+
+@pytest.mark.asyncio
+async def test_multi_gateway_report_exposes_only_safe_topology_status() -> None:
+    topology = TopologyStatusV1(
+        replica_id="gateway-0",
+        topology_digest="a" * 64,
+        ready=True,
+        live_compatible_replicas=1,
+        degraded_replicas=1,
+        qualification_ready=False,
+    )
+    reporter = GatewayDeploymentReporter(
+        profile=DeploymentProfile.durable_two_gateway_v1,
+        database_backend="postgres",
+        atomic_lifecycle=True,
+        manifest=build_capability_manifest(ExtensionRegistry().build(generation=7)),
+        health_monitor=_HealthMonitor(),
+        topology_supplier=lambda: topology,
+    )
+
+    payload = (await reporter.deployment_report()).to_dict()
+
+    assert payload["topology"] == topology.to_dict()
+    assert "password" not in str(payload["topology"]).lower()
+
+
+@pytest.mark.asyncio
+async def test_multi_gateway_report_exposes_bounded_scheduler_lease_stats() -> None:
+    stats = SchedulerLeaseStatsReport(
+        cycles=11,
+        database_clock_reads=11,
+        due_occurrences_claimed=3,
+        launch_claims_acquired=2,
+        recovery_transitions=1,
+        stale_write_rejections=1,
+        dependency_failures=2,
+        last_database_time=datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+    )
+    reporter = GatewayDeploymentReporter(
+        profile=DeploymentProfile.durable_two_gateway_v1,
+        database_backend="postgres",
+        atomic_lifecycle=True,
+        manifest=build_capability_manifest(ExtensionRegistry().build(generation=7)),
+        health_monitor=_HealthMonitor(),
+        scheduler_lease_stats_supplier=lambda: stats,
+    )
+
+    payload = (await reporter.deployment_report()).to_dict()
+
+    assert payload["scheduler_lease_stats"] == {
+        "version": 1,
+        "scope": "replica_since_start",
+        "cycles": 11,
+        "database_clock_reads": 11,
+        "due_occurrences_claimed": 3,
+        "launch_claims_acquired": 2,
+        "recovery_transitions": 1,
+        "stale_write_rejections": 1,
+        "dependency_failures": 2,
+        "last_database_time": "2026-09-01T12:00:00Z",
     }
 
 

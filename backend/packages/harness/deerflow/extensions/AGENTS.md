@@ -396,3 +396,14 @@ that the current host silently ignores.
 `test_extension_manager.py` creates temporary Git repositories for local extension sources.
 Temporary commits use an empty repository-local hook directory. They must not run developer or CI Git hooks.
 Tests for hook behavior must create and invoke their own hook fixtures.
+
+## Replica-safety declarations
+
+Gateway-lifetime/background services declare exactly one public
+`ReplicaSafety`: `stateless_replica_safe`, `shared_store_fenced`,
+`singleton_leased`, `single_replica_only`, or `unclassified`. The exact
+two-Gateway profile rejects the last two and requires health/fence evidence for
+the shared-store/leased forms. Both replicas freeze the same artifact,
+configuration, contribution, and capability digests. V1 permits the empty
+canonical set or only the specifically qualified first-party governance
+artifact; no other extension inherits its evidence.

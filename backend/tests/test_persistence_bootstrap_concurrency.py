@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0026_mcp_task_lineage"
+HEAD = "0027_multi_gateway_topology"
 
 
 def _url(tmp_path: Path) -> str:

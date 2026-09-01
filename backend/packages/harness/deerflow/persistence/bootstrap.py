@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -268,6 +269,42 @@ def _get_head_revision() -> str:
             raise RuntimeError("alembic has no head revision -- versions/ directory is empty")
         _HEAD_REVISION = head
     return _HEAD_REVISION
+
+
+def get_expected_migration_head() -> str:
+    """Return the image-bundled Alembic head as a public startup fact."""
+
+    return _get_head_revision()
+
+
+class SchemaMigrationHeadError(RuntimeError):
+    """Bounded failure raised when a serving Gateway is not exactly at head."""
+
+    code = "migration_head_mismatch"
+
+    def __init__(self, *, expected: str, actual: str | None) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(self.code)
+
+
+async def verify_schema_head(engine: AsyncEngine) -> str:
+    """Read, but never mutate, the schema's exact Alembic revision."""
+
+    expected = get_expected_migration_head()
+    actual: str | None = None
+    try:
+        async with engine.connect() as connection:
+            revisions = tuple(await connection.scalars(text("SELECT version_num FROM alembic_version")))
+        if len(revisions) == 1 and isinstance(revisions[0], str):
+            candidate = revisions[0]
+            if re.fullmatch(r"[0-9]{4}_[a-z0-9_]{1,123}", candidate):
+                actual = candidate
+    except Exception:  # noqa: BLE001 - missing/unreachable schema is not ready
+        actual = None
+    if actual != expected:
+        raise SchemaMigrationHeadError(expected=expected, actual=actual)
+    return expected
 
 
 def _reflect_state(sync_conn: Any) -> dict[str, bool]:

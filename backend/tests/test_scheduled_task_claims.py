@@ -150,3 +150,65 @@ async def test_claim_skips_task_with_active_lease(tmp_path):
     assert reclaimed == []
 
     await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_authority_clock_is_the_aware_caller_clock(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+    repo = ScheduledTaskRepository(sf)
+    fallback = datetime(2026, 9, 1, 12, 34, tzinfo=UTC)
+
+    assert await repo.authority_now(fallback=fallback) == fallback
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repo.authority_now(fallback=fallback.replace(tzinfo=None))
+
+    await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_pause_and_resume_advance_persisted_schedule_version(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+    repo = ScheduledTaskRepository(sf)
+    now = datetime.now(UTC)
+    created = await repo.create(
+        task_id="versioned-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        context_mode="reuse_thread",
+        assistant_id="lead_agent",
+        title="Versioned",
+        prompt="Prompt",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=now + timedelta(hours=1),
+    )
+    assert created["schedule_version"] == 1
+
+    assert (
+        await repo.pause_with_queue_cancellation(
+            "versioned-1",
+            user_id="user-1",
+            error="paused",
+            now=now,
+        )
+        == "paused"
+    )
+    paused = await repo.get("versioned-1", user_id="user-1")
+    assert paused is not None
+    assert paused["schedule_version"] == 2
+
+    resumed = await repo.update(
+        "versioned-1",
+        user_id="user-1",
+        updates={"status": "enabled"},
+        require_mutable=True,
+    )
+    assert resumed is not None
+    assert resumed["schedule_version"] == 3
+
+    await close_engine()

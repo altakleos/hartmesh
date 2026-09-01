@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
+from deerflow.deployment.topology import TopologyStatusV1
 from deerflow.extensions.capabilities import (
     CapabilityHealthSnapshot,
     CapabilityReadinessSnapshot,
@@ -80,6 +81,8 @@ class RuntimeReadinessCoordinator:
         overall_timeout_seconds: float,
         sandbox_projection_ready: Callable[[], Awaitable[bool]] | None = None,
         post_commit_obligations_ready: Callable[[], bool] | None = None,
+        topology_status: Callable[[], Awaitable[TopologyStatusV1]] | None = None,
+        topology_dependencies_ready: Callable[[], Awaitable[bool]] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if overall_timeout_seconds <= 0:
@@ -91,8 +94,11 @@ class RuntimeReadinessCoordinator:
         self._overall_timeout_seconds = overall_timeout_seconds
         self._sandbox_projection_ready = sandbox_projection_ready
         self._post_commit_obligations_ready = post_commit_obligations_ready
+        self._topology_status = topology_status
+        self._topology_dependencies_ready = topology_dependencies_ready
         self._clock = clock or (lambda: datetime.now(UTC))
         self._last_snapshot: RuntimeReadinessSnapshot | None = None
+        self._last_topology_status: TopologyStatusV1 | None = None
         self._admission_condition = asyncio.Condition()
         self._draining = False
         self._active_admissions = 0
@@ -100,6 +106,10 @@ class RuntimeReadinessCoordinator:
     @property
     def last_snapshot(self) -> RuntimeReadinessSnapshot | None:
         return self._last_snapshot
+
+    @property
+    def last_topology_status(self) -> TopologyStatusV1 | None:
+        return self._last_topology_status
 
     def _now(self) -> datetime:
         now = self._clock()
@@ -164,12 +174,30 @@ class RuntimeReadinessCoordinator:
                 return True
             return await self._sandbox_projection_ready()
 
-        health_result, lifecycle_result, sandbox_projection_result = await asyncio.gather(
+        async def topology_check() -> TopologyStatusV1 | None:
+            if self._topology_status is None:
+                return None
+            return await self._topology_status()
+
+        async def topology_dependencies_check() -> bool:
+            if self._topology_dependencies_ready is None:
+                return True
+            return await self._topology_dependencies_ready()
+
+        (
+            health_result,
+            lifecycle_result,
+            sandbox_projection_result,
+            topology_result,
+            topology_dependencies_result,
+        ) = await asyncio.gather(
             self._health_monitor.admission_readiness(
                 expected_generation=expected_generation,
             ),
             lifecycle_check(),
             sandbox_projection_check(),
+            topology_check(),
+            topology_dependencies_check(),
             return_exceptions=True,
         )
         if isinstance(health_result, BaseException):
@@ -211,6 +239,37 @@ class RuntimeReadinessCoordinator:
             )
         elif sandbox_projection_result is not True:
             reasons.append("sandbox_projection_unavailable")
+
+        if isinstance(topology_result, BaseException):
+            if isinstance(topology_result, asyncio.CancelledError):
+                raise topology_result
+            reasons.append("topology_registration_missing")
+            correlation_id = self._log_dependency_failure(
+                "Topology registration readiness check failed",
+                component="topology_registry",
+                error=topology_result,
+            )
+            self._last_topology_status = None
+        elif topology_result is not None:
+            if not isinstance(topology_result, TopologyStatusV1):
+                reasons.append("topology_registration_missing")
+                self._last_topology_status = None
+            else:
+                self._last_topology_status = topology_result
+                if not topology_result.ready:
+                    reasons.append(topology_result.reason_code or "topology_registration_missing")
+
+        if isinstance(topology_dependencies_result, BaseException):
+            if isinstance(topology_dependencies_result, asyncio.CancelledError):
+                raise topology_dependencies_result
+            reasons.append("topology_dependency_not_shared")
+            correlation_id = self._log_dependency_failure(
+                "Shared topology dependency readiness check failed",
+                component="topology_dependencies",
+                error=topology_dependencies_result,
+            )
+        elif topology_dependencies_result is not True:
+            reasons.append("topology_dependency_not_shared")
 
         unique_reasons = tuple(dict.fromkeys(reasons))
         return RuntimeReadinessSnapshot(

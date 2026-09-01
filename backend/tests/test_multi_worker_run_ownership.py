@@ -142,7 +142,8 @@ async def test_interrupt_reclaims_expired_checkpoint_write_reservation():
     stale = await store.get("checkpoint-write-1")
     assert stale is not None
     assert stale["status"] == "interrupted"
-    assert stale["owner_worker_id"] == "worker-b"
+    assert stale["owner_worker_id"] is None
+    assert stale["lease_expires_at"] is None
 
 
 @pytest.mark.anyio
@@ -1411,7 +1412,13 @@ async def test_update_lease_renews_row():
 async def test_update_lease_returns_false_for_terminal_run():
     """update_lease must return False when the run is not pending/running."""
     store = MemoryRunStore()
-    await store.put("run-1", thread_id="thread-1", status="success", owner_worker_id="w1")
+    await store.put(
+        "run-1",
+        thread_id="thread-1",
+        status="success",
+        owner_worker_id="w1",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=5)).isoformat(),
+    )
 
     new_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
     updated = await store.update_lease(
@@ -1423,6 +1430,8 @@ async def test_update_lease_returns_false_for_terminal_run():
 
     stored = await store.get("run-1")
     assert stored["status"] == "success"
+    assert stored["owner_worker_id"] is None
+    assert stored["lease_expires_at"] is None
 
 
 @pytest.mark.anyio

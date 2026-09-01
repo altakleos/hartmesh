@@ -256,6 +256,9 @@ async def _create_durable_row(
     )
     row["status"] = status.value
     row["error"] = "foreign-durable-evidence"
+    if status not in {RunStatus.pending, RunStatus.running}:
+        row["owner_worker_id"] = None
+        row["lease_expires_at"] = None
     return row
 
 

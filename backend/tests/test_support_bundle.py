@@ -565,6 +565,7 @@ channels:
         "environment.json",
         "config-summary.json",
         "extensions-summary.json",
+        "topology-summary.json",
         "git.json",
     }.issubset(names)
 
@@ -578,6 +579,73 @@ channels:
     assert config_summary["models"][0]["api_key"] == "<redacted>"
     assert config_summary["tools"][0]["api_key"] == "<redacted>"
     assert config_summary["channels"]["slack"]["bot_token"] == "<redacted>"
+
+
+def test_topology_summary_keeps_only_safe_deployment_report_fields(tmp_path):
+    report_path = tmp_path / "deployment-report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "api_version": "deerflow.deployment/v1",
+                "tenant": {
+                    "canonical_id": "customer-secret-name",
+                    "public_ref": "tenant-1111111111111111",
+                },
+                "topology": {
+                    "version": 1,
+                    "profile": "durable_two_gateway_v1",
+                    "replica_id": "gateway-0",
+                    "topology_digest": "a" * 64,
+                    "ready": True,
+                    "live_compatible_replicas": 2,
+                    "degraded_replicas": 0,
+                    "qualification_ready": True,
+                    "reason_code": None,
+                },
+                "qualification": {
+                    "version": 1,
+                    "status": "qualified",
+                    "trust": "operator_asserted",
+                    "evidence": [
+                        {
+                            "qualification_id": "qualification-09",
+                            "scope": "durable_two_gateway_v1_postgres_redis_aio_rwx",
+                            "status": "passed",
+                            "artifact_digest": "sha256:" + ("b" * 64),
+                            "completed_at": "2026-09-01T12:00:00Z",
+                        }
+                    ],
+                },
+                "database_url": "postgresql://admin:do-not-copy@example/db",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = support_bundle.collect_topology_summary(report_path)
+
+    assert summary["present"] is True
+    assert summary["topology"]["topology_digest"] == "a" * 64
+    assert summary["qualification"]["evidence"][0]["artifact_digest"] == ("sha256:" + ("b" * 64))
+    rendered = json.dumps(summary)
+    assert "customer-secret-name" not in rendered
+    assert "do-not-copy" not in rendered
+    assert "database_url" not in rendered
+
+
+def test_topology_summary_rejects_invalid_document_without_echoing_it(tmp_path):
+    report_path = tmp_path / "deployment-report.json"
+    report_path.write_text('{"secret":"do-not-echo"}', encoding="utf-8")
+
+    summary = support_bundle.collect_topology_summary(report_path)
+
+    assert summary == {
+        "version": 1,
+        "present": True,
+        "valid": False,
+        "error_code": "deployment_report_invalid",
+    }
+    assert "do-not-echo" not in json.dumps(summary)
 
 
 def test_create_support_bundle_writes_ai_triage_entrypoints(tmp_path, monkeypatch):

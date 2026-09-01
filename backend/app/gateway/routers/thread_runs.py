@@ -42,6 +42,7 @@ from app.gateway.services import (
     build_checkpoint_state_accessor,
     build_invocation_runtime,
     build_thread_checkpoint_state_accessor,
+    ensure_stream_transport_available,
     invocation_observation_enabled,
     invocation_principal_from_request,
     raise_for_invocation_authorization,
@@ -1078,6 +1079,7 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
         visibility_prevalidated=True,
     )
     bridge = get_stream_bridge(request)
+    await ensure_stream_transport_available(bridge, run_id)
     if record.store_only and not bridge.supports_cross_process:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
     run_mgr = get_run_manager(request)
@@ -1122,6 +1124,7 @@ async def stream_existing_run(
         visibility_prevalidated=True,
     )
     bridge = get_stream_bridge(request)
+    await ensure_stream_transport_available(bridge, run_id)
     if record.store_only and action is None and not bridge.supports_cross_process:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 

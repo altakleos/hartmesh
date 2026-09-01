@@ -1,6 +1,8 @@
 """Opt-in real-process Kubernetes qualification hooks.
 
-The hooks are inert unless ``DEERFLOW_TEST_KUBERNETES_RUNTIME=1`` is present.
+Fault hooks are inert unless both ``DEERFLOW_TEST_KUBERNETES_RUNTIME=1`` and
+``DEERFLOW_TEST_KUBERNETES_FAULT_INJECTION=1`` are present, and every barrier
+also consumes one tenant-scoped Redis arm.
 They coordinate through the deployment's shared Redis so deleting the Gateway
 pod cannot erase a reached fault point. No HTTP endpoint or production config
 field exposes this module.
@@ -11,25 +13,32 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import Any, ClassVar
 
+from langchain.tools import tool
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from deerflow.multi_gateway_qualification import (
+    MULTI_GATEWAY_QUALIFICATION_SCENARIOS,
+)
 from deerflow.qualification_evidence import QUALIFICATION_SCENARIOS
 from deerflow.runtime.tenant_identity import (
     RedisTenantComponent,
+    TenantIdentityV1,
     TenantNamespaceV1,
     TenantReferenceV1,
     TenantSubsystem,
     redis_component_key_prefix,
     tenant_namespace_from_reference,
 )
+from deerflow.tools.types import Runtime
 
-_SCENARIOS = frozenset(QUALIFICATION_SCENARIOS)
+_SCENARIOS = frozenset((*QUALIFICATION_SCENARIOS, *MULTI_GATEWAY_QUALIFICATION_SCENARIOS))
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _EXTERNAL_KEY_PREFIX = "raw:k8s-qual-v1:"
 _ACTIVE_SCENARIO: ContextVar[str | None] = ContextVar(
@@ -61,10 +70,41 @@ def _scenario_for_record(record: object) -> str | None:
 def _point_matches(point: str, scenario: str) -> bool:
     if point == scenario:
         return True
+    if point == "accepted_before_worker_start":
+        return scenario == "concurrent_admission"
+    if point == "accepted_before_client_response":
+        return scenario == "sse_reconnect"
+    if scenario == "owner_sigkill":
+        return point in {
+            "accepted_before_materialization",
+            "post_materialization_before_checkpoint",
+            "post_checkpoint_before_graph",
+            "during_model_execution",
+            "during_tool_execution",
+            "terminal_before_lifecycle_commit",
+        }
+    if scenario == "sandbox_recovery":
+        return point in {
+            "post_materialization_before_checkpoint",
+            "during_model_execution",
+            "during_tool_execution",
+        }
+    if scenario == "cancellation_finalization":
+        return point in {
+            "during_model_execution",
+            "terminal_before_lifecycle_commit",
+        }
+    if scenario == "postgresql_interruption":
+        return point in {
+            "post_checkpoint_before_graph",
+            "during_tool_execution",
+            "terminal_before_lifecycle_commit",
+        }
     return point == "during_model_execution" and scenario in {
         "active_execution",
         "graceful_rollout_termination",
         "forced_kill_after_graceful_deadline",
+        "execution_ownership",
     }
 
 
@@ -107,8 +147,25 @@ class KubernetesQualificationHooks:
         if not isinstance(run_id, str) or not run_id or len(run_id) > 128:
             raise RuntimeError("qualification_barrier_invalid_run")
         scenario_prefix = f"{self._prefix}:{scenario}"
+        selected_point = await self._redis.get(
+            f"{scenario_prefix}:selected_point",
+        )
+        if selected_point is not None:
+            if isinstance(selected_point, bytes):
+                selected_point = selected_point.decode("utf-8", errors="strict")
+            if selected_point != point:
+                return False
+        if await self._redis.getdel(f"{scenario_prefix}:arm") != b"1":
+            return False
         await self._redis.incr(f"{scenario_prefix}:barrier_hits")
+        await self._redis.set(f"{scenario_prefix}:reached_point", point)
         await self._redis.set(f"{scenario_prefix}:reached", run_id)
+        replica_id = os.getenv("DEER_FLOW_REPLICA_ID")
+        if isinstance(replica_id, str) and _SAFE_ID.fullmatch(replica_id):
+            await self._redis.set(
+                f"{scenario_prefix}:owner_replica_id",
+                replica_id,
+            )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._timeout_seconds
         while True:
@@ -142,9 +199,39 @@ class KubernetesQualificationHooks:
         await self._redis.incr(f"{self._prefix}:{scenario}:{name}")
         return True
 
+    async def stale_external_renewal_probe(
+        self,
+        record: object,
+        renewal: Callable[[], Awaitable[bool]],
+    ) -> bool:
+        """Exercise one returning stale owner's real accepted-material lease."""
 
-def _runtime_configuration() -> tuple[str, str, float] | None:
+        scenario = _scenario_for_record(record)
+        if scenario != "postgresql_interruption":
+            return False
+        scenario_prefix = f"{self._prefix}:{scenario}"
+        if (
+            await self._redis.getdel(
+                f"{scenario_prefix}:stale_external_renewal_arm",
+            )
+            != b"1"
+        ):
+            return False
+        if await renewal():
+            raise RuntimeError("stale_external_renewal_was_accepted")
+        await self._redis.incr(
+            f"{scenario_prefix}:sandbox_stale_renewal_rejections",
+        )
+        return True
+
+
+def _runtime_configuration(
+    *,
+    require_fault_injection: bool = False,
+) -> tuple[str, str, float] | None:
     if os.getenv("DEERFLOW_TEST_KUBERNETES_RUNTIME") != "1":
+        return None
+    if require_fault_injection and os.getenv("DEERFLOW_TEST_KUBERNETES_FAULT_INJECTION") != "1":
         return None
     qualification_id = os.getenv("DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID", "")
     redis_url = os.getenv("DEERFLOW_TEST_KUBERNETES_REDIS_URL") or os.getenv(
@@ -165,8 +252,12 @@ def _runtime_configuration() -> tuple[str, str, float] | None:
 async def _with_async_hooks(
     record: object,
     operation: Callable[[KubernetesQualificationHooks], Awaitable[bool]],
+    *,
+    require_fault_injection: bool = False,
 ) -> bool:
-    configuration = _runtime_configuration()
+    configuration = _runtime_configuration(
+        require_fault_injection=require_fault_injection,
+    )
     if configuration is None:
         return False
     qualification_id, redis_url, timeout_seconds = configuration
@@ -191,6 +282,7 @@ async def qualification_barrier(point: str, record: object) -> bool:
     return await _with_async_hooks(
         record,
         lambda hooks: hooks.barrier(point, record),
+        require_fault_injection=True,
     )
 
 
@@ -201,6 +293,71 @@ async def qualification_counter(name: str, record: object) -> bool:
         record,
         lambda hooks: hooks.counter(name, record),
     )
+
+
+async def qualification_stale_external_renewal_probe(
+    record: object,
+    renewal: Callable[[], Awaitable[bool]],
+) -> bool:
+    """Run an armed stale accepted-material renewal in the fault harness."""
+
+    return await _with_async_hooks(
+        record,
+        lambda hooks: hooks.stale_external_renewal_probe(record, renewal),
+        require_fault_injection=True,
+    )
+
+
+async def qualification_service_barrier(
+    *,
+    scenario: str,
+    point: str,
+    subject_id: str,
+) -> bool:
+    """Pause a scheduler/MCP lease owner at an explicitly armed live point.
+
+    Unlike invocation barriers, these services do not own a ``RunRecord`` yet.
+    The harness must atomically arm a named point in the tenant Redis prefix;
+    production processes and unarmed qualification work return immediately.
+    """
+
+    configuration = _runtime_configuration(require_fault_injection=True)
+    if configuration is None:
+        return False
+    if scenario not in {"scheduler_owner_loss", "mcp_task_notification"}:
+        raise ValueError("qualification service scenario is invalid")
+    if _SAFE_ID.fullmatch(point) is None or _SAFE_ID.fullmatch(subject_id) is None:
+        raise ValueError("qualification service barrier identity is invalid")
+    tenant_id = os.getenv("DEER_FLOW_TENANT_ID", "")
+    if _SAFE_ID.fullmatch(tenant_id) is None:
+        raise RuntimeError("kubernetes_qualification_tenant_missing")
+    qualification_id, redis_url, timeout_seconds = configuration
+    tenant_namespace = TenantIdentityV1.from_canonical_id(tenant_id).namespace(TenantSubsystem.REDIS)
+    prefix = f"{redis_component_key_prefix(tenant_namespace, RedisTenantComponent.QUALIFICATION)}:{qualification_id}:{scenario}:{point}"
+    from redis.asyncio import Redis
+
+    client = Redis.from_url(redis_url, decode_responses=False)
+    try:
+        if await client.getdel(f"{prefix}:arm") != b"1":
+            return False
+        await client.incr(f"{prefix}:barrier_hits")
+        await client.set(f"{prefix}:reached", subject_id, ex=300)
+        replica_id = os.getenv("DEER_FLOW_REPLICA_ID")
+        if isinstance(replica_id, str) and _SAFE_ID.fullmatch(replica_id):
+            await client.set(
+                f"{prefix}:owner_replica_id",
+                replica_id,
+                ex=300,
+            )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while await client.get(f"{prefix}:release") != b"1":
+            if loop.time() >= deadline:
+                raise RuntimeError(f"qualification_barrier_timeout:{scenario}:{point}")
+            await asyncio.sleep(0.1)
+        return True
+    finally:
+        await client.aclose()
 
 
 class KubernetesQualificationChatModel(BaseChatModel):
@@ -218,12 +375,36 @@ class KubernetesQualificationChatModel(BaseChatModel):
     def _llm_type(self) -> str:
         return self._model_name
 
+    def bind_tools(self, tools: list[Any], **kwargs: Any) -> Any:
+        """Advertise the deterministic qualification tool without provider IO."""
+
+        del tools, kwargs
+        return self
+
+    @staticmethod
+    def _delay_seconds() -> float:
+        try:
+            value = float(
+                os.getenv(
+                    "DEERFLOW_TEST_KUBERNETES_MODEL_DELAY_SECONDS",
+                    "0",
+                )
+            )
+        except ValueError as exc:
+            raise RuntimeError("kubernetes_qualification_runtime_misconfigured") from exc
+        if not 0 <= value <= 10:
+            raise RuntimeError("kubernetes_qualification_runtime_misconfigured")
+        return value
+
     async def _record_model_start_async(self) -> None:
         scenario = _ACTIVE_SCENARIO.get()
         record = _ACTIVE_RECORD.get()
         configuration = _runtime_configuration()
-        if scenario is None or record is None or configuration is None:
+        if configuration is None:
             raise RuntimeError("qualification_model_missing_scenario")
+        if scenario is None or record is None:
+            await asyncio.sleep(self._delay_seconds())
+            return
         qualification_id, redis_url, _timeout = configuration
         from redis.asyncio import Redis
 
@@ -240,12 +421,48 @@ class KubernetesQualificationChatModel(BaseChatModel):
         finally:
             await client.aclose()
 
+    @staticmethod
+    def _raise_selected_failure() -> None:
+        record = _ACTIVE_RECORD.get()
+        external_key = getattr(record, "external_key", None)
+        if isinstance(external_key, str) and external_key.endswith(":fail"):
+            raise RuntimeError("qualification_deterministic_model_failure")
+
+    @staticmethod
+    def _response(messages: list[Any]) -> AIMessage:
+        record = _ACTIVE_RECORD.get()
+        external_key = getattr(record, "external_key", None)
+        tool_selected = isinstance(external_key, str) and external_key.endswith(
+            ":during-tool",
+        )
+        tool_finished = any(isinstance(message, ToolMessage) for message in messages)
+        if tool_selected and not tool_finished:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "qualification_sandbox_operation",
+                        "args": {
+                            "description": ("exercise a bounded long sandbox operation"),
+                        },
+                        "id": "qualification-sandbox-operation-1",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        return AIMessage(
+            content="Kubernetes qualification completed deterministically.",
+        )
+
     def _record_model_start_sync(self) -> None:
         scenario = _ACTIVE_SCENARIO.get()
         record = _ACTIVE_RECORD.get()
         configuration = _runtime_configuration()
-        if scenario is None or record is None or configuration is None:
+        if configuration is None:
             raise RuntimeError("qualification_model_missing_scenario")
+        if scenario is None or record is None:
+            time.sleep(self._delay_seconds())
+            return
         qualification_id, redis_url, _timeout = configuration
         from redis import Redis
 
@@ -268,9 +485,12 @@ class KubernetesQualificationChatModel(BaseChatModel):
         run_manager: Any | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        del messages, stop, run_manager, kwargs
+        del stop, run_manager, kwargs
         self._record_model_start_sync()
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.response_text))])
+        self._raise_selected_failure()
+        return ChatResult(
+            generations=[ChatGeneration(message=self._response(messages))],
+        )
 
     async def _agenerate(
         self,
@@ -279,9 +499,54 @@ class KubernetesQualificationChatModel(BaseChatModel):
         run_manager: Any | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        del messages, stop, run_manager, kwargs
+        del stop, run_manager, kwargs
         await self._record_model_start_async()
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.response_text))])
+        self._raise_selected_failure()
+        return ChatResult(
+            generations=[ChatGeneration(message=self._response(messages))],
+        )
+
+
+@tool("qualification_sandbox_operation", parse_docstring=True)
+async def qualification_sandbox_operation(
+    runtime: Runtime,
+    description: str,
+) -> str:
+    """Run one bounded, side-effect-free sandbox operation for live qualification.
+
+    Args:
+        description: Explain the qualification operation in short words.
+    """
+
+    del description
+    record = _ACTIVE_RECORD.get()
+    if record is None:
+        raise RuntimeError("qualification_tool_missing_run")
+    from deerflow.sandbox.tools import _bash_tool_async
+
+    operation = asyncio.create_task(
+        _bash_tool_async(
+            runtime,
+            "run a bounded qualification delay",
+            "python -c \"import time; time.sleep(20); print('qualification-complete')\"",
+        )
+    )
+    await asyncio.sleep(0.25)
+    try:
+        await qualification_counter("tool_starts", record)
+        await qualification_barrier("during_tool_execution", record)
+        renewal = getattr(record, "execution_lease_renewal", None)
+        if callable(renewal):
+            await qualification_stale_external_renewal_probe(
+                record,
+                renewal,
+            )
+        result = await operation
+        await qualification_counter("tool_completions", record)
+        return result
+    finally:
+        if not operation.done():
+            operation.cancel()
 
 
 __all__ = [
@@ -290,5 +555,8 @@ __all__ = [
     "KubernetesQualificationHooks",
     "qualification_barrier",
     "qualification_counter",
+    "qualification_stale_external_renewal_probe",
+    "qualification_sandbox_operation",
+    "qualification_service_barrier",
     "scenario_from_external_key",
 ]

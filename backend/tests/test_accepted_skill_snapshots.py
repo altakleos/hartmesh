@@ -1963,9 +1963,10 @@ async def test_remote_materialization_is_refenced_immediately_before_astream(
     )
     monkeypatch.setattr("deerflow.sandbox.get_sandbox_provider", lambda: provider)
 
-    async def qualification_barrier(*_args, **_kwargs) -> None:
+    async def qualification_barrier(counter_name, *_args, **_kwargs) -> None:
         nonlocal attempt_valid
-        attempt_valid = False
+        if counter_name == "checkpoint_preflight_starts":
+            attempt_valid = False
 
     monkeypatch.setattr(
         "deerflow.runtime.kubernetes_qualification.qualification_counter",

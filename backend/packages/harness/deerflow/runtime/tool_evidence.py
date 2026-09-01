@@ -14,7 +14,7 @@ import json
 import math
 import re
 import threading
-from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -1204,9 +1204,19 @@ class NullDurableToolReceiptSink:
 class RunEventToolReceiptSink:
     """Adapt validated receipts onto fenced, idempotent run events."""
 
-    def __init__(self, event_store: Any) -> None:
+    def __init__(
+        self,
+        event_store: Any,
+        *,
+        on_ownership_lost: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
         self._event_store = event_store
+        self._on_ownership_lost = on_ownership_lost
         self._active_fences: dict[str, tuple[str, int]] = {}
+
+    async def _report_ownership_lost(self, operation: str) -> None:
+        if self._on_ownership_lost is not None:
+            await self._on_ownership_lost(operation)
 
     async def reserve_started(
         self,
@@ -1218,17 +1228,21 @@ class RunEventToolReceiptSink:
         dispatch: ToolDispatchObservationV1,
     ) -> ToolAttemptReservation:
         expected_attempt = binding.expected_dispatch_attempt(tool_call_id, dispatch)
-        outcome = await self._event_store.reserve_tool_attempt(
-            binding.run_id,
-            binding=binding,
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
-            request_projection_digest=request_projection_digest,
-            observed_node_attempt=dispatch.node_attempt,
-            expected_attempt=expected_attempt,
-            owner_id=binding.owner_id,
-            lease_epoch=binding.lease_epoch,
-        )
+        try:
+            outcome = await self._event_store.reserve_tool_attempt(
+                binding.run_id,
+                binding=binding,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                request_projection_digest=request_projection_digest,
+                observed_node_attempt=dispatch.node_attempt,
+                expected_attempt=expected_attempt,
+                owner_id=binding.owner_id,
+                lease_epoch=binding.lease_epoch,
+            )
+        except ToolReceiptOwnershipLost:
+            await self._report_ownership_lost("reserve_started")
+            raise
         receipt = parse_tool_receipt_event(outcome.event).receipt
         replayed_outcome = parse_tool_receipt_event(outcome.terminal_event).receipt if outcome.terminal_event is not None else None
         binding.bind_dispatch_attempt(
@@ -1259,14 +1273,18 @@ class RunEventToolReceiptSink:
                 receipt.context.lease_epoch,
             )
         owner_id, lease_epoch = active
-        await self._event_store.append_idempotent(
-            receipt.context.run_id,
-            event_type=event_type,
-            idempotency_key=receipt.idempotency_key,
-            body=receipt.to_event_body(),
-            owner_id=owner_id,
-            lease_epoch=lease_epoch,
-        )
+        try:
+            await self._event_store.append_idempotent(
+                receipt.context.run_id,
+                event_type=event_type,
+                idempotency_key=receipt.idempotency_key,
+                body=receipt.to_event_body(),
+                owner_id=owner_id,
+                lease_epoch=lease_epoch,
+            )
+        except ToolReceiptOwnershipLost:
+            await self._report_ownership_lost("append")
+            raise
 
     async def record_started(self, receipt: DurableToolReceiptV1) -> None:
         if receipt.phase != "started":
