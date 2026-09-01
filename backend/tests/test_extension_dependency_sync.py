@@ -17,7 +17,11 @@ BACKEND_ROOT = REPO_ROOT / "backend"
 
 def _make_recipe(path: Path, target: str) -> str:
     content = path.read_text(encoding="utf-8")
-    match = re.search(rf"^{re.escape(target)}:[^\n]*\n(?P<recipe>(?:\t[^\n]*\n)+)", content, re.MULTILINE)
+    match = re.search(
+        rf"^{re.escape(target)}:[^\n]*\n(?P<recipe>(?:\t[^\n]*\n)+)",
+        content,
+        re.MULTILINE,
+    )
     assert match is not None, f"missing {target!r} target in {path}"
     return match.group("recipe")
 
@@ -194,7 +198,10 @@ def test_root_extension_shortcuts_are_cross_platform_and_keep_trust_confirmation
 def test_root_extension_shortcuts_reject_ambient_environment_arguments() -> None:
     environment = os.environ.copy()
 
-    for target, variable in (("extension-install", "SOURCE"), ("extension-enable", "NAME")):
+    for target, variable in (
+        ("extension-install", "SOURCE"),
+        ("extension-enable", "NAME"),
+    ):
         environment[variable] = "ambient-value"
         result = subprocess.run(
             ["make", "--no-print-directory", "-n", target],
@@ -293,6 +300,11 @@ def test_docker_image_builds_from_the_lock_and_never_syncs_at_runtime() -> None:
     production_compose = (REPO_ROOT / "docker" / "docker-compose.yaml").read_text(encoding="utf-8")
 
     assert "uv sync --locked --extra redis" in dockerfile
+    assert ".venv/bin/python -m deerflow.extensions.artifact_build" in dockerfile
+    assert "--source-lock /app/backend/extensions.lock.json" in dockerfile
+    assert "--output /app/hartmesh/extension-artifacts.json" in dockerfile
+    assert "chmod 0444 /app/hartmesh/extension-artifacts.json" in dockerfile
+    assert "COPY --from=builder /app/hartmesh ./hartmesh" in dockerfile
     assert "ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.1" in dockerfile
     assert dockerfile.count("uv run --no-sync uvicorn app.gateway.app:app") == 2
     assert "uv run --no-sync uvicorn app.gateway.app:app" in production_compose

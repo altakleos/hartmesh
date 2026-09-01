@@ -6,7 +6,13 @@ import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
-from deerflow_extension_api import ConstraintProjectionV1, ConstraintProjectionV2, InvocationIdentityV1, SealedOriginV1, TrustedRunContextV1
+from deerflow_extension_api import (
+    ConstraintProjectionV1,
+    ConstraintProjectionV2,
+    InvocationIdentityV1,
+    SealedOriginV1,
+    TrustedRunContextV1,
+)
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
 from langchain_core.messages import ToolMessage
@@ -45,8 +51,15 @@ from deerflow.runtime.tool_evidence import (
     stable_subagent_task_id,
 )
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
-from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
+from deerflow.sandbox.security import (
+    LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
+    is_host_bash_allowed,
+)
+from deerflow.subagents import (
+    SubagentExecutor,
+    get_available_subagent_names,
+    get_subagent_config,
+)
 from deerflow.subagents.config import resolve_subagent_model_name
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -61,7 +74,11 @@ from deerflow.subagents.status_contract import (
     make_subagent_additional_kwargs,
 )
 from deerflow.tools.types import Runtime
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.trace_context import (
+    DEERFLOW_TRACE_METADATA_KEY,
+    get_current_trace_id,
+    normalize_trace_id,
+)
 from deerflow.utils.custom_events import aemit_custom_event
 
 if TYPE_CHECKING:
@@ -72,7 +89,16 @@ logger = logging.getLogger(__name__)
 
 def _is_subagent_terminal(result: Any) -> bool:
     """Return whether a background subagent result is safe to clean up."""
-    return result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None
+    return (
+        result.status
+        in {
+            SubagentStatus.COMPLETED,
+            SubagentStatus.FAILED,
+            SubagentStatus.CANCELLED,
+            SubagentStatus.TIMED_OUT,
+        }
+        or getattr(result, "completed_at", None) is not None
+    )
 
 
 async def _await_subagent_terminal(execution_id: str, max_polls: int) -> Any | None:
@@ -420,6 +446,8 @@ async def task_tool(
     subagent_reservation = parent_context.get(SUBAGENT_RESERVATION_CONTEXT_KEY)
     accepted_extension_generation = parent_context.get("accepted_extension_generation")
     accepted_extension_manifest_digest = parent_context.get("accepted_extension_manifest_digest")
+    accepted_extension_artifact_manifest_digest = parent_context.get("accepted_extension_artifact_manifest_digest")
+    accepted_extension_configuration_digest = parent_context.get("accepted_extension_configuration_digest")
     skill_projection_token = parent_context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
     if not isinstance(skill_projection_token, SkillProjectionConsumerToken):
         skill_projection_token = None
@@ -492,6 +520,8 @@ async def task_tool(
                 "accepted_agent_revision_digest": parent_context.get("accepted_agent_revision_digest"),
                 "accepted_extension_generation": accepted_extension_generation,
                 "accepted_extension_manifest_digest": accepted_extension_manifest_digest,
+                "accepted_extension_artifact_manifest_digest": accepted_extension_artifact_manifest_digest,
+                "accepted_extension_configuration_digest": accepted_extension_configuration_digest,
                 "constraint_evidence_digest": getattr(
                     invocation_constraints,
                     "evidence_digest",
@@ -567,6 +597,20 @@ async def task_tool(
         executor_kwargs["accepted_extension_generation"] = accepted_extension_generation
     if isinstance(accepted_extension_manifest_digest, str) and len(accepted_extension_manifest_digest) == 64 and all(character in "0123456789abcdef" for character in accepted_extension_manifest_digest):
         executor_kwargs["accepted_extension_manifest_digest"] = accepted_extension_manifest_digest
+    if (
+        isinstance(accepted_extension_artifact_manifest_digest, str)
+        and accepted_extension_artifact_manifest_digest.startswith("sha256:")
+        and len(accepted_extension_artifact_manifest_digest) == 71
+        and all(character in "0123456789abcdef" for character in accepted_extension_artifact_manifest_digest.removeprefix("sha256:"))
+    ):
+        executor_kwargs["accepted_extension_artifact_manifest_digest"] = accepted_extension_artifact_manifest_digest
+    if (
+        isinstance(accepted_extension_configuration_digest, str)
+        and accepted_extension_configuration_digest.startswith("sha256:")
+        and len(accepted_extension_configuration_digest) == 71
+        and all(character in "0123456789abcdef" for character in accepted_extension_configuration_digest.removeprefix("sha256:"))
+    ):
+        executor_kwargs["accepted_extension_configuration_digest"] = accepted_extension_configuration_digest
     if mcp_invocation_facts is not None:
         executor_kwargs["mcp_invocation_facts"] = mcp_invocation_facts
     if mcp_preparation_audit_sink is not None:
@@ -635,7 +679,11 @@ async def task_tool(
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {tool_call_id} execution {execution_id} not found in background tasks")
                 await aemit_custom_event(
-                    {"type": "task_failed", "task_id": tool_call_id, "error": "Task disappeared from background tasks"},
+                    {
+                        "type": "task_failed",
+                        "task_id": tool_call_id,
+                        "error": "Task disappeared from background tasks",
+                    },
                     writer=writer,
                 )
                 cleanup_background_task(execution_id)

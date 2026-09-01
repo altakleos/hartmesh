@@ -42,8 +42,14 @@ from app.runtime.invocation import (
     InvocationRuntime,
     PreparedLaunch,
 )
-from deerflow.extensions.capabilities import CapabilityHealthMonitor, build_capability_manifest
-from deerflow.extensions.constraints import ConstraintStartupError, InvocationConstraintsHost
+from deerflow.extensions.capabilities import (
+    CapabilityHealthMonitor,
+    build_capability_manifest,
+)
+from deerflow.extensions.constraints import (
+    ConstraintStartupError,
+    InvocationConstraintsHost,
+)
 from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 from deerflow.runtime.accepted_invocation import (
@@ -134,6 +140,9 @@ def test_v2_contract_is_explicit_and_does_not_widen_v1() -> None:
         "extension_manifest_digest",
         "extension_generation",
         "host_max_total_subagents",
+        "tenant",
+        "extension_artifact_manifest_digest",
+        "extension_configuration_digest",
     }
     assert {field.name for field in dataclasses.fields(ConstraintProjectionV2)} == {
         "request_digest",
@@ -347,7 +356,9 @@ async def test_unknown_mandatory_obligation_fails_closed() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider_result", [ConstraintIndeterminate(), object()])
-async def test_v2_indeterminate_or_malformed_result_fails_closed(provider_result: object) -> None:
+async def test_v2_indeterminate_or_malformed_result_fails_closed(
+    provider_result: object,
+) -> None:
     request = _request_v2()
 
     class _Provider:
@@ -735,7 +746,10 @@ async def test_replay_reuses_v2_evidence_while_a_new_invocation_gets_a_new_proje
             return record.task
 
         async def observe(self, run_id, _principal):
-            return next((record for record in self.records.values() if record.run_id == run_id), None)
+            return next(
+                (record for record in self.records.values() if record.run_id == run_id),
+                None,
+            )
 
         async def fail_start(self, *_args):
             raise AssertionError("worker attachment should not fail")

@@ -226,6 +226,16 @@ async def create_mcp_task(
             principal_identity=principal.identity,
             extension_generation=int(getattr(manifest, "extension_generation")),
             extension_manifest_digest=getattr(manifest, "digest", None),
+            artifact_manifest_digest=getattr(
+                manifest,
+                "artifact_manifest_digest",
+                None,
+            ),
+            extension_configuration_digest=getattr(
+                manifest,
+                "extension_configuration_digest",
+                None,
+            ),
             accepted_origin_digest=canonical_digest(
                 {
                     "version": 1,

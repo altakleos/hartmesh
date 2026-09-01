@@ -9,6 +9,13 @@ import zipfile
 import pytest
 import support_bundle
 
+from deerflow.extensions.artifacts import (
+    ExtensionSourceLockV1,
+    build_installed_artifact_manifest,
+    write_artifact_manifest,
+    write_source_lock,
+)
+
 
 def _zip_text(zip_path, name: str) -> str:
     with zipfile.ZipFile(zip_path) as zf:
@@ -67,12 +74,18 @@ def test_redact_data_masks_url_credentials_and_cli_flag_secrets():
     data = {
         "models": [
             {"name": "m", "base_url": "https://admin:S3cr3tPass@proxy.internal/v1"},
-            {"name": "n", "endpoint": "https://host/v1?access_token=AKIA1234567890ABCD"},
+            {
+                "name": "n",
+                "endpoint": "https://host/v1?access_token=AKIA1234567890ABCD",
+            },
             {"name": "h", "default_headers": {"X-My-Auth": "rawsecrettoken123"}},
         ],
         "database_url": "postgres://dfuser:dfpass@db:5432/deer",
         "mcpServers": {
-            "svc": {"command": "npx", "args": ["-y", "server", "--api-key", "LIVE-MCP-SECRET-XYZ"]},
+            "svc": {
+                "command": "npx",
+                "args": ["-y", "server", "--api-key", "LIVE-MCP-SECRET-XYZ"],
+            },
         },
     }
 
@@ -92,7 +105,10 @@ def test_redact_data_masks_url_credentials_and_cli_flag_secrets():
 def test_redact_data_masks_inline_and_credential_only_url_secrets():
     data = {
         "mcpServers": {
-            "svc": {"command": "npx", "args": ["server", "--api-key=LIVE-COMBINED-SECRET"]},
+            "svc": {
+                "command": "npx",
+                "args": ["server", "--api-key=LIVE-COMBINED-SECRET"],
+            },
         },
         "cache_url": "redis://:SuperSecretPass@cache:6379/0",
     }
@@ -267,7 +283,11 @@ def test_redact_data_does_not_over_redact_lookalike_non_secret_keys():
     (extensions_config.json -> mcpServers.*.routing.keywords) and the
     guardrails "passport" path/ID are real, non-secret fields."""
     data = {
-        "routing": {"mode": "prefer", "priority": 50, "keywords": ["database", "SQL", "table"]},
+        "routing": {
+            "mode": "prefer",
+            "priority": 50,
+            "keywords": ["database", "SQL", "table"],
+        },
         "guardrails": {"passport": "/etc/deer-flow/passport.json"},
     }
 
@@ -352,7 +372,12 @@ def test_create_support_bundle_masks_provider_config_secret_shaped_keys(tmp_path
     assert manifest["privacy"]["redacted_secret_fields"] is True
 
     all_text = "\n".join(_zip_text(output_path, name) for name in zipfile.ZipFile(output_path).namelist())
-    for secret in ("hunter2-literal", "0123456789abcdef-literal", "redis-literal-secret", "whsec_literal_secret"):
+    for secret in (
+        "hunter2-literal",
+        "0123456789abcdef-literal",
+        "redis-literal-secret",
+        "whsec_literal_secret",
+    ):
         assert secret not in all_text
 
 
@@ -573,7 +598,12 @@ def test_create_support_bundle_writes_ai_triage_entrypoints(tmp_path, monkeypatc
                 {"name": "node", "ok": True, "stdout": "v20.19.5", "stderr": ""},
                 {"name": "pnpm", "ok": True, "stdout": "11.7.0", "stderr": ""},
                 {"name": "uv", "ok": True, "stdout": "uv 0.8.11", "stderr": ""},
-                {"name": "nginx", "ok": True, "stdout": "", "stderr": "nginx version: nginx/1.31.1"},
+                {
+                    "name": "nginx",
+                    "ok": True,
+                    "stdout": "",
+                    "stderr": "nginx version: nginx/1.31.1",
+                },
                 {"name": "docker", "ok": False, "error": "docker not found"},
             ],
         },
@@ -582,10 +612,18 @@ def test_create_support_bundle_writes_ai_triage_entrypoints(tmp_path, monkeypatc
         support_bundle,
         "collect_git_summary",
         lambda _project_root: {
-            "branch": {"ok": True, "stdout": "feat/community-support-bundle", "stderr": ""},
+            "branch": {
+                "ok": True,
+                "stdout": "feat/community-support-bundle",
+                "stderr": "",
+            },
             "head": {"ok": True, "stdout": "abc123", "stderr": ""},
             "upstream": {"ok": True, "stdout": "origin/main", "stderr": ""},
-            "status_short": {"ok": True, "stdout": "## feat/community-support-bundle...origin/main\n M README.md", "stderr": ""},
+            "status_short": {
+                "ok": True,
+                "stdout": "## feat/community-support-bundle...origin/main\n M README.md",
+                "stderr": "",
+            },
             "diff_stat": {"ok": True, "stdout": " README.md | 1 +", "stderr": ""},
         },
     )
@@ -619,7 +657,12 @@ def test_create_support_bundle_writes_ai_triage_entrypoints(tmp_path, monkeypatc
     with zipfile.ZipFile(output_path) as zf:
         names = set(zf.namelist())
 
-    assert {"README.md", "issue-summary.md", "ai-issue-draft.md", "triage.json"}.issubset(names)
+    assert {
+        "README.md",
+        "issue-summary.md",
+        "ai-issue-draft.md",
+        "triage.json",
+    }.issubset(names)
 
     triage = json.loads(_zip_text(output_path, "triage.json"))
     assert triage["schema_version"] == 1
@@ -850,3 +893,64 @@ def test_main_prints_reporter_next_steps_and_optional_upload(tmp_path, capsys):
     assert "Suggested next steps:" in captured.out
     assert "If an AI assistant files the issue, start from the issue draft" in captured.out
     assert "Attach the zip if a maintainer asks" in captured.out
+
+
+def test_extension_artifact_summary_contains_only_canonical_safe_facts(tmp_path):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    lock = ExtensionSourceLockV1.create(
+        extension_api_version="0.13.0",
+        entries=(),
+    )
+    write_source_lock(backend / "extensions.lock.json", lock)
+    manifest = build_installed_artifact_manifest(lock, platform_tag="py3-none-any")
+    write_artifact_manifest(
+        tmp_path / "hartmesh" / "extension-artifacts.json",
+        manifest,
+    )
+
+    summary = support_bundle.collect_extension_artifact_summary(tmp_path)
+
+    assert summary == {
+        "version": 1,
+        "source_lock": {
+            "present": True,
+            "valid": True,
+            "digest": lock.digest,
+            "extension_api_version": "0.13.0",
+            "entry_count": 0,
+        },
+        "installed_manifest": {
+            "present": True,
+            "valid": True,
+            "digest": manifest.digest,
+            "source_lock_digest": lock.digest,
+            "extension_api_version": "0.13.0",
+            "platform_tag": "py3-none-any",
+            "entry_count": 0,
+        },
+        "source_lock_matches": True,
+    }
+    serialized = json.dumps(summary)
+    assert str(tmp_path) not in serialized
+    assert "plugins" not in serialized
+
+
+def test_extension_artifact_summary_never_echoes_invalid_document_values(tmp_path):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "extensions.lock.json").write_text(
+        '{"secret":"do-not-echo"}\n',
+        encoding="utf-8",
+    )
+
+    summary = support_bundle.collect_extension_artifact_summary(tmp_path)
+
+    serialized = json.dumps(summary)
+    assert summary["source_lock"] == {
+        "present": True,
+        "valid": False,
+        "error_code": "extension_artifact_manifest_invalid",
+    }
+    assert "do-not-echo" not in serialized
+    assert str(tmp_path) not in serialized

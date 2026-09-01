@@ -154,7 +154,7 @@ from deerflow_extension_api.tenant import TenantReferenceV1
 #: Contract version. Pre-1.0 minors may break and only patches promise to be
 #: additive. From 1.0 on, bump the major on any breaking change; see the spec's
 #: evolution rules for what counts as additive.
-API_VERSION = "0.12.1"
+API_VERSION = "0.13.0"
 
 __all__ = [
     "API_VERSION",

@@ -39,7 +39,11 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
-from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL
+from app.gateway.auth_disabled import (
+    AUTH_DISABLED_USER_ID,
+    AUTH_SOURCE_AUTH_DISABLED,
+    AUTH_SOURCE_INTERNAL,
+)
 from app.gateway.authorization import AuthorizationResolutionSnapshot
 from app.gateway.deps import (
     get_checkpointer,
@@ -93,12 +97,22 @@ from app.runtime.invocation import (
 )
 from app.runtime.native_binding import InternalVerifiedNativeBindingKind
 from app.runtime.service_identity import validate_persisted_service_id
-from app.runtime.visibility import ObservationVisibilityResolver, ServiceObservationGrant
-from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
-from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from app.runtime.visibility import (
+    ObservationVisibilityResolver,
+    ServiceObservationGrant,
+)
+from deerflow.agents.middlewares.dynamic_context_middleware import (
+    _DYNAMIC_CONTEXT_REMINDER_KEY,
+    _REMINDER_DATE_KEY,
+)
+from deerflow.agents.middlewares.input_sanitization_middleware import (
+    frame_untrusted_text,
+)
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
-from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
+from deerflow.agents.middlewares.view_image_middleware import (
+    _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+)
 from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
@@ -153,7 +167,10 @@ from deerflow.runtime.runs.lifecycle_query import (
 )
 from deerflow.runtime.runs.manager import IdempotencyConflictError
 from deerflow.runtime.runs.naming import resolve_root_run_name
-from deerflow.runtime.runs.store.base import AdmissionOutcome, CancellationRequestOutcome
+from deerflow.runtime.runs.store.base import (
+    AdmissionOutcome,
+    CancellationRequestOutcome,
+)
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
     redact_config_secrets,
@@ -165,7 +182,11 @@ from deerflow.runtime.tenant_identity import (
     TenantIdentityV1,
     tenant_admission_scope,
 )
-from deerflow.runtime.user_context import DEFAULT_USER_ID, reset_current_user, set_current_user
+from deerflow.runtime.user_context import (
+    DEFAULT_USER_ID,
+    reset_current_user,
+    set_current_user,
+)
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -785,7 +806,10 @@ async def resolve_trusted_internal_owner_for_attribution(request: Request, owner
     try:
         return await get_local_provider().get_user(owner_user_id)
     except Exception:
-        logger.exception("Failed to resolve trusted internal owner %s", sanitize_log_param(owner_user_id))
+        logger.exception(
+            "Failed to resolve trusted internal owner %s",
+            sanitize_log_param(owner_user_id),
+        )
         return None
 
 
@@ -1142,7 +1166,13 @@ def _accessor_graph_cache_max(app_config: Any) -> int:
     )
 
 
-def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
+def _state_accessor_graph(
+    agent_factory: Any,
+    assistant_id: str | None,
+    mode: str,
+    snapshot_frequency: int | None,
+    config: dict[str, Any],
+) -> Any:
     app_config = (config.get("context") or {}).get("app_config")
     key = (assistant_id, mode, snapshot_frequency)
     cached = _state_accessor_graph_cache.get(key)
@@ -1171,7 +1201,17 @@ class _RawCheckpointSnapshot:
     metadata, config ancestry, created_at) comes straight from the tuple.
     """
 
-    __slots__ = ("checkpoint_exists", "config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next")
+    __slots__ = (
+        "checkpoint_exists",
+        "config",
+        "values",
+        "metadata",
+        "parent_config",
+        "created_at",
+        "tasks",
+        "tasks_known",
+        "next",
+    )
 
     def __init__(self, config: dict[str, Any], tup: Any | None) -> None:
         self.checkpoint_exists = tup is not None
@@ -1266,7 +1306,13 @@ def build_checkpoint_state_accessor(
 
     agent_factory = resolve_agent_factory(assistant_id)
     try:
-        graph = _state_accessor_graph(agent_factory, assistant_id, ctx.checkpoint_channel_mode, getattr(ctx, "checkpoint_snapshot_frequency", None), config)
+        graph = _state_accessor_graph(
+            agent_factory,
+            assistant_id,
+            ctx.checkpoint_channel_mode,
+            getattr(ctx, "checkpoint_snapshot_frequency", None),
+            config,
+        )
     except Exception:
         if ctx.checkpoint_channel_mode != "full":
             # Delta materialization needs the graph's channel table; there is
@@ -1384,7 +1430,10 @@ async def apply_checkpoint_to_run_config(
             raise HTTPException(status_code=400, detail="checkpoint must be an object")
         checkpoint_thread_id = checkpoint.get("thread_id")
         if checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
-            raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")
+            raise HTTPException(
+                status_code=400,
+                detail="checkpoint thread_id does not match request thread_id",
+            )
         raw_checkpoint_id = checkpoint.get("checkpoint_id")
         if raw_checkpoint_id:
             checkpoint_id = str(raw_checkpoint_id)
@@ -1410,7 +1459,11 @@ async def apply_checkpoint_to_run_config(
     try:
         checkpoint_tuple = await checkpointer.aget_tuple(read_config)
     except Exception as exc:
-        logger.exception("Failed to validate checkpoint %s for thread %s", checkpoint_id, sanitize_log_param(thread_id))
+        logger.exception(
+            "Failed to validate checkpoint %s for thread %s",
+            checkpoint_id,
+            sanitize_log_param(thread_id),
+        )
         raise HTTPException(status_code=500, detail="Failed to validate checkpoint") from exc
     if checkpoint_tuple is None:
         raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found")
@@ -1546,7 +1599,9 @@ def _base_origin_references(
     return {}
 
 
-def _origin_request_references(references: Mapping[str, Any]) -> tuple[SafeContextReferenceV1, ...]:
+def _origin_request_references(
+    references: Mapping[str, Any],
+) -> tuple[SafeContextReferenceV1, ...]:
     return tuple(
         SafeContextReferenceV1(
             key=key,
@@ -1784,7 +1839,14 @@ def _canonical_caller_intent(intent: InternalLaunchIntent) -> CanonicalCallerInt
             # A missing or explicit-null limit both select the documented
             # Gateway default. Every other supplied value remains caller
             # intent; server clamping belongs only to the effective projection.
-            "recursion_limit": ({"selection": "default"} if recursion_limit is None else {"selection": "explicit", "value": canonical_request_value(recursion_limit)}),
+            "recursion_limit": (
+                {"selection": "default"}
+                if recursion_limit is None
+                else {
+                    "selection": "explicit",
+                    "value": canonical_request_value(recursion_limit),
+                }
+            ),
         }
     )
 
@@ -1818,6 +1880,14 @@ def _effective_execution_projection(
             "runtime_identity_digest": accepted.runtime_identity_digest,
             "contributor_execution_digest": accepted.contributor_execution_digest,
             "extension_generation": accepted.extension_generation,
+            **(
+                {
+                    "extension_artifact_manifest_digest": (accepted.extension_artifact_manifest_digest),
+                    "extension_configuration_digest": (accepted.extension_configuration_digest),
+                }
+                if accepted.extension_artifact_manifest_digest is not None
+                else {}
+            ),
             "input": input_projection,
             "command": canonical_request_value(intent.command),
             "multitask_strategy": intent.multitask_strategy,
@@ -2223,6 +2293,16 @@ async def _seal_accepted_invocation(
     }
     extensions = getattr(app_state, "extensions", None)
     extension_generation = int(getattr(extensions, "generation", 0))
+    extension_artifact_manifest_digest = getattr(
+        extensions,
+        "artifact_manifest_digest",
+        None,
+    )
+    extension_configuration_digest = getattr(
+        extensions,
+        "extension_configuration_digest",
+        None,
+    )
     capability_manifest = getattr(app_state, "capability_manifest", None)
     extension_manifest_digest = getattr(capability_manifest, "digest", None)
     if principal.identity is None:  # pragma: no cover - new acceptance contract
@@ -2246,6 +2326,8 @@ async def _seal_accepted_invocation(
         ),
         extension_generation=extension_generation,
         extension_manifest_digest=extension_manifest_digest,
+        extension_artifact_manifest_digest=extension_artifact_manifest_digest,
+        extension_configuration_digest=extension_configuration_digest,
         persistable_references=(*origin_persistable, *context_persistable),
         runtime_only_references=(*origin_runtime_only, *context_runtime_only),
         secret_handles=(*origin_secret_handles, *context_secret_handles),
@@ -2266,6 +2348,8 @@ async def _seal_accepted_invocation(
         },
         extension_generation=extension_generation,
         extension_manifest_digest=extension_manifest_digest,
+        extension_artifact_manifest_digest=extension_artifact_manifest_digest,
+        extension_configuration_digest=extension_configuration_digest,
         contributor_execution_digest=contributor_execution_digest,
         tenant=tenant_reference,
         trusted_context=trusted_context,
@@ -2279,6 +2363,10 @@ async def _seal_accepted_invocation(
     runtime_context["accepted_extension_generation"] = extension_generation
     if extension_manifest_digest is not None:
         runtime_context["accepted_extension_manifest_digest"] = extension_manifest_digest
+    if extension_artifact_manifest_digest is not None:
+        runtime_context["accepted_extension_artifact_manifest_digest"] = extension_artifact_manifest_digest
+    if extension_configuration_digest is not None:
+        runtime_context["accepted_extension_configuration_digest"] = extension_configuration_digest
     config["context"] = runtime_context
     return accepted
 
@@ -2323,7 +2411,9 @@ class _GatewayLaunchNormalizer:
         return get_trusted_internal_owner_user_id(self._request)
 
     @staticmethod
-    def _validate_native_channel_facts(intent: InternalLaunchIntent) -> InternalNativeChannelFacts:
+    def _validate_native_channel_facts(
+        intent: InternalLaunchIntent,
+    ) -> InternalNativeChannelFacts:
         facts = intent.native_channel
         if facts is None or not facts.provider or not facts.chat_id or not facts.channel_user_id:
             raise ValueError("native channel launch requires authenticated provider, chat, and sender facts")
@@ -2908,7 +2998,9 @@ class _GatewayDurableRuns:
             reservation = self._projection_reservations.pop(launch_identity, None)
             self._projection_supersessions.pop(launch_identity, None)
             if reservation is not None:
-                from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+                from deerflow.runtime.skill_projection import (
+                    get_skill_projection_coordinator,
+                )
 
                 get_skill_projection_coordinator().abort_admission(reservation)
             raise
@@ -2983,7 +3075,9 @@ class _GatewayDurableRuns:
                     accepted_invocation=launch.accepted_invocation,
                 )
                 if reservation is not None:
-                    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+                    from deerflow.runtime.skill_projection import (
+                        get_skill_projection_coordinator,
+                    )
 
                     get_skill_projection_coordinator().promote_admission(
                         reservation,
@@ -3025,7 +3119,9 @@ class _GatewayDurableRuns:
                 caller_intent_digest_version=launch.caller_intent_digest_version,
             )
             if reservation is not None:
-                from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+                from deerflow.runtime.skill_projection import (
+                    get_skill_projection_coordinator,
+                )
 
                 coordinator = get_skill_projection_coordinator()
                 if admission.outcome is AdmissionOutcome.created:
@@ -3050,7 +3146,9 @@ class _GatewayDurableRuns:
                 )
             return DurableAdmission(record=admission.record, outcome=admission.outcome)
         except BaseException:
-            from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+            from deerflow.runtime.skill_projection import (
+                get_skill_projection_coordinator,
+            )
 
             coordinator = get_skill_projection_coordinator()
             if reservation is not None:
@@ -3210,7 +3308,9 @@ def _build_invocation_authorization(request: Any) -> ProviderInvocationAuthoriza
     app_state = getattr(getattr(request, "app", None), "state", None)
     settings = getattr(app_state, "invocation_authorization_config", None)
     if settings is None:
-        from deerflow.config.authorization_config import InvocationOperationsAuthorizationConfig
+        from deerflow.config.authorization_config import (
+            InvocationOperationsAuthorizationConfig,
+        )
 
         settings = InvocationOperationsAuthorizationConfig()
     resolver = getattr(app_state, "authorization_provider_resolver", None)
@@ -3521,7 +3621,15 @@ async def launch_scheduled_thread_run(
 
 def _mcp_task_notification_prompt(event: dict[str, Any]) -> str:
     """Build the internal user turn for one immutable MCP task event snapshot."""
-    payload = frame_untrusted_text(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+    payload = frame_untrusted_text(
+        json.dumps(
+            event,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    )
     instruction = (
         "A durable background MCP task has an update that requires the user's attention. "
         "Explain the update clearly and concisely. Do not expose or ask for a remote task ID. "

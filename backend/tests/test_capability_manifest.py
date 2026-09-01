@@ -58,11 +58,12 @@ def test_empty_manifest_is_deterministic_and_bound_to_extension_generation() -> 
 
     assert first == second
     assert first.extension_generation == 7
-    assert first.extension_api_version == "0.12.1"
+    assert first.extension_api_version == "0.13.0"
     assert first.digest == second.digest
     assert first.digest != next_generation.digest
     assert len(first.digest) == 64
     assert first.plugins == ()
+    assert first.contributions == ()
     assert first.capabilities == ()
 
 
@@ -167,6 +168,7 @@ def test_manifest_serialization_excludes_source_config_and_high_cardinality_data
         "private.module:install?token=secret",
         package_name="example-policy",
         package_version="1.2.3",
+        source_entry_digest="sha256:" + ("a" * 64),
     ):
         registry.origin_contributor(
             OriginContributorFactory(
@@ -186,6 +188,15 @@ def test_manifest_serialization_excludes_source_config_and_high_cardinality_data
 
     assert payload["manifest_digest"] == manifest.digest
     assert payload["extension_generation"] == 9
+    assert payload["contributions"] == [
+        {
+            "contribution_id": "safe_origin",
+            "contribution_type": "origin_contributor",
+            "package_name": "example-policy",
+            "package_version": "1.2.3",
+            "source_entry_digest": "sha256:" + ("a" * 64),
+        }
+    ]
     assert "example-policy" in rendered
     assert "private.module" not in rendered
     assert "token=secret" not in rendered

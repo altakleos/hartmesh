@@ -17,6 +17,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from deerflow.extensions.artifacts import (
+    extension_configuration_digest,
+    read_source_lock,
+)
 from deerflow.extensions.cli import find_project_root
 from deerflow.extensions.loader import ExtensionSpec
 from deerflow.extensions.manager import (
@@ -93,15 +97,52 @@ default-groups = ["extensions"]
     (root / "config.yaml").write_text("config_version: 1\n", encoding="utf-8")
 
 
+def _simulate_uv_local_add(root: Path) -> None:
+    """Model the two files ``uv add --no-sync`` changes for local sources."""
+
+    backend = root / "backend"
+    pyproject_path = backend / "pyproject.toml"
+    pyproject_path.write_text(
+        pyproject_path.read_text(encoding="utf-8").replace(
+            "extensions = []",
+            'extensions = ["deerflow-extension-demo"]',
+        ),
+        encoding="utf-8",
+    )
+    (backend / "uv.lock").write_text(
+        """\
+version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "deerflow-extension-demo"
+version = "1.0.0"
+source = { directory = "extensions/sources/deerflow-extension-demo" }
+""",
+        encoding="utf-8",
+    )
+
+
 def _commit_local_extension(source: Path) -> str:
     subprocess.run(["git", "init", "-q"], cwd=source, check=True)
     test_hooks = source / ".git" / "test-hooks"
     test_hooks.mkdir()
     subprocess.run(["git", "config", "user.name", "Extension Test"], cwd=source, check=True)
-    subprocess.run(["git", "config", "user.email", "extension-test@example.com"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "extension-test@example.com"],
+        cwd=source,
+        check=True,
+    )
     subprocess.run(["git", "add", "."], cwd=source, check=True)
     subprocess.run(
-        ["git", "-c", f"core.hooksPath={test_hooks}", "commit", "-qm", "initial extension"],
+        [
+            "git",
+            "-c",
+            f"core.hooksPath={test_hooks}",
+            "commit",
+            "-qm",
+            "initial extension",
+        ],
         cwd=source,
         check=True,
     )
@@ -183,7 +224,9 @@ def _write_demo_wheel(directory: Path) -> Path:
     return wheel
 
 
-def test_install_local_directory_makes_it_deployable_and_enabled(tmp_path: Path) -> None:
+def test_install_local_directory_makes_it_deployable_and_enabled(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -215,6 +258,24 @@ def test_install_local_directory_makes_it_deployable_and_enabled(tmp_path: Path)
             "config": {},
         }
     ]
+
+    source_lock_path = root / "backend" / "extensions.lock.json"
+    source_lock = read_source_lock(source_lock_path)
+    assert len(source_lock.entries) == 1
+    assert source_lock.entries[0].source_kind == "local_snapshot"
+    assert source_lock.entries[0].distribution == "deerflow-extension-demo"
+    source_lock_bytes = source_lock_path.read_bytes()
+    enabled_digest = extension_configuration_digest(config["plugins"])
+
+    manager = ExtensionManager(root)
+    manager.set_enabled("demo", enabled=False)
+    disabled_plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
+    assert extension_configuration_digest(disabled_plugins) != enabled_digest
+    assert source_lock_path.read_bytes() == source_lock_bytes
+    manager.set_enabled("demo", enabled=True)
+    reenabled_plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
+    assert extension_configuration_digest(reenabled_plugins) == enabled_digest
+    assert source_lock_path.read_bytes() == source_lock_bytes
 
     _assert_demo_entry_point_loads(root / "backend")
 
@@ -376,7 +437,9 @@ def test_explicit_invalid_project_root_does_not_fall_back_to_current_checkout(
         find_project_root()
 
 
-def test_install_git_source_discovers_and_enables_its_packaging_entry_point(tmp_path: Path) -> None:
+def test_install_git_source_discovers_and_enables_its_packaging_entry_point(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-git-source"
     root.mkdir()
@@ -487,7 +550,9 @@ def _write_audit_host(backend: Path) -> None:
     )
 
 
-def test_locked_local_source_audit_accepts_deployable_relative_references(tmp_path: Path) -> None:
+def test_locked_local_source_audit_accepts_deployable_relative_references(
+    tmp_path: Path,
+) -> None:
     backend = tmp_path / "backend"
     backend.mkdir()
     _write_audit_host(backend)
@@ -680,7 +745,9 @@ wheels = [
     assert caplog.text == ""
 
 
-def test_locked_local_source_audit_rejects_absolute_paths_even_inside_allowed_roots(tmp_path: Path) -> None:
+def test_locked_local_source_audit_rejects_absolute_paths_even_inside_allowed_roots(
+    tmp_path: Path,
+) -> None:
     backend = tmp_path / "backend"
     backend.mkdir()
     _write_audit_host(backend)
@@ -708,7 +775,9 @@ source = {{ editable = "{workspace_member.as_posix()}" }}
         _validate_locked_local_sources(lock_path, backend)
 
 
-def test_file_urls_are_rejected_because_they_cannot_enter_the_docker_build_context(tmp_path: Path) -> None:
+def test_file_urls_are_rejected_because_they_cannot_enter_the_docker_build_context(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
     _write_host_project(root)
@@ -717,7 +786,9 @@ def test_file_urls_are_rejected_because_they_cannot_enter_the_docker_build_conte
         ExtensionManager(root).install("git+file:///outside/demo.git@deadbeef", yes=True)
 
 
-def test_install_rolls_back_when_the_declared_entry_point_cannot_be_imported(tmp_path: Path) -> None:
+def test_install_rolls_back_when_the_declared_entry_point_cannot_be_imported(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -794,7 +865,9 @@ database:
     assert "database:\n  url: sqlite:///data.db" in updated
 
 
-def test_toggle_preserves_the_next_section_header_and_crlf_style(tmp_path: Path) -> None:
+def test_toggle_preserves_the_next_section_header_and_crlf_style(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
     _write_host_project(root)
@@ -1050,6 +1123,7 @@ def test_deerflow_extensions_remove_uninstalls_dependency_source_and_activation(
     assert not (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo").exists()
     pyproject = (root / "backend" / "pyproject.toml").read_text(encoding="utf-8")
     assert "deerflow-extension-demo" not in pyproject
+    assert read_source_lock(root / "backend" / "extensions.lock.json").entries == ()
 
 
 def test_remove_one_configured_instance_keeps_its_shared_distribution_runnable(
@@ -1084,7 +1158,10 @@ def test_remove_one_configured_instance_keeps_its_shared_distribution_runnable(
 
     assert removed == "first"
     assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["plugins"] == [second]
-    assert (pyproject_path.read_bytes(), lock_path.read_bytes()) == dependency_files_before
+    assert (
+        pyproject_path.read_bytes(),
+        lock_path.read_bytes(),
+    ) == dependency_files_before
     assert (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo").is_dir()
     _assert_demo_entry_point_loads(root / "backend")
 
@@ -1109,7 +1186,9 @@ def test_install_prompts_for_trust_when_yes_is_not_supplied(
     assert "executes code with Gateway privileges" in capsys.readouterr().out
 
 
-def test_failed_entry_point_discovery_rolls_back_dependency_and_lock(tmp_path: Path) -> None:
+def test_failed_entry_point_discovery_rolls_back_dependency_and_lock(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "broken-git-source"
     root.mkdir()
@@ -1241,7 +1320,9 @@ def test_uv_add_partial_writes_are_rolled_back_when_the_command_fails(
     assert uv_commands == ["add", "sync"]
 
 
-def test_local_install_rejects_symlinks_before_copying_or_resolving(tmp_path: Path) -> None:
+def test_local_install_rejects_symlinks_before_copying_or_resolving(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -1261,7 +1342,9 @@ def test_local_install_rejects_symlinks_before_copying_or_resolving(tmp_path: Pa
 
 
 @pytest.mark.skipif(os.name == "nt", reason="named pipes are POSIX-specific")
-def test_local_install_rejects_special_files_before_snapshotting(tmp_path: Path) -> None:
+def test_local_install_rejects_special_files_before_snapshotting(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -1316,7 +1399,9 @@ def test_local_install_rejects_distribution_names_that_escape_the_managed_root(
     assert not (root / "backend" / "extensions").exists()
 
 
-def test_install_adopts_an_existing_manual_plugin_instead_of_loading_it_twice(tmp_path: Path) -> None:
+def test_install_adopts_an_existing_manual_plugin_instead_of_loading_it_twice(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -1396,7 +1481,9 @@ def test_install_rejects_identity_collisions_with_a_different_entry_point(
     assert "deerflow-extension-demo" not in (root / "backend" / "pyproject.toml").read_text(encoding="utf-8")
 
 
-def test_install_replaces_inline_empty_plugins_with_one_schema_valid_block(tmp_path: Path) -> None:
+def test_install_replaces_inline_empty_plugins_with_one_schema_valid_block(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -1515,7 +1602,9 @@ def test_plugins_rewrite_preserves_a_following_section_with_an_unconventional_ke
     assert config[next_key] == {"nested": "keep-me"}
 
 
-def test_plugins_rewrite_preserves_trailing_content_below_a_final_plugins_block(tmp_path: Path) -> None:
+def test_plugins_rewrite_preserves_trailing_content_below_a_final_plugins_block(
+    tmp_path: Path,
+) -> None:
     """The manager appends `plugins:` at end of file, so the steady-state shape
     has no following key; trailing operator notes still must survive a toggle."""
     root = tmp_path / "deer-flow"
@@ -1536,7 +1625,9 @@ def test_plugins_rewrite_preserves_trailing_content_below_a_final_plugins_block(
     assert config["log_level"] == "info"
 
 
-def test_null_plugins_is_treated_as_the_runtime_default_and_can_be_managed(tmp_path: Path) -> None:
+def test_null_plugins_is_treated_as_the_runtime_default_and_can_be_managed(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
     _write_host_project(root)
@@ -1547,7 +1638,9 @@ def test_null_plugins_is_treated_as_the_runtime_default_and_can_be_managed(tmp_p
     assert manager.list_configured() == ()
 
 
-def test_list_uses_the_same_boolean_coercion_as_the_runtime_loader(tmp_path: Path) -> None:
+def test_list_uses_the_same_boolean_coercion_as_the_runtime_loader(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
     _write_host_project(root)
@@ -1625,11 +1718,13 @@ def test_remove_rolls_back_package_lock_config_source_and_environment_when_confi
     manager.install(str(source), yes=True)
     pyproject_path = root / "backend" / "pyproject.toml"
     lock_path = root / "backend" / "uv.lock"
+    source_lock_path = root / "backend" / "extensions.lock.json"
     config_path = root / "config.yaml"
     managed_source = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
     before = (
         pyproject_path.read_bytes(),
         lock_path.read_bytes(),
+        source_lock_path.read_bytes(),
         config_path.read_bytes(),
     )
 
@@ -1641,7 +1736,12 @@ def test_remove_rolls_back_package_lock_config_source_and_environment_when_confi
     with pytest.raises(OSError, match="replacement failure"):
         manager.remove("demo")
 
-    assert (pyproject_path.read_bytes(), lock_path.read_bytes(), config_path.read_bytes()) == before
+    assert (
+        pyproject_path.read_bytes(),
+        lock_path.read_bytes(),
+        source_lock_path.read_bytes(),
+        config_path.read_bytes(),
+    ) == before
     assert managed_source.is_dir()
     present = subprocess.run(
         [
@@ -1740,7 +1840,11 @@ def test_uv_remove_partial_writes_are_rolled_back_when_the_command_fails(
     lock_path = root / "backend" / "uv.lock"
     config_path = root / "config.yaml"
     managed_source = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
-    before = (pyproject_path.read_bytes(), lock_path.read_bytes(), config_path.read_bytes())
+    before = (
+        pyproject_path.read_bytes(),
+        lock_path.read_bytes(),
+        config_path.read_bytes(),
+    )
     uv_commands: list[str] = []
 
     def _partially_write_then_fail(command, _backend_dir):
@@ -1761,7 +1865,11 @@ def test_uv_remove_partial_writes_are_rolled_back_when_the_command_fails(
     with pytest.raises(subprocess.CalledProcessError):
         manager.remove("demo")
 
-    assert (pyproject_path.read_bytes(), lock_path.read_bytes(), config_path.read_bytes()) == before
+    assert (
+        pyproject_path.read_bytes(),
+        lock_path.read_bytes(),
+        config_path.read_bytes(),
+    ) == before
     assert managed_source.is_dir()
     assert uv_commands == ["remove", "sync"]
 
@@ -2001,7 +2109,7 @@ def test_install_uses_one_controlled_uv_project_and_deferred_sync(
         if command[0] == "uv":
             uv_calls.append((list(command), kwargs))
             if command[1] == "add":
-                (root / "backend" / "uv.lock").write_text('version = 1\nrequires-python = ">=3.12"\n', encoding="utf-8")
+                _simulate_uv_local_add(root)
             return subprocess.CompletedProcess(command, 0)
         return subprocess.CompletedProcess(command, 0, stdout='[["demo", "demo_extension:install"]]\n')
 
@@ -2202,7 +2310,7 @@ def test_entry_point_discovery_tolerates_interpreter_startup_output(
             return subprocess.CompletedProcess(command, 0, stdout="uv 0.11.1\n")
         if command[0] == "uv":
             if command[1] == "add":
-                (root / "backend" / "uv.lock").write_text('version = 1\nrequires-python = ">=3.12"\n', encoding="utf-8")
+                _simulate_uv_local_add(root)
             return subprocess.CompletedProcess(command, 0)
         return subprocess.CompletedProcess(
             command,

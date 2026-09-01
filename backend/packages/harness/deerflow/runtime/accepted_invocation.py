@@ -30,6 +30,7 @@ _DIGEST_VERSION = 1
 _AGENT_REVISION_VERSION = 1
 _DECISION_EVIDENCE_V1 = {"version": 1, "decisions": []}
 _TOOL_RECEIPT_EVIDENCE_V2 = {"version": 2}
+_EXTENSION_ARTIFACT_EVIDENCE_V1 = {"version": 1}
 _SHA256_LENGTH = 64
 _EFFECTIVE_EXECUTION_PROJECTION_KEY = "__accepted_request_projection_v1"
 _REQUEST_DIGEST_VERSION = "sha256-canonical-json-v1"
@@ -45,6 +46,8 @@ _EFFECTIVE_EXECUTION_FIELDS_V1 = frozenset(
         "runtime_identity_digest",
         "contributor_execution_digest",
         "extension_generation",
+        "extension_artifact_manifest_digest",
+        "extension_configuration_digest",
         "input",
         "command",
         "multitask_strategy",
@@ -280,7 +283,10 @@ class ResolvedAgentMaterialV1:
             scopes = ResolvedSkillScopesV1.empty()
         if not isinstance(scopes, ResolvedSkillScopesV1):
             raise TypeError("skill_scopes must be ResolvedSkillScopesV1 or None")
-        expected_scopes = {"lead", *(f"subagent:{name}" for name in catalog.allowed_names)}
+        expected_scopes = {
+            "lead",
+            *(f"subagent:{name}" for name in catalog.allowed_names),
+        }
         if set(scopes.scopes) != expected_scopes:
             raise ValueError("accepted skill scopes must exactly match the subagent catalog")
         object.__setattr__(self, "subagent_catalog", catalog)
@@ -303,7 +309,11 @@ class ResolvedAgentMaterialV1:
                 profile_name,
                 field_name="resolved model profile identifier",
             )
-        object.__setattr__(self, "agent_config", None if self.agent_config is None else _frozen_json_mapping(self.agent_config))
+        object.__setattr__(
+            self,
+            "agent_config",
+            None if self.agent_config is None else _frozen_json_mapping(self.agent_config),
+        )
         object.__setattr__(self, "model_profile", _frozen_json_mapping(self.model_profile))
         object.__setattr__(self, "runtime_defaults", _frozen_json_mapping(self.runtime_defaults))
         object.__setattr__(self, "tool_groups", tuple(self.tool_groups))
@@ -432,7 +442,11 @@ class AcceptedInvocation:
     def __post_init__(self) -> None:
         object.__setattr__(self, "context_references", _frozen_json_mapping(self.context_references))
         object.__setattr__(self, "execution_options", _frozen_json_mapping(self.execution_options))
-        object.__setattr__(self, "normalized_input", _deep_freeze(_canonical_value(self.normalized_input)))
+        object.__setattr__(
+            self,
+            "normalized_input",
+            _deep_freeze(_canonical_value(self.normalized_input)),
+        )
         object.__setattr__(self, "decision_evidence", _frozen_json_mapping(self.decision_evidence))
         if self.tenant is not None and not isinstance(self.tenant, TenantReferenceV1):
             raise TypeError("tenant must be TenantReferenceV1 or None")
@@ -448,6 +462,44 @@ class AcceptedInvocation:
             return None
         digest = evidence.get("digest")
         if not isinstance(digest, str) or len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            return None
+        return digest
+
+    @property
+    def extension_artifact_manifest_digest(self) -> str | None:
+        """Digest of the verified installed extension artifact manifest."""
+
+        evidence = self.decision_evidence.get("extension_artifacts")
+        if not isinstance(evidence, Mapping):
+            return None
+        digest = evidence.get("artifact_manifest_digest")
+        if not isinstance(digest, str) or not digest.startswith("sha256:"):
+            return None
+        try:
+            _require_digest(
+                digest.removeprefix("sha256:"),
+                field_name="extension artifact manifest digest",
+            )
+        except ValueError:
+            return None
+        return digest
+
+    @property
+    def extension_configuration_digest(self) -> str | None:
+        """Digest of the secret-safe startup extension configuration."""
+
+        evidence = self.decision_evidence.get("extension_artifacts")
+        if not isinstance(evidence, Mapping):
+            return None
+        digest = evidence.get("configuration_digest")
+        if not isinstance(digest, str) or not digest.startswith("sha256:"):
+            return None
+        try:
+            _require_digest(
+                digest.removeprefix("sha256:"),
+                field_name="extension configuration digest",
+            )
+        except ValueError:
             return None
         return digest
 
@@ -485,6 +537,8 @@ class AcceptedInvocation:
         execution_options: Mapping[str, Any],
         extension_generation: int,
         extension_manifest_digest: str | None = None,
+        extension_artifact_manifest_digest: str | None = None,
+        extension_configuration_digest: str | None = None,
         contributor_execution_digest: str,
         tenant: TenantReferenceV1,
         trusted_context: TrustedRunContextV1 | None = None,
@@ -492,6 +546,21 @@ class AcceptedInvocation:
         thread_id = validate_thread_identifier(thread_id)
         if extension_manifest_digest is not None and (len(extension_manifest_digest) != 64 or any(character not in "0123456789abcdef" for character in extension_manifest_digest)):
             raise ValueError("extension_manifest_digest must be a lowercase SHA-256 digest")
+        for field_name, digest in (
+            ("extension_artifact_manifest_digest", extension_artifact_manifest_digest),
+            ("extension_configuration_digest", extension_configuration_digest),
+        ):
+            if digest is not None:
+                if not digest.startswith("sha256:"):
+                    raise ValueError(f"{field_name} must use sha256:<64 lowercase hex>")
+                _require_digest(
+                    digest.removeprefix("sha256:"),
+                    field_name=field_name,
+                )
+        if (extension_artifact_manifest_digest is None) != (extension_configuration_digest is None):
+            raise ValueError("extension artifact and configuration digests must be supplied together")
+        if extension_artifact_manifest_digest is not None and extension_manifest_digest is None:
+            raise ValueError("extension artifact evidence requires a capability manifest digest")
         if not isinstance(tenant, TenantReferenceV1):
             raise TypeError("new accepted invocations require TenantReferenceV1")
         if trusted_context is not None:
@@ -507,6 +576,8 @@ class AcceptedInvocation:
                 raise ValueError("trusted context agent revision must match the accepted revision")
             if extension_generation != trusted_context.extension_generation or extension_manifest_digest != trusted_context.extension_manifest_digest:
                 raise ValueError("trusted context extension generation must match accepted evidence")
+            if extension_artifact_manifest_digest != trusted_context.extension_artifact_manifest_digest or extension_configuration_digest != trusted_context.extension_configuration_digest:
+                raise ValueError("trusted context extension artifact tuple must match accepted evidence")
         principal_digest = canonical_digest({"version": _DIGEST_VERSION, "principal": principal.to_json()})
         base_origin_digest = canonical_digest({"version": _DIGEST_VERSION, "origin": origin.base_json()})
         accepted_context_digest = canonical_digest(
@@ -530,6 +601,14 @@ class AcceptedInvocation:
                 "execution_options": execution_options,
                 "extension_generation": extension_generation,
                 "extension_manifest_digest": extension_manifest_digest,
+                **(
+                    {
+                        "extension_artifact_manifest_digest": extension_artifact_manifest_digest,
+                        "extension_configuration_digest": extension_configuration_digest,
+                    }
+                    if extension_artifact_manifest_digest is not None
+                    else {}
+                ),
                 "accepted_context_digest": accepted_context_digest,
             }
         )
@@ -540,6 +619,12 @@ class AcceptedInvocation:
                 "version": 1,
                 "generation": extension_generation,
                 "digest": extension_manifest_digest,
+            }
+        if extension_artifact_manifest_digest is not None:
+            decision_evidence["extension_artifacts"] = {
+                **_EXTENSION_ARTIFACT_EVIDENCE_V1,
+                "artifact_manifest_digest": extension_artifact_manifest_digest,
+                "configuration_digest": extension_configuration_digest,
             }
         return cls(
             principal=principal,
@@ -775,6 +860,36 @@ class AcceptedInvocation:
                 manifest_evidence.get("digest"),
                 field_name="extension manifest digest",
             )
+        artifact_evidence = decision_evidence.get("extension_artifacts")
+        artifact_manifest_digest: str | None = None
+        configuration_digest: str | None = None
+        if artifact_evidence is not None:
+            if manifest_evidence is None:
+                raise ValueError("extension artifact evidence requires capability manifest evidence")
+            if (
+                not isinstance(artifact_evidence, Mapping)
+                or set(artifact_evidence)
+                != {
+                    "version",
+                    "artifact_manifest_digest",
+                    "configuration_digest",
+                }
+                or artifact_evidence.get("version") != 1
+            ):
+                raise ValueError("extension artifact evidence is malformed")
+            for field_name in (
+                "artifact_manifest_digest",
+                "configuration_digest",
+            ):
+                digest = artifact_evidence.get(field_name)
+                if not isinstance(digest, str) or not digest.startswith("sha256:"):
+                    raise ValueError("extension artifact evidence is malformed")
+                _require_digest(
+                    digest.removeprefix("sha256:"),
+                    field_name=f"extension {field_name}",
+                )
+            artifact_manifest_digest = artifact_evidence["artifact_manifest_digest"]  # type: ignore[assignment]
+            configuration_digest = artifact_evidence["configuration_digest"]  # type: ignore[assignment]
         if trusted_context is not None:
             if trusted_context.tenant is not None and trusted_context.tenant != tenant:
                 raise ValueError("trusted context tenant contradicts accepted evidence")
@@ -792,6 +907,8 @@ class AcceptedInvocation:
                 raise ValueError("trusted context extension generation contradicts accepted evidence")
             if manifest_digest != trusted_context.extension_manifest_digest:
                 raise ValueError("trusted context extension manifest contradicts accepted evidence")
+            if artifact_manifest_digest != trusted_context.extension_artifact_manifest_digest or configuration_digest != trusted_context.extension_configuration_digest:
+                raise ValueError("trusted context extension artifact tuple contradicts accepted evidence")
 
             trusted_base_references: dict[str, Any] = {}
             for reference in trusted_context.origin.references:
@@ -858,6 +975,9 @@ class AcceptedInvocation:
             projection_fields = set(effective_projection)
             accepted_semantics = effective_projection.get("accepted_digest_semantics")
             expected_projection_fields = set(_EFFECTIVE_EXECUTION_FIELDS_V1)
+            if artifact_evidence is None:
+                expected_projection_fields.discard("extension_artifact_manifest_digest")
+                expected_projection_fields.discard("extension_configuration_digest")
             projection_has_tenant = "tenant_digest" in projection_fields
             if tenant_bound_evidence and not projection_has_tenant:
                 raise ValueError("tenant-bound accepted execution is missing its tenant")
@@ -886,6 +1006,13 @@ class AcceptedInvocation:
                 "accepted_context_digest": persisted_context_digest,
                 "extension_generation": extension_generation,
             }
+            if artifact_evidence is not None:
+                expected_identities.update(
+                    {
+                        "extension_artifact_manifest_digest": artifact_manifest_digest,
+                        "extension_configuration_digest": configuration_digest,
+                    }
+                )
             if projection_has_tenant:
                 assert tenant is not None
                 expected_identities["tenant_digest"] = tenant.digest
@@ -956,6 +1083,14 @@ class AcceptedInvocation:
                         },
                         "extension_generation": extension_generation,
                         "extension_manifest_digest": manifest_digest,
+                        **(
+                            {
+                                "extension_artifact_manifest_digest": artifact_manifest_digest,
+                                "extension_configuration_digest": configuration_digest,
+                            }
+                            if artifact_evidence is not None
+                            else {}
+                        ),
                         "accepted_context_digest": persisted_context_digest,
                     }
                 )

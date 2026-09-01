@@ -19,6 +19,7 @@ from deerflow_extension_api.contributors import (
 from deerflow_extension_api.health import CapabilityHealthProbe
 from deerflow_extension_api.identifiers import validate_thread_identifier
 from deerflow_extension_api.identity import InvocationIdentityV1
+from deerflow_extension_api.tenant import TenantReferenceV1
 
 INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION = "1.0"
 INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2 = "2.0"
@@ -28,6 +29,7 @@ INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2 = "invocation_constraints.v2"
 INVOCATION_CONSTRAINTS_V2_SUPPORTED_OBLIGATIONS = frozenset({"max_total_subagents"})
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
+_PREFIXED_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$", re.ASCII)
 _MAX_VALIDITY = timedelta(minutes=15)
 _MAX_SUBAGENTS = 2_147_483_647
@@ -124,6 +126,9 @@ class ConstraintProjectionRequestV2:
     extension_manifest_digest: str
     extension_generation: int
     host_max_total_subagents: int
+    tenant: TenantReferenceV1 | None = None
+    extension_artifact_manifest_digest: str | None = None
+    extension_configuration_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, InvocationIdentityV1):
@@ -164,6 +169,17 @@ class ConstraintProjectionRequestV2:
             raise ValueError("extension_generation must be a non-negative integer")
         if type(self.host_max_total_subagents) is not int or not 0 <= self.host_max_total_subagents <= _MAX_SUBAGENTS:
             raise ValueError("host_max_total_subagents must be a possible non-negative integer")
+        if self.tenant is not None and not isinstance(self.tenant, TenantReferenceV1):
+            raise TypeError("tenant must be TenantReferenceV1 or None")
+        for field_name in (
+            "extension_artifact_manifest_digest",
+            "extension_configuration_digest",
+        ):
+            digest = getattr(self, field_name)
+            if digest is not None and _PREFIXED_DIGEST.fullmatch(digest) is None:
+                raise ValueError(f"{field_name} must use sha256:<64 lowercase hex>")
+        if (self.extension_artifact_manifest_digest is None) != (self.extension_configuration_digest is None):
+            raise ValueError("extension artifact and configuration digests must be supplied together")
 
 
 @dataclass(frozen=True)

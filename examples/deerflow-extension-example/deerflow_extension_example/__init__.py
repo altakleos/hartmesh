@@ -18,7 +18,7 @@ from deerflow_extension_example.plugin import (
 __all__ = ["install"]
 
 
-@extension(api="0.12.1", name="example")
+@extension(api="0.13.0", name="example")
 def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     """Register one example of each supported contribution kind."""
     if config.get("enabled", True) is False:

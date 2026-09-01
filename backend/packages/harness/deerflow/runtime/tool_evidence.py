@@ -258,6 +258,9 @@ class ToolAttemptContextV1:
     extension_generation: int
     subagent_catalog_digest: str
     subagent_definition_digest: str | None
+    capability_manifest_digest: str | None = None
+    artifact_manifest_digest: str | None = None
+    extension_configuration_digest: str | None = None
     tenant: TenantReferenceV1 | None = None
 
     def __post_init__(self) -> None:
@@ -287,6 +290,26 @@ class ToolAttemptContextV1:
             TenantReferenceV1,
         ):
             raise ToolEvidenceError("tenant_anchor_invalid")
+        if self.capability_manifest_digest is not None:
+            _require_digest(
+                self.capability_manifest_digest,
+                "capability_manifest_digest_invalid",
+            )
+        for digest, code in (
+            (self.artifact_manifest_digest, "artifact_manifest_digest_invalid"),
+            (
+                self.extension_configuration_digest,
+                "extension_configuration_digest_invalid",
+            ),
+        ):
+            if digest is not None:
+                if not isinstance(digest, str) or not digest.startswith("sha256:"):
+                    raise ToolEvidenceError(code)
+                _require_digest(digest.removeprefix("sha256:"), code)
+        if (self.artifact_manifest_digest is None) != (self.extension_configuration_digest is None):
+            raise ToolEvidenceError("extension_artifact_tuple_invalid")
+        if self.artifact_manifest_digest is not None and self.capability_manifest_digest is None:
+            raise ToolEvidenceError("extension_artifact_tuple_invalid")
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -307,6 +330,10 @@ class ToolAttemptContextV1:
         if self.tenant is not None:
             result["tenant_ref"] = self.tenant.public_ref
             result["tenant_digest"] = self.tenant.digest
+        if self.artifact_manifest_digest is not None:
+            result["capability_manifest_digest"] = self.capability_manifest_digest
+            result["artifact_manifest_digest"] = self.artifact_manifest_digest
+            result["extension_configuration_digest"] = self.extension_configuration_digest
         return result
 
     @classmethod
@@ -327,11 +354,20 @@ class ToolAttemptContextV1:
             "subagent_definition_digest",
         }
         tenant_fields = {"tenant_ref", "tenant_digest"}
-        if set(value) not in (expected, expected | tenant_fields):
+        artifact_fields = {
+            "capability_manifest_digest",
+            "artifact_manifest_digest",
+            "extension_configuration_digest",
+        }
+        if set(value) not in (
+            expected,
+            expected | tenant_fields,
+            expected | tenant_fields | artifact_fields,
+        ):
             raise ToolEvidenceError("attempt_context_fields_invalid")
         fields = dict(value)
         tenant = None
-        if set(value) == expected | tenant_fields:
+        if tenant_fields.issubset(value):
             try:
                 tenant = TenantReferenceV1(
                     version=1,
@@ -603,7 +639,7 @@ def digest_result_projection(result: object, *, result_kind: str, status: str) -
 
 @dataclass(frozen=True, slots=True)
 class DurableToolReceiptV1:
-    version: Literal[1, 2]
+    version: Literal[1, 2, 3]
     receipt_id: str
     idempotency_key: str
     phase: ToolReceiptPhase
@@ -618,7 +654,7 @@ class DurableToolReceiptV1:
     context: ToolAttemptContextV1
 
     def __post_init__(self) -> None:
-        expected_version = 2 if self.context.tenant is not None else 1
+        expected_version = 3 if self.context.artifact_manifest_digest is not None else (2 if self.context.tenant is not None else 1)
         if self.version != expected_version:
             raise ToolEvidenceError("receipt_version_invalid")
         if _RECEIPT_ID_RE.fullmatch(self.receipt_id) is None or self.receipt_id != stable_receipt_id(self.context):
@@ -649,7 +685,14 @@ class DurableToolReceiptV1:
         if not isinstance(self.occurred_at, datetime) or self.occurred_at.tzinfo is None:
             raise ToolEvidenceError("occurred_at_invalid")
         if self.phase == "started":
-            if any(value is not None for value in (self.result_projection_digest, self.result_kind, self.safe_error_code)):
+            if any(
+                value is not None
+                for value in (
+                    self.result_projection_digest,
+                    self.result_kind,
+                    self.safe_error_code,
+                )
+            ):
                 raise ToolEvidenceError("started_outcome_fields_invalid")
             if self.authz_decision_ref is not None or refs:
                 raise ToolEvidenceError("started_policy_refs_invalid")
@@ -738,7 +781,7 @@ class DurableToolReceiptV1:
     ) -> DurableToolReceiptV1:
         receipt_id = stable_receipt_id(context)
         return cls(
-            version=2 if context.tenant is not None else 1,
+            version=(3 if context.artifact_manifest_digest is not None else (2 if context.tenant is not None else 1)),
             receipt_id=receipt_id,
             idempotency_key=f"{receipt_id}:start",
             phase="started",
@@ -961,7 +1004,10 @@ def reserve_attempt_from_events(
     starts: list[tuple[DurableToolReceiptV1, Mapping[str, object]]] = []
     outcomes: dict[str, tuple[DurableToolReceiptV1, Mapping[str, object]]] = {}
     for event in events:
-        if event.get("event_type") not in (TOOL_RECEIPT_STARTED_EVENT, TOOL_RECEIPT_OUTCOME_EVENT):
+        if event.get("event_type") not in (
+            TOOL_RECEIPT_STARTED_EVENT,
+            TOOL_RECEIPT_OUTCOME_EVENT,
+        ):
             continue
         receipt = parse_tool_receipt_event(event).receipt
         if receipt.context.run_id != binding.run_id:
@@ -1254,6 +1300,9 @@ class ToolEvidenceRuntimeBinding:
         "agent_revision_digest",
         "assembly_fingerprint",
         "extension_generation",
+        "capability_manifest_digest",
+        "artifact_manifest_digest",
+        "extension_configuration_digest",
         "subagent_catalog_digest",
         "subagent_definition_digest",
         "tenant",
@@ -1276,6 +1325,9 @@ class ToolEvidenceRuntimeBinding:
         extension_generation: int,
         subagent_catalog_digest: str,
         subagent_definition_digest: str | None,
+        capability_manifest_digest: str | None = None,
+        artifact_manifest_digest: str | None = None,
+        extension_configuration_digest: str | None = None,
         tenant: TenantReferenceV1 | None = None,
     ) -> None:
         # Validate all static anchors through the public context type.
@@ -1293,6 +1345,9 @@ class ToolEvidenceRuntimeBinding:
             extension_generation=extension_generation,
             subagent_catalog_digest=subagent_catalog_digest,
             subagent_definition_digest=subagent_definition_digest,
+            capability_manifest_digest=capability_manifest_digest,
+            artifact_manifest_digest=artifact_manifest_digest,
+            extension_configuration_digest=extension_configuration_digest,
             tenant=tenant,
         )
         self.run_id = run_id
@@ -1306,6 +1361,9 @@ class ToolEvidenceRuntimeBinding:
         self.extension_generation = extension_generation
         self.subagent_catalog_digest = subagent_catalog_digest
         self.subagent_definition_digest = subagent_definition_digest
+        self.capability_manifest_digest = capability_manifest_digest
+        self.artifact_manifest_digest = artifact_manifest_digest
+        self.extension_configuration_digest = extension_configuration_digest
         self.tenant = tenant
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
         self._dispatch_offsets: dict[tuple[str, str], int] = {}
@@ -1327,6 +1385,9 @@ class ToolEvidenceRuntimeBinding:
             extension_generation=self.extension_generation,
             subagent_catalog_digest=self.subagent_catalog_digest,
             subagent_definition_digest=self.subagent_definition_digest,
+            capability_manifest_digest=self.capability_manifest_digest,
+            artifact_manifest_digest=self.artifact_manifest_digest,
+            extension_configuration_digest=self.extension_configuration_digest,
             tenant=self.tenant,
         )
 
@@ -1400,6 +1461,9 @@ class ToolEvidenceRuntimeBinding:
             extension_generation=self.extension_generation,
             subagent_catalog_digest=self.subagent_catalog_digest,
             subagent_definition_digest=subagent_definition_digest,
+            capability_manifest_digest=self.capability_manifest_digest,
+            artifact_manifest_digest=self.artifact_manifest_digest,
+            extension_configuration_digest=self.extension_configuration_digest,
             tenant=self.tenant,
         )
 

@@ -98,7 +98,18 @@ uv run --frozen --no-group extensions deerflow extensions list
 uv run --frozen --no-group extensions deerflow extensions enable <name>
 uv run --frozen --no-group extensions deerflow extensions disable <name>
 uv run --frozen --no-group extensions deerflow extensions remove <name>
+uv run --frozen --no-group extensions deerflow extensions verify
+uv run --frozen --no-group extensions deerflow extensions manifest [--json]
+uv run --frozen --no-group extensions deerflow extensions config-digest --config <path>
 ```
+
+Install/remove update `backend/extensions.lock.json` with the dependency lock;
+enable/disable leave that source identity unchanged and change the separate
+configuration digest. Production images generate the installed manifest after
+their locked sync and verify it before importing this package. Artifact
+provenance proves which extension bytes/configuration HartMesh admitted.
+Extensions still execute with Gateway privileges and must come from a trusted
+operator source.
 
 `--yes` is intended only for automation that has already reviewed and trusted
 the source: extension build hooks and runtime code execute with Gateway

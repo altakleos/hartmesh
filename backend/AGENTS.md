@@ -45,10 +45,10 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   in-process adapters must remain behaviorally identical. The synchronous
   `DeerFlowClient` is a legacy local graph client and does not enter `InvocationRuntime`;
   it makes no durability claim.
-- The extension Capability Host pins `deerflow-extension-api` exactly. Public
-  typed contracts stay host-independent, while construction, authorization,
-  provenance, rollback, and lifecycle ownership remain inside the host. Each
-  invocation binds one startup-frozen process generation.
+- Artifact provenance proves which extension bytes/configuration HartMesh
+  admitted. Extensions still execute with Gateway privileges and must come from
+  a trusted operator source. Provenance and enforcement remain host-owned within
+  one startup-frozen process generation.
 - The qualified Helm topology is exactly one Gateway replica with shared durable
   state and pinned images. Do not infer scheduler HA, multi-replica ownership, or
   zero-downtime behavior from process-recovery tests.

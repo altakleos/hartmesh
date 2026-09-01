@@ -452,7 +452,20 @@ It also covers restrictive constraints, capability health, and required MCP prep
 
 Python plugins are trusted operator code loaded at startup from top-level `plugins:` in `config.yaml`. That list intentionally stays outside API-writable `extensions_config.json`, which owns MCP and skill configuration.
 
-An accepted invocation pins one startup-frozen extension generation. Skill changes affect later admission; plugin changes require a Gateway restart to create a new generation. Neither changes already accepted work.
+Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source.
+
+The extension manager commits a platform-neutral source lock; production images
+embed and verify a platform-specific installed manifest before importing plugin
+code. A separate secret-safe digest binds the ordered deployment configuration.
+Use `deerflow extensions verify`, `manifest [--json]`, and `config-digest
+--config <path>` to inspect those identities. See the [extension artifact
+provenance guide](docs/EXTENSION_ARTIFACT_PROVENANCE.md) for deployment,
+migration, and rollback.
+
+An accepted invocation pins one startup-frozen extension generation plus the
+artifact, configuration, and capability-manifest digests. Skill changes affect
+later admission; plugin changes require a Gateway restart to create a new
+generation. Neither changes already accepted work.
 
 The managed Lark/Feishu CLI integration remains user-scoped. After connecting,
 **Change Lark app** can replace that user's App ID and App Secret without
@@ -492,6 +505,7 @@ Version sources report `2.1.0`, but no tag contains the audited HartMesh impleme
 - [Runtime API](backend/packages/runtime-api/README.md) — DTOs and `DurableInvocationPort`
 - [Gateway API](backend/docs/API.md) — authenticated HTTP behavior
 - [Extension API](backend/packages/extension-api/README.md) — policy and trust boundaries
+- [Extension artifact provenance](docs/EXTENSION_ARTIFACT_PROVENANCE.md) — source/artifact/config identities, migration, and rollback
 - [Tenant identity](backend/docs/TENANT_IDENTITY.md) — server-owned trust boundary, schema/Redis migration, ACLs, and rollback
 - [Honcho memory backend](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md) — tenant/user isolation, durable observation limits, and existing-workspace migration
 - [Helm deployment](deploy/helm/deer-flow/README.md) — one-Gateway modes and qualification
@@ -508,6 +522,9 @@ make support-bundle
 ```
 
 Review generated support material before sharing it.
+The extension artifact summary contains only parse/verification status, digest
+prefixes, API/platform identifiers, and entry counts; it omits source paths,
+URLs, plugin configuration, file lists, and contents.
 For Honcho, the generated config summary omits the endpoint, raw workspace/user
 overrides, assistant peer, and reserved tenant projection. It retains only
 HTTP/HTTPS posture and configured override counts; it never includes the API

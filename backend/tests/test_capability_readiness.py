@@ -608,7 +608,7 @@ async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
     monkeypatch.setattr(
         extensions_module,
         "load_extensions",
-        lambda _plugins: (ExtensionRegistry().build(), []),
+        lambda _plugins, **_kwargs: (ExtensionRegistry().build(), []),
     )
     app = app_module.create_app()
 
@@ -653,11 +653,13 @@ async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
     assert readiness.json() == {
         "status": "not_ready",
         "tenant_identity": liveness.json()["tenant_identity"],
+        "extension_provenance": readiness.json()["extension_provenance"],
     }
     assert recovered.status_code == 200
     assert recovered.json() == {
         "status": "ready",
         "tenant_identity": liveness.json()["tenant_identity"],
+        "extension_provenance": readiness.json()["extension_provenance"],
     }
 
 
@@ -676,7 +678,7 @@ async def test_gateway_readiness_reports_optional_contextual_memory_degradation(
     monkeypatch.setattr(
         extensions_module,
         "load_extensions",
-        lambda _plugins: (ExtensionRegistry().build(), []),
+        lambda _plugins, **_kwargs: (ExtensionRegistry().build(), []),
     )
     app = app_module.create_app()
 
@@ -728,7 +730,7 @@ async def test_gateway_deployment_report_reads_live_post_commit_status(
     monkeypatch.setattr(
         extensions_module,
         "load_extensions",
-        lambda _plugins: (ExtensionRegistry().build(), []),
+        lambda _plugins, **_kwargs: (ExtensionRegistry().build(), []),
     )
     app = app_module.create_app()
 
@@ -786,7 +788,7 @@ async def test_gateway_readiness_authenticates_required_remote_skill_profile(
     monkeypatch.setattr(
         extensions_module,
         "load_extensions",
-        lambda _plugins: (ExtensionRegistry().build(), []),
+        lambda _plugins, **_kwargs: (ExtensionRegistry().build(), []),
     )
     results = iter((False, True))
     monkeypatch.setattr(

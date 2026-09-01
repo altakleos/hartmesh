@@ -129,6 +129,12 @@ spec:
             - name: DEER_FLOW_IMAGE_DIGEST
               value: {{ .Values.gateway.image.digest | quote }}
             {{- end }}
+            {{- if .Values.extensions.artifactManifestDigest }}
+            - name: DEER_FLOW_EXTENSION_ARTIFACT_MANIFEST_DIGEST
+              value: {{ .Values.extensions.artifactManifestDigest | quote }}
+            - name: DEER_FLOW_EXTENSION_CONFIGURATION_DIGEST
+              value: {{ .Values.extensions.configurationDigest | quote }}
+            {{- end }}
             {{- if .Values.deployment.provenance.sourceRevision }}
             - name: DEER_FLOW_SOURCE_REVISION
               value: {{ .Values.deployment.provenance.sourceRevision | quote }}
