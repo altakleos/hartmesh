@@ -11,9 +11,9 @@
       "source_reference": "extensions/sources/hartmesh-governance-extension",
       "source_revision": null,
       "locked_artifact_hashes": [],
-      "local_tree_digest": "sha256:62411868824d1b91e308af84420ccae5c56d5045dc86816253ae8654dbf3e024",
-      "entry_digest": "sha256:94bf840c4dc03420fe5aa5f89d3c93a7b91f2f25dcee7cde8551d4fc39e448e7"
+      "local_tree_digest": "sha256:4a369f03d27be7a9818cb90ae99df242248126e1bbdd12640ba41b63586b2661",
+      "entry_digest": "sha256:8bc8e891dce61b8f6728095de22eb75615be8e15e55c9ef2aa577baf0216cc5e"
     }
   ],
-  "digest": "sha256:ee5d4c661f8948cf674a0236d09ffbcf00e4ce21aa84a73b9e971e649cf718f2"
+  "digest": "sha256:deb385cdb50c97573856f40ea4e2933a97afa8de48da3337548d45fc6afbdb0c"
 }
