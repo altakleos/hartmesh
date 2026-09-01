@@ -52,7 +52,28 @@
   imports of the OpenViking embedded runtime. Multi-user provisioning,
   query-aware refresh policy and new lifecycle scheduling are separate changes,
   not part of this backend.
-- The optional `honcho` backend under `packages/harness/deerflow/agents/memory/backends/honcho/` is a remote-only HTTP adapter for user-model memory (RFC #1898's user-dimension option). Select with `memory.manager_class: honcho`, keep `memory.mode: middleware` (tool mode also supported — it implements `search`). It writes filtered turns as Honcho messages (no local LLM calls; Honcho's deriver builds representations server-side), resolves one workspace per `user_id` (`workspace_overrides` else `workspace_prefix + collision-resistant sanitized id`; missing user fails closed to no memory), offloads sync HTTP in its `a*` overrides via `asyncio.to_thread`, and tool mode retains passive writes via MemoryMiddleware, mirroring mem0. `failure_policy.read: fail_closed` rethrows recall failures; default is log-and-empty.
+- The optional `honcho` backend is a portable remote HTTP adapter. The host
+  projects the startup-frozen `TenantIdentityV1.namespace(HONCHO)` into its
+  reserved `_hartmesh_tenant` config key; the portable folder must not import
+  host tenant types. `HonchoIdentityResolver` centrally derives every bounded
+  workspace, peer, and session from that pseudonymous tenant namespace plus a
+  collision-resistant user/thread component. Missing users make no external
+  call. Production overrides cannot escape or share the derived workspace;
+  shared search visibility exists only in warned
+  `allow_local_shared_workspaces` local mode. The host-injected key is removed
+  from file/API config before construction and cannot be caller-selected.
+- Honcho supplies mutable contextual memory. It is tenant- and user-scoped, but it is not HartMesh's source of truth for admission, checkpoints, invocation status, authorization, or audit evidence.
+- Accepted durable runs bind the host observation callback only around graph
+  execution. Each completed Honcho operation admitted through that trusted
+  boundary persists one `memory.observation.v1` event with tenant reference,
+  hashed workspace, operation/status, exact bounded read-projection digest when
+  applicable, count, truncation, and time—never content, query, raw identity, or
+  provider failure text. Timed-out candidate reads are discarded before
+  admission and emit no event. A successful admitted read whose persistence
+  fails is discarded under fail-open and raises under fail-closed;
+  ordinary/legacy calls have no binding and retain their old behavior. Health,
+  readiness, and deployment surfaces report Honcho as an optional
+  mutable-context dependency and do not probe it or expose its endpoint.
 - Honcho configuration objects reject non-finite or non-positive timeout values and non-positive character budgets during construction, including direct dataclass construction, before an HTTP client can use them.
 - `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
 - Both modes share `FileMemoryStorage`, per-user/per-agent isolation, manual CRUD primitives, and the updater backend. Injection is mode-aware: middleware mode injects global `user`/`history` summaries plus the selected agent's facts, while tool mode injects only the global summaries and leaves every agent fact behind `memory_search` to avoid duplicating automatically injected and retrieval-returned context. `memory.injection_enabled: false` suppresses the complete block in either mode.
@@ -69,6 +90,10 @@
 - Every Gateway run with an effective hidden memory block hashes the exact `HumanMessage.content`, including the `<memory>` wrapper, and records one `context:memory` event through its run-scoped `RunJournal`. Later runs and checkpoint-based branches reuse the frozen message without reloading memory; goal continuations are deduplicated to one event per run.
 - A first-run block is trusted only when it comes from `DynamicContextMiddleware`'s current update. A reused block must have existed in the checkpoint before the run, and the Gateway strips dynamic-context markers from untrusted input so a caller cannot forge the identity event by reusing a known message ID.
 - The production consumer is the existing debug/audit endpoint `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory`. Event content has exactly one field, `content_sha256`, which operators use to compare the effective memory identity across runs. The full memory text stays in checkpoint state and is not duplicated into `run_events`.
+- Honcho's mutable provider reads use separate `memory.observation.v1` events
+  rather than `context:memory`. Retries are intentionally not deduplicated and
+  do not claim deterministic replay; the same owner-authorized run-events route
+  is the only lifecycle projection.
 
 **Token counting** (`packages/harness/deerflow/agents/memory/prompt.py`):
 - `_count_tokens` budgets the injection. In default `tiktoken` mode, the encoding is loaded lazily and cached.

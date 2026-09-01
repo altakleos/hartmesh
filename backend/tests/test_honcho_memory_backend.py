@@ -55,6 +55,16 @@ class TestHonchoConfig:
         cfg = HonchoConfig.from_backend_config({"base_url": "http://internal:8000", "api_key": "sk-x", "allow_insecure_http": True})
         assert cfg.api_key == "sk-x"
 
+    def test_http_opt_in_requires_a_literal_boolean(self):
+        with pytest.raises(ValueError, match="allow_insecure_http"):
+            HonchoConfig.from_backend_config(
+                {
+                    "base_url": "http://internal:8000",
+                    "api_key": "sk-x",
+                    "allow_insecure_http": "true",
+                }
+            )
+
     def test_http_without_api_key_is_fine(self):
         cfg = HonchoConfig.from_backend_config({"base_url": "http://host.docker.internal:8000"})
         assert cfg.api_key is None
@@ -70,6 +80,11 @@ class TestHonchoConfig:
             HonchoConfig.from_backend_config({"workspace_overrides": {"alice": None}})
         with pytest.raises(ValueError, match="user_peer_overrides"):
             HonchoConfig.from_backend_config({"user_peer_overrides": {"bob": "  "}})
+
+    @pytest.mark.parametrize("value", [[], "", False])
+    def test_override_containers_must_be_mappings_even_when_empty(self, value):
+        with pytest.raises(ValueError, match="workspace_overrides"):
+            HonchoConfig.from_backend_config({"workspace_overrides": value})
 
     @pytest.mark.parametrize(
         ("key", "value"),
@@ -91,7 +106,7 @@ class TestHonchoConfig:
             HonchoConfig.from_backend_config({key: value})
 
     @pytest.mark.parametrize("key", ["message_char_limit", "max_injection_chars"])
-    @pytest.mark.parametrize("value", [0, -1])
+    @pytest.mark.parametrize("value", [0, -1, 100_001])
     def test_rejects_non_positive_character_limits(self, key, value):
         with pytest.raises(ValueError, match=key):
             HonchoConfig.from_backend_config({key: value})
@@ -324,6 +339,19 @@ class TestHonchoManagerWrite:
         mgr.add("t-4", [_msg("human", "0123456789ABCDEF")], user_id="u1")
         sent = [c for c in fake.calls if c[0] == "messages"][0][1][2][0][1]
         assert len(sent) == 10
+
+    def test_add_bounds_the_message_batch(self):
+        mgr, fake = _manager()
+        mgr.add(
+            "t-bounded",
+            [_msg("human", f"message-{index}") for index in range(150)],
+            user_id="u1",
+        )
+
+        sent = [call for call in fake.calls if call[0] == "messages"][0][1][2]
+        assert len(sent) == 100
+        assert sent[0][1] == "message-50"
+        assert sent[-1][1] == "message-149"
 
     def test_from_config_rejects_negative_message_char_limit(self):
         """add() uses ``text[:message_char_limit]``. A negative limit is a

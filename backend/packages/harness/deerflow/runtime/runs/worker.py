@@ -25,7 +25,7 @@ import sys
 import threading
 import weakref
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -1852,48 +1852,57 @@ async def run_agent(
                             raise AcceptedSkillExecutionFenceError(
                                 "accepted_skill_execution_fence_failed",
                             )
+                    observation_scope = nullcontext()
+                    if journal is not None and accepted_for_cleanup is not None:
+                        from deerflow.agents.memory.observations import (
+                            bind_memory_observation_sink,
+                        )
+
+                        observation_scope = bind_memory_observation_sink(journal, ctx.tenant)
                     if len(lg_modes) == 1 and not stream_subgraphs:
                         # Single mode, no subgraphs: astream yields raw chunks
                         single_mode = lg_modes[0]
-                        async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
+                        with observation_scope:
+                            async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
+                                if record.abort_event.is_set():
+                                    logger.info("Run %s abort requested — stopping", run_id)
+                                    break
+                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                                sse_event = _lg_mode_to_sse_event(single_mode)
+                                await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                                if single_mode == "custom":
+                                    await subagent_events.add(chunk)
+                        return
+                    # Multiple modes or subgraphs: astream yields tuples
+                    with observation_scope:
+                        async for item in agent.astream(
+                            input_payload,
+                            config=stream_config,
+                            stream_mode=lg_modes,
+                            subgraphs=stream_subgraphs,
+                        ):
                             if record.abort_event.is_set():
                                 logger.info("Run %s abort requested — stopping", run_id)
                                 break
-                            llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                            sse_event = _lg_mode_to_sse_event(single_mode)
-                            await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
-                            if single_mode == "custom":
-                                await subagent_events.add(chunk)
-                        return
-                    # Multiple modes or subgraphs: astream yields tuples
-                    async for item in agent.astream(
-                        input_payload,
-                        config=stream_config,
-                        stream_mode=lg_modes,
-                        subgraphs=stream_subgraphs,
-                    ):
-                        if record.abort_event.is_set():
-                            logger.info("Run %s abort requested — stopping", run_id)
-                            break
 
-                        mode, chunk, namespace = _unpack_stream_item(item, lg_modes, stream_subgraphs)
-                        if mode is None:
-                            continue
+                            mode, chunk, namespace = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                            if mode is None:
+                                continue
 
-                        if not namespace:
-                            # Only root-graph frames may decide the parent run's error
-                            # fallback: a delegated subagent's marked fallback is the
-                            # executor's to map (task_failed), not this run's.
-                            llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                        await _publish_stream_item(
-                            bridge=bridge,
-                            run_id=run_id,
-                            mode=mode,
-                            chunk=chunk,
-                            namespace=namespace,
-                            file_tool_chunk_batcher=file_tool_chunk_batcher,
-                            subagent_events=subagent_events,
-                        )
+                            if not namespace:
+                                # Only root-graph frames may decide the parent run's error
+                                # fallback: a delegated subagent's marked fallback is the
+                                # executor's to map (task_failed), not this run's.
+                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                            await _publish_stream_item(
+                                bridge=bridge,
+                                run_id=run_id,
+                                mode=mode,
+                                chunk=chunk,
+                                namespace=namespace,
+                                file_tool_chunk_batcher=file_tool_chunk_batcher,
+                                subagent_events=subagent_events,
+                            )
             finally:
                 stream_error = sys.exception()
                 if file_tool_chunk_batcher is not None:

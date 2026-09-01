@@ -11,11 +11,14 @@ shared contract).
 """
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
+
+_HARTMESH_TENANT_CONFIG_KEY = "_hartmesh_tenant"
 
 # Host-shared MemoryConfig fields (read by every backend / call site / factory).
 _SHARED_FIELDS = frozenset({"enabled", "mode", "injection_enabled", "shutdown_flush_timeout_seconds", "manager_class", "backend_config"})
@@ -109,6 +112,16 @@ class MemoryConfig(BaseModel):
             "they do not belong on the shared `MemoryConfig` schema."
         ),
     )
+
+    @field_validator("backend_config", mode="before")
+    @classmethod
+    def _drop_server_owned_honcho_projection(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping) or _HARTMESH_TENANT_CONFIG_KEY not in value:
+            return value
+        sanitized = dict(value)
+        sanitized.pop(_HARTMESH_TENANT_CONFIG_KEY, None)
+        logger.warning("Ignoring caller-configured reserved Honcho tenant projection; the Gateway injects its server-owned value")
+        return sanitized
 
 
 def should_use_memory_tools(config: MemoryConfig) -> bool:

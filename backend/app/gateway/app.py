@@ -193,6 +193,24 @@ async def _warm_memory_retrieval(manager) -> None:
         logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
 
 
+def _memory_backend_diagnostics(app: FastAPI) -> dict[str, object] | None:
+    """Return a local-only safe memory projection without probing the provider."""
+
+    manager = getattr(app.state, "memory_manager", None)
+    diagnostics = getattr(manager, "safe_diagnostics", None)
+    if not callable(diagnostics):
+        return None
+    try:
+        value = diagnostics()
+    except Exception as exc:
+        logger.warning(
+            "Memory diagnostics unavailable code=honcho_diagnostics_unavailable error_class=%s",
+            type(exc).__name__,
+        )
+        return None
+    return dict(value) if isinstance(value, dict) else None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
@@ -294,21 +312,40 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # searches remain correct while this runs because DeerMem lazily rebuilds
     # the requested scope when the full warm-up has not completed yet.
     retrieval_warm_task: asyncio.Task[None] | None = None
-    try:
-        from deerflow.agents.memory import get_memory_manager
+    from deerflow.agents.memory import MemoryManager, get_memory_manager
 
-        if startup_config.memory.enabled:
-            manager = await asyncio.to_thread(get_memory_manager)
+    startup_memory_enabled = bool(getattr(startup_config.memory, "enabled", False))
+    resolved_memory_manager: MemoryManager | None = None
+
+    async def resolve_memory_manager() -> MemoryManager:
+        """Construct this lifespan's manager at most once."""
+
+        nonlocal resolved_memory_manager
+        if resolved_memory_manager is None:
+            resolved_memory_manager = await asyncio.to_thread(
+                get_memory_manager,
+                tenant_identity=tenant_identity,
+                deployment_profile=startup_profile,
+            )
+        return resolved_memory_manager
+
+    if startup_memory_enabled:
+        # Construction validates backend configuration. This is intentionally
+        # outside the best-effort warm-up boundary: an enabled backend with an
+        # invalid tenant/security projection must abort startup.
+        manager = await resolve_memory_manager()
+        app.state.memory_manager = manager
+        try:
             warm_retrieval = getattr(manager, "warm_retrieval", None)
             if callable(warm_retrieval):
                 retrieval_warm_task = asyncio.create_task(
                     _warm_memory_retrieval(manager),
                     name="memory-retrieval-warm-up",
                 )
-        else:
-            logger.info("Memory is disabled; skipping retrieval index rebuild")
-    except Exception:
-        logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
+        except Exception:
+            logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
+    else:
+        logger.info("Memory is disabled; skipping retrieval index rebuild")
 
     # Pre-warm tiktoken encoding cache so the first memory-injection request
     # never blocks on the BPE data download (which hits an OpenAI/Azure URL
@@ -320,9 +357,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # the base default -- log "skipping" instead of the misleading "warmed
     # successfully" so the log reflects what actually happened.
     try:
-        from deerflow.agents.memory import get_memory_manager
-
-        manager = await asyncio.to_thread(get_memory_manager)
+        manager = await resolve_memory_manager()
+        if startup_memory_enabled:
+            app.state.memory_manager = manager
         warmed = await asyncio.wait_for(
             asyncio.to_thread(manager.warm),
             timeout=5,
@@ -472,14 +509,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             return float(value) if isinstance(value, (int, float)) else default
 
         memory_enabled = bool(getattr(startup_config.memory, "enabled", False))
-        memory_manager = None
-        if memory_enabled:
-            try:
-                from deerflow.agents.memory import get_memory_manager
-
-                memory_manager = await asyncio.to_thread(get_memory_manager)
-            except Exception:
-                logger.exception("Memory manager unavailable for graceful shutdown")
+        memory_manager = resolved_memory_manager if memory_enabled else None
 
         async def begin_admission_drain() -> bool:
             # Memory shutdown can trigger detached system-model callbacks.
@@ -1005,6 +1035,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             )
             else None
         ),
+        contextual_memory_supplier=lambda: _memory_backend_diagnostics(app),
     )
     from app.runtime.readiness import RuntimeReadinessCoordinator
 
@@ -1151,24 +1182,32 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             Service health status information.
         """
         tenant_identity = app.state.tenant_identity
-        return {
+        payload: dict[str, object] = {
             "status": "healthy",
             "service": "deer-flow-gateway",
             "tenant_identity": tenant_observability_projection(tenant_identity.to_persisted_reference()),
         }
+        memory_diagnostics = _memory_backend_diagnostics(app)
+        if memory_diagnostics is not None:
+            payload["contextual_memory"] = memory_diagnostics
+        return payload
 
     @app.get("/ready", tags=["health"])
     async def readiness_check() -> JSONResponse:
-        """Return a deliberately minimal deployable readiness result."""
+        """Return bounded authoritative readiness plus safe optional context."""
 
         readiness = await app.state.runtime_readiness.readiness()
         ready = readiness.status == "ready"
+        payload: dict[str, object] = {
+            "status": "ready" if ready else "not_ready",
+            "tenant_identity": tenant_observability_projection(app.state.tenant_identity.to_persisted_reference()),
+        }
+        memory_diagnostics = _memory_backend_diagnostics(app)
+        if memory_diagnostics is not None:
+            payload["contextual_memory"] = memory_diagnostics
         return JSONResponse(
             status_code=200 if ready else 503,
-            content={
-                "status": "ready" if ready else "not_ready",
-                "tenant_identity": tenant_observability_projection(app.state.tenant_identity.to_persisted_reference()),
-            },
+            content=payload,
         )
 
     # Extension routes are deliberately last: FastAPI/Starlette dispatches in

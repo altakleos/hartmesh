@@ -6,7 +6,7 @@ import json
 import math
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -451,6 +451,7 @@ class DeploymentReport:
     native_ingress: NativeIngressReport = field(default_factory=NativeIngressReport)
     post_commit_obligations: PostCommitObligationReport | None = None
     tenant: TenantReferenceV1 | None = None
+    contextual_memory: Mapping[str, object] | None = None
     api_version: Literal["deerflow.deployment/v1"] = field(
         default=DEPLOYMENT_API_VERSION,
         init=False,
@@ -472,6 +473,23 @@ class DeploymentReport:
             TenantReferenceV1,
         ):
             raise TypeError("tenant must use TenantReferenceV1")
+        if self.contextual_memory is not None:
+            if not isinstance(self.contextual_memory, Mapping):
+                raise TypeError("contextual_memory must be a mapping")
+            try:
+                encoded = json.dumps(
+                    self.contextual_memory,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                detached = json.loads(encoded)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("contextual_memory must be JSON-safe") from exc
+            if len(encoded) > 8 * 1024 or not isinstance(detached, dict):
+                raise ValueError("contextual_memory exceeds its bounded mapping contract")
+            object.__setattr__(self, "contextual_memory", detached)
 
     def to_dict(self) -> dict[str, object]:
         """Return a fresh safe wire projection; no plugin configuration is included."""
@@ -501,6 +519,8 @@ class DeploymentReport:
         }
         if self.post_commit_obligations is not None:
             payload["post_commit_obligations"] = self.post_commit_obligations.to_dict()
+        if self.contextual_memory is not None:
+            payload["contextual_memory"] = dict(self.contextual_memory)
         return payload
 
 
@@ -532,6 +552,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         native_ingress_supplier: Callable[[], NativeIngressReport] | None = None,
         post_commit_obligations_supplier: (Callable[[], PostCommitObligationReport | None] | None) = None,
         tenant_supplier: Callable[[], TenantReferenceV1 | None] | None = None,
+        contextual_memory_supplier: Callable[[], Mapping[str, object] | None] | None = None,
     ) -> None:
         self._profile = DeploymentProfile(profile)
         self._persistence = describe_persistence(
@@ -549,6 +570,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
         self._native_ingress_supplier = native_ingress_supplier or (lambda: static_native_ingress)
         self._post_commit_obligations_supplier = post_commit_obligations_supplier or (lambda: None)
         self._tenant_supplier = tenant_supplier or (lambda: None)
+        self._contextual_memory_supplier = contextual_memory_supplier or (lambda: None)
 
     @property
     def persistence_ready(self) -> bool:
@@ -589,6 +611,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             native_ingress_supplier=self._native_ingress_supplier,
             post_commit_obligations_supplier=(self._post_commit_obligations_supplier),
             tenant_supplier=self._tenant_supplier,
+            contextual_memory_supplier=self._contextual_memory_supplier,
         )
 
     async def deployment_report(self) -> DeploymentReport:
@@ -603,6 +626,7 @@ class GatewayDeploymentReporter(DeploymentReportPort):
             native_ingress=self._native_ingress_supplier(),
             post_commit_obligations=self._post_commit_obligations_supplier(),
             tenant=self._tenant_supplier(),
+            contextual_memory=self._contextual_memory_supplier(),
         )
 
 

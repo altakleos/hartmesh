@@ -67,7 +67,7 @@
     "outputs": "Root graph completion output; not an authoritative run lifecycle status.",
     "error": "Callback-observed run or chain failure evidence.",
     "middleware": "Middleware state-change audit evidence.",
-    "context": "Identity-only evidence about effective hidden context.",
+    "context": "Bounded identity/digest evidence about effective hidden or mutable context; raw context is excluded.",
     "subagent": "Subagent lifecycle and persisted step evidence.",
     "tool": "Bounded, redacted, owner-fenced durable tool-attempt evidence.",
     "workspace": "Run-scoped workspace and output file-change evidence."
@@ -203,6 +203,53 @@
           "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         },
         "additionalProperties": true
+      },
+      "metadata_schema": {"type": "object", "additionalProperties": true}
+    },
+    {
+      "event_type": "memory.observation.v1",
+      "category": "context",
+      "producer": "RunJournal.persist_memory_observations() from a trusted durable Honcho operation binding",
+      "content_description": "Bounded evidence about one mutable Honcho operation. Read projections may carry only a digest; write observations carry no content digest. It contains no memory/query text, raw workspace/user identity, provider response, or exception detail.",
+      "content_schema": {
+        "type": "object",
+        "required": [
+          "version",
+          "backend",
+          "tenant",
+          "workspace_ref",
+          "operation",
+          "status",
+          "safe_projection_digest",
+          "item_count",
+          "truncated",
+          "occurred_at"
+        ],
+        "properties": {
+          "version": {"const": 1},
+          "backend": {"const": "honcho"},
+          "tenant": {
+            "type": "object",
+            "required": ["version", "public_ref", "digest"],
+            "properties": {
+              "version": {"const": 1},
+              "public_ref": {"type": "string", "pattern": "^tenant-[0-9a-f]{16}$"},
+              "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            },
+            "additionalProperties": false
+          },
+          "workspace_ref": {"type": "string", "pattern": "^honcho-workspace-[0-9a-f]{24}$"},
+          "operation": {"enum": ["get_context", "search", "get_memory", "add"]},
+          "status": {"enum": ["succeeded", "empty", "failed_open", "failed_closed"]},
+          "safe_projection_digest": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "item_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+          "truncated": {"type": "boolean"},
+          "occurred_at": {"type": "string", "format": "date-time"}
+        },
+        "additionalProperties": false
       },
       "metadata_schema": {"type": "object", "additionalProperties": true}
     },

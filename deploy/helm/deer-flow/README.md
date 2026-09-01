@@ -229,7 +229,7 @@ they resolve from the selected Secret):
 
 ```yaml
 config: |
-  config_version: 45
+  config_version: 46
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -314,6 +314,16 @@ named during render or startup failure. The following feature release removes
 these legacy fields. Existing keys are not searched or copied automatically;
 follow the stop/backup/inventory/offline-copy procedure in
 [the tenant migration guide](../../../backend/docs/TENANT_IDENTITY.md#database-binding-and-migration).
+
+When the `config:` blob selects `memory.manager_class: honcho`, `tenant.id` is
+also the sole tenant input for Honcho. Do not put `_hartmesh_tenant` or an
+independent workspace namespace in the blob: the Gateway injects the safe
+projection and production rejects escaping/shared overrides. Keep
+`HONCHO_API_KEY` in `existingSecret`, use an HTTPS `base_url`, and follow the
+[provider-copy migration procedure](../../../backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md#existing-workspace-migration)
+before switching existing workspaces. Honcho remains an optional mutable
+context backend and is not a durable readiness dependency.
+
 Because `config:` is a single override blob, a partial `config:` replaces the
 chart default entirely - keep the `tools:`/`tool_groups:` block (or the agent
 will have no tools) and the `sandbox:`/`database:`/`checkpointer:`/`stream_bridge:`

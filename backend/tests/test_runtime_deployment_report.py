@@ -224,6 +224,40 @@ async def test_admin_report_exposes_bounded_process_local_post_commit_counts() -
     }
 
 
+@pytest.mark.asyncio
+async def test_admin_report_exposes_optional_context_memory_without_claiming_durability() -> None:
+    diagnostics = {
+        "version": 1,
+        "backend": "honcho",
+        "selected": True,
+        "initialized": True,
+        "dependency_role": "mutable_contextual_memory",
+        "durable_dependency": False,
+        "tenant_public_ref": "tenant-0123456789abcdef",
+        "tenant_digest_prefix": "0123456789ab",
+        "workspace_namespace": "hm-v1-0123456789abcdef-honcho-",
+        "isolation_mode": "tenant_user",
+        "transport_security": "https",
+        "read_failure_policy": "fail_open",
+        "last_successful_probe_at": None,
+        "last_failed_probe_at": None,
+        "last_error_code": None,
+    }
+    reporter = GatewayDeploymentReporter(
+        profile=DeploymentProfile.durable_production,
+        database_backend="postgres",
+        atomic_lifecycle=True,
+        manifest=build_capability_manifest(ExtensionRegistry().build(generation=7)),
+        health_monitor=_HealthMonitor(),
+        contextual_memory_supplier=lambda: diagnostics,
+    )
+
+    payload = (await reporter.deployment_report()).to_dict()
+
+    assert payload["contextual_memory"] == diagnostics
+    assert payload["contextual_memory"]["durable_dependency"] is False
+
+
 def test_post_commit_report_saturates_counts_and_rejects_malformed_values() -> None:
     maximum = 2_147_483_647
     report = PostCommitObligationReport.from_status(

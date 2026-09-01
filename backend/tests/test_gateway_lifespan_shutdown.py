@@ -362,6 +362,49 @@ def test_lifespan_closes_memory_manager_when_flush_raises() -> None:
     manager.close.assert_called_once_with()
 
 
+async def _run_lifespan_with_memory_init_failure() -> None:
+    from app.gateway.app import lifespan
+
+    app = _gateway_test_app()
+    startup_config = SimpleNamespace(
+        log_level="INFO",
+        memory=SimpleNamespace(
+            token_counting="char",
+            enabled=True,
+            shutdown_flush_timeout_seconds=5.0,
+        ),
+    )
+    fake_service = MagicMock()
+    fake_service.get_status.return_value = {}
+
+    async def fake_start(_startup_config, **_kwargs):
+        return fake_service
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch(
+            "app.gateway.app.get_gateway_config",
+            return_value=MagicMock(host="x", port=0),
+        ),
+        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", side_effect=fake_start),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch(
+            "deerflow.agents.memory.get_memory_manager",
+            side_effect=ValueError("honcho_tenant_projection_invalid"),
+        ),
+    ):
+        async with lifespan(app):
+            pass
+
+
+def test_enabled_memory_configuration_failure_aborts_gateway_startup() -> None:
+    with pytest.raises(ValueError, match="honcho_tenant_projection_invalid"):
+        asyncio.run(_run_lifespan_with_memory_init_failure())
+
+
 # ── startup warm-up log accuracy ────────────────────────────────────────────
 
 

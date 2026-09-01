@@ -6,26 +6,11 @@ complementing project/task-oriented backends. Ingestion is cheap (plain message
 writes); Honcho's own server-side deriver performs fact extraction and
 representation building asynchronously, so this backend makes **no LLM calls**.
 
-Multi-user isolation: every operation resolves a workspace from ``user_id``
-(``workspace_overrides`` exact match, else ``workspace_prefix + _stable_id``).
-``_stable_id`` appends an 8-hex-char SHA-256 suffix to ``sanitize_id``'s output
-because ``sanitize_id`` alone is lossy -- it collapses every run of non
-``[a-zA-Z0-9_-]`` characters to a single ``-``, so distinct raw ids can collide
-(``"user.name@x"`` and ``"user-name@x"`` both sanitize to ``"user-name-x"``).
-Reusing the lossy form bare for the default (non-override) workspace/peer
-derivation would silently merge two different people's memory into one
-workspace; the hash suffix makes the default path collision-resistant while
-staying readable. ``workspace_overrides`` / ``user_peer_overrides`` match on
-the raw, un-sanitized key and are unaffected. Honcho scopes all queries to one
-workspace, so under the default one-workspace-per-user derivation users cannot
-see each other's memory by construction. A ``workspace_overrides`` entry
-shared across users deliberately shares that workspace — ``get_context`` /
-``get_memory`` stay peer-scoped there, but ``search`` uses Honcho's
-workspace-scoped ``/search`` (no peer filter), so those users share one
-search index. A missing ``user_id`` fails closed: the call becomes a no-op /
-empty read, never a shared fallback workspace. Session ids reuse the same derivation
-(``df-`` + ``_stable_id(thread_id)``) — bare ``sanitize_id`` would merge
-threads like ``"t.1"`` and ``"t-1"`` into one Honcho session.
+Multi-user isolation is owned by ``HonchoIdentityResolver``. In Gateway use,
+the host supplies a validated tenant-derived namespace and the resolver adds a
+readable user component plus a 16-hex SHA-256 suffix. Production overrides
+must resolve to that same user workspace; only explicit local-development
+configuration may share one. Missing users fail closed with no provider call.
 
 Portability golden rule: the only ``from deerflow`` import is the contract line
 below. Everything else arrives via ``backend_config``.
@@ -34,8 +19,9 @@ below. Everything else arrives via ``backend_config``.
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import html
 import logging
+import threading
 from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
@@ -44,11 +30,13 @@ from pydantic import PrivateAttr
 from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
 
 from .client import HonchoClient
-from .config import HonchoConfig, sanitize_id
+from .config import HonchoConfig, HonchoIdentityResolver, stable_id
 
 logger = logging.getLogger(__name__)
 
 _UTC_NOW_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_MAX_SEARCH_RESULTS = 100
+_MAX_WRITE_MESSAGES = 100
 
 
 def _now_iso() -> str:
@@ -75,24 +63,23 @@ def _content_to_text(content: Any) -> str:
 def _stable_id(raw: str) -> str:
     """Readable-but-collision-resistant id for the default (non-override) path.
 
-    ``sanitize_id`` alone is lossy (every run of disallowed characters
-    collapses to one ``-``), so two distinct raw ids can sanitize to the same
-    string. Appending an 8-hex-char SHA-256 suffix of the *original* raw id
-    keeps the result readable while making distinct inputs resolve to
-    distinct outputs. The digest is always 8 hex characters, so the result is
-    never empty even when ``sanitize_id`` strips a degenerate raw id (e.g.
-    ``"!!!"``) down to ``""``.
+    The portable resolver reserves a 16-hex SHA-256 suffix before truncating
+    the readable segment, so sanitization collisions remain disjoint.
     """
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
-    readable = sanitize_id(raw)[:48].rstrip("-")
-    return f"{readable}-{digest}" if readable else digest
+    return stable_id(raw)
 
 
 class HonchoMemoryManager(MemoryManager):
     """MemoryManager backed by a Honcho v3 instance (self-hosted or hosted)."""
 
     _config: HonchoConfig = PrivateAttr(default=None)
+    _identity: HonchoIdentityResolver = PrivateAttr(default=None)
     _client: Any = PrivateAttr(default=None)
+    _memory_observer: Any = PrivateAttr(default=None)
+    _health_lock: Any = PrivateAttr(default_factory=threading.Lock)
+    _last_successful_probe_at: str | None = PrivateAttr(default=None)
+    _last_failed_probe_at: str | None = PrivateAttr(default=None)
+    _last_error_code: str | None = PrivateAttr(default=None)
 
     supports_search: ClassVar[bool] = True
     # Honcho's server-side deriver extracts facts/representation from add()
@@ -105,6 +92,7 @@ class HonchoMemoryManager(MemoryManager):
 
     def model_post_init(self, __context: Any) -> None:
         self._config = HonchoConfig.from_backend_config(self.backend_config)
+        self._identity = HonchoIdentityResolver(self._config)
         self._client = HonchoClient(self._config)
 
     @classmethod
@@ -120,36 +108,173 @@ class HonchoMemoryManager(MemoryManager):
         Connectivity is deliberately NOT probed: a temporarily unreachable Honcho
         must not block Gateway startup; reads degrade per ``failure_policy.read``.
         """
-        return cls(backend_config=backend_config, mode=mode)
+        manager = cls(backend_config=backend_config, mode=mode)
+        manager._memory_observer = host_hooks.get("memory_observer")
+        return manager
 
     # ── identity resolution (fail closed) ────────────────────────────────
     def _workspace(self, user_id: str | None) -> str | None:
-        if not user_id:
-            return None
-        override = self._config.workspace_overrides.get(user_id)
-        if override:
-            return override
-        return f"{self._config.workspace_prefix}{_stable_id(user_id)}"
+        return self._identity.workspace(user_id)
 
     def _user_peer(self, user_id: str) -> str:
-        return self._config.user_peer_overrides.get(user_id) or _stable_id(user_id)
+        return self._identity.user_peer(user_id)
 
-    # ── recall policy gate (get_context / search / get_memory) ───────────
-    def _read_or_fallback(self, fallback: Any, fn: Any) -> Any:
-        """Single ``failure_policy.read`` gate for every recall path, mirroring
-        mem0's helper of the same name: fail-open (default) logs and returns
-        ``fallback``; ``fail_closed`` wraps into ``MemoryManagerError``. The
-        broad ``except Exception`` is the containment boundary — no client
-        exception may escape into ``MemoryMiddleware.after_agent``."""
+    def validate_tenant_binding(
+        self,
+        *,
+        expected_tenant_digest: str | None,
+        required: bool,
+    ) -> None:
+        """Validate reuse against a host-supplied tenant digest only."""
+
+        configured_tenant = self._config.tenant
+        if configured_tenant is None:
+            if required:
+                raise ValueError("honcho_tenant_projection_required: cached Honcho manager lacks the Gateway's frozen tenant projection")
+            return
+        if expected_tenant_digest is not None and configured_tenant.tenant_digest != expected_tenant_digest:
+            raise ValueError("honcho_tenant_projection_invalid: cached Honcho manager belongs to a different process tenant")
+
+    def _record_probe_success(self) -> None:
+        with self._health_lock:
+            self._last_successful_probe_at = _now_iso()
+            self._last_error_code = None
+
+    def _record_probe_failure(self, code: str) -> None:
+        with self._health_lock:
+            self._last_failed_probe_at = _now_iso()
+            self._last_error_code = code
+
+    def _observe(
+        self,
+        *,
+        workspace: str,
+        operation: str,
+        status: str,
+        safe_projection: Any | None,
+        item_count: int | None,
+        truncated: bool,
+    ) -> None:
+        observer = self._memory_observer
+        if not callable(observer):
+            return
+        observer(
+            workspace=workspace,
+            operation=operation,
+            status=status,
+            safe_projection=safe_projection,
+            item_count=item_count,
+            truncated=truncated,
+        )
+
+    def _observe_read(
+        self,
+        *,
+        workspace: str,
+        operation: str,
+        status: str,
+        safe_projection: Any | None,
+        item_count: int | None,
+        truncated: bool,
+    ) -> bool:
+        """Record a read observation, applying the configured failure policy."""
+
         try:
-            return fn()
-        except MemoryManagerError:
-            raise
+            self._observe(
+                workspace=workspace,
+                operation=operation,
+                status=status,
+                safe_projection=safe_projection,
+                item_count=item_count,
+                truncated=truncated,
+            )
+            return True
         except Exception as exc:
+            logger.warning(
+                "honcho memory observation append failed code=honcho_memory_recall_failed error_class=%s",
+                type(exc).__name__,
+            )
             if self._config.read_fail_closed:
-                raise MemoryManagerError(f"honcho memory recall failed: {exc}") from exc
-            logger.warning("honcho memory: recall failed (fail-open): %s", exc)
-            return fallback
+                raise MemoryManagerError("honcho_memory_recall_failed") from None
+            return False
+
+    def _provider_read(self, *, workspace: str, operation: str, fn: Any) -> tuple[bool, Any]:
+        """One secret-safe provider boundary for every recall path."""
+
+        try:
+            value = fn()
+            self._record_probe_success()
+            return True, value
+        except Exception as exc:
+            self._record_probe_failure("honcho_memory_recall_failed")
+            status = "failed_closed" if self._config.read_fail_closed else "failed_open"
+            try:
+                self._observe(
+                    workspace=workspace,
+                    operation=operation,
+                    status=status,
+                    safe_projection=None,
+                    item_count=None,
+                    truncated=False,
+                )
+            except Exception as observation_exc:
+                logger.warning(
+                    "honcho memory failure observation append failed code=honcho_memory_recall_failed error_class=%s",
+                    type(observation_exc).__name__,
+                )
+            if self._config.read_fail_closed:
+                raise MemoryManagerError("honcho_memory_recall_failed") from None
+            logger.warning(
+                "honcho memory recall failed code=honcho_memory_recall_failed policy=fail_open error_class=%s",
+                type(exc).__name__,
+            )
+            return False, None
+
+    @staticmethod
+    def _safe_text(value: Any, *, max_chars: int) -> tuple[str, bool]:
+        escaped = html.escape(str(value or "").strip(), quote=False)
+        return escaped[:max_chars], len(escaped) > max_chars
+
+    def _safe_search_results(
+        self,
+        results: Any,
+        *,
+        top_k: int,
+        category: str | None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        raw_items = list(results) if isinstance(results, list) else []
+        limit = max(0, top_k)
+        truncated = len(raw_items) > limit
+        remaining = self._config.max_injection_chars
+        projected: list[dict[str, Any]] = []
+        for item in raw_items[:limit]:
+            if remaining <= 0:
+                truncated = True
+                break
+            if not isinstance(item, dict):
+                truncated = True
+                continue
+            safe_content, content_truncated = self._safe_text(
+                item.get("content", ""),
+                max_chars=remaining,
+            )
+            if not safe_content:
+                continue
+            remaining -= len(safe_content)
+            projected.append(
+                {
+                    "content": safe_content,
+                    "category": html.escape(str(category or "memory"), quote=False)[:128],
+                    "session_id": html.escape(str(item.get("session_id")), quote=False)[:256] if item.get("session_id") is not None else None,
+                    "peer_id": html.escape(str(item.get("peer_id")), quote=False)[:256] if item.get("peer_id") is not None else None,
+                    "created_at": html.escape(str(item.get("created_at")), quote=False)[:64] if item.get("created_at") is not None else None,
+                }
+            )
+            truncated = truncated or content_truncated
+            if remaining <= 0:
+                truncated = truncated or len(projected) < min(len(raw_items), limit)
+                break
+        return projected, truncated
 
     # ── Tier 1: write ────────────────────────────────────────────────────
     def add(
@@ -163,33 +288,69 @@ class HonchoMemoryManager(MemoryManager):
     ) -> None:
         workspace = self._workspace(user_id)
         if workspace is None or not user_id:
-            logger.debug("honcho memory: no resolvable user for thread %s; skipping write", thread_id)
+            logger.debug("honcho memory: no resolvable user; skipping write")
             return
         user_peer = self._user_peer(user_id)
-        assistant_peer = self._config.assistant_peer
+        assistant_peer = self._identity.assistant_peer()
         outgoing: list[dict[str, str]] = []
+        truncated = False
         for message in messages or []:
             msg_type = getattr(message, "type", None)
             text = _content_to_text(getattr(message, "content", "")).strip()
             if not text:
                 continue
+            truncated = truncated or len(text) > self._config.message_char_limit
             if msg_type == "human":
                 outgoing.append({"peer_id": user_peer, "content": text[: self._config.message_char_limit]})
             elif msg_type in ("ai", "AIMessageChunk"):
                 outgoing.append({"peer_id": assistant_peer, "content": text[: self._config.message_char_limit]})
         if not outgoing:
             return
-        session_id = f"df-{_stable_id(thread_id)}"
+        if len(outgoing) > _MAX_WRITE_MESSAGES:
+            outgoing = outgoing[-_MAX_WRITE_MESSAGES:]
+            truncated = True
+        session_id = self._identity.session(thread_id)
         try:
             self._client.get_or_create_peer(workspace, user_peer)
             self._client.get_or_create_peer(workspace, assistant_peer)
             self._client.get_or_create_session(workspace, session_id)
             self._client.set_session_peers(workspace, session_id, [user_peer, assistant_peer])
             self._client.add_messages(workspace, session_id, outgoing)
-        except MemoryManagerError:
-            raise
+            self._record_probe_success()
+            try:
+                self._observe(
+                    workspace=workspace,
+                    operation="add",
+                    status="succeeded",
+                    # Writes are not projected into model context. Record
+                    # bounded status/count evidence without hashing raw
+                    # conversation content as though it were an injection.
+                    safe_projection=None,
+                    item_count=len(outgoing),
+                    truncated=truncated,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "honcho memory write observation append failed code=honcho_memory_recall_failed error_class=%s",
+                    type(exc).__name__,
+                )
         except Exception as exc:
-            logger.warning("honcho memory: write failed for thread %s: %s", thread_id, exc)
+            self._record_probe_failure("honcho_request_failed")
+            try:
+                self._observe(
+                    workspace=workspace,
+                    operation="add",
+                    status="failed_open",
+                    safe_projection=None,
+                    item_count=None,
+                    truncated=truncated,
+                )
+            except Exception:
+                pass
+            logger.warning(
+                "honcho memory write failed code=honcho_request_failed error_class=%s",
+                type(exc).__name__,
+            )
 
     # ── Tier 1: read ─────────────────────────────────────────────────────
     def get_context(
@@ -202,8 +363,28 @@ class HonchoMemoryManager(MemoryManager):
         workspace = self._workspace(user_id)
         if workspace is None or not user_id:
             return ""
-        representation = self._read_or_fallback("", lambda: self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25))
-        return representation.strip()[: self._config.max_injection_chars]
+        succeeded, representation = self._provider_read(
+            workspace=workspace,
+            operation="get_context",
+            fn=lambda: self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25),
+        )
+        if not succeeded:
+            return ""
+        projected, truncated = self._safe_text(
+            representation,
+            max_chars=self._config.max_injection_chars,
+        )
+        status = "succeeded" if projected else "empty"
+        if not self._observe_read(
+            workspace=workspace,
+            operation="get_context",
+            status=status,
+            safe_projection=projected or None,
+            item_count=1 if projected else 0,
+            truncated=truncated,
+        ):
+            return ""
+        return projected
 
     # ── Tier 2 ───────────────────────────────────────────────────────────
     def search(
@@ -218,18 +399,31 @@ class HonchoMemoryManager(MemoryManager):
         workspace = self._workspace(user_id)
         if workspace is None:
             return []
-        results = self._read_or_fallback([], lambda: self._client.search(workspace, query, limit=top_k))
-        return [
-            {
-                "content": item.get("content", ""),
-                "category": category or "memory",
-                "session_id": item.get("session_id"),
-                "peer_id": item.get("peer_id"),
-                "created_at": item.get("created_at"),
-            }
-            for item in results
-            if isinstance(item, dict)
-        ][:top_k]
+        effective_top_k = max(0, min(top_k, _MAX_SEARCH_RESULTS))
+        succeeded, results = self._provider_read(
+            workspace=workspace,
+            operation="search",
+            fn=lambda: self._client.search(workspace, query, limit=effective_top_k),
+        )
+        if not succeeded:
+            return []
+        projected, truncated = self._safe_search_results(
+            results,
+            top_k=effective_top_k,
+            category=category,
+        )
+        result_count = len(results) if isinstance(results, list) else 0
+        truncated = truncated or (top_k > effective_top_k and result_count >= effective_top_k)
+        if not self._observe_read(
+            workspace=workspace,
+            operation="search",
+            status="succeeded" if projected else "empty",
+            safe_projection=projected or None,
+            item_count=len(projected),
+            truncated=truncated,
+        ):
+            return []
+        return projected
 
     def get_memory(
         self,
@@ -246,14 +440,31 @@ class HonchoMemoryManager(MemoryManager):
         workspace = self._workspace(user_id)
         if workspace is None or not user_id:
             return empty
-        representation = self._read_or_fallback(None, lambda: self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25))
-        if representation is None:  # fail-open fallback: keep the noop-shaped doc
+        succeeded, representation = self._provider_read(
+            workspace=workspace,
+            operation="get_memory",
+            fn=lambda: self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25),
+        )
+        if not succeeded:
+            return empty
+        projected, truncated = self._safe_text(
+            representation,
+            max_chars=self._config.max_injection_chars,
+        )
+        if not self._observe_read(
+            workspace=workspace,
+            operation="get_memory",
+            status="succeeded" if projected else "empty",
+            safe_projection=projected or None,
+            item_count=1 if projected else 0,
+            truncated=truncated,
+        ):
             return empty
         now = _now_iso()
         return {
             "facts": [],
             "lastUpdated": now,
-            "user": {"workContext": {"summary": representation.strip()[: self._config.max_injection_chars], "updatedAt": now}},
+            "user": {"workContext": {"summary": projected, "updatedAt": now}},
             "history": {},
         }
 
@@ -264,6 +475,40 @@ class HonchoMemoryManager(MemoryManager):
     def close(self) -> None:
         """Release the HTTP client (gateway shutdown hook)."""
         self._client.close()
+
+    def safe_diagnostics(self) -> dict[str, object]:
+        """Return the bounded operator projection; never provider/user data."""
+
+        with self._health_lock:
+            last_successful = self._last_successful_probe_at
+            last_failed = self._last_failed_probe_at
+            last_error_code = self._last_error_code
+        if self._config.base_url.lower().startswith("https://"):
+            transport_security = "https"
+        elif self._config.api_key:
+            transport_security = "insecure_local_http"
+        else:
+            transport_security = "http_without_credentials"
+        if last_error_code is not None:
+            operational_status = "degraded"
+        elif last_successful is not None:
+            operational_status = "available"
+        else:
+            operational_status = "not_observed"
+        return {
+            **dict(self._identity.safe_diagnostics()),
+            "backend": "honcho",
+            "selected": True,
+            "initialized": True,
+            "dependency_role": "mutable_contextual_memory",
+            "durable_dependency": False,
+            "transport_security": transport_security,
+            "read_failure_policy": "fail_closed" if self._config.read_fail_closed else "fail_open",
+            "operational_status": operational_status,
+            "last_successful_probe_at": last_successful,
+            "last_failed_probe_at": last_failed,
+            "last_error_code": last_error_code,
+        }
 
     # ── async offload (blocking-io gate: never run httpx on the event loop) ──
     async def aadd(

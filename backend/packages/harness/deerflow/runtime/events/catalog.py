@@ -63,6 +63,7 @@ LLM_AI_RESPONSE_EVENT = RunEventDefinition("llm.ai.response", "message")
 LLM_TOOL_RESULT_EVENT = RunEventDefinition("llm.tool.result", "message")
 LLM_ERROR_EVENT = RunEventDefinition("llm.error", "trace")
 MEMORY_CONTEXT_EVENT = RunEventDefinition("context:memory", "context")
+MEMORY_OBSERVATION_EVENT = RunEventDefinition("memory.observation.v1", "context")
 
 SUBAGENT_START_EVENT = RunEventDefinition("subagent.start", "subagent")
 SUBAGENT_STEP_EVENT = RunEventDefinition("subagent.step", "subagent")
@@ -101,6 +102,7 @@ JOURNAL_RUN_EVENT_DEFINITIONS = (
     LLM_TOOL_RESULT_EVENT,
     LLM_ERROR_EVENT,
     MEMORY_CONTEXT_EVENT,
+    MEMORY_OBSERVATION_EVENT,
 )
 
 SUBAGENT_RUN_EVENT_DEFINITIONS = (

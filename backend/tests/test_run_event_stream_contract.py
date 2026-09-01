@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from deerflow_extension_api import TenantReferenceV1
 from jsonschema import Draft202012Validator, FormatChecker
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
@@ -28,6 +29,7 @@ from deerflow.runtime.events.catalog import (
 )
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
+from deerflow.runtime.memory_observation import MemoryObservationV1
 from deerflow.runtime.tool_evidence import (
     DurableToolReceiptV1,
     ToolAttemptContextV1,
@@ -391,6 +393,26 @@ async def test_run_journal_observed_events_exactly_match_its_catalog():
     journal.on_chain_error(ValueError("run failed"), run_id=uuid4())
     journal.on_chain_end({"messages": []}, run_id=root_run_id, parent_run_id=None)
     journal.record_memory_context(content_sha256="a" * 64)
+    await journal.persist_memory_observations(
+        (
+            MemoryObservationV1(
+                version=1,
+                backend="honcho",
+                tenant=TenantReferenceV1(
+                    version=1,
+                    public_ref=f"tenant-{'b' * 16}",
+                    digest="b" * 64,
+                ),
+                workspace_ref=f"honcho-workspace-{'c' * 24}",
+                operation="get_context",
+                status="succeeded",
+                safe_projection_digest="d" * 64,
+                item_count=1,
+                truncated=False,
+                occurred_at=datetime(2026, 8, 31, tzinfo=UTC),
+            ),
+        )
+    )
     await journal.flush()
 
     events = await store.list_events("thread-1", "run-1")

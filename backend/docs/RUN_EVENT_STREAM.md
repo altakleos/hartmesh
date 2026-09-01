@@ -182,7 +182,7 @@ through run-event or specialized APIs:
 | `outputs` | Root graph completion output. |
 | `error` | Callback-observed failure evidence. |
 | `middleware` | Middleware state-change audit evidence. |
-| `context` | Effective hidden-context identity. |
+| `context` | Effective hidden-context identity and bounded external-memory audit evidence. |
 | `subagent` | Subagent lifecycle and step history. |
 | `tool` | Bounded durable tool-attempt start/outcome evidence. |
 | `workspace` | Workspace/output file-change evidence. |
@@ -201,6 +201,7 @@ through run-event or specialized APIs:
 | `llm.tool.result` | `message` | `on_tool_end()` |
 | `llm.error` | `trace` | `on_llm_error()` |
 | `context:memory` | `context` | `record_memory_context()` |
+| `memory.observation.v1` | `context` | `persist_memory_observations()` for tenant-bound Honcho operations |
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
 | `tool_receipt.started.v1` | `tool` | `RunEventToolReceiptSink.reserve_started()` |
 | `tool_receipt.outcome.v1` | `tool` | `RunEventToolReceiptSink.record_outcome()` |
@@ -212,6 +213,33 @@ contribution IDs, and bounded persistable safe evidence references; transient
 headers and MCP arguments are excluded. The pattern is intentionally open so
 new middleware tags are additive. Because the full event type is limited to 32
 characters and `middleware:` uses 11, a tag must contain 1-21 characters.
+
+### External memory observations
+
+Accepted durable runs bind Honcho's portable operation callback to their
+`RunJournal`. Each completed `get_context`, `search`, `get_memory`, or `add`
+operation admitted through that trusted boundary emits one
+`memory.observation.v1` event. The event contains the server-owned tenant
+reference, a pseudonymous workspace reference, operation and bounded status,
+an optional projection digest, optional item count, truncation flag, and
+timestamp. It never contains raw workspace names, memory text, user IDs,
+prompts, credentials, or provider errors. Write observations deliberately omit
+the projection digest so low-entropy written content is not turned into a
+guessable oracle.
+
+Candidate middleware reads are not admitted operations yet: they stage their
+observation in the offloaded worker and commit it only after the worker returns
+before its timeout. The
+journal flushes prior callback rows, then awaits the observation batch's real
+event-store write before the candidate memory can enter model context. A late
+worker completion after timeout is discarded and emits no observation.
+Direct durable reads likewise wait for the acknowledged store write.
+
+Retries are separate observations because the external memory is mutable.
+Ordinary non-durable calls have no run journal and do not emit this event. An
+observation persistence failure follows the configured Honcho failure policy:
+the operation fails closed, or its otherwise successful result is discarded
+and reported through the normal fail-open path.
 
 ### Opaque Run Outputs
 
@@ -261,7 +289,7 @@ Schema. It is the authoritative field-level reference.
 | Per-run message clients | Thread-scoped and stateless run message endpoints call `list_messages_by_run()`. |
 | Run debug/audit | `GET /api/threads/{thread_id}/runs/{run_id}/events` calls `list_events()` and supports `event_types`, `task_id`, `limit`, and `after_seq`. |
 | Historical subtask cards | Fetch `subagent.step` through the run-events endpoint, filtered and paginated by `task_id`. |
-| Memory audit | Filters run events to `context:memory` and compares `content_sha256`; full memory text is not duplicated into the event store. |
+| Memory audit | Filters run events to `context:memory` to compare the frozen hidden block's `content_sha256`, or to `memory.observation.v1` to audit bounded tenant-bound Honcho operation evidence; full memory text is not duplicated into the event store. |
 | Workspace review | `GET /api/threads/{thread_id}/runs/{run_id}/workspace-changes` projects the latest `workspace_changes` payload. |
 | Authorized durable receipt page | `GET /api/runtime/v1/invocations/{run_id}?include_tool_receipts=true` pairs starts/outcomes with an independently scoped cursor and a 100-item cap. |
 

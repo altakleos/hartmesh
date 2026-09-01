@@ -113,6 +113,48 @@ is never searched or copied automatically. Follow the bounded inventory,
 offline copy, and verification procedure in
 [Server-Owned Tenant Identity](TENANT_IDENTITY.md#database-binding-and-migration).
 
+### Honcho contextual memory
+
+Select the optional external backend with `memory.manager_class: honcho`.
+The Gateway derives its workspace namespace from `deployment.tenant_id`; the
+reserved `_hartmesh_tenant` projection is server-owned and must not appear in
+operator or API-written `backend_config`. Durable production fails startup if
+the projection is unavailable, malformed, or conflicts with the deprecated
+`workspace_prefix`.
+
+```yaml
+memory:
+  enabled: true
+  manager_class: honcho
+  mode: middleware
+  backend_config:
+    base_url: https://api.honcho.example
+    api_key: $HONCHO_API_KEY
+    assistant_peer: deerflow
+    message_char_limit: 8000
+    max_injection_chars: 6000
+    timeout_seconds: 10
+    connect_timeout_seconds: 3
+    failure_policy:
+      read: fail_open
+```
+
+Every default workspace is the pseudonymous tenant namespace plus a
+collision-resistant user component. Production `workspace_overrides` may only
+repeat the exact derived workspace for that user; there is no cross-tenant or
+cross-user sharing switch. Local sharing requires `deployment.profile:
+local_development`, a custom override, and the loudly named
+`allow_local_shared_workspaces: true` opt-in. An API key requires HTTPS in
+production. Startup validates configuration but does not probe the provider.
+
+Honcho supplies mutable contextual memory. It is tenant- and user-scoped, but it is not HartMesh's source of truth for admission, checkpoints, invocation status, authorization, or audit evidence.
+
+Accepted durable runs persist only bounded `memory.observation.v1` metadata,
+not memory/query text. Health, readiness, and deployment reports show Honcho
+as an optional contextual backend, not a durable dependency; a degraded
+fail-open Honcho does not make overall readiness fail. Namespace upgrades deliberately have no dual-read;
+use the documented [dry-run mapping and provider-copy procedure](../packages/harness/deerflow/agents/memory/backends/honcho/README.md#existing-workspace-migration).
+
 ### Extensions
 
 MCP servers and skill enabled states live in `extensions_config.json`, separate

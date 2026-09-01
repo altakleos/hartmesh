@@ -22,13 +22,20 @@ from unittest import mock
 import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from deerflow.agents.lead_agent import prompt as lead_agent_prompt
+from deerflow.agents.memory.manager import MemoryManagerError
+from deerflow.agents.memory.observations import (
+    bind_memory_observation_sink,
+    observe_honcho_memory,
+)
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
     DynamicContextMiddleware,
 )
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 pytestmark = pytest.mark.asyncio
 
@@ -57,7 +64,7 @@ async def test_abefore_agent_does_not_block_event_loop() -> None:
 
     with (
         mock.patch.object(mw, "_build_full_reminder", slow_build_reminder),
-        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""),
+        mock.patch.object(lead_agent_prompt, "_get_memory_context", return_value=""),
     ):
         agent = await asyncio.to_thread(
             lambda: create_agent(
@@ -84,7 +91,7 @@ async def test_abefore_agent_returns_same_result_as_before_agent() -> None:
     runtime = SimpleNamespace(context={})
 
     with (
-        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""),
+        mock.patch.object(lead_agent_prompt, "_get_memory_context", return_value=""),
         mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
     ):
         mock_dt.now.return_value.strftime.return_value = "2026-06-05, Friday"
@@ -148,6 +155,142 @@ async def test_abefore_agent_returns_none_on_timeout() -> None:
     release.set()
     assert await asyncio.to_thread(finished.wait, 1)
     journal.record_memory_context.assert_not_called()
+
+
+async def test_timed_out_honcho_read_emits_no_late_observation() -> None:
+    """Content discarded by the timeout must not gain injection evidence later."""
+
+    mw = DynamicContextMiddleware()
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    observations: list[object] = []
+
+    class Sink:
+        async def persist_memory_observations(self, batch: object) -> None:
+            observations.extend(batch)
+
+    def blocking_inject(state, runtime=None):
+        started.set()
+        release.wait(timeout=2)
+        try:
+            observe_honcho_memory(
+                workspace="workspace-safe",
+                operation="get_context",
+                status="succeeded",
+                safe_projection="late context",
+                item_count=1,
+                truncated=False,
+            )
+            return {"messages": [HumanMessage(content="late context")]}
+        finally:
+            finished.set()
+
+    identity = TenantIdentityV1.from_canonical_id("customer-alpha")
+    with (
+        bind_memory_observation_sink(Sink(), identity.to_persisted_reference()),
+        mock.patch.object(mw, "_inject", blocking_inject),
+        mock.patch(
+            "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
+            0.01,
+        ),
+    ):
+        result = await mw.abefore_agent(
+            {"messages": [HumanMessage(content="Hello", id="msg-1")]},
+            SimpleNamespace(context={}),
+        )
+
+    assert started.is_set()
+    assert result is None
+    release.set()
+    assert await asyncio.to_thread(finished.wait, 1)
+    assert observations == []
+
+
+async def test_completed_injection_persists_staged_observation_before_return() -> None:
+    mw = DynamicContextMiddleware()
+    observations: list[object] = []
+
+    class Sink:
+        async def persist_memory_observations(self, batch: object) -> None:
+            observations.extend(batch)
+
+    def observed_inject(state, runtime=None):
+        observe_honcho_memory(
+            workspace="workspace-safe",
+            operation="get_context",
+            status="succeeded",
+            safe_projection="bounded context",
+            item_count=1,
+            truncated=False,
+        )
+        return {"messages": [HumanMessage(content="bounded context", id="msg-1__memory", additional_kwargs={_DYNAMIC_CONTEXT_REMINDER_KEY: True})]}
+
+    identity = TenantIdentityV1.from_canonical_id("customer-alpha")
+    with (
+        bind_memory_observation_sink(Sink(), identity.to_persisted_reference()),
+        mock.patch.object(mw, "_inject", observed_inject),
+    ):
+        result = await mw.abefore_agent(
+            {"messages": [HumanMessage(content="Hello", id="msg-1")]},
+            SimpleNamespace(context={}),
+        )
+
+    assert result is not None
+    assert len(observations) == 1
+    assert observations[0].safe_projection_digest == hashlib.sha256(b"bounded context").hexdigest()
+
+
+@pytest.mark.parametrize("fail_closed", [False, True])
+async def test_staged_observation_store_failure_applies_read_policy(
+    fail_closed: bool,
+) -> None:
+    mw = DynamicContextMiddleware()
+
+    class Sink:
+        async def persist_memory_observations(self, batch: object) -> None:
+            raise RuntimeError("event store unavailable")
+
+    def observed_inject(state, runtime=None):
+        observe_honcho_memory(
+            workspace="workspace-safe",
+            operation="get_context",
+            status="succeeded",
+            safe_projection="bounded context",
+            item_count=1,
+            truncated=False,
+        )
+        return {
+            "messages": [
+                SystemMessage(content="date", id="msg-1"),
+                HumanMessage(
+                    content="bounded context",
+                    id="msg-1__memory",
+                    additional_kwargs={_DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                ),
+                HumanMessage(content="Hello", id="msg-1__user"),
+            ]
+        }
+
+    identity = TenantIdentityV1.from_canonical_id("customer-alpha")
+    with (
+        bind_memory_observation_sink(Sink(), identity.to_persisted_reference()),
+        mock.patch.object(mw, "_inject", observed_inject),
+        mock.patch.object(mw, "_memory_read_fail_closed", return_value=fail_closed),
+    ):
+        if fail_closed:
+            with pytest.raises(MemoryManagerError, match="honcho_memory_recall_failed"):
+                await mw.abefore_agent(
+                    {"messages": [HumanMessage(content="Hello", id="msg-1")]},
+                    SimpleNamespace(context={}),
+                )
+        else:
+            result = await mw.abefore_agent(
+                {"messages": [HumanMessage(content="Hello", id="msg-1")]},
+                SimpleNamespace(context={}),
+            )
+            assert result is not None
+            assert [message.id for message in result["messages"]] == ["msg-1", "msg-1__user"]
 
 
 async def test_abefore_agent_records_checkpointed_memory_on_timeout() -> None:

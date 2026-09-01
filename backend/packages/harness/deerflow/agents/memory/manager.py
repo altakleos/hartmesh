@@ -831,6 +831,7 @@ def _collect_host_hooks() -> dict[str, Any]:
     of its own) -- building an unused default on every startup would waste
     time. The others are direct values (cheap function refs).
     """
+    from deerflow.agents.memory.observations import observe_honcho_memory
     from deerflow.trace_context import request_trace_context
 
     return {
@@ -839,11 +840,39 @@ def _collect_host_hooks() -> dict[str, Any]:
         "trace_context_manager": request_trace_context,
         "host_llm_factory": _host_default_llm,
         "extraction_callback": _host_default_extraction_callback,
+        "memory_observer": observe_honcho_memory,
     }
 
 
 # ── Singleton factory ─────────────────────────────────────────────────────
-def get_memory_manager() -> MemoryManager:
+def _validate_cached_manager_tenant(
+    manager: MemoryManager,
+    tenant_identity: Any | None,
+    deployment_profile: Any | None,
+) -> None:
+    from deerflow.agents.memory.backends.honcho.honcho_manager import (
+        HonchoMemoryManager,
+    )
+
+    if not isinstance(manager, HonchoMemoryManager):
+        return
+    profile_value = getattr(deployment_profile, "value", deployment_profile)
+    if profile_value is not None and profile_value not in {
+        "local_development",
+        "durable_production",
+    }:
+        raise ValueError("unknown deployment profile")
+    manager.validate_tenant_binding(
+        expected_tenant_digest=getattr(tenant_identity, "digest", None),
+        required=profile_value == "durable_production" or tenant_identity is not None,
+    )
+
+
+def get_memory_manager(
+    *,
+    tenant_identity: Any | None = None,
+    deployment_profile: Any | None = None,
+) -> MemoryManager:
     """Return the singleton :class:`MemoryManager` for the active config.
 
     Reads ``MemoryConfig.manager_class`` and resolves it via
@@ -853,6 +882,11 @@ def get_memory_manager() -> MemoryManager:
     """
     global _memory_manager
     if _memory_manager is not None:
+        _validate_cached_manager_tenant(
+            _memory_manager,
+            tenant_identity,
+            deployment_profile,
+        )
         return _memory_manager
 
     # deer-flow is multi-threaded: memory injection runs via asyncio.to_thread,
@@ -863,12 +897,46 @@ def get_memory_manager() -> MemoryManager:
     # connections) constructed here in __init__.
     with _manager_lock:
         if _memory_manager is not None:
+            _validate_cached_manager_tenant(
+                _memory_manager,
+                tenant_identity,
+                deployment_profile,
+            )
             return _memory_manager
 
         cfg = get_memory_config()
         manager_class = cfg.manager_class
         cls = _resolve_manager_class(manager_class)
         backend_config = dict(cfg.backend_config or {})
+        from deerflow.agents.memory.backends.honcho.honcho_manager import (
+            HonchoMemoryManager,
+        )
+
+        if issubclass(cls, HonchoMemoryManager):
+            profile_value = getattr(deployment_profile, "value", deployment_profile)
+            if profile_value is not None and profile_value not in {
+                "local_development",
+                "durable_production",
+            }:
+                raise ValueError("unknown deployment profile")
+            if tenant_identity is None:
+                if profile_value == "durable_production":
+                    raise ValueError("honcho_tenant_projection_required: durable production Honcho requires the Gateway's frozen tenant identity")
+                # Direct/embedded local use remains backward compatible. The
+                # Gateway always supplies its frozen tenant identity below.
+                backend_config.pop("_hartmesh_tenant", None)
+            else:
+                if deployment_profile is None:
+                    raise ValueError("deployment_profile is required with tenant_identity")
+                from deerflow.agents.memory.honcho_tenant import (
+                    project_honcho_backend_config,
+                )
+
+                backend_config = project_honcho_backend_config(
+                    backend_config,
+                    tenant_identity=tenant_identity,
+                    deployment_profile=deployment_profile,
+                )
         # Zero-config UX: default DeerMem storage to deer-flow's state dir
         # (absolute, CWD-independent) so memory lands at
         # {runtime_home}/users/{user_id}/memory.json (deer-flow's base_dir,

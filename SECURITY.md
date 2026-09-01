@@ -30,6 +30,31 @@ guessable for a small identifier space. Redis principals should be restricted
 with both key/stream and pub/sub channel ACL patterns derived from the same
 identity. See [the deployment and migration guide](backend/docs/TENANT_IDENTITY.md).
 
+## External Honcho Memory
+
+Honcho supplies mutable contextual memory. It is tenant- and user-scoped, but it is not HartMesh's source of truth for admission, checkpoints, invocation status, authorization, or audit evidence.
+
+The Gateway derives Honcho workspaces from its server-owned tenant identity and
+a collision-resistant user component. Production rejects escaping/shared
+overrides, and missing users cause no provider request. This isolates names; it
+does not make Honcho a trusted durable boundary. Honcho receives the bounded
+conversation content selected for memory and readable sanitized components of
+user/thread identifiers. Treat its service, operators, retention, deletion,
+residency, and backup controls as part of the deployment's data-processing
+boundary. Never put secrets in identifiers, workspace overrides, or the
+configured assistant peer, and keep the API key in a secret store.
+
+Durable `memory.observation.v1` events contain only a pseudonymous tenant
+reference, hashed workspace reference, operation/status, digest of the exact
+bounded read projection when one exists, count, truncation, and time. Write
+observations carry no content digest. All observations exclude memory/query
+content, raw identities, URLs, credentials, provider bodies, and exception
+messages; these observations do not make mutable provider state replayable.
+Health/deployment diagnostics do not probe Honcho and expose no host. Support
+bundles replace the endpoint with HTTP/HTTPS posture, reduce override maps to
+counts, and redact the assistant/reserved projection. Review every generated
+bundle before sharing it.
+
 ## External Sandbox Material Trust
 
 An external sandbox service is not an authority for accepted durable material.

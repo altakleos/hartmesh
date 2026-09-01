@@ -36,6 +36,7 @@ from deerflow.runtime.events.catalog import (
     LLM_HUMAN_INPUT_EVENT,
     LLM_TOOL_RESULT_EVENT,
     MEMORY_CONTEXT_EVENT,
+    MEMORY_OBSERVATION_EVENT,
     MIDDLEWARE_EVENT_PATTERN,
     RUN_END_EVENT,
     RUN_ERROR_EVENT,
@@ -845,6 +846,41 @@ class RunJournal(BaseCallbackHandler):
             content={"content_sha256": content_sha256},
         )
         self._memory_context_recorded = True
+
+    async def persist_memory_observations(
+        self,
+        observations: Sequence[Any],
+    ) -> None:
+        """Persist bounded mutable-memory observations before context use.
+
+        Unlike the frozen ``context:memory`` identity, retries are intentionally
+        not deduplicated: Honcho may return different mutable context each time.
+        Earlier callback rows are flushed first to preserve stream ordering;
+        the observation batch then reaches the store before the read result is
+        allowed into model context.
+        """
+
+        from deerflow.runtime.memory_observation import MemoryObservationV1
+
+        batch: list[dict[str, Any]] = []
+        for observation in observations:
+            if not isinstance(observation, MemoryObservationV1):
+                raise TypeError("observation must be MemoryObservationV1")
+            batch.append(
+                {
+                    "thread_id": self.thread_id,
+                    "run_id": self.run_id,
+                    "event_type": MEMORY_OBSERVATION_EVENT.event_type,
+                    "category": MEMORY_OBSERVATION_EVENT.category,
+                    "content": observation.to_event_body(),
+                    "metadata": {},
+                    "created_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        if not batch:
+            return
+        await self.flush()
+        await self._store.put_batch(batch)
 
     def _record_produced_artifacts(self, artifacts: Any, tool_name: str | None) -> None:
         """Accumulate produced artifact paths, deduped by (path, tool_name)."""
