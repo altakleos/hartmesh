@@ -127,7 +127,17 @@ async def test_postgres_registry_serializes_exact_two_and_reports_degraded() -> 
         assert exc_info.value.code == "topology_replica_count_invalid"
 
         async with engine.begin() as connection:
-            await connection.execute(sa.text("UPDATE hartmesh_topology_replicas SET heartbeat_at = CURRENT_TIMESTAMP - INTERVAL '31 seconds' WHERE replica_id = 'gateway-1'"))
+            await connection.execute(
+                sa.text(
+                    """
+                    UPDATE hartmesh_topology_replicas
+                    SET
+                      started_at = CURRENT_TIMESTAMP - INTERVAL '32 seconds',
+                      heartbeat_at = CURRENT_TIMESTAMP - INTERVAL '31 seconds'
+                    WHERE replica_id = 'gateway-1'
+                    """
+                )
+            )
         status = await first.status()
         assert status.ready is True
         assert status.qualification_ready is False
