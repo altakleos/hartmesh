@@ -311,6 +311,68 @@ def collect_extensions_summary(extensions_config_path: Path) -> Any:
     return redact_data(_read_json(extensions_config_path))
 
 
+def collect_extension_artifact_summary(project_root: Path) -> dict[str, Any]:
+    """Report bounded provenance status without paths, config, or file contents."""
+
+    try:
+        from deerflow.extensions.artifacts import (
+            ExtensionArtifactVerificationError,
+            read_artifact_manifest,
+            read_source_lock,
+        )
+    except Exception:
+        return {
+            "version": 1,
+            "source_lock": {"present": None, "valid": False},
+            "installed_manifest": {"present": None, "valid": False},
+            "source_lock_matches": None,
+            "error_code": "verifier_unavailable",
+        }
+
+    def source_document(path: Path) -> dict[str, Any]:
+        if not path.is_file():
+            return {"present": False, "valid": False}
+        try:
+            value = read_source_lock(path)
+        except ExtensionArtifactVerificationError as exc:
+            return {"present": True, "valid": False, "error_code": exc.code}
+        return {
+            "present": True,
+            "valid": True,
+            "digest": value.digest,
+            "extension_api_version": value.extension_api_version,
+            "entry_count": len(value.entries),
+        }
+
+    def artifact_document(path: Path) -> dict[str, Any]:
+        if not path.is_file():
+            return {"present": False, "valid": False}
+        try:
+            value = read_artifact_manifest(path)
+        except ExtensionArtifactVerificationError as exc:
+            return {"present": True, "valid": False, "error_code": exc.code}
+        return {
+            "present": True,
+            "valid": True,
+            "digest": value.digest,
+            "source_lock_digest": value.source_lock_digest,
+            "extension_api_version": value.extension_api_version,
+            "platform_tag": value.platform_tag,
+            "entry_count": len(value.entries),
+        }
+
+    source_lock = source_document(project_root / "backend" / "extensions.lock.json")
+    installed = artifact_document(project_root / "hartmesh" / "extension-artifacts.json")
+    source_digest = source_lock.get("digest")
+    installed_source_digest = installed.get("source_lock_digest")
+    return {
+        "version": 1,
+        "source_lock": source_lock,
+        "installed_manifest": installed,
+        "source_lock_matches": (source_digest == installed_source_digest if isinstance(source_digest, str) and isinstance(installed_source_digest, str) else None),
+    }
+
+
 def collect_git_summary(project_root: Path) -> dict[str, Any]:
     """Collect best-effort git metadata without requiring a git checkout."""
     commands = {
@@ -586,6 +648,10 @@ def _evidence_files(*, include_doctor: bool, include_thread_summary: bool) -> li
         ("environment.json", "OS, Python, and toolchain version probes."),
         ("config-summary.json", "Redacted config.yaml structure."),
         ("extensions-summary.json", "Redacted extensions_config.json structure."),
+        (
+            "extension-artifact-summary.json",
+            "Bounded extension source-lock and installed-manifest digest status.",
+        ),
         ("git.json", "Branch, commit, upstream, status, and diff-stat metadata."),
     ]
     if include_thread_summary:
@@ -609,6 +675,7 @@ def build_triage_report(
     git_summary: dict[str, Any],
     doctor: dict[str, Any] | None,
     thread_summary: dict[str, Any] | None,
+    extension_artifact_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the stable machine-readable summary that maintainers and AI read first."""
     versions = _environment_versions(environment)
@@ -643,6 +710,7 @@ def build_triage_report(
         "platform": environment.get("platform", {}),
         "config": config,
         "extensions": extensions,
+        "extension_artifacts": extension_artifact_summary,
         "git": {
             "branch": _git_stdout(git_summary, "branch"),
             "head": _git_stdout(git_summary, "head"),
@@ -959,6 +1027,7 @@ def create_support_bundle(
     environment = collect_environment(project_root)
     config_summary = collect_config_summary(config_path)
     extensions_summary = collect_extensions_summary(extensions_config_path)
+    extension_artifact_summary = collect_extension_artifact_summary(project_root)
     git_summary = collect_git_summary(project_root)
     thread_summary = collect_thread_summary(project_root, thread_id) if thread_id else None
     doctor = collect_doctor_output(project_root) if include_doctor else None
@@ -970,6 +1039,7 @@ def create_support_bundle(
         git_summary=git_summary,
         doctor=doctor,
         thread_summary=thread_summary,
+        extension_artifact_summary=extension_artifact_summary,
     )
 
     issue_summary = render_issue_summary(triage)
@@ -983,6 +1053,7 @@ def create_support_bundle(
         _write_json(zf, "environment", environment)
         _write_json(zf, "config-summary", config_summary)
         _write_json(zf, "extensions-summary", extensions_summary)
+        _write_json(zf, "extension-artifact-summary", extension_artifact_summary)
         _write_json(zf, "git", git_summary)
         if thread_summary is not None:
             _write_json(zf, "thread-summary", thread_summary)

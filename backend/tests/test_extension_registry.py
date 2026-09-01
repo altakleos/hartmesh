@@ -47,11 +47,54 @@ def test_task_scoped_contributions_require_a_task_store(register):
 def test_entries_carry_their_source():
     registry = ExtensionRegistry()
     contributor = _Contributor("mw")
-    with registry.attributed_to("demo_ext:install"):
+    source_entry_digest = "sha256:" + ("a" * 64)
+    with registry.attributed_to(
+        "demo_ext:install",
+        package_name="demo-ext",
+        package_version="1.0.0",
+        source_entry_digest=source_entry_digest,
+    ):
         registry.middlewares(contributor)
     loaded = registry.build()
     assert loaded.middleware_contributors == (("demo_ext:install", contributor),)
     assert loaded.has_middleware_contributors is True
+    assert len(loaded.contributions) == 1
+    registration = loaded.contributions[0]
+    assert registration.contribution_type == "middleware"
+    assert registration.contribution_id is None
+    assert registration.package_name == "demo-ext"
+    assert registration.package_version == "1.0.0"
+    assert registration.source_entry_digest == source_entry_digest
+
+
+@pytest.mark.parametrize(
+    ("contribution_type", "register"),
+    [
+        ("middleware", lambda registry, item: registry.middlewares(item)),
+        ("task_lifecycle", lambda registry, item: registry.task_lifecycle(item)),
+        ("system_model_observer", lambda registry, item: registry.system_model_observer(item)),
+        ("agent_assembly_observer", lambda registry, item: registry.agent_assembly_observer(item)),
+        ("context_compaction_observer", lambda registry, item: registry.context_compaction_observer(item)),
+        ("service", lambda registry, item: registry.service(item)),
+        ("router", lambda registry, item: registry.routers((item,))),
+    ],
+)
+def test_plain_contribution_kinds_retain_source_entry_attribution(
+    contribution_type,
+    register,
+) -> None:
+    registry = ExtensionRegistry()
+    source_entry_digest = "sha256:" + ("b" * 64)
+    with registry.attributed_to(
+        "demo_ext:install",
+        source_entry_digest=source_entry_digest,
+    ):
+        register(registry, _Contributor(contribution_type))
+
+    contribution = registry.build().contributions[0]
+
+    assert contribution.contribution_type == contribution_type
+    assert contribution.source_entry_digest == source_entry_digest
 
 
 def test_task_lifecycle_entries_are_attributed_and_require_task_storage():
@@ -128,6 +171,7 @@ def test_rollback_restores_all_registration_buckets_positionally():
     assert loaded.system_model_observers == ()
     assert loaded.services == ()
     assert loaded.routers == ()
+    assert [item.source for item in loaded.contributions] == ["keep:install"]
 
 
 def test_registration_order_is_preserved():
@@ -161,6 +205,7 @@ def test_discard_removes_every_entry_of_one_source():
     assert loaded.system_model_observers == ()
     assert loaded.services == ()
     assert loaded.routers == ()
+    assert {item.source for item in loaded.contributions} == {"good:install"}
 
 
 def test_registering_outside_attributed_to_raises():

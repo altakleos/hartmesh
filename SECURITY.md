@@ -11,6 +11,18 @@ Currently, we have two branches to maintain:
 
 Please go to https://github.com/bytedance/deer-flow/security to report the vulnerability you find.
 
+## Python Extension Provenance
+
+Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source.
+
+Production verifies the manager-owned source lock and image-embedded installed
+manifest before extension import. This detects drift; it does not sandbox code,
+vouch for a registry/Git host, or make build hooks safe. Source URLs, manifests,
+readiness, evidence, and support bundles must never contain credentials, private
+configuration, secret values or hashes, file contents, or absolute developer
+paths. Plugin secrets belong in existing Secret/env mechanisms. See
+[the provenance guide](docs/EXTENSION_ARTIFACT_PROVENANCE.md).
+
 ## Deployment Tenant Boundary
 
 Tenant identity is selected by the operator at service startup. It cannot be selected by an API caller and does not replace per-user authorization.

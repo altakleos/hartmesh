@@ -96,6 +96,54 @@ def test_durable_profile_requires_explicit_tenant_identity(tmp_path: Path) -> No
     assert "durable_one_replica requires tenant.id" in result.stderr
 
 
+def test_durable_profile_fences_enabled_extension_artifact_and_configuration(
+    tmp_path: Path,
+) -> None:
+    values = _production_values()
+    _set_config_value(
+        values,
+        ("plugins",),
+        [
+            {
+                "name": "governance",
+                "package": "hartmesh-governance-extension",
+                "use": "hartmesh_governance_extension:install",
+                "enabled": True,
+                "required": True,
+                "config": {"auditToken": "$AUDIT_TOKEN"},
+            }
+        ],
+    )
+
+    missing = _render(tmp_path, values, expect_success=False)
+    assert "enabled extensions requires expected artifact and configuration digests" in missing.stderr
+
+    artifact_digest = "sha256:" + ("c" * 64)
+    configuration_digest = "sha256:" + ("d" * 64)
+    values["extensions"] = {
+        "artifactManifestDigest": artifact_digest,
+        "configurationDigest": configuration_digest,
+    }
+    rendered = _render(tmp_path, values).stdout
+    gateway = _workload(rendered, kind="Deployment", component="gateway")
+    environment = {item["name"]: item.get("value") for item in gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert environment["DEER_FLOW_EXTENSION_ARTIFACT_MANIFEST_DIGEST"] == artifact_digest
+    assert environment["DEER_FLOW_EXTENSION_CONFIGURATION_DIGEST"] == configuration_digest
+    assert "super-secret-value" not in rendered
+
+
+def test_extension_expected_digests_are_an_exact_validated_pair(tmp_path: Path) -> None:
+    values = copy.deepcopy(_VALUES)
+    values["extensions"]["artifactManifestDigest"] = "sha256:" + ("a" * 64)
+
+    missing_pair = _render(tmp_path, values, expect_success=False)
+    assert "must be supplied together" in missing_pair.stderr
+
+    values["extensions"]["configurationDigest"] = "sha256:NOT-A-DIGEST"
+    malformed = _render(tmp_path, values, expect_success=False)
+    assert "configurationDigest must be a lowercase SHA-256 digest" in malformed.stderr
+
+
 def _set_config_value(
     values: dict[str, object],
     path: tuple[str, ...],

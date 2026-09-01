@@ -9,6 +9,15 @@ malformed authoritative contributions fail startup, while optional contributor
 diagnostics remain bounded and redacted. One frozen extension generation is
 bound to each accepted durable invocation and cannot change mid-run.
 
+Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source.
+`artifacts.py` is the single deep module for source normalization, local-tree
+hashing, uv-lock extraction, installed `RECORD` verification, safe configuration
+projection, canonical documents, and mismatch codes. Do not duplicate its uv
+parser, file walker, or projector in manager, build, loader, CI, or reporting
+code. Artifact, configuration, generation, and capability-manifest digests stay
+distinct; the capability manifest also binds every registered contribution to
+its loader-stamped source-entry digest without serializing contribution objects.
+
 Required MCP preparation remains additive to host-owned durable task lineage.
 The Capability Host may attach transient headers and record bounded accepted
 decision/evidence references, but an extension cannot construct, replace, or
@@ -28,14 +37,16 @@ cannot load; optional plugins fail open with attributed diagnostics.
 Packaged extensions use one PEP 621 entry point in the
 `deerflow.extensions` group, for example
 `example = "deerflow_extension_example:install"`. The operator CLI is dispatched from
-the existing `deerflow` console script to `extensions/cli.py` and exposes only these
-surfaces: `install SOURCE [--yes]`, `list`, `enable NAME`, `disable NAME`, and
-`remove NAME`. `NAME` resolves against the entry-point name, distribution name, or
+the existing `deerflow` console script to `extensions/cli.py` and exposes these
+surfaces: `install SOURCE [--yes]`, `list`, `enable NAME`, `disable NAME`,
+`remove NAME`, read-only `verify`, bounded `manifest [--json]`, and secret-safe
+`config-digest --config PATH`. `NAME` resolves against the entry-point name, distribution name, or
 `module:install` value. The root `make extension-*` targets are convenience wrappers;
 because they execute from `backend/`, documentation should use absolute local source
 paths with `SOURCE=` unless backend-relative behavior is intentional.
 
-`ExtensionManager` owns the package/config transaction. Install runs a controlled
+`ExtensionManager` is the only source-lock writer and owns the package/config
+transaction. Install runs a controlled
 `uv add --project <backend> --group extensions --no-workspace --no-sync -- <source>`, updates the dedicated
 `[dependency-groups].extensions` list and `uv.lock`, discovers exactly one packaging entry
 point, and inserts or adopts one
@@ -46,7 +57,11 @@ deleted snapshot — into a Gateway startup abort recoverable only through shell
 it is an explicit `install --required` opt-in rather than the managed default. Adoption of
 an existing hand-written record preserves whatever `required` the operator already chose.
 Enable/disable changes only the host-level `enabled` flag and preserves
-private configuration. Remove runs `uv remove --group extensions`, removes the plugin
+private configuration, so it changes only the deployment configuration digest
+and never `backend/extensions.lock.json`. Install/remove regenerate that source
+lock inside the same cross-process transaction as the dependency files,
+snapshot, and plugin declaration; rollback/conflict handling covers it too.
+Remove runs `uv remove --group extensions`, removes the plugin
 record, and deletes its managed source snapshot. Install validates the selected config
 file before running any uv command, because `uv add`/`uv sync` execute the package's build
 backend: a config this manager could never write to must fail before that code runs, not
@@ -129,8 +144,11 @@ targets use `uv sync --locked`; direct backend `make dev`/`make gateway` use
 locked sync and then launch with `uv run --no-sync`; the production Docker builder syncs
 the same copied backend project and lock, and both image runtime commands use
 `--no-sync`. Thus production may download locked remote artifacts while building an
-image, but production container startup never resolves or installs an extension from the
-network. Local and Docker-dev pre-start syncs may fetch missing locked artifacts.
+image. After that locked sync, the image build is the only writer of
+`/app/hartmesh/extension-artifacts.json`; startup verifies it and the packaged
+source lock before resolving any extension entry point. Production container
+startup never resolves or installs an extension from the network. Local and
+Docker-dev pre-start syncs may fetch missing locked artifacts.
 `docker/dev-entrypoint.sh` retries a failed sync once after recreating `.venv`, but keeps
 `--locked` on the retry: that repairs a broken virtualenv, not a stale lock. A second
 failure aborts with recovery instructions instead of starting uvicorn against an

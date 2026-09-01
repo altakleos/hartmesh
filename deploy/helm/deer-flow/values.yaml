@@ -63,6 +63,14 @@ deployment:
   #   scope: durable_one_replica_pod_recovery
   #   status: passed
 
+# -- Expected non-secret extension provenance for the pinned Gateway image and
+#    ordered plugins configuration. Calculate configurationDigest with
+#    `deerflow extensions config-digest --config <path>`. Both values are
+#    required in durable_one_replica when any plugin is enabled.
+extensions:
+  artifactManifestDigest: ""
+  configurationDigest: ""
+
 # -- Gateway ServiceAccount. The default account has no chart-created RBAC and
 #    does not mount an API token. Set create=false/name to select an existing
 #    least-privilege account.

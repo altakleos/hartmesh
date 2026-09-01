@@ -9,11 +9,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, warn_if_auth_disabled_enabled
+from app.gateway.auth_disabled import (
+    AUTH_SOURCE_INTERNAL,
+    warn_if_auth_disabled_enabled,
+)
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.browser_capability import ensure_browser_runtime_available
 from app.gateway.config import get_gateway_config
-from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS, CSRFMiddleware, get_configured_cors_origins
+from app.gateway.csrf_middleware import (
+    CORS_EXPOSED_HEADERS,
+    CSRFMiddleware,
+    get_configured_cors_origins,
+)
 from app.gateway.deps import langgraph_runtime
 from app.gateway.routers import (
     agents,
@@ -46,7 +53,11 @@ from app.gateway.routers import (
 from app.gateway.runtime_http import install_runtime_error_handlers
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
-from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.logging_config import (
+    DEFAULT_LOG_DATE_FORMAT,
+    DEFAULT_LOG_FORMAT,
+    configure_logging,
+)
 from deerflow.runtime.tenant_identity import (
     TenantIdentityV1,
     tenant_observability_projection,
@@ -365,7 +376,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             timeout=5,
         )
         if warmed is None:
-            logger.info("Memory backend %s has nothing to warm; skipping tiktoken warm-up", type(manager).__name__)
+            logger.info(
+                "Memory backend %s has nothing to warm; skipping tiktoken warm-up",
+                type(manager).__name__,
+            )
         elif warmed:
             logger.info("tiktoken encoding cache warmed successfully")
         else:
@@ -516,7 +530,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # Stop accepting those callbacks at the beginning of shutdown;
             # awaited task hooks remain enabled while runs and subagents drain.
             try:
-                from deerflow.extensions.notify import suspend_extension_system_observations
+                from deerflow.extensions.notify import (
+                    suspend_extension_system_observations,
+                )
 
                 suspend_extension_system_observations()
             except Exception:
@@ -824,7 +840,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     )
 
     try:
-        loaded_extensions, extension_diagnostics = load_extensions(configured_plugins)
+        loaded_extensions, extension_diagnostics = load_extensions(
+            configured_plugins,
+            deployment_profile=construction_deployment.profile,
+        )
     except ExtensionLoadError:
         # `required: true` makes the extension part of the startup contract.
         # Booting without it would silently change configured behaviour.
@@ -1201,6 +1220,13 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         payload: dict[str, object] = {
             "status": "ready" if ready else "not_ready",
             "tenant_identity": tenant_observability_projection(app.state.tenant_identity.to_persisted_reference()),
+            "extension_provenance": {
+                "version": 1,
+                "extension_generation": app.state.capability_manifest.extension_generation,
+                "capability_manifest_digest": app.state.capability_manifest.digest,
+                "artifact_manifest_digest": app.state.capability_manifest.artifact_manifest_digest,
+                "extension_configuration_digest": app.state.capability_manifest.extension_configuration_digest,
+            },
         }
         memory_diagnostics = _memory_backend_diagnostics(app)
         if memory_diagnostics is not None:

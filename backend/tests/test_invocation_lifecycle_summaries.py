@@ -75,6 +75,8 @@ def test_invocation_summary_is_strict_immutable_and_round_trips() -> None:
         "agent_revision_digest": "a" * 64,
         "extension_generation": 7,
         "extension_manifest_digest": "b" * 64,
+        "extension_artifact_manifest_digest": None,
+        "extension_configuration_digest": None,
         "caller_intent_digest": "c" * 64,
         "accepted_context_digest": "d" * 64,
         "authorization_evidence_digests": ["e" * 64],
@@ -232,7 +234,9 @@ def test_invocation_summary_rejects_invalid_assembly_projection(evidence, status
 
 
 @pytest.mark.parametrize("construction", ["direct", "wire"])
-def test_invocation_summary_rejects_null_authorization_evidence_members(construction: str) -> None:
+def test_invocation_summary_rejects_null_authorization_evidence_members(
+    construction: str,
+) -> None:
     from deerflow_runtime_api import InvocationSummaryV1, record_from_dict
 
     values = {
@@ -265,7 +269,9 @@ def test_invocation_summary_rejects_null_authorization_evidence_members(construc
         tuple(f"{index:064x}" for index in range(65)),
     ],
 )
-def test_invocation_summary_bounds_unique_authorization_evidence(digests: tuple[str, ...]) -> None:
+def test_invocation_summary_bounds_unique_authorization_evidence(
+    digests: tuple[str, ...],
+) -> None:
     from deerflow_runtime_api import InvocationSummaryV1
 
     with pytest.raises(ValueError, match="authorization evidence"):
@@ -300,7 +306,11 @@ def test_correlation_reference_snapshots_nested_caller_values() -> None:
 
 
 def test_observation_carries_typed_summaries_and_reads_legacy_wire() -> None:
-    from deerflow_runtime_api import InvocationObservation, InvocationSummaryV1, record_from_dict
+    from deerflow_runtime_api import (
+        InvocationObservation,
+        InvocationSummaryV1,
+        record_from_dict,
+    )
 
     summary = InvocationSummaryV1(
         run_id="run-1",
@@ -428,7 +438,10 @@ def _accepted_fields(source_kind: str, source_id: str) -> dict[str, object]:
 
 
 def _persisted_assembly_evidence() -> tuple[dict[str, object], str]:
-    from deerflow.runtime.assembly_evidence import AssemblyEvidenceV1, assembly_evidence_digest
+    from deerflow.runtime.assembly_evidence import (
+        AssemblyEvidenceV1,
+        assembly_evidence_digest,
+    )
 
     evidence = AssemblyEvidenceV1(
         version=1,
@@ -800,7 +813,11 @@ async def test_summary_projects_each_production_source_mapping_and_safe_correlat
     expected: tuple[tuple[str, str], ...],
 ) -> None:
     from app.gateway.services import _base_origin_references
-    from app.runtime.invocation import InternalLaunchIntent, InternalNativeChannelFacts, InternalSourceKind
+    from app.runtime.invocation import (
+        InternalLaunchIntent,
+        InternalNativeChannelFacts,
+        InternalSourceKind,
+    )
     from deerflow.runtime.runs.lifecycle_query import LifecycleQuery
     from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -855,7 +872,9 @@ async def test_summary_projects_each_production_source_mapping_and_safe_correlat
 
 
 @pytest.mark.anyio
-async def test_sql_context_page_loads_summary_rows_only_for_bounded_page_ids(tmp_path) -> None:
+async def test_sql_context_page_loads_summary_rows_only_for_bounded_page_ids(
+    tmp_path,
+) -> None:
     from deerflow.persistence.base import Base
     from deerflow.persistence.run.sql import RunRepository
     from deerflow.runtime.runs.lifecycle_query import LifecycleQuery
@@ -910,7 +929,10 @@ async def test_in_process_observation_maps_source_filter_and_typed_summaries() -
 
     from app.runtime.api import InProcessInvocationRuntime
     from app.runtime.invocation import InternalLifecycleObservation
-    from deerflow.runtime.runs.lifecycle_query import LifecyclePage, encode_lifecycle_cursor
+    from deerflow.runtime.runs.lifecycle_query import (
+        LifecyclePage,
+        encode_lifecycle_cursor,
+    )
 
     class Runtime:
         async def observe_context_lifecycle(self, query):
@@ -919,7 +941,14 @@ async def test_in_process_observation_maps_source_filter_and_typed_summaries() -
             return InternalLifecycleObservation(
                 record=None,
                 page=LifecyclePage(
-                    snapshots=({"run_id": "run-1", "thread_id": "thread-1", "status": "pending", "state_version": 1},),
+                    snapshots=(
+                        {
+                            "run_id": "run-1",
+                            "thread_id": "thread-1",
+                            "status": "pending",
+                            "state_version": 1,
+                        },
+                    ),
                     summaries=(
                         {
                             "run_id": "run-1",
@@ -927,7 +956,13 @@ async def test_in_process_observation_maps_source_filter_and_typed_summaries() -
                             "status": "pending",
                             "state_version": 1,
                             "source_kind": "native_channel",
-                            "correlation_references": ({"namespace": "origin", "key": "provider_message_id", "value": "message-1"},),
+                            "correlation_references": (
+                                {
+                                    "namespace": "origin",
+                                    "key": "provider_message_id",
+                                    "value": "message-1",
+                                },
+                            ),
                             "agent_revision_digest": "a" * 64,
                             "extension_generation": 2,
                             "extension_manifest_digest": "b" * 64,
@@ -961,11 +996,18 @@ async def test_in_process_observation_maps_source_filter_and_typed_summaries() -
 
 @pytest.mark.anyio
 async def test_in_process_observation_rejects_null_authorization_evidence_instead_of_coercing_it() -> None:
-    from deerflow_runtime_api import ContextInvocationsQuery, FailureCode, RuntimeFailure
+    from deerflow_runtime_api import (
+        ContextInvocationsQuery,
+        FailureCode,
+        RuntimeFailure,
+    )
 
     from app.runtime.api import InProcessInvocationRuntime
     from app.runtime.invocation import InternalLifecycleObservation
-    from deerflow.runtime.runs.lifecycle_query import LifecyclePage, encode_lifecycle_cursor
+    from deerflow.runtime.runs.lifecycle_query import (
+        LifecyclePage,
+        encode_lifecycle_cursor,
+    )
 
     class Runtime:
         async def observe_context_lifecycle(self, _query):
@@ -973,7 +1015,14 @@ async def test_in_process_observation_rejects_null_authorization_evidence_instea
             return InternalLifecycleObservation(
                 record=None,
                 page=LifecyclePage(
-                    snapshots=({"run_id": "run-1", "thread_id": "thread-1", "status": "pending", "state_version": 1},),
+                    snapshots=(
+                        {
+                            "run_id": "run-1",
+                            "thread_id": "thread-1",
+                            "status": "pending",
+                            "state_version": 1,
+                        },
+                    ),
                     summaries=(
                         {
                             "run_id": "run-1",
@@ -1063,7 +1112,10 @@ async def test_http_and_in_process_observations_round_trip_identically() -> None
     from app.gateway.routers import runtime_api
     from app.runtime.api import InProcessInvocationRuntime
     from app.runtime.invocation import InternalLifecycleObservation
-    from deerflow.runtime.runs.lifecycle_query import LifecyclePage, encode_lifecycle_cursor
+    from deerflow.runtime.runs.lifecycle_query import (
+        LifecyclePage,
+        encode_lifecycle_cursor,
+    )
 
     class Runtime:
         async def observe_context_lifecycle(self, query):

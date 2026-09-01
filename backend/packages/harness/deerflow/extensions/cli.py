@@ -9,6 +9,17 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+import yaml
+from deerflow_extension_api import API_VERSION
+
+from deerflow.extensions.artifacts import (
+    ExtensionArtifactVerificationError,
+    extension_configuration_digest,
+    read_artifact_manifest,
+    read_source_lock,
+    verify_installed_artifact_manifest,
+    verify_source_lock_current,
+)
 from deerflow.extensions.manager import ExtensionManager
 
 _NAME_ENV = "DEER_FLOW_EXTENSION_NAME"
@@ -41,6 +52,28 @@ def build_parser() -> argparse.ArgumentParser:
     enable.add_argument("--name-env", action="store_true", help=argparse.SUPPRESS)
     enable.add_argument("name", help="extension name, distribution, or module:install entry point")
     commands.add_parser("list", help="list configured extensions")
+    commands.add_parser(
+        "verify",
+        help="verify the source lock, installed manifest, and installed extension bytes",
+    )
+    manifest = commands.add_parser(
+        "manifest",
+        help="show bounded extension provenance status",
+    )
+    manifest.add_argument(
+        "--json",
+        action="store_true",
+        help="print the canonical installed artifact manifest",
+    )
+    config_digest = commands.add_parser(
+        "config-digest",
+        help="calculate the secret-safe deployment extension configuration digest",
+    )
+    config_digest.add_argument(
+        "--config",
+        required=True,
+        help="path to config.yaml",
+    )
     remove = commands.add_parser("remove", help="uninstall an extension and remove its config entry")
     remove.add_argument("--name-env", action="store_true", help=argparse.SUPPRESS)
     remove.add_argument("name", help="extension name, distribution, or module:install entry point")
@@ -83,6 +116,43 @@ def main(argv: Sequence[str] | None = None) -> int:
                 state = "enabled" if extension.enabled else "disabled"
                 print(f"{extension.name}\t{state}\t{extension.distribution}\t{extension.use}")
             return 0
+        if args.command == "verify":
+            source_lock_path, artifact_manifest_path = _manifest_paths(root)
+            source_lock = read_source_lock(source_lock_path)
+            verify_source_lock_current(source_lock, source_lock_path.parent)
+            manifest = read_artifact_manifest(artifact_manifest_path)
+            verify_installed_artifact_manifest(
+                source_lock,
+                manifest,
+                backend_dir=source_lock_path.parent,
+                expected_extension_api_version=API_VERSION,
+            )
+            print(f"Extension artifacts verified ({len(manifest.entries)} entries, {manifest.digest}).")
+            return 0
+        if args.command == "manifest":
+            source_lock_path, artifact_manifest_path = _manifest_paths(root)
+            source_lock = read_source_lock(source_lock_path)
+            try:
+                manifest = read_artifact_manifest(artifact_manifest_path)
+            except ExtensionArtifactVerificationError as exc:
+                if exc.code != "extension_artifact_manifest_missing":
+                    raise
+                if args.json:
+                    print(source_lock.to_json(), end="")
+                else:
+                    print(f"SOURCE LOCK\t{source_lock.digest}\t{len(source_lock.entries)} entries")
+                    print(f"INSTALLED MANIFEST\tunavailable\t{exc.code}")
+                return 0
+            if args.json:
+                print(manifest.to_json(), end="")
+            else:
+                status = "matching" if manifest.source_lock_digest == source_lock.digest else "mismatch"
+                print(f"SOURCE LOCK\t{source_lock.digest}\t{len(source_lock.entries)} entries")
+                print(f"INSTALLED MANIFEST\t{manifest.digest}\t{len(manifest.entries)} entries\t{status}")
+            return 0
+        if args.command == "config-digest":
+            print(_configuration_digest_from_file(Path(args.config)))
+            return 0
         if args.command == "remove":
             name = manager.remove(_name_argument(args))
             print(f"Removed {name}. Restart DeerFlow to apply the change.")
@@ -109,6 +179,35 @@ def _source_argument(args: argparse.Namespace) -> str:
     if source is None or not source.strip():
         raise ValueError(f"{_SOURCE_ENV} must contain an extension source")
     return source
+
+
+def _manifest_paths(root: Path) -> tuple[Path, Path]:
+    source_lock = Path(
+        os.environ.get(
+            "DEER_FLOW_EXTENSION_SOURCE_LOCK_PATH",
+            str(root / "backend" / "extensions.lock.json"),
+        )
+    )
+    artifact_manifest = Path(
+        os.environ.get(
+            "DEER_FLOW_EXTENSION_ARTIFACT_MANIFEST_PATH",
+            str(root / "hartmesh" / "extension-artifacts.json"),
+        )
+    )
+    return source_lock, artifact_manifest
+
+
+def _configuration_digest_from_file(path: Path) -> str:
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError("invalid DeerFlow config YAML") from exc
+    if not isinstance(document, dict):
+        raise ValueError("DeerFlow config root must be a mapping")
+    plugins = document.get("plugins", [])
+    if not isinstance(plugins, list):
+        raise ValueError("config.yaml plugins must be a list")
+    return extension_configuration_digest(plugins)
 
 
 def find_project_root() -> Path:

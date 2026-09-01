@@ -310,6 +310,24 @@ imagePullSecrets:
 {{- fail "config must contain one YAML object" -}}
 {{- end -}}
 {{- $deploymentConfig := (index $appConfig "deployment") | default dict -}}
+{{- $pluginsConfig := (index $appConfig "plugins") | default list -}}
+{{- $hasEnabledExtensions := false -}}
+{{- range $pluginsConfig -}}
+  {{- if and (kindIs "map" .) (or (not (hasKey . "enabled")) (index . "enabled")) -}}
+    {{- $hasEnabledExtensions = true -}}
+  {{- end -}}
+{{- end -}}
+{{- $artifactManifestDigest := .Values.extensions.artifactManifestDigest | default "" -}}
+{{- $extensionConfigurationDigest := .Values.extensions.configurationDigest | default "" -}}
+{{- if ne (not (empty $artifactManifestDigest)) (not (empty $extensionConfigurationDigest)) -}}
+{{- fail "extensions artifactManifestDigest and configurationDigest must be supplied together" -}}
+{{- end -}}
+{{- if and $artifactManifestDigest (not (regexMatch "^sha256:[0-9a-f]{64}$" $artifactManifestDigest)) -}}
+{{- fail "extensions artifactManifestDigest must be a lowercase SHA-256 digest" -}}
+{{- end -}}
+{{- if and $extensionConfigurationDigest (not (regexMatch "^sha256:[0-9a-f]{64}$" $extensionConfigurationDigest)) -}}
+{{- fail "extensions configurationDigest must be a lowercase SHA-256 digest" -}}
+{{- end -}}
 {{- $readinessConfig := (index $deploymentConfig "readiness") | default dict -}}
 {{- $shutdownConfig := (index $deploymentConfig "shutdown") | default dict -}}
 {{- $memoryConfig := (index $appConfig "memory") | default dict -}}
@@ -592,6 +610,7 @@ imagePullSecrets:
 {{- if eq $mode "durable_one_replica" -}}
   {{- if or (not $tenantId) (eq $tenantId "local") -}}{{- fail "durable_one_replica requires tenant.id to be an explicit non-local identity" -}}{{- end -}}
   {{- if not .Values.gateway.image.digest -}}{{- fail "production validation requires a gateway image digest" -}}{{- end -}}
+  {{- if and $hasEnabledExtensions (not $artifactManifestDigest) -}}{{- fail "durable_one_replica with enabled extensions requires expected artifact and configuration digests" -}}{{- end -}}
   {{- if and .Values.provisioner.enabled (not .Values.provisioner.image.digest) -}}{{- fail "production validation requires a provisioner image digest" -}}{{- end -}}
   {{- if ne $tier "shared_durable" -}}{{- fail "durable_one_replica requires shared_durable persistence" -}}{{- end -}}
   {{- if ne ((index $deploymentConfig "profile") | default "local_development") "durable_production" -}}

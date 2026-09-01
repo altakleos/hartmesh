@@ -1,0 +1,155 @@
+# Extension artifact provenance
+
+Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source.
+
+This provenance is an admission and attribution mechanism, not an extension
+sandbox, package-repository trust decision, or signature policy. Core tenant
+identity, authorization, constraints, run fencing, assembly, receipts, and MCP
+lineage remain Gateway-owned.
+
+## Four distinct identities
+
+| Identity | What it binds | Lifetime |
+| --- | --- | --- |
+| Source-lock digest | Resolved distribution/version, entry point, and registry hashes, immutable Git commit, or managed local-tree digest | Committed, platform-neutral |
+| Artifact-manifest digest | Source lock, extension API, target platform, selected artifact when available, and verified installed `RECORD` files | Built into one Gateway image |
+| Configuration digest | Complete ordered `plugins:` activation projection, including enabled/required and non-secret configuration | One deployment configuration |
+| Generation/capability digest | Successfully loaded contributions and their source-entry digests | One Gateway process |
+
+These values are never interchangeable. Newly accepted invocations persist the
+artifact/configuration/capability tuple; assembly evidence, tool receipts, MCP
+lineage, readiness, deployment reporting, and recovery carry or revalidate the
+same anchors. The capability manifest also lists every registered contribution
+kind with its loader-stamped package identity and source-entry digest; it never
+serializes the entry-point source string or a contribution object.
+
+## Owned artifacts
+
+`ExtensionManager` is the only writer of committed
+`backend/extensions.lock.json`. Install and remove update it inside the same
+cross-process transaction as `backend/pyproject.toml`, `backend/uv.lock`, the
+managed local snapshot, and the top-level `plugins:` declaration. Enable and
+disable change configuration only and leave the source lock untouched.
+
+The production image build is the only writer of
+`/app/hartmesh/extension-artifacts.json`. After `uv sync --locked`, it verifies
+each managed distribution's exact name/version, sole `deerflow.extensions`
+entry point, every hash-bearing `RECORD` entry, and all entry-point-owned Python
+or native executable files. Every owned executable must have a SHA-256 `RECORD`
+hash. Registry direct installs must name a locked archive hash, Git installs
+must carry a matching PEP 610 URL and commit, and local installs must carry the
+managed snapshot's PEP 610 file URL. It also re-hashes managed local source snapshots.
+The resulting file is copied into a read-only image layer. Startup repeats the
+bounded verification before resolving or importing any extension module and
+does not access the network. The manifest platform tag is the image
+interpreter's first normalized compatibility tag; startup rejects it when it
+does not equal the running interpreter's tag.
+
+Installed-file ownership is derived from the first component of the entry
+point's module target. It covers that top-level package tree, a matching
+top-level `<module>.py`, and adjacent `<module>.*` Python or native executable
+files (`.py`, `.pyi`, `.pyw`, `.so`, `.pyd`, `.dll`, and `.dylib`).
+`__pycache__` trees are excluded. Any owned executable missing from `RECORD`,
+or any owned `RECORD` executable missing from disk, rejects the installation.
+
+Local snapshot hashing excludes only `.git`, `.venv`, `venv`, `__pycache__`,
+and `*.pyc`, matching manager snapshot copying. It rejects links, special files,
+likely credential files, and paths outside `backend/extensions/sources/`.
+
+## Configuration projection
+
+The artifact manifest contains no plugin activation or private configuration.
+At startup HartMesh separately projects every ordered `plugins:` entry. Bounded
+JSON scalar/list/map values are retained, while secret-shaped fields are
+replaced by stable handles derived only from their field path. Secret values and
+secret-value hashes never enter a digest, manifest, log, readiness response, or
+support bundle. Unknown plugin fields, unsupported objects, non-finite numbers,
+and over-limit structures fail closed.
+
+Rotating a value under the same secret-shaped field intentionally keeps the
+configuration digest stable. Change a non-secret binding/version field when a
+rotation must fence recovery.
+
+## Operator commands
+
+Run these from `backend/` in an installed checkout:
+
+```text
+deerflow extensions verify
+deerflow extensions manifest [--json]
+deerflow extensions config-digest --config <path>
+```
+
+`verify` is read-only and exits nonzero with a stable safe code. `manifest`
+prints bounded counts/digests by default; `--json` prints the canonical
+non-secret installed manifest. `config-digest` uses the startup projector and
+prints only `sha256:<64 lowercase hex>`.
+
+In `durable_production`, a missing, malformed, stale, or mismatched embedded
+manifest always stops startup, including for an enabled plugin marked optional.
+An expected artifact or configuration digest mismatch also stops startup.
+Local development may start without a trusted installed manifest, emits one
+warning per process, and records an explicit unverified sentinel; it does not
+generate or claim trusted production provenance.
+
+## Helm and release identity
+
+The qualified chart accepts:
+
+```yaml
+extensions:
+  artifactManifestDigest: "sha256:<64 lowercase hex>"
+  configurationDigest: "sha256:<64 lowercase hex>"
+```
+
+Set the artifact value from `release-manifest.json ->
+images.backend.extension_artifact_manifest_digest`. Calculate the configuration
+value against the exact deployment `config.yaml`. `durable_one_replica` requires
+both values whenever any plugin is enabled and passes them to the Gateway only
+as expected digests; plugin secrets stay in existing Secret/env mechanisms.
+
+Release-manifest schema 2 records the pinned backend image digest, embedded
+extension artifact digest, extension API version, extension entry count, and
+OCI provenance subject. `scripts/verify_release_manifest.py` validates the
+document offline and can additionally compare an extracted embedded manifest
+and expected Gateway image digest.
+
+## Migration
+
+1. Start from a clean checkout and trusted build environment.
+2. Install/remove the current trusted sources through `ExtensionManager` so the
+   committed source lock is generated with the dependency lock and plugin
+   declarations.
+3. Run `deerflow extensions verify` in the synchronized environment and review
+   `deerflow extensions manifest`; generation records facts and grants no new
+   trust.
+4. Commit `extensions.lock.json` with `pyproject.toml`, `uv.lock`, managed local
+   snapshots, and the relevant plugin declaration.
+5. Rebuild and digest-pin the Gateway image. Read the artifact digest from
+   release-manifest schema 2.
+6. Compute the deployment configuration digest, configure both Helm expected
+   values, deploy, and confirm `/ready` reports the same four-part tuple.
+7. Enable production enforcement only after that readiness check succeeds.
+
+The feature has no production compatibility grace period: upgrading a
+`durable_production` Gateway requires an image with its embedded manifest.
+Public extension API 0.13.0 adds artifact/configuration fields additively to the
+trusted constraint context. Legacy persisted evidence remains readable where
+its versioned parser permits it, but new accepted work always records the new
+tuple.
+
+## Rollback
+
+Roll back the prior pinned Gateway image together with its matching source lock,
+artifact expected digest, configuration expected digest, and plugin
+configuration. Do not pair an old image with new digest values or regenerate a
+manifest from whichever files happen to be installed at startup. New work is
+admitted only under the process tuple; recovery on a different artifact or
+configuration fails before graph/model/tool/external work and must remain on a
+matching image or be safely failed.
+
+The standalone
+[`examples/hartmesh-governance-extension/`](../examples/hartmesh-governance-extension/)
+shows restrictive tenant-aware policy and bounded audit contributions using
+only `deerflow-extension-api`; it is a template and is never enabled
+automatically.

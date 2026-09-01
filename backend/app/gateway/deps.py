@@ -32,7 +32,13 @@ from deerflow.community.browser_automation.session import browser_multi_worker_e
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.persistence.mcp_tasks import McpTaskRepository
-from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
+from deerflow.runtime import (
+    ORPHAN_RECOVERY_STOP_REASON,
+    STARTUP_ORPHAN_RECOVERY_ERROR,
+    RunContext,
+    RunManager,
+    StreamBridge,
+)
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
 from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
@@ -207,10 +213,17 @@ async def _publish_recovered_run_stream_end(
         if stream_exists is not None:
             try:
                 if not await stream_exists(record.run_id):
-                    logger.debug("Skipping recovered stream end for %s: stream already expired", record.run_id)
+                    logger.debug(
+                        "Skipping recovered stream end for %s: stream already expired",
+                        record.run_id,
+                    )
                     continue
             except Exception:
-                logger.debug("Failed to check recovered stream existence for %s", record.run_id, exc_info=True)
+                logger.debug(
+                    "Failed to check recovered stream existence for %s",
+                    record.run_id,
+                    exc_info=True,
+                )
         try:
             await bridge.publish_end(record.run_id)
         except Exception:
@@ -308,14 +321,22 @@ async def _mark_latest_startup_recovered_threads_error(
         try:
             latest_runs = await run_manager.list_by_thread(thread_id, user_id=None, limit=1)
         except Exception:
-            logger.warning("Failed to find latest run for thread %s during run reconciliation", thread_id, exc_info=True)
+            logger.warning(
+                "Failed to find latest run for thread %s during run reconciliation",
+                thread_id,
+                exc_info=True,
+            )
             continue
         if not latest_runs or latest_runs[0].run_id not in recovered_run_ids:
             continue
         try:
             await thread_store.update_status(thread_id, "error", user_id=None)
         except Exception:
-            logger.warning("Failed to mark thread %s as error during run reconciliation", thread_id, exc_info=True)
+            logger.warning(
+                "Failed to mark thread %s as error during run reconciliation",
+                thread_id,
+                exc_info=True,
+            )
 
 
 async def _terminalize_recovered_runs(
@@ -395,9 +416,16 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         async with langgraph_runtime(app, startup_config):
             yield
     """
-    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
+    from deerflow.persistence.engine import (
+        close_engine,
+        get_session_factory,
+        init_engine_from_config,
+    )
     from deerflow.runtime import make_store, make_stream_bridge
-    from deerflow.runtime.checkpoint_mode import freeze_checkpoint_channel_mode, freeze_checkpoint_snapshot_frequency
+    from deerflow.runtime.checkpoint_mode import (
+        freeze_checkpoint_channel_mode,
+        freeze_checkpoint_snapshot_frequency,
+    )
     from deerflow.runtime.checkpointer.async_provider import make_checkpointer
     from deerflow.runtime.events.store import make_run_event_store
 
@@ -863,6 +891,11 @@ def get_run_context(request: Request) -> RunContext:
         authorization_provider=authorization_provider,
         tenant=tenant_identity.to_persisted_reference(),
         extensions=getattr(request.app.state, "extensions", None),
+        capability_manifest_digest=getattr(
+            getattr(request.app.state, "capability_manifest", None),
+            "digest",
+            None,
+        ),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
         constraint_clock=getattr(
             getattr(request.app.state, "invocation_constraints_host", None),
@@ -911,7 +944,11 @@ async def get_current_user_from_request(request: Request):
     """
     state = getattr(request, "state", None)
     state_user = getattr(state, "user", None)
-    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
+    from app.gateway.auth_disabled import (
+        AUTH_SOURCE_AUTH_DISABLED,
+        AUTH_SOURCE_INTERNAL,
+        AUTH_SOURCE_SESSION,
+    )
 
     if state_user is not None and getattr(state, "auth_source", None) in {
         AUTH_SOURCE_SESSION,
@@ -921,7 +958,12 @@ async def get_current_user_from_request(request: Request):
         return state_user
 
     from app.gateway.auth import decode_token
-    from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError, token_error_to_code
+    from app.gateway.auth.errors import (
+        AuthErrorCode,
+        AuthErrorResponse,
+        TokenError,
+        token_error_to_code,
+    )
 
     access_token = request.cookies.get("access_token")
     if not access_token:
@@ -934,7 +976,10 @@ async def get_current_user_from_request(request: Request):
     if isinstance(payload, TokenError):
         raise HTTPException(
             status_code=401,
-            detail=AuthErrorResponse(code=token_error_to_code(payload), message=f"Token error: {payload.value}").model_dump(),
+            detail=AuthErrorResponse(
+                code=token_error_to_code(payload),
+                message=f"Token error: {payload.value}",
+            ).model_dump(),
         )
 
     provider = get_local_provider()
@@ -949,7 +994,10 @@ async def get_current_user_from_request(request: Request):
     if user.token_version != payload.ver:
         raise HTTPException(
             status_code=401,
-            detail=AuthErrorResponse(code=AuthErrorCode.TOKEN_INVALID, message="Token revoked (password changed)").model_dump(),
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.TOKEN_INVALID,
+                message="Token revoked (password changed)",
+            ).model_dump(),
         )
 
     return user

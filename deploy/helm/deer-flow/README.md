@@ -97,6 +97,12 @@ gateway:
     repository: ghcr.io/<owner>/<repo>-backend
     digest: "sha256:..." # release-manifest.json -> images.backend.digest
 
+extensions:
+  # release-manifest.json -> images.backend.extension_artifact_manifest_digest
+  artifactManifestDigest: "sha256:..."
+  # `deerflow extensions config-digest --config <exact-config-path>`
+  configurationDigest: "sha256:..."
+
 frontend:
   image:
     repository: ghcr.io/<owner>/<repo>-frontend
@@ -377,6 +383,25 @@ When `persistence.home.existingClaim` is set, the chart does not create the
 home PVC. Both the Gateway home volume and provisioner `USERDATA_PVC_NAME` use
 the existing claim. Keep `persistence.home.enabled: true`, because disabling it
 also suppresses the provisioner environment variable.
+
+### Extension artifact fence
+
+Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source.
+
+The Gateway image embeds `/app/hartmesh/extension-artifacts.json` after its
+locked dependency sync. Set `extensions.artifactManifestDigest` to the value in
+release-manifest schema 2, and calculate `extensions.configurationDigest` from
+the exact ordered `plugins:` block with `deerflow extensions config-digest
+--config <path>`. Both fields require exact lowercase SHA-256 values when
+`deployment.mode=durable_one_replica` and any plugin is enabled. The rendered
+Deployment passes only these expected digests; the manifest and plugin config
+do not enter a ConfigMap through these values.
+
+Keep plugin credentials in existing Secret/env mechanisms, never in either
+digest value. A mismatch makes Gateway startup/readiness fail before extension
+import. For migration and rollback, use the matching image, source lock,
+artifact digest, configuration digest, and config as one unit; see the
+[provenance guide](../../../docs/EXTENSION_ARTIFACT_PROVENANCE.md).
 
 `extensionsConfig` is an initial seed, not a live read-only mount. An init
 container copies it into

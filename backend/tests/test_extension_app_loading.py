@@ -19,7 +19,7 @@ def _reset_extension_process_state():
 
 
 @pytest.fixture(autouse=True)
-def stub_app_config(monkeypatch):
+def stub_app_config(monkeypatch, tmp_path):
     """Keep ``create_app()`` independent of a real ``config.yaml``.
 
     The repo-root ``config.yaml`` is gitignored and absent on CI runners, so
@@ -27,23 +27,52 @@ def stub_app_config(monkeypatch):
     in CI. Tests that need a specific plugin list copy this config instead of
     loading one from disk.
     """
+    from deerflow_extension_api import API_VERSION
+
     import app.gateway.app as app_module
     from deerflow.config.app_config import AppConfig
     from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.extensions.artifacts import (
+        ExtensionSourceLockV1,
+        build_installed_artifact_manifest,
+        canonical_platform_tag,
+        write_artifact_manifest,
+        write_source_lock,
+    )
+
+    source_lock = ExtensionSourceLockV1.create(
+        extension_api_version=API_VERSION,
+        entries=(),
+    )
+    artifact_manifest = build_installed_artifact_manifest(
+        source_lock,
+        platform_tag=canonical_platform_tag(),
+    )
+    source_lock_path = tmp_path / "extensions.lock.json"
+    artifact_manifest_path = tmp_path / "extension-artifacts.json"
+    write_source_lock(source_lock_path, source_lock)
+    write_artifact_manifest(artifact_manifest_path, artifact_manifest)
+    monkeypatch.setenv("DEER_FLOW_EXTENSION_SOURCE_LOCK_PATH", str(source_lock_path))
+    monkeypatch.setenv(
+        "DEER_FLOW_EXTENSION_ARTIFACT_MANIFEST_PATH",
+        str(artifact_manifest_path),
+    )
 
     config = AppConfig(sandbox=SandboxConfig(use="test"))
     monkeypatch.setattr(app_module, "get_app_config", lambda: config)
     return config
 
 
-def test_create_app_exposes_loaded_extensions_on_app_state_and_process_singleton(monkeypatch):
+def test_create_app_exposes_loaded_extensions_on_app_state_and_process_singleton(
+    monkeypatch,
+):
     import deerflow.extensions as extensions_module
 
     loaded = ExtensionRegistry().build()
     monkeypatch.setattr(
         extensions_module,
         "load_extensions",
-        lambda plugins: (loaded, []),
+        lambda plugins, **_kwargs: (loaded, []),
     )
 
     from app.gateway.app import create_app
@@ -65,7 +94,7 @@ def test_create_app_exposes_one_canonical_live_diagnostics_list(monkeypatch):
     monkeypatch.setattr(
         extensions_module,
         "load_extensions",
-        lambda plugins: (loaded, [load_diagnostic]),
+        lambda plugins, **_kwargs: (loaded, [load_diagnostic]),
     )
 
     from app.gateway.app import create_app
@@ -109,7 +138,7 @@ def test_create_app_mounts_extension_routers_after_all_host_routes(monkeypatch):
     monkeypatch.setattr(
         extensions_module,
         "load_extensions",
-        lambda plugins: (loaded, []),
+        lambda plugins, **_kwargs: (loaded, []),
     )
 
     from app.gateway.app import create_app
@@ -138,7 +167,9 @@ def test_create_app_mounts_extension_routers_after_all_host_routes(monkeypatch):
     assert client.get("/api/extension-test/ping").status_code == 401
 
 
-def test_create_app_retains_structured_redacted_contributor_startup_diagnostic(monkeypatch):
+def test_create_app_retains_structured_redacted_contributor_startup_diagnostic(
+    monkeypatch,
+):
     from deerflow_extension_api import (
         ORIGIN_CONTRIBUTOR_CAPABILITY_API_VERSION,
         ORIGIN_CONTRIBUTOR_KIND,
@@ -161,7 +192,11 @@ def test_create_app_retains_structured_redacted_contributor_startup_diagnostic(m
             )
         )
     loaded = registry.build()
-    monkeypatch.setattr(extensions_module, "load_extensions", lambda plugins: (loaded, []))
+    monkeypatch.setattr(
+        extensions_module,
+        "load_extensions",
+        lambda plugins, **_kwargs: (loaded, []),
+    )
 
     from app.gateway.app import create_app
 
@@ -182,7 +217,7 @@ def test_create_app_fails_open_when_extension_loading_raises_unexpectedly(
 
     marker = "credential=extension-loader-secret-marker"
 
-    def _raise_unexpectedly(plugins):
+    def _raise_unexpectedly(plugins, **_kwargs):
         raise RuntimeError(marker)
 
     monkeypatch.setattr(extensions_module, "load_extensions", _raise_unexpectedly)
@@ -204,7 +239,7 @@ def test_create_app_fails_closed_when_a_required_extension_cannot_load(monkeypat
     import deerflow.extensions as extensions_module
     from app.gateway.app import create_app
 
-    def _raise_required(plugins):
+    def _raise_required(plugins, **_kwargs):
         raise extensions_module.ExtensionLoadError("required extension example_policy:install failed to install")
 
     monkeypatch.setattr(extensions_module, "load_extensions", _raise_required)
@@ -213,7 +248,9 @@ def test_create_app_fails_closed_when_a_required_extension_cannot_load(monkeypat
         create_app()
 
 
-def test_create_app_tolerates_a_missing_config_file_and_loads_no_extensions(monkeypatch):
+def test_create_app_tolerates_a_missing_config_file_and_loads_no_extensions(
+    monkeypatch,
+):
     """``create_app()`` runs at import time, so an absent config.yaml must not break it.
 
     Mirrors ``_resolve_trace_enabled_for_app_construction()``: lifespan still
@@ -230,7 +267,7 @@ def test_create_app_tolerates_a_missing_config_file_and_loads_no_extensions(monk
     observed_plugins = []
     loaded = ExtensionRegistry().build()
 
-    def _record(plugins):
+    def _record(plugins, **_kwargs):
         observed_plugins.append(plugins)
         return loaded, []
 
@@ -242,7 +279,9 @@ def test_create_app_tolerates_a_missing_config_file_and_loads_no_extensions(monk
     assert app.state.extensions is loaded
 
 
-def test_create_app_propagates_config_failures_instead_of_blaming_extension_loading(monkeypatch):
+def test_create_app_propagates_config_failures_instead_of_blaming_extension_loading(
+    monkeypatch,
+):
     """A parseable-but-broken config.yaml must not be swallowed by the fail-open guard.
 
     Extension loading is fail-open for unexpected errors, but resolving the
@@ -257,7 +296,7 @@ def test_create_app_propagates_config_failures_instead_of_blaming_extension_load
 
     monkeypatch.setattr(app_module, "get_app_config", _broken_config)
 
-    def _must_not_run(plugins):
+    def _must_not_run(plugins, **_kwargs):
         raise AssertionError("load_extensions must not run when the plugin list cannot be resolved")
 
     monkeypatch.setattr(extensions_module, "load_extensions", _must_not_run)
@@ -515,7 +554,7 @@ def _create_gateway(monkeypatch, stub_app_config, loaded, required_capabilities)
     monkeypatch.setattr(
         extensions_module,
         "load_extensions",
-        lambda plugins: (loaded, []),
+        lambda plugins, **_kwargs: (loaded, []),
     )
     config = stub_app_config.model_copy(update={"required_capabilities": list(required_capabilities)})
     monkeypatch.setattr(app_module, "get_app_config", lambda: config)

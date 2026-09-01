@@ -130,6 +130,9 @@ class ProviderInvocationConstraints:
                     extension_manifest_digest=manifest_digest,
                     extension_generation=accepted.extension_generation,
                     host_max_total_subagents=host_ceiling,
+                    tenant=trusted_context.tenant,
+                    extension_artifact_manifest_digest=(trusted_context.extension_artifact_manifest_digest),
+                    extension_configuration_digest=(trusted_context.extension_configuration_digest),
                 )
                 result = await host.project(request, runtime_enforceable=True)
             else:

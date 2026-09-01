@@ -13,6 +13,14 @@ verifies an operator-selected upstream digest into the distinct
 publisher of the deployable `<repo>-sandbox` package. Keep publishing out of
 these local scripts and keep the two manual workflows dispatch-only.
 
+`verify_release_manifest.py` owns the strict, stdlib-only offline parser for
+release-manifest schema 2 and the embedded extension artifact-manifest shape.
+The release workflow may extract the manifest from the exact backend image, but
+must call this verifier rather than independently calculating or interpreting
+its digest. Missing/unknown fields, a wrong image/artifact/API/count tuple, or a
+wrong OCI provenance subject are fatal stable-code failures. The verifier is
+read-only and performs no network access.
+
 ## Service Startup Contracts
 
 The root `PORT` value configures Docker's published nginx ingress only; local

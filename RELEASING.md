@@ -191,9 +191,31 @@ against its `sha-` tag when present, resolves the chart, creates the GitHub
 Release if needed, and attaches `release-manifest.json` as both a workflow
 artifact and a release asset. A missing `sha-` tag is recorded as
 `revision_check: tag-not-found`; a resolved digest mismatch remains fatal. The
-schema-1 manifest always records all four built images under `images`, including
+schema-2 manifest always records all four built images under `images`, including
 `images.sandbox`, with the same repository, digest, tag, and revision-check
-shape.
+shape. The backend entry additionally records the embedded extension artifact
+manifest digest, pinned extension API version, entry count, and OCI provenance
+subject. The workflow exports the exact backend image by digest, extracts
+`/app/hartmesh/extension-artifacts.json`, verifies its canonical digest, and
+fails if it is missing or malformed. Container publishing already creates the
+GitHub build-provenance attestation for that image subject.
+
+Verify a downloaded release document without network access:
+
+```bash
+python3 scripts/verify_release_manifest.py release-manifest.json
+```
+
+For the strongest local check, also supply the manifest extracted from the
+Gateway image and its expected image digest:
+
+```bash
+python3 scripts/verify_release_manifest.py release-manifest.json \
+  --artifact-manifest extension-artifacts.json \
+  --gateway-image-digest sha256:<64-lowercase-hex>
+```
+
+Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source.
 
 Do not dispatch the manifest while a publish job is pending or failed: a
 missing image or a tag/digest mismatch intentionally fails the workflow. The

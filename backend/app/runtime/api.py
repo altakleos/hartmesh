@@ -266,6 +266,8 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                     agent_revision_digest=summary.get("agent_revision_digest"),
                     extension_generation=summary.get("extension_generation"),
                     extension_manifest_digest=summary.get("extension_manifest_digest"),
+                    extension_artifact_manifest_digest=summary.get("extension_artifact_manifest_digest"),
+                    extension_configuration_digest=summary.get("extension_configuration_digest"),
                     caller_intent_digest=summary.get("caller_intent_digest"),
                     accepted_context_digest=summary.get("accepted_context_digest"),
                     authorization_evidence_digests=tuple(summary.get("authorization_evidence_digests", ())),

@@ -34,7 +34,7 @@ from deerflow.runtime.accepted_invocation import (
 
 REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY = "__deerflow_require_assembly_evidence"
 
-ASSEMBLY_EVIDENCE_VERSION = 2
+ASSEMBLY_EVIDENCE_VERSION = 3
 ASSEMBLY_DESCRIPTOR_VERSION = 1
 MAX_ASSEMBLY_IDENTIFIER_BYTES = 128
 MAX_ASSEMBLY_EVIDENCE_BYTES = 8 * 1024
@@ -286,7 +286,9 @@ def _middleware_projection(middleware: MiddlewareDescriptor) -> dict[str, object
     }
 
 
-def _validated_descriptor_projection(descriptor: AgentAssemblyDescriptor) -> dict[str, object]:
+def _validated_descriptor_projection(
+    descriptor: AgentAssemblyDescriptor,
+) -> dict[str, object]:
     if type(descriptor) is not AgentAssemblyDescriptor:
         _invalid()
     assert_descriptor_projection_complete()
@@ -365,6 +367,9 @@ class AcceptedAssemblyAnchors:
     expected_policy_digest: str
     agent_revision_digest: str
     extension_generation: int
+    capability_manifest_digest: str | None = None
+    artifact_manifest_digest: str | None = None
+    extension_configuration_digest: str | None = None
     tenant: TenantReferenceV1 | None = None
 
     def __post_init__(self) -> None:
@@ -378,6 +383,18 @@ class AcceptedAssemblyAnchors:
         if type(self.extension_generation) is not int or self.extension_generation < 0:
             _invalid()
         if self.tenant is not None and not isinstance(self.tenant, TenantReferenceV1):
+            _invalid()
+        if self.capability_manifest_digest is not None:
+            _validate_digest(self.capability_manifest_digest)
+        for digest in (
+            self.artifact_manifest_digest,
+            self.extension_configuration_digest,
+        ):
+            if digest is not None and (not digest.startswith("sha256:") or not _is_digest(digest.removeprefix("sha256:"))):
+                _invalid()
+        if (self.artifact_manifest_digest is None) != (self.extension_configuration_digest is None):
+            _invalid()
+        if self.artifact_manifest_digest is not None and self.capability_manifest_digest is None:
             _invalid()
 
 
@@ -453,6 +470,9 @@ def build_accepted_assembly_anchors(
         ),
         agent_revision_digest=accepted.agent_revision.digest,
         extension_generation=accepted.extension_generation,
+        capability_manifest_digest=accepted.extension_manifest_digest,
+        artifact_manifest_digest=accepted.extension_artifact_manifest_digest,
+        extension_configuration_digest=accepted.extension_configuration_digest,
         tenant=accepted.tenant,
     )
 
@@ -461,7 +481,7 @@ def build_accepted_assembly_anchors(
 class AssemblyEvidenceV1:
     """Bounded persisted proof of one validated lead-agent assembly."""
 
-    version: Literal[1, 2]
+    version: Literal[1, 2, 3]
     fingerprint: str
     descriptor_version: int
     namespace: str
@@ -474,10 +494,13 @@ class AssemblyEvidenceV1:
     policy_digest: str
     accepted_agent_revision_digest: str
     extension_generation: int
+    accepted_capability_manifest_digest: str | None = None
+    accepted_artifact_manifest_digest: str | None = None
+    accepted_extension_configuration_digest: str | None = None
     tenant: TenantReferenceV1 | None = None
 
     def __post_init__(self) -> None:
-        if self.version not in (1, ASSEMBLY_EVIDENCE_VERSION) or type(self.version) is not int:
+        if self.version not in (1, 2, ASSEMBLY_EVIDENCE_VERSION) or type(self.version) is not int:
             _invalid()
         if self.descriptor_version != ASSEMBLY_DESCRIPTOR_VERSION or type(self.descriptor_version) is not int:
             _invalid()
@@ -501,6 +524,25 @@ class AssemblyEvidenceV1:
                 _invalid()
         elif not isinstance(self.tenant, TenantReferenceV1):
             _invalid()
+        if self.version < 3:
+            if any(
+                digest is not None
+                for digest in (
+                    self.accepted_capability_manifest_digest,
+                    self.accepted_artifact_manifest_digest,
+                    self.accepted_extension_configuration_digest,
+                )
+            ):
+                _invalid()
+        else:
+            _validate_digest(self.accepted_capability_manifest_digest)
+            for digest in (
+                self.accepted_artifact_manifest_digest,
+                self.accepted_extension_configuration_digest,
+            ):
+                if not isinstance(digest, str) or not digest.startswith("sha256:"):
+                    _invalid()
+                _validate_digest(digest.removeprefix("sha256:"))
         if _canonical_size(self._projection()) > MAX_ASSEMBLY_EVIDENCE_BYTES:
             _invalid()
 
@@ -524,6 +566,10 @@ class AssemblyEvidenceV1:
             assert self.tenant is not None
             projection["tenant_ref"] = self.tenant.public_ref
             projection["tenant_digest"] = self.tenant.digest
+        if self.version >= 3:
+            projection["accepted_capability_manifest_digest"] = self.accepted_capability_manifest_digest
+            projection["accepted_artifact_manifest_digest"] = self.accepted_artifact_manifest_digest
+            projection["accepted_extension_configuration_digest"] = self.accepted_extension_configuration_digest
         return projection
 
     def to_persisted_json(self) -> dict[str, object]:
@@ -549,14 +595,20 @@ class AssemblyEvidenceV1:
             "accepted_agent_revision_digest",
             "extension_generation",
         }
-        if version == ASSEMBLY_EVIDENCE_VERSION:
+        if version in {2, ASSEMBLY_EVIDENCE_VERSION}:
             expected |= {"tenant_ref", "tenant_digest"}
+        if version == ASSEMBLY_EVIDENCE_VERSION:
+            expected |= {
+                "accepted_capability_manifest_digest",
+                "accepted_artifact_manifest_digest",
+                "accepted_extension_configuration_digest",
+            }
         if set(value) != expected:
             _invalid()
         try:
             fields = dict(value)
             tenant = None
-            if version == ASSEMBLY_EVIDENCE_VERSION:
+            if version in {2, ASSEMBLY_EVIDENCE_VERSION}:
                 tenant = TenantReferenceV1(
                     version=1,
                     public_ref=fields.pop("tenant_ref"),  # type: ignore[arg-type]
@@ -609,7 +661,7 @@ def build_assembly_evidence(
         "deferred_tool_names": projection["deferred_tool_names"],
     }
     return AssemblyEvidenceV1(
-        version=ASSEMBLY_EVIDENCE_VERSION if anchors.tenant is not None else 1,
+        version=(ASSEMBLY_EVIDENCE_VERSION if anchors.artifact_manifest_digest is not None else (2 if anchors.tenant is not None else 1)),
         fingerprint=canonical_digest(projection),
         descriptor_version=ASSEMBLY_DESCRIPTOR_VERSION,
         namespace=descriptor.namespace,
@@ -622,6 +674,9 @@ def build_assembly_evidence(
         policy_digest=canonical_digest(policies),
         accepted_agent_revision_digest=anchors.agent_revision_digest,
         extension_generation=anchors.extension_generation,
+        accepted_capability_manifest_digest=anchors.capability_manifest_digest,
+        accepted_artifact_manifest_digest=anchors.artifact_manifest_digest,
+        accepted_extension_configuration_digest=anchors.extension_configuration_digest,
         tenant=anchors.tenant,
     )
 

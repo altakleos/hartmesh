@@ -15,7 +15,13 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from deerflow_extension_api import ConstraintProjectionV1, ConstraintProjectionV2, InvocationIdentityV1, SealedOriginV1, TrustedRunContextV1
+from deerflow_extension_api import (
+    ConstraintProjectionV1,
+    ConstraintProjectionV2,
+    InvocationIdentityV1,
+    SealedOriginV1,
+    TrustedRunContextV1,
+)
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.callbacks.base import BaseCallbackManager
@@ -490,6 +496,8 @@ class SubagentExecutor:
         subagent_reservation: InvocationSubagentReservation | None = None,
         accepted_extension_generation: int | None = None,
         accepted_extension_manifest_digest: str | None = None,
+        accepted_extension_artifact_manifest_digest: str | None = None,
+        accepted_extension_configuration_digest: str | None = None,
         mcp_invocation_facts: Any | None = None,
         mcp_preparation_audit_sink: Any | None = None,
         resolved_agent_material: ResolvedAgentMaterialV1 | None = None,
@@ -532,6 +540,10 @@ class SubagentExecutor:
                 accepted for the parent invocation.
             accepted_extension_manifest_digest: The matching immutable safe
                 manifest digest accepted for the parent invocation.
+            accepted_extension_artifact_manifest_digest: The verified installed
+                extension artifact manifest accepted for the parent invocation.
+            accepted_extension_configuration_digest: The matching secret-safe
+                deployment configuration digest.
             mcp_invocation_facts: Host-sealed MCP operation facts inherited
                 from the accepted parent invocation.
             mcp_preparation_audit_sink: Thread-safe bridge to the parent run's
@@ -590,8 +602,14 @@ class SubagentExecutor:
                 raise ValueError("trusted run context does not match extension generation")
             if accepted_extension_manifest_digest is not None and accepted_extension_manifest_digest != trusted_run_context.extension_manifest_digest:
                 raise ValueError("trusted run context does not match extension manifest")
+            if accepted_extension_artifact_manifest_digest is not None and accepted_extension_artifact_manifest_digest != trusted_run_context.extension_artifact_manifest_digest:
+                raise ValueError("trusted run context does not match extension artifact manifest")
+            if accepted_extension_configuration_digest is not None and accepted_extension_configuration_digest != trusted_run_context.extension_configuration_digest:
+                raise ValueError("trusted run context does not match extension configuration")
             accepted_extension_generation = trusted_run_context.extension_generation
             accepted_extension_manifest_digest = trusted_run_context.extension_manifest_digest
+            accepted_extension_artifact_manifest_digest = trusted_run_context.extension_artifact_manifest_digest
+            accepted_extension_configuration_digest = trusted_run_context.extension_configuration_digest
         if invocation_identity is not None and not isinstance(invocation_identity, InvocationIdentityV1):
             raise TypeError("invocation_identity must be InvocationIdentityV1 or None")
         if invocation_origin is not None and not isinstance(invocation_origin, SealedOriginV1):
@@ -615,6 +633,8 @@ class SubagentExecutor:
         self.subagent_reservation = subagent_reservation
         self.accepted_extension_generation = accepted_extension_generation
         self.accepted_extension_manifest_digest = accepted_extension_manifest_digest
+        self.accepted_extension_artifact_manifest_digest = accepted_extension_artifact_manifest_digest
+        self.accepted_extension_configuration_digest = accepted_extension_configuration_digest
         self.mcp_invocation_facts = mcp_invocation_facts
         self.mcp_preparation_audit_sink = mcp_preparation_audit_sink
         if resolved_agent_material is not None and not isinstance(
@@ -715,9 +735,16 @@ class SubagentExecutor:
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+        model = create_chat_model(
+            name=self.model_name,
+            thinking_enabled=False,
+            app_config=app_config,
+            attach_tracing=False,
+        )
 
-        from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+        from deerflow.agents.middlewares.tool_error_handling_middleware import (
+            build_subagent_runtime_middlewares,
+        )
 
         # Reuse shared middleware composition with lead agent. ``agent_name``
         # lets the builder resolve the per-agent token_budget override.
@@ -935,7 +962,11 @@ class SubagentExecutor:
         # Lazy import: see the TYPE_CHECKING note at the top of this module -
         # importing tool_search runs tools/builtins/__init__, which would
         # re-enter this package during its own initialization.
-        from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section, get_mcp_routing_hints_prompt_section
+        from deerflow.tools.builtins.tool_search import (
+            assemble_deferred_tools,
+            get_deferred_tools_prompt_section,
+            get_mcp_routing_hints_prompt_section,
+        )
 
         # Skills are discoverable metadata until explicitly slash-activated or
         # loaded through read_file. Their allowed-tools declarations are applied
@@ -946,7 +977,10 @@ class SubagentExecutor:
 
         resolved_app_config = self.app_config or get_app_config()
 
-        from deerflow.skills.describe import build_skill_search_setup, get_skill_index_prompt_section
+        from deerflow.skills.describe import (
+            build_skill_search_setup,
+            get_skill_index_prompt_section,
+        )
 
         skill_setup = build_skill_search_setup(
             skills,
@@ -1222,17 +1256,25 @@ class SubagentExecutor:
                 context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
             context["is_subagent"] = True
             if self.invocation_constraints is not None:
-                from deerflow.runtime.constraints import INVOCATION_CONSTRAINTS_CONTEXT_KEY
+                from deerflow.runtime.constraints import (
+                    INVOCATION_CONSTRAINTS_CONTEXT_KEY,
+                )
 
                 context[INVOCATION_CONSTRAINTS_CONTEXT_KEY] = self.invocation_constraints
             if self.subagent_reservation is not None:
-                from deerflow.runtime.constraints import SUBAGENT_RESERVATION_CONTEXT_KEY
+                from deerflow.runtime.constraints import (
+                    SUBAGENT_RESERVATION_CONTEXT_KEY,
+                )
 
                 context[SUBAGENT_RESERVATION_CONTEXT_KEY] = self.subagent_reservation
             if self.accepted_extension_generation is not None:
                 context["accepted_extension_generation"] = self.accepted_extension_generation
             if self.accepted_extension_manifest_digest is not None:
                 context["accepted_extension_manifest_digest"] = self.accepted_extension_manifest_digest
+            if self.accepted_extension_artifact_manifest_digest is not None:
+                context["accepted_extension_artifact_manifest_digest"] = self.accepted_extension_artifact_manifest_digest
+            if self.accepted_extension_configuration_digest is not None:
+                context["accepted_extension_configuration_digest"] = self.accepted_extension_configuration_digest
             if self.mcp_invocation_facts is not None:
                 from deerflow.extensions.mcp import MCP_INVOCATION_FACTS_CONTEXT_KEY
 
@@ -1450,7 +1492,9 @@ class SubagentExecutor:
         try:
             if self._owns_skill_projection_token:
                 self._owns_skill_projection_token = False
-                from deerflow.sandbox.sandbox_provider import release_accepted_skill_consumer
+                from deerflow.sandbox.sandbox_provider import (
+                    release_accepted_skill_consumer,
+                )
 
                 release_accepted_skill_consumer(self.skill_projection_token)
         finally:

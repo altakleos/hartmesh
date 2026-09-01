@@ -26,6 +26,7 @@ _RUN_STATUSES = frozenset({"pending", "running", "success", "error", "timeout", 
 _INVOCATION_SOURCE_KINDS = frozenset({"http", "scheduled_task", "native_channel", "service"})
 _CORRELATION_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_PREFIXED_SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _PUBLIC_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,191}\Z", re.ASCII)
 _AGENT_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}\Z", re.ASCII)
 _THREAD_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
@@ -187,6 +188,14 @@ def _optional_digest(value: Any, name: str) -> str | None:
         return None
     if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
         raise ValueError(f"{name} must be a lowercase SHA-256 digest or null")
+    return value
+
+
+def _optional_prefixed_digest(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or _PREFIXED_SHA256_RE.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a prefixed lowercase SHA-256 digest or null")
     return value
 
 
@@ -417,7 +426,10 @@ class InvocationEnsureReceipt(_Record):
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "disposition", EnsureDisposition(self.disposition))
-        visible = self.disposition in {EnsureDisposition.created, EnsureDisposition.known}
+        visible = self.disposition in {
+            EnsureDisposition.created,
+            EnsureDisposition.known,
+        }
         if visible:
             _nonempty(self.run_id, "run_id")
             _thread_identifier(self.thread_id)
@@ -597,6 +609,8 @@ class InvocationSummaryV1(_Record):
     agent_revision_digest: str | None = None
     extension_generation: int | None = None
     extension_manifest_digest: str | None = None
+    extension_artifact_manifest_digest: str | None = None
+    extension_configuration_digest: str | None = None
     caller_intent_digest: str | None = None
     accepted_context_digest: str | None = None
     authorization_evidence_digests: tuple[str, ...] = ()
@@ -632,6 +646,18 @@ class InvocationSummaryV1(_Record):
             "constraint_evidence_digest",
         ):
             _optional_digest(getattr(self, name), name)
+        _optional_prefixed_digest(
+            self.extension_artifact_manifest_digest,
+            "extension_artifact_manifest_digest",
+        )
+        _optional_prefixed_digest(
+            self.extension_configuration_digest,
+            "extension_configuration_digest",
+        )
+        if (self.extension_artifact_manifest_digest is None) != (self.extension_configuration_digest is None):
+            raise ValueError("extension artifact and configuration digests must be supplied together")
+        if self.extension_artifact_manifest_digest is not None and self.extension_manifest_digest is None:
+            raise ValueError("extension artifact identity requires a capability manifest digest")
         authorization_digests = tuple(self.authorization_evidence_digests)
         if len(authorization_digests) > _MAX_AUTHORIZATION_EVIDENCE_DIGESTS:
             raise ValueError("an invocation summary may contain at most 64 authorization evidence digests")
@@ -667,7 +693,13 @@ class InvocationSummaryV1(_Record):
             if catalog_status != "verified":
                 raise ValueError("subagent catalog may be present only when verified")
             object.__setattr__(self, "subagent_catalog", _subagent_catalog(self.subagent_catalog))
-        encoded = json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
+        encoded = json.dumps(
+            self.to_dict(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
         if len(encoded) > _MAX_INVOCATION_SUMMARY_BYTES:
             raise ValueError("an invocation summary is limited to 16 KiB canonical JSON")
 
@@ -693,6 +725,10 @@ class InvocationSummaryV1(_Record):
         additive_field_pairs = (
             {"assembly_evidence", "assembly_evidence_status"},
             {"subagent_catalog", "subagent_catalog_status"},
+            {
+                "extension_artifact_manifest_digest",
+                "extension_configuration_digest",
+            },
         )
         for field_pair in additive_field_pairs:
             if missing & field_pair and missing & field_pair != field_pair:
@@ -712,6 +748,8 @@ class InvocationSummaryV1(_Record):
         values.setdefault("assembly_evidence_status", None)
         values.setdefault("subagent_catalog", None)
         values.setdefault("subagent_catalog_status", None)
+        values.setdefault("extension_artifact_manifest_digest", None)
+        values.setdefault("extension_configuration_digest", None)
         return cls._from_wire(values)
 
 
@@ -766,6 +804,9 @@ _TOOL_RECEIPT_ITEM_FIELDS = {
     "extension_generation",
     "subagent_catalog_digest",
     "subagent_definition_digest",
+    "capability_manifest_digest",
+    "artifact_manifest_digest",
+    "extension_configuration_digest",
 }
 
 
@@ -775,9 +816,22 @@ def _tool_receipt_page(value: Any) -> Mapping[str, ImmutableJsonValue]:
     items = value.get("items")
     if not isinstance(items, (list, tuple)) or len(items) > MAX_TOOL_RECEIPT_PAGE_SIZE:
         raise ValueError("tool receipt items must be a list of at most 100")
-    for item in items:
-        if not isinstance(item, Mapping) or set(item) != _TOOL_RECEIPT_ITEM_FIELDS:
+    artifact_fields = {
+        "capability_manifest_digest",
+        "artifact_manifest_digest",
+        "extension_configuration_digest",
+    }
+    normalized_items: list[Mapping[str, Any]] = []
+    for raw_item in items:
+        if not isinstance(raw_item, Mapping) or set(raw_item) not in {
+            frozenset(_TOOL_RECEIPT_ITEM_FIELDS),
+            frozenset(_TOOL_RECEIPT_ITEM_FIELDS - artifact_fields),
+        }:
             raise ValueError("tool receipt item fields are invalid")
+        item = dict(raw_item)
+        for name in artifact_fields:
+            item.setdefault(name, None)
+        normalized_items.append(item)
         if not isinstance(item.get("receipt_id"), str) or _RECEIPT_ID_RE.fullmatch(item["receipt_id"]) is None:
             raise ValueError("tool receipt id is invalid")
         kind = item.get("kind")
@@ -820,7 +874,24 @@ def _tool_receipt_page(value: Any) -> Mapping[str, ImmutableJsonValue]:
         _optional_digest(item.get("agent_revision_digest"), "tool receipt agent revision")
         _optional_digest(item.get("assembly_fingerprint"), "tool receipt assembly fingerprint")
         _optional_digest(item.get("subagent_catalog_digest"), "tool receipt subagent catalog")
-        if any(item.get(name) is None for name in ("agent_revision_digest", "assembly_fingerprint", "subagent_catalog_digest")):
+        _optional_digest(item.get("capability_manifest_digest"), "tool receipt capability manifest")
+        _optional_prefixed_digest(item.get("artifact_manifest_digest"), "tool receipt artifact manifest")
+        _optional_prefixed_digest(
+            item.get("extension_configuration_digest"),
+            "tool receipt extension configuration",
+        )
+        if (item.get("artifact_manifest_digest") is None) != (item.get("extension_configuration_digest") is None):
+            raise ValueError("tool receipt extension artifact tuple is invalid")
+        if item.get("artifact_manifest_digest") is not None and item.get("capability_manifest_digest") is None:
+            raise ValueError("tool receipt extension artifact tuple is invalid")
+        if any(
+            item.get(name) is None
+            for name in (
+                "agent_revision_digest",
+                "assembly_fingerprint",
+                "subagent_catalog_digest",
+            )
+        ):
             raise ValueError("tool receipt accepted anchor digest is required")
         definition_digest = _optional_digest(
             item.get("subagent_definition_digest"),
@@ -861,7 +932,11 @@ def _tool_receipt_page(value: Any) -> Mapping[str, ImmutableJsonValue]:
             raise ValueError("tool receipt guardrail references are invalid")
         if status == "indeterminate" and guardrail_refs:
             raise ValueError("indeterminate tool receipt outcome fields are invalid")
-    if value.get("evidence_status") not in {"available", "legacy_unavailable", "invalid"}:
+    if value.get("evidence_status") not in {
+        "available",
+        "legacy_unavailable",
+        "invalid",
+    }:
         raise ValueError("tool receipt evidence status is invalid")
     if type(value.get("invalid_event_count")) is not int or value["invalid_event_count"] < 0:
         raise ValueError("tool receipt invalid event count is invalid")
@@ -870,7 +945,9 @@ def _tool_receipt_page(value: Any) -> Mapping[str, ImmutableJsonValue]:
             cursor = _nonempty(value[name], name)
             if len(cursor.encode("utf-8")) > 4096:
                 raise ValueError(f"{name} is too long")
-    frozen = _json_value(value, object_only=True)
+    normalized_value = dict(value)
+    normalized_value["items"] = normalized_items
+    frozen = _json_value(normalized_value, object_only=True)
     assert isinstance(frozen, Mapping)
     return frozen
 
@@ -1003,7 +1080,13 @@ def _validate_lifecycle_event(row: Mapping[str, ImmutableJsonValue]) -> None:
     payload = row["payload"]
     if not isinstance(payload, Mapping):
         raise TypeError("lifecycle event payload must be an object")
-    encoded = json.dumps(_wire(payload), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
+    encoded = json.dumps(
+        _wire(payload),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    ).encode("utf-8")
     if len(encoded) > MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES:
         raise ValueError("lifecycle event payload is limited to 4 KiB canonical JSON")
 
@@ -1107,7 +1190,13 @@ class InvocationObservation(_Record):
             if self.run_id is None:
                 raise ValueError("MCP tasks require a singular invocation observation")
             object.__setattr__(self, "mcp_tasks", _mcp_task_page(self.mcp_tasks))
-        encoded = json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
+        encoded = json.dumps(
+            self.to_dict(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
         if len(encoded) > MAX_OBSERVATION_PAYLOAD_BYTES:
             raise ValueError("an invocation observation is limited to 12 MiB canonical JSON")
 

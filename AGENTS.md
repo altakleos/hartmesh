@@ -98,11 +98,9 @@ kept out of the API-writable `extensions_config.json`). Packaged extensions can 
 middleware, task lifecycle, system-model observers, Gateway services, and FastAPI HTTP
 routers; the [reference extension](examples/deerflow-extension-example/) demonstrates all
 five. Manage them with `deerflow extensions install/list/enable/disable/remove` or the root
-`make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
-hooks and extension code execute with Gateway privileges, so only trusted operator sources
-belong in this path. The manager transaction, accepted source forms, lock discipline, and
-contribution contract live in
-[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md).
+`make extension-*` wrappers. Changes require Gateway restart. Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source. See
+[extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md) and
+[provenance guide](docs/EXTENSION_ARTIFACT_PROVENANCE.md).
 
 `deerflow-runtime-api` provides transport-neutral durable invocation records for
 the Gateway-owned in-process adapter and authenticated `/api/runtime/v1/*` routes.

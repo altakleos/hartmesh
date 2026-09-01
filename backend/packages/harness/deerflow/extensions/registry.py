@@ -57,6 +57,7 @@ class RegisteredAuthorizationProviderFactory:
     source: str
     package_name: str | None
     package_version: str | None
+    source_entry_digest: str | None = None
     health_probe: CapabilityHealthProbe | None = None
 
 
@@ -69,6 +70,7 @@ class RegisteredOriginContributorFactory:
     source: str
     package_name: str | None
     package_version: str | None
+    source_entry_digest: str | None = None
     health_probe: CapabilityHealthProbe | None = None
 
 
@@ -81,6 +83,7 @@ class RegisteredRunContextContributorFactory:
     source: str
     package_name: str | None
     package_version: str | None
+    source_entry_digest: str | None = None
     health_probe: CapabilityHealthProbe | None = None
 
 
@@ -93,6 +96,7 @@ class RegisteredInvocationConstraintsProviderFactory:
     source: str
     package_name: str | None
     package_version: str | None
+    source_entry_digest: str | None = None
     health_probe: CapabilityHealthProbe | None = None
 
 
@@ -105,6 +109,7 @@ class RegisteredMcpInterceptorDescriptor:
     source: str
     package_name: str | None
     package_version: str | None
+    source_entry_digest: str | None = None
     health_probe: CapabilityHealthProbe | None = None
 
 
@@ -115,11 +120,25 @@ class LoadedPluginRegistration:
     package_name: str | None
     package_version: str | None
     required: bool
+    source_entry_digest: str | None = None
+
+
+@dataclass(frozen=True)
+class RegisteredContribution:
+    """Loader-stamped source identity for every registered contribution."""
+
+    source: str
+    contribution_type: str
+    contribution_id: str | None
+    package_name: str | None
+    package_version: str | None
+    source_entry_digest: str | None
 
 
 @dataclass(frozen=True)
 class _RegistryMark:
     loaded_plugin_count: int
+    contribution_count: int
     middleware_count: int
     authorization_provider_count: int
     origin_contributor_count: int
@@ -144,7 +163,10 @@ class LoadedExtensions:
 
     app_store: ExtensionData
     generation: int = 0
+    artifact_manifest_digest: str | None = None
+    extension_configuration_digest: str | None = None
     loaded_plugins: tuple[LoadedPluginRegistration, ...] = ()
+    contributions: tuple[RegisteredContribution, ...] = ()
     middleware_contributors: tuple[tuple[str, MiddlewareContributor], ...] = ()
     authorization_provider_factories: tuple[RegisteredAuthorizationProviderFactory, ...] = ()
     origin_contributor_factories: tuple[RegisteredOriginContributorFactory, ...] = ()
@@ -177,11 +199,15 @@ class LoadedExtensions:
     needs_task_store: bool = False
 
     @property
-    def authorization_provider_factory(self) -> RegisteredAuthorizationProviderFactory | None:
+    def authorization_provider_factory(
+        self,
+    ) -> RegisteredAuthorizationProviderFactory | None:
         return self.authorization_provider_factories[0] if self.authorization_provider_factories else None
 
     @property
-    def invocation_constraints_provider_factory(self) -> RegisteredInvocationConstraintsProviderFactory | None:
+    def invocation_constraints_provider_factory(
+        self,
+    ) -> RegisteredInvocationConstraintsProviderFactory | None:
         return self.invocation_constraints_provider_factories[0] if self.invocation_constraints_provider_factories else None
 
 
@@ -196,6 +222,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
 
     def __init__(self) -> None:
         self._loaded_plugins: list[LoadedPluginRegistration] = []
+        self._contributions: list[RegisteredContribution] = []
         self._middlewares: list[_Entry] = []
         self._authorization_providers: list[RegisteredAuthorizationProviderFactory] = []
         self._origin_contributors: list[RegisteredOriginContributorFactory] = []
@@ -213,6 +240,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._current_source: str | None = None
         self._current_package_name: str | None = None
         self._current_package_version: str | None = None
+        self._current_source_entry_digest: str | None = None
 
     @contextmanager
     def attributed_to(
@@ -221,28 +249,50 @@ class ExtensionRegistry(ExtensionRegistryContract):
         *,
         package_name: str | None = None,
         package_version: str | None = None,
+        source_entry_digest: str | None = None,
     ) -> Iterator[None]:
         """Attribute everything registered inside the block to ``source``."""
         previous = self._current_source
         previous_package_name = self._current_package_name
         previous_package_version = self._current_package_version
+        previous_source_entry_digest = self._current_source_entry_digest
         self._current_source = source
         self._current_package_name = package_name
         self._current_package_version = package_version
+        self._current_source_entry_digest = source_entry_digest
         try:
             yield
         finally:
             self._current_source = previous
             self._current_package_name = previous_package_name
             self._current_package_version = previous_package_version
+            self._current_source_entry_digest = previous_source_entry_digest
 
     def _source(self) -> str:
         if self._current_source is None:
             raise RuntimeError("registration must happen inside ExtensionRegistry.attributed_to(...)")
         return self._current_source
 
+    def _record_contribution(
+        self,
+        contribution_type: str,
+        *,
+        contribution_id: str | None = None,
+    ) -> None:
+        self._contributions.append(
+            RegisteredContribution(
+                source=self._source(),
+                contribution_type=contribution_type,
+                contribution_id=contribution_id,
+                package_name=self._current_package_name,
+                package_version=self._current_package_version,
+                source_entry_digest=self._current_source_entry_digest,
+            )
+        )
+
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         self._middlewares.append((self._source(), contributor))
+        self._record_contribution("middleware")
 
     def record_loaded_plugin(
         self,
@@ -250,6 +300,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         package_name: str | None,
         package_version: str | None,
         required: bool,
+        source_entry_digest: str | None = None,
     ) -> None:
         """Record successful install provenance after install() returns."""
 
@@ -258,6 +309,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 package_name=package_name,
                 package_version=package_version,
                 required=required,
+                source_entry_digest=source_entry_digest,
             )
         )
 
@@ -276,8 +328,13 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 source=self._source(),
                 package_name=self._current_package_name,
                 package_version=self._current_package_version,
+                source_entry_digest=self._current_source_entry_digest,
                 health_probe=contribution.health_probe,
             )
+        )
+        self._record_contribution(
+            contribution.kind,
+            contribution_id=contribution.contribution_id,
         )
 
     def origin_contributor(self, contribution: OriginContributorFactory) -> None:
@@ -294,8 +351,13 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 source=self._source(),
                 package_name=self._current_package_name,
                 package_version=self._current_package_version,
+                source_entry_digest=self._current_source_entry_digest,
                 health_probe=contribution.health_probe,
             )
+        )
+        self._record_contribution(
+            contribution.kind,
+            contribution_id=contribution.contribution_id,
         )
 
     def run_context_contributor(self, contribution: RunContextContributorFactory) -> None:
@@ -312,8 +374,13 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 source=self._source(),
                 package_name=self._current_package_name,
                 package_version=self._current_package_version,
+                source_entry_digest=self._current_source_entry_digest,
                 health_probe=contribution.health_probe,
             )
+        )
+        self._record_contribution(
+            contribution.kind,
+            contribution_id=contribution.contribution_id,
         )
 
     def invocation_constraints(self, contribution: InvocationConstraintsProviderFactory) -> None:
@@ -332,8 +399,13 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 source=self._source(),
                 package_name=self._current_package_name,
                 package_version=self._current_package_version,
+                source_entry_digest=self._current_source_entry_digest,
                 health_probe=contribution.health_probe,
             )
+        )
+        self._record_contribution(
+            contribution.kind,
+            contribution_id=contribution.contribution_id,
         )
 
     def mcp_interceptor(self, contribution: McpInterceptorDescriptor) -> None:
@@ -355,28 +427,40 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 source=self._source(),
                 package_name=self._current_package_name,
                 package_version=self._current_package_version,
+                source_entry_digest=self._current_source_entry_digest,
                 health_probe=contribution.health_probe,
             )
+        )
+        self._record_contribution(
+            contribution.kind,
+            contribution_id=contribution.contribution_id,
         )
 
     def task_lifecycle(self, contributor: TaskLifecycleContributor) -> None:
         self._task_lifecycle.append((self._source(), contributor))
+        self._record_contribution("task_lifecycle")
 
     def system_model_observer(self, observer: SystemModelCallObserver) -> None:
         self._system_model_observers.append((self._source(), observer))
+        self._record_contribution("system_model_observer")
 
     def agent_assembly_observer(self, observer: AgentAssemblyObserver) -> None:
         self._agent_assembly_observers.append((self._source(), observer))
+        self._record_contribution("agent_assembly_observer")
 
     def context_compaction_observer(self, observer: ContextCompactionObserver) -> None:
         self._context_compaction_observers.append((self._source(), observer))
+        self._record_contribution("context_compaction_observer")
 
     def service(self, service: ExtensionService) -> None:
         self._services.append((self._source(), service))
+        self._record_contribution("service")
 
     def routers(self, routers: Sequence[Any]) -> None:
         source = self._source()
-        self._routers.extend((source, router) for router in routers)
+        for router in routers:
+            self._routers.append((source, router))
+            self._record_contribution("router")
 
     def discard(self, source: str) -> None:
         """Remove every entry registered by ``source``.
@@ -391,6 +475,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         that process one install() at a time should prefer
         ``mark()``/``rollback_to()`` instead.
         """
+        self._contributions[:] = [entry for entry in self._contributions if entry.source != source]
         self._middlewares[:] = [entry for entry in self._middlewares if entry[0] != source]
         self._authorization_providers[:] = [entry for entry in self._authorization_providers if entry.source != source]
         self._origin_contributors[:] = [entry for entry in self._origin_contributors if entry.source != source]
@@ -411,6 +496,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         """Snapshot bucket lengths so one install() can be undone positionally."""
         return _RegistryMark(
             len(self._loaded_plugins),
+            len(self._contributions),
             len(self._middlewares),
             len(self._authorization_providers),
             len(self._origin_contributors),
@@ -433,6 +519,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         take the other instance's successful registrations with it.
         """
         del self._loaded_plugins[mark.loaded_plugin_count :]
+        del self._contributions[mark.contribution_count :]
         del self._middlewares[mark.middleware_count :]
         del self._authorization_providers[mark.authorization_provider_count :]
         del self._origin_contributors[mark.origin_contributor_count :]
@@ -446,11 +533,20 @@ class ExtensionRegistry(ExtensionRegistryContract):
         del self._services[mark.service_count :]
         del self._routers[mark.router_count :]
 
-    def build(self, *, generation: int = 0) -> LoadedExtensions:
+    def build(
+        self,
+        *,
+        generation: int = 0,
+        artifact_manifest_digest: str | None = None,
+        extension_configuration_digest: str | None = None,
+    ) -> LoadedExtensions:
         return LoadedExtensions(
             app_store=ExtensionData("app"),
             generation=generation,
+            artifact_manifest_digest=artifact_manifest_digest,
+            extension_configuration_digest=extension_configuration_digest,
             loaded_plugins=tuple(self._loaded_plugins),
+            contributions=tuple(self._contributions),
             middleware_contributors=tuple(self._middlewares),
             authorization_provider_factories=tuple(self._authorization_providers),
             origin_contributor_factories=tuple(self._origin_contributors),

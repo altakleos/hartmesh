@@ -201,6 +201,9 @@ class ToolReceiptLifecycleItem:
     extension_generation: int
     subagent_catalog_digest: str
     subagent_definition_digest: str | None
+    capability_manifest_digest: str | None = None
+    artifact_manifest_digest: str | None = None
+    extension_configuration_digest: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -224,6 +227,9 @@ class ToolReceiptLifecycleItem:
             "extension_generation": self.extension_generation,
             "subagent_catalog_digest": self.subagent_catalog_digest,
             "subagent_definition_digest": self.subagent_definition_digest,
+            "capability_manifest_digest": self.capability_manifest_digest,
+            "artifact_manifest_digest": self.artifact_manifest_digest,
+            "extension_configuration_digest": self.extension_configuration_digest,
         }
 
 
@@ -342,6 +348,9 @@ def build_tool_receipt_page(
                 extension_generation=context.extension_generation,
                 subagent_catalog_digest=context.subagent_catalog_digest,
                 subagent_definition_digest=context.subagent_definition_digest,
+                capability_manifest_digest=context.capability_manifest_digest,
+                artifact_manifest_digest=context.artifact_manifest_digest,
+                extension_configuration_digest=context.extension_configuration_digest,
             )
         )
     # A store-side cursor window can begin with the outcome for the final
@@ -439,14 +448,25 @@ def _safe_digest(value: Any) -> str | None:
     return value if isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None else None
 
 
-def _assembly_evidence_projection(row: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str]:
+def _safe_prefixed_digest(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        return None
+    return value if _SHA256_RE.fullmatch(value.removeprefix("sha256:")) is not None else None
+
+
+def _assembly_evidence_projection(
+    row: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
     """Return only revalidated public evidence, never raw stored material."""
 
     raw_evidence = row.get("assembly_evidence_json")
     raw_digest = row.get("assembly_evidence_digest")
     if raw_evidence is None and raw_digest is None:
         status = str(row.get("status"))
-        return None, "pending" if status in _NONTERMINAL_RUN_STATUSES else "legacy_unavailable"
+        return (
+            None,
+            "pending" if status in _NONTERMINAL_RUN_STATUSES else "legacy_unavailable",
+        )
     if not isinstance(raw_evidence, Mapping) or _safe_digest(raw_digest) is None:
         return None, "legacy_unavailable"
     try:
@@ -560,7 +580,13 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
         for key, value in sorted(base.items(), key=lambda item: str(item[0])):
             if not isinstance(key, str) or _PUBLIC_IDENTIFIER_RE.fullmatch(key) is None:
                 return None
-            references.append({"namespace": "origin", "key": key, "value": _safe_correlation_value(value)})
+            references.append(
+                {
+                    "namespace": "origin",
+                    "key": key,
+                    "value": _safe_correlation_value(value),
+                }
+            )
         contributor_references = origin.get("contributor_references") or ()
         if not isinstance(contributor_references, (list, tuple)):
             return None
@@ -601,6 +627,9 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
         constraint_evidence_digest = _safe_digest(constraints.get("evidence_digest")) if isinstance(constraints, Mapping) else None
         manifest = decisions.get("capability_manifest")
         extension_manifest_digest = _safe_digest(manifest.get("digest")) if isinstance(manifest, Mapping) else None
+        extension_artifacts = decisions.get("extension_artifacts")
+        extension_artifact_manifest_digest = _safe_prefixed_digest(extension_artifacts.get("artifact_manifest_digest")) if isinstance(extension_artifacts, Mapping) else None
+        extension_configuration_digest = _safe_prefixed_digest(extension_artifacts.get("configuration_digest")) if isinstance(extension_artifacts, Mapping) else None
         assembly_evidence, assembly_evidence_status = _assembly_evidence_projection(row)
         subagent_catalog, subagent_catalog_status = _subagent_catalog_projection(row)
         summary = {
@@ -613,6 +642,8 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
             "agent_revision_digest": _safe_digest(row.get("agent_revision_digest")),
             "extension_generation": (row.get("extension_generation") if type(row.get("extension_generation")) is int and row.get("extension_generation") >= 0 else None),
             "extension_manifest_digest": extension_manifest_digest,
+            "extension_artifact_manifest_digest": extension_artifact_manifest_digest,
+            "extension_configuration_digest": extension_configuration_digest,
             "caller_intent_digest": _safe_digest(row.get("caller_intent_digest")),
             "accepted_context_digest": _safe_digest(row.get("accepted_context_digest")),
             "authorization_evidence_digests": tuple(authorization_digests),
@@ -623,7 +654,13 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
             "subagent_catalog_status": subagent_catalog_status,
             "tenant_identity": tenant.to_json() if tenant is not None else None,
         }
-        encoded = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
+        encoded = json.dumps(
+            summary,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
         return summary if len(encoded) <= MAX_INVOCATION_SUMMARY_BYTES else None
     except (KeyError, TypeError, ValueError):
         return None

@@ -4,8 +4,11 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
-Version 0.12.1 adds the immutable, pseudonymous `TenantReferenceV1` to trusted
-run-context contributor requests. Version 0.12.0 introduced the authorization
+Version 0.13.0 adds host-owned extension artifact and configuration digests to
+`TrustedRunContextV1` and the v2 invocation-constraint request. They are paired,
+immutable accepted facts: extensions may observe them but cannot construct or
+replace them. It also retains the immutable, pseudonymous `TenantReferenceV1`
+introduced in 0.12.1. Version 0.12.0 introduced the authorization
 contracts `Principal`, `AuthzRequest`,
 `AuthzDecision`, `AuthzReason`, and `AuthorizationProvider`. Existing host code may keep
 using `deerflow.authz.provider`; those names are compatibility re-exports of the same
@@ -191,7 +194,8 @@ included in the accepted-context digest.
 The host combines both contributor phases into one immutable `TrustedRunContextV1` after
 validation. It carries the effective subject/acting service, safe tenant reference,
 final `SealedOriginV1`, bound
-thread and external-key reference, agent/profile revisions, extension generation/manifest,
+thread and external-key reference, agent/profile revisions, extension generation/capability
+manifest plus the paired installed-artifact and deployment-configuration digests,
 and three finite namespaced products: persistable references, runtime-only execution
 references, and stable secret handles. Per-result limits also apply to the aggregate across
 all contributors: 32 fully qualified keys and 8 KiB canonical reference data. Duplicate
@@ -240,7 +244,8 @@ A trusted plugin may register the process's single
 widening of v1. Its async `InvocationConstraintsProviderV2` receives an immutable
 `ConstraintProjectionRequestV2` containing only the split identity, finalized sealed
 Origin, bounded namespaced correlation references, thread/external-key reference,
-agent/profile revisions, request/trusted-context/manifest digests, extension generation,
+agent/profile revisions, request/trusted-context/capability-manifest digests, extension
+generation, the paired artifact/configuration digests,
 and the host's enforceable subagent ceiling. It receives no prompt, credential, arbitrary
 kwargs, or host object.
 

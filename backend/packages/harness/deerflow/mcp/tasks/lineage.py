@@ -16,7 +16,7 @@ from typing import Any, Literal, Self
 
 from deerflow_extension_api import InvocationIdentityV1, TenantReferenceV1
 
-LINEAGE_VERSION = 1
+LINEAGE_VERSION = 2
 MAX_REQUEST_PROJECTION_BYTES = 8 * 1024
 MAX_LINEAGE_BYTES = 16 * 1024
 
@@ -328,6 +328,8 @@ class TrustedMcpSubmissionContext:
     extension_generation: int
     extension_manifest_digest: str
     accepted_origin_digest: str
+    artifact_manifest_digest: str | None = None
+    extension_configuration_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.tenant, TenantReferenceV1) or not isinstance(
@@ -353,6 +355,16 @@ class TrustedMcpSubmissionContext:
             except McpTaskLineageError as exc:
                 raise McpTaskLineageError("mcp_task_lineage_unavailable") from exc
         if type(self.extension_generation) is not int or self.extension_generation < 0:
+            raise McpTaskLineageError("mcp_task_lineage_unavailable")
+        for digest in (
+            self.artifact_manifest_digest,
+            self.extension_configuration_digest,
+        ):
+            if digest is not None:
+                if not isinstance(digest, str) or not digest.startswith("sha256:"):
+                    raise McpTaskLineageError("mcp_task_lineage_unavailable")
+                _require_digest(digest.removeprefix("sha256:"))
+        if (self.artifact_manifest_digest is None) != (self.extension_configuration_digest is None):
             raise McpTaskLineageError("mcp_task_lineage_unavailable")
         if self.parent_execution_kind == "lead":
             if self.parent_subagent_name is not None or self.subagent_definition_digest is not None:
@@ -405,6 +417,8 @@ class TrustedMcpSubmissionContext:
             or receipt_context.extension_generation != facts.extension_generation
             or trusted.extension_manifest_digest is None
             or facts.extension_manifest_digest != trusted.extension_manifest_digest
+            or receipt_context.artifact_manifest_digest != trusted.extension_artifact_manifest_digest
+            or receipt_context.extension_configuration_digest != trusted.extension_configuration_digest
             or not facts.origin.digest
         ):
             raise McpTaskLineageError("mcp_task_lineage_unavailable")
@@ -424,6 +438,8 @@ class TrustedMcpSubmissionContext:
                 extension_generation=receipt_context.extension_generation,
                 extension_manifest_digest=trusted.extension_manifest_digest,
                 accepted_origin_digest=facts.origin.digest,
+                artifact_manifest_digest=trusted.extension_artifact_manifest_digest,
+                extension_configuration_digest=trusted.extension_configuration_digest,
             )
         except (TypeError, ValueError) as exc:
             raise McpTaskLineageError("mcp_task_lineage_unavailable") from exc
@@ -433,7 +449,7 @@ class TrustedMcpSubmissionContext:
 class McpTaskLineageV1:
     """Canonical persisted commitments for one durable MCP task submission."""
 
-    version: Literal[1]
+    version: Literal[1, 2]
     kind: McpTaskLineageKind
     tenant: TenantReferenceV1
     principal_ref: str
@@ -454,10 +470,12 @@ class McpTaskLineageV1:
     request_projection_digest: str
     credential_selector_ref: str | None
     credential_selector_version: int | None
+    artifact_manifest_digest: str | None
+    extension_configuration_digest: str | None
     digest: str
 
     def __post_init__(self) -> None:
-        if self.version != LINEAGE_VERSION or self.kind not in (
+        if self.version not in (1, LINEAGE_VERSION) or self.kind not in (
             "agent_tool",
             "standalone_api",
             "internal",
@@ -478,6 +496,17 @@ class McpTaskLineageV1:
             _invalid()
         if type(self.extension_generation) is not int or self.extension_generation < 0:
             _invalid()
+        if self.version == 1:
+            if self.artifact_manifest_digest is not None or self.extension_configuration_digest is not None:
+                _invalid()
+        else:
+            for digest in (
+                self.artifact_manifest_digest,
+                self.extension_configuration_digest,
+            ):
+                if not isinstance(digest, str) or not digest.startswith("sha256:"):
+                    _invalid()
+                _require_digest(digest.removeprefix("sha256:"))
 
         parent_fields = (
             self.parent_run_id,
@@ -530,7 +559,7 @@ class McpTaskLineageV1:
             _invalid()
 
     def _without_digest(self) -> dict[str, object]:
-        return {
+        projection = {
             "version": self.version,
             "kind": self.kind,
             "tenant": self.tenant.to_json(),
@@ -553,6 +582,10 @@ class McpTaskLineageV1:
             "credential_selector_ref": self.credential_selector_ref,
             "credential_selector_version": self.credential_selector_version,
         }
+        if self.version >= 2:
+            projection["artifact_manifest_digest"] = self.artifact_manifest_digest
+            projection["extension_configuration_digest"] = self.extension_configuration_digest
+        return projection
 
     def to_persisted_json(self) -> dict[str, object]:
         """Return the exact JSON-safe representation stored with the task."""
@@ -587,7 +620,11 @@ class McpTaskLineageV1:
             "credential_selector_version",
             "digest",
         }
-        if not isinstance(value, Mapping) or set(value) != expected:
+        artifact_fields = {
+            "artifact_manifest_digest",
+            "extension_configuration_digest",
+        }
+        if not isinstance(value, Mapping) or (set(value) != expected if value.get("version") == 1 else set(value) != expected | artifact_fields):
             _invalid()
         try:
             tenant = TenantReferenceV1.from_json(value["tenant"])
@@ -613,6 +650,8 @@ class McpTaskLineageV1:
                 request_projection_digest=value["request_projection_digest"],  # type: ignore[arg-type]
                 credential_selector_ref=value["credential_selector_ref"],  # type: ignore[arg-type]
                 credential_selector_version=value["credential_selector_version"],  # type: ignore[arg-type]
+                artifact_manifest_digest=value.get("artifact_manifest_digest"),  # type: ignore[arg-type]
+                extension_configuration_digest=value.get("extension_configuration_digest"),  # type: ignore[arg-type]
                 digest=value["digest"],  # type: ignore[arg-type]
             )
         except McpTaskLineageError:
@@ -626,9 +665,13 @@ class McpTaskLineageBinder:
 
     @staticmethod
     def _build(**values: Any) -> McpTaskLineageV1:
+        digest_values = dict(values)
+        if values.get("version") == 1:
+            digest_values.pop("artifact_manifest_digest", None)
+            digest_values.pop("extension_configuration_digest", None)
         digest = _canonical_digest(
             {
-                **values,
+                **digest_values,
                 "tenant": values["tenant"].to_json(),
             }
         )
@@ -666,7 +709,7 @@ class McpTaskLineageBinder:
             )
         )
         return self._build(
-            version=LINEAGE_VERSION,
+            version=(LINEAGE_VERSION if trusted_runtime.artifact_manifest_digest is not None else 1),
             kind="agent_tool",
             tenant=trusted_runtime.tenant,
             principal_ref=principal_ref,
@@ -687,6 +730,8 @@ class McpTaskLineageBinder:
             request_projection_digest=hashlib.sha256(projection_bytes).hexdigest(),
             credential_selector_ref=selector_ref,
             credential_selector_version=(None if credential_selector is None else credential_selector.version),
+            artifact_manifest_digest=trusted_runtime.artifact_manifest_digest,
+            extension_configuration_digest=(trusted_runtime.extension_configuration_digest),
         )
 
     def for_standalone_api(
@@ -697,6 +742,8 @@ class McpTaskLineageBinder:
         extension_generation: int,
         extension_manifest_digest: str | None,
         accepted_origin_digest: str | None,
+        artifact_manifest_digest: str | None = None,
+        extension_configuration_digest: str | None = None,
         server_name: str,
         tool_name: str,
         safe_request_projection: Mapping[str, object],
@@ -723,7 +770,7 @@ class McpTaskLineageBinder:
             )
         )
         return self._build(
-            version=LINEAGE_VERSION,
+            version=(LINEAGE_VERSION if artifact_manifest_digest is not None else 1),
             kind="standalone_api",
             tenant=tenant,
             principal_ref=principal_ref,
@@ -744,6 +791,8 @@ class McpTaskLineageBinder:
             request_projection_digest=hashlib.sha256(projection_bytes).hexdigest(),
             credential_selector_ref=selector_ref,
             credential_selector_version=(None if credential_selector is None else credential_selector.version),
+            artifact_manifest_digest=artifact_manifest_digest,
+            extension_configuration_digest=extension_configuration_digest,
         )
 
 

@@ -63,7 +63,10 @@ def test_release_manifest_dispatch_contract_is_manual_and_minimal() -> None:
     assert "        type: string\n" in _input_body(workflow, "version")
     assert trigger.count("workflow_dispatch:") == 1
     assert all(event not in trigger for event in ("push:", "pull_request:", "schedule:", "workflow_call:"))
-    assert _top_level_block(workflow, "permissions", "jobs").strip().splitlines() == ["contents: write", "  packages: read"]
+    assert _top_level_block(workflow, "permissions", "jobs").strip().splitlines() == [
+        "contents: write",
+        "  packages: read",
+    ]
     _assert_actions_are_pinned(workflow)
 
 
@@ -77,7 +80,19 @@ def test_release_manifest_resolves_and_records_every_published_identity() -> Non
     assert 'if [ "$TAG_DIGEST" != "$SHA_DIGEST" ]; then' in workflow
     assert "helm pull" in workflow and '--version "$VERSION"' in workflow
     assert "release-manifest.json" in workflow
-    for field in ("schema", "version", "tag", "commit", "images", "chart", "repository", "digest", "oci_tag", "manifest_digest", "package_sha256"):
+    for field in (
+        "schema",
+        "version",
+        "tag",
+        "commit",
+        "images",
+        "chart",
+        "repository",
+        "digest",
+        "oci_tag",
+        "manifest_digest",
+        "package_sha256",
+    ):
         assert f'"{field}"' in workflow
     for component in ("backend", "frontend", "provisioner", "sandbox"):
         assert f'"{component}"' in workflow
@@ -131,7 +146,13 @@ def test_release_manifest_resolves_sandbox_as_a_built_image() -> None:
     assert "inputs.sandbox" not in workflow
     assert 'manifest["sandbox"]' not in workflow
     assert '"sandbox"' in workflow
-    assert '"schema": 1' in workflow
+    assert '"schema": 2' in workflow
+    assert "extension_artifact_manifest_digest" in workflow
+    assert "extension_api_version" in workflow
+    assert "extension_entry_count" in workflow
+    assert "provenance_reference" in workflow
+    assert 'BACKEND_DIGEST="$TAG_DIGEST"' in workflow
+    assert "scripts/verify_release_manifest.py" in workflow
 
 
 def test_release_manifest_verifies_the_pulled_chart_version() -> None:
@@ -153,7 +174,10 @@ def test_sandbox_mirror_dispatch_contract_is_manual_and_minimal() -> None:
         assert "        type: string\n" in _input_body(workflow, name)
     assert trigger.count("workflow_dispatch:") == 1
     assert all(event not in trigger for event in ("push:", "pull_request:", "schedule:", "workflow_call:"))
-    assert _top_level_block(workflow, "permissions", "jobs").strip().splitlines() == ["contents: read", "  packages: write"]
+    assert _top_level_block(workflow, "permissions", "jobs").strip().splitlines() == [
+        "contents: read",
+        "  packages: write",
+    ]
     _assert_actions_are_pinned(workflow)
 
 
@@ -188,7 +212,12 @@ def test_only_the_release_container_workflow_publishes_the_sandbox_package() -> 
 
 
 def test_shared_release_spelling_script_is_the_only_substitution_implementation() -> None:
-    result = subprocess.run(["bash", str(_SPELLINGS), "2.1.0+hartmesh.7"], capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["bash", str(_SPELLINGS), "2.1.0+hartmesh.7"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     injected = subprocess.run(
         ["bash", str(_SPELLINGS), "2.1.0+hartmesh.7\nimage_tag=untrusted"],
         capture_output=True,
@@ -197,7 +226,10 @@ def test_shared_release_spelling_script_is_the_only_substitution_implementation(
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["image_tag=v2.1.0-hartmesh.7", "chart_oci_tag=2.1.0_hartmesh.7"]
+    assert result.stdout.splitlines() == [
+        "image_tag=v2.1.0-hartmesh.7",
+        "chart_oci_tag=2.1.0_hartmesh.7",
+    ]
     assert injected.returncode == 1
     for workflow_path in (_MANIFEST, _MIRROR):
         workflow = workflow_path.read_text(encoding="utf-8")

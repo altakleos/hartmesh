@@ -97,6 +97,9 @@ jobs:
             printf '%s_repository=%s\n' "$COMPONENT" "$IMAGE_REPOSITORY" >> "$GITHUB_OUTPUT"
             printf '%s_digest=%s\n' "$COMPONENT" "$TAG_DIGEST" >> "$GITHUB_OUTPUT"
             printf '%s_revision_check=%s\n' "$COMPONENT" "$REVISION_CHECK" >> "$GITHUB_OUTPUT"
+            if [ "$COMPONENT" = "backend" ]; then
+              BACKEND_DIGEST="$TAG_DIGEST"
+            fi
           done
 
           CHART_MANIFEST_DIGEST="$(crane digest "ghcr.io/${OWNER}/charts/deer-flow:${CHART_OCI_TAG}")"
@@ -118,6 +121,44 @@ jobs:
           printf 'chart_manifest_digest=%s\n' "$CHART_MANIFEST_DIGEST" >> "$GITHUB_OUTPUT"
           printf 'package_sha256=%s\n' "$PACKAGE_SHA256" >> "$GITHUB_OUTPUT"
 
+          BACKEND_ROOTFS="$RUNNER_TEMP/backend-rootfs.tar"
+          EXTENSION_ARTIFACT_MANIFEST="$RUNNER_TEMP/extension-artifacts.json"
+          crane export "${IMAGE_BASE}-backend@${BACKEND_DIGEST}" "$BACKEND_ROOTFS"
+          python3 - "$BACKEND_ROOTFS" "$EXTENSION_ARTIFACT_MANIFEST" <<'PY'
+          import sys
+          import tarfile
+
+          archive_path, output_path = sys.argv[1:]
+          with tarfile.open(archive_path, "r:*") as archive:
+              matches = [
+                  item
+                  for item in archive.getmembers()
+                  if item.name.lstrip("./") == "app/hartmesh/extension-artifacts.json"
+              ]
+              if len(matches) != 1 or not matches[0].isfile():
+                  raise SystemExit("Gateway image must contain exactly one extension artifact manifest")
+              source = archive.extractfile(matches[0])
+              if source is None:
+                  raise SystemExit("Gateway extension artifact manifest could not be extracted")
+              payload = source.read()
+          with open(output_path, "wb") as output:
+              output.write(payload)
+          PY
+          python3 - "$EXTENSION_ARTIFACT_MANIFEST" "$GITHUB_OUTPUT" <<'PY'
+          import sys
+          from pathlib import Path
+
+          from scripts.verify_release_manifest import verify_artifact_manifest
+
+          manifest_path, output_path = sys.argv[1:]
+          digest, api_version, entry_count = verify_artifact_manifest(Path(manifest_path))
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write(f"extension_artifact_path={manifest_path}\n")
+              output.write(f"extension_artifact_digest={digest}\n")
+              output.write(f"extension_api_version={api_version}\n")
+              output.write(f"extension_entry_count={entry_count}\n")
+          PY
+
       - name: Write release-manifest.json
         env:
           VERSION: ${{ inputs.version }}
@@ -127,6 +168,9 @@ jobs:
           BACKEND_REPOSITORY: ${{ steps.resolve.outputs.backend_repository }}
           BACKEND_DIGEST: ${{ steps.resolve.outputs.backend_digest }}
           BACKEND_REVISION_CHECK: ${{ steps.resolve.outputs.backend_revision_check }}
+          EXTENSION_ARTIFACT_DIGEST: ${{ steps.resolve.outputs.extension_artifact_digest }}
+          EXTENSION_API_VERSION: ${{ steps.resolve.outputs.extension_api_version }}
+          EXTENSION_ENTRY_COUNT: ${{ steps.resolve.outputs.extension_entry_count }}
           FRONTEND_REPOSITORY: ${{ steps.resolve.outputs.frontend_repository }}
           FRONTEND_DIGEST: ${{ steps.resolve.outputs.frontend_digest }}
           FRONTEND_REVISION_CHECK: ${{ steps.resolve.outputs.frontend_revision_check }}
@@ -146,7 +190,7 @@ jobs:
 
           image_tag = os.environ["IMAGE_TAG"]
           manifest = {
-              "schema": 1,
+              "schema": 2,
               "version": os.environ["VERSION"],
               "tag": f"v{os.environ['VERSION']}",
               "commit": os.environ["COMMIT"],
@@ -156,6 +200,18 @@ jobs:
                       "tag": image_tag,
                       "digest": os.environ[f"{name.upper()}_DIGEST"],
                       "revision_check": os.environ[f"{name.upper()}_REVISION_CHECK"],
+                      **(
+                          {
+                              "extension_artifact_manifest_digest": os.environ["EXTENSION_ARTIFACT_DIGEST"],
+                              "extension_api_version": os.environ["EXTENSION_API_VERSION"],
+                              "extension_entry_count": int(os.environ["EXTENSION_ENTRY_COUNT"]),
+                              "provenance_reference": (
+                                  f"oci://{os.environ['BACKEND_REPOSITORY']}@{os.environ['BACKEND_DIGEST']}"
+                              ),
+                          }
+                          if name == "backend"
+                          else {}
+                      ),
                   }
                   for name in ("backend", "frontend", "provisioner", "sandbox")
               },
@@ -171,6 +227,15 @@ jobs:
               json.dump(manifest, output, indent=2)
               output.write("\n")
           PY
+
+      - name: Verify release manifest offline
+        env:
+          BACKEND_DIGEST: ${{ steps.resolve.outputs.backend_digest }}
+          EXTENSION_ARTIFACT_PATH: ${{ steps.resolve.outputs.extension_artifact_path }}
+        run: |
+          python3 scripts/verify_release_manifest.py release-manifest.json \
+            --artifact-manifest "$EXTENSION_ARTIFACT_PATH" \
+            --gateway-image-digest "$BACKEND_DIGEST"
 
       - name: Upload manifest workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

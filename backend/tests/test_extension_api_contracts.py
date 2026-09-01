@@ -80,7 +80,13 @@ def test_every_dataclass_is_frozen(cls):
 
 @pytest.mark.parametrize(
     "cls",
-    [HostPolicySnapshot, ExtensionRuntimeDeps, TaskInfo, SystemModelRequest, SystemModelResult],
+    [
+        HostPolicySnapshot,
+        ExtensionRuntimeDeps,
+        TaskInfo,
+        SystemModelRequest,
+        SystemModelResult,
+    ],
 )
 def test_additive_dataclasses_are_constructible_with_required_fields_only(cls):
     """Fields added later must carry defaults, or old extensions break on upgrade.
@@ -176,8 +182,32 @@ def test_system_model_observer_contract_reports_success_and_failure_shapes():
     failure = SystemModelResult(error=RuntimeError("provider failed"), duration_ms=2.0)
 
     assert SystemOperationKind.GOAL.value == "goal"
-    assert asyncio.run(SystemModelCallObserver.on_system_model_call(_Bare(), app_store, task_store, SystemOperationKind.GOAL, request, success)) is None
-    assert asyncio.run(SystemModelCallObserver.on_system_model_call(_Bare(), app_store, task_store, SystemOperationKind.GOAL, request, failure)) is None
+    assert (
+        asyncio.run(
+            SystemModelCallObserver.on_system_model_call(
+                _Bare(),
+                app_store,
+                task_store,
+                SystemOperationKind.GOAL,
+                request,
+                success,
+            )
+        )
+        is None
+    )
+    assert (
+        asyncio.run(
+            SystemModelCallObserver.on_system_model_call(
+                _Bare(),
+                app_store,
+                task_store,
+                SystemOperationKind.GOAL,
+                request,
+                failure,
+            )
+        )
+        is None
+    )
 
 
 def test_system_model_request_normalizes_messages_into_an_immutable_sequence():
@@ -196,7 +226,11 @@ def test_system_model_request_normalizes_messages_into_an_immutable_sequence():
     assert request.messages == ("first",)
 
     assert SystemModelRequest().messages == ()
-    assert SystemModelRequest(messages=("already", "a", "tuple")).messages == ("already", "a", "tuple")
+    assert SystemModelRequest(messages=("already", "a", "tuple")).messages == (
+        "already",
+        "a",
+        "tuple",
+    )
 
 
 def test_gateway_contribution_points_are_part_of_the_public_surface():
@@ -243,11 +277,20 @@ def test_extension_decorator_stamps_api_requirement():
 
 
 def test_task_outcome_members():
-    assert {outcome.value for outcome in TaskOutcome} == {"completed", "aborted", "failed"}
+    assert {outcome.value for outcome in TaskOutcome} == {
+        "completed",
+        "aborted",
+        "failed",
+    }
 
 
 def test_system_operation_kind_members():
-    assert {kind.value for kind in SystemOperationKind} == {"goal", "memory", "title", "summarization"}
+    assert {kind.value for kind in SystemOperationKind} == {
+        "goal",
+        "memory",
+        "title",
+        "summarization",
+    }
 
 
 def test_registry_and_install_alias_are_part_of_the_public_surface():
@@ -304,12 +347,16 @@ def test_runtime_api_version_matches_the_installed_contract_package():
     """Every additive contract slice bumps both gates together."""
     from importlib.metadata import version
 
-    assert API_VERSION == "0.12.1"
+    assert API_VERSION == "0.13.0"
     assert API_VERSION == version("deerflow-extension-api")
 
 
 def test_invocation_identity_contract_is_frozen_bounded_and_round_trips() -> None:
-    from deerflow_extension_api import ActingServiceV1, EffectiveSubjectV1, InvocationIdentityV1
+    from deerflow_extension_api import (
+        ActingServiceV1,
+        EffectiveSubjectV1,
+        InvocationIdentityV1,
+    )
 
     attributes = {"tenant": {"id": "north"}, "groups": ["readers"]}
     identity = InvocationIdentityV1(

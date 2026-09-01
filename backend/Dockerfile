@@ -73,6 +73,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     done; \
     UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync --locked --extra redis $extras_flags'
 
+# Bind the platform-specific installed extension bytes after the locked sync.
+# Runtime startup repeats this bounded verification without network access.
+RUN mkdir -p /app/hartmesh \
+    && cd /app/backend \
+    && .venv/bin/python -m deerflow.extensions.artifact_build \
+        --source-lock /app/backend/extensions.lock.json \
+        --backend-dir /app/backend \
+        --output /app/hartmesh/extension-artifacts.json \
+    && chmod 0444 /app/hartmesh/extension-artifacts.json
+
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.
 ENV LANG=C.UTF-8
@@ -119,6 +129,7 @@ WORKDIR /app
 
 # Copy backend with pre-built virtualenv from builder
 COPY --from=builder /app/backend ./backend
+COPY --from=builder /app/hartmesh ./hartmesh
 
 # Expose Gateway API port.
 EXPOSE 8001

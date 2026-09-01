@@ -117,6 +117,18 @@ class CapabilityPluginManifestEntry:
     package_name: str | None
     package_version: str | None
     load_required: bool
+    source_entry_digest: str | None
+
+
+@dataclass(frozen=True)
+class CapabilityContributionManifestEntry:
+    """Safe source attribution for every registered extension contribution."""
+
+    contribution_id: str | None
+    contribution_type: str
+    package_name: str | None
+    package_version: str | None
+    source_entry_digest: str | None
 
 
 @dataclass(frozen=True)
@@ -129,6 +141,7 @@ class CapabilityManifestEntry:
     capability_api_version: str
     package_name: str | None
     package_version: str | None
+    source_entry_digest: str | None
     operator_required: bool
     initialization_status: Literal["initialized", "failed", "missing"]
     diagnostic_code: str
@@ -140,7 +153,10 @@ class CapabilityManifest:
 
     extension_api_version: str
     extension_generation: int
+    artifact_manifest_digest: str | None
+    extension_configuration_digest: str | None
     plugins: tuple[CapabilityPluginManifestEntry, ...]
+    contributions: tuple[CapabilityContributionManifestEntry, ...]
     capabilities: tuple[CapabilityManifestEntry, ...]
     digest: str
 
@@ -176,11 +192,14 @@ def capability_manifest_to_dict(manifest: CapabilityManifest) -> dict[str, Any]:
     """Return the exact safe public projection of an immutable manifest."""
 
     return {
-        "version": 1,
+        "version": 2,
         "extension_api_version": manifest.extension_api_version,
         "extension_generation": manifest.extension_generation,
+        "artifact_manifest_digest": manifest.artifact_manifest_digest,
+        "extension_configuration_digest": manifest.extension_configuration_digest,
         "manifest_digest": manifest.digest,
         "plugins": [asdict(item) for item in manifest.plugins],
+        "contributions": [asdict(item) for item in manifest.contributions],
         "capabilities": [asdict(item) for item in manifest.capabilities],
     }
 
@@ -241,6 +260,7 @@ def _registration_manifest_entry(
         capability_api_version=str(getattr(registration, "capability_api_version")),
         package_name=getattr(registration, "package_name", None),
         package_version=getattr(registration, "package_version", None),
+        source_entry_digest=getattr(registration, "source_entry_digest", None),
         operator_required=operator_required,
         initialization_status="initialized" if initialized else "failed",
         diagnostic_code="initialized" if initialized else "initialization_failed",
@@ -259,20 +279,31 @@ def build_capability_manifest(
 
     required = frozenset(required_capabilities)
     initialized = frozenset(initialized_capability_ids)
-    plugin_requirements: dict[tuple[str | None, str | None], bool] = {}
+    plugin_requirements: dict[tuple[str | None, str | None, str | None], bool] = {}
     for item in extensions.loaded_plugins:
-        key = (item.package_name, item.package_version)
+        key = (item.package_name, item.package_version, item.source_entry_digest)
         plugin_requirements[key] = plugin_requirements.get(key, False) or item.required
     plugins = tuple(
         CapabilityPluginManifestEntry(
             package_name=name,
             package_version=version,
-            load_required=plugin_requirements[(name, version)],
+            load_required=plugin_requirements[(name, version, source_entry_digest)],
+            source_entry_digest=source_entry_digest,
         )
-        for name, version in sorted(
+        for name, version, source_entry_digest in sorted(
             plugin_requirements,
-            key=lambda item: (item[0] or "", item[1] or ""),
+            key=lambda item: (item[0] or "", item[1] or "", item[2] or ""),
         )
+    )
+    contributions = tuple(
+        CapabilityContributionManifestEntry(
+            contribution_id=item.contribution_id,
+            contribution_type=item.contribution_type,
+            package_name=item.package_name,
+            package_version=item.package_version,
+            source_entry_digest=item.source_entry_digest,
+        )
+        for item in extensions.contributions
     )
     entries: list[CapabilityManifestEntry] = []
     for registration in extensions.authorization_provider_factories:
@@ -296,6 +327,7 @@ def build_capability_manifest(
                 capability_api_version="1.0",
                 package_name=None,
                 package_version=None,
+                source_entry_digest=None,
                 operator_required=authorization_required,
                 initialization_status="initialized",
                 diagnostic_code="initialized",
@@ -310,6 +342,7 @@ def build_capability_manifest(
                 capability_api_version="1.0",
                 package_name=None,
                 package_version=None,
+                source_entry_digest=None,
                 operator_required=True,
                 initialization_status="missing",
                 diagnostic_code="not_registered",
@@ -352,6 +385,7 @@ def build_capability_manifest(
                     capability_api_version=registration.capability_api_version,
                     package_name=registration.package_name,
                     package_version=registration.package_version,
+                    source_entry_digest=registration.source_entry_digest,
                     operator_required=capability_id in required,
                     initialization_status="failed",
                     diagnostic_code="duplicate_registration",
@@ -390,6 +424,7 @@ def build_capability_manifest(
                 capability_api_version=(INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2 if missing_id == INVOCATION_CONSTRAINTS_REQUIRED_CAPABILITY_V2 else "1.0"),
                 package_name=None,
                 package_version=None,
+                source_entry_digest=None,
                 operator_required=True,
                 initialization_status="missing",
                 diagnostic_code="not_registered",
@@ -406,16 +441,22 @@ def build_capability_manifest(
         )
     )
     payload: dict[str, object] = {
-        "version": 1,
+        "version": 2,
         "extension_api_version": API_VERSION,
         "extension_generation": extensions.generation,
+        "artifact_manifest_digest": extensions.artifact_manifest_digest,
+        "extension_configuration_digest": extensions.extension_configuration_digest,
         "plugins": [asdict(item) for item in plugins],
+        "contributions": [asdict(item) for item in contributions],
         "capabilities": [asdict(item) for item in capabilities],
     }
     return CapabilityManifest(
         extension_api_version=API_VERSION,
         extension_generation=extensions.generation,
+        artifact_manifest_digest=extensions.artifact_manifest_digest,
+        extension_configuration_digest=extensions.extension_configuration_digest,
         plugins=plugins,
+        contributions=contributions,
         capabilities=capabilities,
         digest=_manifest_digest(payload),
     )

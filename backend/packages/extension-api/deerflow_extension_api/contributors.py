@@ -102,7 +102,12 @@ def _reference_json(reference: SafeContextReferenceV1) -> dict[str, object]:
 
 
 def _reference_from_json(value: object) -> SafeContextReferenceV1:
-    if not isinstance(value, dict) or set(value) != {"key", "value", "storage_class", "purpose"}:
+    if not isinstance(value, dict) or set(value) != {
+        "key",
+        "value",
+        "storage_class",
+        "purpose",
+    }:
         raise ValueError("safe context reference has unknown or missing fields")
     return SafeContextReferenceV1(
         key=value["key"],  # type: ignore[arg-type]
@@ -246,7 +251,11 @@ class NamespacedContextReferenceV1:
 
     @classmethod
     def from_json(cls, value: object) -> NamespacedContextReferenceV1:
-        if not isinstance(value, dict) or set(value) != {"capability_id", "namespace", "reference"}:
+        if not isinstance(value, dict) or set(value) != {
+            "capability_id",
+            "namespace",
+            "reference",
+        }:
             raise ValueError("namespaced context reference has unknown or missing fields")
         return cls(
             capability_id=value["capability_id"],  # type: ignore[arg-type]
@@ -281,7 +290,9 @@ class ResolvedProfileRevisionReferenceV1:
             raise ValueError("resolved profile digest must be a lowercase SHA-256 digest")
 
 
-def _trusted_reference_projection(items: tuple[NamespacedContextReferenceV1, ...]) -> list[dict[str, object]]:
+def _trusted_reference_projection(
+    items: tuple[NamespacedContextReferenceV1, ...],
+) -> list[dict[str, object]]:
     return [item.to_json() for item in items]
 
 
@@ -301,6 +312,8 @@ class TrustedRunContextV1:
     profile_revision: ResolvedProfileRevisionReferenceV1
     extension_generation: int
     extension_manifest_digest: str | None
+    extension_artifact_manifest_digest: str | None = None
+    extension_configuration_digest: str | None = None
     tenant: TenantReferenceV1 | None = None
     persistable_references: tuple[NamespacedContextReferenceV1, ...] = ()
     runtime_only_references: tuple[NamespacedContextReferenceV1, ...] = ()
@@ -334,8 +347,25 @@ class TrustedRunContextV1:
             raise ValueError("extension_generation must be a non-negative integer")
         if self.extension_manifest_digest is not None and _DIGEST.fullmatch(self.extension_manifest_digest) is None:
             raise ValueError("extension_manifest_digest must be a lowercase SHA-256 digest")
+        for field_name in (
+            "extension_artifact_manifest_digest",
+            "extension_configuration_digest",
+        ):
+            digest = getattr(self, field_name)
+            if digest is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                raise ValueError(f"{field_name} must use sha256:<64 lowercase hex>")
+        if (self.extension_artifact_manifest_digest is None) != (self.extension_configuration_digest is None):
+            raise ValueError("extension artifact and configuration digests must be supplied together")
+        if self.extension_artifact_manifest_digest is not None and self.tenant is None:
+            raise ValueError("artifact-bound trusted run context requires a tenant reference")
+        if self.extension_artifact_manifest_digest is not None and self.extension_manifest_digest is None:
+            raise ValueError("artifact-bound trusted run context requires a capability manifest digest")
 
-        for name in ("persistable_references", "runtime_only_references", "secret_handles"):
+        for name in (
+            "persistable_references",
+            "runtime_only_references",
+            "secret_handles",
+        ):
             items = tuple(getattr(self, name))
             object.__setattr__(self, name, items)
             if any(not isinstance(item, NamespacedContextReferenceV1) for item in items):
@@ -347,7 +377,11 @@ class TrustedRunContextV1:
         if any(item.reference.purpose != "secret_handle" for item in self.secret_handles):
             raise ValueError("secret_handles must contain only stable secret-handle references")
 
-        all_items = (*self.persistable_references, *self.runtime_only_references, *self.secret_handles)
+        all_items = (
+            *self.persistable_references,
+            *self.runtime_only_references,
+            *self.secret_handles,
+        )
         if len(all_items) > _MAX_REFERENCES:
             raise ValueError("trusted run context accepts at most 32 aggregate references")
         keys = [item.fully_qualified_key for item in all_items]
@@ -366,7 +400,10 @@ class TrustedRunContextV1:
         runtime_items = tuple(item for item in (*self.runtime_only_references, *self.secret_handles) if item.reference.storage_class == "runtime_only")
         computed_runtime_digest = hashlib.sha256(
             json.dumps(
-                {"version": 1, "references": _trusted_reference_projection(runtime_items)},
+                {
+                    "version": 1,
+                    "references": _trusted_reference_projection(runtime_items),
+                },
                 ensure_ascii=False,
                 separators=(",", ":"),
                 sort_keys=True,
@@ -401,7 +438,7 @@ class TrustedRunContextV1:
 
     def _full_projection(self) -> dict[str, object]:
         projection = {
-            "version": 2 if self.tenant is not None else 1,
+            "version": (3 if self.extension_artifact_manifest_digest is not None else (2 if self.tenant is not None else 1)),
             "identity": self.identity.to_json(),
             "origin": {
                 "source_kind": self.origin.source_kind,
@@ -411,8 +448,14 @@ class TrustedRunContextV1:
             },
             "thread_id": self.thread_id,
             "external_key_reference": self.external_key_reference,
-            "agent_revision": {"agent_id": self.agent_revision.agent_id, "digest": self.agent_revision.digest},
-            "profile_revision": {"profile_id": self.profile_revision.profile_id, "digest": self.profile_revision.digest},
+            "agent_revision": {
+                "agent_id": self.agent_revision.agent_id,
+                "digest": self.agent_revision.digest,
+            },
+            "profile_revision": {
+                "profile_id": self.profile_revision.profile_id,
+                "digest": self.profile_revision.digest,
+            },
             "extension_generation": self.extension_generation,
             "extension_manifest_digest": self.extension_manifest_digest,
             "persistable_references": _trusted_reference_projection(self.persistable_references),
@@ -424,6 +467,9 @@ class TrustedRunContextV1:
         }
         if self.tenant is not None:
             projection["tenant"] = self.tenant.to_json()
+        if self.extension_artifact_manifest_digest is not None:
+            projection["extension_artifact_manifest_digest"] = self.extension_artifact_manifest_digest
+            projection["extension_configuration_digest"] = self.extension_configuration_digest
         return projection
 
     def bind_run(self, run_id: str) -> TrustedRunContextV1:
@@ -435,7 +481,16 @@ class TrustedRunContextV1:
     def authorization_attributes(self) -> Mapping[str, SafeValueV1]:
         """Read-only, namespaced execution values for compatibility policy."""
 
-        return MappingProxyType({item.fully_qualified_key: item.reference.value for item in (*self.persistable_references, *self.runtime_only_references) if item.reference.purpose == "execution"})
+        return MappingProxyType(
+            {
+                item.fully_qualified_key: item.reference.value
+                for item in (
+                    *self.persistable_references,
+                    *self.runtime_only_references,
+                )
+                if item.reference.purpose == "execution"
+            }
+        )
 
     @property
     def digest(self) -> str:
@@ -458,7 +513,7 @@ class TrustedRunContextV1:
         persistable_execution = tuple(item for item in self.persistable_references if item.reference.purpose == "execution")
         persistable_handles = tuple(item for item in self.secret_handles if item.reference.storage_class == "persistable")
         projection = {
-            "version": 2 if self.tenant is not None else 1,
+            "version": (3 if self.extension_artifact_manifest_digest is not None else (2 if self.tenant is not None else 1)),
             "identity": self.identity.to_json(),
             "base_origin": {
                 "source_kind": self.origin.source_kind,
@@ -483,6 +538,9 @@ class TrustedRunContextV1:
         }
         if self.tenant is not None:
             projection["tenant"] = self.tenant.to_json()
+        if self.extension_artifact_manifest_digest is not None:
+            projection["extension_artifact_manifest_digest"] = self.extension_artifact_manifest_digest
+            projection["extension_configuration_digest"] = self.extension_configuration_digest
         return hashlib.sha256(
             json.dumps(
                 projection,
@@ -530,16 +588,28 @@ class TrustedRunContextV1:
             "runtime_reference_count",
             "evidence_digest",
         }
-        if not isinstance(value, dict) or value.get("version") not in {1, 2}:
+        if not isinstance(value, dict) or value.get("version") not in {1, 2, 3}:
             raise ValueError("trusted run context has unknown fields or an unsupported version")
-        if value.get("version") == 2:
+        if value.get("version") in {2, 3}:
             expected.add("tenant")
+        if value.get("version") == 3:
+            expected.update(
+                {
+                    "extension_artifact_manifest_digest",
+                    "extension_configuration_digest",
+                }
+            )
         if set(value) != expected:
             raise ValueError("trusted run context has unknown fields or an unsupported version")
         origin = value["origin"]
         agent = value["agent_revision"]
         profile = value["profile_revision"]
-        if not isinstance(origin, dict) or set(origin) != {"source_kind", "references", "digest", "contributor_references"}:
+        if not isinstance(origin, dict) or set(origin) != {
+            "source_kind",
+            "references",
+            "digest",
+            "contributor_references",
+        }:
             raise ValueError("trusted Origin has unknown or missing fields")
         if not isinstance(agent, dict) or set(agent) != {"agent_id", "digest"}:
             raise ValueError("trusted agent revision has unknown or missing fields")
@@ -548,7 +618,7 @@ class TrustedRunContextV1:
         runtime_count = value["runtime_reference_count"]
         trusted = cls(
             identity=InvocationIdentityV1.from_json(value["identity"]),  # type: ignore[arg-type]
-            tenant=(TenantReferenceV1.from_json(value["tenant"]) if value.get("version") == 2 else None),
+            tenant=(TenantReferenceV1.from_json(value["tenant"]) if value.get("version") in {2, 3} else None),
             origin=SealedOriginV1(
                 source_kind=origin["source_kind"],  # type: ignore[arg-type]
                 references=tuple(_reference_from_json(item) for item in origin["references"]),  # type: ignore[union-attr]
@@ -561,6 +631,8 @@ class TrustedRunContextV1:
             profile_revision=ResolvedProfileRevisionReferenceV1(profile_id=profile["profile_id"], digest=profile["digest"]),  # type: ignore[arg-type]
             extension_generation=value["extension_generation"],  # type: ignore[arg-type]
             extension_manifest_digest=value["extension_manifest_digest"],  # type: ignore[arg-type]
+            extension_artifact_manifest_digest=value.get("extension_artifact_manifest_digest"),  # type: ignore[arg-type]
+            extension_configuration_digest=value.get("extension_configuration_digest"),  # type: ignore[arg-type]
             persistable_references=tuple(NamespacedContextReferenceV1.from_json(item) for item in value["persistable_references"]),  # type: ignore[union-attr]
             runtime_only_references=(),
             secret_handles=tuple(NamespacedContextReferenceV1.from_json(item) for item in value["secret_handles"]),  # type: ignore[union-attr]
