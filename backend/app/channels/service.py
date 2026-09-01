@@ -15,6 +15,7 @@ from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_CHANNE
 from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
 from app.channels.store import ChannelStore
+from deerflow.deployment import coerce_deployment_profile
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,9 @@ class ChannelService:
         self._connection_repo = connection_repo
         self._get_stream_bridge = get_stream_bridge
         deployment = getattr(app_config, "deployment", None)
-        self._durable_production = getattr(deployment, "profile", None) == "durable_production"
+        self._durable_profile = coerce_deployment_profile(
+            getattr(deployment, "profile", None),
+        ).is_durable
         langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
         gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
         default_session = config.pop("session", None)
@@ -377,11 +380,11 @@ class ChannelService:
             return
         processor = self.inbound_receipt_processor
         if processor is not None:
-            if self._durable_production and not getattr(processor, "durable", False):
+            if self._durable_profile and not getattr(processor, "durable", False):
                 raise RuntimeError("durable inbound receipt processor is unavailable")
             await processor.receive_batch(batch)
             return
-        if self._durable_production:
+        if self._durable_profile:
             raise RuntimeError("durable inbound receipt processor is unavailable")
         for message in batch:
             await self.bus.publish_inbound(message)

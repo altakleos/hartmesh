@@ -229,6 +229,25 @@ imagePullSecrets:
   value: {{ ($configuredOwnership | default $sandboxOwnership) | quote }}
 {{- end -}}
 
+{{/* Exact config bytes mounted by the Gateway and migration hook. Keep the
+     profile-derived fields in one renderer so the topology digest cannot
+     describe different bytes from the runtime ConfigMap. */}}
+{{- define "deer-flow.renderedConfig" -}}
+{{- $renderedConfig := ((.Values.config | default "") | fromYaml) | default dict -}}
+{{- $sandboxConfig := (index $renderedConfig "sandbox") | default dict -}}
+{{- $_ := set $sandboxConfig "accepted_skill_projection_profile" (.Values.provisioner.acceptedSkillProjectionProfile | default "disabled") -}}
+{{- if .Values.provisioner.enabled -}}
+{{- $_ := set $sandboxConfig "provisioner_service_account_token_file" "/var/run/secrets/hartmesh-provisioner/token" -}}
+{{- end -}}
+{{- if eq (.Values.provisioner.acceptedSkillProjectionProfile | default "disabled") "rwx_verified_copy_v2" -}}
+{{- $runOwnership := (index $renderedConfig "run_ownership") | default dict -}}
+{{- $_ := set $runOwnership "heartbeat_enabled" true -}}
+{{- $_ := set $renderedConfig "run_ownership" $runOwnership -}}
+{{- end -}}
+{{- $_ := set $renderedConfig "sandbox" $sandboxConfig -}}
+{{- toYaml $renderedConfig -}}
+{{- end -}}
+
 {{/* SHA256 checksums of the ConfigMaps. Mount these as pod-template
      annotations: ConfigMaps mounted via subPath do NOT receive live updates,
      so a `helm upgrade` that only changes a ConfigMap would leave pods on stale
@@ -294,14 +313,18 @@ imagePullSecrets:
 
 {{- $mode := .Values.deployment.mode -}}
 {{- $tenantId := include "deer-flow.tenantId" . -}}
-{{- if not (has $mode (list "local_evaluation" "durable_one_replica")) -}}
-{{- fail "deployment.mode must be local_evaluation or durable_one_replica" -}}
+{{- if not (has $mode (list "local_evaluation" "durable_one_replica" "durable_two_gateway_v1")) -}}
+{{- fail "deployment.mode must be local_evaluation, durable_one_replica, or durable_two_gateway_v1" -}}
 {{- end -}}
 {{- $tier := .Values.deployment.persistenceTier -}}
 {{- if not (has $tier (list "process_local" "node_durable" "shared_durable")) -}}
 {{- fail "deployment.persistenceTier must be process_local, node_durable, or shared_durable" -}}
 {{- end -}}
-{{- if ne (int .Values.gateway.replicas) 1 -}}
+{{- if eq $mode "durable_two_gateway_v1" -}}
+  {{- if ne (int .Values.gateway.replicas) 2 -}}
+  {{- fail "durable_two_gateway_v1 requires gateway.replicas=2" -}}
+  {{- end -}}
+{{- else if ne (int .Values.gateway.replicas) 1 -}}
 {{- fail "the supported chart topology requires gateway.replicas=1" -}}
 {{- end -}}
 
@@ -604,6 +627,185 @@ imagePullSecrets:
     {{- if ne .status "passed" -}}
     {{- fail "deployment qualification status must be passed" -}}
     {{- end -}}
+  {{- end -}}
+{{- end -}}
+
+{{- if eq $mode "durable_two_gateway_v1" -}}
+  {{- $profile := ((index $deploymentConfig "profile") | default "local_development") -}}
+  {{- $checkpointCache := (index $databaseConfig "checkpoint_cache") | default dict -}}
+  {{- $checkpointerConfig := (index $appConfig "checkpointer") | default dict -}}
+  {{- $runEventsConfig := (index $appConfig "run_events") | default dict -}}
+  {{- $agentStorageConfig := (index $appConfig "agent_storage") | default dict -}}
+  {{- $streamBridgeConfig := (index $appConfig "stream_bridge") | default dict -}}
+  {{- $schedulerConfig := (index $appConfig "scheduler") | default dict -}}
+  {{- $mcpTasksConfig := (index $appConfig "mcp_tasks") | default dict -}}
+  {{- $sandboxConfig := (index $appConfig "sandbox") | default dict -}}
+  {{- $sandboxOwnership := (index $sandboxConfig "ownership") | default dict -}}
+  {{- $channelConnections := (index $appConfig "channel_connections") | default dict -}}
+  {{- $legacyChannels := (index $appConfig "channels") | default dict -}}
+  {{- $extensionsRuntimeConfig := (.Values.extensionsConfig | default "") | fromJson -}}
+  {{- $databaseSchema := (index $databaseConfig "postgres_schema") | default "" -}}
+  {{- $checkpointerSchema := (index $checkpointerConfig "postgres_schema") | default "" -}}
+  {{- $databaseSchemaRef := .Values.deployment.topology.databaseSchemaRef | default "" -}}
+  {{- $globalAutoscaling := (index .Values "autoscaling") | default dict -}}
+
+  {{- if or (not $tenantId) (eq $tenantId "local") -}}
+  {{- fail "durable_two_gateway_v1 requires tenant.id to be an explicit non-local identity" -}}
+  {{- end -}}
+  {{- if ne $tier "shared_durable" -}}
+  {{- fail "durable_two_gateway_v1 requires shared_durable persistence" -}}
+  {{- end -}}
+  {{- if ne $profile "durable_two_gateway_v1" -}}
+  {{- fail "durable_two_gateway_v1 requires config deployment.profile=durable_two_gateway_v1" -}}
+  {{- end -}}
+  {{- if or .Values.gateway.autoscaling.enabled ((index $globalAutoscaling "enabled") | default false) -}}
+  {{- fail "durable_two_gateway_v1 forbids Gateway autoscaling" -}}
+  {{- end -}}
+  {{- if not (regexMatch "^schema:sha256:[0-9a-f]{64}$" $databaseSchemaRef) -}}
+  {{- fail "durable_two_gateway_v1 requires deployment.topology.databaseSchemaRef as schema:sha256:<64 lowercase hex>" -}}
+  {{- end -}}
+  {{- if not $sourceRevision -}}
+  {{- fail "durable_two_gateway_v1 requires deployment.provenance.sourceRevision" -}}
+  {{- end -}}
+
+  {{- $matchingEvidence := 0 -}}
+  {{- range .Values.deployment.qualificationEvidence -}}
+    {{- if and (eq (.scope | default "") "durable_two_gateway_v1_postgres_redis_aio_rwx") (eq (.status | default "") "passed") -}}
+      {{- $matchingEvidence = add1 $matchingEvidence -}}
+    {{- end -}}
+  {{- end -}}
+  {{- $candidate := .Values.deployment.qualificationCandidate | default dict -}}
+  {{- $candidateEnabled := (index $candidate "enabled") | default false -}}
+  {{- $candidateId := (index $candidate "id") | default "" -}}
+  {{- if and $candidateEnabled (not (hasPrefix "hartmesh-qualification-" (include "deer-flow.namespace" .))) -}}
+  {{- fail "durable_two_gateway_v1 qualification candidate requires a disposable namespace beginning hartmesh-qualification-" -}}
+  {{- end -}}
+  {{- if and $candidateEnabled (not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$" $candidateId)) -}}
+  {{- fail "durable_two_gateway_v1 qualification candidate requires a bounded safe id" -}}
+  {{- end -}}
+  {{- if and $candidateEnabled (ne $matchingEvidence 0) -}}
+  {{- fail "durable_two_gateway_v1 qualification candidate cannot declare passing evidence" -}}
+  {{- end -}}
+  {{- if and (not $candidateEnabled) (ne $matchingEvidence 1) -}}
+  {{- fail "durable_two_gateway_v1 requires passed qualification evidence for durable_two_gateway_v1_postgres_redis_aio_rwx" -}}
+  {{- end -}}
+
+  {{- if or (not .Values.gateway.image.digest) (not .Values.frontend.image.digest) (not .Values.nginx.image.digest) (not .Values.provisioner.image.digest) (not .Values.postgresql.image.digest) (not .Values.redis.image.digest) -}}
+  {{- fail "durable_two_gateway_v1 requires digest-pinned gateway, frontend, nginx, provisioner, PostgreSQL, and Redis images" -}}
+  {{- end -}}
+  {{- if not (regexMatch "^[^[:space:]@]+@sha256:[0-9a-f]{64}$" .Values.provisioner.sandboxImage) -}}
+  {{- fail "durable_two_gateway_v1 requires a digest-pinned provisioner.sandboxImage" -}}
+  {{- end -}}
+  {{- if ne ((index $sandboxConfig "image") | default "") .Values.provisioner.sandboxImage -}}
+  {{- fail "durable_two_gateway_v1 requires config sandbox.image to equal provisioner.sandboxImage" -}}
+  {{- end -}}
+  {{- if or (not $artifactManifestDigest) (not $extensionConfigurationDigest) -}}
+  {{- fail "durable_two_gateway_v1 requires extension artifact and configuration digests" -}}
+  {{- end -}}
+
+  {{- if or (ne $databaseBackend "postgres") (not ((index $databaseConfig "command_timeout") | default false)) -}}
+  {{- fail "durable_two_gateway_v1 requires PostgreSQL with a finite database.command_timeout" -}}
+  {{- end -}}
+  {{- if ne ((index $checkpointCache "type") | default "memory") "redis" -}}
+  {{- fail "durable_two_gateway_v1 requires database.checkpoint_cache.type=redis" -}}
+  {{- end -}}
+  {{- if or (ne ((index $checkpointerConfig "type") | default "") "postgres") (ne $checkpointerSchema $databaseSchema) -}}
+  {{- fail "durable_two_gateway_v1 requires a PostgreSQL checkpointer on the application schema" -}}
+  {{- end -}}
+  {{- if ne ((index $runEventsConfig "backend") | default "memory") "db" -}}
+  {{- fail "durable_two_gateway_v1 requires run_events.backend=db" -}}
+  {{- end -}}
+  {{- if ne ((index $agentStorageConfig "backend") | default "file") "db" -}}
+  {{- fail "durable_two_gateway_v1 requires agent_storage.backend=db" -}}
+  {{- end -}}
+  {{- if ne ((index $streamBridgeConfig "type") | default "memory") "redis" -}}
+  {{- fail "durable_two_gateway_v1 requires stream_bridge.type=redis" -}}
+  {{- end -}}
+  {{- if or (not ((index $schedulerConfig "enabled") | default false)) (not ((index $schedulerConfig "multi_instance") | default false)) -}}
+  {{- fail "durable_two_gateway_v1 requires scheduler.enabled and scheduler.multi_instance" -}}
+  {{- end -}}
+  {{- if not ((index $mcpTasksConfig "enabled") | default false) -}}
+  {{- fail "durable_two_gateway_v1 requires mcp_tasks.enabled" -}}
+  {{- end -}}
+  {{- if not (kindIs "map" $extensionsRuntimeConfig) -}}
+  {{- fail "durable_two_gateway_v1 requires valid extensionsConfig JSON" -}}
+  {{- end -}}
+  {{- $mcpServers := (index $extensionsRuntimeConfig "mcpServers") | default dict -}}
+  {{- $taskToolsetCount := 0 -}}
+  {{- range $serverName, $server := $mcpServers -}}
+    {{- if and (kindIs "map" $server) (or (not (hasKey $server "enabled")) (index $server "enabled")) -}}
+      {{- $taskToolsetCount = add $taskToolsetCount (len ((index $server "task_toolsets") | default list)) -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if lt $taskToolsetCount 1 -}}
+  {{- fail "durable_two_gateway_v1 requires at least one enabled durable MCP task toolset" -}}
+  {{- end -}}
+  {{- if not ((index $runOwnershipConfig "heartbeat_enabled") | default false) -}}
+  {{- fail "durable_two_gateway_v1 requires run_ownership.heartbeat_enabled" -}}
+  {{- end -}}
+  {{- if not (has $receiptBackend (list "auto" "postgres")) -}}
+  {{- fail "durable_two_gateway_v1 requires shared PostgreSQL inbound dedupe" -}}
+  {{- end -}}
+
+  {{- if or .Values.postgresql.enabled (not .Values.postgresql.external.existingSecret) .Values.postgresql.external.databaseUrl .Values.postgresql.auth.password .Values.postgresql.existingSecret -}}
+  {{- fail "durable_two_gateway_v1 requires a pre-existing external PostgreSQL Secret for migration authority" -}}
+  {{- end -}}
+  {{- if or .Values.redis.enabled (not .Values.redis.external.existingSecret) .Values.redis.external.redisUrl .Values.redis.auth.password .Values.redis.existingSecret -}}
+  {{- fail "durable_two_gateway_v1 requires a pre-existing external Redis Secret" -}}
+  {{- end -}}
+  {{- if .Values.secrets -}}
+  {{- fail "durable_two_gateway_v1 forbids inline provider secrets" -}}
+  {{- end -}}
+
+  {{- if or (not .Values.provisioner.enabled) (ne (.Values.sandbox.volumeMode | default "") "pvc") (ne (.Values.provisioner.sandboxServiceType | default "ClusterIP") "ClusterIP") -}}
+  {{- fail "durable_two_gateway_v1 requires the in-cluster AIO provisioner with ClusterIP PVC mode" -}}
+  {{- end -}}
+  {{- if not (has ((index $sandboxConfig "use") | default "") (list "deerflow.community.aio_sandbox:AioSandboxProvider" "deerflow.community.aio_sandbox.provider:AioSandboxProvider")) -}}
+  {{- fail "durable_two_gateway_v1 requires the AIO sandbox provider" -}}
+  {{- end -}}
+  {{- if or (ne ((index $sandboxOwnership "type") | default "memory") "redis") (index $sandboxConfig "provisioner_api_key") -}}
+  {{- fail "durable_two_gateway_v1 requires Redis sandbox ownership and projected ServiceAccount authentication" -}}
+  {{- end -}}
+  {{- if ne ((index $sandboxConfig "accepted_materialization_profile") | default "disabled") "disabled" -}}
+  {{- fail "durable_two_gateway_v1 forbids unsupported sandbox materialization providers" -}}
+  {{- end -}}
+  {{- if ne (.Values.provisioner.acceptedSkillProjectionProfile | default "disabled") "rwx_verified_copy_v2" -}}
+  {{- fail "durable_two_gateway_v1 requires rwx_verified_copy_v2" -}}
+  {{- end -}}
+  {{- if or (not .Values.persistence.home.enabled) (not .Values.persistence.home.existingClaim) (not .Values.skills.existingClaim) (ne .Values.persistence.home.accessMode "ReadWriteMany") (ne .Values.skills.accessMode "ReadWriteMany") -}}
+  {{- fail "durable_two_gateway_v1 requires ReadWriteMany existing home and skills PVCs" -}}
+  {{- end -}}
+
+  {{- $channelsEnabled := ((index $channelConnections "enabled") | default false) -}}
+  {{- range $provider := list "slack" "telegram" "discord" "feishu" "dingtalk" "wechat" "wecom" "buzz" "github" -}}
+    {{- $providerConfig := (index $channelConnections $provider) | default dict -}}
+    {{- if ((index $providerConfig "enabled") | default false) -}}
+      {{- $channelsEnabled = true -}}
+    {{- end -}}
+    {{- $legacyProviderConfig := (index $legacyChannels $provider) | default dict -}}
+    {{- if ((index $legacyProviderConfig "enabled") | default false) -}}
+      {{- $channelsEnabled = true -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if $channelsEnabled -}}
+  {{- fail "durable_two_gateway_v1 forbids IM/channel connectors" -}}
+  {{- end -}}
+
+  {{- $enabledPluginCount := 0 -}}
+  {{- $pluginsQualified := true -}}
+  {{- range $pluginsConfig -}}
+    {{- if and (kindIs "map" .) (or (not (hasKey . "enabled")) (index . "enabled")) -}}
+      {{- $enabledPluginCount = add1 $enabledPluginCount -}}
+      {{- if or (ne ((index . "name") | default "") "governance") (ne ((index . "package") | default "") "hartmesh-governance-extension") (ne ((index . "use") | default "") "hartmesh_governance_extension:install") -}}
+        {{- $pluginsQualified = false -}}
+      {{- end -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if or (gt $enabledPluginCount 1) (not $pluginsQualified) -}}
+  {{- fail "durable_two_gateway_v1 allows only the qualified governance extension" -}}
+  {{- end -}}
+  {{- if not $candidateEnabled -}}
+  {{- fail "topology_qualification_missing: durable_two_gateway_v1 remains unavailable until a verified qualification artifact is bundled by a future release" -}}
   {{- end -}}
 {{- end -}}
 

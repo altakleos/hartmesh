@@ -312,6 +312,16 @@ class RunRecord:
         repr=False,
     )
     state_version: int = 0
+    # Local-only checkpoint capability. Store hydration never populates these:
+    # a terminal version is minted only after this worker's owner-fenced CAS.
+    checkpoint_terminal_state_version: int | None = field(
+        default=None,
+        repr=False,
+    )
+    checkpoint_execution_fence_revoked: bool = field(
+        default=False,
+        repr=False,
+    )
     pending_lifecycle_type: LifecycleType | None = field(default=None, repr=False)
     idempotency_key: str | None = None
     # True only on the caller that recovered an existing idempotent admission;
@@ -974,11 +984,24 @@ class RunManager:
         candidate: _UnresolvedAdmissionCandidate,
         row: dict[str, Any],
     ) -> bool:
+        status = row.get("status")
+        active_statuses = {
+            RunStatus.pending.value,
+            RunStatus.running.value,
+        }
+        terminal_statuses = {
+            RunStatus.success.value,
+            RunStatus.error.value,
+            RunStatus.timeout.value,
+            RunStatus.interrupted.value,
+        }
+        if status not in active_statuses | terminal_statuses:
+            return False
         expected = {
             "run_id": candidate.run_id,
             "thread_id": candidate.thread_id,
             "user_id": candidate.user_id,
-            "owner_worker_id": candidate.owner_worker_id,
+            "owner_worker_id": (candidate.owner_worker_id if status in active_statuses else None),
             "operation_kind": ThreadOperationKind.run.value,
             "external_scope": candidate.external_scope,
             "external_key": candidate.external_key,
@@ -994,11 +1017,24 @@ class RunManager:
     ) -> bool:
         """Return whether authoritative truth matches one retained release."""
 
+        status = row.get("status")
+        active_statuses = {
+            RunStatus.pending.value,
+            RunStatus.running.value,
+        }
+        terminal_statuses = {
+            RunStatus.success.value,
+            RunStatus.error.value,
+            RunStatus.timeout.value,
+            RunStatus.interrupted.value,
+        }
+        if status not in active_statuses | terminal_statuses:
+            return False
         expected = {
             "run_id": obligation.run_id,
             "thread_id": obligation.thread_id,
             "user_id": obligation.user_id,
-            "owner_worker_id": obligation.owner_worker_id,
+            "owner_worker_id": (obligation.owner_worker_id if status in active_statuses else None),
             "operation_kind": obligation.operation_kind.value,
         }
         return all(row.get(field) == value for field, value in expected.items())
@@ -1630,6 +1666,13 @@ class RunManager:
             return False
         if self._store is None:
             return True
+        if self._store.durable_lifecycle and record.operation_kind == ThreadOperationKind.run and self.heartbeat_enabled and record.owner_worker_id != self._worker_id:
+            await self._mark_ownership_lost(
+                record,
+                reason=("The local worker cannot persist run status without its durable owner fence."),
+                require_active=False,
+            )
+            return False
         row_recovery_payload = self._store_put_payload(record, error=error, stop_reason=stop_reason)
         try:
             if self._store.durable_lifecycle and record.operation_kind == ThreadOperationKind.run:
@@ -1645,13 +1688,14 @@ class RunManager:
                     stop_reason=stop_reason,
                     reason=stop_reason,
                 )
+                transition_owned_by_this_worker = bool(self.heartbeat_enabled and record.owner_worker_id == self._worker_id)
 
                 def transition_call(
                     expected_state_version: int,
                     expected_statuses: tuple[str, ...],
                     transition: LifecycleTransition,
                 ) -> Awaitable[LifecycleTransitionResult]:
-                    if self.heartbeat_enabled and record.owner_worker_id == self._worker_id:
+                    if transition_owned_by_this_worker:
                         return self._store.transition_owned_run_atomic(
                             record.run_id,
                             expected_state_version=expected_state_version,
@@ -1699,6 +1743,10 @@ class RunManager:
                         ),
                     )
                     updated = transition_result.applied
+                if updated and transition_owned_by_this_worker and transition_result.row is not None and transition_result.row.get("status") in {"success", "error", "timeout", "interrupted"}:
+                    terminal_version = transition_result.row.get("state_version")
+                    if type(terminal_version) is int and terminal_version >= 0:
+                        record.checkpoint_terminal_state_version = terminal_version
                 if transition_result.row is not None:
                     self._sync_record_from_store_row(record, transition_result.row)
                 if updated:
@@ -1727,15 +1775,27 @@ class RunManager:
                 if existing is not None:
                     existing_status = existing.get("status")
                     if existing_status == status.value:
+                        if self.heartbeat_enabled and not record.store_only and record.checkpoint_terminal_state_version is None:
+                            await self._mark_ownership_lost(
+                                record,
+                                reason=("A matching terminal outcome was not proven to be this worker's own write."),
+                                require_active=False,
+                            )
+                            return False
                         logger.info(
                             "Run %s status update to %s was already persisted",
                             record.run_id,
                             status.value,
                         )
                         return True
-                    if existing_status == "error":
+                    if existing_status in {
+                        "success",
+                        "error",
+                        "timeout",
+                        "interrupted",
+                    }:
                         logger.warning(
-                            "Run %s status update to %s skipped: store row already at error (peer takeover)",
+                            "Run %s status update to %s skipped: store row is already terminal (peer takeover)",
                             record.run_id,
                             status.value,
                         )
@@ -2398,6 +2458,29 @@ class RunManager:
 
         return self._store is not None and self._store.durable_lifecycle
 
+    @asynccontextmanager
+    async def hold_execution_fence(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        state_version: int,
+        terminal_state_version: int | None = None,
+        revoked: bool = False,
+    ) -> AsyncIterator[bool]:
+        """Serialize one external mutation with durable owner changes."""
+
+        if revoked or self._store is None or not self._store.durable_lifecycle:
+            yield False
+            return
+        async with self._store.hold_execution_fence(
+            run_id,
+            owner_worker_id=owner_worker_id,
+            state_version=state_version,
+            terminal_state_version=terminal_state_version,
+        ) as active:
+            yield active
+
     async def _resolve_uncertain_assembly_evidence_bind(
         self,
         run_id: str,
@@ -2861,6 +2944,33 @@ class RunManager:
             )
             return None
 
+        async with self._lock:
+            owner_record = self._runs.get(run_id)
+            owner_worker_id = owner_record.owner_worker_id if owner_record is not None and self.heartbeat_enabled else None
+            owner_state_version = owner_record.state_version if owner_worker_id == self._worker_id else None
+
+        if self.heartbeat_enabled and self._store.durable_lifecycle and (owner_record is None or owner_state_version is None):
+            if owner_record is not None:
+                from deerflow.runtime.kubernetes_qualification import (
+                    qualification_counter,
+                )
+
+                await qualification_counter(
+                    "terminal_stale_rejections",
+                    owner_record,
+                )
+                await self._mark_ownership_lost(
+                    owner_record,
+                    reason=("The local worker cannot finalize a run without its durable owner fence."),
+                    require_active=False,
+                )
+            else:
+                logger.error(
+                    "Refused to finalize unknown durable run %s without an owner fence",
+                    run_id,
+                )
+            return None
+
         try:
             result = await self._call_store_with_retry(
                 "finalize_if_not_cancelled",
@@ -2870,6 +2980,9 @@ class RunManager:
                     status=status.value,
                     error=error,
                     stop_reason=stop_reason,
+                    expected_owner_worker_id=(owner_worker_id if owner_state_version is not None else None),
+                    expected_state_version=owner_state_version,
+                    require_unexpired_lease=(owner_state_version is not None),
                 ),
             )
         except Exception:
@@ -2891,6 +3004,25 @@ class RunManager:
                     record.abort_event.set()
             return result.cancel_action
 
+        if not result.finalized and owner_state_version is not None:
+            async with self._lock:
+                record = self._runs.get(run_id)
+            if record is not None:
+                from deerflow.runtime.kubernetes_qualification import (
+                    qualification_counter,
+                )
+
+                await qualification_counter(
+                    "terminal_stale_rejections",
+                    record,
+                )
+                await self._mark_ownership_lost(
+                    record,
+                    reason=("The durable store rejected terminal state from a stale run owner."),
+                    require_active=False,
+                )
+            return None
+
         await self.set_status(
             run_id,
             status,
@@ -2904,6 +3036,9 @@ class RunManager:
                 async with self._lock:
                     record = self._runs.get(run_id)
                     if record is not None:
+                        terminal_version = stored.get("state_version")
+                        if record is owner_record and owner_state_version is not None and stored.get("status") == status.value and type(terminal_version) is int and terminal_version >= 0:
+                            record.checkpoint_terminal_state_version = terminal_version
                         self._sync_record_from_store_row(record, stored)
         return None
 
@@ -4508,6 +4643,8 @@ class RunManager:
             if record.ownership_lost:
                 return True
             record.ownership_lost = True
+            record.checkpoint_execution_fence_revoked = True
+            record.checkpoint_terminal_state_version = None
             record.abort_event.set()
             if record.task is None and record.attachment_supervised:
                 # Keep the last store-confirmed status visible locally. This

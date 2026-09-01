@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -154,6 +155,26 @@ async def test_stale_or_expired_owner_cannot_append(local_store) -> None:
     runs.row["state_version"] = 6
     with pytest.raises(ToolReceiptOwnershipLost, match="tool_receipt_ownership_lost"):
         await _append(store)
+
+
+@pytest.mark.anyio
+async def test_receipt_sink_reports_rejected_stale_append(local_store) -> None:
+    store, runs = local_store
+    rejected = AsyncMock()
+    sink = RunEventToolReceiptSink(
+        store,
+        on_ownership_lost=rejected,
+    )
+    receipt = DurableToolReceiptV1.from_event_body(
+        _body(),
+        occurred_at=datetime.now(UTC),
+    )
+    runs.row["state_version"] = 6
+
+    with pytest.raises(ToolReceiptOwnershipLost, match="tool_receipt_ownership_lost"):
+        await sink.record_started(receipt)
+
+    rejected.assert_awaited_once_with("append")
 
     runs.row["state_version"] = 5
     runs.row["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()

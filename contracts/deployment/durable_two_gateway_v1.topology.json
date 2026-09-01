@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "profile": "durable_two_gateway_v1",
+  "scope": "durable_two_gateway_v1_postgres_redis_aio_rwx",
+  "replica_count": 2,
+  "dependencies": [
+    {
+      "id": "deployment_identity_and_profile",
+      "classification": "replica_safe_stateless_work",
+      "authority": "startup-frozen tenant reference and exact topology fingerprint",
+      "required_adapter": "server-owned TenantIdentityV1 plus PostgreSQL topology registry",
+      "config_fields": ["deployment"],
+      "service_registrations": ["topology_registry", "runtime_readiness"],
+      "runtime_state_fields": ["deployment_profile", "redis_tenant_namespace", "tenant_identity", "tenant_schema_binding", "topology_redis_key_prefixes", "topology_registration", "topology_service_registry", "topology_supervisor"],
+      "requirement": "One tenant is frozen per release; every live replica registers the same redacted fingerprint."
+    },
+    {
+      "id": "run_manager_store_and_worker_heartbeat",
+      "classification": "local_substitutable_store",
+      "authority": "runs table ownership lease, epoch, cancellation fence, and lifecycle rows",
+      "required_adapter": "PostgreSQL RunRepository with heartbeat enabled",
+      "config_fields": ["database", "run_ownership"],
+      "service_registrations": ["persistence_engine", "run_store", "run_manager"],
+      "runtime_state_fields": ["close_runtime_dependencies", "run_manager", "run_store", "shutdown_coordinator"],
+      "requirement": "Process-local RunRecord objects are caches only; every authoritative mutation is owner-fenced in PostgreSQL."
+    },
+    {
+      "id": "checkpoint_saver_and_channel_mode",
+      "classification": "local_substitutable_store",
+      "authority": "LangGraph checkpoints, writes, Store data, channel mode, and snapshot cadence",
+      "required_adapter": "PostgreSQL checkpointer and Store with one fingerprinted mode/cadence",
+      "config_fields": ["checkpointer", "database"],
+      "service_registrations": ["checkpointer", "langgraph_store"],
+      "runtime_state_fields": ["checkpoint_channel_mode", "checkpoint_snapshot_frequency", "checkpointer", "store"],
+      "requirement": "No memory, SQLite, or per-node checkpoint authority is permitted."
+    },
+    {
+      "id": "checkpoint_cache",
+      "classification": "process_local_cache_only",
+      "authority": "none; cached materialized checkpoint history is derived from PostgreSQL",
+      "required_adapter": "tenant-prefixed Redis cache or disabled cache",
+      "config_fields": ["database"],
+      "service_registrations": ["checkpoint_cache"],
+      "runtime_state_fields": [],
+      "requirement": "An empty or stale cache must reconstruct from the checkpoint authority and must never change lifecycle state."
+    },
+    {
+      "id": "run_event_store_and_journal",
+      "classification": "local_substitutable_store",
+      "authority": "ordered run events, receipts, attempt reservations, and terminal delivery evidence",
+      "required_adapter": "PostgreSQL DBRunEventStore",
+      "config_fields": ["run_events"],
+      "service_registrations": ["run_event_store"],
+      "runtime_state_fields": ["run_event_store", "run_events_config"],
+      "requirement": "Memory and JSONL event stores are forbidden; durable sequence and idempotency constraints are authoritative."
+    },
+    {
+      "id": "stream_bridge_and_retained_snapshots",
+      "classification": "remote_owned_service",
+      "authority": "bounded SSE transport replay only; durable events remain authoritative",
+      "required_adapter": "tenant-prefixed shared Redis Streams",
+      "config_fields": ["stream_bridge"],
+      "service_registrations": ["stream_bridge"],
+      "runtime_state_fields": ["stream_bridge"],
+      "requirement": "Either replica can publish or reconnect; Redis loss is retryable and never invents durable history."
+    },
+    {
+      "id": "inbound_receipts_and_dedupe",
+      "classification": "local_substitutable_store",
+      "authority": "tenant-scoped inbound receipt identity and leased dispatch",
+      "required_adapter": "PostgreSQL inbound receipt repository",
+      "config_fields": ["dedupe_storage"],
+      "service_registrations": ["inbound_dedupe_store"],
+      "runtime_state_fields": [],
+      "requirement": "The process-local dedupe adapter is forbidden even though channel ingress is disabled."
+    },
+    {
+      "id": "scheduler_schedule_store",
+      "classification": "local_substitutable_store",
+      "authority": "schedule definitions and immutable schedule versions",
+      "required_adapter": "PostgreSQL ScheduledTaskRepository",
+      "config_fields": ["scheduler"],
+      "service_registrations": ["scheduled_task_repo"],
+      "runtime_state_fields": ["scheduled_task_repo"],
+      "requirement": "Both replicas observe one shared definition authority."
+    },
+    {
+      "id": "scheduler_occurrence_claims_and_global_slots",
+      "classification": "singleton_activity",
+      "authority": "deterministic occurrence identity, launch lease, and global concurrency budget",
+      "required_adapter": "PostgreSQL ScheduledTaskRunRepository using database time",
+      "config_fields": ["scheduler", "run_ownership"],
+      "service_registrations": ["scheduled_task_run_repo", "scheduled_task_service"],
+      "runtime_state_fields": ["scheduled_task_run_repo", "scheduled_task_service"],
+      "requirement": "Both schedulers participate; unique occurrence admission and advisory-locked capacity replace a process leader."
+    },
+    {
+      "id": "mcp_task_repository_poller_and_notifications",
+      "classification": "singleton_activity",
+      "authority": "task lineage, poll lease, terminal result, cancellation fence, and notification intent",
+      "required_adapter": "PostgreSQL McpTaskRepository and fenced McpTaskService",
+      "config_fields": ["mcp_tasks"],
+      "service_registrations": ["mcp_task_repo", "mcp_task_service"],
+      "runtime_state_fields": ["mcp_task_drivers", "mcp_task_extensions_config", "mcp_task_repo", "mcp_task_service", "mcp_tasks_available"],
+      "requirement": "Duplicate submissions reuse one row; stale pollers cannot finish or notify."
+    },
+    {
+      "id": "thread_feedback_and_user_metadata",
+      "classification": "local_substitutable_store",
+      "authority": "thread metadata, users, sessions, feedback, and ownership projections",
+      "required_adapter": "shared PostgreSQL repositories",
+      "config_fields": ["auth", "database"],
+      "service_registrations": ["thread_store", "feedback_repo", "user_store"],
+      "runtime_state_fields": ["feedback_repo", "service_observation_visibility_resolver", "thread_store"],
+      "requirement": "Filesystem and process-memory metadata cannot decide visibility or lifecycle."
+    },
+    {
+      "id": "agent_and_managed_subagent_definitions",
+      "classification": "local_substitutable_store",
+      "authority": "custom-agent and managed-subagent definitions",
+      "required_adapter": "PostgreSQL agent_storage backend",
+      "config_fields": ["agent_storage"],
+      "service_registrations": ["agent_store"],
+      "runtime_state_fields": [],
+      "requirement": "Per-node file catalogs are forbidden; local descriptor caches are reconstructible."
+    },
+    {
+      "id": "accepted_skill_snapshots_materialization_and_leases",
+      "classification": "remote_owned_service",
+      "authority": "immutable accepted snapshot plus fenced Lease/Pod/materialization evidence",
+      "required_adapter": "AIO/Kubernetes rwx_verified_copy_v2 AcceptedMaterializer",
+      "config_fields": ["sandbox"],
+      "service_registrations": ["accepted_materializer", "provisioner"],
+      "runtime_state_fields": [],
+      "requirement": "A stale Gateway cannot validate, renew, execute, or destroy a newer accepted-material epoch."
+    },
+    {
+      "id": "sandbox_ownership_capacity_and_cleanup",
+      "classification": "remote_owned_service",
+      "authority": "tenant-prefixed ownership leases and provisioner/Kubernetes resource identity",
+      "required_adapter": "shared Redis ownership plus AIO Kubernetes provisioner",
+      "config_fields": ["sandbox"],
+      "service_registrations": ["sandbox_provider", "sandbox_reconciler"],
+      "runtime_state_fields": [],
+      "requirement": "Warm pools remain process-local caches; ownership, teardown, adoption, and accepted material are fenced remotely."
+    },
+    {
+      "id": "extension_artifact_configuration_and_capabilities",
+      "classification": "replica_safe_stateless_work",
+      "authority": "startup-frozen artifact, configuration, contribution, and capability tuple",
+      "required_adapter": "empty canonical set or qualified first-party governance artifact with replica-safety declarations",
+      "config_fields": ["plugins", "required_capabilities"],
+      "service_registrations": ["extension_services", "capability_health_monitor"],
+      "runtime_state_fields": ["authorization_provider_resolver", "capability_health_monitor", "capability_manifest", "contributor_host", "extension_diagnostics", "extensions", "invocation_authorization_config", "invocation_constraints_host", "mcp_interceptor_host"],
+      "requirement": "Unclassified and single-replica-only background contributions fail before service startup."
+    },
+    {
+      "id": "memory_backend_and_caches",
+      "classification": "process_local_cache_only",
+      "authority": "none for run correctness; contextual memory remains explicitly non-durable",
+      "required_adapter": "disabled or tenant-isolated remote backend with reconstructible caches",
+      "config_fields": ["memory"],
+      "service_registrations": ["memory_manager"],
+      "runtime_state_fields": ["memory_manager"],
+      "requirement": "A cold or stale cache cannot alter accepted identity, ownership, receipts, or lifecycle."
+    },
+    {
+      "id": "rate_limits_circuit_breakers_and_token_budgets",
+      "classification": "process_local_cache_only",
+      "authority": "local protection only, never a deployment-wide quota claim",
+      "required_adapter": "disabled global claims; per-process diagnostics remain truthful",
+      "config_fields": ["circuit_breaker", "llm_call", "token_budget"],
+      "service_registrations": ["llm_call_limiter"],
+      "runtime_state_fields": [],
+      "requirement": "The profile does not reinterpret process-local counters as tenant-global enforcement."
+    },
+    {
+      "id": "background_cleanup_and_reconciliation",
+      "classification": "singleton_activity",
+      "authority": "lease-fenced run, stream, sandbox, task, and schedule recovery",
+      "required_adapter": "idempotent reconcilers using shared authorities",
+      "config_fields": ["run_ownership", "scheduler", "mcp_tasks", "sandbox", "stream_bridge"],
+      "service_registrations": ["orphan_reconciler", "sandbox_reconciler", "stream_cleanup"],
+      "runtime_state_fields": [],
+      "requirement": "Every loop can run on both replicas or is backed by a shared lease; no hidden process leader is authoritative."
+    },
+    {
+      "id": "migration_and_configuration_startup",
+      "classification": "singleton_activity",
+      "authority": "Alembic head, immutable config digest, and deployment artifact tuple",
+      "required_adapter": "Helm migration Job with PostgreSQL advisory lock; Gateways verify head only",
+      "config_fields": ["database", "deployment", "log_level", "logging"],
+      "service_registrations": ["migration_verifier", "configuration_snapshot"],
+      "runtime_state_fields": ["deployment_reporter", "runtime_readiness"],
+      "requirement": "Mixed heads, binaries, or config digests cannot register or become ready."
+    },
+    {
+      "id": "im_connectors_and_webhook_ingress",
+      "classification": "singleton_activity",
+      "authority": "excluded from V1",
+      "required_adapter": "disabled",
+      "config_fields": ["channels", "channel_connections"],
+      "service_registrations": ["channel_service", "webhook_ingress"],
+      "runtime_state_fields": ["verified_native_sources_at_composition"],
+      "requirement": "All long-lived connectors, user connection workers, and webhook channel ingress fail profile validation when enabled."
+    }
+  ]
+}

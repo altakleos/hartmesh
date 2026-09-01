@@ -480,7 +480,19 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # A legacy prefix is authoritative only when the explicit migration
         # command stored it alongside this schema's tenant binding.
         stack.push_async_callback(close_engine)
-        await init_engine_from_config(config.database)
+        from deerflow.deployment.topology import (
+            DeploymentProfile,
+            coerce_deployment_profile,
+        )
+
+        deployment_profile = coerce_deployment_profile(
+            getattr(getattr(config, "deployment", None), "profile", None),
+        )
+        is_multi_gateway_profile = deployment_profile is DeploymentProfile.durable_two_gateway_v1
+        if is_multi_gateway_profile:
+            await init_engine_from_config(config.database, migration_mode="verify")
+        else:
+            await init_engine_from_config(config.database)
         sf = get_session_factory()
         from deerflow.runtime.tenant_identity import LegacyRedisPrefixRecordV1
 
@@ -495,6 +507,51 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 tenant_identity,
             )
             legacy_redis_prefixes = app.state.tenant_schema_binding.legacy_redis_prefixes
+
+        if is_multi_gateway_profile:
+            if sf is None:
+                raise RuntimeError("topology_dependency_not_shared")
+            from datetime import UTC, datetime
+
+            from deerflow.deployment.topology import (
+                TOPOLOGY_HEARTBEAT_INTERVAL_SECONDS,
+                TOPOLOGY_LIVE_TTL_SECONDS,
+                ReplicaRegistrationV1,
+                TopologyHeartbeatSupervisor,
+                TopologyStartupFactsV1,
+                build_topology_fingerprint,
+            )
+            from deerflow.persistence.topology import PostgresTopologyRegistry
+
+            topology_facts = TopologyStartupFactsV1.from_environment()
+            topology_fingerprint = build_topology_fingerprint(
+                facts=topology_facts,
+                tenant_digest=tenant_identity.digest,
+                redis_namespace_digest=redis_tenant_namespace.digest,
+                capability_manifest=app.state.capability_manifest,
+                config=config,
+            )
+            topology_registration = ReplicaRegistrationV1(
+                replica_id=topology_facts.replica_id,
+                topology_fingerprint=topology_fingerprint,
+                started_at=datetime.now(UTC),
+                heartbeat_at=datetime.now(UTC),
+            )
+            topology_supervisor = TopologyHeartbeatSupervisor(
+                registry=PostgresTopologyRegistry(
+                    sf,
+                    live_ttl_seconds=TOPOLOGY_LIVE_TTL_SECONDS,
+                ),
+                registration=topology_registration,
+                heartbeat_interval_seconds=TOPOLOGY_HEARTBEAT_INTERVAL_SECONDS,
+            )
+            app.state.topology_supervisor = topology_supervisor
+            app.state.topology_registration = topology_registration
+            stack.push_async_callback(topology_supervisor.close)
+            await topology_supervisor.start()
+        else:
+            app.state.topology_supervisor = None
+            app.state.topology_registration = None
 
         # Sandbox providers are lazy process singletons, so bind their Redis
         # ownership factory before the first request can construct one. This is
@@ -521,18 +578,23 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             getattr(getattr(config, "sandbox", None), "ownership", None),
             stream_bridge=getattr(config, "stream_bridge", None),
         )
+        topology_redis_key_prefixes: list[str] = []
         if ownership_config.type == "redis":
-            resolve_ownership_key_prefix(
+            ownership_key_prefix = resolve_ownership_key_prefix(
                 ownership_config,
                 tenant_namespace=redis_tenant_namespace,
                 legacy_redis_prefixes=legacy_redis_prefixes,
             )
+            topology_redis_key_prefixes.append(ownership_key_prefix)
         if getattr(config.database, "checkpoint_cache", None) is not None:
-            checkpoint_cache_key_prefix(
+            checkpoint_key_prefix = checkpoint_cache_key_prefix(
                 config,
                 redis_tenant_namespace,
                 legacy_redis_prefixes,
             )
+            if getattr(config.database.checkpoint_cache, "type", None) == "redis":
+                topology_redis_key_prefixes.append(checkpoint_key_prefix)
+        app.state.topology_redis_key_prefixes = tuple(topology_redis_key_prefixes)
         app.state.stream_bridge = await stack.enter_async_context(
             make_stream_bridge(
                 config,
@@ -749,6 +811,151 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                         await close_runtime_dependencies()
                     else:
                         logger.warning("Runtime dependencies retained because run drain was not proven")
+
+
+def build_multi_gateway_topology_service_registry():
+    """Register every service surface composed by the exact Gateway profile."""
+
+    from deerflow.deployment.topology import TopologyServiceRegistry
+
+    registry = TopologyServiceRegistry()
+    registry.register(
+        "accepted_materializer",
+        construction_ref="deerflow.sandbox.accepted_material",
+    )
+    registry.register(
+        "agent_store",
+        construction_ref="deerflow.persistence.agents:make_agent_store",
+    )
+    registry.register(
+        "capability_health_monitor",
+        construction_ref="app.gateway.app:create_app",
+    )
+    registry.register(
+        "channel_service",
+        construction_ref="app.channels.service:start_channel_service",
+    )
+    registry.register(
+        "checkpoint_cache",
+        construction_ref="deerflow.runtime.checkpoint_cache.provider",
+    )
+    registry.register(
+        "checkpointer",
+        construction_ref="deerflow.runtime.checkpointer.async_provider:make_checkpointer",
+    )
+    registry.register(
+        "configuration_snapshot",
+        construction_ref="app.gateway.app:lifespan",
+    )
+    registry.register(
+        "extension_services",
+        construction_ref="deerflow.extensions.gateway:start_services",
+    )
+    registry.register(
+        "feedback_repo",
+        construction_ref="deerflow.persistence.feedback:FeedbackRepository",
+    )
+    registry.register(
+        "inbound_dedupe_store",
+        construction_ref="app.channels.dedupe_store:PostgresInboundDedupeStore",
+    )
+    registry.register(
+        "langgraph_store",
+        construction_ref="deerflow.runtime:make_store",
+    )
+    registry.register(
+        "llm_call_limiter",
+        construction_ref="deerflow.agents.middlewares.llm_error_handling_middleware:_ProcessWideLimiter",
+    )
+    registry.register(
+        "mcp_task_repo",
+        construction_ref="deerflow.persistence.mcp_tasks:McpTaskRepository",
+    )
+    registry.register(
+        "mcp_task_service",
+        construction_ref="app.mcp_tasks.service:McpTaskService",
+    )
+    registry.register(
+        "memory_manager",
+        construction_ref="deerflow.agents.memory:get_memory_manager",
+    )
+    registry.register(
+        "migration_verifier",
+        construction_ref="deerflow.persistence.engine:init_engine_from_config",
+    )
+    registry.register(
+        "orphan_reconciler",
+        construction_ref="deerflow.runtime.runs.manager:RunManager",
+    )
+    registry.register(
+        "persistence_engine",
+        construction_ref="deerflow.persistence.engine:init_engine_from_config",
+    )
+    registry.register(
+        "provisioner",
+        construction_ref="deerflow.community.aio_sandbox:AioSandboxProvider",
+    )
+    registry.register(
+        "run_event_store",
+        construction_ref="deerflow.runtime.events.store:make_run_event_store",
+    )
+    registry.register(
+        "run_manager",
+        construction_ref="deerflow.runtime.runs.manager:RunManager",
+    )
+    registry.register(
+        "run_store",
+        construction_ref="deerflow.persistence.run:RunRepository",
+    )
+    registry.register(
+        "runtime_readiness",
+        construction_ref="app.runtime.readiness:RuntimeReadinessCoordinator",
+    )
+    registry.register(
+        "sandbox_provider",
+        construction_ref="deerflow.sandbox.sandbox_provider",
+    )
+    registry.register(
+        "sandbox_reconciler",
+        construction_ref="deerflow.community.aio_sandbox",
+    )
+    registry.register(
+        "scheduled_task_repo",
+        construction_ref="deerflow.persistence.scheduled_tasks:ScheduledTaskRepository",
+    )
+    registry.register(
+        "scheduled_task_run_repo",
+        construction_ref="deerflow.persistence.scheduled_task_runs:ScheduledTaskRunRepository",
+    )
+    registry.register(
+        "scheduled_task_service",
+        construction_ref="app.scheduler.service:ScheduledTaskService",
+    )
+    registry.register(
+        "stream_bridge",
+        construction_ref="deerflow.runtime:make_stream_bridge",
+    )
+    registry.register(
+        "stream_cleanup",
+        construction_ref="deerflow.runtime.stream_bridge",
+    )
+    registry.register(
+        "thread_store",
+        construction_ref="deerflow.persistence.thread_meta:make_thread_store",
+    )
+    registry.register(
+        "topology_registry",
+        construction_ref="deerflow.persistence.topology:PostgresTopologyRegistry",
+    )
+    registry.register(
+        "user_store",
+        construction_ref="app.gateway.auth.repositories",
+    )
+    registry.register(
+        "webhook_ingress",
+        construction_ref="app.gateway.github.webhook_auth",
+    )
+    return registry
 
 
 # ---------------------------------------------------------------------------

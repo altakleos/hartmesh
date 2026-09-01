@@ -69,6 +69,7 @@ _ASSEMBLY_EVIDENCE_REVISION = "0023_agent_assembly_evidence"
 _TOOL_RECEIPT_REVISION = "0024_tool_receipt_idempotency"
 _TENANT_IDENTITY_REVISION = "0025_tenant_identity"
 _MCP_TASK_LINEAGE_REVISION = "0026_mcp_task_lineage"
+_MULTI_GATEWAY_TOPOLOGY_REVISION = "0027_multi_gateway_topology"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
     "0012_invocation_idempotency",
@@ -1130,6 +1131,7 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     tool_receipts = script.get_revision(_TOOL_RECEIPT_REVISION)
     tenant_identity = script.get_revision(_TENANT_IDENTITY_REVISION)
     mcp_task_lineage = script.get_revision(_MCP_TASK_LINEAGE_REVISION)
+    multi_gateway_topology = script.get_revision(_MULTI_GATEWAY_TOPOLOGY_REVISION)
     assert mcp_results is not None
     assert mcp_results.down_revision == _PRE_FEATURE_REVISION
     assert mcp_merge is not None
@@ -1155,7 +1157,9 @@ def test_invocation_migration_tail_starts_after_mcp_tasks() -> None:
     assert tenant_identity.down_revision == _TOOL_RECEIPT_REVISION
     assert mcp_task_lineage is not None
     assert mcp_task_lineage.down_revision == _TENANT_IDENTITY_REVISION
-    assert script.get_current_head() == _MCP_TASK_LINEAGE_REVISION
+    assert multi_gateway_topology is not None
+    assert multi_gateway_topology.down_revision == _MCP_TASK_LINEAGE_REVISION
+    assert script.get_current_head() == _MULTI_GATEWAY_TOPOLOGY_REVISION
 
 
 def test_intermediate_revision_contracts_exclude_future_schema() -> None:
@@ -1220,7 +1224,7 @@ async def test_fresh_postgres_migration_chain_reaches_exact_head_schema() -> Non
             revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
         print(f"PostgreSQL qualification: server_version={server_version} migration_head={revision}")
 
-        assert revision == _get_head_revision() == _MCP_TASK_LINEAGE_REVISION
+        assert revision == _get_head_revision() == _MULTI_GATEWAY_TOPOLOGY_REVISION
         await _assert_postgres_head_contract(engine, schema)
         await _assert_postgres_checks_reject_invalid_rows(engine)
         await _assert_lifecycle_constraints_reject_invalid_rows(engine)
@@ -1720,7 +1724,7 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
 
         await _upgrade(engine, schema, "head")
         async with engine.connect() as connection:
-            assert await connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == _MCP_TASK_LINEAGE_REVISION
+            assert await connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == _MULTI_GATEWAY_TOPOLOGY_REVISION
         await _assert_postgres_head_contract(engine, schema)
 
         async with engine.connect() as connection:

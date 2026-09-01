@@ -170,3 +170,15 @@ PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_production.py \
 PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py \
   /tmp/production-bench.jsonl
 ```
+
+## Exact two-Gateway boundary
+
+The only multi-pod runtime claim is
+`durable_two_gateway_v1_postgres_redis_aio_rwx`. Runs, events, checkpoints, and
+ownership remain PostgreSQL-authoritative; Redis is a tenant-scoped reconnect
+transport and cache. Cross-pod callers must use stable external keys and current
+owner/epoch fences, and reconnect must rebuild from durable history after Redis
+loss. The qualification-only failure barriers in
+`runtime/kubernetes_qualification.py` are inert unless both exact internal test
+flags are present and a tenant-prefixed Redis arm is atomically consumed. Never
+reuse them as a production coordination mechanism.

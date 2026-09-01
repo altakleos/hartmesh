@@ -82,6 +82,14 @@ ATTENTION_SIGNAL_NAMES = {
     "nginx_missing",
     "dirty_worktree",
 }
+TOPOLOGY_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+TOPOLOGY_REPLICA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+QUALIFICATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+QUALIFICATION_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+RFC3339_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+)
 
 
 def _redact_yaml_secret_match(match: re.Match[str]) -> str:
@@ -370,6 +378,126 @@ def collect_extension_artifact_summary(project_root: Path) -> dict[str, Any]:
         "source_lock": source_lock,
         "installed_manifest": installed,
         "source_lock_matches": (source_digest == installed_source_digest if isinstance(source_digest, str) and isinstance(installed_source_digest, str) else None),
+    }
+
+
+def collect_topology_summary(
+    deployment_report_path: Path | None,
+) -> dict[str, Any]:
+    """Extract only safe topology/evidence projections from an admin report."""
+
+    unavailable = {"version": 1, "present": False}
+    if deployment_report_path is None or not deployment_report_path.is_file():
+        return unavailable
+    invalid = {
+        "version": 1,
+        "present": True,
+        "valid": False,
+        "error_code": "deployment_report_invalid",
+    }
+    try:
+        payload = deployment_report_path.read_bytes()
+        if not payload or len(payload) > 64 * 1024:
+            return invalid
+        report = json.loads(payload)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return invalid
+    if (
+        not isinstance(report, dict)
+        or report.get("api_version") != "deerflow.deployment/v1"
+    ):
+        return invalid
+    topology = report.get("topology")
+    qualification = report.get("qualification")
+    topology_fields = {
+        "version",
+        "profile",
+        "replica_id",
+        "topology_digest",
+        "ready",
+        "live_compatible_replicas",
+        "degraded_replicas",
+        "qualification_ready",
+        "reason_code",
+    }
+    if not isinstance(topology, dict) or set(topology) != topology_fields:
+        return invalid
+    if (
+        topology.get("version") != 1
+        or topology.get("profile") != "durable_two_gateway_v1"
+        or not isinstance(topology.get("replica_id"), str)
+        or TOPOLOGY_REPLICA_RE.fullmatch(topology["replica_id"]) is None
+        or not isinstance(topology.get("topology_digest"), str)
+        or TOPOLOGY_DIGEST_RE.fullmatch(topology["topology_digest"]) is None
+        or type(topology.get("ready")) is not bool
+        or type(topology.get("qualification_ready")) is not bool
+        or type(topology.get("live_compatible_replicas")) is not int
+        or not 0 <= topology["live_compatible_replicas"] <= 2
+        or type(topology.get("degraded_replicas")) is not int
+        or not 0 <= topology["degraded_replicas"] <= 2
+        or (
+            topology.get("reason_code") is not None
+            and (
+                not isinstance(topology["reason_code"], str)
+                or QUALIFICATION_ID_RE.fullmatch(topology["reason_code"])
+                is None
+            )
+        )
+    ):
+        return invalid
+    if not isinstance(qualification, dict) or set(qualification) != {
+        "version",
+        "status",
+        "trust",
+        "evidence",
+    }:
+        return invalid
+    evidence = qualification.get("evidence")
+    if (
+        qualification.get("version") != 1
+        or qualification.get("status") not in {"qualified", "unqualified"}
+        or qualification.get("trust")
+        not in {"operator_asserted", "none_declared"}
+        or not isinstance(evidence, list)
+        or len(evidence) > 16
+    ):
+        return invalid
+    safe_evidence: list[dict[str, str]] = []
+    evidence_fields = {
+        "qualification_id",
+        "scope",
+        "status",
+        "artifact_digest",
+        "completed_at",
+    }
+    for item in evidence:
+        if not isinstance(item, dict) or set(item) != evidence_fields:
+            return invalid
+        if (
+            not all(
+                isinstance(item.get(name), str)
+                for name in evidence_fields
+            )
+            or QUALIFICATION_ID_RE.fullmatch(item["qualification_id"]) is None
+            or QUALIFICATION_ID_RE.fullmatch(item["scope"]) is None
+            or item["status"] != "passed"
+            or QUALIFICATION_DIGEST_RE.fullmatch(item["artifact_digest"])
+            is None
+            or RFC3339_RE.fullmatch(item["completed_at"]) is None
+        ):
+            return invalid
+        safe_evidence.append({name: item[name] for name in sorted(evidence_fields)})
+    return {
+        "version": 1,
+        "present": True,
+        "valid": True,
+        "topology": {name: topology[name] for name in sorted(topology_fields)},
+        "qualification": {
+            "version": 1,
+            "status": qualification["status"],
+            "trust": qualification["trust"],
+            "evidence": safe_evidence,
+        },
     }
 
 
@@ -996,6 +1124,7 @@ def create_support_bundle(
     out_path: Path | None = None,
     config_path: Path | None = None,
     extensions_config_path: Path | None = None,
+    deployment_report_path: Path | None = None,
     thread_id: str | None = None,
     include_doctor: bool = False,
 ) -> Path:
@@ -1028,6 +1157,7 @@ def create_support_bundle(
     config_summary = collect_config_summary(config_path)
     extensions_summary = collect_extensions_summary(extensions_config_path)
     extension_artifact_summary = collect_extension_artifact_summary(project_root)
+    topology_summary = collect_topology_summary(deployment_report_path)
     git_summary = collect_git_summary(project_root)
     thread_summary = collect_thread_summary(project_root, thread_id) if thread_id else None
     doctor = collect_doctor_output(project_root) if include_doctor else None
@@ -1054,6 +1184,7 @@ def create_support_bundle(
         _write_json(zf, "config-summary", config_summary)
         _write_json(zf, "extensions-summary", extensions_summary)
         _write_json(zf, "extension-artifact-summary", extension_artifact_summary)
+        _write_json(zf, "topology-summary", topology_summary)
         _write_json(zf, "git", git_summary)
         if thread_summary is not None:
             _write_json(zf, "thread-summary", thread_summary)
@@ -1081,6 +1212,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional thread id to include file manifests for",
     )
+    parser.add_argument(
+        "--deployment-report",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON captured from the authenticated deployment report; "
+            "only safe topology/evidence fields are retained"
+        ),
+    )
     parser.add_argument("--out", type=Path, default=None, help="Output zip path")
     parser.add_argument(
         "--include-doctor",
@@ -1098,6 +1238,7 @@ def main(argv: list[str] | None = None) -> int:
             out_path=args.out,
             config_path=args.config,
             extensions_config_path=args.extensions_config,
+            deployment_report_path=args.deployment_report,
             thread_id=args.thread_id,
             include_doctor=args.include_doctor,
         )

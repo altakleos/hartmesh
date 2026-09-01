@@ -114,3 +114,13 @@ ordinary owner-controlled `chmod`, or echoed requested-image metadata. See
 - `read_file` - Read file contents with optional line range
 - `write_file` - Write/append to files, creates directories; overwrites by default and exposes the `append` argument in the model-facing schema for end-of-file writes; subject to the read-before-write gate when `read_before_write.enabled` (see Middleware Chain)
 - `str_replace` - Substring replacement (single or all occurrences); same-path serialization is scoped to `(sandbox.id, path)` so isolated sandboxes do not contend on identical virtual paths inside one process; subject to the read-before-write gate when `read_before_write.enabled` (see Middleware Chain)
+
+## Exact two-Gateway boundary
+
+`durable_two_gateway_v1` admits only the AIO/Kubernetes provider with shared
+tenant-prefixed Redis ownership, existing RWX home/skills claims, projected
+ServiceAccount authentication, and `rwx_verified_copy_v2`. A takeover must claim
+the remote ownership fence and then revalidate the immutable accepted attempt's
+Lease/Pod/materialization tuple before graph or tool work. Process-local warm
+pools are caches only. OpenSandbox and every other materialization profile are
+excluded from this scope.

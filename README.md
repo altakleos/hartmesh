@@ -388,8 +388,10 @@ Evidence: [receipt store](backend/app/channels/inbound_receipts.py) and [receipt
 
 Read these limits before following any deployment guide:
 
-- The validated topology has exactly one Gateway replica.
-- No active-active Gateway HA, scheduler HA, or zero-downtime rollout is claimed.
+- Default and `durable_one_replica` deployments have exactly one Gateway. The
+  exact-two topology is candidate-only in this checkout and cannot be unlocked
+  by operator-declared evidence.
+- No arbitrary active-active scaling, IM connector HA, or zero-downtime rollout is claimed.
 - Replay-safe admission is not universal exactly-once execution of external side effects.
 - With durable invocation storage, process-loss recovery preserves authoritative terminal evidence; it does not transparently resume every graph or tool call.
 - Memory is process-local, SQLite is node-durable for invocation state, and PostgreSQL is the shared-durable store.
@@ -408,12 +410,21 @@ unpassed gate—not durability or recovery evidence.
 | --- | --- |
 | `local_development` | Allows process-local state without a durability claim. |
 | `durable_production` | Rejects process-local invocation state and requires database-backed run events for fenced tool receipts at startup and readiness. |
+| `durable_two_gateway_v1` | Candidate-only exact-two backend profile with PostgreSQL, tenant-scoped Redis, AIO/RWX, scheduler, and MCP fencing; production startup remains blocked. |
 | Helm `local_evaluation` | One-Gateway evaluation defaults; explicitly unqualified. |
 | Helm `durable_one_replica` | Requires digest-pinned images, PostgreSQL/shared state, and safe probes and shutdown timing; still unqualified without exact passing evidence. |
+| Helm `durable_two_gateway_v1` | Renders only in an isolated qualification namespace; a declared reference cannot enable production. |
 
 The administrator deployment report separates persistence tier, health, provenance, and qualification.
 
 A supplied qualification reference remains `operator_asserted`; only the offline verifier can establish `external_evidence_verified` for exact evidence. Portable capabilities do not carry deployment claims.
+
+`durable_two_gateway_v1` is qualified only for the exact two-replica PostgreSQL + Redis + AIO/RWX profile and artifact. It does not claim arbitrary scaling, IM connector HA, cross-region operation, or zero-downtime upgrades.
+
+This checkout ships the implementation and opt-in 16-scenario harness, not a
+passing live artifact. See the [exact two-Gateway qualification and maintenance
+guide](docs/MULTI_GATEWAY_QUALIFICATION.md). Missing Kubernetes, PostgreSQL,
+Redis, routing, or RWX infrastructure is an unpassed release gate.
 
 `GET /health` reports process liveness. `GET /ready` is a bounded ready/not-ready signal. Administrators inspect persistence and qualification at `GET /api/runtime/v1/deployment`.
 When present, that deployment report also includes a versioned process-local snapshot of pending and resolved post-commit ownership obligations; the counters reset on restart and are operational telemetry, not durable or multi-replica evidence.
@@ -438,7 +449,7 @@ Complete first-admin setup before making the service reachable beyond loopback.
 
 Administrators can configure stdio MCP processes and trusted Python plugins, so administrator access is equivalent to code execution.
 
-See the [Helm deployment guide](deploy/helm/deer-flow/README.md) for the one-Gateway render contract, accepted-skill projection, credentials, and exact qualification procedure.
+See the [Helm deployment guide](deploy/helm/deer-flow/README.md) for the exact render contracts, accepted-skill projection, credentials, and qualification procedures.
 The chart also documents non-recursive PVC ownership handling and the
 values-driven startup budget used by provisioner-created gVisor sandboxes.
 
@@ -491,7 +502,7 @@ This repository does not yet document a HartMesh sync cadence, API/configuration
 
 Treat these hashes as provenance, not a maintenance promise.
 
-The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, `0024_tool_receipt_idempotency` fences receipt appends, `0025_tenant_identity` binds the schema tenant, and `0026_mcp_task_lineage` is the current head.
+The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, `0024_tool_receipt_idempotency` fences receipt appends, `0025_tenant_identity` binds the schema tenant, `0026_mcp_task_lineage` seals MCP lineage, and `0027_multi_gateway_topology` adds exact-two topology registration plus persisted scheduler generations.
 
 PostgreSQL operators should quiesce writers and back up data before rollback; use the migration guidance in [backend/AGENTS.md](backend/AGENTS.md).
 
@@ -508,7 +519,8 @@ Version sources report `2.1.0`, but no tag contains the audited HartMesh impleme
 - [Extension artifact provenance](docs/EXTENSION_ARTIFACT_PROVENANCE.md) — source/artifact/config identities, migration, and rollback
 - [Tenant identity](backend/docs/TENANT_IDENTITY.md) — server-owned trust boundary, schema/Redis migration, ACLs, and rollback
 - [Honcho memory backend](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md) — tenant/user isolation, durable observation limits, and existing-workspace migration
-- [Helm deployment](deploy/helm/deer-flow/README.md) — one-Gateway modes and qualification
+- [Helm deployment](deploy/helm/deer-flow/README.md) — production and candidate qualification contracts
+- [Exact two-Gateway qualification](docs/MULTI_GATEWAY_QUALIFICATION.md) — topology boundary, live evidence, maintenance upgrade, rollback, and exclusions
 - [Configuration](config.example.yaml) — operator settings
 - [Backend guide](backend/AGENTS.md) and [frontend guide](frontend/AGENTS.md) — architecture and tests
 

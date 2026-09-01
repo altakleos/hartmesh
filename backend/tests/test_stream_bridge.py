@@ -232,6 +232,79 @@ class _FakeRedisPipeline:
         return results
 
 
+class _FakeReadinessPubSub:
+    def __init__(self, redis: "_FakeReadinessRedis") -> None:
+        self.redis = redis
+        self.channel: str | None = None
+        self.messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        self.closed = False
+
+    async def subscribe(self, channel: str) -> None:
+        self.channel = channel
+        self.redis.subscribers[channel] = self
+        await self.messages.put({"type": "subscribe", "channel": channel, "data": 1})
+
+    async def get_message(self, *, timeout: float = 0) -> dict[str, object] | None:
+        try:
+            return await asyncio.wait_for(self.messages.get(), timeout=timeout)
+        except TimeoutError:
+            return None
+
+    async def unsubscribe(self, channel: str) -> None:
+        self.redis.subscribers.pop(channel, None)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _FakeReadinessRedis:
+    def __init__(
+        self,
+        *,
+        deny_publish: bool = False,
+        deny_prefix: str | None = None,
+    ) -> None:
+        self.values: dict[str, str] = {}
+        self.subscribers: dict[str, _FakeReadinessPubSub] = {}
+        self.names: list[str] = []
+        self.deny_publish = deny_publish
+        self.deny_prefix = deny_prefix
+
+    async def ping(self) -> bool:
+        return True
+
+    async def set(self, name: str, value: str, *, ex: int) -> bool:
+        if self.deny_prefix and name.startswith(self.deny_prefix):
+            raise RuntimeError("NOPERM")
+        assert ex == 5
+        self.names.append(name)
+        self.values[name] = value
+        return True
+
+    async def get(self, name: str) -> str | None:
+        self.names.append(name)
+        return self.values.get(name)
+
+    async def delete(self, name: str) -> int:
+        self.names.append(name)
+        return int(self.values.pop(name, None) is not None)
+
+    def pubsub(self) -> _FakeReadinessPubSub:
+        return _FakeReadinessPubSub(self)
+
+    async def publish(self, channel: str, data: str) -> int:
+        if self.deny_prefix and channel.startswith(self.deny_prefix):
+            raise RuntimeError("NOPERM")
+        self.names.append(channel)
+        if self.deny_publish:
+            return 0
+        subscriber = self.subscribers.get(channel)
+        if subscriber is None:
+            return 0
+        await subscriber.messages.put({"type": "message", "channel": channel, "data": data})
+        return 1
+
+
 # ---------------------------------------------------------------------------
 # Unit tests for MemoryStreamBridge
 # ---------------------------------------------------------------------------
@@ -628,6 +701,73 @@ async def test_redis_bridge_routes_every_emitted_name_through_configurable_prefi
     assert set(emitted_names) == {expected_key}
     assert all(re.fullmatch(r"tA:.*", name) for name in emitted_names) is bool(
         namespace_prefix,
+    )
+
+
+@pytest.mark.anyio
+async def test_redis_topology_readiness_proves_tenant_key_and_channel_acl() -> None:
+    fake = _FakeReadinessRedis()
+    bridge = RedisStreamBridge(
+        redis_url="redis://fake",
+        namespace_prefix="hm:v1:tenant-abcd:redis:stream",
+        client=fake,
+    )
+
+    assert await bridge.topology_readiness_probe(
+        replica_id="gateway-0",
+        timeout_seconds=1,
+        additional_key_prefixes=(
+            "hm:v1:tenant-abcd:redis:ckpt-hist:v1",
+            "hm:v1:tenant-abcd:redis:deerflow:sandbox:owner",
+        ),
+    )
+
+    assert fake.values == {}
+    assert fake.subscribers == {}
+    assert fake.names
+    assert all(name.startswith("hm:v1:tenant-abcd:redis:") for name in fake.names)
+
+
+@pytest.mark.anyio
+async def test_redis_topology_readiness_fails_closed_when_channel_acl_denies_publish() -> None:
+    bridge = RedisStreamBridge(
+        redis_url="redis://fake",
+        namespace_prefix="hm:v1:tenant-abcd:redis:stream",
+        client=_FakeReadinessRedis(deny_publish=True),
+    )
+
+    with pytest.raises(RuntimeError, match="redis_topology_channel_probe_failed"):
+        await bridge.topology_readiness_probe(
+            replica_id="gateway-0",
+            timeout_seconds=1,
+        )
+
+
+@pytest.mark.anyio
+async def test_redis_topology_readiness_requires_cross_tenant_acl_denial() -> None:
+    foreign = "hm:v1:tenant-foreign:redis"
+    bridge = RedisStreamBridge(
+        redis_url="redis://fake",
+        namespace_prefix="hm:v1:tenant-abcd:redis:stream",
+        client=_FakeReadinessRedis(),
+    )
+
+    with pytest.raises(RuntimeError, match="redis_topology_acl_isolation_failed"):
+        await bridge.topology_readiness_probe(
+            replica_id="gateway-0",
+            timeout_seconds=1,
+            forbidden_key_prefix=foreign,
+        )
+
+    isolated = RedisStreamBridge(
+        redis_url="redis://fake",
+        namespace_prefix="hm:v1:tenant-abcd:redis:stream",
+        client=_FakeReadinessRedis(deny_prefix=foreign),
+    )
+    assert await isolated.topology_readiness_probe(
+        replica_id="gateway-0",
+        timeout_seconds=1,
+        forbidden_key_prefix=foreign,
     )
 
 

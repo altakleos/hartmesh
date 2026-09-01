@@ -52,7 +52,9 @@ opensandbox = ["deerflow-harness[opensandbox]"]
 # Managed extension packages are added here by `deerflow extensions install`.
 # Keeping them separate from development tooling lets every startup mode sync
 # the same locked runtime set without promoting those packages to core deps.
-extensions = []
+extensions = [
+    "hartmesh-governance-extension",
+]
 dev = [
     "blockbuster>=1.5.26,<1.6",
     "hypothesis>=6.100,<7",
@@ -110,3 +112,4 @@ members = ["packages/harness", "packages/extension-api", "packages/runtime-api"]
 deerflow-harness = { workspace = true }
 deerflow-extension-api = { workspace = true }
 deerflow-runtime-api = { workspace = true }
+hartmesh-governance-extension = { path = "extensions/sources/hartmesh-governance-extension" }

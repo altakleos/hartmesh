@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from deerflow.deployment.topology import DeploymentProfile
+
 
 class ReadinessConfig(BaseModel):
     """Startup-only bounded timing contract for readiness and admission."""
@@ -42,9 +44,14 @@ class GracefulShutdownConfig(BaseModel):
 class DeploymentConfig(BaseModel):
     """Select local convenience or a fail-closed durable production profile."""
 
-    profile: Literal["local_development", "durable_production"] = Field(
-        default="local_development",
-        description=("Deployment promise. local_development permits process-local state; durable_production requires restart-durable authoritative invocation storage."),
+    profile: DeploymentProfile = Field(
+        default=DeploymentProfile.local_development,
+        description=(
+            "Deployment promise. local_development permits process-local state; "
+            "durable_production requires restart-durable authoritative invocation "
+            "storage; durable_two_gateway_v1 selects the isolated exact-two "
+            "qualification candidate contract."
+        ),
     )
     tenant_id: str | None = Field(
         default=None,

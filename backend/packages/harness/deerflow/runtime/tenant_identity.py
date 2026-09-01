@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 
 from deerflow_extension_api.tenant import TenantReferenceV1
 
+from deerflow.deployment.topology import DeploymentProfile, coerce_deployment_profile
+
 if TYPE_CHECKING:
     from deerflow.config.deployment_config import DeploymentConfig
 
@@ -229,15 +231,16 @@ class TenantIdentityV1:
             configured = deployment_config.tenant_id
             explicit = configured is not None
 
+        profile = coerce_deployment_profile(deployment_config.profile)
         if configured is None:
-            if deployment_config.profile == "durable_production":
+            if profile.is_durable:
                 raise TenantIdentityError(
                     "tenant_identity_required",
                     "durable_production requires an explicit non-'local' deployment.tenant_id or DEER_FLOW_TENANT_ID",
                 )
             configured = "local"
 
-        if deployment_config.profile == "durable_production" and (not explicit or configured == "local"):
+        if profile is not DeploymentProfile.local_development and (not explicit or configured == "local"):
             raise TenantIdentityError(
                 "tenant_identity_required",
                 "durable_production requires an explicit non-'local' deployment.tenant_id or DEER_FLOW_TENANT_ID",

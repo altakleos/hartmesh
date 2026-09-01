@@ -14,7 +14,8 @@ import abc
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
@@ -470,6 +471,25 @@ class RunStore(abc.ABC):
 
         raise NotImplementedError
 
+    @asynccontextmanager
+    async def hold_execution_fence(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        state_version: int,
+        terminal_state_version: int | None = None,
+    ) -> AsyncIterator[bool]:
+        """Hold an ownership fence across one external durable mutation.
+
+        Implementations must serialize ownership changes with the protected
+        mutation for the full context lifetime. Stores without that guarantee
+        fail closed so a stale process never receives mutation authority.
+        """
+
+        del run_id, owner_worker_id, state_version, terminal_state_version
+        yield False
+
     async def bind_assembly_evidence(
         self,
         run_id: str,
@@ -835,12 +855,17 @@ class RunStore(abc.ABC):
         status: str,
         error: str | None = None,
         stop_reason: str | None = None,
+        expected_owner_worker_id: str | None = None,
+        expected_state_version: int | None = None,
+        require_unexpired_lease: bool = False,
     ) -> StatusFinalization:
         """Atomically finalize an active run unless cancellation won.
 
         The compatibility default is safe for stores that do not implement
         durable cancellation.
         """
+        if expected_owner_worker_id is not None or expected_state_version is not None:
+            return StatusFinalization(finalized=False)
         updated = await self.update_status(
             run_id,
             status,

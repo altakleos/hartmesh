@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import re
 import socket
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -9,6 +12,7 @@ from typing import Any, Literal
 
 from fastapi import HTTPException
 
+from app.runtime.deployment import SchedulerLeaseStatsReport
 from app.runtime.invocation import InternalLaunchIntent, InternalLaunchReceipt, InternalSourceKind, InvocationRuntime
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected, ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
@@ -39,6 +43,7 @@ class ScheduledTaskService:
         queue_timeout_seconds: int = 3600,
         multi_instance: bool = False,
         run_lease_grace_seconds: int = 10,
+        tenant_digest: str | None = None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -49,12 +54,69 @@ class ScheduledTaskService:
         self._queue_timeout_seconds = queue_timeout_seconds
         self._multi_instance = multi_instance
         self._run_lease_grace_seconds = run_lease_grace_seconds
+        if (
+            tenant_digest is not None
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                tenant_digest,
+            )
+            is None
+        ):
+            raise ValueError("scheduler tenant_digest is invalid")
+        self._tenant_digest = tenant_digest or "single-process"
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._skip_next_lease_reconciliation = False
+        self._stats_cycles = 0
+        self._stats_database_clock_reads = 0
+        self._stats_due_occurrences_claimed = 0
+        self._stats_launch_claims_acquired = 0
+        self._stats_recovery_transitions = 0
+        self._stats_stale_write_rejections = 0
+        self._stats_dependency_failures = 0
+        self._stats_last_database_time: datetime | None = None
+
+    @property
+    def running(self) -> bool:
+        """Return whether this replica's scheduler loop is currently live."""
+
+        return self._task is not None and not self._task.done()
+
+    @property
+    def lease_stats(self) -> SchedulerLeaseStatsReport:
+        """Return bounded per-replica lease telemetry without owner tokens."""
+
+        return SchedulerLeaseStatsReport(
+            cycles=self._stats_cycles,
+            database_clock_reads=self._stats_database_clock_reads,
+            due_occurrences_claimed=self._stats_due_occurrences_claimed,
+            launch_claims_acquired=self._stats_launch_claims_acquired,
+            recovery_transitions=self._stats_recovery_transitions,
+            stale_write_rejections=self._stats_stale_write_rejections,
+            dependency_failures=self._stats_dependency_failures,
+            last_database_time=self._stats_last_database_time,
+        )
+
+    async def _authority_now(self, *, fallback: datetime) -> datetime:
+        """Resolve lease/admission time from the durable store when available."""
+
+        if fallback.tzinfo is None or fallback.utcoffset() is None:
+            raise ValueError("scheduler authority fallback must be timezone-aware")
+        authority_clock = getattr(self._task_repo, "authority_now", None)
+        if not callable(authority_clock):
+            return fallback.astimezone(UTC)
+        resolved = await authority_clock(fallback=fallback)
+        if not isinstance(resolved, datetime) or resolved.tzinfo is None or resolved.utcoffset() is None:
+            raise RuntimeError("scheduler authority clock returned an invalid timestamp")
+        resolved = resolved.astimezone(UTC)
+        self._stats_database_clock_reads += 1
+        self._stats_last_database_time = resolved
+        return resolved
 
     async def run_once(self, *, now: datetime) -> None:
+        self._stats_cycles += 1
+        now = await self._authority_now(fallback=now)
         if self._multi_instance:
             if self._skip_next_lease_reconciliation:
                 self._skip_next_lease_reconciliation = False
@@ -76,8 +138,14 @@ class ScheduledTaskService:
             lease_seconds=self._lease_seconds,
             limit=self._max_concurrent_runs,
         )
+        self._stats_due_occurrences_claimed += len(claimed)
         for task in claimed:
-            await self.dispatch_task(task, now=now, trigger="scheduled")
+            await self.dispatch_task(
+                task,
+                now=now,
+                trigger="scheduled",
+                _now_is_authoritative=True,
+            )
 
     @staticmethod
     def _is_overlap_conflict(exc: Exception) -> bool:
@@ -109,13 +177,44 @@ class ScheduledTaskService:
             return "paused"
         return "enabled"
 
+    def _scheduled_occurrence_id(
+        self,
+        task: dict[str, Any],
+        *,
+        scheduled_for: datetime,
+    ) -> str:
+        """Derive one stable identity from tenant, schedule, due time, and version."""
+
+        material = {
+            "occurrence_identity_version": 1,
+            "tenant_digest": self._tenant_digest,
+            "task_id": task["id"],
+            "schedule_version": task.get("schedule_version", 1),
+            "schedule_type": task["schedule_type"],
+            "schedule_spec": task["schedule_spec"],
+            "timezone": task["timezone"],
+            "scheduled_for": scheduled_for.astimezone(UTC).isoformat(),
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                material,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        return f"task-run-{digest[:48]}"
+
     async def dispatch_task(
         self,
         task: dict[str, Any],
         *,
         now: datetime,
         trigger: Literal["scheduled", "manual"],
+        _now_is_authoritative: bool = False,
     ) -> dict[str, Any]:
+        if not _now_is_authoritative:
+            now = await self._authority_now(fallback=now)
         expected_lease_owner = self._lease_owner if trigger == "scheduled" else None
         execution_thread_id = task.get("thread_id")
         if task.get("context_mode") == "fresh_thread_per_run" or execution_thread_id is None:
@@ -160,13 +259,32 @@ class ScheduledTaskService:
                 await self._release_admission_lease(task, trigger=trigger)
             return self._existing_active_result(active, execution_thread_id, trigger=trigger)
 
-        task_run_id = f"task-run-{uuid.uuid4().hex}"
+        scheduled_for = now
+        if trigger == "scheduled":
+            due = task.get("next_run_at")
+            if isinstance(due, str):
+                try:
+                    due = datetime.fromisoformat(due.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise RuntimeError("scheduled_task_due_time_invalid") from exc
+            if isinstance(due, datetime):
+                if due.tzinfo is None or due.utcoffset() is None:
+                    due = due.replace(tzinfo=UTC)
+                scheduled_for = due.astimezone(UTC)
+        task_run_id = (
+            self._scheduled_occurrence_id(
+                task,
+                scheduled_for=scheduled_for,
+            )
+            if trigger == "scheduled"
+            else f"task-run-{uuid.uuid4().hex}"
+        )
         try:
             await self._task_run_repo.create(
                 run_record_id=task_run_id,
                 task_id=task["id"],
                 thread_id=execution_thread_id,
-                scheduled_for=now,
+                scheduled_for=scheduled_for,
                 trigger=trigger,
                 status="queued",
                 coordinate_with_task=True,
@@ -238,6 +356,20 @@ class ScheduledTaskService:
         )
         if claimed is None:
             return self._queued_result(task_run_id, execution_thread_id)
+        self._stats_launch_claims_acquired += 1
+
+        # Test-only, Redis-armed process-failure barrier. The imported helper
+        # is inert unless the real Kubernetes qualification runtime is
+        # explicitly enabled and this exact point was atomically armed.
+        from deerflow.runtime.kubernetes_qualification import (
+            qualification_service_barrier,
+        )
+
+        await qualification_service_barrier(
+            scenario="scheduler_owner_loss",
+            point="claimed_before_launch",
+            subject_id=task_run_id,
+        )
 
         # Track whether InvocationRuntime has produced a live run. A bookkeeping
         # failure after launch must retain the non-terminal slot so a later
@@ -271,6 +403,11 @@ class ScheduledTaskService:
             launch_succeeded = True
             launched_run_id = receipt.record.run_id
             launched_thread_id = receipt.record.thread_id
+            await qualification_service_barrier(
+                scenario="scheduler_owner_loss",
+                point="launched_before_record",
+                subject_id=task_run_id,
+            )
             next_at = next_run_at(
                 task["schedule_type"],
                 task["schedule_spec"],
@@ -419,6 +556,7 @@ class ScheduledTaskService:
         )
         if updated:
             return
+        self._stats_stale_write_rejections += 1
         reconciled = await self._task_run_repo.reconcile_launched_run(
             task_run_id,
             task_id=task_id,
@@ -562,7 +700,8 @@ class ScheduledTaskService:
             return
         restart_error = _RESTART_RECOVERY_ERROR
         if self._multi_instance:
-            await self._reconcile_active_state(now=datetime.now(UTC))
+            now = await self._authority_now(fallback=datetime.now(UTC))
+            await self._reconcile_active_state(now=now)
             self._skip_next_lease_reconciliation = True
         else:
             try:
@@ -592,6 +731,7 @@ class ScheduledTaskService:
                 lease_grace_seconds=self._run_lease_grace_seconds,
             )
             if stale:
+                self._stats_recovery_transitions += stale
                 logger.warning("Marked %d stale scheduled task run(s) as interrupted after lease reconciliation", stale)
         except Exception:
             logger.exception("Failed to reconcile scheduled task runs with leases")
@@ -602,6 +742,7 @@ class ScheduledTaskService:
                 lease_grace_seconds=self._run_lease_grace_seconds,
             )
             if stuck:
+                self._stats_recovery_transitions += stuck
                 logger.warning("Cancelled %d stuck once task(s) after lease reconciliation", stuck)
         except Exception:
             logger.exception("Failed to reconcile once tasks with leases")
@@ -618,6 +759,7 @@ class ScheduledTaskService:
             try:
                 await self.run_once(now=datetime.now(UTC))
             except Exception:
+                self._stats_dependency_failures += 1
                 # A transient DB error (e.g. SQLite "database is locked") must
                 # not kill the poller task for the rest of the process life.
                 logger.exception("Scheduled task poll failed; retrying next interval")

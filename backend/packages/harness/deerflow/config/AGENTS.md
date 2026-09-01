@@ -93,3 +93,13 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `middlewares` - Zero-argument `AgentMiddleware` class paths for lead and subagent runtime extension. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
 
 Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and skill state at runtime; their `extensions_config.json` writes use the shared atomic replacement helper, while `middlewares` remains an operator-controlled config-file extension point.
+
+## Deployment profile freeze
+
+Deployment profiles are centralized in `deerflow.deployment.topology`.
+`durable_two_gateway_v1` is startup-frozen and validates the complete exact
+support matrix: shared PostgreSQL/Redis stores, scheduler and MCP enabled,
+heartbeat ownership, AIO/RWX accepted material, one tenant, safe extensions,
+and channels disabled. Hot config edits affect later ordinary invocations only;
+they cannot mutate an already registered topology tuple. Any tuple change
+requires a maintenance restart and a new matching qualification artifact.

@@ -13,6 +13,11 @@ DeerFlow has been deployed.
 {{- if eq .Values.deployment.mode "local_evaluation" }}
   ⚠️  This is an explicitly unqualified local evaluation, not a production
   durability claim. See the chart README before enabling durable_one_replica.
+{{- else if eq .Values.deployment.mode "durable_two_gateway_v1" }}
+  ✓ exact-two render validation passed for the declared immutable topology.
+  This is not live qualification: independently verify the exact
+  durable_two_gateway_v1_postgres_redis_aio_rwx artifact before traffic.
+  The profile claims neither arbitrary scaling nor zero-downtime upgrades.
 {{- else }}
   ✓ durable_one_replica render validation passed. This pins deployment inputs;
   it is not live Kubernetes recovery qualification or high availability.

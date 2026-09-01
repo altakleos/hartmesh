@@ -13,6 +13,7 @@ from support.kubernetes_qualification import (
     KubernetesQualificationRunner,
 )
 
+from deerflow.deployment.topology import MULTI_GATEWAY_QUALIFICATION_SCOPE
 from deerflow.qualification_evidence import (
     ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
     KubernetesAcceptedSkillQualificationEvidenceV2,
@@ -23,6 +24,9 @@ pytestmark = pytest.mark.kubernetes_contract
 
 def test_real_one_replica_pod_recovery_contract() -> None:
     """Qualify every commit-boundary fault against one exact image and chart."""
+
+    if os.environ.get("DEERFLOW_TEST_KUBERNETES_SCOPE") == (MULTI_GATEWAY_QUALIFICATION_SCOPE):
+        return
 
     if os.environ.get("DEERFLOW_TEST_KUBERNETES_SCOPE") == (ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2):
         config_v2 = KubernetesAcceptedSkillQualificationConfigV2.from_environment(

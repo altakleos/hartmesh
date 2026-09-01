@@ -30,3 +30,14 @@
 
   Verdicts are pinned against the real launchers: for npx, every argument vector the validator rejects is one `npx` actually executes, and every vector it allows is one `npx` passes through to the server. `env` screening covers names that execute code **unconditionally** at process startup, e.g. `PYTHONPATH`/`PYTHONHOME`, which run a caller-controlled `sitecustomize.py` at interpreter startup under plain `uvx`. Caller-controlled **search paths** are a weaker, conditional class and are an accepted residual: `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` (conditional on the process loading a shadowable library, and legitimately set by native-dependency servers) and `NODE_PATH` (searched *after* the local `node_modules` chain, so it cannot shadow an installed dependency, and ignored entirely by ESM `import` — it can only supply a CJS module that would otherwise fail to resolve). Do not move a search path into the set: it would make the "unconditional" rule untrue, which is how a defense-in-depth list starts being mistaken for a boundary. Remote transports skip all three — they spawn nothing.
   **This is defense in depth, not a trust boundary.** `npx`/`uvx` exist to fetch and execute remote packages, so an admin can still point one at a package they published; the boundary is admin authentication plus network reachability. Do not add a check here on the assumption that it makes MCP registration safe for untrusted admins — it does not, and the fix for that is not a bigger denylist.
+
+## Exact two-Gateway task boundary
+
+The V1 profile requires at least one enabled durable MCP task toolset and the
+shared PostgreSQL `McpTaskRepository`. Submission lineage and tenant/credential
+commitments identify one row; polling, cancellation, terminal transition, and
+notification intent are lease-fenced and idempotent. Both replicas may poll.
+Stale pollers cannot apply a remote result or emit another notification. The
+live scope uses `deerflow.qualification_mcp_server`, guarded by
+`DEERFLOW_QUALIFICATION_MCP=1`, to exercise submission, poller death, takeover,
+one result, and one notification.

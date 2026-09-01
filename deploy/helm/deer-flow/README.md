@@ -9,9 +9,11 @@ The default values describe an explicitly unqualified local evaluation profile,
 but a bare install is intentionally refused: home persistence is enabled while
 no skills claim is named, which would crashloop the provisioner. Supply the
 recommended PVC values below or explicitly select the legacy local/hybrid
-hostPath mode. The validated production mode is still exactly one Gateway
-replica; it does not claim high availability, rolling zero downtime, or live
-pod-loss qualification.
+hostPath mode. `durable_one_replica` remains the validated production mode.
+The exact-two profile in this checkout is available only as an isolated live-
+qualification candidate; production rendering stays blocked until a future
+release bundles authority for an independently verified artifact. Neither mode
+claims arbitrary scaling or rolling zero downtime.
 
 Each chart release owns one server identity configured by `tenant.id`.
 Tenant identity is selected by the operator at service startup. It cannot be selected by an API caller and does not replace per-user authorization.
@@ -235,7 +237,7 @@ they resolve from the selected Secret):
 
 ```yaml
 config: |
-  config_version: 46
+  config_version: 47
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -488,6 +490,52 @@ but explicitly reports `trust: operator_asserted`. It does not mean the Gateway
 fetched or verified the artifact. Neither configuration accepts credentials or
 arbitrary metadata.
 
+#### Exact two-Gateway qualification
+
+`deployment.mode=durable_two_gateway_v1` is a separate exact profile, not a
+replica-count variant of `durable_one_replica`. It requires exactly two Gateway
+replicas; seven digest-pinned images; one explicit tenant; shared external
+PostgreSQL and Redis Secrets; database-backed checkpoint, run-event, metadata,
+dedupe, scheduler, and MCP state; tenant-prefixed Redis adapters; existing home
+and skills RWX claims; the in-cluster AIO provisioner with
+`rwx_verified_copy_v2`; active multi-instance scheduler and MCP services; and
+the exact extension artifact/configuration/capability tuple for
+`durable_two_gateway_v1_postgres_redis_aio_rwx`.
+
+Render validation rejects any other replica count, HPA, local/memory/JSONL
+stores, inline database or Redis credentials, mutable image tags, OpenSandbox,
+non-RWX claims, IM connectors/webhook ingress, or unqualified extension service.
+It emits a `Recreate` Gateway Deployment, a one-available PDB, preferred
+anti-affinity/topology spread, and a pre-install/pre-upgrade migration Job using
+the exact Gateway digest. Gateway containers verify the head and do not migrate.
+
+The optional `deployment.qualificationCandidate` path exists only for the live
+harness. It requires a disposable `hartmesh-qualification-*` namespace, cannot
+declare passing evidence, and the backend accepts it only with its internal test
+runtime flag. Never route production traffic to a candidate.
+
+The repository does not bundle a passing artifact. A reference under
+`deployment.qualificationEvidence` is still `operator_asserted`; Helm cannot
+read the referenced bytes and deliberately refuses to unlock the profile from
+that reference. Run the offline verifier with independent expected subjects and
+retain its `external_evidence_verified` result as release evidence. Enabling
+production requires a later reviewed change that bundles authority for that
+exact verified artifact; this checkout remains candidate-only.
+The dedicated manual workflow is
+`.github/workflows/multi-gateway-qualification.yml`. Its bounded subject JSON
+must include three distinct digest-pinned Gateway binaries: the target, a
+compatible predecessor used for the stop/migrate/start proof, and an
+incompatible negative control. Operator inputs supply immutable expected
+subjects only; the harness itself collects Kubernetes UID references, topology
+registrations, ACL outcomes, and scenario counters from the live cluster.
+
+`durable_two_gateway_v1` is qualified only for the exact two-replica PostgreSQL + Redis + AIO/RWX profile and artifact. It does not claim arbitrary scaling, IM connector HA, cross-region operation, or zero-downtime upgrades.
+
+See the [complete topology, live-gate, stop/migrate/start, rollback, and
+troubleshooting guide](../../../docs/MULTI_GATEWAY_QUALIFICATION.md). Missing
+real Kubernetes, PostgreSQL, Redis, routing, or RWX infrastructure is an unpassed
+gate, never a pass or harmless skip.
+
 For `durable_one_replica_pod_recovery`, the operator copies only an artifact-bound passing
 live result into `deployment.qualificationEvidence`. The Gateway reports that bounded
 assertion through the authenticated administrative deployment report. A release or
@@ -515,6 +563,8 @@ export DEERFLOW_TEST_KUBERNETES_NAMESPACE=hartmesh-qualification-20260808
 export DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID=pod-recovery-20260808
 export DEERFLOW_TEST_GATEWAY_IMAGE_REPOSITORY=registry.example/hartmesh/gateway
 export DEERFLOW_TEST_GATEWAY_IMAGE_DIGEST=sha256:<64-lowercase-hex>
+export DEERFLOW_TEST_INCOMPATIBLE_GATEWAY_IMAGE_REPOSITORY=registry.example/hartmesh/gateway-negative-control
+export DEERFLOW_TEST_INCOMPATIBLE_GATEWAY_IMAGE_DIGEST=sha256:<different-64-lowercase-hex>
 export DEERFLOW_TEST_KUBERNETES_EVIDENCE="$PWD/artifacts/kubernetes-qualification.json"
 cd backend
 PYTHONPATH=. uv run pytest -m kubernetes_contract -v -s
@@ -660,11 +710,12 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   the old execution owner before creating its replacement. The rendered
   strategy explicitly clears previously defaulted RollingUpdate settings
   during upgrade. Replacement causes an availability gap; it is not a
-  zero-downtime claim. The chart does
-  not install a PodDisruptionBudget, topology spread, leader election, or a
-  rolling-zero-downtime policy because those controls would imply coordination
-  the runtime does not yet provide. They remain deferred until a real
-  multi-replica ownership and scheduler design exists.
+  zero-downtime claim. Those one-replica modes do not install a
+  PodDisruptionBudget or topology spread. The unavailable exact-two
+  qualification candidate renders a one-pod PDB plus required anti-affinity
+  and topology spread as scheduling safeguards; they are not availability or
+  zero-downtime evidence. No mode installs a process leader-election or
+  rolling-zero-downtime policy.
 - **Scheduled task recovery.** If a deployment explicitly enables
   `scheduler.multi_instance: true`, it must use shared Postgres,
   `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`.
@@ -672,7 +723,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   atomically takes over only expired leases, and fences stale post-launch
   bookkeeping. `max_concurrent_runs` is a shared global cap across Pods,
   including pre-launch dispatch reservations. These startup-only controls do
-  not qualify scheduler HA or relax this chart's exactly-one-Gateway contract.
+  not by themselves qualify scheduler HA. The candidate-only exact-two profile
+  adds its own stricter topology and live-evidence contract.
 - **Redis stream bridge.** A bundled single-instance redis StatefulSet
   (`redis.enabled: true`, `redis:7-alpine`) runs in the namespace and the
   gateway connects via the in-cluster Service. Per-run SSE events are stored in

@@ -52,6 +52,7 @@ WORKDIR /app
 
 # Copy backend source code
 COPY backend ./backend
+COPY contracts ./contracts
 
 # Install dependencies with cache mount
 # `redis` is always installed because Docker Compose defaults the stream bridge
@@ -130,6 +131,7 @@ WORKDIR /app
 # Copy backend with pre-built virtualenv from builder
 COPY --from=builder /app/backend ./backend
 COPY --from=builder /app/hartmesh ./hartmesh
+COPY --from=builder /app/contracts ./contracts
 
 # Expose Gateway API port.
 EXPOSE 8001

@@ -1162,6 +1162,8 @@ async def run_agent(
                 lifecycle_type=LifecycleType.cancelled,
                 **terminal_status_kwargs,
             )
+            if record.ownership_lost:
+                return
             if not restore_checkpoint:
                 return
             try:
@@ -1639,6 +1641,16 @@ async def run_agent(
             initial_runnable_config = RunnableConfig(**config)
 
         if accepted is not None and pinned_material_for_cleanup is not None and pinned_material_for_cleanup.skill_snapshot is not None:
+            from deerflow.runtime.kubernetes_qualification import (
+                qualification_barrier,
+                qualification_counter,
+            )
+
+            await qualification_counter("materialization_starts", record)
+            await qualification_barrier(
+                "accepted_before_materialization",
+                record,
+            )
             raw_materialization = await _materialize_accepted_skill_projection(
                 runtime,
                 user_id=skill_binding_user_id,
@@ -1688,12 +1700,60 @@ async def run_agent(
             return
         started = True
 
+        if checkpointer is not None and getattr(
+            run_manager,
+            "heartbeat_enabled",
+            False,
+        ):
+            from deerflow.runtime.checkpointer.fenced_saver import (
+                FencedCheckpointSaver,
+            )
+            from deerflow.runtime.kubernetes_qualification import (
+                qualification_counter,
+            )
+
+            checkpoint_owner_id = record.owner_worker_id
+            if not isinstance(checkpoint_owner_id, str) or not checkpoint_owner_id or type(record.state_version) is not int:
+                raise RuntimeError("run_checkpoint_ownership_fence_unavailable")
+            checkpoint_state_version = record.state_version
+            record.checkpoint_terminal_state_version = None
+            record.checkpoint_execution_fence_revoked = False
+
+            async def _checkpoint_rejected(operation: str) -> None:
+                del operation
+                await qualification_counter(
+                    "checkpoint_stale_rejections",
+                    record,
+                )
+
+            checkpointer = FencedCheckpointSaver(
+                checkpointer,
+                fence=lambda: run_manager.hold_execution_fence(
+                    run_id,
+                    owner_worker_id=checkpoint_owner_id,
+                    state_version=checkpoint_state_version,
+                    terminal_state_version=(record.checkpoint_terminal_state_version),
+                    revoked=record.checkpoint_execution_fence_revoked,
+                ),
+                on_rejected=_checkpoint_rejected,
+            )
+
         if materialization_evidence is not None:
             assert materialization is not None
             if record.ownership_lost or not await materialization.validate():
                 raise AcceptedSkillExecutionFenceError(
                     "accepted_skill_execution_fence_failed",
                 )
+            from deerflow.runtime.kubernetes_qualification import (
+                qualification_barrier,
+                qualification_counter,
+            )
+
+            await qualification_counter("materialization_validations", record)
+            await qualification_barrier(
+                "post_materialization_before_checkpoint",
+                record,
+            )
 
         if extensions.has_task_lifecycle:
             task_info = TaskInfo(
@@ -1784,6 +1844,18 @@ async def run_agent(
                 if not isinstance(owner_id, str) or not owner_id or type(lease_epoch) is not int:
                     raise AssemblyEvidenceError("tool_receipt_fence_unavailable")
                 catalog = pinned_material_for_cleanup.subagent_catalog
+
+                async def _receipt_ownership_lost(operation: str) -> None:
+                    del operation
+                    from deerflow.runtime.kubernetes_qualification import (
+                        qualification_counter,
+                    )
+
+                    await qualification_counter(
+                        "receipt_stale_rejections",
+                        record,
+                    )
+
                 install_tool_evidence_context(
                     runtime_ctx,
                     binding=ToolEvidenceRuntimeBinding(
@@ -1803,7 +1875,10 @@ async def run_agent(
                         subagent_definition_digest=None,
                         tenant=evidence.tenant,
                     ),
-                    sink=RunEventToolReceiptSink(event_store),
+                    sink=RunEventToolReceiptSink(
+                        event_store,
+                        on_ownership_lost=_receipt_ownership_lost,
+                    ),
                 )
                 _install_runtime_context(config, runtime_ctx)
 
@@ -1869,6 +1944,17 @@ async def run_agent(
 
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         _install_runtime_context(config, runtime_ctx)
+
+        from deerflow.runtime.kubernetes_qualification import (
+            qualification_barrier,
+            qualification_counter,
+        )
+
+        await qualification_counter("checkpoint_preflight_starts", record)
+        await qualification_barrier(
+            "post_checkpoint_before_graph",
+            record,
+        )
 
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the
@@ -2321,8 +2407,10 @@ async def run_agent(
             try:
                 from deerflow.runtime.kubernetes_qualification import (
                     qualification_barrier,
+                    qualification_counter,
                 )
 
+                await qualification_counter("terminal_commit_attempts", record)
                 await qualification_barrier(
                     "terminal_before_lifecycle_commit",
                     record,

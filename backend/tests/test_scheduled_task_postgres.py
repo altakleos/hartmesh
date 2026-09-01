@@ -156,3 +156,20 @@ async def test_postgres_reconciliation_uses_metadata_and_atomically_claims_expir
     assert recovered is not None
     assert recovered["status"] == "error"
     assert recovered["stop_reason"] == "scheduled_task_orphan_recovered"
+
+
+@pytest.mark.asyncio
+async def test_postgres_scheduler_clock_comes_from_database_authority(
+    postgres_repositories,
+):
+    task_repo, _task_run_repo, _run_repo = postgres_repositories
+    engine = get_engine()
+    async with engine.connect() as connection:
+        before = await connection.scalar(text("SELECT CURRENT_TIMESTAMP"))
+    authority = await task_repo.authority_now(fallback=datetime(2000, 1, 1, tzinfo=UTC))
+    async with engine.connect() as connection:
+        after = await connection.scalar(text("SELECT CURRENT_TIMESTAMP"))
+
+    assert isinstance(before, datetime)
+    assert isinstance(after, datetime)
+    assert before <= authority <= after

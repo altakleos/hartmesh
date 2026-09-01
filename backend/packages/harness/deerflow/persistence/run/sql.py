@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -533,6 +534,56 @@ class RunRepository(RunStore):
             require_unexpired_lease=require_unexpired_lease,
         )
 
+    @asynccontextmanager
+    async def hold_execution_fence(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        state_version: int,
+        terminal_state_version: int | None = None,
+    ) -> AsyncIterator[bool]:
+        """Lock the run row while a checkpoint mutation uses its owner fence."""
+
+        async with self._sf() as session:
+            await self._begin_lifecycle_write(session)
+            statement = self._scope_run(select(RunRow)).where(
+                RunRow.run_id == run_id,
+                RunRow.operation_kind == "run",
+            )
+            if session.get_bind().dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            row = (await session.execute(statement)).scalar_one_or_none()
+            active = bool(
+                row is not None
+                and terminal_state_version is not None
+                and row.state_version == terminal_state_version
+                and row.status in {"success", "error", "timeout", "interrupted"}
+                and row.owner_worker_id is None
+                and row.lease_expires_at is None
+            )
+            if row is not None and row.status == "running" and row.owner_worker_id == owner_worker_id and row.state_version == state_version and row.lease_expires_at is not None:
+                deadline = row.lease_expires_at
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=UTC)
+                database_now = await session.scalar(
+                    select(
+                        _release_wall_clock_expression(
+                            session.get_bind().dialect.name,
+                        )
+                    )
+                )
+                if database_now is None:
+                    await session.rollback()
+                    raise RuntimeError("database clock is unavailable")
+                if database_now.tzinfo is None:
+                    database_now = database_now.replace(tzinfo=UTC)
+                active = deadline > database_now
+            try:
+                yield active
+            finally:
+                await session.rollback()
+
     async def _transition_run_atomic(
         self,
         run_id: str,
@@ -579,6 +630,14 @@ class RunRepository(RunStore):
                 return LifecycleTransitionResult(applied=False, row=result_row)
             row.status = transition.status
             row.state_version += 1
+            if transition.status in {
+                "success",
+                "error",
+                "timeout",
+                "interrupted",
+            }:
+                row.owner_worker_id = None
+                row.lease_expires_at = None
             if transition.error is not None:
                 row.error = transition.error
             if transition.stop_reason is not None:
@@ -885,6 +944,13 @@ class RunRepository(RunStore):
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
         requested_status = status
         lifecycle_row = operation_kind == "run" and requested_status is not None
+        terminal_statuses = {
+            "success",
+            "error",
+            "timeout",
+            "interrupted",
+        }
+        terminal_status = requested_status in terminal_statuses
         values = {
             "thread_id": thread_id,
             "assistant_id": assistant_id,
@@ -960,6 +1026,9 @@ class RunRepository(RunStore):
                     if requested_status != "pending":
                         row.status = requested_status
                         row.state_version += 1
+                        if terminal_status:
+                            row.owner_worker_id = None
+                            row.lease_expires_at = None
                         await self._append_lifecycle_event(
                             session,
                             cursor_state,
@@ -980,11 +1049,19 @@ class RunRepository(RunStore):
                 if row.operation_kind == "run":
                     values.pop("error", None)
                     values.pop("stop_reason", None)
+                    values.pop("owner_worker_id", None)
+                    values.pop("lease_expires_at", None)
                 for key, value in values.items():
                     setattr(row, key, value)
                 if row.status != requested_status:
                     if row.operation_kind != "run":
                         row.status = requested_status
+                        if terminal_status:
+                            row.owner_worker_id = None
+                            row.lease_expires_at = None
+            if row.status in terminal_statuses:
+                row.owner_worker_id = None
+                row.lease_expires_at = None
             await session.commit()
 
     async def get(
@@ -1563,6 +1640,9 @@ class RunRepository(RunStore):
         status: str,
         error: str | None = None,
         stop_reason: str | None = None,
+        expected_owner_worker_id: str | None = None,
+        expected_state_version: int | None = None,
+        require_unexpired_lease: bool = False,
     ) -> StatusFinalization:
         """Atomically let completion win only before cancellation."""
         current = await self.get(run_id, user_id=None)
@@ -1572,19 +1652,34 @@ class RunRepository(RunStore):
             return StatusFinalization(finalized=False, cancel_action=current["cancel_action"])
         if current["status"] not in ("pending", "running"):
             return StatusFinalization(finalized=False)
+        if (expected_owner_worker_id is None) != (expected_state_version is None):
+            return StatusFinalization(finalized=False)
+        if expected_state_version is not None and current["state_version"] != expected_state_version:
+            return StatusFinalization(finalized=False)
         lifecycle_type = lifecycle_type_for_status(status)
-        result = await self.transition_run_atomic(
-            run_id,
-            expected_state_version=current["state_version"],
-            expected_statuses=("pending", "running"),
-            transition=LifecycleTransition(
-                lifecycle_type=lifecycle_type,
-                status=status,
-                error=error,
-                stop_reason=stop_reason,
-                reason=stop_reason,
-            ),
+        transition = LifecycleTransition(
+            lifecycle_type=lifecycle_type,
+            status=status,
+            error=error,
+            stop_reason=stop_reason,
+            reason=stop_reason,
         )
+        if expected_owner_worker_id is not None:
+            result = await self.transition_owned_run_atomic(
+                run_id,
+                expected_state_version=expected_state_version,
+                expected_statuses=("pending", "running"),
+                transition=transition,
+                expected_owner_worker_id=expected_owner_worker_id,
+                require_unexpired_lease=require_unexpired_lease,
+            )
+        else:
+            result = await self.transition_run_atomic(
+                run_id,
+                expected_state_version=current["state_version"],
+                expected_statuses=("pending", "running"),
+                transition=transition,
+            )
         if result.applied:
             return StatusFinalization(finalized=True)
         latest = await self.get(run_id, user_id=None)
@@ -1622,6 +1717,8 @@ class RunRepository(RunStore):
             if row.operation_kind != "run":
                 row.status = "error"
                 row.error = error
+                row.owner_worker_id = None
+                row.lease_expires_at = None
                 if stop_reason is not None:
                     row.stop_reason = stop_reason
                 row.updated_at = datetime.now(UTC)
@@ -1631,6 +1728,8 @@ class RunRepository(RunStore):
             row.status = "error"
             row.state_version += 1
             row.error = error
+            row.owner_worker_id = None
+            row.lease_expires_at = None
             if stop_reason is not None:
                 row.stop_reason = stop_reason
             row.updated_at = datetime.now(UTC)
@@ -1811,7 +1910,8 @@ class RunRepository(RunStore):
                     replacement_error = "Rolled back by user" if multitask_strategy == "rollback" else "Cancelled by newer run"
                     row.status = replacement_status
                     row.error = replacement_error
-                    row.owner_worker_id = owner_worker_id
+                    row.owner_worker_id = None
+                    row.lease_expires_at = None
                     row.updated_at = now
                     if row.operation_kind == "run":
                         if cursor_state is None:

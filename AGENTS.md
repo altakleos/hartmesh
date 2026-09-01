@@ -51,10 +51,9 @@ internal; the published nginx port is the entire external surface, and the Gatew
 address; `backend/tests/test_compose_default_bind_host.py` pins this for every service
 in both compose files.
 
-The Helm chart supports exactly one Gateway replica. `durable_one_replica`
-requires pinned images, shared durable state, and safe lifecycle timing; do not
-claim multi-replica or zero-downtime behavior. Its render contract is pinned by
-`backend/tests/test_helm_durable_deployment_contract.py`.
+`durable_two_gateway_v1` is qualified only for the exact two-replica PostgreSQL + Redis + AIO/RWX profile and artifact. It does not claim arbitrary scaling, IM connector HA, cross-region operation, or zero-downtime upgrades.
+This checkout bundles no passing artifact, so the profile is candidate-only and
+operator-declared evidence cannot unlock production rendering or startup.
 
 The chart can place provisioner-created sandboxes in a separate, pre-created
 `sandboxNamespace`. The provisioner stays in the release namespace, receives
@@ -113,10 +112,8 @@ servers + skills). Both real files are gitignored and may be edited at runtime v
 Gateway API. Config schema and resolution order are documented in
 [backend/AGENTS.md](backend/AGENTS.md).
 
-Durable invocation qualification spans the contract, process-failure, real-Postgres,
-and opt-in real-Kubernetes suites under `backend/tests/`. Missing external test
-infrastructure is an unpassed release gate, not passing evidence. These suites do
-not qualify scheduler HA or a multi-replica Gateway.
+Durable qualification requires exact passing external evidence; missing
+infrastructure is an unpassed gate. See `docs/MULTI_GATEWAY_QUALIFICATION.md`.
 
 Skill quality review note:
 - `skills/public/skill-reviewer/` is the built-in read-only skill quality reviewer.

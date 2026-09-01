@@ -21,6 +21,11 @@ class ScheduledTaskRow(Base):
     schedule_type: Mapped[str] = mapped_column(String(16))
     schedule_spec: Mapped[dict] = mapped_column(JSON, default=dict)
     timezone: Mapped[str] = mapped_column(String(64))
+    schedule_version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default="1",
+    )
     status: Mapped[str] = mapped_column(String(16), default="enabled", index=True)
     overlap_policy: Mapped[str] = mapped_column(String(16), default="enqueue")
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True)

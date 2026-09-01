@@ -161,6 +161,16 @@ class MiddlewareContributor(Protocol):
 # --- Extension services ----------------------------------------------------
 
 
+class ReplicaSafety(StrEnum):
+    """Cross-replica authority declaration for Gateway-lifetime work."""
+
+    STATELESS_REPLICA_SAFE = "stateless_replica_safe"
+    SHARED_STORE_FENCED = "shared_store_fenced"
+    SINGLETON_LEASED = "singleton_leased"
+    SINGLE_REPLICA_ONLY = "single_replica_only"
+    UNCLASSIFIED = "unclassified"
+
+
 @dataclass(frozen=True)
 class ExtensionRuntimeDeps:
     """Host capabilities bound after Gateway infrastructure is ready."""
@@ -171,6 +181,12 @@ class ExtensionRuntimeDeps:
 
 
 class ExtensionService(Protocol):
+    # Existing services remain source-compatible and are deliberately treated
+    # as unclassified by multi-replica hosts until they opt in explicitly.
+    replica_safety: ReplicaSafety = ReplicaSafety.UNCLASSIFIED
+    replica_safety_health_capability_id: str | None = None
+    replica_safety_fence_evidence_kind: str | None = None
+
     async def start(self, deps: ExtensionRuntimeDeps) -> None:
         return None
 

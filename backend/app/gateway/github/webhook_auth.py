@@ -13,10 +13,11 @@ import os
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from deerflow.deployment import DeploymentProfile, coerce_deployment_profile
+
 GITHUB_WEBHOOK_SECRET_ENV = "GITHUB_WEBHOOK_SECRET"
 ALLOW_UNVERIFIED_GITHUB_WEBHOOKS_ENV = "DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS"
 
-_LOCAL_DEVELOPMENT_PROFILE = "local_development"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
@@ -71,7 +72,7 @@ class GitHubWebhookAuth:
 
 def resolve_github_webhook_auth(
     *,
-    deployment_profile: object = _LOCAL_DEVELOPMENT_PROFILE,
+    deployment_profile: object = DeploymentProfile.local_development,
 ) -> GitHubWebhookAuth:
     """Resolve current authentication with verified-secret precedence.
 
@@ -88,8 +89,8 @@ def resolve_github_webhook_auth(
             secret=secret,
         )
 
-    raw_profile = getattr(deployment_profile, "value", deployment_profile)
-    allow_unverified = isinstance(raw_profile, str) and raw_profile == _LOCAL_DEVELOPMENT_PROFILE and os.environ.get(ALLOW_UNVERIFIED_GITHUB_WEBHOOKS_ENV, "").strip().lower() in _TRUTHY
+    profile = coerce_deployment_profile(deployment_profile)
+    allow_unverified = profile is DeploymentProfile.local_development and os.environ.get(ALLOW_UNVERIFIED_GITHUB_WEBHOOKS_ENV, "").strip().lower() in _TRUTHY
     if allow_unverified:
         return GitHubWebhookAuth(mode=GitHubWebhookAuthMode.unverified_development)
     return GitHubWebhookAuth(mode=GitHubWebhookAuthMode.disabled)

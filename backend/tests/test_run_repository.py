@@ -935,7 +935,8 @@ class TestRunRepository:
         stale = await repo.get("checkpoint-write-1")
         assert stale is not None
         assert stale["status"] == "interrupted"
-        assert stale["owner_worker_id"] == "worker-b"
+        assert stale["owner_worker_id"] is None
+        assert stale["lease_expires_at"] is None
         await _cleanup()
 
     @pytest.mark.anyio
@@ -1173,7 +1174,10 @@ class TestRunRepository:
 
         assert result.finalized is True
         assert await repo.request_cancel("run-1", action="rollback") is None
-        assert (await repo.get("run-1"))["status"] == "success"
+        row = await repo.get("run-1")
+        assert row["status"] == "success"
+        assert row["owner_worker_id"] is None
+        assert row["lease_expires_at"] is None
         await _cleanup()
 
     @pytest.mark.anyio

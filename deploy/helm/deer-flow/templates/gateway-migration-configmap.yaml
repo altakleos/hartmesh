@@ -1,0 +1,18 @@
+{{- include "deer-flow.validate" . -}}
+{{- if eq .Values.deployment.mode "durable_two_gateway_v1" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-migration-config
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway-migration
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  config.yaml: |
+{{ include "deer-flow.renderedConfig" . | indent 4 }}
+{{- end }}

@@ -146,10 +146,10 @@ shares that exact object across current route, resource, model, tool, skill-disc
 agent-assembly checks. Legacy class-path providers remain supported and may be atomically
 replaced when their hot-reloaded configuration changes.
 
-For durable invocations, one immutable generation means one startup-frozen process generation
-in the supported one-replica topology. Accepted invocations pin that generation. A restart
-constructs a later process generation; the public extension contract does not coordinate
-simultaneous generations, rolling replicas, or hot replacement of accepted material.
+For durable invocations, one immutable generation means one startup-frozen process generation.
+Accepted invocations pin that generation. A restart constructs a later process generation;
+the public extension contract does not coordinate hot replacement of accepted material.
+Multi-replica eligibility is a separate, explicit service contract described below.
 
 Operator `authorization.service_observation_grants` is deliberately not another extension
 permission contract. It gives an exactly authenticated service only a finite host-owned
@@ -162,6 +162,20 @@ role text, and caller-supplied attributes cannot create a scope.
 Extensions may also contribute observational middleware. Its existing isolation remains
 fail-open; authorization-provider factories are authoritative startup capabilities and do
 not use that observational failure policy.
+
+## Extension service replica safety
+
+Gateway-lifetime `ExtensionService` implementations may declare `replica_safety` with the
+public `ReplicaSafety` enum. Existing services default to `UNCLASSIFIED`, preserving source
+compatibility while preventing an accidental multi-replica claim. `SINGLE_REPLICA_ONLY` and
+`UNCLASSIFIED` are rejected by the exact-two topology. `STATELESS_REPLICA_SAFE` needs no
+additional fence metadata. `SHARED_STORE_FENCED` and `SINGLETON_LEASED` must also declare
+bounded `replica_safety_health_capability_id` and
+`replica_safety_fence_evidence_kind` values so the host can bind health and fencing evidence.
+
+This declaration is necessary but not sufficient: the operator-controlled plugin identity,
+artifact/configuration digests, capability manifest, and live qualification scope must also
+match the exact deployment contract. A declaration does not make an extension safe by itself.
 
 ## Invocation contributor contributions
 

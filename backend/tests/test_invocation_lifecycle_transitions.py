@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import CancelOutcome, RunManager, RunStatus
 from deerflow.runtime.runs.manager import ORPHAN_RECOVERY_STOP_REASON, RunRecord
 from deerflow.runtime.runs.store.base import (
@@ -360,6 +361,141 @@ async def test_cancel_and_finalization_races_have_one_authoritative_winner() -> 
     assert completion_won.finalized is True
     assert cancellation_lost.outcome.value == "already_terminal"
     assert [event["lifecycle_type"] for event in await complete_store.list_lifecycle_events(run_id=complete_record.run_id)] == [LifecycleType.accepted, LifecycleType.started, LifecycleType.succeeded]
+
+
+@pytest.mark.anyio
+async def test_stale_owner_cannot_finalize_after_active_owner_changes() -> None:
+    _, store, record = await _manager_and_run()
+    stale_epoch = record.state_version
+    row = store._runs[record.run_id]
+    row["owner_worker_id"] = "replacement-worker"
+    row["state_version"] += 1
+    row["lease_expires_at"] = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+
+    result = await store.finalize_if_not_cancelled(
+        record.run_id,
+        status="success",
+        expected_owner_worker_id=record.owner_worker_id,
+        expected_state_version=stale_epoch,
+        require_unexpired_lease=True,
+    )
+
+    assert result.finalized is False
+    assert (await store.get(record.run_id))["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_peer_terminal_row_never_mints_local_checkpoint_authority() -> None:
+    store = MemoryRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id="gateway-a",
+        run_ownership_config=RunOwnershipConfig(
+            heartbeat_enabled=True,
+            lease_seconds=30,
+            grace_seconds=0,
+        ),
+    )
+    record = await manager.create("thread-peer-terminal")
+    assert await manager.try_start(record.run_id)
+
+    peer_row = store._runs[record.run_id]
+    peer_row["status"] = "error"
+    peer_row["state_version"] += 1
+    peer_row["owner_worker_id"] = None
+    peer_row["lease_expires_at"] = None
+
+    await manager.set_status(record.run_id, RunStatus.error)
+
+    assert record.ownership_lost is True
+    assert record.checkpoint_execution_fence_revoked is True
+    assert record.checkpoint_terminal_state_version is None
+
+
+@pytest.mark.anyio
+async def test_own_terminal_cas_mints_local_checkpoint_authority() -> None:
+    store = MemoryRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id="gateway-a",
+        run_ownership_config=RunOwnershipConfig(
+            heartbeat_enabled=True,
+            lease_seconds=30,
+            grace_seconds=0,
+        ),
+    )
+    record = await manager.create("thread-own-terminal")
+    await manager.try_start(record.run_id)
+
+    await manager.set_status(record.run_id, RunStatus.success)
+
+    assert record.ownership_lost is False
+    assert record.checkpoint_execution_fence_revoked is False
+    assert record.checkpoint_terminal_state_version == record.state_version
+
+
+@pytest.mark.anyio
+async def test_owned_finalize_if_not_cancelled_mints_local_checkpoint_authority() -> None:
+    store = MemoryRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id="gateway-a",
+        run_ownership_config=RunOwnershipConfig(
+            heartbeat_enabled=True,
+            lease_seconds=30,
+            grace_seconds=0,
+        ),
+    )
+    record = await manager.create("thread-owned-finalize")
+    await manager.try_start(record.run_id)
+
+    await manager.set_status_if_not_cancelled(record.run_id, RunStatus.success)
+
+    assert record.ownership_lost is False
+    assert record.checkpoint_execution_fence_revoked is False
+    assert record.checkpoint_terminal_state_version == record.state_version
+
+
+@pytest.mark.anyio
+async def test_peer_owned_active_row_cannot_be_terminalized_locally() -> None:
+    store = MemoryRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id="gateway-a",
+        run_ownership_config=RunOwnershipConfig(
+            heartbeat_enabled=True,
+            lease_seconds=30,
+            grace_seconds=0,
+        ),
+    )
+    record = await manager.create("thread-peer-owner")
+    await manager.try_start(record.run_id)
+    peer_row = store._runs[record.run_id]
+    peer_row["owner_worker_id"] = "gateway-peer"
+    peer_row["state_version"] += 1
+    peer_row["lease_expires_at"] = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+    manager._sync_record_from_store_row(record, peer_row)
+
+    await manager.set_status_if_not_cancelled(record.run_id, RunStatus.success)
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored["owner_worker_id"] == "gateway-peer"
+    assert record.ownership_lost is True
+    assert record.checkpoint_terminal_state_version is None
+
+
+@pytest.mark.anyio
+async def test_memory_store_execution_fence_fails_closed() -> None:
+    store = MemoryRunStore()
+    async with store.hold_execution_fence(
+        "run-1",
+        owner_worker_id="gateway-a",
+        state_version=2,
+        terminal_state_version=3,
+    ) as active:
+        assert active is False
 
 
 @pytest.mark.anyio

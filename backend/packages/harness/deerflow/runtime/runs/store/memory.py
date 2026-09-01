@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import copy
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from typing import Any
@@ -288,6 +289,20 @@ class MemoryRunStore(RunStore):
             require_unexpired_lease=require_unexpired_lease,
         )
 
+    @asynccontextmanager
+    async def hold_execution_fence(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        state_version: int,
+        terminal_state_version: int | None = None,
+    ) -> AsyncIterator[bool]:
+        """Fail closed: this store cannot lock ownership across a mutation."""
+
+        del run_id, owner_worker_id, state_version, terminal_state_version
+        yield False
+
     def _transition_run_atomic(
         self,
         run_id: str,
@@ -317,6 +332,9 @@ class MemoryRunStore(RunStore):
             return LifecycleTransitionResult(applied=False, row=row)
         row["status"] = transition.status
         row["state_version"] += 1
+        if transition.status in _TERMINAL_STATUSES:
+            row["owner_worker_id"] = None
+            row["lease_expires_at"] = None
         if transition.error is not None:
             row["error"] = transition.error
         if transition.stop_reason is not None:
@@ -542,6 +560,13 @@ class MemoryRunStore(RunStore):
                 "run identity is already bound to a different tenant",
             )
         lifecycle_row = operation_kind == "run" and status is not None
+        terminal_statuses = {
+            "success",
+            "error",
+            "timeout",
+            "interrupted",
+        }
+        terminal_status = status in terminal_statuses
         new_row = {
             "run_id": run_id,
             "thread_id": thread_id,
@@ -596,6 +621,8 @@ class MemoryRunStore(RunStore):
             if existing.get("operation_kind", "run") == "run":
                 new_row["error"] = existing.get("error")
                 new_row["stop_reason"] = existing.get("stop_reason")
+                new_row["owner_worker_id"] = existing.get("owner_worker_id")
+                new_row["lease_expires_at"] = existing.get("lease_expires_at")
         self._runs[run_id] = new_row
         self._index_run(run_id, thread_id)
         if operation_kind == "run" and external_scope is not None and external_key is not None:
@@ -608,6 +635,9 @@ class MemoryRunStore(RunStore):
             if status != "pending":
                 new_row["status"] = status
                 new_row["state_version"] += 1
+                if terminal_status:
+                    new_row["owner_worker_id"] = None
+                    new_row["lease_expires_at"] = None
                 self._append_lifecycle_event(
                     new_row,
                     LifecycleTransition(
@@ -621,6 +651,15 @@ class MemoryRunStore(RunStore):
         elif existing is not None and existing["status"] != status:
             if operation_kind != "run":
                 new_row["status"] = status
+                if terminal_status:
+                    new_row["owner_worker_id"] = None
+                    new_row["lease_expires_at"] = None
+        elif existing is None and terminal_status:
+            new_row["owner_worker_id"] = None
+            new_row["lease_expires_at"] = None
+        if new_row["status"] in terminal_statuses:
+            new_row["owner_worker_id"] = None
+            new_row["lease_expires_at"] = None
 
     async def get(self, run_id, *, user_id=None):
         run = self._visible_run(run_id)
@@ -914,6 +953,9 @@ class MemoryRunStore(RunStore):
         status: str,
         error: str | None = None,
         stop_reason: str | None = None,
+        expected_owner_worker_id: str | None = None,
+        expected_state_version: int | None = None,
+        require_unexpired_lease: bool = False,
     ) -> StatusFinalization:
         run = self._visible_run(run_id)
         if run is None:
@@ -925,19 +967,41 @@ class MemoryRunStore(RunStore):
             )
         if run["status"] not in ("pending", "running"):
             return StatusFinalization(finalized=False)
+        if (expected_owner_worker_id is None) != (expected_state_version is None):
+            return StatusFinalization(finalized=False)
+        if expected_owner_worker_id is not None and (
+            run["state_version"] != expected_state_version
+            or not self._owned_run_fence_matches(
+                run,
+                expected_owner_worker_id=expected_owner_worker_id,
+                require_unexpired_lease=require_unexpired_lease,
+            )
+        ):
+            return StatusFinalization(finalized=False)
         lifecycle_type = lifecycle_type_for_status(status)
-        result = await self.transition_run_atomic(
-            run_id,
-            expected_state_version=run["state_version"],
-            expected_statuses=("pending", "running"),
-            transition=LifecycleTransition(
-                lifecycle_type=lifecycle_type,
-                status=status,
-                error=error,
-                stop_reason=stop_reason,
-                reason=stop_reason,
-            ),
+        transition = LifecycleTransition(
+            lifecycle_type=lifecycle_type,
+            status=status,
+            error=error,
+            stop_reason=stop_reason,
+            reason=stop_reason,
         )
+        if expected_owner_worker_id is not None:
+            result = await self.transition_owned_run_atomic(
+                run_id,
+                expected_state_version=expected_state_version,
+                expected_statuses=("pending", "running"),
+                transition=transition,
+                expected_owner_worker_id=expected_owner_worker_id,
+                require_unexpired_lease=require_unexpired_lease,
+            )
+        else:
+            result = await self.transition_run_atomic(
+                run_id,
+                expected_state_version=run["state_version"],
+                expected_statuses=("pending", "running"),
+                transition=transition,
+            )
         return StatusFinalization(finalized=result.applied)
 
     async def claim_for_takeover(
@@ -964,6 +1028,8 @@ class MemoryRunStore(RunStore):
         if run.get("operation_kind", "run") != "run":
             run["status"] = "error"
             run["error"] = error
+            run["owner_worker_id"] = None
+            run["lease_expires_at"] = None
             if stop_reason is not None:
                 run["stop_reason"] = stop_reason
             run["updated_at"] = datetime.now(UTC).isoformat()
@@ -1136,7 +1202,8 @@ class MemoryRunStore(RunStore):
                 replacement_error = "Rolled back by user" if multitask_strategy == "rollback" else "Cancelled by newer run"
                 r["status"] = replacement_status
                 r["error"] = replacement_error
-                r["owner_worker_id"] = owner_worker_id
+                r["owner_worker_id"] = None
+                r["lease_expires_at"] = None
                 r["updated_at"] = now
                 if r.get("operation_kind", "run") == "run":
                     r["state_version"] += 1

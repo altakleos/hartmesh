@@ -1146,3 +1146,142 @@ async def test_manual_trigger_proceeds_when_global_budget_available():
 
     assert result["outcome"] == "launched"
     assert len(launched) == 1
+
+
+def test_scheduled_occurrence_identity_is_tenant_due_time_and_version_bound():
+    task = {
+        "id": "task-stable",
+        "schedule_type": "cron",
+        "schedule_spec": {"cron": "*/5 * * * *"},
+        "schedule_version": 7,
+        "timezone": "UTC",
+    }
+    due = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+
+    def service(tenant: str) -> ScheduledTaskService:
+        return ScheduledTaskService(
+            task_repo=DummyTaskRepo([]),
+            task_run_repo=DummyRunRepo(),
+            invocation_runtime=NeverLaunchInvocationRuntime(),
+            poll_interval_seconds=5,
+            lease_seconds=120,
+            max_concurrent_runs=3,
+            tenant_digest=tenant,
+        )
+
+    first = service("a" * 64)._scheduled_occurrence_id(task, scheduled_for=due)
+    second = service("a" * 64)._scheduled_occurrence_id(task, scheduled_for=due)
+
+    assert first == second
+    assert first.startswith("task-run-")
+    assert first != service("b" * 64)._scheduled_occurrence_id(
+        task,
+        scheduled_for=due,
+    )
+    assert first != service("a" * 64)._scheduled_occurrence_id(
+        {**task, "schedule_version": 8},
+        scheduled_for=due,
+    )
+    assert first != service("a" * 64)._scheduled_occurrence_id(
+        task,
+        scheduled_for=due + timedelta(minutes=5),
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_once_replaces_pod_clock_with_repository_authority_time():
+    pod_time = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    database_time = datetime(2026, 9, 1, 10, 2, tzinfo=UTC)
+
+    class AuthorityTaskRepo(DummyTaskRepo):
+        def __init__(self):
+            super().__init__([])
+            self.fallback = None
+            self.claim_now = None
+
+        async def authority_now(self, *, fallback):
+            self.fallback = fallback
+            return database_time
+
+        async def claim_due_tasks(self, **kwargs):
+            self.claim_now = kwargs["now"]
+            return []
+
+    task_repo = AuthorityTaskRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=DummyRunRepo(),
+        invocation_runtime=NeverLaunchInvocationRuntime(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    await service.run_once(now=pod_time)
+
+    assert task_repo.fallback == pod_time
+    assert task_repo.claim_now == database_time
+    assert service.lease_stats.cycles == 1
+    assert service.lease_stats.database_clock_reads == 1
+    assert service.lease_stats.last_database_time == database_time
+
+
+@pytest.mark.asyncio
+async def test_manual_dispatch_uses_repository_authority_time():
+    pod_time = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    database_time = datetime(2026, 9, 1, 10, 2, tzinfo=UTC)
+
+    class AuthorityTaskRepo(DummyTaskRepo):
+        async def authority_now(self, *, fallback):
+            assert fallback == pod_time
+            return database_time
+
+    async def fake_launch(**kwargs):
+        return {"run_id": "run-authority", "thread_id": kwargs["thread_id"]}
+
+    row = _once_task_row(task_id="task-authority", status="enabled")
+    task_repo = AuthorityTaskRepo([row])
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    await service.dispatch_task(row, now=pod_time, trigger="manual")
+
+    assert run_repo.created["scheduled_for"] == database_time
+    assert run_repo.updated[0][1]["started_at"] == database_time
+    assert service.lease_stats.database_clock_reads == 1
+
+
+@pytest.mark.asyncio
+async def test_multi_instance_start_reconciles_with_repository_authority_time():
+    database_time = datetime(2026, 9, 1, 10, 2, tzinfo=UTC)
+
+    class AuthorityTaskRepo(DummyTaskRepo):
+        async def authority_now(self, *, fallback):
+            return database_time
+
+    task_repo = AuthorityTaskRepo([])
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        invocation_runtime=NeverLaunchInvocationRuntime(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+        multi_instance=True,
+    )
+
+    await service.start()
+    await asyncio.sleep(0)
+    await service.stop()
+
+    assert run_repo.reconciled["now"] == database_time
+    assert task_repo.reconciled_stuck_once["now"] == database_time
+    assert service.lease_stats.database_clock_reads >= 1
