@@ -324,6 +324,29 @@ def test_peer_overrides_cannot_use_assistant_namespace_or_collide() -> None:
         )
 
 
+def test_local_shared_peer_override_cannot_collide_with_another_derived_user() -> None:
+    shared = "explicit-local-shared"
+    projected = _projected_config(
+        "customer-alpha",
+        {
+            "allow_local_shared_workspaces": True,
+            "workspace_overrides": {"alice": shared, "bob": shared},
+        },
+        profile="local_development",
+    )
+    resolver = HonchoIdentityResolver(HonchoConfig.from_backend_config(projected))
+
+    with pytest.raises(ValueError, match="honcho_identity_collision"):
+        HonchoConfig.from_backend_config(
+            {
+                **projected,
+                "user_peer_overrides": {
+                    "alice": resolver.user_peer("bob"),
+                },
+            }
+        )
+
+
 def test_safe_diagnostics_expose_only_tenant_pseudonyms() -> None:
     raw_user = "alice@example.com"
     resolver = HonchoIdentityResolver(HonchoConfig.from_backend_config(_projected_config("customer-alpha")))

@@ -95,14 +95,50 @@ def _journal(identity: TenantIdentityV1) -> tuple[RunJournal, MemoryRunEventStor
     return RunJournal("run-1", "thread-1", store, flush_threshold=100), store
 
 
+class _FailingObservationStore(MemoryRunEventStore):
+    async def put_batch(self, events):  # type: ignore[no-untyped-def,override]
+        if any(event.get("event_type") == "memory.observation.v1" for event in events):
+            raise RuntimeError("event store unavailable")
+        return await super().put_batch(events)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("failure_policy", "expected_error"),
+    [("fail_open", False), ("fail_closed", True)],
+)
+async def test_read_waits_for_actual_observation_persistence(
+    failure_policy: str,
+    expected_error: bool,
+) -> None:
+    manager, _client, identity = _manager(failure_policy=failure_policy)
+    store = _FailingObservationStore(tenant=identity.to_persisted_reference())
+    journal = RunJournal("run-1", "thread-1", store, flush_threshold=100)
+
+    with bind_memory_observation_sink(journal, identity.to_persisted_reference()):
+        if expected_error:
+            with pytest.raises(MemoryManagerError, match="honcho_memory_recall_failed"):
+                await manager.aget_context("alice@example.com")
+        else:
+            assert await manager.aget_context("alice@example.com") == ""
+
+    assert (
+        await store.list_events(
+            "thread-1",
+            "run-1",
+            event_types=["memory.observation.v1"],
+        )
+        == []
+    )
+
+
 @pytest.mark.anyio
 async def test_success_observation_digests_exact_sanitized_projection() -> None:
     manager, client, identity = _manager()
     journal, store = _journal(identity)
 
     with bind_memory_observation_sink(journal, identity.to_persisted_reference()):
-        projected = manager.get_context("alice@example.com")
-    await journal.flush()
+        projected = await manager.aget_context("alice@example.com")
 
     assert projected == "Useful &lt;memory&gt; context"
     events = await store.list_events("thread-1", "run-1", event_types=["memory.observation.v1"])
@@ -148,11 +184,10 @@ async def test_empty_and_failed_reads_record_honest_status_without_provider_deta
 
     client.representation = ""
     with bind_memory_observation_sink(journal, identity.to_persisted_reference()):
-        assert manager.get_context("alice@example.com") == ""
+        assert await manager.aget_context("alice@example.com") == ""
     client.fail_representation = RuntimeError("provider body SECRET query=private")
     with bind_memory_observation_sink(journal, identity.to_persisted_reference()):
-        assert manager.get_context("alice@example.com") == ""
-    await journal.flush()
+        assert await manager.aget_context("alice@example.com") == ""
 
     events = await store.list_events("thread-1", "run-1", event_types=["memory.observation.v1"])
     assert [event["content"]["status"] for event in events] == ["empty", "failed_open"]
@@ -169,8 +204,7 @@ async def test_search_with_only_empty_content_records_empty() -> None:
     client.search_results = [{"content": ""}]
 
     with bind_memory_observation_sink(journal, identity.to_persisted_reference()):
-        assert manager.search("query", user_id="alice@example.com") == []
-    await journal.flush()
+        assert await manager.asearch("query", user_id="alice@example.com") == []
 
     events = await store.list_events(
         "thread-1",
@@ -189,8 +223,7 @@ async def test_fail_closed_records_status_then_raises_safe_contract_error() -> N
 
     with bind_memory_observation_sink(journal, identity.to_persisted_reference()):
         with pytest.raises(MemoryManagerError, match="honcho_memory_recall_failed") as raised:
-            manager.get_context("alice@example.com")
-    await journal.flush()
+            await manager.aget_context("alice@example.com")
 
     assert "raw provider" not in str(raised.value)
     assert raised.value.__cause__ is None
@@ -205,9 +238,8 @@ async def test_truncation_and_retry_produce_separate_observations() -> None:
     client.representation = "<memory>" + "x" * 100
 
     with bind_memory_observation_sink(journal, identity.to_persisted_reference()):
-        first = manager.get_context("alice@example.com")
-        second = manager.get_context("alice@example.com")
-    await journal.flush()
+        first = await manager.aget_context("alice@example.com")
+        second = await manager.aget_context("alice@example.com")
 
     assert first == second
     assert len(first) == 12
@@ -243,7 +275,7 @@ async def test_offloaded_observation_returns_to_the_owner_event_loop() -> None:
     observed_threads: list[int] = []
 
     class Sink:
-        def record_memory_observation(self, observation: object) -> None:
+        async def persist_memory_observations(self, observations: object) -> None:
             observed_threads.append(threading.get_ident())
 
     with bind_memory_observation_sink(Sink(), identity.to_persisted_reference()):
@@ -258,13 +290,12 @@ async def test_search_and_add_observations_never_persist_query_or_content() -> N
     journal, store = _journal(identity)
 
     with bind_memory_observation_sink(journal, identity.to_persisted_reference()):
-        results = manager.search("private customer query", user_id="alice@example.com")
-        manager.add(
+        results = await manager.asearch("private customer query", user_id="alice@example.com")
+        await manager.aadd(
             "thread-raw",
             [SimpleNamespace(type="human", content="private conversation content")],
             user_id="alice@example.com",
         )
-    await journal.flush()
 
     events = await store.list_events("thread-1", "run-1", event_types=["memory.observation.v1"])
     assert [event["content"]["operation"] for event in events] == ["search", "add"]
@@ -284,12 +315,11 @@ async def test_exact_write_limit_is_not_reported_as_truncated() -> None:
     journal, store = _journal(identity)
 
     with bind_memory_observation_sink(journal, identity.to_persisted_reference()):
-        manager.add(
+        await manager.aadd(
             "thread-raw",
             [SimpleNamespace(type="human", content="12345")],
             user_id="alice@example.com",
         )
-    await journal.flush()
 
     events = await store.list_events("thread-1", "run-1", event_types=["memory.observation.v1"])
     assert events[0]["content"]["truncated"] is False

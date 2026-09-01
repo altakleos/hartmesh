@@ -64,14 +64,16 @@
   from file/API config before construction and cannot be caller-selected.
 - Honcho supplies mutable contextual memory. It is tenant- and user-scoped, but it is not HartMesh's source of truth for admission, checkpoints, invocation status, authorization, or audit evidence.
 - Accepted durable runs bind the host observation callback only around graph
-  execution. It appends one `memory.observation.v1` event per Honcho operation
-  with tenant reference, hashed workspace, operation/status, exact bounded
-  read-projection digest when applicable, count, truncation, and time—never content, query, raw
-  identity, or provider failure text. A successful read whose observation
-  append fails is discarded under fail-open and raises under fail-closed;
-  ordinary/legacy calls have no binding and retain their old behavior. Health
-  and deployment surfaces report Honcho as an optional mutable-context
-  dependency and do not probe it or expose its endpoint.
+  execution. Each completed Honcho operation admitted through that trusted
+  boundary persists one `memory.observation.v1` event with tenant reference,
+  hashed workspace, operation/status, exact bounded read-projection digest when
+  applicable, count, truncation, and time—never content, query, raw identity, or
+  provider failure text. Timed-out candidate reads are discarded before
+  admission and emit no event. A successful admitted read whose persistence
+  fails is discarded under fail-open and raises under fail-closed;
+  ordinary/legacy calls have no binding and retain their old behavior. Health,
+  readiness, and deployment surfaces report Honcho as an optional
+  mutable-context dependency and do not probe it or expose its endpoint.
 - Honcho configuration objects reject non-finite or non-positive timeout values and non-positive character budgets during construction, including direct dataclass construction, before an HTTP client can use them.
 - `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
 - Both modes share `FileMemoryStorage`, per-user/per-agent isolation, manual CRUD primitives, and the updater backend. Injection is mode-aware: middleware mode injects global `user`/`history` summaries plus the selected agent's facts, while tool mode injects only the global summaries and leaves every agent fact behind `memory_search` to avoid duplicating automatically injected and retrieval-returned context. `memory.injection_enabled: false` suppresses the complete block in either mode.

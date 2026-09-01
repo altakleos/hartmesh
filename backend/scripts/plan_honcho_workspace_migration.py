@@ -31,6 +31,8 @@ MAX_INVENTORY_BYTES = 1_048_576
 MAX_RAW_USER_BYTES = 512
 
 _HONCHO_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$", re.ASCII)
+_LEGACY_SANITIZE_RE = re.compile(r"[^A-Za-z0-9_-]+")
+_LEGACY_IDENTITY_FIELDS = frozenset({"workspace", "user_peer", "assistant_peer"})
 
 
 class HonchoMigrationError(ValueError):
@@ -55,26 +57,64 @@ def _validate_page(*, offset: object, limit: object) -> tuple[int, int]:
     return offset, limit
 
 
-def _validate_inventory(inventory: object) -> dict[str, str]:
+def _validate_honcho_id(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > HONCHO_ID_MAX_LENGTH or _HONCHO_ID_RE.fullmatch(value) is None:
+        raise HonchoMigrationError(
+            "honcho_migration_input_invalid",
+            f"each {field} must satisfy Honcho's identifier grammar and length bound",
+        )
+    return value
+
+
+def _legacy_stable_id(raw: str) -> str:
+    """Reproduce the pre-tenant Honcho peer derivation exactly."""
+
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    readable = _LEGACY_SANITIZE_RE.sub("-", raw).strip("-")[:48].rstrip("-")
+    return f"{readable}-{digest}" if readable else digest
+
+
+def _validate_inventory(inventory: object) -> dict[str, dict[str, str]]:
     if not isinstance(inventory, Mapping) or len(inventory) > MAX_INVENTORY_ENTRIES:
         raise HonchoMigrationError(
             "honcho_migration_input_invalid",
             f"inventory must be a JSON object with at most {MAX_INVENTORY_ENTRIES} entries",
         )
 
-    validated: dict[str, str] = {}
-    for user_id, workspace in inventory.items():
+    validated: dict[str, dict[str, str]] = {}
+    for user_id, raw_identity in inventory.items():
         if not isinstance(user_id, str) or not user_id or len(user_id.encode("utf-8")) > MAX_RAW_USER_BYTES:
             raise HonchoMigrationError(
                 "honcho_migration_input_invalid",
                 f"each user identifier must be a non-empty string of at most {MAX_RAW_USER_BYTES} bytes",
             )
-        if not isinstance(workspace, str) or not workspace or len(workspace) > HONCHO_ID_MAX_LENGTH or _HONCHO_ID_RE.fullmatch(workspace) is None:
+        if isinstance(raw_identity, str):
+            identity = {
+                "workspace": raw_identity,
+                "user_peer": _legacy_stable_id(user_id),
+                "assistant_peer": "deerflow",
+            }
+        elif isinstance(raw_identity, Mapping):
+            if not set(raw_identity).issubset(_LEGACY_IDENTITY_FIELDS) or "workspace" not in raw_identity:
+                raise HonchoMigrationError(
+                    "honcho_migration_input_invalid",
+                    "identity objects require workspace and allow only user_peer/assistant_peer overrides",
+                )
+            identity = {
+                "workspace": raw_identity["workspace"],
+                "user_peer": raw_identity.get("user_peer", _legacy_stable_id(user_id)),
+                "assistant_peer": raw_identity.get("assistant_peer", "deerflow"),
+            }
+        else:
             raise HonchoMigrationError(
                 "honcho_migration_input_invalid",
-                "each source workspace must satisfy Honcho's identifier grammar and length bound",
+                "each inventory value must be a workspace ID or exact legacy identity object",
             )
-        validated[user_id] = workspace
+        validated[user_id] = {
+            "workspace": _validate_honcho_id(identity["workspace"], field="source workspace"),
+            "user_peer": _validate_honcho_id(identity["user_peer"], field="source user peer"),
+            "assistant_peer": _validate_honcho_id(identity["assistant_peer"], field="source assistant peer"),
+        }
     return validated
 
 
@@ -94,7 +134,7 @@ def _canonical_digest(value: object) -> str:
 
 
 def run_honcho_workspace_migration(
-    inventory: Mapping[str, str],
+    inventory: Mapping[str, object],
     *,
     tenant_id: str,
     dry_run: bool,
@@ -129,10 +169,14 @@ def run_honcho_workspace_migration(
     mappings = [
         {
             "user_ref": _user_ref(user_id),
-            "source_workspace": source_workspace,
+            "source_workspace": source_identity["workspace"],
+            "source_user_peer": source_identity["user_peer"],
+            "source_assistant_peer": source_identity["assistant_peer"],
             "target_workspace": resolver.derived_workspace(user_id),
+            "target_user_peer": resolver.user_peer(user_id),
+            "target_assistant_peer": resolver.assistant_peer(),
         }
-        for user_id, source_workspace in validated.items()
+        for user_id, source_identity in validated.items()
     ]
     mappings.sort(key=lambda item: item["user_ref"])
     if len({item["user_ref"] for item in mappings}) != len(mappings) or len({item["target_workspace"] for item in mappings}) != len(mappings):
@@ -155,11 +199,15 @@ def run_honcho_workspace_migration(
         "emitted_count": len(page),
         "has_more": offset + len(page) < len(mappings),
         "mappings": page,
-        "instruction": "Stop Gateway writes, copy these exact workspace mappings with Honcho provider tooling, validate provider counts, then deploy tenant-derived configuration. DeerFlow will not dual-read legacy workspaces.",
+        "instruction": (
+            "Stop Gateway writes, copy each exact workspace and user/assistant peer mapping with Honcho provider tooling, "
+            "preserve legacy sessions while rewriting their peer associations, validate provider counts, then deploy "
+            "tenant-derived configuration. DeerFlow will not dual-read legacy workspaces."
+        ),
     }
 
 
-def _read_inventory(path: Path) -> Mapping[str, str]:
+def _read_inventory(path: Path) -> Mapping[str, object]:
     try:
         if path.stat().st_size > MAX_INVENTORY_BYTES:
             raise HonchoMigrationError(
@@ -184,7 +232,12 @@ def _read_inventory(path: Path) -> Mapping[str, str]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--inventory", type=Path, required=True, help="JSON object mapping raw user IDs to exact legacy workspace IDs")
+    parser.add_argument(
+        "--inventory",
+        type=Path,
+        required=True,
+        help="JSON object mapping raw user IDs to legacy workspace IDs or exact workspace/user_peer/assistant_peer objects",
+    )
     parser.add_argument("--tenant-id", required=True, help="canonical deployment tenant ID (never emitted)")
     parser.add_argument("--dry-run", action="store_true", help="required; this utility has no provider write path")
     parser.add_argument("--offset", type=int, default=0, help="sorted mapping offset")

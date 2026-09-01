@@ -1039,8 +1039,11 @@ digest plus expected qualification ID, image/chart/config/schema, namespace, sco
 required scenarios. Its only successful trust state is
 `external_evidence_verified`; it performs no network fetch.
 
-`GET /health` is independent process liveness. Unauthenticated `GET /ready` returns only
-`{"status":"ready"}` or `{"status":"not_ready"}` and uses the same bounded proof that fences
+`GET /health` is independent process liveness. Unauthenticated `GET /ready`
+returns the overall `status`, the safe tenant-identity projection, and—when
+selected—the safe optional contextual-memory projection. A degraded optional
+Honcho backend is reported without changing overall readiness and is never
+described as a durable dependency. The overall status uses the same bounded proof that fences
 genuinely new invocation admission: current-generation fresh health for every required
 authority capability, bounded lifecycle singleton/pruning/event-edge integrity, database
 availability, and the configured persistence profile. Accepted keyed replay is resolved

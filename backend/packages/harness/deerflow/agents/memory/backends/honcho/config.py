@@ -241,6 +241,13 @@ class HonchoConfig:
                 "honcho_identity_collision",
                 "a user peer override collides with the reserved assistant peer",
             )
+        configured_users = set(self.workspace_overrides) | set(self.user_peer_overrides)
+        effective_user_peers = [resolver.user_peer(user_id) for user_id in configured_users]
+        if len(set(effective_user_peers)) != len(effective_user_peers):
+            raise HonchoConfigError(
+                "honcho_identity_collision",
+                "configured users must resolve to unique effective peer IDs",
+            )
 
         if self.tenant is None:
             return

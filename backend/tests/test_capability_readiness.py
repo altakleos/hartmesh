@@ -662,6 +662,59 @@ async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
 
 
 @pytest.mark.asyncio
+async def test_gateway_readiness_reports_optional_contextual_memory_degradation(
+    monkeypatch,
+) -> None:
+    import app.gateway.app as app_module
+    import deerflow.extensions as extensions_module
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.runtime.runs.store.base import LifecycleReadiness
+
+    config = AppConfig(sandbox=SandboxConfig(use="test"))
+    monkeypatch.setattr(app_module, "get_app_config", lambda: config)
+    monkeypatch.setattr(
+        extensions_module,
+        "load_extensions",
+        lambda _plugins: (ExtensionRegistry().build(), []),
+    )
+    app = app_module.create_app()
+
+    class HealthyLifecycle:
+        async def lifecycle_readiness(self):
+            return LifecycleReadiness(True)
+
+    class DegradedContextualMemory:
+        def safe_diagnostics(self):
+            return {
+                "backend": "honcho",
+                "dependency_role": "mutable_contextual_memory",
+                "durable_dependency": False,
+                "operational_status": "degraded",
+                "last_error_code": "honcho_memory_recall_failed",
+            }
+
+    app.state.run_store = HealthyLifecycle()
+    app.state.memory_manager = DegradedContextualMemory()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert response.json()["contextual_memory"] == {
+        "backend": "honcho",
+        "dependency_role": "mutable_contextual_memory",
+        "durable_dependency": False,
+        "operational_status": "degraded",
+        "last_error_code": "honcho_memory_recall_failed",
+    }
+
+
+@pytest.mark.asyncio
 async def test_gateway_deployment_report_reads_live_post_commit_status(
     monkeypatch,
 ) -> None:

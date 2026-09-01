@@ -847,22 +847,40 @@ class RunJournal(BaseCallbackHandler):
         )
         self._memory_context_recorded = True
 
-    def record_memory_observation(self, observation: Any) -> None:
-        """Buffer one bounded mutable-memory observation.
+    async def persist_memory_observations(
+        self,
+        observations: Sequence[Any],
+    ) -> None:
+        """Persist bounded mutable-memory observations before context use.
 
         Unlike the frozen ``context:memory`` identity, retries are intentionally
         not deduplicated: Honcho may return different mutable context each time.
+        Earlier callback rows are flushed first to preserve stream ordering;
+        the observation batch then reaches the store before the read result is
+        allowed into model context.
         """
 
         from deerflow.runtime.memory_observation import MemoryObservationV1
 
-        if not isinstance(observation, MemoryObservationV1):
-            raise TypeError("observation must be MemoryObservationV1")
-        self._put(
-            event_type=MEMORY_OBSERVATION_EVENT.event_type,
-            category=MEMORY_OBSERVATION_EVENT.category,
-            content=observation.to_event_body(),
-        )
+        batch: list[dict[str, Any]] = []
+        for observation in observations:
+            if not isinstance(observation, MemoryObservationV1):
+                raise TypeError("observation must be MemoryObservationV1")
+            batch.append(
+                {
+                    "thread_id": self.thread_id,
+                    "run_id": self.run_id,
+                    "event_type": MEMORY_OBSERVATION_EVENT.event_type,
+                    "category": MEMORY_OBSERVATION_EVENT.category,
+                    "content": observation.to_event_body(),
+                    "metadata": {},
+                    "created_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        if not batch:
+            return
+        await self.flush()
+        await self._store.put_batch(batch)
 
     def _record_produced_artifacts(self, artifacts: Any, tool_name: str | None) -> None:
         """Accumulate produced artifact paths, deduped by (path, tool_name)."""

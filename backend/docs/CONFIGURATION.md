@@ -150,8 +150,9 @@ production. Startup validates configuration but does not probe the provider.
 Honcho supplies mutable contextual memory. It is tenant- and user-scoped, but it is not HartMesh's source of truth for admission, checkpoints, invocation status, authorization, or audit evidence.
 
 Accepted durable runs persist only bounded `memory.observation.v1` metadata,
-not memory/query text. Health reports Honcho as an optional contextual backend,
-not a durable dependency. Namespace upgrades deliberately have no dual-read;
+not memory/query text. Health, readiness, and deployment reports show Honcho
+as an optional contextual backend, not a durable dependency; a degraded
+fail-open Honcho does not make overall readiness fail. Namespace upgrades deliberately have no dual-read;
 use the documented [dry-run mapping and provider-copy procedure](../packages/harness/deerflow/agents/memory/backends/honcho/README.md#existing-workspace-migration).
 
 ### Extensions

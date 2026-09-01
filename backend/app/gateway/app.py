@@ -312,18 +312,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # searches remain correct while this runs because DeerMem lazily rebuilds
     # the requested scope when the full warm-up has not completed yet.
     retrieval_warm_task: asyncio.Task[None] | None = None
-    from deerflow.agents.memory import get_memory_manager
+    from deerflow.agents.memory import MemoryManager, get_memory_manager
 
     startup_memory_enabled = bool(getattr(startup_config.memory, "enabled", False))
+    resolved_memory_manager: MemoryManager | None = None
+
+    async def resolve_memory_manager() -> MemoryManager:
+        """Construct this lifespan's manager at most once."""
+
+        nonlocal resolved_memory_manager
+        if resolved_memory_manager is None:
+            resolved_memory_manager = await asyncio.to_thread(
+                get_memory_manager,
+                tenant_identity=tenant_identity,
+                deployment_profile=startup_profile,
+            )
+        return resolved_memory_manager
+
     if startup_memory_enabled:
         # Construction validates backend configuration. This is intentionally
         # outside the best-effort warm-up boundary: an enabled backend with an
         # invalid tenant/security projection must abort startup.
-        manager = await asyncio.to_thread(
-            get_memory_manager,
-            tenant_identity=tenant_identity,
-            deployment_profile=startup_profile,
-        )
+        manager = await resolve_memory_manager()
         app.state.memory_manager = manager
         try:
             warm_retrieval = getattr(manager, "warm_retrieval", None)
@@ -347,13 +357,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # the base default -- log "skipping" instead of the misleading "warmed
     # successfully" so the log reflects what actually happened.
     try:
-        from deerflow.agents.memory import get_memory_manager
-
-        manager = await asyncio.to_thread(
-            get_memory_manager,
-            tenant_identity=tenant_identity,
-            deployment_profile=startup_profile,
-        )
+        manager = await resolve_memory_manager()
         if startup_memory_enabled:
             app.state.memory_manager = manager
         warmed = await asyncio.wait_for(
@@ -505,19 +509,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             return float(value) if isinstance(value, (int, float)) else default
 
         memory_enabled = bool(getattr(startup_config.memory, "enabled", False))
-        memory_manager = None
-        if memory_enabled:
-            try:
-                from deerflow.agents.memory import get_memory_manager
-
-                memory_manager = await asyncio.to_thread(
-                    get_memory_manager,
-                    tenant_identity=tenant_identity,
-                    deployment_profile=startup_profile,
-                )
-                app.state.memory_manager = memory_manager
-            except Exception:
-                logger.exception("Memory manager unavailable for graceful shutdown")
+        memory_manager = resolved_memory_manager if memory_enabled else None
 
         async def begin_admission_drain() -> bool:
             # Memory shutdown can trigger detached system-model callbacks.
@@ -1202,16 +1194,20 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     @app.get("/ready", tags=["health"])
     async def readiness_check() -> JSONResponse:
-        """Return a deliberately minimal deployable readiness result."""
+        """Return bounded authoritative readiness plus safe optional context."""
 
         readiness = await app.state.runtime_readiness.readiness()
         ready = readiness.status == "ready"
+        payload: dict[str, object] = {
+            "status": "ready" if ready else "not_ready",
+            "tenant_identity": tenant_observability_projection(app.state.tenant_identity.to_persisted_reference()),
+        }
+        memory_diagnostics = _memory_backend_diagnostics(app)
+        if memory_diagnostics is not None:
+            payload["contextual_memory"] = memory_diagnostics
         return JSONResponse(
             status_code=200 if ready else 503,
-            content={
-                "status": "ready" if ready else "not_ready",
-                "tenant_identity": tenant_observability_projection(app.state.tenant_identity.to_persisted_reference()),
-            },
+            content=payload,
         )
 
     # Extension routes are deliberately last: FastAPI/Starlette dispatches in

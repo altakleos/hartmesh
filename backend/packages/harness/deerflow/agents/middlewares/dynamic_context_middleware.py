@@ -390,20 +390,61 @@ class DynamicContextMiddleware(AgentMiddleware):
         # block for tens of minutes (OS TCP timeout).  Time-box injection so
         # the request degrades gracefully (no new dynamic-context update)
         # rather than hanging. Frozen context already in state remains active.
+        from deerflow.agents.memory.observations import (
+            commit_memory_observations,
+            stage_memory_observations,
+        )
+
+        with stage_memory_observations() as observation_stage:
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(self._inject, state, runtime),
+                    timeout=_INJECT_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                observation_stage.discard()
+                logger.warning(
+                    "DynamicContextMiddleware: injection timed out (%.1fs); skipping new memory/date injection for this turn",
+                    _INJECT_TIMEOUT_SECONDS,
+                )
+                self._record_effective_memory(state, None, runtime)
+                return None
         try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(self._inject, state, runtime),
-                timeout=_INJECT_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
+            await commit_memory_observations(observation_stage)
+        except Exception as exc:
             logger.warning(
-                "DynamicContextMiddleware: injection timed out (%.1fs); skipping new memory/date injection for this turn",
-                _INJECT_TIMEOUT_SECONDS,
+                "DynamicContextMiddleware: memory observation persistence failed code=honcho_memory_recall_failed error_class=%s",
+                type(exc).__name__,
             )
-            self._record_effective_memory(state, None, runtime)
-            return None
+            if self._memory_read_fail_closed():
+                from deerflow.agents.memory import MemoryManagerError
+
+                raise MemoryManagerError("honcho_memory_recall_failed") from None
+            result = self._without_new_memory(result)
         self._record_effective_memory(state, result, runtime)
         return result
+
+    def _memory_read_fail_closed(self) -> bool:
+        """Return the configured recall policy without exposing backend detail."""
+
+        if self._app_config is not None:
+            config = self._app_config.memory
+        else:
+            from deerflow.config.memory_config import get_memory_config
+
+            config = get_memory_config()
+        backend_config = getattr(config, "backend_config", {})
+        failure_policy = backend_config.get("failure_policy", {}) if isinstance(backend_config, dict) else {}
+        return isinstance(failure_policy, dict) and str(failure_policy.get("read", "")).lower() == "fail_closed"
+
+    @staticmethod
+    def _without_new_memory(result: dict | None) -> dict | None:
+        """Remove a candidate memory message whose evidence could not persist."""
+
+        if not isinstance(result, dict) or not isinstance(result.get("messages"), list):
+            return result
+        messages = [message for message in result["messages"] if not (isinstance(message, HumanMessage) and isinstance(message.id, str) and message.id.endswith("__memory") and is_dynamic_context_reminder(message))]
+        return result if len(messages) == len(result["messages"]) else {**result, "messages": messages}
 
     @staticmethod
     def _effective_memory_message(state, update: dict | None, runtime: Runtime) -> HumanMessage | None:

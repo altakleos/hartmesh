@@ -119,6 +119,22 @@ class HonchoMemoryManager(MemoryManager):
     def _user_peer(self, user_id: str) -> str:
         return self._identity.user_peer(user_id)
 
+    def validate_tenant_binding(
+        self,
+        *,
+        expected_tenant_digest: str | None,
+        required: bool,
+    ) -> None:
+        """Validate reuse against a host-supplied tenant digest only."""
+
+        configured_tenant = self._config.tenant
+        if configured_tenant is None:
+            if required:
+                raise ValueError("honcho_tenant_projection_required: cached Honcho manager lacks the Gateway's frozen tenant projection")
+            return
+        if expected_tenant_digest is not None and configured_tenant.tenant_digest != expected_tenant_digest:
+            raise ValueError("honcho_tenant_projection_invalid: cached Honcho manager belongs to a different process tenant")
+
     def _record_probe_success(self) -> None:
         with self._health_lock:
             self._last_successful_probe_at = _now_iso()

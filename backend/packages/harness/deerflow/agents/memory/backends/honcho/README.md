@@ -98,6 +98,12 @@ digest is evidence of what HartMesh observed, not deterministic replay proof.
 Legacy and ordinary non-durable calls have no trusted observation binding and
 continue without claiming that memory was or was not used.
 
+The durable path acknowledges the actual run-event-store write before using a
+read projection. Middleware candidates are staged until the offloaded
+injection finishes within its deadline; a timeout discards the stage, so a
+late Honcho response cannot create evidence for content that was never
+injected.
+
 `failure_policy.read: fail_open` (default) records a safe failed-open status
 when possible and continues with empty context. `fail_closed` raises the stable
 `honcho_memory_recall_failed` error. If a successful durable read cannot append
@@ -111,8 +117,9 @@ async manager entrypoint runs it through `asyncio.to_thread`, preserving the
 event-loop/blocking-I/O contract. Writes remain at-most-once and log-and-drop;
 nothing is buffered for `shutdown_flush`.
 
-Health and deployment reports describe Honcho as optional mutable contextual
-memory, never as a durable dependency. They expose only selection/init state,
+Health, readiness, and deployment reports describe Honcho as optional mutable
+contextual memory, never as a durable dependency. A degraded Honcho projection
+does not make overall readiness fail. These surfaces expose only selection/init state,
 safe tenant projection, isolation/transport/failure posture, a bounded
 operational status, safe timestamps, and the last stable error code. They do
 not contact Honcho or expose its host.
@@ -128,7 +135,11 @@ Use this operator procedure:
 
 1. Stop the Gateway and every writer, then retain a provider backup/export.
 2. Build a UTF-8 JSON inventory mapping each raw user ID to its exact old
-   workspace ID. Do not include messages, API keys, or other provider data.
+   workspace ID. If legacy `user_peer_overrides` or a non-default
+   `assistant_peer` was used, make that value an object with `workspace`,
+   `user_peer`, and `assistant_peer`; otherwise the string form reproduces the
+   old default peer derivation. Do not include messages, API keys, or other
+   provider data.
 3. Choose and record the canonical deployment tenant ID.
 4. From `backend/`, generate the first bounded plan page:
 
@@ -141,11 +152,13 @@ Use this operator procedure:
      --limit 100
    ```
 
-   The command emits pseudonymous user references, exact old/new workspace
-   mappings, counts, and a digest. It accepts no provider credential, reads no
-   content, performs zero writes, and limits each page to 100 mappings. Repeat
-   with the next `offset` while `has_more` is true.
+   The command emits pseudonymous user references, exact old/new workspace and
+   user/assistant peer mappings, counts, and a digest. It accepts no provider
+   credential, reads no content, performs zero writes, and limits each page to
+   100 mappings. Repeat with the next `offset` while `has_more` is true.
 5. Copy/export/import each exact mapping with Honcho-supported provider tooling.
+   Preserve the legacy sessions and rewrite their peer associations to the
+   emitted target peers; new tenant-scoped session IDs apply to future writes.
    Running the local utility without `--dry-run` fails with
    `honcho_provider_copy_required`; it never falls back to dual-read.
 6. Validate provider counts/digests where available, deploy the tenant-derived

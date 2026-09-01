@@ -34,8 +34,14 @@ def test_dry_run_emits_only_a_bounded_pseudonymous_mapping() -> None:
     assert set(report["mappings"][0]) == {
         "user_ref",
         "source_workspace",
+        "source_user_peer",
+        "source_assistant_peer",
         "target_workspace",
+        "target_user_peer",
+        "target_assistant_peer",
     }
+    assert report["mappings"][0]["source_user_peer"] != report["mappings"][0]["target_user_peer"]
+    assert report["mappings"][0]["source_assistant_peer"] != report["mappings"][0]["target_assistant_peer"]
     rendered = repr(report)
     assert "alice@example.internal" not in rendered
     assert "bob@example.internal" not in rendered
@@ -54,6 +60,27 @@ def test_non_dry_run_stops_with_provider_tooling_instruction() -> None:
             tenant_id="customer-production",
             dry_run=False,
         )
+
+
+def test_dry_run_preserves_exact_legacy_peer_overrides_for_provider_copy() -> None:
+    report = run_honcho_workspace_migration(
+        {
+            "alice@example.internal": {
+                "workspace": "legacy-workspace-a",
+                "user_peer": "legacy-user-peer-a",
+                "assistant_peer": "legacy-assistant",
+            }
+        },
+        tenant_id="customer-production",
+        dry_run=True,
+    )
+
+    mapping = report["mappings"][0]
+    assert mapping["source_workspace"] == "legacy-workspace-a"
+    assert mapping["source_user_peer"] == "legacy-user-peer-a"
+    assert mapping["source_assistant_peer"] == "legacy-assistant"
+    assert mapping["target_user_peer"] != mapping["source_user_peer"]
+    assert "peer associations" in report["instruction"]
 
 
 @pytest.mark.parametrize("limit", [0, 101, True])

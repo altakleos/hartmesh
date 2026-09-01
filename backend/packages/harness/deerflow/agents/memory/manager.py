@@ -862,15 +862,10 @@ def _validate_cached_manager_tenant(
         "durable_production",
     }:
         raise ValueError("unknown deployment profile")
-    configured_tenant = manager._config.tenant
-    if profile_value == "durable_production" and configured_tenant is None:
-        raise ValueError("honcho_tenant_projection_required: durable production Honcho requires the Gateway's frozen tenant identity")
-    if tenant_identity is None:
-        return
-    if configured_tenant is None:
-        raise ValueError("honcho_tenant_projection_required: cached Honcho manager lacks the Gateway's frozen tenant projection")
-    if configured_tenant.tenant_digest != getattr(tenant_identity, "digest", None):
-        raise ValueError("honcho_tenant_projection_invalid: cached Honcho manager belongs to a different process tenant")
+    manager.validate_tenant_binding(
+        expected_tenant_digest=getattr(tenant_identity, "digest", None),
+        required=profile_value == "durable_production" or tenant_identity is not None,
+    )
 
 
 def get_memory_manager(

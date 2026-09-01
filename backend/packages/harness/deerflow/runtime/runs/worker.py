@@ -1852,16 +1852,16 @@ async def run_agent(
                             raise AcceptedSkillExecutionFenceError(
                                 "accepted_skill_execution_fence_failed",
                             )
+                    observation_scope = nullcontext()
+                    if journal is not None and accepted_for_cleanup is not None:
+                        from deerflow.agents.memory.observations import (
+                            bind_memory_observation_sink,
+                        )
+
+                        observation_scope = bind_memory_observation_sink(journal, ctx.tenant)
                     if len(lg_modes) == 1 and not stream_subgraphs:
                         # Single mode, no subgraphs: astream yields raw chunks
                         single_mode = lg_modes[0]
-                        observation_scope = nullcontext()
-                        if journal is not None and accepted_for_cleanup is not None:
-                            from deerflow.agents.memory.observations import (
-                                bind_memory_observation_sink,
-                            )
-
-                            observation_scope = bind_memory_observation_sink(journal, ctx.tenant)
                         with observation_scope:
                             async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
                                 if record.abort_event.is_set():
@@ -1874,13 +1874,6 @@ async def run_agent(
                                     await subagent_events.add(chunk)
                         return
                     # Multiple modes or subgraphs: astream yields tuples
-                    observation_scope = nullcontext()
-                    if journal is not None and accepted_for_cleanup is not None:
-                        from deerflow.agents.memory.observations import (
-                            bind_memory_observation_sink,
-                        )
-
-                        observation_scope = bind_memory_observation_sink(journal, ctx.tenant)
                     with observation_scope:
                         async for item in agent.astream(
                             input_payload,
