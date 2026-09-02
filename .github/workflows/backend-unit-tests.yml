@@ -96,7 +96,8 @@ jobs:
         working-directory: backend
         # The Phase 0 feasibility probe byte-verifies the exact optional SDK.
         # Keep it out of the documented default install job above, but present
-        # wherever the executable probe runs as part of the full suite.
+        # before the full-suite step so `make test`'s same locked extra
+        # selection is a no-op and install failures stay separately attributed.
         run: uv sync --group dev --extra postgres --extra opensandbox
 
       - name: Qualify PostgreSQL invocation persistence

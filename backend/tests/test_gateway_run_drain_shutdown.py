@@ -212,7 +212,10 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     monkeypatch.setattr("deerflow.persistence.engine.close_engine", fake_close_engine)
     monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", fake_session_factory)
     monkeypatch.setattr("deerflow.runtime.events.store.make_run_event_store", lambda _cfg, **_kwargs: object())
-    monkeypatch.setattr("deerflow.persistence.thread_meta.make_thread_store", lambda _sf, _store: object())
+    monkeypatch.setattr(
+        "deerflow.persistence.thread_meta.make_thread_store",
+        lambda _sf, _store, *, run_store: object(),
+    )
     monkeypatch.setattr(RunManager, "shutdown", spy_shutdown, raising=False)
     monkeypatch.setattr("deerflow.extensions.notify.set_extension_notify_loop", spy_set_extension_notify_loop)
     monkeypatch.setattr("deerflow.extensions.notify.reset_extension_notify_loop", spy_reset_extension_notify_loop)
@@ -312,7 +315,7 @@ async def test_langgraph_runtime_fallback_does_not_close_after_unproven_run_drai
     )
     monkeypatch.setattr(
         "deerflow.persistence.thread_meta.make_thread_store",
-        lambda _sf, _store: object(),
+        lambda _sf, _store, *, run_store: object(),
     )
 
     app = FastAPI()

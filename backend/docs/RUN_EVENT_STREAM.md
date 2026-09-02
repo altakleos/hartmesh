@@ -163,6 +163,24 @@ A durable receipt records HartMesh's observation of a tool attempt. It does not
 guarantee an external side effect occurred exactly once or that the tool result
 was correct.
 
+### Live rich-event write authority
+
+After run admission, worker-owned journal, subagent, workspace, and delivery
+writes pass through `FencedRunEventAppender`. Its capability fixes tenant,
+thread, run, owner, and lifecycle epoch; callers cannot select a different
+identity. The memory store validates and appends without yielding, the database
+store locks and validates the `RunRow` in the same transaction as the event
+insert, and JSONL holds the run-store execution fence until its off-thread
+atomic rename has completed. Cancellation of the JSONL awaiter is delayed until
+that rename finishes, so cancellation never releases the fence around a still-
+running filesystem mutation.
+
+Pre-admission failures and recovery have no live execution capability. They
+must opt into the visibly separate `AdministrativeRunEventAppender`; that port
+is for recovery, migration, and history seeding, not ordinary worker writes.
+Process-local unqualified execution uses an explicit local authority validator;
+it is not a multi-process durability claim.
+
 ## Categories
 
 `category="message"` means an event is eligible for a message projection; it
@@ -196,6 +214,7 @@ through run-event or specialized APIs:
 | `run.start` | `trace` | Root `on_chain_start()` |
 | `run.end` | `outputs` | Root `on_chain_end()` |
 | `run.error` | `error` | `on_chain_error()` |
+| `run.terminal.v1` | `trace` | Worker finalization through `record_terminal_summary()` |
 | `llm.human.input` | `message` | First persisted lead-agent human input |
 | `llm.ai.response` | `message` | `on_llm_end()` |
 | `llm.tool.result` | `message` | `on_tool_end()` |
@@ -256,6 +275,14 @@ Consumers may use `run.end` as completion evidence, but must not depend on
 backend-identical nested output values. Normalizing those values would be a
 separate runtime compatibility change rather than part of this current-state
 contract.
+
+`run.terminal.v1` is the bounded companion for lifecycle consumers. It contains
+only version, terminal status, optional safe stop reason, and optional V1
+failure evidence (`code`, sanitized exception class, and opaque correlation
+ID). It does not replace or reinterpret `run.end.content`. `run.error` and
+`llm.error` use the same bounded failure shape; raw exception messages and
+tracebacks are excluded. Intentional assistant and tool message content remains
+unchanged.
 
 `subagents/step_events.py::subagent_run_event()` maps streamed `task_*` chunks
 to persisted events. The worker batches them through `put_batch()`:
@@ -333,10 +360,11 @@ be used by new producers.
   Local/direct and historical pre-feature runs have display receipts only, and a
   started attempt interrupted by process loss deliberately has no outcome.
 - `run.end.metadata.status` is only a root graph completion marker and is
-  always `success`. `RunRow.status` remains authoritative for lifecycle state.
+  always `success`. Live workers also append bounded `run.terminal.v1`, but
+  `RunRow.status` remains authoritative for lifecycle state.
   The separate lifecycle journal records authoritative worker-loss recovery as
   `failed` with reason `orphan_recovered`; this rich callback stream may still
-  have no matching terminal `run.end`/`run.error` event.
+  have no matching terminal `run.end`/`run.error`/`run.terminal.v1` event.
 - Nested non-JSON values in `run.end.content` have backend-dependent
   representations: memory retains Python values, while JSONL and database
   stores read them back as strings.

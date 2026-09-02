@@ -1992,7 +1992,10 @@ async def test_remote_materialization_is_refenced_immediately_before_astream(
         record,
         ctx=RunContext(
             checkpointer=None,
-            event_store=MemoryRunEventStore(run_store=store),
+            event_store=MemoryRunEventStore(
+                run_store=store,
+                tenant=_TEST_TENANT,
+            ),
             tenant=_TEST_TENANT,
         ),
         agent_factory=lambda **_kwargs: _assembled_agent_for_revision(revision, Agent()),

@@ -32,7 +32,9 @@ def _fingerprint(seed: str = "1") -> TopologyFingerprintV1:
         extension_artifact_digest="sha256:" + ("7" * 64),
         extension_configuration_digest="sha256:" + ("8" * 64),
         capability_manifest_digest="9" * 64,
-        migration_head="0027_multi_gateway_topology",
+        mcp_task_replay_keyring_confirmation_version=1,
+        mcp_task_replay_keyring_confirmation_digest="sha256:" + ("e" * 64),
+        migration_head="0030_run_delivery_owner_backfill",
         accepted_materialization_profile="rwx_verified_copy_v2",
     )
 
@@ -80,6 +82,11 @@ async def test_two_compatible_replicas_register_concurrently_and_report_full_str
     assert status.live_compatible_replicas == 2
     assert status.degraded_replicas == 0
     assert status.qualification_ready is True
+    assert status.to_dict()["execution_recovery"] == {
+        "version": 1,
+        "post_dispatch_takeover_available": False,
+        "reason_code": "linearizable_execution_authority_unavailable",
+    }
 
 
 @pytest.mark.asyncio

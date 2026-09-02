@@ -23,6 +23,22 @@ class RunRow(Base):
     state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     # "pending" | "running" | "success" | "error" | "timeout" | "interrupted"
     operation_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="run", server_default=text("'run'"))
+    admission_cursor: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    recovery_policy: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="terminalize_v1",
+        server_default=text("'terminalize_v1'"),
+    )
+    # Server-only, bounded V1 inputs used exclusively by exact-two recovery.
+    # Historical and terminalize_v1 rows remain NULL.
+    recovery_payload_json: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True),
+        nullable=True,
+    )
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     model_name: Mapped[str | None] = mapped_column(String(128))
@@ -95,6 +111,18 @@ class RunRow(Base):
     # Multi-worker run ownership
     owner_worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Immutable proof of the owner/active epoch that minted the current
+    # terminal state. The live owner fields above are deliberately released
+    # on terminalization; these nullable fields authorize only the derived
+    # terminal thread projection and never grant execution ownership.
+    terminal_projection_owner_worker_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    terminal_projection_active_state_version: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     # A non-owning worker records cancellation here; the owner consumes it
     # while renewing its lease. The first action wins.
     cancel_action: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -105,6 +133,26 @@ class RunRow(Base):
 
     __table_args__ = (
         CheckConstraint("state_version >= 0", name="ck_runs_state_version_nonnegative"),
+        CheckConstraint(
+            "admission_cursor IS NULL OR admission_cursor > 0",
+            name="ck_runs_admission_cursor_positive",
+        ),
+        CheckConstraint(
+            "(terminal_projection_owner_worker_id IS NULL) = (terminal_projection_active_state_version IS NULL)",
+            name="ck_runs_terminal_projection_authority_pair",
+        ),
+        CheckConstraint(
+            "terminal_projection_active_state_version IS NULL OR (operation_kind = 'run' AND terminal_projection_active_state_version >= 0 AND terminal_projection_active_state_version < state_version)",
+            name="ck_runs_terminal_projection_authority_version",
+        ),
+        CheckConstraint(
+            "recovery_policy IN ('terminalize_v1', 'exact_two_takeover_v1')",
+            name="ck_runs_recovery_policy",
+        ),
+        CheckConstraint(
+            "(recovery_policy = 'exact_two_takeover_v1') = (recovery_payload_json IS NOT NULL) AND (operation_kind = 'run' OR recovery_policy = 'terminalize_v1')",
+            name="ck_runs_recovery_payload_policy",
+        ),
         CheckConstraint(
             "(tenant_ref IS NULL) = (tenant_digest IS NULL)",
             name="ck_runs_tenant_pair",
@@ -186,6 +234,19 @@ class RunRow(Base):
             name="ck_runs_caller_intent_digest_version_format",
         ),
         Index("ix_runs_thread_status", "thread_id", "status"),
+        Index(
+            "ix_runs_thread_kind_admission",
+            "thread_id",
+            "operation_kind",
+            "admission_cursor",
+        ),
+        Index(
+            "uq_runs_admission_cursor",
+            "admission_cursor",
+            unique=True,
+            sqlite_where=text("admission_cursor IS NOT NULL"),
+            postgresql_where=text("admission_cursor IS NOT NULL"),
+        ),
         Index("ix_runs_lease", "lease_expires_at"),
         Index("uq_runs_idempotency_key", "idempotency_key", unique=True),
         # Cross-process atomicity guarantee: at most one pending/running run per
@@ -206,6 +267,29 @@ class RunRow(Base):
             unique=True,
             sqlite_where=text("external_scope IS NOT NULL AND external_key IS NOT NULL"),
             postgresql_where=text("external_scope IS NOT NULL AND external_key IS NOT NULL"),
+        ),
+    )
+
+
+class RunAdmissionCursorStateRow(Base):
+    __tablename__ = "run_admission_cursor_state"
+
+    singleton_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    last_cursor: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "singleton_id = 1",
+            name="ck_run_admission_cursor_singleton",
+        ),
+        CheckConstraint(
+            "last_cursor >= 0",
+            name="ck_run_admission_cursor_nonnegative",
         ),
     )
 
@@ -327,3 +411,25 @@ def _install_lifecycle_integrity_triggers(connection: Connection) -> None:
 # migration. Seed only after all full-schema tables exist, and never repair the
 # ordering state when lifecycle evidence already exists.
 event.listen(Base.metadata, "after_create", _seed_lifecycle_cursor_after_create)
+
+
+def _seed_admission_cursor_after_create(
+    _target: MetaData,
+    connection: Connection,
+    **_kwargs: object,
+) -> None:
+    requested_tables = _kwargs.get("tables")
+    if requested_tables is not None:
+        requested_names = {table.name for table in requested_tables}
+        if "run_admission_cursor_state" not in requested_names:
+            return
+    if "run_admission_cursor_state" not in set(inspect(connection).get_table_names()):
+        return
+    connection.execute(text("INSERT INTO run_admission_cursor_state (singleton_id, last_cursor) SELECT 1, 0 WHERE NOT EXISTS (SELECT 1 FROM run_admission_cursor_state WHERE singleton_id = 1)"))
+
+
+event.listen(
+    Base.metadata,
+    "after_create",
+    _seed_admission_cursor_after_create,
+)

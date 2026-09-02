@@ -21,8 +21,20 @@ import pytest
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, ThreadOperationKind
-from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, _generate_worker_id
-from deerflow.runtime.runs.store.base import LifecycleTransition, LifecycleType
+from deerflow.runtime.runs.manager import (
+    CancelOutcome,
+    ConflictError,
+    RunStartupError,
+    _generate_worker_id,
+)
+from deerflow.runtime.runs.store.base import (
+    CancellationRequestOutcome,
+    ExecutionTakeoverOutcome,
+    LeaseClockAuthority,
+    LifecycleTransition,
+    LifecycleType,
+    RecoveryPolicy,
+)
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 # ---------------------------------------------------------------------------
@@ -38,12 +50,106 @@ def _lease_config(**kwargs) -> RunOwnershipConfig:
     )
 
 
+def _timing_lease_config(*, lease_seconds: int = 1) -> RunOwnershipConfig:
+    """Build a compact integer TTL for deterministic manager timing tests."""
+
+    return RunOwnershipConfig.model_construct(
+        lease_seconds=lease_seconds,
+        grace_seconds=0,
+        heartbeat_enabled=True,
+    )
+
+
+def _execution_recovery_payload(thread_id: str) -> dict[str, object]:
+    return {
+        "version": 1,
+        "input_kind": "graph",
+        "input_value": {"messages": []},
+        "config": {"configurable": {"thread_id": thread_id}},
+        "stream_modes": ["values"],
+        "stream_subgraphs": False,
+        "interrupt_before": None,
+        "interrupt_after": None,
+    }
+
+
 def _make_manager(store=None, **kwargs) -> RunManager:
     return RunManager(
         store=store or MemoryRunStore(),
         run_ownership_config=kwargs.pop("run_ownership_config", _lease_config()),
         **kwargs,
     )
+
+
+class CapturingDatabaseClockStore(MemoryRunStore):
+    """Exercise the manager's database-clock protocol without a live Postgres."""
+
+    # The topology boundary accepts the public wire value as well as StrEnum;
+    # the manager must normalize it identically.
+    lease_clock_authority = LeaseClockAuthority.database_v1.value
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.create_lease_arguments: list[tuple[str | None, int | None]] = []
+        self.ensure_lease_arguments: list[tuple[str | None, int | None]] = []
+        self.renew_lease_arguments: list[tuple[str | None, int | None]] = []
+        self.renewal_delay_seconds = 0.0
+
+    async def create_thread_operation_atomic(
+        self,
+        run_id,
+        *,
+        lease_expires_at=None,
+        lease_duration_seconds=None,
+        **kwargs,
+    ):
+        self.create_lease_arguments.append((lease_expires_at, lease_duration_seconds))
+        return await super().create_thread_operation_atomic(
+            run_id,
+            lease_expires_at=lease_expires_at,
+            lease_duration_seconds=lease_duration_seconds,
+            **kwargs,
+        )
+
+    async def ensure_run_atomic(
+        self,
+        run_id,
+        *,
+        lease_expires_at=None,
+        lease_duration_seconds=None,
+        **kwargs,
+    ):
+        self.ensure_lease_arguments.append((lease_expires_at, lease_duration_seconds))
+        return await super().ensure_run_atomic(
+            run_id,
+            lease_expires_at=lease_expires_at,
+            lease_duration_seconds=lease_duration_seconds,
+            **kwargs,
+        )
+
+    async def renew_lease(
+        self,
+        run_id,
+        *,
+        owner_worker_id,
+        lease_expires_at=None,
+        lease_duration_seconds=None,
+    ):
+        self.renew_lease_arguments.append((lease_expires_at, lease_duration_seconds))
+        if self.renewal_delay_seconds:
+            await asyncio.sleep(self.renewal_delay_seconds)
+        return await super().renew_lease(
+            run_id,
+            owner_worker_id=owner_worker_id,
+            lease_expires_at=lease_expires_at,
+            lease_duration_seconds=lease_duration_seconds,
+        )
+
+
+class DurableCapturingDatabaseClockStore(CapturingDatabaseClockStore):
+    """Opt into the row+journal lifecycle contract for terminal-sync tests."""
+
+    durable_lifecycle = True
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +250,8 @@ async def test_interrupt_reclaims_expired_checkpoint_write_reservation():
     assert stale["status"] == "interrupted"
     assert stale["owner_worker_id"] is None
     assert stale["lease_expires_at"] is None
+    assert stale["terminal_projection_owner_worker_id"] is None
+    assert stale["terminal_projection_active_state_version"] is None
 
 
 @pytest.mark.anyio
@@ -363,33 +471,28 @@ async def test_reconciliation_skips_active_lease_runs():
 
 
 @pytest.mark.anyio
-async def test_reconciliation_skips_candidate_when_owner_renews_lease_after_scan():
-    """A renewed lease between scan and claim must keep the run active."""
+async def test_reconciliation_rechecks_live_lease_after_stale_scan():
+    """A stale scan result cannot bypass the claim-time lease check."""
     store = MemoryRunStore()
     grace = 10
-    expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
     await store.put(
         "race-run",
         thread_id="thread-1",
         status="running",
         owner_worker_id="worker-alive",
-        lease_expires_at=expired_lease,
+        lease_expires_at=valid_lease,
         created_at=(datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
     )
-    original_list = store.list_inflight_with_expired_lease
 
-    async def list_then_owner_renews(*, before=None, grace_seconds=10):
-        rows = [dict(row) for row in await original_list(before=before, grace_seconds=grace_seconds)]
-        renewed_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
-        updated = await store.update_lease(
-            "race-run",
-            owner_worker_id="worker-alive",
-            lease_expires_at=renewed_lease,
-        )
-        assert updated is True
-        return rows
+    async def stale_scan(*, before=None, grace_seconds=10):
+        del before, grace_seconds
+        stale = await store.get("race-run")
+        assert stale is not None
+        stale["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+        return [stale]
 
-    store.list_inflight_with_expired_lease = list_then_owner_renews
+    store.list_inflight_with_expired_lease = stale_scan
     manager = _make_manager(
         store=store,
         run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace),
@@ -403,6 +506,39 @@ async def test_reconciliation_skips_candidate_when_owner_renews_lease_after_scan
     stored = await store.get("race-run")
     assert stored["status"] == "running"
     assert datetime.fromisoformat(stored["lease_expires_at"]) > datetime.now(UTC)
+
+
+@pytest.mark.anyio
+async def test_memory_expired_owner_cannot_resurrect_lease():
+    """Once the deadline passes, only takeover may establish new authority."""
+
+    store = MemoryRunStore()
+    expired_lease = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    await store.put(
+        "expired-owner-run",
+        thread_id="thread-expired-owner",
+        status="running",
+        owner_worker_id="worker-expired",
+        lease_expires_at=expired_lease,
+    )
+    requested_lease = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+
+    updated = await store.update_lease(
+        "expired-owner-run",
+        owner_worker_id="worker-expired",
+        lease_expires_at=requested_lease,
+    )
+    renewed = await store.renew_lease(
+        "expired-owner-run",
+        owner_worker_id="worker-expired",
+        lease_expires_at=requested_lease,
+    )
+
+    assert updated is False
+    assert renewed.renewed is False
+    retained = await store.get("expired-owner-run")
+    assert retained is not None
+    assert retained["lease_expires_at"] == expired_lease
 
 
 @pytest.mark.anyio
@@ -853,6 +989,77 @@ async def test_heartbeat_renews_active_run_leases():
 
 
 @pytest.mark.anyio
+async def test_database_clock_manager_uses_duration_and_monotonic_budget(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Pod wall-clock skew cannot mint or locally validate a DB lease."""
+
+    from deerflow.runtime.runs import manager as run_manager_module
+
+    actual_now = datetime.now(UTC)
+
+    class FastProcessDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = actual_now + timedelta(hours=24)
+            return value if tz is not None else value.replace(tzinfo=None)
+
+    monkeypatch.setattr(run_manager_module, "datetime", FastProcessDateTime)
+    config = _lease_config(lease_seconds=5, heartbeat_enabled=True)
+    store = CapturingDatabaseClockStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-database-clock",
+        run_ownership_config=config,
+    )
+
+    record = await manager.create_or_reject(
+        "thread-duration-unkeyed",
+        candidate_run_id="77777777-7777-4777-8777-777777777777",
+    )
+    keyed = await manager.ensure_or_reject(
+        "thread-duration-keyed",
+        candidate_run_id="88888888-8888-4888-8888-888888888888",
+        external_scope="test-duration",
+        external_key="keyed",
+        request_digest="a" * 64,
+        request_digest_version="request-v1",
+        caller_intent_json={"input": "test"},
+        caller_intent_digest="b" * 64,
+        caller_intent_digest_version="intent-v1",
+    )
+
+    # The keyed Memory compatibility implementation delegates its create to
+    # the same atomic primitive, so both admissions are visible here.
+    assert store.create_lease_arguments == [(None, 5), (None, 5)]
+    assert store.ensure_lease_arguments == [(None, 5)]
+    assert record.lease_expires_at is not None
+    assert keyed.record.lease_expires_at is not None
+    assert record.lease_safety_deadline_monotonic is not None
+
+    await manager.set_status(record.run_id, RunStatus.running)
+    store.renewal_delay_seconds = 0.1
+    loop = asyncio.get_running_loop()
+    renewal_started = loop.time()
+
+    await manager._renew_leases()
+
+    renewal_finished = loop.time()
+    assert store.renew_lease_arguments == [(None, 5), (None, 5)]
+    assert record.ownership_lost is False
+    assert record.lease_safety_deadline_monotonic is not None
+    assert record.lease_safety_deadline_monotonic <= renewal_started + 5.05
+    assert record.lease_safety_deadline_monotonic < renewal_finished + 4.98
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert record.lease_expires_at == persisted["lease_expires_at"]
+    assert record.created_at == persisted["created_at"]
+    keyed_persisted = await store.get(keyed.record.run_id)
+    assert keyed_persisted is not None
+    assert keyed.record.created_at == keyed_persisted["created_at"]
+
+
+@pytest.mark.anyio
 async def test_heartbeat_renews_pending_run_before_task_is_spawned():
     """A run sitting in ``pending`` between ``create_thread_operation_atomic`` and task
     spawn must still have its lease renewed.
@@ -885,11 +1092,11 @@ async def test_heartbeat_renews_pending_run_before_task_is_spawned():
     # microsecond on fast hosts and the strict comparison fails trivially.
     await asyncio.sleep(0.001)
 
-    store.update_lease = AsyncMock(wraps=store.update_lease)
+    store.renew_lease = AsyncMock(wraps=store.renew_lease)
 
     await manager._renew_leases()
 
-    store.update_lease.assert_awaited_once()
+    store.renew_lease.assert_awaited_once()
     assert record.lease_expires_at is not None
     assert record.lease_expires_at > original_lease
 
@@ -903,7 +1110,7 @@ async def test_transient_renewal_exception_before_deadline_keeps_run_alive():
     record = await manager.create("thread-1")
     await manager.set_status(record.run_id, RunStatus.running)
     record.task = asyncio.create_task(asyncio.sleep(3600))
-    original_update_lease = store.update_lease
+    original_renew_lease = store.renew_lease
     attempts = 0
 
     async def fail_once_then_renew(*args, **kwargs):
@@ -911,9 +1118,9 @@ async def test_transient_renewal_exception_before_deadline_keeps_run_alive():
         attempts += 1
         if attempts == 1:
             raise OSError("temporary database outage")
-        return await original_update_lease(*args, **kwargs)
+        return await original_renew_lease(*args, **kwargs)
 
-    store.update_lease = fail_once_then_renew
+    store.renew_lease = fail_once_then_renew
     original_expiry = record.lease_expires_at
 
     try:
@@ -953,7 +1160,7 @@ async def test_renewal_exception_through_confirmed_expiry_fail_stops_run():
         attempts += 1
         raise OSError("database unreachable")
 
-    store.update_lease = fail_renewal
+    store.renew_lease = fail_renewal
 
     await manager._renew_leases()
     assert record.abort_event.is_set() is False
@@ -962,6 +1169,7 @@ async def test_renewal_exception_through_confirmed_expiry_fail_stops_run():
     expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     record.lease_expires_at = expired
     store._runs[record.run_id]["lease_expires_at"] = expired
+    store._runs[record.run_id]["recovery_policy"] = RecoveryPolicy.exact_two_takeover_v1.value
 
     await manager._renew_leases()
     await asyncio.sleep(0)
@@ -988,7 +1196,7 @@ async def test_hung_renewal_is_bounded_by_confirmed_lease_deadline():
     async def hang_renewal(*_args, **_kwargs):
         await asyncio.Event().wait()
 
-    store.update_lease = hang_renewal
+    store.renew_lease = hang_renewal
 
     await asyncio.wait_for(manager._renew_leases(), timeout=1)
     await asyncio.sleep(0)
@@ -999,8 +1207,8 @@ async def test_hung_renewal_is_bounded_by_confirmed_lease_deadline():
 
 
 @pytest.mark.anyio
-async def test_late_successful_renewal_still_fences_local_run():
-    """A renewal confirmed after the old deadline cannot revive local work."""
+async def test_late_renewal_attempt_is_rejected_and_fences_local_run():
+    """An owner cannot revive authority after its old deadline passes."""
     config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
     store = MemoryRunStore()
     manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
@@ -1010,29 +1218,459 @@ async def test_late_successful_renewal_still_fences_local_run():
     near_expiry = (datetime.now(UTC) + timedelta(milliseconds=50)).isoformat()
     record.lease_expires_at = near_expiry
     store._runs[record.run_id]["lease_expires_at"] = near_expiry
-    original_update_lease = store.update_lease
+    original_renew_lease = store.renew_lease
 
     async def renew_after_timeout_cancellation(*args, **kwargs):
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
-            # Simulate a store operation that commits successfully despite the
-            # caller's deadline cancellation.
+            # Simulate a store operation that reaches its authority check only
+            # after the caller's deadline cancellation.
             pass
-        return await original_update_lease(*args, **kwargs)
+        return await original_renew_lease(*args, **kwargs)
 
-    store.update_lease = renew_after_timeout_cancellation
+    store.renew_lease = renew_after_timeout_cancellation
 
     await asyncio.wait_for(manager._renew_leases(), timeout=1)
     await asyncio.sleep(0)
 
     row = await store.get(record.run_id)
     assert row is not None
-    assert row["lease_expires_at"] > near_expiry
+    assert row["lease_expires_at"] == near_expiry
     assert record.lease_expires_at == near_expiry
     assert record.ownership_lost is True
     assert record.abort_event.is_set() is True
     assert record.task.cancelled()
+
+
+@pytest.mark.anyio
+async def test_database_clock_renewal_failure_is_fenced_at_monotonic_deadline():
+    """A late transient failure cannot defer fencing to the next heartbeat."""
+
+    config = _timing_lease_config()
+    store = CapturingDatabaseClockStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-deadline-watchdog",
+        run_ownership_config=config,
+    )
+    record = await manager.create_or_reject(
+        "thread-deadline-watchdog",
+        candidate_run_id="99999999-9999-4999-8999-999999999991",
+    )
+    task = await manager.attach_worker_once(
+        record.run_id,
+        asyncio.sleep(3600),
+        asyncio.create_task,
+    )
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    try:
+        # Move to a fresh confirmed deadline. The watchdog must move with it;
+        # otherwise the admission timer becomes stale and no later timer fences
+        # this capability.
+        await manager._renew_leases()
+        confirmed_deadline = record.lease_safety_deadline_monotonic
+        assert confirmed_deadline is not None
+
+        async def fail_just_before_deadline(*_args, **_kwargs):
+            remaining = confirmed_deadline - asyncio.get_running_loop().time()
+            await asyncio.sleep(max(0.0, remaining - 0.08))
+            raise RuntimeError("transient renewal failure")
+
+        store.renew_lease = fail_just_before_deadline
+        await manager._renew_leases()
+        failure_returned_at = asyncio.get_running_loop().time()
+        await asyncio.sleep(
+            max(
+                0.0,
+                confirmed_deadline - asyncio.get_running_loop().time() + 0.08,
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert record.ownership_lost is True
+        assert record.abort_event.is_set() is True
+        assert task.cancelled()
+        assert asyncio.get_running_loop().time() - failure_returned_at < 0.5
+    finally:
+        for watchdog in manager._lease_watchdogs.values():
+            watchdog[3].cancel()
+        manager._lease_watchdogs.clear()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_database_clock_attachment_validates_and_invokes_factory_in_one_lock_turn():
+    """No queued contender may split deadline validation from task creation."""
+
+    config = _timing_lease_config()
+    store = CapturingDatabaseClockStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-attachment-deadline",
+        run_ownership_config=config,
+    )
+    record = await manager.create_or_reject(
+        "thread-attachment-deadline",
+        candidate_run_id="99999999-9999-4999-8999-999999999995",
+    )
+    manager._disarm_database_lease_watchdog(record.run_id, record=record)
+    loop = asyncio.get_running_loop()
+    worker = asyncio.sleep(0)
+    factory_called_at = None
+    factory_observed_lock = False
+    factory_observed_contender = False
+    spawned_tasks: list[asyncio.Task[None]] = []
+    contender_acquired = asyncio.Event()
+    release_contender = asyncio.Event()
+
+    def task_factory(coroutine):
+        nonlocal factory_called_at, factory_observed_lock, factory_observed_contender
+        factory_called_at = loop.time()
+        factory_observed_lock = manager._lock.locked()
+        factory_observed_contender = contender_acquired.is_set()
+        task = asyncio.create_task(coroutine)
+        spawned_tasks.append(task)
+        return task
+
+    async def hold_attachment_lock() -> None:
+        async with manager._lock:
+            contender_acquired.set()
+            await release_contender.wait()
+
+    attach_task = None
+    contender_task = None
+    await manager._lock.acquire()
+    try:
+        record.lease_safety_deadline_monotonic = loop.time() + 0.1
+        attach_task = asyncio.create_task(
+            manager.attach_worker_once(
+                record.run_id,
+                worker,
+                task_factory,
+            )
+        )
+        await asyncio.sleep(0)
+        contender_task = asyncio.create_task(hold_attachment_lock())
+        await asyncio.sleep(0)
+    finally:
+        manager._lock.release()
+
+    try:
+        await asyncio.wait_for(contender_acquired.wait(), timeout=1)
+        deadline = record.lease_safety_deadline_monotonic
+        assert deadline is not None
+        await asyncio.sleep(max(0.0, deadline - loop.time() + 0.02))
+        release_contender.set()
+        await asyncio.wait_for(contender_task, timeout=1)
+        await asyncio.wait_for(attach_task, timeout=1)
+
+        assert factory_called_at is not None
+        assert factory_called_at < deadline
+        assert factory_observed_lock is True
+        assert factory_observed_contender is False
+    finally:
+        release_contender.set()
+        if contender_task is not None and not contender_task.done():
+            contender_task.cancel()
+        if attach_task is not None and not attach_task.done():
+            attach_task.cancel()
+        await asyncio.gather(
+            *(task for task in (contender_task, attach_task) if task is not None),
+            return_exceptions=True,
+        )
+        for task in spawned_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*spawned_tasks, return_exceptions=True)
+        if worker.cr_frame is not None:
+            worker.close()
+
+
+@pytest.mark.anyio
+async def test_database_clock_attachment_queued_past_deadline_never_calls_factory():
+    """An attachment first acquiring the lock after expiry cannot start work."""
+
+    config = _timing_lease_config()
+    store = CapturingDatabaseClockStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-attachment-expired-waiter",
+        run_ownership_config=config,
+    )
+    record = await manager.create_or_reject(
+        "thread-attachment-expired-waiter",
+        candidate_run_id="99999999-9999-4999-8999-999999999994",
+    )
+    manager._disarm_database_lease_watchdog(record.run_id, record=record)
+    loop = asyncio.get_running_loop()
+    worker = asyncio.sleep(0)
+    factory_called = False
+    spawned_tasks: list[asyncio.Task[None]] = []
+
+    def task_factory(coroutine):
+        nonlocal factory_called
+        factory_called = True
+        task = asyncio.create_task(coroutine)
+        spawned_tasks.append(task)
+        return task
+
+    await manager._lock.acquire()
+    record.lease_safety_deadline_monotonic = loop.time() + 0.05
+    attach_task = asyncio.create_task(
+        manager.attach_worker_once(
+            record.run_id,
+            worker,
+            task_factory,
+        )
+    )
+    try:
+        await asyncio.sleep(0)
+        deadline = record.lease_safety_deadline_monotonic
+        assert deadline is not None
+        await asyncio.sleep(max(0.0, deadline - loop.time() + 0.02))
+    finally:
+        manager._lock.release()
+
+    try:
+        with pytest.raises(RunStartupError):
+            await asyncio.wait_for(attach_task, timeout=1)
+        assert factory_called is False
+    finally:
+        if not attach_task.done():
+            attach_task.cancel()
+        await asyncio.gather(attach_task, return_exceptions=True)
+        for task in spawned_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*spawned_tasks, return_exceptions=True)
+        if worker.cr_frame is not None:
+            worker.close()
+
+
+@pytest.mark.anyio
+async def test_stale_equal_deadline_watchdog_cannot_disarm_same_id_replacement():
+    """Record identity, not deadline equality, owns a same-ID watchdog."""
+
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = CapturingDatabaseClockStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-watchdog-replacement",
+        run_ownership_config=config,
+    )
+    original = await manager.create_or_reject(
+        "thread-watchdog-replacement",
+        candidate_run_id="99999999-9999-4999-8999-999999999996",
+    )
+    original_watchdog = manager._lease_watchdogs[original.run_id]
+    deadline = original.lease_safety_deadline_monotonic
+    assert deadline is not None
+    original_token = original_watchdog[2]
+
+    replacement = type(original)(
+        run_id=original.run_id,
+        thread_id=original.thread_id,
+        assistant_id=original.assistant_id,
+        status=original.status,
+        on_disconnect=original.on_disconnect,
+        owner_worker_id=manager.worker_id,
+        lease_expires_at=original.lease_expires_at,
+        lease_safety_deadline_monotonic=deadline,
+    )
+    manager._runs[original.run_id] = replacement
+    manager._arm_database_lease_watchdog(replacement)
+    replacement_watchdog = manager._lease_watchdogs[replacement.run_id]
+
+    try:
+        assert replacement_watchdog[0] is replacement
+        assert replacement_watchdog[1] == deadline
+
+        await manager._fence_database_lease_at_deadline(
+            original,
+            deadline,
+            original_token,
+        )
+
+        assert manager._lease_watchdogs[replacement.run_id] is replacement_watchdog
+        assert replacement.ownership_lost is False
+        assert replacement.abort_event.is_set() is False
+    finally:
+        manager._disarm_database_lease_watchdog(
+            replacement.run_id,
+            record=replacement,
+        )
+
+
+@pytest.mark.anyio
+async def test_terminal_store_sync_disarms_database_clock_watchdog():
+    """A confirmed terminal row cannot retain a live local lease timer."""
+
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = DurableCapturingDatabaseClockStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-terminal-watchdog",
+        run_ownership_config=config,
+    )
+    record = await manager.create_or_reject(
+        "thread-terminal-watchdog",
+        candidate_run_id="99999999-9999-4999-8999-999999999997",
+    )
+    watchdog = manager._lease_watchdogs[record.run_id]
+
+    await manager.set_status(record.run_id, RunStatus.success)
+
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert persisted["status"] == RunStatus.success.value
+    assert record.run_id not in manager._lease_watchdogs
+    assert watchdog[3].cancelled()
+
+
+@pytest.mark.anyio
+async def test_database_clock_watchdog_fences_unpersisted_staged_terminal():
+    """A local terminal stage cannot outlive its still-running durable lease."""
+
+    config = _timing_lease_config()
+    store = DurableCapturingDatabaseClockStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-staged-terminal",
+        run_ownership_config=config,
+    )
+    record = await manager.create_or_reject(
+        "thread-staged-terminal",
+        candidate_run_id="99999999-9999-4999-8999-999999999998",
+    )
+    task = await manager.attach_worker_once(
+        record.run_id,
+        asyncio.sleep(3600),
+        asyncio.create_task,
+    )
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.lease_safety_deadline_monotonic = asyncio.get_running_loop().time() + 0.05
+    manager._arm_database_lease_watchdog(record)
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+
+    try:
+        await asyncio.wait_for(record.abort_event.wait(), timeout=1)
+        await asyncio.gather(task, return_exceptions=True)
+
+        persisted = await store.get(record.run_id)
+        assert persisted is not None
+        assert persisted["status"] == RunStatus.running.value
+        assert record.ownership_lost is True
+        assert record.abort_event.is_set() is True
+        assert task.cancelled()
+    finally:
+        for watchdog in manager._lease_watchdogs.values():
+            watchdog[3].cancel()
+        manager._lease_watchdogs.clear()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_duration_admission_exhausting_ttl_never_becomes_attachable():
+    """A committed row returned after its safety budget cannot start work."""
+
+    config = _timing_lease_config()
+    store = CapturingDatabaseClockStore()
+    original_create = store.create_thread_operation_atomic
+
+    async def create_after_ttl(*args, **kwargs):
+        await asyncio.sleep(config.lease_seconds + 0.05)
+        return await original_create(*args, **kwargs)
+
+    store.create_thread_operation_atomic = create_after_ttl
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-expired-admission",
+        run_ownership_config=config,
+    )
+    run_id = "99999999-9999-4999-8999-999999999992"
+
+    with pytest.raises(
+        RunStartupError,
+        match="Database-clock lease expired before worker attachment",
+    ):
+        await manager.create_or_reject(
+            "thread-expired-admission",
+            candidate_run_id=run_id,
+        )
+
+    record = manager._runs[run_id]
+    assert record.ownership_lost is True
+    assert record.abort_event.is_set() is True
+    assert record.task is None
+    worker = asyncio.sleep(0)
+    factory_called = False
+
+    def task_factory(coroutine):
+        nonlocal factory_called
+        factory_called = True
+        coroutine.close()
+        raise AssertionError("fenced admission must not invoke task_factory")
+
+    try:
+        with pytest.raises(RunStartupError):
+            await manager.attach_worker_once(
+                run_id,
+                worker,
+                task_factory,
+            )
+        assert factory_called is False
+    finally:
+        worker.close()
+
+
+@pytest.mark.anyio
+async def test_duration_takeover_exhausting_ttl_never_invokes_recovery_callback():
+    """A slow winning CAS is not enough authority to dispatch recovery work."""
+
+    config = _timing_lease_config()
+    store = CapturingDatabaseClockStore()
+    expired = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    await store.put(
+        "run-expired-duration-takeover",
+        thread_id="thread-expired-duration-takeover",
+        status="running",
+        owner_worker_id="worker-dead",
+        lease_expires_at=expired,
+        created_at=expired,
+        recovery_policy=RecoveryPolicy.exact_two_takeover_v1,
+        recovery_payload_json=_execution_recovery_payload("thread-expired-duration-takeover"),
+    )
+    original_claim = store.claim_for_execution_takeover
+
+    async def claim_after_ttl(*args, **kwargs):
+        await asyncio.sleep(config.lease_seconds + 0.05)
+        return await original_claim(*args, **kwargs)
+
+    store.claim_for_execution_takeover = claim_after_ttl
+    callback_calls = 0
+
+    async def recovery_callback(_record):
+        nonlocal callback_calls
+        callback_calls += 1
+        raise AssertionError("expired takeover must not invoke application recovery")
+
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-duration-takeover",
+        run_ownership_config=config,
+        on_execution_takeover=recovery_callback,
+    )
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(error="orphaned")
+
+    assert recovered == []
+    assert callback_calls == 0
 
 
 @pytest.mark.anyio
@@ -1690,6 +2328,41 @@ async def test_cancel_takeover_from_crashed_worker():
     row = await store.get("run-expired")
     assert row is not None
     assert row["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_cancel_cannot_take_over_ineligible_exact_two_run():
+    """An exact-two kill switch must govern non-local cancel takeover too."""
+    store = MemoryRunStore()
+    grace = 10
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+    await store.put(
+        "run-exact-two-ineligible",
+        thread_id="t1",
+        status="running",
+        created_at=datetime.now(UTC).isoformat(),
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+        recovery_policy=RecoveryPolicy.exact_two_takeover_v1,
+        recovery_payload_json=_execution_recovery_payload("t1"),
+    )
+
+    manager = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(
+            heartbeat_enabled=True,
+            grace_seconds=grace,
+        ),
+        execution_recovery_claims_enabled=True,
+        execution_takeover_eligibility=lambda _record: False,
+    )
+    before = await store.get("run-exact-two-ineligible")
+
+    outcome = await manager.cancel("run-exact-two-ineligible")
+    row = await store.get("run-exact-two-ineligible")
+
+    assert outcome == CancelOutcome.not_active_locally
+    assert row == before
 
 
 @pytest.mark.anyio
@@ -2367,6 +3040,121 @@ async def test_unconfirmed_success_is_fenced_when_heartbeat_is_enabled():
     assert record.status == RunStatus.error
     assert record.abort_event.is_set() is True
     assert row["status"] == "running"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("terminal_status", [RunStatus.error, RunStatus.interrupted])
+async def test_every_unconfirmed_terminal_status_loses_ownership(
+    terminal_status,
+):
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await manager.create("thread-terminal-fence")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    async def fail_status_write(*_args, **_kwargs):
+        raise OSError("database unreachable")
+
+    store.transition_owned_run_atomic = fail_status_write
+    await manager.set_status(record.run_id, terminal_status)
+
+    assert record.ownership_lost is True
+    assert record.abort_event.is_set() is True
+    assert (await store.get(record.run_id))["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_stale_attachment_failure_cannot_terminalize_takeover_owner() -> None:
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True, grace_seconds=0)
+    owner = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=config,
+    )
+    record = await owner.create("thread-attachment-takeover")
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    record.lease_expires_at = expired
+    store._runs[record.run_id]["lease_expires_at"] = expired
+    store._runs[record.run_id]["recovery_policy"] = RecoveryPolicy.exact_two_takeover_v1.value
+    active_version = store._runs[record.run_id]["state_version"]
+    takeover = await store.claim_for_execution_takeover(
+        record.run_id,
+        new_owner_worker_id="worker-b",
+        lease_expires_at=(datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+        grace_seconds=0,
+        expected_state_version=active_version,
+    )
+    assert takeover.outcome is ExecutionTakeoverOutcome.claimed
+
+    assert (
+        await owner.fail_start_if_pending(
+            record.run_id,
+            error="thread metadata unavailable",
+        )
+        is False
+    )
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "pending"
+    assert stored["owner_worker_id"] == "worker-b"
+    assert stored["state_version"] == active_version + 1
+    assert record.ownership_lost is True
+
+
+@pytest.mark.anyio
+async def test_duplicate_fenced_cancel_does_not_interrupt_terminal_cleanup() -> None:
+    store = MemoryRunStore()
+    manager = _make_manager(store=store)
+    record = await manager.create("thread-duplicate-cancel")
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    second_cancel = asyncio.Event()
+
+    async def worker() -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            async with manager._lock:
+                record.status = RunStatus.interrupted
+            cleanup_started.set()
+            try:
+                await release_cleanup.wait()
+            except asyncio.CancelledError:
+                second_cancel.set()
+                raise
+
+    task = asyncio.create_task(worker())
+    await asyncio.sleep(0)
+    async with manager._lock:
+        record.task = task
+    initial_version = record.state_version
+
+    first = await manager.request_cancel_fenced(
+        record.run_id,
+        action="interrupt",
+        expected_state_version=initial_version,
+    )
+    assert first is CancellationRequestOutcome.requested
+    await cleanup_started.wait()
+    assert record.status is RunStatus.interrupted
+
+    duplicate = await manager.request_cancel_fenced(
+        record.run_id,
+        action="interrupt",
+        expected_state_version=initial_version,
+    )
+
+    assert duplicate is CancellationRequestOutcome.already_requested
+    assert record.status is RunStatus.interrupted
+    assert second_cancel.is_set() is False
+    release_cleanup.set()
+    await task
 
 
 @pytest.mark.anyio

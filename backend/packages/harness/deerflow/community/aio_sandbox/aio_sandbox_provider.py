@@ -44,7 +44,10 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, join_host_path
 from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATION_ID
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_LOCKS_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.sandbox.accepted_material import AcceptedMaterializerSelection
+from deerflow.sandbox.accepted_material import (
+    AcceptedMaterialExecutionClaimV1,
+    AcceptedMaterializerSelection,
+)
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
     AcceptedSkillExecutionEvidence,
@@ -1963,12 +1966,54 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         *,
         user_id: str,
         binding: AcceptedSkillSandboxBindingV1,
+        execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
     ) -> str:
         return await asyncio.to_thread(
-            self.acquire_bound_accepted_skills,
+            self._acquire_bound_accepted_skills_with_claim,
+            thread_id,
+            user_id,
+            binding,
+            execution_claim,
+        )
+
+    def _acquire_bound_accepted_skills_with_claim(
+        self,
+        thread_id: str,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+        execution_claim: AcceptedMaterialExecutionClaimV1 | None,
+    ) -> str:
+        sandbox_id = self._acquire_accepted_skills_internal(
             thread_id,
             user_id=user_id,
             binding=binding,
+            execution_claim=execution_claim,
+        )
+        self.bind_accepted_skill_snapshot(
+            sandbox_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            binding=binding,
+        )
+        return sandbox_id
+
+    async def recover_bound_accepted_skills_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+        execution_claim: AcceptedMaterialExecutionClaimV1,
+    ) -> str:
+        if not execution_claim.execution_takeover:
+            raise AcceptedSkillSandboxBindingError(
+                "accepted_material_execution_takeover_invalid",
+            )
+        return await self.acquire_bound_accepted_skills_async(
+            thread_id,
+            user_id=user_id,
+            binding=binding,
+            execution_claim=execution_claim,
         )
 
     def _acquire_accepted_skills_internal(
@@ -1977,6 +2022,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         *,
         user_id: str,
         binding: AcceptedSkillSandboxBindingV1 | None,
+        execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
     ) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)
         try:
@@ -2023,6 +2069,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 user_id=effective_user_id,
                 accepted_skills_only=True,
                 accepted_skill_binding=binding,
+                accepted_execution_claim=execution_claim,
             )
             with self._lock:
                 accepted_ids = getattr(self, "_accepted_only_sandbox_ids", None)
@@ -2376,6 +2423,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         user_id: str | None = None,
         accepted_skills_only: bool = False,
         accepted_skill_binding: AcceptedSkillSandboxBindingV1 | None = None,
+        accepted_execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
     ) -> str:
         """Create a new sandbox via the backend.
 
@@ -2418,6 +2466,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 provision_lark_cli_broker=provision_lark_cli_broker,
                 accepted_skills_only=accepted_skills_only,
                 accepted_skill_binding=accepted_skill_binding,
+                accepted_execution_claim=accepted_execution_claim,
             )
         else:
             info = self._backend.create(

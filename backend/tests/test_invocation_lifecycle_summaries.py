@@ -515,6 +515,34 @@ def test_lifecycle_summary_exposes_only_safe_tenant_reference() -> None:
     assert "customer-readable-name" not in json.dumps(summary)
 
 
+def test_lifecycle_summary_redacts_linked_parent_resource_identifiers() -> None:
+    from deerflow.runtime.runs.lifecycle_query import build_invocation_summary
+
+    accepted = _accepted_fields("http", "notification-1")
+    accepted["origin_json"]["references"].update(
+        {
+            "task_lineage_digest": "f" * 64,
+            "parent_run_id": "private-parent-run",
+            "parent_tool_receipt_id": "tr_" + "9" * 64,
+        }
+    )
+    summary = build_invocation_summary(
+        {
+            "run_id": "notification-run",
+            "thread_id": "thread-1",
+            "status": "success",
+            "state_version": 3,
+            **accepted,
+        }
+    )
+
+    assert summary is not None
+    references = {item["key"]: item["value"] for item in summary["correlation_references"] if item["namespace"] == "origin"}
+    assert references["task_lineage_digest"] == "f" * 64
+    assert "parent_run_id" not in references
+    assert "parent_tool_receipt_id" not in references
+
+
 def test_lifecycle_summary_exposes_only_bounded_subagent_catalog_facts() -> None:
     from deerflow.runtime.runs.lifecycle_query import build_invocation_summary
     from deerflow.runtime.subagent_snapshot import (

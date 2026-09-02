@@ -114,6 +114,9 @@ make dev
 `make setup` writes the gitignored local configuration. `make dev` reruns the tool check, synchronizes dependencies, and starts the Gateway, frontend, and nginx.
 
 `make install` is optional for contributors who also want pre-commit hooks.
+From `backend/`, `make test` selects the lock-pinned OpenSandbox SDK used by
+the offline Phase 0 feasibility probe. This test-only selection does not make
+OpenSandbox a required runtime or harness dependency.
 
 Open [http://localhost:2026](http://localhost:2026). On a new installation, complete first-admin setup, create a thread, and submit a prompt.
 
@@ -254,6 +257,15 @@ A stable external key plus complete canonical caller intent converges on one ret
 
 This guarantee lasts while the normal run row is retained. It does not deduplicate arbitrary external side effects.
 
+Durable MCP tasks apply the same fail-closed principle through a separate
+private exact-request HMAC; their public lineage remains redacted structural
+evidence. Enabling `mcp_tasks` requires the dedicated versioned replay keyring,
+and rotation retains old keys until their rows can no longer replay. Exact-two
+replicas also compare a non-secret confirmation of the complete keyring in their
+topology fingerprint, so key changes use a quiesced restart rather than a
+rolling update. See the
+[MCP task guide](backend/docs/MCP_SERVER.md#durable-background-tasks-with-ordinary-mcp-tools).
+
 Evidence: [`idempotency.py`](backend/app/runtime/idempotency.py) and [`test_invocation_idempotency.py`](backend/tests/test_invocation_idempotency.py).
 
 ### One admission boundary
@@ -274,6 +286,8 @@ release needs a separate database or PostgreSQL schema. Existing deployments
 must explicitly bind a legacy nonempty schema and copy retained Redis data
 offline; no request and no automatic dual-read path can select or infer a
 tenant. See the [tenant identity and migration guide](backend/docs/TENANT_IDENTITY.md).
+Populated extension-owned or otherwise unknown tables count as legacy schema
+occupancy, and an established binding cannot be removed by migration downgrade.
 
 ### Pinned accepted execution material
 
@@ -338,6 +352,12 @@ was correct.
 
 Evidence: [`tool_evidence.py`](backend/packages/harness/deerflow/runtime/tool_evidence.py), [event-store contracts](backend/tests/test_tool_receipt_event_store.py), and [HTTP reference](backend/docs/API.md#durable-invocation-runtime-api).
 
+Live rich-event writes are likewise bound to the admitted tenant, run, worker,
+and lifecycle epoch. Authorized graph output remains opaque in `run.end`, while
+the additive `run.terminal.v1` and bounded correlated failure records provide a
+safe terminal projection without persisting provider exception messages or
+tracebacks.
+
 ### Policy that follows execution
 
 HartMesh keeps effective subject, acting service, and source evidence distinct.
@@ -393,8 +413,16 @@ Read these limits before following any deployment guide:
   by operator-declared evidence.
 - No arbitrary active-active scaling, IM connector HA, or zero-downtime rollout is claimed.
 - Replay-safe admission is not universal exactly-once execution of external side effects.
-- With durable invocation storage, process-loss recovery preserves authoritative terminal evidence; it does not transparently resume every graph or tool call.
+- With durable invocation storage, process-loss recovery preserves authoritative
+  terminal evidence. The default remains terminalization. Exact-two execution
+  takeover is currently unavailable for every eligible orphan, even if its
+  process-local claim flag is enabled; mandatory live recovery scenarios remain
+  unpassed. The retained recovery schema/coordinator is a future seam, not a
+  capability claim.
 - Memory is process-local, SQLite is node-durable for invocation state, and PostgreSQL is the shared-durable store.
+- The exact-two candidate validates the constructed run adapter at startup and
+  readiness: lease deadlines, renewals, and expired-run scans must use
+  PostgreSQL-owned `database_v1` time rather than either Gateway pod clock.
 - Memory and SQLite native-channel ingress remain best-effort.
 - Durable native ingress currently means verified signed-GitHub delivery with PostgreSQL.
 - Nonempty accepted skills require a supported accepted-only sandbox path.
@@ -467,7 +495,9 @@ Artifact provenance proves which extension bytes/configuration HartMesh admitted
 
 The extension manager commits a platform-neutral source lock; production images
 embed and verify a platform-specific installed manifest before importing plugin
-code. A separate secret-safe digest binds the ordered deployment configuration.
+code. Generated Ruff caches are outside managed snapshot identity, so the
+documented lint workflow cannot change that source lock. A separate secret-safe
+digest binds the ordered deployment configuration.
 Use `deerflow extensions verify`, `manifest [--json]`, and `config-digest
 --config <path>` to inspect those identities. See the [extension artifact
 provenance guide](docs/EXTENSION_ARTIFACT_PROVENANCE.md) for deployment,
@@ -502,7 +532,7 @@ This repository does not yet document a HartMesh sync cadence, API/configuration
 
 Treat these hashes as provenance, not a maintenance promise.
 
-The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, `0024_tool_receipt_idempotency` fences receipt appends, `0025_tenant_identity` binds the schema tenant, `0026_mcp_task_lineage` seals MCP lineage, and `0027_multi_gateway_topology` adds exact-two topology registration plus persisted scheduler generations.
+The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, `0024_tool_receipt_idempotency` fences receipt appends, `0025_tenant_identity` binds the schema tenant, `0026_mcp_task_lineage` seals MCP lineage, `0027_multi_gateway_topology` adds exact-two topology registration plus persisted scheduler generations, `0028_mcp_request_commitment` adds private exact-request MCP replay commitments while cleaning up superseded indexes, `0029_run_recovery_policy` adds immutable run recovery policy, bounded recovery payloads, and database-ordered admission cursors, and `0030_run_delivery_owner_backfill` repairs unowned legacy delivery receipts only when their run, thread, and tenant anchors select one authoritative owner.
 
 PostgreSQL operators should quiesce writers and back up data before rollback; use the migration guidance in [backend/AGENTS.md](backend/AGENTS.md).
 

@@ -18,10 +18,12 @@ Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from fastapi import FastAPI, HTTPException, Request
@@ -40,7 +42,7 @@ from deerflow.runtime import (
     StreamBridge,
 )
 from deerflow.runtime.events.store.base import RunEventStore
-from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.runs.store.base import RecoveryPolicy, RunStore
 from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
 
 logger = logging.getLogger(__name__)
@@ -54,6 +56,169 @@ logger = logging.getLogger(__name__)
 # them together if their sum must stay within the server's graceful-shutdown
 # timeout.
 _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
+_EXECUTION_RECOVERY_CLAIMS_ENV = "HARTMESH_EXECUTION_RECOVERY_CLAIMS_ENABLED"
+
+
+def _execution_recovery_claims_enabled() -> bool:
+    """Resolve the reversible process-local claim kill switch."""
+
+    value = os.environ.get(_EXECUTION_RECOVERY_CLAIMS_ENV, "false")
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(
+        f"{_EXECUTION_RECOVERY_CLAIMS_ENV} must be a boolean",
+    )
+
+
+def _exact_two_execution_takeover_eligible(record: RunRecord) -> bool:
+    """Keep post-dispatch exact-two takeover unavailable.
+
+    Absence of accepted-skill evidence does not prove absence of ordinary AIO
+    sandbox use, durable delivery state, or other process-local execution
+    state. A future adapter may replace this kill switch only after it binds a
+    linearizable per-request owner/epoch gate and reconstructible recovery
+    inputs before the first external side effect.
+    """
+
+    del record
+    return False
+
+
+def _execution_recovery_manager_options(
+    *,
+    exact_two_profile: bool,
+    takeover_callback: Callable[[RunRecord], Any],
+) -> dict[str, Any]:
+    """Return startup-frozen manager options for the qualified profile."""
+
+    if not exact_two_profile:
+        return {}
+    return {
+        "on_execution_takeover": takeover_callback,
+        "admission_recovery_policy": (RecoveryPolicy.exact_two_takeover_v1),
+        "execution_recovery_claims_enabled": (_execution_recovery_claims_enabled()),
+        "execution_takeover_eligibility": (_exact_two_execution_takeover_eligible),
+    }
+
+
+async def _launch_execution_recovery_worker(
+    app: FastAPI,
+    manager: RunManager,
+    record: RunRecord,
+    decision_gate: Callable[
+        [RunRecord, object],
+        Any,
+    ],
+) -> None:
+    """Attach one app-scoped worker behind the manager release barrier.
+
+    Parsing the bounded payload is safe before release. All materialization,
+    agent-factory resolution, checkpoint/event access, and graph work happens
+    inside ``released_worker`` after the manager has verified the attachment
+    against the won owner/epoch and set the release event.
+    """
+
+    from langgraph.types import Command
+
+    from app.gateway.services import normalize_input, resolve_agent_factory
+    from deerflow.runtime import (
+        ExecutionRecoveryDisposition,
+        ExecutionRecoveryPayloadV1,
+        run_agent,
+    )
+
+    payload_json = record.recovery_payload_json
+    if payload_json is None:
+        raise ValueError("recovery_payload_unavailable")
+    payload = ExecutionRecoveryPayloadV1.from_persisted(payload_json)
+    accepted = record.accepted_invocation
+    if accepted is None:
+        raise ValueError("recovery_accepted_invocation_unavailable")
+    configurable = payload.config.get("configurable")
+    if not isinstance(configurable, dict) or configurable.get("thread_id") != record.thread_id:
+        raise ValueError("recovery_payload_thread_mismatch")
+
+    async def verified_gate(
+        claimed_record: RunRecord,
+        assembly_descriptor: object,
+    ):
+        decision = await decision_gate(
+            claimed_record,
+            assembly_descriptor,
+        )
+        terminal = decision.disposition in {
+            ExecutionRecoveryDisposition.terminalize_checkpoint_unavailable,
+            ExecutionRecoveryDisposition.terminalize_tool_attempt_indeterminate,
+        }
+        if terminal:
+            committed = await manager.terminalize_execution_takeover(
+                claimed_record,
+                decision,
+            )
+            if not committed:
+                claimed_record.ownership_lost = True
+                raise RuntimeError(
+                    "execution_recovery_terminal_fence_lost",
+                )
+            await _project_recovered_threads_error(
+                app.state.thread_store,
+                [claimed_record],
+            )
+            return decision
+        if not await manager.validate_execution_recovery_decision(
+            claimed_record,
+            decision,
+        ):
+            claimed_record.ownership_lost = True
+            raise RuntimeError("execution_recovery_decision_fence_lost")
+        return decision
+
+    async def released_worker() -> None:
+        await record.execution_recovery_release_event.wait()
+        config = copy.deepcopy(dict(payload.config))
+        if payload.input_kind == "command_resume":
+            graph_input = Command(
+                resume=copy.deepcopy(payload.input_value),
+            )
+        else:
+            graph_input = normalize_input(
+                copy.deepcopy(payload.input_value),
+                trusted_internal=accepted.principal.is_internal,
+            )
+        run_context = replace(
+            get_app_run_context(app),
+            execution_recovery_gate=verified_gate,
+        )
+        agent_factory = resolve_agent_factory(record.assistant_id)
+        before = payload.interrupt_before
+        after = payload.interrupt_after
+        await run_agent(
+            app.state.stream_bridge,
+            manager,
+            record,
+            ctx=run_context,
+            agent_factory=agent_factory,
+            graph_input=graph_input,
+            config=config,
+            stream_modes=list(payload.stream_modes),
+            stream_subgraphs=payload.stream_subgraphs,
+            interrupt_before=list(before) if isinstance(before, tuple) else before,
+            interrupt_after=list(after) if isinstance(after, tuple) else after,
+        )
+
+    worker = released_worker()
+    try:
+        await manager.attach_worker_once(
+            record.run_id,
+            worker,
+            asyncio.create_task,
+        )
+    except BaseException:
+        worker.close()
+        raise
 
 
 def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
@@ -300,43 +465,67 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+async def _project_recovered_threads_error(
+    thread_store: ThreadMetaStore,
+    recovered_runs: list[RunRecord],
+) -> None:
+    """Project recovered terminal state through the durable authority seam."""
+
+    from deerflow.persistence.thread_meta import ThreadMetaRunProjection
+
+    for record in recovered_runs:
+        owner_worker_id = getattr(
+            record,
+            "recovery_projection_owner_worker_id",
+            None,
+        )
+        active_state_version = getattr(
+            record,
+            "recovery_projection_active_state_version",
+            None,
+        )
+        terminal_state_version = getattr(
+            record,
+            "checkpoint_terminal_state_version",
+            None,
+        )
+        if not isinstance(owner_worker_id, str) or not owner_worker_id or type(active_state_version) is not int or type(terminal_state_version) is not int:
+            logger.warning(
+                "Skipped recovered thread projection for run %s without an exact terminal authority capability",
+                record.run_id,
+            )
+            continue
+        try:
+            await thread_store.project_run(
+                ThreadMetaRunProjection(
+                    run_id=record.run_id,
+                    thread_id=record.thread_id,
+                    owner_worker_id=owner_worker_id,
+                    active_state_version=active_state_version,
+                    terminal_state_version=terminal_state_version,
+                    status="error",
+                ),
+                user_id=None,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to project recovered run %s into thread %s",
+                record.run_id,
+                record.thread_id,
+                exc_info=True,
+            )
+
+
+# Private compatibility alias for downstream test fixtures. It now uses the
+# same authority-bound path as periodic recovery rather than a startup-only
+# read/update exception.
 async def _mark_latest_startup_recovered_threads_error(
     run_manager: RunManager,
     thread_store: ThreadMetaStore,
     recovered_runs: list[RunRecord],
 ) -> None:
-    """Project startup recovery before request-serving concurrency begins.
-
-    This helper must remain on the pre-``yield`` startup path. ``ThreadMetaStore``
-    has no ``latest_run_id`` column, so it cannot express an atomic conditional
-    update keyed by the recovered run. Periodic recovery deliberately skips this
-    projection; moving this helper after request serving starts would reintroduce
-    a read/update race with newer runs.
-    """
-    recovered_by_thread: dict[str, set[str]] = {}
-    for record in recovered_runs:
-        recovered_by_thread.setdefault(record.thread_id, set()).add(record.run_id)
-
-    for thread_id, recovered_run_ids in recovered_by_thread.items():
-        try:
-            latest_runs = await run_manager.list_by_thread(thread_id, user_id=None, limit=1)
-        except Exception:
-            logger.warning(
-                "Failed to find latest run for thread %s during run reconciliation",
-                thread_id,
-                exc_info=True,
-            )
-            continue
-        if not latest_runs or latest_runs[0].run_id not in recovered_run_ids:
-            continue
-        try:
-            await thread_store.update_status(thread_id, "error", user_id=None)
-        except Exception:
-            logger.warning(
-                "Failed to mark thread %s as error during run reconciliation",
-                thread_id,
-                exc_info=True,
-            )
+    del run_manager
+    await _project_recovered_threads_error(thread_store, recovered_runs)
 
 
 async def _terminalize_recovered_runs(
@@ -513,6 +702,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 raise RuntimeError("topology_dependency_not_shared")
             from datetime import UTC, datetime
 
+            from app.mcp_tasks.replay_commitment import (
+                McpTaskReplayKeyringConfirmation,
+            )
             from deerflow.deployment.topology import (
                 TOPOLOGY_HEARTBEAT_INTERVAL_SECONDS,
                 TOPOLOGY_LIVE_TTL_SECONDS,
@@ -524,12 +716,24 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.topology import PostgresTopologyRegistry
 
             topology_facts = TopologyStartupFactsV1.from_environment()
+            replay_keyring_confirmation = getattr(
+                app.state,
+                "mcp_task_replay_keyring_confirmation",
+                None,
+            )
+            if not isinstance(
+                replay_keyring_confirmation,
+                McpTaskReplayKeyringConfirmation,
+            ):
+                raise RuntimeError("topology_dependency_not_shared")
             topology_fingerprint = build_topology_fingerprint(
                 facts=topology_facts,
                 tenant_digest=tenant_identity.digest,
                 redis_namespace_digest=redis_tenant_namespace.digest,
                 capability_manifest=app.state.capability_manifest,
                 config=config,
+                mcp_task_replay_keyring_confirmation_version=(replay_keyring_confirmation.version),
+                mcp_task_replay_keyring_confirmation_digest=(replay_keyring_confirmation.digest),
             )
             topology_registration = ReplicaRegistrationV1(
                 replica_id=topology_facts.replica_id,
@@ -625,6 +829,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.run_store = MemoryRunStore(tenant=tenant_reference)
             app.state.feedback_repo = None
         await app.state.run_store.initialize_lifecycle()
+        if is_multi_gateway_profile:
+            from deerflow.deployment.topology import (
+                validate_multi_gateway_run_store,
+            )
+
+            validate_multi_gateway_run_store(app.state.run_store)
         deployment_reporter = getattr(app.state, "deployment_reporter", None)
         if deployment_reporter is not None:
             app.state.deployment_reporter = deployment_reporter.with_runtime_store(
@@ -664,7 +874,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         from deerflow.persistence.thread_meta import make_thread_store
 
-        app.state.thread_store = make_thread_store(sf, app.state.store)
+        app.state.thread_store = make_thread_store(
+            sf,
+            app.state.store,
+            run_store=app.state.run_store,
+        )
         if sf is not None:
             from deerflow.persistence.mcp_tasks import McpTaskRepository
             from deerflow.persistence.scheduled_task_runs import (
@@ -722,14 +936,58 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 cleanup_delay=cleanup_delay,
                 on_cleanup_scheduled=track_recovered_stream_cleanup,
             )
+            await _project_recovered_threads_error(
+                app.state.thread_store,
+                recovered_runs,
+            )
 
-        app.state.run_manager = RunManager(
-            store=app.state.run_store,
-            run_ownership_config=run_ownership_config,
-            event_store=app.state.run_event_store,
-            on_orphans_recovered=terminalize_recovered_runs,
-            tenant=tenant_reference,
-        )
+        manager_kwargs: dict[str, Any] = {
+            "store": app.state.run_store,
+            "run_ownership_config": run_ownership_config,
+            "event_store": app.state.run_event_store,
+            "on_orphans_recovered": terminalize_recovered_runs,
+            "tenant": tenant_reference,
+        }
+        recovery_coordinator = None
+        if is_multi_gateway_profile:
+            from app.gateway.run_recovery import (
+                GatewayExecutionRecoveryCoordinator,
+            )
+
+            async def execution_takeover(record: RunRecord):
+                if recovery_coordinator is None:
+                    raise RuntimeError(
+                        "execution_recovery_coordinator_unavailable",
+                    )
+                return await recovery_coordinator.recover(record)
+
+            manager_kwargs.update(
+                _execution_recovery_manager_options(
+                    exact_two_profile=True,
+                    takeover_callback=execution_takeover,
+                )
+            )
+        app.state.run_manager = RunManager(**manager_kwargs)
+        if is_multi_gateway_profile:
+            recovery_coordinator = GatewayExecutionRecoveryCoordinator(
+                run_store=app.state.run_store,
+                event_store=app.state.run_event_store,
+                checkpointer=app.state.checkpointer,
+                worker_launcher=lambda record, decision_gate: _launch_execution_recovery_worker(
+                    app,
+                    app.state.run_manager,
+                    record,
+                    decision_gate,
+                ),
+            )
+        app.state.execution_recovery_coordinator = recovery_coordinator
+
+        # Claimed execution epochs need renewal while startup scans and
+        # reconstructs later rows. Register teardown before starting so a
+        # partial startup failure cannot strand the renewal task.
+        stack.push_async_callback(app.state.run_manager.stop_heartbeat)
+        await app.state.run_manager.start_heartbeat()
+
         # Startup recovery: mark inflight runs whose lease has expired as error.
         # In single-worker mode (SQLite / backend=memory), no run has a lease, so
         # all inflight rows are reclaimed (unchanged behaviour). In multi-worker
@@ -739,7 +997,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
             error=STARTUP_ORPHAN_RECOVERY_ERROR,
-            before=now_iso(),
+            # Exact-two SQL recovery derives both eligibility and its default
+            # created-at bound from the database clock. A pod-authored bound
+            # could hide stale rows when that pod's wall clock lags.
+            before=(None if is_multi_gateway_profile else now_iso()),
             stop_reason=ORPHAN_RECOVERY_STOP_REASON,
         )
         await _terminalize_recovered_runs(
@@ -748,14 +1009,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             cleanup_delay=cleanup_delay,
             on_cleanup_scheduled=track_recovered_stream_cleanup,
         )
-        await _mark_latest_startup_recovered_threads_error(
-            app.state.run_manager,
+        await _project_recovered_threads_error(
             app.state.thread_store,
             recovered_runs,
         )
-
-        # Start the lease heartbeat if enabled (multi-worker deployments).
-        await app.state.run_manager.start_heartbeat()
 
         # Transfer ownership out of the surrounding context manager before the
         # application shutdown coordinator runs.  If admission or a producer
@@ -1036,8 +1293,8 @@ def get_mcp_task_service(request: Request) -> McpTaskService:
     return val
 
 
-def get_run_context(request: Request) -> RunContext:
-    """Build a :class:`RunContext` from ``app.state`` singletons.
+def get_app_run_context(app: FastAPI) -> RunContext:
+    """Build a request-independent :class:`RunContext` from app singletons.
 
     Returns a *base* context with infrastructure dependencies. The
     ``app_config`` field is resolved live so per-run fields (e.g.
@@ -1048,7 +1305,7 @@ def get_run_context(request: Request) -> RunContext:
     """
     app_config = get_config()
     authorization_config = getattr(app_config, "authorization", None)
-    resolver = getattr(request.app.state, "authorization_provider_resolver", None)
+    resolver = getattr(app.state, "authorization_provider_resolver", None)
     if resolver is None:
         if getattr(authorization_config, "enabled", False) is True:
             raise HTTPException(status_code=503, detail="Authorization provider resolver not available")
@@ -1081,36 +1338,42 @@ def get_run_context(request: Request) -> RunContext:
             ),
         )
 
-    tenant_identity = getattr(request.app.state, "tenant_identity", None)
+    tenant_identity = getattr(app.state, "tenant_identity", None)
     if not isinstance(tenant_identity, TenantIdentityV1):
         raise RuntimeError("Gateway tenant identity was not resolved during application construction")
 
     return RunContext(
-        checkpointer=get_checkpointer(request),
-        store=get_store(request),
-        event_store=get_run_event_store(request),
-        run_events_config=getattr(request.app.state, "run_events_config", None),
-        checkpoint_channel_mode=getattr(request.app.state, "checkpoint_channel_mode", "full"),
-        checkpoint_snapshot_frequency=getattr(request.app.state, "checkpoint_snapshot_frequency", None),
-        thread_store=get_thread_store(request),
-        mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
+        checkpointer=getattr(app.state, "checkpointer", None),
+        store=getattr(app.state, "store", None),
+        event_store=getattr(app.state, "run_event_store", None),
+        run_events_config=getattr(app.state, "run_events_config", None),
+        checkpoint_channel_mode=getattr(app.state, "checkpoint_channel_mode", "full"),
+        checkpoint_snapshot_frequency=getattr(app.state, "checkpoint_snapshot_frequency", None),
+        thread_store=getattr(app.state, "thread_store", None),
+        mcp_task_repo=getattr(app.state, "mcp_task_repo", None),
         app_config=app_config,
         authorization_provider=authorization_provider,
         tenant=tenant_identity.to_persisted_reference(),
-        extensions=getattr(request.app.state, "extensions", None),
+        extensions=getattr(app.state, "extensions", None),
         capability_manifest_digest=getattr(
-            getattr(request.app.state, "capability_manifest", None),
+            getattr(app.state, "capability_manifest", None),
             "digest",
             None,
         ),
-        on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
+        on_run_completed=getattr(app.state, "scheduled_task_service", None).handle_run_completion if getattr(app.state, "scheduled_task_service", None) is not None else None,
         constraint_clock=getattr(
-            getattr(request.app.state, "invocation_constraints_host", None),
+            getattr(app.state, "invocation_constraints_host", None),
             "clock",
             None,
         ),
         agent_revision_resolver=_resolve_recovered_agent_revision,
     )
+
+
+def get_run_context(request: Request) -> RunContext:
+    """Build the same app-scoped context for an ordinary HTTP request."""
+
+    return get_app_run_context(request.app)
 
 
 # ---------------------------------------------------------------------------

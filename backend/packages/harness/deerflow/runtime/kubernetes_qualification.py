@@ -11,8 +11,10 @@ field exposes this module.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
+import shlex
 import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
@@ -23,6 +25,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from deerflow.agents.assembly_descriptor import _seal_host_tool_recovery
 from deerflow.multi_gateway_qualification import (
     MULTI_GATEWAY_QUALIFICATION_SCENARIOS,
 )
@@ -49,6 +52,76 @@ _ACTIVE_RECORD: ContextVar[object | None] = ContextVar(
     "deerflow_kubernetes_qualification_record",
     default=None,
 )
+
+
+def qualification_reconciled_operation_command(
+    receipt_id: str,
+    *,
+    base_dir: str = "/mnt/user-data/workspace/.hartmesh-qualification-operations",
+    delay_seconds: float = 20.0,
+) -> str:
+    """Build one receipt-keyed sandbox operation with one execution body."""
+
+    if not isinstance(receipt_id, str) or _SAFE_ID.fullmatch(receipt_id) is None:
+        raise ValueError("qualification receipt id is invalid")
+    if not isinstance(base_dir, str) or not base_dir.startswith("/") or "\x00" in base_dir or len(base_dir.encode("utf-8")) > 512:
+        raise ValueError("qualification operation base directory is invalid")
+    if not isinstance(delay_seconds, (int, float)) or isinstance(delay_seconds, bool) or not 0 <= float(delay_seconds) <= 60:
+        raise ValueError("qualification operation delay is invalid")
+
+    child_source = """
+import os
+import pathlib
+import sys
+import time
+
+operation = pathlib.Path(sys.argv[1])
+launched = operation / "launched"
+try:
+    descriptor = os.open(launched, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+except FileExistsError:
+    raise SystemExit(0)
+with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+    stream.write(str(os.getpid()) + "\\n")
+(operation / "execution-count").write_text("1\\n", encoding="utf-8")
+time.sleep(float(sys.argv[2]))
+temporary = operation / ("result.tmp." + str(os.getpid()))
+temporary.write_text("qualification-complete\\n", encoding="utf-8")
+os.replace(temporary, operation / "result")
+""".strip()
+    coordinator_source = f"""
+import fcntl
+import pathlib
+import subprocess
+import sys
+import time
+
+operation = pathlib.Path({json.dumps(base_dir)}) / {json.dumps(receipt_id)}
+operation.mkdir(parents=True, exist_ok=True)
+result = operation / "result"
+with (operation / "coordinator.lock").open("a+", encoding="utf-8") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    if not result.exists() and not (operation / "launched").exists():
+        subprocess.Popen(
+            [sys.executable, "-c", {json.dumps(child_source)}, str(operation), {json.dumps(str(float(delay_seconds)))}],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        launch_deadline = time.monotonic() + 5
+        while not (operation / "launched").exists() and time.monotonic() < launch_deadline:
+            time.sleep(0.02)
+        if not (operation / "launched").exists():
+            raise RuntimeError("qualification operation did not launch")
+deadline = time.monotonic() + 90
+while not result.exists() and time.monotonic() < deadline:
+    time.sleep(0.1)
+if not result.exists():
+    raise RuntimeError("qualification operation did not complete")
+sys.stdout.write(result.read_text(encoding="utf-8"))
+""".strip()
+    return f"python -c {shlex.quote(coordinator_source)}"
 
 
 def scenario_from_external_key(value: object) -> str | None:
@@ -79,6 +152,7 @@ def _point_matches(point: str, scenario: str) -> bool:
             "accepted_before_materialization",
             "post_materialization_before_checkpoint",
             "post_checkpoint_before_graph",
+            "post_dispatch_marker_before_graph",
             "during_model_execution",
             "during_tool_execution",
             "terminal_before_lifecycle_commit",
@@ -522,13 +596,18 @@ async def qualification_sandbox_operation(
     record = _ACTIVE_RECORD.get()
     if record is None:
         raise RuntimeError("qualification_tool_missing_run")
+    from deerflow.runtime.tool_evidence import get_active_tool_receipt
     from deerflow.sandbox.tools import _bash_tool_async
+
+    receipt = get_active_tool_receipt()
+    if receipt is None or receipt.tool_name != "qualification_sandbox_operation":
+        raise RuntimeError("qualification_tool_receipt_missing")
 
     operation = asyncio.create_task(
         _bash_tool_async(
             runtime,
             "run a bounded qualification delay",
-            "python -c \"import time; time.sleep(20); print('qualification-complete')\"",
+            qualification_reconciled_operation_command(receipt.receipt_id),
         )
     )
     await asyncio.sleep(0.25)
@@ -549,12 +628,19 @@ async def qualification_sandbox_operation(
             operation.cancel()
 
 
+_seal_host_tool_recovery(
+    qualification_sandbox_operation,
+    "receipt_idempotent_reconcile_v1",
+)
+
+
 __all__ = [
     "QUALIFICATION_SCENARIOS",
     "KubernetesQualificationChatModel",
     "KubernetesQualificationHooks",
     "qualification_barrier",
     "qualification_counter",
+    "qualification_reconciled_operation_command",
     "qualification_stale_external_renewal_probe",
     "qualification_sandbox_operation",
     "qualification_service_barrier",

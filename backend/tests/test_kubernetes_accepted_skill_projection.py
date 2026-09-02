@@ -29,6 +29,7 @@ from deerflow.runtime.runs.manager import RunManager, RunStartOutcome, RunStartu
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.skill_projection import SkillProjectionEvidence
 from deerflow.runtime.skill_snapshot import SkillSnapshotProjection
+from deerflow.sandbox.accepted_material import AcceptedMaterialExecutionClaimV1
 from deerflow.sandbox.sandbox_provider import (
     AcceptedSkillExecutionEvidenceV1,
     AcceptedSkillExecutionEvidenceV2,
@@ -519,6 +520,86 @@ def test_remote_retries_response_loss_with_the_same_attempt_identity(
     assert payloads[0]["attempt_capability"] == payloads[1]["attempt_capability"]
     assert info.accepted_skill_material is not None
     assert info.accepted_skill_material.pod_uid == "pod-uid-1"
+
+
+def test_remote_fresh_process_sends_new_owner_epoch_for_same_material_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = _projection_evidence()
+    binding = AcceptedSkillSandboxBindingV1(
+        snapshot_id=evidence.snapshot_id,
+        run_id="run-1",
+        generation=7,
+        evidence=evidence,
+    )
+    receipt = _v2_receipt_wire(evidence)
+    payloads: list[dict[str, object]] = []
+
+    class Response:
+        ok = True
+        status_code = 200
+        text = ""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "sandbox_id": "sandbox-1",
+                "sandbox_url": "http://10.0.0.8:8081",
+                "status": "Running",
+                "accepted_skill_material": receipt,
+            }
+
+    def post(_url: str, *, json: dict[str, object], **_kwargs):
+        payloads.append(dict(json))
+        return Response()
+
+    monkeypatch.setattr("requests.post", post)
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.remote_backend.user_should_see_legacy_skills",
+        lambda _user_id: False,
+    )
+    initial = AcceptedMaterialExecutionClaimV1(
+        version=1,
+        tenant_digest="1" * 64,
+        run_id="run-1",
+        owner_worker_id="gateway-a",
+        state_version=9,
+        execution_takeover=False,
+    )
+    first = RemoteSandboxBackend("http://provisioner:8002")
+    first_info = first.create(
+        "thread-1",
+        "sandbox-1",
+        user_id="owner-1",
+        accepted_skill_binding=binding,
+        accepted_execution_claim=initial,
+    )
+    takeover = AcceptedMaterialExecutionClaimV1(
+        version=1,
+        tenant_digest="1" * 64,
+        run_id="run-1",
+        owner_worker_id="gateway-b",
+        state_version=12,
+        execution_takeover=True,
+        expected_materialization_digest=str(
+            receipt["materialization_evidence_digest"],
+        ),
+    )
+    fresh = RemoteSandboxBackend("http://provisioner:8002")
+    recovered_info = fresh.create(
+        "thread-1",
+        "sandbox-1",
+        user_id="owner-1",
+        accepted_skill_binding=binding,
+        accepted_execution_claim=takeover,
+    )
+
+    assert payloads[0]["accepted_execution_claim"] == initial.to_wire()
+    assert payloads[1]["accepted_execution_claim"] == takeover.to_wire()
+    assert payloads[0]["attempt_capability"] != payloads[1]["attempt_capability"]
+    assert first_info.accepted_skill_material == recovered_info.accepted_skill_material
 
 
 def test_remote_preflight_uses_and_rereads_projected_service_account_token(
@@ -1073,6 +1154,48 @@ def test_accepted_attempt_lease_is_the_owner_root_and_is_idempotent(
         accepted_attempt_owner=owner,
     )
     assert pod.metadata.owner_references == [owner]
+
+
+def test_accepted_execution_takeover_is_unavailable_before_kubernetes_mutation(
+    provisioner_module,
+) -> None:
+    evidence = _projection_evidence()
+    projection = provisioner_module.AcceptedSkillProjectionV2(
+        profile="rwx_verified_copy_v2",
+        snapshot_id=evidence.snapshot_id,
+        content_digest=evidence.content_digest,
+        run_id="run-1",
+        generation=7,
+        projections=[item.to_json() for item in evidence.projections],
+        file_count=evidence.file_count,
+        total_bytes=evidence.total_bytes,
+    )
+    takeover = provisioner_module.AcceptedExecutionClaimV1(
+        version=1,
+        tenant_digest="1" * 64,
+        run_id="run-1",
+        owner_worker_id="gateway-b",
+        state_version=12,
+        execution_takeover=True,
+        expected_materialization_digest="3" * 64,
+    )
+
+    class _NoKubernetesCalls:
+        def __getattr__(self, name):
+            raise AssertionError(f"takeover touched Kubernetes API: {name}")
+
+    provisioner_module.coordination_v1 = _NoKubernetesCalls()
+    provisioner_module.core_v1 = _NoKubernetesCalls()
+    with pytest.raises(provisioner_module.HTTPException) as unavailable:
+        provisioner_module._takeover_accepted_attempt(
+            "sandbox-1",
+            projection,
+            "B" * 43,
+            takeover,
+            isolation_digest="2" * 64,
+        )
+    assert unavailable.value.status_code == 409
+    assert unavailable.value.detail == "accepted_execution_takeover_unavailable"
 
 
 def test_expired_accepted_attempt_is_reconciled_by_exact_lease_uid(
@@ -1947,6 +2070,10 @@ def test_accepted_secret_cleanup_never_deletes_another_lease_owner(
             "secret-capability-uid",
             "replacement-lease-uid",
         ),
+        provisioner_module._accepted_execution_claim_secret_name("sandbox-1"): (
+            "secret-claim-uid",
+            "replacement-lease-uid",
+        ),
     }
     deleted: list[tuple[str, str]] = []
 
@@ -2056,14 +2183,29 @@ def test_capability_gate_rejects_wrong_identity_and_proxies_once(
     )
     with urllib.request.urlopen(allowed, timeout=2) as response:
         assert response.read() == b'{"ok":true}'
+    capability_file.write_text("C" * 43, encoding="utf-8")
+    with pytest.raises(urllib.error.HTTPError) as stale_capability:
+        urllib.request.urlopen(allowed, timeout=2)
+    assert stale_capability.value.code == 403
+    rotated = urllib.request.Request(
+        f"http://127.0.0.1:{gate_port}/v1/test",
+        data=b"rotated",
+        headers={"Authorization": "Bearer " + ("C" * 43)},
+        method="POST",
+    )
+    with urllib.request.urlopen(rotated, timeout=2) as response:
+        assert response.read() == b'{"ok":true}'
     receipt_request = urllib.request.Request(
         f"http://127.0.0.1:{gate_port}/__hartmesh/accepted-material/v2",
-        headers={"Authorization": "Bearer " + ("A" * 43)},
+        headers={"Authorization": "Bearer " + ("C" * 43)},
         method="GET",
     )
     with urllib.request.urlopen(receipt_request, timeout=2) as response:
         assert json.loads(response.read()) == receipt
-    assert upstream_calls == [("/v1/test", b"payload", None)]
+    assert upstream_calls == [
+        ("/v1/test", b"payload", None),
+        ("/v1/test", b"rotated", None),
+    ]
     upstream.shutdown()
 
 
@@ -2094,6 +2236,52 @@ async def test_started_transition_atomically_binds_materialization_evidence() ->
     assert row["execution_evidence_digest"] == evidence.digest
     assert events[-1]["lifecycle_type"] == "started"
     assert events[-1]["payload"]["execution_evidence_digest"] == evidence.digest
+
+
+@pytest.mark.asyncio
+async def test_rejected_running_takeover_is_detached_instead_of_wedging_local_owner() -> None:
+    store = MemoryRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id="gateway-b",
+        run_ownership_config=RunOwnershipConfig(
+            heartbeat_enabled=True,
+            lease_seconds=30,
+            grace_seconds=0,
+        ),
+    )
+    record = await manager.create_or_reject("thread-takeover-evidence-reject")
+    original = AcceptedSkillExecutionEvidenceV1(
+        profile="rwx_verified_copy_v1",
+        attempt_id="sandbox-run-accepted-attempt",
+        snapshot_id="a" * 64,
+        run_id=record.run_id,
+        generation=4,
+        pod_uid="pod-uid-1",
+        lease_uid="lease-uid-1",
+        runtime_image_ids_digest="c" * 64,
+        verifier_receipt_digest="d" * 64,
+        materialization_evidence_digest="b" * 64,
+    )
+    assert await manager.try_start(record.run_id, execution_evidence=original) is RunStartOutcome.started
+    record.execution_takeover = True
+    mismatched = AcceptedSkillExecutionEvidenceV1(
+        profile=original.profile,
+        attempt_id=original.attempt_id,
+        snapshot_id=original.snapshot_id,
+        run_id=record.run_id,
+        generation=5,
+        pod_uid=original.pod_uid,
+        lease_uid=original.lease_uid,
+        runtime_image_ids_digest=original.runtime_image_ids_digest,
+        verifier_receipt_digest=original.verifier_receipt_digest,
+        materialization_evidence_digest=original.materialization_evidence_digest,
+    )
+
+    assert await manager.try_start(record.run_id, execution_evidence=mismatched) is RunStartOutcome.cancelled
+    assert record.ownership_lost is True
+    assert record.abort_event.is_set()
+    assert record.run_id not in manager._runs
 
 
 @pytest.mark.asyncio

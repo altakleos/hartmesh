@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0027_multi_gateway_topology"
+HEAD = "0030_run_delivery_owner_backfill"
 
 
 def _url(tmp_path: Path) -> str:

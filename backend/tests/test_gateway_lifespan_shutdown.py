@@ -10,6 +10,8 @@ signal-reentrancy deadlock described in
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -132,6 +134,56 @@ def test_lifespan_sweeps_upload_staging_files_on_startup():
     cleanup_upload_staging_files.assert_called_once_with()
     close_oidc_service.assert_awaited_once()
     stop_channel_service.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_freezes_mcp_replay_keyring_before_runtime_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.gateway.app import lifespan
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    startup_config = AppConfig(sandbox=SandboxConfig(use="test"))
+    startup_config.mcp_tasks.enabled = True
+    encoded_key = base64.urlsafe_b64encode(b"k" * 32).decode("ascii").rstrip("=")
+    monkeypatch.setenv(
+        "MCP_TASK_REPLAY_HMAC_KEYS",
+        json.dumps({"qualification-v1": encoded_key}),
+    )
+    monkeypatch.setenv(
+        "MCP_TASK_REPLAY_HMAC_ACTIVE_KEY_ID",
+        "qualification-v1",
+    )
+    app = _gateway_test_app()
+
+    @asynccontextmanager
+    async def observe_runtime(runtime_app, _startup_config):
+        keyring = runtime_app.state.mcp_task_replay_keyring
+        confirmation = runtime_app.state.mcp_task_replay_keyring_confirmation
+        assert confirmation == keyring.confirmation()
+        raise RuntimeError("runtime_observed_frozen_mcp_replay_keyring")
+        yield
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch(
+            "app.gateway.app.get_gateway_config",
+            return_value=SimpleNamespace(host="x", port=0),
+        ),
+        patch("app.gateway.app.langgraph_runtime", observe_runtime),
+        patch("app.gateway.app.ensure_browser_runtime_available"),
+        patch("app.gateway.app.cleanup_stale_upload_staging_files", return_value=0),
+        patch("deerflow.runtime.skill_snapshot.cleanup_abandoned_skill_snapshots", return_value=0),
+        patch("deerflow.skills.projection.ensure_public_skill_projection", return_value=False),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match="runtime_observed_frozen_mcp_replay_keyring",
+        ):
+            async with lifespan(app):
+                pass
 
 
 @pytest.mark.asyncio

@@ -108,6 +108,7 @@ Content-Type: application/json
 
 **Run Option Compatibility:**
 - Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
+- With durable run events configured, `rollback` and `interrupt` return `409` without mutation while a predecessor is active. Cancel that run, wait for its terminal `run.delivery`, then retry. Receiptless compatibility deployments retain legacy atomic supersession; the durable path stays fail-closed until a prepared replacement transaction can bind candidate identity, predecessor epoch, and delivery evidence together.
 - Compatibility default: `if_not_exists="create"`; this matches DeerFlow's current behavior
 - Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
 - Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
@@ -148,8 +149,9 @@ but replay returns `409` because equality cannot be proven safely.
 Keys through 255 UTF-8 bytes are retained exactly behind a `raw:` form marker; longer values
 are represented by a SHA-256 UTF-8 digest. Replay is guaranteed only while the original run
 row is retained. A different key targeting a thread with an active run keeps the existing
-multitask semantics: `reject` reports the thread as busy, while `interrupt` and `rollback`
-perform their normal atomic supersession.
+multitask semantics: `reject` reports the thread as busy; with durable run events,
+`interrupt` and `rollback` do the same without mutating the predecessor. A retry of an
+already-persisted equal key remains a read-only replay and returns its original run.
 
 When outputs changed during the run, `run.delivery` events retain the Slice 1
 facts (`presented`, `paths`, and `by_tool`) and add `produced_paths`,
@@ -905,8 +907,8 @@ The thread-scoped durable-task API is outside the `/api/runtime/v1` base:
 | Route | Contract |
 |---|---|
 | `GET /api/threads/{thread_id}/mcp-tasks` | Owner-authorized bounded current-task list with a safe lineage summary. |
-| `POST /api/threads/{thread_id}/mcp-tasks` | Owner-authorized standalone task creation. Accepts server/task-toolset names, arguments, and idempotency key; provenance-shaped extras are ignored and all lineage fields are server-derived. |
-| `GET /api/threads/{thread_id}/mcp-tasks/{task_id}` | Owner-authorized detail with bounded lineage and result fields. Parent/notification links are included only after independent run authorization. |
+| `POST /api/threads/{thread_id}/mcp-tasks` | Owner-authorized standalone task creation. Accepts server/task-toolset names, arguments, and idempotency key; provenance-shaped extras are ignored and all lineage fields are server-derived. A private versioned HMAC commitment enforces exact replay equality without persisting raw arguments. |
+| `GET /api/threads/{thread_id}/mcp-tasks/{task_id}` | Owner-authorized detail with bounded lineage and result fields. Parent execution/receipt/evidence fields and parent/notification links are included only after independent run authorization; private replay commitments are never returned. |
 | `POST /api/threads/{thread_id}/mcp-tasks/{task_id}/cancel` | Durably requests remote cancellation; it does not modify immutable lineage, and the first request records separate pseudonymous actor attribution plus a fixed reason code. |
 
 Agent-created lineage is classified `agent_tool` and binds the accepted parent

@@ -190,7 +190,7 @@ async def test_sqlite_owned_compensation_rechecks_lease_after_cursor_lock(
             super().__init__(*args, **kwargs)
             self.fence_checks = 0
 
-        def _owned_run_fence_matches(self, *args, **kwargs) -> bool:
+        async def _owned_run_fence_matches(self, *args, **kwargs) -> bool:
             self.fence_checks += 1
             return self.fence_checks == 1
 

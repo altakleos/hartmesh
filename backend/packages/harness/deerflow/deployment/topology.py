@@ -145,6 +145,8 @@ class TopologyFingerprintV1:
     capability_manifest_digest: str
     migration_head: str
     accepted_materialization_profile: str
+    mcp_task_replay_keyring_confirmation_version: int | None = None
+    mcp_task_replay_keyring_confirmation_digest: str | None = None
     digest: str = ""
 
     def __post_init__(self) -> None:
@@ -185,6 +187,22 @@ class TopologyFingerprintV1:
             field_name="capability_manifest_digest",
             prefixed=False,
         )
+        confirmation_version = self.mcp_task_replay_keyring_confirmation_version
+        confirmation_digest = self.mcp_task_replay_keyring_confirmation_digest
+        if (confirmation_version is None) != (confirmation_digest is None):
+            raise ValueError(
+                "MCP replay keyring confirmation fields must be paired",
+            )
+        if confirmation_version is not None:
+            if type(confirmation_version) is not int or confirmation_version != 1:
+                raise ValueError(
+                    "mcp_task_replay_keyring_confirmation_version must be 1",
+                )
+            _require_digest(
+                confirmation_digest,
+                field_name="mcp_task_replay_keyring_confirmation_digest",
+                prefixed=True,
+            )
         if not isinstance(self.database_schema_ref, str) or _SCHEMA_REFERENCE.fullmatch(self.database_schema_ref) is None:
             raise ValueError("database_schema_ref must be a redacted schema:sha256 reference")
         if not isinstance(self.migration_head, str) or _MIGRATION_HEAD.fullmatch(self.migration_head) is None:
@@ -214,6 +232,8 @@ class TopologyFingerprintV1:
         capability_manifest_digest: str,
         migration_head: str,
         accepted_materialization_profile: str,
+        mcp_task_replay_keyring_confirmation_version: int | None = None,
+        mcp_task_replay_keyring_confirmation_digest: str | None = None,
     ) -> TopologyFingerprintV1:
         return cls(
             profile=profile,
@@ -225,12 +245,14 @@ class TopologyFingerprintV1:
             extension_artifact_digest=extension_artifact_digest,
             extension_configuration_digest=extension_configuration_digest,
             capability_manifest_digest=capability_manifest_digest,
+            mcp_task_replay_keyring_confirmation_version=(mcp_task_replay_keyring_confirmation_version),
+            mcp_task_replay_keyring_confirmation_digest=(mcp_task_replay_keyring_confirmation_digest),
             migration_head=migration_head,
             accepted_materialization_profile=accepted_materialization_profile,
         )
 
     def _core_dict(self) -> dict[str, object]:
-        return {
+        core: dict[str, object] = {
             "version": 1,
             "profile": self.profile,
             "tenant_digest": self.tenant_digest,
@@ -244,6 +266,10 @@ class TopologyFingerprintV1:
             "migration_head": self.migration_head,
             "accepted_materialization_profile": self.accepted_materialization_profile,
         }
+        if self.mcp_task_replay_keyring_confirmation_version is not None:
+            core["mcp_task_replay_keyring_confirmation_version"] = self.mcp_task_replay_keyring_confirmation_version
+            core["mcp_task_replay_keyring_confirmation_digest"] = self.mcp_task_replay_keyring_confirmation_digest
+        return core
 
     def to_dict(self) -> dict[str, object]:
         return {**self._core_dict(), "digest": self.digest}
@@ -255,7 +281,7 @@ class TopologyFingerprintV1:
 
     @classmethod
     def from_dict(cls, value: object) -> TopologyFingerprintV1:
-        fields = {
+        legacy_fields = {
             "version",
             "profile",
             "tenant_digest",
@@ -270,7 +296,14 @@ class TopologyFingerprintV1:
             "accepted_materialization_profile",
             "digest",
         }
-        if not isinstance(value, dict) or set(value) != fields or value.get("version") != 1:
+        confirmation_fields = {
+            "mcp_task_replay_keyring_confirmation_version",
+            "mcp_task_replay_keyring_confirmation_digest",
+        }
+        if not isinstance(value, dict) or value.get("version") != 1:
+            raise ValueError("topology fingerprint fields are invalid")
+        actual_fields = set(value)
+        if actual_fields != legacy_fields and actual_fields != legacy_fields | confirmation_fields:
             raise ValueError("topology fingerprint fields are invalid")
         images = value.get("image_digests")
         if not isinstance(images, dict):
@@ -286,6 +319,12 @@ class TopologyFingerprintV1:
                 extension_artifact_digest=value["extension_artifact_digest"],
                 extension_configuration_digest=value["extension_configuration_digest"],
                 capability_manifest_digest=value["capability_manifest_digest"],
+                mcp_task_replay_keyring_confirmation_version=value.get(
+                    "mcp_task_replay_keyring_confirmation_version",
+                ),
+                mcp_task_replay_keyring_confirmation_digest=value.get(
+                    "mcp_task_replay_keyring_confirmation_digest",
+                ),
                 migration_head=value["migration_head"],
                 accepted_materialization_profile=value["accepted_materialization_profile"],
                 digest=value["digest"],
@@ -369,6 +408,8 @@ def build_topology_fingerprint(
     redis_namespace_digest: str,
     capability_manifest: object,
     config: object,
+    mcp_task_replay_keyring_confirmation_version: int,
+    mcp_task_replay_keyring_confirmation_digest: str,
 ) -> TopologyFingerprintV1:
     """Bind verified startup facts without serializing config or credentials."""
 
@@ -400,6 +441,8 @@ def build_topology_fingerprint(
         extension_artifact_digest=artifact_digest,
         extension_configuration_digest=configuration_digest,
         capability_manifest_digest=capability_digest,
+        mcp_task_replay_keyring_confirmation_version=(mcp_task_replay_keyring_confirmation_version),
+        mcp_task_replay_keyring_confirmation_digest=(mcp_task_replay_keyring_confirmation_digest),
         migration_head=get_expected_migration_head(),
         accepted_materialization_profile=accepted_profile,
     )
@@ -740,6 +783,11 @@ class TopologyStatusV1:
             "degraded_replicas": self.degraded_replicas,
             "qualification_ready": self.qualification_ready,
             "reason_code": self.reason_code,
+            "execution_recovery": {
+                "version": 1,
+                "post_dispatch_takeover_available": False,
+                "reason_code": ("linearizable_execution_authority_unavailable"),
+            },
         }
 
 
@@ -1162,6 +1210,27 @@ def default_topology_inventory_path() -> Path:
     return Path(__file__).resolve().parents[5] / "contracts" / "deployment" / "durable_two_gateway_v1.topology.json"
 
 
+def multi_gateway_run_store_ready(run_store: object) -> bool:
+    """Return whether the live run adapter uses the qualified lease clock."""
+
+    # Importing the enum here would make this deployment/config module recurse
+    # through ``deerflow.runtime`` while application config is still loading.
+    # Normalize the typed StrEnum's public value at this boundary instead.
+    return (
+        _string_value(
+            getattr(run_store, "lease_clock_authority", None),
+        )
+        == "database_v1"
+    )
+
+
+def validate_multi_gateway_run_store(run_store: object) -> None:
+    """Reject an exact-two live adapter without database-owned lease time."""
+
+    if not multi_gateway_run_store_ready(run_store):
+        raise TopologyError("topology_dependency_not_shared")
+
+
 def validate_topology_inventory_runtime_state(
     state: object,
     *,
@@ -1179,6 +1248,7 @@ def validate_topology_inventory_runtime_state(
     if not isinstance(service_registry, TopologyServiceRegistry):
         raise TopologyError("topology_dependency_not_shared")
     service_registry.validate_inventory(inventory)
+    validate_multi_gateway_run_store(getattr(state, "run_store", None))
     return inventory
 
 
@@ -1202,5 +1272,7 @@ __all__ = [
     "TopologyServiceRegistry",
     "load_topology_inventory",
     "default_topology_inventory_path",
+    "multi_gateway_run_store_ready",
+    "validate_multi_gateway_run_store",
     "validate_topology_inventory_runtime_state",
 ]

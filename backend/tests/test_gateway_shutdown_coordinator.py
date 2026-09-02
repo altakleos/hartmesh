@@ -216,6 +216,58 @@ async def test_unsettled_producer_blocks_memory_flush_and_runtime_close(
 
 
 @pytest.mark.asyncio
+async def test_mcp_compensation_shutdown_failure_keeps_runtime_dependencies_open() -> None:
+    """An unquiesced MCP compensation still owns its runtime dependencies."""
+
+    from app.gateway.shutdown import GracefulShutdownCoordinator, ShutdownBudgets
+
+    flushed = False
+    memory_closed = False
+    runtime_closed = False
+
+    async def stop_scheduler() -> None:
+        raise RuntimeError("mcp_task_compensation_shutdown_incomplete")
+
+    def flush(_timeout: float) -> bool:
+        nonlocal flushed
+        flushed = True
+        return True
+
+    def close_memory() -> None:
+        nonlocal memory_closed
+        memory_closed = True
+
+    async def close_runtime() -> None:
+        nonlocal runtime_closed
+        runtime_closed = True
+
+    coordinator = GracefulShutdownCoordinator(
+        budgets=ShutdownBudgets.uniform(0.1),
+        begin_admission_drain=lambda: asyncio.sleep(0, result=True),
+        stop_channels=lambda: asyncio.sleep(0),
+        stop_scheduler=stop_scheduler,
+        drain_runs=lambda _timeout: asyncio.sleep(0, result=True),
+        flush_memory=flush,
+        close_memory=close_memory,
+        close_browser=lambda: asyncio.sleep(0),
+        close_oidc=lambda: asyncio.sleep(0),
+        close_runtime=close_runtime,
+    )
+
+    report = await coordinator.shutdown()
+
+    assert report.scheduler_quiescent is False
+    scheduler_diagnostic = next(item for item in report.diagnostics if item.phase == "scheduler")
+    assert scheduler_diagnostic.code == "shutdown_phase_failed"
+    assert scheduler_diagnostic.error_class == "RuntimeError"
+    assert flushed is False
+    assert memory_closed is False
+    assert runtime_closed is False
+    assert "memory_flush_skipped_active_writers" in {item.code for item in report.diagnostics}
+    assert "runtime_dependencies_close_skipped_active_users" in {item.code for item in report.diagnostics}
+
+
+@pytest.mark.asyncio
 async def test_shutdown_diagnostics_are_bounded_and_redact_exception_text(caplog) -> None:
     from app.gateway.shutdown import GracefulShutdownCoordinator, ShutdownBudgets
 

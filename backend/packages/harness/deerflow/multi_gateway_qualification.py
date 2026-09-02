@@ -107,7 +107,7 @@ _DEPENDENCY_INTERRUPTION_SCENARIOS = frozenset({"redis_outage_recovery", "postgr
 _EXPECTED_AUTHORITATIVE_COUNTS = MappingProxyType(
     {
         "topology_identity": 2,
-        "owner_sigkill": 6,
+        "owner_sigkill": 7,
         "scheduler_owner_loss": 2,
         "cancellation_finalization": 3,
         "postgresql_interruption": 3,
@@ -116,7 +116,7 @@ _EXPECTED_AUTHORITATIVE_COUNTS = MappingProxyType(
 _EXPECTED_VERIFIED_CASE_COUNTS = MappingProxyType(
     {
         "topology_identity": 2,
-        "owner_sigkill": 6,
+        "owner_sigkill": 7,
         "scheduler_owner_loss": 2,
         "cancellation_finalization": 3,
         "unsupported_surfaces": 8,
@@ -219,7 +219,7 @@ class MultiGatewayScenarioEvidenceV1:
             or self.status != "passed"
         ):
             raise ValueError("scenario invariant counters are invalid")
-        if self.scenario_id == "owner_sigkill" and (self.stale_write_rejections != 6 or self.takeover_count != 6 or self.pod_deletion_count != 6 or self.pod_restart_count != 6):
+        if self.scenario_id == "owner_sigkill" and (self.stale_write_rejections != 7 or self.takeover_count != 7 or self.pod_deletion_count != 7 or self.pod_restart_count != 7):
             raise ValueError("scenario invariant counters are invalid")
         if self.scenario_id == "postgresql_interruption" and (self.stale_write_rejections != 7 or self.takeover_count != 3 or self.pod_deletion_count != 0 or self.pod_restart_count != 0):
             raise ValueError("scenario invariant counters are invalid")

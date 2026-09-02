@@ -17,9 +17,13 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from deerflow.runtime.events.catalog import TOOL_RECEIPT_RUN_EVENT_DEFINITIONS
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
+
+if TYPE_CHECKING:
+    from deerflow.runtime.events.appender import RuntimeEventAuthority
 
 _RECEIPT_EVENT_TYPES = frozenset(definition.event_type for definition in TOOL_RECEIPT_RUN_EVENT_DEFINITIONS)
 _MAX_IDEMPOTENCY_KEY_BYTES = 128
@@ -41,8 +45,14 @@ async def resolve_owned_run(
     *,
     owner_id: str,
     lease_epoch: int,
+    allowed_statuses: tuple[str, ...] = ("running",),
 ) -> dict:
-    """Resolve a normal running row only while its execution fence is live."""
+    """Resolve a normal active row only while its execution fence is live.
+
+    Tool-receipt callers retain the running-only default. Runtime-event
+    appenders explicitly include ``pending`` so pre-start failures are fenced
+    by the same owner/epoch capability as the rest of execution.
+    """
 
     from deerflow.runtime.tool_evidence import ToolReceiptOwnershipLost
 
@@ -56,7 +66,9 @@ async def resolve_owned_run(
         row = await getter(run_id, user_id=None) if callable(getter) else None
     if not isinstance(row, dict):
         raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
-    if row.get("operation_kind", "run") != "run" or row.get("status") != "running" or row.get("owner_worker_id") != owner_id or row.get("state_version") != lease_epoch:
+    if not allowed_statuses or any(status not in {"pending", "running"} for status in allowed_statuses):
+        raise ValueError("allowed_statuses must contain active run states")
+    if row.get("operation_kind", "run") != "run" or row.get("status") not in allowed_statuses or row.get("owner_worker_id") != owner_id or row.get("state_version") != lease_epoch:
         raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
     deadline = row.get("lease_expires_at")
     if deadline is not None:
@@ -159,13 +171,16 @@ class RunEventStore(abc.ABC):
         content: str | dict = "",
         metadata: dict | None = None,
         created_at: str | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> tuple[dict, bool]:
         """Write one event unless this run already has the same event type.
 
         The check and write must be serialized with ordinary writers for the
         thread. Returns ``(record, created)``. This is the durability primitive
         used by terminal run receipts, whose recovery path may safely retry
-        after a worker crash.
+        after a worker crash. Administrative background writers must pass the
+        authoritative run owner explicitly because no request user context is
+        available during recovery.
         """
 
     async def append_idempotent(
@@ -216,6 +231,34 @@ class RunEventStore(abc.ABC):
         from deerflow.runtime.tool_evidence import ToolReceiptOwnershipLost
 
         raise ToolReceiptOwnershipLost("tool_receipt_store_unfenced")
+
+    async def append_fenced_batch(
+        self,
+        authority: RuntimeEventAuthority,
+        events: list[dict],
+    ) -> list[dict]:
+        """Append a live-worker batch under one tenant/run/owner/epoch fence.
+
+        Compatibility stores fail closed. Administrative callers use
+        :meth:`put_batch` explicitly and never receive this capability.
+        """
+
+        del authority, events
+        from deerflow.runtime.events.appender import RuntimeEventOwnershipLost
+
+        raise RuntimeEventOwnershipLost("runtime_event_store_unfenced")
+
+    async def append_fenced_if_absent(
+        self,
+        authority: RuntimeEventAuthority,
+        event: dict,
+    ) -> tuple[dict, bool]:
+        """Append one run-scoped singleton under the live execution fence."""
+
+        del authority, event
+        from deerflow.runtime.events.appender import RuntimeEventOwnershipLost
+
+        raise RuntimeEventOwnershipLost("runtime_event_store_unfenced")
 
     @abc.abstractmethod
     async def list_messages(

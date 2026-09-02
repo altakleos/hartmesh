@@ -281,6 +281,7 @@ def _completed_run(
 
 async def _seed_run(store, *, run_id: str, model_name: str | None, completion: dict) -> None:
     await store.put(run_id, thread_id=_THREAD, status="pending", model_name=model_name)
+    await store.update_status(run_id, "success")
     await store.update_run_completion(run_id, **completion)
 
 

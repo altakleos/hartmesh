@@ -313,6 +313,8 @@ class _RecordingStreamBridge(MemoryStreamBridge):
 
 
 class _IntegrationRunManager:
+    heartbeat_enabled = False
+
     def __init__(self, record: RunRecord) -> None:
         self._record = record
 

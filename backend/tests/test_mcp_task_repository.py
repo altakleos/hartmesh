@@ -118,6 +118,9 @@ async def _create_working_task(
         driver_name="fake",
         remote_task_id=resolved_remote_task_id,
         task_name="Generate report",
+        request_commitment_version=1,
+        request_commitment_key_id="test-v1",
+        request_commitment_digest=hashlib.sha256(f"commitment:{task_id}".encode()).hexdigest(),
         status="working",
         result=None,
         result_preview=None,
@@ -125,7 +128,7 @@ async def _create_working_task(
         result_artifact=None,
         error=None,
         input_required=None,
-        next_poll_at=now - timedelta(seconds=1),
+        next_poll_after_seconds=0,
         driver_data={"status_tool": "status"},
     )
 
@@ -328,7 +331,7 @@ async def test_repository_rejects_stale_tenant_before_any_mutation(tmp_path):
             result_artifact=None,
             error=None,
             input_required=None,
-            next_poll_at=None,
+            next_poll_after_seconds=None,
             polled_at=datetime.now(UTC),
             tenant_digest=other.digest,
         )
@@ -385,7 +388,7 @@ async def test_repository_refuses_newer_schema_writer_at_startup(tmp_path):
         now=datetime.now(UTC),
     )
     async with repo._sf() as session:
-        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "future-writer").values(schema_writer_version=3))
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "future-writer").values(schema_writer_version=4))
         await session.commit()
 
     with pytest.raises(McpTaskRepositoryError) as exc_info:
@@ -409,6 +412,7 @@ async def test_schema_writer_v2_cannot_commit_without_tenant_lineage(tmp_path):
                 update(McpTaskRow)
                 .where(McpTaskRow.id == "required-lineage")
                 .values(
+                    schema_writer_version=2,
                     tenant_ref=None,
                     tenant_digest=None,
                     lineage_json=null(),
@@ -479,7 +483,7 @@ async def test_legacy_terminal_and_nonterminal_rows_never_fabricate_lineage(tmp_
         result_artifact=None,
         error=None,
         input_required=None,
-        next_poll_at=None,
+        next_poll_after_seconds=None,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -551,6 +555,10 @@ async def test_claim_due_tasks_skips_live_leases_and_reclaims_expired_ones(tmp_p
     )
     assert while_live == []
 
+    async with repo._sf() as session:
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-1").values(lease_expires_at=now - timedelta(seconds=1)))
+        await session.commit()
+
     reclaimed = await repo.claim_due_tasks(
         now=now + timedelta(seconds=61),
         lease_owner="worker-2",
@@ -560,6 +568,288 @@ async def test_claim_due_tasks_skips_live_leases_and_reclaims_expired_ones(tmp_p
     )
     assert [task["id"] for task in reclaimed] == ["task-1"]
     assert reclaimed[0]["lease_owner"] == "worker-2"
+
+
+@pytest.mark.asyncio
+async def test_poll_lease_and_completion_use_database_clock_under_pod_skew(tmp_path):
+    repo = await _make_repo(tmp_path)
+    database_window_start = datetime.now(UTC)
+    await _create_working_task(
+        repo,
+        task_id="task-db-clock-poll",
+        now=database_window_start,
+    )
+    fast_pod = database_window_start + timedelta(days=1)
+
+    claimed = await repo.claim_due_tasks(
+        now=fast_pod,
+        lease_owner="fast-pod",
+        lease_seconds=60,
+        limit=1,
+        tenant_digest=repo.tenant.digest,
+    )
+
+    assert [item["id"] for item in claimed] == ["task-db-clock-poll"]
+    lease_expires_at = datetime.fromisoformat(claimed[0]["lease_expires_at"])
+    assert database_window_start + timedelta(seconds=55) <= lease_expires_at
+    assert lease_expires_at <= datetime.now(UTC) + timedelta(seconds=65)
+    assert await repo.apply_snapshot(
+        "task-db-clock-poll",
+        lease_owner="fast-pod",
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_after_seconds=None,
+        polled_at=fast_pod,
+        tenant_digest=repo.tenant.digest,
+    )
+
+
+@pytest.mark.asyncio
+async def test_slow_pod_clock_cannot_hide_database_due_poll_work(tmp_path):
+    repo = await _make_repo(tmp_path)
+    database_now = datetime.now(UTC)
+    await _create_working_task(
+        repo,
+        task_id="task-db-clock-slow",
+        now=database_now,
+    )
+
+    claimed = await repo.claim_due_tasks(
+        now=database_now - timedelta(days=1),
+        lease_owner="slow-pod",
+        lease_seconds=60,
+        limit=1,
+        tenant_digest=repo.tenant.digest,
+    )
+
+    assert [item["id"] for item in claimed] == ["task-db-clock-slow"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_and_notification_leases_use_database_clock_under_pod_skew(
+    tmp_path,
+):
+    repo = await _make_repo(tmp_path)
+    database_window_start = datetime.now(UTC)
+    fast_pod = database_window_start + timedelta(days=1)
+    await _create_working_task(
+        repo,
+        task_id="task-db-clock-cancel",
+        now=database_window_start,
+    )
+    assert await repo.request_cancel(
+        "task-db-clock-cancel",
+        user_id="user-1",
+        thread_id="thread-1",
+        requested_at=database_window_start,
+        actor_ref="a" * 64,
+        reason_code="user_api",
+        tenant_digest=repo.tenant.digest,
+    )
+    cancelled = await repo.claim_cancel_requests(
+        now=fast_pod,
+        lease_owner="fast-canceller",
+        lease_seconds=60,
+        limit=1,
+        tenant_digest=repo.tenant.digest,
+    )
+    cancel_expiry = datetime.fromisoformat(cancelled[0]["lease_expires_at"])
+    assert cancel_expiry <= datetime.now(UTC) + timedelta(seconds=65)
+    assert await repo.apply_cancel_snapshot(
+        "task-db-clock-cancel",
+        lease_owner="fast-canceller",
+        status="cancelled",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        completed_at=fast_pod,
+        tenant_digest=repo.tenant.digest,
+    )
+
+    notification = await repo.claim_notification_work(
+        now=fast_pod,
+        lease_owner="fast-notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+        tenant_digest=repo.tenant.digest,
+    )
+    assert [item["id"] for item in notification] == ["task-db-clock-cancel"]
+    notification_expiry = datetime.fromisoformat(
+        notification[0]["notification_lease_expires_at"],
+    )
+    assert notification_expiry <= datetime.now(UTC) + timedelta(seconds=65)
+
+
+@pytest.mark.asyncio
+async def test_expired_poll_owner_cannot_release_or_schedule_work(tmp_path):
+    repo = await _make_repo(tmp_path)
+    database_now = datetime.now(UTC)
+    await _create_working_task(
+        repo,
+        task_id="task-expired-poll-release",
+        now=database_now,
+    )
+    await repo.claim_due_tasks(
+        now=database_now,
+        lease_owner="stale-poller",
+        lease_seconds=60,
+        limit=1,
+        tenant_digest=repo.tenant.digest,
+    )
+    async with repo._sf() as session:
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-expired-poll-release").values(lease_expires_at=database_now - timedelta(seconds=1)))
+        await session.commit()
+
+    assert not await repo.release_claim(
+        "task-expired-poll-release",
+        lease_owner="stale-poller",
+        retry_after_seconds=86_400,
+        error="late remote failure",
+        tenant_digest=repo.tenant.digest,
+    )
+
+    reclaimed = await repo.claim_due_tasks(
+        now=database_now + timedelta(days=1),
+        lease_owner="replacement-poller",
+        lease_seconds=60,
+        limit=1,
+        tenant_digest=repo.tenant.digest,
+    )
+    assert [item["id"] for item in reclaimed] == [
+        "task-expired-poll-release",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_expired_cancel_owner_cannot_release_or_schedule_work(tmp_path):
+    repo = await _make_repo(tmp_path)
+    database_now = datetime.now(UTC)
+    await _create_working_task(
+        repo,
+        task_id="task-expired-cancel-release",
+        now=database_now,
+    )
+    assert await repo.request_cancel(
+        "task-expired-cancel-release",
+        user_id="user-1",
+        thread_id="thread-1",
+        requested_at=database_now + timedelta(days=1),
+        actor_ref="a" * 64,
+        reason_code="user_api",
+        tenant_digest=repo.tenant.digest,
+    )
+    claimed = await repo.claim_cancel_requests(
+        now=database_now - timedelta(days=1),
+        lease_owner="stale-canceller",
+        lease_seconds=60,
+        limit=1,
+        tenant_digest=repo.tenant.digest,
+    )
+    assert [item["id"] for item in claimed] == [
+        "task-expired-cancel-release",
+    ]
+    requested_at = datetime.fromisoformat(claimed[0]["cancel_requested_at"])
+    assert requested_at <= datetime.now(UTC) + timedelta(seconds=5)
+    async with repo._sf() as session:
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-expired-cancel-release").values(lease_expires_at=database_now - timedelta(seconds=1)))
+        await session.commit()
+
+    assert not await repo.release_cancel_claim(
+        "task-expired-cancel-release",
+        lease_owner="stale-canceller",
+        retry_after_seconds=86_400,
+        error="late cancellation failure",
+        tenant_digest=repo.tenant.digest,
+    )
+
+    reclaimed = await repo.claim_cancel_requests(
+        now=database_now + timedelta(days=1),
+        lease_owner="replacement-canceller",
+        lease_seconds=60,
+        limit=1,
+        tenant_digest=repo.tenant.digest,
+    )
+    assert [item["id"] for item in reclaimed] == [
+        "task-expired-cancel-release",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_expired_notification_owner_cannot_release_or_schedule_work(
+    tmp_path,
+):
+    repo = await _make_repo(tmp_path)
+    database_now = datetime.now(UTC)
+    await _create_working_task(
+        repo,
+        task_id="task-expired-notification-release",
+        now=database_now,
+    )
+    await repo.claim_due_tasks(
+        now=database_now,
+        lease_owner="poller",
+        lease_seconds=60,
+        limit=1,
+        tenant_digest=repo.tenant.digest,
+    )
+    await repo.apply_snapshot(
+        "task-expired-notification-release",
+        lease_owner="poller",
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_after_seconds=None,
+        polled_at=database_now,
+        tenant_digest=repo.tenant.digest,
+    )
+    claimed = await repo.claim_notification_work(
+        now=database_now,
+        lease_owner="stale-notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+        tenant_digest=repo.tenant.digest,
+    )
+    assert [item["id"] for item in claimed] == [
+        "task-expired-notification-release",
+    ]
+    async with repo._sf() as session:
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-expired-notification-release").values(notification_lease_expires_at=(database_now - timedelta(seconds=1))))
+        await session.commit()
+
+    assert not await repo.release_notification_claim(
+        "task-expired-notification-release",
+        lease_owner="stale-notifier",
+        retry_after_seconds=86_400,
+        error="late notification failure",
+        replace_with_latest=True,
+        tenant_digest=repo.tenant.digest,
+    )
+
+    reclaimed = await repo.claim_notification_work(
+        now=database_now + timedelta(days=1),
+        lease_owner="replacement-notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+        tenant_digest=repo.tenant.digest,
+    )
+    assert [item["id"] for item in reclaimed] == [
+        "task-expired-notification-release",
+    ]
 
 
 @pytest.mark.asyncio
@@ -585,7 +875,7 @@ async def test_apply_snapshot_requires_current_lease_owner_and_terminalizes_task
         result_artifact=None,
         error="stale result",
         input_required=None,
-        next_poll_at=None,
+        next_poll_after_seconds=None,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -601,7 +891,7 @@ async def test_apply_snapshot_requires_current_lease_owner_and_terminalizes_task
         result_artifact={"uri": "s3://reports/2.json", "mime_type": "application/json"},
         error=None,
         input_required=None,
-        next_poll_at=None,
+        next_poll_after_seconds=None,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -646,6 +936,9 @@ async def test_apply_snapshot_rejects_result_after_same_workers_lease_expires(tm
         limit=10,
         tenant_digest=repo.tenant.digest,
     )
+    async with repo._sf() as session:
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-expired").values(lease_expires_at=now - timedelta(seconds=1)))
+        await session.commit()
 
     applied = await repo.apply_snapshot(
         "task-expired",
@@ -657,7 +950,7 @@ async def test_apply_snapshot_rejects_result_after_same_workers_lease_expires(tm
         result_artifact=None,
         error=None,
         input_required=None,
-        next_poll_at=None,
+        next_poll_after_seconds=None,
         polled_at=now + timedelta(seconds=61),
         tenant_digest=repo.tenant.digest,
     )
@@ -696,7 +989,7 @@ async def test_input_required_is_persisted_and_remains_scheduled_for_slow_pollin
         result_artifact=None,
         error=None,
         input_required={"prompt": "Approve deployment?"},
-        next_poll_at=now + timedelta(seconds=60),
+        next_poll_after_seconds=60,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -710,7 +1003,9 @@ async def test_input_required_is_persisted_and_remains_scheduled_for_slow_pollin
     assert stored is not None
     assert stored["input_required"] == {"prompt": "Approve deployment?"}
     assert stored["notification_status"] == "pending"
-    assert datetime.fromisoformat(stored["next_poll_at"]) == now + timedelta(seconds=60)
+    next_poll_at = datetime.fromisoformat(stored["next_poll_at"])
+    assert now + timedelta(seconds=59) <= next_poll_at
+    assert next_poll_at <= datetime.now(UTC) + timedelta(seconds=61)
 
 
 @pytest.mark.asyncio
@@ -725,12 +1020,10 @@ async def test_release_claim_retries_transient_poll_failure(tmp_path):
         limit=10,
         tenant_digest=repo.tenant.digest,
     )
-    retry_at = now + timedelta(seconds=30)
-
     released = await repo.release_claim(
         "task-4",
         lease_owner="worker-1",
-        next_poll_at=retry_at,
+        retry_after_seconds=30,
         error="temporary network failure",
         tenant_digest=repo.tenant.digest,
     )
@@ -744,7 +1037,9 @@ async def test_release_claim_retries_transient_poll_failure(tmp_path):
     assert stored is not None
     assert stored["status"] == "working"
     assert stored["last_poll_error"] == "temporary network failure"
-    assert datetime.fromisoformat(stored["next_poll_at"]) == retry_at
+    next_poll_at = datetime.fromisoformat(stored["next_poll_at"])
+    assert now + timedelta(seconds=29) <= next_poll_at
+    assert next_poll_at <= datetime.now(UTC) + timedelta(seconds=31)
     assert stored["lease_owner"] is None
 
 
@@ -765,7 +1060,7 @@ async def test_consecutive_poll_error_count_increments_and_resets_on_success(tmp
         await repo.release_claim(
             "task-6",
             lease_owner="worker-1",
-            next_poll_at=now - timedelta(seconds=1),
+            retry_after_seconds=0,
             error="temporary network failure",
             tenant_digest=repo.tenant.digest,
         )
@@ -794,7 +1089,7 @@ async def test_consecutive_poll_error_count_increments_and_resets_on_success(tmp
         result_artifact=None,
         error=None,
         input_required=None,
-        next_poll_at=now + timedelta(seconds=5),
+        next_poll_after_seconds=5,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -831,7 +1126,7 @@ async def test_notification_snapshot_is_versioned_and_not_overwritten_in_flight(
         result_artifact=None,
         error=None,
         input_required={"prompt": "Approve?"},
-        next_poll_at=now,
+        next_poll_after_seconds=0,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -864,7 +1159,7 @@ async def test_notification_snapshot_is_versioned_and_not_overwritten_in_flight(
         result_artifact=None,
         error=None,
         input_required=None,
-        next_poll_at=None,
+        next_poll_after_seconds=None,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -899,7 +1194,7 @@ async def test_notification_snapshot_is_versioned_and_not_overwritten_in_flight(
         lease_owner="notifier",
         dispatch_version=1,
         delivered=True,
-        next_notification_at=None,
+        retry_after_seconds=None,
         error=None,
         now=now,
         tenant_digest=repo.tenant.digest,
@@ -945,7 +1240,7 @@ async def test_notification_retry_rebuilds_a_newer_event_and_resets_its_budget(t
         result_artifact=None,
         error=None,
         input_required={"prompt": "Approve?"},
-        next_poll_at=now,
+        next_poll_after_seconds=0,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -973,13 +1268,12 @@ async def test_notification_retry_rebuilds_a_newer_event_and_resets_its_budget(t
         tracking_degraded_after_errors=3,
         tenant_digest=repo.tenant.digest,
     )
-    retry_at = now + timedelta(seconds=5)
     await repo.finish_notification_run(
         "task-retry-latest",
         lease_owner="notifier",
         dispatch_version=first[0]["dispatch_version"],
         delivered=False,
-        next_notification_at=retry_at,
+        retry_after_seconds=5,
         error="Agent run failed",
         now=now,
         tenant_digest=repo.tenant.digest,
@@ -1011,12 +1305,15 @@ async def test_notification_retry_rebuilds_a_newer_event_and_resets_its_budget(t
         result_artifact=None,
         error=None,
         input_required=None,
-        next_poll_at=None,
+        next_poll_after_seconds=None,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
+    async with repo._sf() as session:
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-retry-latest").values(next_notification_at=now - timedelta(seconds=1)))
+        await session.commit()
     latest = await repo.claim_notification_work(
-        now=retry_at,
+        now=now + timedelta(days=1),
         lease_owner="notifier",
         lease_seconds=60,
         limit=1,
@@ -1052,7 +1349,7 @@ async def test_unexpected_notification_failure_releases_lease_without_changing_p
         result_artifact=None,
         error=None,
         input_required={"prompt": "Approve?"},
-        next_poll_at=now,
+        next_poll_after_seconds=0,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -1064,12 +1361,10 @@ async def test_unexpected_notification_failure_releases_lease_without_changing_p
         tracking_degraded_after_errors=3,
         tenant_digest=repo.tenant.digest,
     )
-    retry_at = now + timedelta(seconds=5)
-
     assert await repo.release_notification_lease(
         "task-notify-release",
         lease_owner="notifier",
-        next_notification_at=retry_at,
+        retry_after_seconds=5,
         error="run store unavailable",
         tenant_digest=repo.tenant.digest,
     )
@@ -1083,7 +1378,11 @@ async def test_unexpected_notification_failure_releases_lease_without_changing_p
     assert stored["notification_status"] == "claimed"
     assert stored["notification_lease_owner"] is None
     assert stored["notification_error"] == "run store unavailable"
-    assert datetime.fromisoformat(stored["next_notification_at"]) == retry_at
+    next_notification_at = datetime.fromisoformat(
+        stored["next_notification_at"],
+    )
+    assert now + timedelta(seconds=4) <= next_notification_at
+    assert next_notification_at <= datetime.now(UTC) + timedelta(seconds=6)
 
 
 @pytest.mark.asyncio
@@ -1108,7 +1407,7 @@ async def test_notification_launch_failure_counts_and_reclaims_latest_snapshot(t
         result_artifact=None,
         error=None,
         input_required={"prompt": "Approve?"},
-        next_poll_at=now,
+        next_poll_after_seconds=0,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -1120,12 +1419,10 @@ async def test_notification_launch_failure_counts_and_reclaims_latest_snapshot(t
         tracking_degraded_after_errors=3,
         tenant_digest=repo.tenant.digest,
     )
-    retry_at = now + timedelta(seconds=5)
-
     assert await repo.release_notification_claim(
         "task-launch-retry",
         lease_owner="notifier",
-        next_notification_at=retry_at,
+        retry_after_seconds=5,
         error="run store unavailable",
         replace_with_latest=True,
         count_failure=True,
@@ -1141,8 +1438,11 @@ async def test_notification_launch_failure_counts_and_reclaims_latest_snapshot(t
     assert stored["notification_status"] == "pending"
     assert stored["notification_attempt_count"] == 1
     assert stored["dispatch_version"] == first[0]["dispatch_version"]
+    async with repo._sf() as session:
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-launch-retry").values(next_notification_at=now - timedelta(seconds=1)))
+        await session.commit()
     reclaimed = await repo.claim_notification_work(
-        now=retry_at,
+        now=now + timedelta(days=1),
         lease_owner="notifier",
         lease_seconds=60,
         limit=1,
@@ -1176,7 +1476,7 @@ async def test_permanent_notification_failure_is_not_reclaimed(tmp_path):
         result_artifact=None,
         error=None,
         input_required=None,
-        next_poll_at=None,
+        next_poll_after_seconds=None,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -1243,7 +1543,7 @@ async def test_dispatched_notification_can_be_dead_lettered_after_retry_budget(t
         result_artifact=None,
         error=None,
         input_required=None,
-        next_poll_at=None,
+        next_poll_after_seconds=None,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -1316,7 +1616,7 @@ async def test_dead_lettering_dispatched_snapshot_preserves_newer_event(tmp_path
         result_artifact=None,
         error=None,
         input_required={"prompt": "Approve?"},
-        next_poll_at=now,
+        next_poll_after_seconds=0,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -1355,7 +1655,7 @@ async def test_dead_lettering_dispatched_snapshot_preserves_newer_event(tmp_path
         result_artifact=None,
         error=None,
         input_required=None,
-        next_poll_at=None,
+        next_poll_after_seconds=None,
         polled_at=now,
         tenant_digest=repo.tenant.digest,
     )
@@ -1422,7 +1722,10 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
         tenant_digest=repo.tenant.digest,
     )
     assert requested is not None
-    assert requested["cancel_requested_at"] == now.isoformat()
+    cancel_requested_at = datetime.fromisoformat(
+        requested["cancel_requested_at"],
+    )
+    assert now <= cancel_requested_at <= datetime.now(UTC)
     assert requested["cancel_actor_ref"] == "a" * 64
     assert requested["cancel_reason_code"] == "user_api"
     assert requested["lineage_digest"] == created["lineage_digest"]
@@ -1447,7 +1750,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
             result_artifact=None,
             error=None,
             input_required=None,
-            next_poll_at=None,
+            next_poll_after_seconds=None,
             polled_at=now,
             tenant_digest=repo.tenant.digest,
         )
@@ -1473,7 +1776,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
         tenant_digest=repo.tenant.digest,
     )
     assert repeated is not None
-    assert repeated["cancel_requested_at"] == now.isoformat()
+    assert repeated["cancel_requested_at"] == requested["cancel_requested_at"]
     assert repeated["cancel_actor_ref"] == "a" * 64
     assert repeated["cancel_reason_code"] == "user_api"
     assert repeated["lineage_digest"] == created["lineage_digest"]

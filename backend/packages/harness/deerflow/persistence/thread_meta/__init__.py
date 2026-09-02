@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaAlreadyExistsError, ThreadMetaStore
+from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaAlreadyExistsError, ThreadMetaRunProjection, ThreadMetaStore
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
@@ -13,12 +13,15 @@ if TYPE_CHECKING:
     from langgraph.store.base import BaseStore
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from deerflow.runtime.runs.store.base import RunStore
+
 __all__ = [
     "InvalidMetadataFilterError",
     "MemoryThreadMetaStore",
     "THREAD_PINNED_METADATA_KEY",
     "ThreadMetaAlreadyExistsError",
     "ThreadMetaRepository",
+    "ThreadMetaRunProjection",
     "ThreadMetaRow",
     "ThreadMetaStore",
     "make_thread_store",
@@ -28,6 +31,8 @@ __all__ = [
 def make_thread_store(
     session_factory: async_sessionmaker[AsyncSession] | None,
     store: BaseStore | None = None,
+    *,
+    run_store: RunStore | None = None,
 ) -> ThreadMetaStore:
     """Create the appropriate ThreadMetaStore based on available backends.
 
@@ -38,4 +43,4 @@ def make_thread_store(
         return ThreadMetaRepository(session_factory)
     if store is None:
         raise ValueError("make_thread_store requires either a session_factory (SQL) or a store (memory)")
-    return MemoryThreadMetaStore(store)
+    return MemoryThreadMetaStore(store, run_store=run_store)

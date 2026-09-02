@@ -34,7 +34,9 @@ def _registration() -> ReplicaRegistrationV1:
         extension_artifact_digest=f"sha256:{'8' * 64}",
         extension_configuration_digest=f"sha256:{'9' * 64}",
         capability_manifest_digest="a" * 64,
-        migration_head="0027_multi_gateway_topology",
+        mcp_task_replay_keyring_confirmation_version=1,
+        mcp_task_replay_keyring_confirmation_digest=f"sha256:{'e' * 64}",
+        migration_head="0030_run_delivery_owner_backfill",
         accepted_materialization_profile="rwx_verified_copy_v2",
     )
     now = datetime.now(UTC)

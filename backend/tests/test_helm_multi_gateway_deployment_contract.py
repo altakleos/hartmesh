@@ -257,6 +257,21 @@ def test_qualification_candidate_cannot_escape_disposable_namespace(
     assert "qualification candidate requires a disposable namespace" in (result.stderr)
 
 
+def test_qualification_candidate_cannot_publish_a_passing_artifact(
+    tmp_path: Path,
+) -> None:
+    values = _qualified_values()
+    values["namespace"] = "hartmesh-qualification-two-gateway"
+    values["deployment"]["qualificationCandidate"] = {
+        "enabled": True,
+        "id": "qualification-09",
+    }
+
+    result = _render(tmp_path, values, expect_success=False)
+
+    assert "qualification candidate cannot declare passing evidence" in (result.stderr)
+
+
 def test_operator_asserted_evidence_cannot_unlock_profile_without_bundled_artifact(
     tmp_path: Path,
 ) -> None:

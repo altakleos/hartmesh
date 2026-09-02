@@ -126,6 +126,7 @@ from deerflow.runtime import (
     CheckpointStateAccessor,
     ConflictError,
     DisconnectMode,
+    ExecutionRecoveryPayloadV1,
     RunContext,
     RunManager,
     RunRecord,
@@ -135,6 +136,7 @@ from deerflow.runtime import (
     ThreadOperationKind,
     UnsupportedStrategyError,
     build_state_mutation_graph,
+    project_execution_recovery_config,
     run_agent,
 )
 from deerflow.runtime.accepted_invocation import (
@@ -170,6 +172,7 @@ from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
     CancellationRequestOutcome,
+    RecoveryPolicy,
 )
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
@@ -678,6 +681,16 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
             converted = [_strip_external_message_metadata(message) for message in converted]
         return {**raw_input, "messages": converted}
     return raw_input
+
+
+def _recovery_graph_input_value(graph_input: dict[str, Any]) -> dict[str, Any]:
+    """Project normalized LangChain messages into lossless JSON semantics."""
+
+    projected = dict(graph_input)
+    messages = projected.get("messages")
+    if isinstance(messages, list):
+        projected["messages"] = [message.model_dump(mode="json") if isinstance(message, BaseMessage) else message for message in messages]
+    return projected
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -2739,6 +2752,37 @@ class _GatewayLaunchNormalizer:
                 if resolved_agent_name is not None:
                     section["agent_name"] = resolved_agent_name
 
+        recovery_payload_json: dict[str, object] | None = None
+        if run_mgr.admission_recovery_policy is RecoveryPolicy.exact_two_takeover_v1:
+            try:
+                if isinstance(graph_input, Command):
+                    input_kind = "command_resume"
+                    recovery_input = graph_input.resume
+                else:
+                    input_kind = "graph"
+                    recovery_input = _recovery_graph_input_value(graph_input)
+                recovery_payload_json = ExecutionRecoveryPayloadV1(
+                    input_kind=input_kind,
+                    input_value=recovery_input,
+                    config=project_execution_recovery_config(config),
+                    stream_modes=tuple(stream_modes),
+                    stream_subgraphs=intent.stream_subgraphs,
+                    interrupt_before=thaw_host_value(
+                        intent.interrupt_before,
+                    ),
+                    interrupt_after=thaw_host_value(
+                        intent.interrupt_after,
+                    ),
+                ).to_persisted()
+            except (TypeError, ValueError) as exc:
+                # Exact-two recovery cannot silently replay a secret-stripped
+                # or semantically lossy request. Refuse before accepted
+                # material or a durable run row exists.
+                raise HTTPException(
+                    status_code=422,
+                    detail=str(exc),
+                ) from exc
+
         try:
             accepted_invocation = await _seal_accepted_invocation(
                 request=self._request,
@@ -2947,6 +2991,7 @@ class _GatewayLaunchNormalizer:
                 caller_intent_json=caller_intent.to_persisted() if caller_intent is not None else None,
                 caller_intent_digest=caller_intent.digest if caller_intent is not None else None,
                 caller_intent_digest_version=caller_intent.digest_version if caller_intent is not None else None,
+                recovery_payload_json=recovery_payload_json,
                 principal=_invocation_principal_from_projection(accepted_invocation.principal),
                 require_existing_thread=require_existing_thread,
             )
@@ -3106,6 +3151,7 @@ class _GatewayDurableRuns:
                     model_name=launch.model_name,
                     user_id=launch.user_id,
                     accepted_invocation=launch.accepted_invocation,
+                    recovery_payload_json=(thaw_host_value(launch.recovery_payload_json) if launch.recovery_payload_json is not None else None),
                 )
                 if reservation is not None:
                     from deerflow.runtime.skill_projection import (
@@ -3150,6 +3196,7 @@ class _GatewayDurableRuns:
                 caller_intent_json=thaw_host_value(launch.caller_intent_json),
                 caller_intent_digest=launch.caller_intent_digest,
                 caller_intent_digest_version=launch.caller_intent_digest_version,
+                recovery_payload_json=(thaw_host_value(launch.recovery_payload_json) if launch.recovery_payload_json is not None else None),
             )
             if reservation is not None:
                 from deerflow.runtime.skill_projection import (

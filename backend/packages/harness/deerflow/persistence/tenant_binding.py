@@ -24,17 +24,10 @@ _SINGLETON_KEY = 1
 _EMPTY_SCHEMA_METADATA_TABLES = frozenset(
     {
         "alembic_version",
+        "checkpoint_migrations",
         "hartmesh_deployment_identity",
         "run_lifecycle_cursor_state",
-    }
-)
-_LANGGRAPH_DURABLE_DATA_TABLES = frozenset(
-    {
-        "checkpoints",
-        "checkpoint_blobs",
-        "checkpoint_writes",
-        "store",
-        "store_vectors",
+        "run_admission_cursor_state",
     }
 )
 
@@ -94,15 +87,24 @@ class TenantSchemaBindingResult:
 
 
 def _schema_has_application_data(sync_connection: Any) -> bool:
-    """Return whether any host- or LangGraph-owned data table has one row."""
+    """Return whether any known or unknown application table has one row.
+
+    Extension tables intentionally use private SQLAlchemy metadata, and an
+    older/newer binary may not know every table in a shared schema.  Treating
+    only host metadata as occupancy would let startup claim populated
+    extension or unknown tables for a new tenant.  The allowlist contains only
+    schema-version/cursor metadata that carries no tenant-owned application
+    state.
+    """
 
     from sqlalchemy import inspect
 
-    # Ensure all mapped tables are registered before intersecting metadata.
+    # Ensure mapped tables are registered before inspection initializes any
+    # dialect-specific metadata state. Unknown tables remain candidates.
     import deerflow.persistence.models  # noqa: F401
 
     present = set(inspect(sync_connection).get_table_names())
-    candidates = sorted((present & (set(Base.metadata.tables) | _LANGGRAPH_DURABLE_DATA_TABLES)) - _EMPTY_SCHEMA_METADATA_TABLES)
+    candidates = sorted(present - _EMPTY_SCHEMA_METADATA_TABLES)
     quote = sync_connection.dialect.identifier_preparer.quote
     for table_name in candidates:
         if sync_connection.execute(text(f"SELECT 1 FROM {quote(table_name)} LIMIT 1")).first() is not None:

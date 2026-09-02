@@ -46,7 +46,9 @@ def _fingerprint() -> TopologyFingerprintV1:
         extension_artifact_digest=f"sha256:{'8' * 64}",
         extension_configuration_digest=f"sha256:{'9' * 64}",
         capability_manifest_digest="a" * 64,
-        migration_head="0027_multi_gateway_topology",
+        mcp_task_replay_keyring_confirmation_version=1,
+        mcp_task_replay_keyring_confirmation_digest=f"sha256:{'b' * 64}",
+        migration_head="0030_run_delivery_owner_backfill",
         accepted_materialization_profile="rwx_verified_copy_v2",
     )
 
@@ -70,14 +72,14 @@ def _artifact(*, completed_at: datetime | None = None):
             result_code=MULTI_GATEWAY_SCENARIO_RESULTS[scenario_id],
             input_digest=f"sha256:{index + 11:064x}",
             evidence_digest=f"sha256:{index + 101:064x}",
-            authoritative_count=(2 if scenario_id in {"topology_identity", "scheduler_owner_loss"} else 6 if scenario_id == "owner_sigkill" else 3 if scenario_id in {"cancellation_finalization", "postgresql_interruption"} else 1),
+            authoritative_count=(2 if scenario_id in {"topology_identity", "scheduler_owner_loss"} else 7 if scenario_id == "owner_sigkill" else 3 if scenario_id in {"cancellation_finalization", "postgresql_interruption"} else 1),
             duplicate_count=0,
-            stale_write_rejections=(6 if scenario_id == "owner_sigkill" else 7 if scenario_id == "postgresql_interruption" else 0),
+            stale_write_rejections=(7 if scenario_id == "owner_sigkill" else 7 if scenario_id == "postgresql_interruption" else 0),
             takeover_count=(
-                6 if scenario_id == "owner_sigkill" else 2 if scenario_id == "scheduler_owner_loss" else 1 if scenario_id in {"sandbox_recovery", "mcp_task_notification"} else 3 if scenario_id == "postgresql_interruption" else 0
+                7 if scenario_id == "owner_sigkill" else 2 if scenario_id == "scheduler_owner_loss" else 1 if scenario_id in {"sandbox_recovery", "mcp_task_notification"} else 3 if scenario_id == "postgresql_interruption" else 0
             ),
-            pod_deletion_count=(6 if scenario_id == "owner_sigkill" else 2 if scenario_id in {"scheduler_owner_loss", "upgrade_truthfulness"} else 1 if scenario_id in {"sandbox_recovery", "mcp_task_notification"} else 0),
-            pod_restart_count=(6 if scenario_id == "owner_sigkill" else 2 if scenario_id in {"scheduler_owner_loss", "upgrade_truthfulness"} else 1 if scenario_id in {"sandbox_recovery", "mcp_task_notification"} else 0),
+            pod_deletion_count=(7 if scenario_id == "owner_sigkill" else 2 if scenario_id in {"scheduler_owner_loss", "upgrade_truthfulness"} else 1 if scenario_id in {"sandbox_recovery", "mcp_task_notification"} else 0),
+            pod_restart_count=(7 if scenario_id == "owner_sigkill" else 2 if scenario_id in {"scheduler_owner_loss", "upgrade_truthfulness"} else 1 if scenario_id in {"sandbox_recovery", "mcp_task_notification"} else 0),
             lease_epoch_before=1,
             lease_epoch_after=(
                 2
@@ -94,7 +96,7 @@ def _artifact(*, completed_at: datetime | None = None):
             dependency_interruption_count=(1 if scenario_id in {"redis_outage_recovery", "postgresql_interruption"} else 0),
             duration_millis=1_000 + index,
             verified_case_count=(
-                6
+                7
                 if scenario_id == "owner_sigkill"
                 else 3
                 if scenario_id in {"cancellation_finalization", "postgresql_interruption"}

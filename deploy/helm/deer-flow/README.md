@@ -502,6 +502,13 @@ and skills RWX claims; the in-cluster AIO provisioner with
 the exact extension artifact/configuration/capability tuple for
 `durable_two_gateway_v1_postgres_redis_aio_rwx`.
 
+Both Gateway replicas must also receive one identical dedicated MCP replay
+keyring through a Secret referenced by `gateway.extraEnvFrom`. The Gateway
+binds a versioned non-secret confirmation of every retained key and the active
+ID into topology compatibility; secrets do not enter Helm values, topology
+rows, or evidence. Any additive/removal/active-key change therefore requires
+the documented quiesced stop/restart sequence, not a rolling per-pod rotation.
+
 Render validation rejects any other replica count, HPA, local/memory/JSONL
 stores, inline database or Redis credentials, mutable image tags, OpenSandbox,
 non-RWX claims, IM connectors/webhook ingress, or unqualified extension service.
@@ -513,6 +520,21 @@ The optional `deployment.qualificationCandidate` path exists only for the live
 harness. It requires a disposable `hartmesh-qualification-*` namespace, cannot
 declare passing evidence, and the backend accepts it only with its internal test
 runtime flag. Never route production traffic to a candidate.
+
+The candidate does not turn every orphan into a retry. Recovery policy is
+server-selected and persisted once per newly accepted run: ordinary,
+one-replica, and historical rows retain `terminalize_v1`, while only the exact
+two-Gateway candidate stamps `exact_two_takeover_v1`. Exact-two execution
+takeover is currently unavailable for every orphan: the Gateway's unconditional eligibility
+gate runs before owner CAS, and setting
+`HARTMESH_EXECUTION_RECOVERY_CLAIMS_ENABLED=true` cannot bypass it. Expired
+exact-two rows remain fail-closed rather than falling through to legacy
+terminalization. Scenarios 4 and 8 therefore remain mandatory and unpassed;
+projected Secret rotation does not count as linearizable old-owner revocation.
+Switching back to
+`durable_one_replica` therefore changes only future admissions after the
+required drain; it does not rewrite rows or require a schema downgrade. See the
+qualification guide for the exact drain and rollback conditions.
 
 The repository does not bundle a passing artifact. A reference under
 `deployment.qualificationEvidence` is still `operator_asserted`; Helm cannot
@@ -720,8 +742,9 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `scheduler.multi_instance: true`, it must use shared Postgres,
   `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`.
   Scheduler startup then preserves live scheduled runs owned by another Pod,
-  atomically takes over only expired leases, and fences stale post-launch
-  bookkeeping. `max_concurrent_runs` is a shared global cap across Pods,
+  atomically terminalizes only expired `terminalize_v1` runs, leaves exact-two
+  rows fail-closed while execution takeover is unavailable, and fences stale
+  post-launch bookkeeping. `max_concurrent_runs` is a shared global cap across Pods,
   including pre-launch dispatch reservations. These startup-only controls do
   not by themselves qualify scheduler HA. The candidate-only exact-two profile
   adds its own stricter topology and live-evidence contract.

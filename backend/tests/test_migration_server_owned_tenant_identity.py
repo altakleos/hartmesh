@@ -45,3 +45,38 @@ async def test_sqlite_upgrade_adds_nullable_anchors_and_singleton_binding(
             assert "tenant_ref" not in {row[1] for row in connection.execute("PRAGMA table_info(runs)")}
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_downgrade_refuses_to_erase_an_established_tenant_binding(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tenant-identity-bound-downgrade.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    config = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(command.upgrade, config, _REVISION)
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                """
+                INSERT INTO hartmesh_deployment_identity (
+                    singleton_key, identity_version, tenant_ref,
+                    tenant_digest, legacy_redis_prefixes_json, bound_at
+                ) VALUES (1, 1, ?, ?, NULL, ?)
+                """,
+                (
+                    "tenant-aaaaaaaaaaaaaaaa",
+                    "a" * 64,
+                    "2026-09-01T00:00:00+00:00",
+                ),
+            )
+            connection.commit()
+
+        with pytest.raises(RuntimeError, match="tenant_identity_downgrade_blocked"):
+            await asyncio.to_thread(command.downgrade, config, _PREVIOUS_REVISION)
+
+        with sqlite3.connect(path) as connection:
+            assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (_REVISION,)
+            assert connection.execute("SELECT tenant_digest FROM hartmesh_deployment_identity").fetchone() == ("a" * 64,)
+    finally:
+        await engine.dispose()

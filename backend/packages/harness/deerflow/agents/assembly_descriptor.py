@@ -94,6 +94,29 @@ _DETECTOR_PARAMETER_FIELDS = (
     "_finish_reasons",
     "_stop_reasons",
 )
+_TOOL_RECOVERY_KINDS = frozenset(
+    {
+        "none",
+        "receipt_idempotent_reconcile_v1",
+    }
+)
+TOOL_RECOVERY_POLICY_KEY = "hartmesh.tool_recovery.v1"
+
+# Recovery eligibility is a host decision, not extension-authored metadata.
+# Keep the seal process-local and identity-based: the persisted descriptor
+# contains only the finite public policy string, while arbitrary tools cannot
+# opt themselves in by copying a metadata value. Extensions already execute
+# with host privileges, so this is an authority boundary in the assembly
+# contract rather than a sandbox boundary.
+_HOST_SEALED_TOOL_RECOVERY: dict[int, tuple[object, str]] = {}
+
+
+def _seal_host_tool_recovery(tool: object, recovery_kind: str) -> None:
+    """Register one host-owned tool instance for finite recovery handling."""
+
+    if recovery_kind == "none" or recovery_kind not in _TOOL_RECOVERY_KINDS:
+        raise ValueError("tool_recovery_kind_invalid")
+    _HOST_SEALED_TOOL_RECOVERY[id(tool)] = (tool, recovery_kind)
 
 
 def _plain_value(value: object) -> object | None:
@@ -227,6 +250,13 @@ def _tool_source(tool: object) -> str:
     return "community" if module else "builtin"
 
 
+def _tool_recovery_kind(tool: object) -> str:
+    sealed = _HOST_SEALED_TOOL_RECOVERY.get(id(tool))
+    if sealed is None or sealed[0] is not tool:
+        return "none"
+    return sealed[1]
+
+
 def describe_tool(tool: object) -> ToolDescriptor:
     """Project one bound tool into its identity."""
     source = get_mcp_source(tool) if is_mcp_tool(tool) else None
@@ -238,6 +268,22 @@ def describe_tool(tool: object) -> ToolDescriptor:
         mcp_server=source["server_name"] if source is not None else None,
         mcp_transport=source["transport"] if source is not None else None,
     )
+
+
+def _tool_recovery_policy(tools: Sequence[object]) -> dict[str, str]:
+    """Return the finite host-owned policy for explicitly reconcilable tools."""
+
+    policy: dict[str, str] = {}
+    for tool in tools:
+        name = str(getattr(tool, "name", type(tool).__name__))
+        recovery_kind = _tool_recovery_kind(tool)
+        if recovery_kind == "none":
+            continue
+        previous = policy.get(name)
+        if previous is not None and previous != recovery_kind:
+            raise ValueError("tool_recovery_policy_conflict")
+        policy[name] = recovery_kind
+    return dict(sorted(policy.items()))
 
 
 def _probe_middleware_parameters(middleware: object) -> dict[str, object]:
@@ -597,6 +643,11 @@ def build_assembly_descriptor(
             assembled_tools.extend(middleware_tools)
 
     resolved_policies = dict(effective_policies)
+    if TOOL_RECOVERY_POLICY_KEY in resolved_policies:
+        raise ValueError("tool_recovery_policy_reserved")
+    tool_recovery_policy = _tool_recovery_policy(assembled_tools)
+    if tool_recovery_policy:
+        resolved_policies[TOOL_RECOVERY_POLICY_KEY] = tool_recovery_policy
     resolved_policies["prompt_template_id"] = prompt_template_id
     resolved_policies["skill_catalog_hash"] = skill_catalog_digest(enabled_skills)
 
@@ -626,4 +677,5 @@ __all__ = [
     "skill_catalog_digest",
     "skill_catalog_digest_from_snapshot",
     "subagent_release_policy",
+    "TOOL_RECOVERY_POLICY_KEY",
 ]

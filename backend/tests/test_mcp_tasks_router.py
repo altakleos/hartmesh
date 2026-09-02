@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from app.gateway.app import create_app
 from app.gateway.routers import mcp_tasks
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.runtime import RunManager
 from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 _TENANT_IDENTITY = TenantIdentityV1.from_canonical_id("test")
@@ -38,7 +39,7 @@ class FakeRunManager:
 
     async def get(self, run_id, *, user_id, raise_on_store_error):
         self.calls.append((run_id, user_id, raise_on_store_error))
-        return SimpleNamespace(run_id=run_id) if run_id in self.allowed else None
+        return SimpleNamespace(run_id=run_id, user_id=user_id) if run_id in self.allowed else None
 
 
 def _record(**overrides):
@@ -64,6 +65,9 @@ def _record(**overrides):
         "remote_task_id": "must-not-leak",
         "driver_data": {"status_tool": "must-not-leak"},
         "server_name": "must-not-leak",
+        "request_commitment_version": 1,
+        "request_commitment_key_id": "must-not-leak",
+        "request_commitment_digest": "must-not-leak",
         "lineage_status": "legacy_unavailable",
         "lineage": None,
         **overrides,
@@ -148,6 +152,9 @@ async def test_detail_exposes_bounded_result_but_not_remote_handle(monkeypatch) 
     assert "remote_task_id" not in response
     assert "driver_data" not in response
     assert "server_name" not in response
+    assert "request_commitment_version" not in response
+    assert "request_commitment_key_id" not in response
+    assert "request_commitment_digest" not in response
     assert response["lineage"] == {"status": "legacy_unavailable"}
     assert response["links"] == {}
 
@@ -197,6 +204,90 @@ async def test_detail_links_require_independent_run_authorization(
         ("run-parent", "user-1", True),
         ("run-notification", "user-1", True),
     ]
+
+
+@pytest.mark.asyncio
+async def test_active_local_parent_link_requires_matching_run_owner() -> None:
+    manager = RunManager()
+    parent = await manager.create("private-thread", user_id="user-b")
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(run_manager=manager)),
+    )
+
+    links = await mcp_tasks._authorized_links(
+        request,
+        {"parent_run_id": parent.run_id},
+        user_id="user-a",
+    )
+
+    assert links == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent_authorized", [False, True])
+async def test_parent_lineage_projection_requires_parent_authorization(
+    monkeypatch,
+    parent_authorized: bool,
+) -> None:
+    lineage = {
+        "kind": "agent_tool",
+        "digest": "1" * 64,
+        "principal_ref": "principal-" + "2" * 24,
+        "parent_execution_task_id": "execution-task-secret",
+        "parent_execution_kind": "subagent",
+        "parent_subagent_name": "private-worker",
+        "parent_tool_receipt_id": "tr_" + "3" * 64,
+        "agent_revision_digest": "4" * 64,
+        "assembly_fingerprint": "5" * 64,
+        "subagent_catalog_digest": "6" * 64,
+        "subagent_definition_digest": "7" * 64,
+        "extension_generation": 2,
+        "extension_manifest_digest": "8" * 64,
+        "accepted_origin_digest": "9" * 64,
+        "mcp_server_name": "reports",
+        "mcp_tool_name": "submit_report",
+        "request_projection_digest": "a" * 64,
+        "credential_selector_ref": None,
+        "credential_selector_version": None,
+    }
+    repo = FakeRepository(
+        [
+            _record(
+                lineage_status="verified",
+                lineage=lineage,
+                parent_run_id="run-parent",
+            )
+        ]
+    )
+    request = _request(repo)
+    request.app.state.run_manager = FakeRunManager(
+        ("run-parent",) if parent_authorized else (),
+    )
+    monkeypatch.setattr(mcp_tasks, "get_current_user", AsyncMock(return_value="user-1"))
+
+    response = await mcp_tasks.get_mcp_task.__wrapped__(
+        thread_id="thread-1",
+        task_id="mcp-task-1",
+        request=request,
+    )
+
+    parent_fields = {
+        "parent_execution_task_id",
+        "parent_execution_kind",
+        "parent_subagent_name",
+        "parent_tool_receipt_id",
+        "agent_revision_digest",
+        "assembly_fingerprint",
+        "subagent_catalog_digest",
+        "subagent_definition_digest",
+        "accepted_origin_digest",
+    }
+    if parent_authorized:
+        assert response["lineage"]["parent_execution_task_id"] == "execution-task-secret"
+        assert parent_fields <= response["lineage"].keys()
+    else:
+        assert not (parent_fields & response["lineage"].keys())
+        assert response["links"] == {}
 
 
 @pytest.mark.asyncio

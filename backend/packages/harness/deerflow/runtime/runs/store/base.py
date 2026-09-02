@@ -40,6 +40,8 @@ _LIFECYCLE_SAFE_REASONS = {
     "loop_capped",
     "model_length_capped",
     "orphan_recovered",
+    "recovery_checkpoint_unavailable",
+    "recovery_tool_attempt_indeterminate",
     "replacement",
     "rollback",
     "safety_capped",
@@ -80,6 +82,29 @@ class EditReplayVisibility:
     hidden_attempt_run_ids: set[str] = field(default_factory=set)
 
 
+class LeaseClockAuthority(StrEnum):
+    """Clock domain that mints durable run-lease deadlines."""
+
+    process_v1 = "process_v1"
+    database_v1 = "database_v1"
+
+
+def validate_lease_deadline_request(
+    *,
+    lease_expires_at: str | None,
+    lease_duration_seconds: int | None,
+    required: bool,
+) -> None:
+    """Validate one absolute-or-duration lease deadline request."""
+
+    if lease_expires_at is not None and lease_duration_seconds is not None:
+        raise ValueError("lease_expires_at and lease_duration_seconds are mutually exclusive")
+    if lease_duration_seconds is not None and (isinstance(lease_duration_seconds, bool) or not isinstance(lease_duration_seconds, int) or lease_duration_seconds <= 0):
+        raise ValueError("lease_duration_seconds must be a positive integer")
+    if required and lease_expires_at is None and lease_duration_seconds is None:
+        raise ValueError("one of lease_expires_at or lease_duration_seconds is required")
+
+
 @dataclass(frozen=True)
 class LeaseRenewal:
     """Result of renewing a run lease.
@@ -90,6 +115,7 @@ class LeaseRenewal:
 
     renewed: bool
     cancel_action: str | None = None
+    lease_expires_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +134,28 @@ class AdmissionOutcome(StrEnum):
     key_conflict = "key_conflict"
 
 
+class RecoveryPolicy(StrEnum):
+    """Server-owned recovery behavior frozen with one admitted run."""
+
+    terminalize_v1 = "terminalize_v1"
+    exact_two_takeover_v1 = "exact_two_takeover_v1"
+
+
+class ExecutionTakeoverOutcome(StrEnum):
+    """Finite result of attempting to transfer one expired execution lease."""
+
+    claimed = "claimed"
+    not_eligible = "not_eligible"
+
+
+@dataclass(frozen=True)
+class ExecutionTakeoverClaim:
+    """A takeover decision and the authoritative row observed under its CAS."""
+
+    outcome: ExecutionTakeoverOutcome
+    row: dict[str, Any] | None = None
+
+
 class BindAssemblyEvidenceOutcome(StrEnum):
     """Finite outcome of binding evidence under the current execution fence."""
 
@@ -123,6 +171,13 @@ class DuplicateRunIdentityError(RuntimeError):
 
     def __init__(self, run_id: str) -> None:
         super().__init__(f"duplicate durable run identity: {run_id}")
+
+
+class RecoveryPayloadIntegrityError(RuntimeError):
+    """Raised when snapshot repair contradicts admission-owned recovery input."""
+
+    def __init__(self) -> None:
+        super().__init__("recovery_payload_integrity_conflict")
 
 
 class ThreadOperationReleaseOutcome(StrEnum):
@@ -358,7 +413,9 @@ class LifecycleReadiness:
     reason_code: Literal[
         "ready",
         "lifecycle_cursor_missing",
+        "admission_cursor_state_invalid",
         "lifecycle_pruning_invalid",
+        "lifecycle_event_cardinality_invalid",
         "lifecycle_event_bounds_invalid",
         "lifecycle_event_sequence_invalid",
         "lifecycle_store_unavailable",
@@ -368,6 +425,7 @@ class LifecycleReadiness:
         allowed = {
             "ready",
             "lifecycle_cursor_missing",
+            "admission_cursor_state_invalid",
             "lifecycle_pruning_invalid",
             "lifecycle_event_cardinality_invalid",
             "lifecycle_event_bounds_invalid",
@@ -392,6 +450,7 @@ class RunStore(abc.ABC):
     # Custom stores retain their compatibility behavior until they implement
     # the same row+journal transaction and explicitly override this flag.
     durable_lifecycle = False
+    lease_clock_authority = LeaseClockAuthority.process_v1
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -479,6 +538,7 @@ class RunStore(abc.ABC):
         owner_worker_id: str,
         state_version: int,
         terminal_state_version: int | None = None,
+        allowed_active_statuses: tuple[str, ...] = ("running",),
     ) -> AsyncIterator[bool]:
         """Hold an ownership fence across one external durable mutation.
 
@@ -487,7 +547,7 @@ class RunStore(abc.ABC):
         fail closed so a stale process never receives mutation authority.
         """
 
-        del run_id, owner_worker_id, state_version, terminal_state_version
+        del run_id, owner_worker_id, state_version, terminal_state_version, allowed_active_statuses
         yield False
 
     async def bind_assembly_evidence(
@@ -586,6 +646,8 @@ class RunStore(abc.ABC):
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
         idempotency_key: str | None = None,
+        recovery_policy: RecoveryPolicy = RecoveryPolicy.terminalize_v1,
+        recovery_payload_json: dict[str, Any] | None = None,
     ) -> None:
         pass
 
@@ -609,12 +671,76 @@ class RunStore(abc.ABC):
 
         raise NotImplementedError
 
+    async def thread_projection_authorized(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        run_status: str,
+        owner_worker_id: str,
+        active_state_version: int,
+        terminal_state_version: int | None = None,
+    ) -> bool:
+        """Validate one current run authority for a derived thread projection.
+
+        Compatibility stores fail closed. The projection store remains
+        responsible for making its own write atomic with this decision when
+        cross-process correctness is required.
+        """
+
+        del (
+            run_id,
+            thread_id,
+            run_status,
+            owner_worker_id,
+            active_state_version,
+            terminal_state_version,
+        )
+        return False
+
+    @asynccontextmanager
+    async def hold_thread_projection_authority(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        run_status: str,
+        owner_worker_id: str,
+        active_state_version: int,
+        terminal_state_version: int | None = None,
+    ) -> AsyncIterator[bool]:
+        """Hold a process-local projection decision through its derived write.
+
+        Cross-process repositories make the decision and projection in one
+        database transaction instead. Compatibility stores fail closed so a
+        caller cannot accidentally turn a read-only authorization check into
+        an atomicity claim.
+        """
+
+        del (
+            run_id,
+            thread_id,
+            run_status,
+            owner_worker_id,
+            active_state_version,
+            terminal_state_version,
+        )
+        yield False
+
     async def get_by_external_identity(
         self,
         external_scope: str,
         external_key: str,
     ) -> dict[str, Any] | None:
         """Return the normal run bound to one normalized external identity."""
+
+        raise NotImplementedError
+
+    async def get_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        """Return tenant-local truth for one process-wide idempotency key."""
 
         raise NotImplementedError
 
@@ -738,8 +864,20 @@ class RunStore(abc.ABC):
         self,
         run_id: str,
         model_name: str | None,
-    ) -> None:
-        """Update the model_name field for an existing run."""
+        *,
+        expected_owner_worker_id: str | None = None,
+        expected_state_version: int | None = None,
+        require_unexpired_lease: bool = False,
+    ) -> bool | None:
+        """Update ``model_name`` under an optional owner/epoch fence.
+
+        ``expected_owner_worker_id`` and ``expected_state_version`` form one
+        authority capability and must be supplied together. Implementations
+        return ``False`` when a supplied fence no longer matches. Omitting the
+        fence preserves the legacy contract only for a row with no lease;
+        actively leased rows fail closed. Compatibility stores may return
+        ``None`` when they cannot report application.
+        """
         pass
 
     @abc.abstractmethod
@@ -748,6 +886,9 @@ class RunStore(abc.ABC):
         run_id: str,
         *,
         status: str,
+        expected_owner_worker_id: str | None = None,
+        expected_active_state_version: int | None = None,
+        expected_terminal_state_version: int | None = None,
         total_input_tokens: int = 0,
         total_output_tokens: int = 0,
         total_tokens: int = 0,
@@ -761,11 +902,12 @@ class RunStore(abc.ABC):
         first_human_message: str | None = None,
         error: str | None = None,
     ) -> bool | None:
-        """Persist final completion fields.
+        """Project completion fields onto an already-terminal row.
 
-        Implementations must not replace a different terminal status. Returns
-        ``False`` when the row is missing or already has a conflicting terminal
-        outcome.
+        Implementations must never transition status.  The three expected
+        values form one terminal authority capability and must be supplied
+        together for a row terminalized by an owned durable lifecycle CAS.
+        Returns ``False`` when the row or exact terminal projection differs.
         """
         pass
 
@@ -773,6 +915,9 @@ class RunStore(abc.ABC):
         self,
         run_id: str,
         *,
+        expected_owner_worker_id: str | None = None,
+        expected_state_version: int | None = None,
+        require_unexpired_lease: bool = False,
         total_input_tokens: int | None = None,
         total_output_tokens: int | None = None,
         total_tokens: int | None = None,
@@ -784,8 +929,16 @@ class RunStore(abc.ABC):
         message_count: int | None = None,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
-    ) -> None:
-        """Persist a best-effort running snapshot without changing run status."""
+    ) -> bool | None:
+        """Persist a running snapshot under an optional owner/epoch fence.
+
+        ``expected_owner_worker_id`` and ``expected_state_version`` form one
+        authority capability and must be supplied together. Implementations
+        return ``False`` when a supplied fence no longer matches. Omitting the
+        fence preserves the legacy contract only for a row with no lease;
+        actively leased rows fail closed. Compatibility stores may return
+        ``None`` when they cannot report application.
+        """
         return None
 
     @abc.abstractmethod
@@ -813,7 +966,8 @@ class RunStore(abc.ABC):
         run_id: str,
         *,
         owner_worker_id: str,
-        lease_expires_at: str,
+        lease_expires_at: str | None = None,
+        lease_duration_seconds: int | None = None,
     ) -> bool:
         """Renew the lease on an active run. Returns ``False`` when no row matched."""
         pass
@@ -823,7 +977,8 @@ class RunStore(abc.ABC):
         run_id: str,
         *,
         owner_worker_id: str,
-        lease_expires_at: str,
+        lease_expires_at: str | None = None,
+        lease_duration_seconds: int | None = None,
     ) -> LeaseRenewal:
         """Renew ownership and return any durable cancellation request.
 
@@ -833,12 +988,39 @@ class RunStore(abc.ABC):
         cancellation must override this method to renew and observe the
         request atomically.
         """
-        renewed = await self.update_lease(
-            run_id,
-            owner_worker_id=owner_worker_id,
+        validate_lease_deadline_request(
             lease_expires_at=lease_expires_at,
+            lease_duration_seconds=lease_duration_seconds,
+            required=True,
         )
-        return LeaseRenewal(renewed=renewed)
+        if lease_duration_seconds is None:
+            renewed = await self.update_lease(
+                run_id,
+                owner_worker_id=owner_worker_id,
+                lease_expires_at=lease_expires_at,
+            )
+        else:
+            renewed = await self.update_lease(
+                run_id,
+                owner_worker_id=owner_worker_id,
+                lease_duration_seconds=lease_duration_seconds,
+            )
+        return LeaseRenewal(
+            renewed=renewed,
+            lease_expires_at=lease_expires_at if renewed else None,
+        )
+
+    async def execution_owner_authorized(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        state_version: int,
+    ) -> bool:
+        """Return whether one execution owner epoch is currently authoritative."""
+
+        del run_id, owner_worker_id, state_version
+        return False
 
     async def request_cancel(self, run_id: str, *, action: str) -> str | None:
         """Persist the first cancellation action for an active run.
@@ -886,18 +1068,49 @@ class RunStore(abc.ABC):
     ) -> bool:
         """Atomically mark an expired-lease active run as ``error``.
 
-        Only rows whose lease has expired past *grace_seconds* (or whose
-        lease is NULL — pre-ownership data) are updated. The conditional
-        status, lease, and optional version fence close races with heartbeat,
-        cancellation, and terminal writers. When provided, *stop_reason* is
-        persisted in the same atomic update.
+        Only ``terminalize_v1`` rows whose lease has expired past
+        *grace_seconds* (or whose lease is NULL — pre-ownership data) are
+        updated. ``exact_two_takeover_v1`` rows fail closed and use the
+        dedicated execution-takeover primitive instead. The conditional
+        policy, status, lease, and optional version fence close races with
+        heartbeat, cancellation, and terminal writers. When provided,
+        *stop_reason* is persisted in the same atomic update.
 
         Returns ``False`` when:
           - the run is no longer ``pending`` / ``running``,
+          - the run's immutable policy is ``exact_two_takeover_v1``,
           - the lease is still valid (owner heartbeat is alive), or
           - the row doesn't exist.
         """
         pass
+
+    async def claim_for_execution_takeover(
+        self,
+        run_id: str,
+        *,
+        new_owner_worker_id: str,
+        lease_expires_at: str | None = None,
+        lease_duration_seconds: int | None = None,
+        grace_seconds: int,
+        expected_state_version: int,
+    ) -> ExecutionTakeoverClaim:
+        """Transfer an expired exact-two run lease without terminalizing it.
+
+        Compatibility stores fail closed. Implementations must atomically
+        verify the admitted recovery policy, active status, expired lease,
+        absent cancellation, and expected epoch before assigning the new owner
+        and incrementing ``state_version``.
+        """
+
+        del (
+            run_id,
+            new_owner_worker_id,
+            lease_expires_at,
+            lease_duration_seconds,
+            grace_seconds,
+            expected_state_version,
+        )
+        return ExecutionTakeoverClaim(ExecutionTakeoverOutcome.not_eligible)
 
     @abc.abstractmethod
     async def list_inflight_with_expired_lease(
@@ -915,7 +1128,8 @@ class RunStore(abc.ABC):
         *,
         thread_id: str,
         owner_worker_id: str,
-        lease_expires_at: str | None,
+        lease_expires_at: str | None = None,
+        lease_duration_seconds: int | None = None,
         operation_kind: str = "run",
         multitask_strategy: str = "reject",
         assistant_id: str | None = None,
@@ -943,6 +1157,9 @@ class RunStore(abc.ABC):
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
         idempotency_key: str | None = None,
+        recovery_policy: RecoveryPolicy = RecoveryPolicy.terminalize_v1,
+        recovery_payload_json: dict[str, Any] | None = None,
+        require_predecessor_inactive: bool = False,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -953,12 +1170,27 @@ class RunStore(abc.ABC):
 
         Returns ``(new_run_dict, claimed_run_dicts)``.
         Raises ``IntegrityError`` on conflict for ``reject`` strategy.
+        When ``require_predecessor_inactive`` is true, replacement strategies
+        must reject an active predecessor instead of terminalizing it. This is
+        the fail-closed boundary used when predecessor delivery evidence lives
+        in a separate transaction domain.
         """
         legacy_impl = type(self).create_run_atomic
         if legacy_impl is RunStore.create_run_atomic:
             raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")
         if operation_kind != "run":
             raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot create non-run thread operations")
+        if lease_duration_seconds is not None:
+            raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot mint duration-based leases")
+        if require_predecessor_inactive and multitask_strategy in {
+            "interrupt",
+            "rollback",
+        }:
+            from deerflow.runtime.runs.manager import ConflictError
+
+            raise ConflictError(
+                f"Thread {thread_id} requires explicit predecessor cancellation",
+            )
         if any(
             value is not None
             for value in (
@@ -980,6 +1212,7 @@ class RunStore(abc.ABC):
                 caller_intent_digest,
                 caller_intent_digest_version,
                 idempotency_key,
+                recovery_payload_json,
             )
         ):
             raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot persist accepted invocation or idempotency facts")
@@ -1004,7 +1237,8 @@ class RunStore(abc.ABC):
         *,
         thread_id: str,
         owner_worker_id: str,
-        lease_expires_at: str | None,
+        lease_expires_at: str | None = None,
+        lease_duration_seconds: int | None = None,
         external_scope: str,
         external_key: str,
         request_digest: str,
@@ -1030,6 +1264,9 @@ class RunStore(abc.ABC):
         agent_revision_digest: str | None = None,
         extension_generation: int | None = None,
         decision_evidence_json: dict[str, Any] | None = None,
+        recovery_policy: RecoveryPolicy = RecoveryPolicy.terminalize_v1,
+        recovery_payload_json: dict[str, Any] | None = None,
+        require_predecessor_inactive: bool = False,
     ) -> RunEnsureResult:
         """Atomically ensure one keyed normal run.
 
@@ -1045,7 +1282,8 @@ class RunStore(abc.ABC):
         *,
         thread_id: str,
         owner_worker_id: str,
-        lease_expires_at: str | None,
+        lease_expires_at: str | None = None,
+        lease_duration_seconds: int | None = None,
         multitask_strategy: str = "reject",
         assistant_id: str | None = None,
         user_id: str | None = None,
@@ -1059,18 +1297,20 @@ class RunStore(abc.ABC):
         operation_impl = type(self).create_thread_operation_atomic
         if operation_impl is RunStore.create_thread_operation_atomic:
             raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")
-        return await self.create_thread_operation_atomic(
-            run_id,
-            thread_id=thread_id,
-            owner_worker_id=owner_worker_id,
-            lease_expires_at=lease_expires_at,
-            operation_kind="run",
-            multitask_strategy=multitask_strategy,
-            assistant_id=assistant_id,
-            user_id=user_id,
-            model_name=model_name,
-            metadata=metadata,
-            kwargs=kwargs,
-            created_at=created_at,
-            grace_seconds=grace_seconds,
-        )
+        call_kwargs: dict[str, Any] = {
+            "thread_id": thread_id,
+            "owner_worker_id": owner_worker_id,
+            "lease_expires_at": lease_expires_at,
+            "operation_kind": "run",
+            "multitask_strategy": multitask_strategy,
+            "assistant_id": assistant_id,
+            "user_id": user_id,
+            "model_name": model_name,
+            "metadata": metadata,
+            "kwargs": kwargs,
+            "created_at": created_at,
+            "grace_seconds": grace_seconds,
+        }
+        if lease_duration_seconds is not None:
+            call_kwargs["lease_duration_seconds"] = lease_duration_seconds
+        return await self.create_thread_operation_atomic(run_id, **call_kwargs)

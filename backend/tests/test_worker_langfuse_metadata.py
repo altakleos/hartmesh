@@ -42,6 +42,8 @@ class _FakeAgent:
 
 
 class _FakeRunManager:
+    heartbeat_enabled = False
+
     async def try_start(self, _run_id: str) -> RunStartOutcome:
         return RunStartOutcome.started
 

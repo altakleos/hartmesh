@@ -96,9 +96,29 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Remove an unused tenant schema only; never erase an established anchor.
+
+    This guard intentionally changes only the future destructive path of the
+    historical revision. Once the singleton or tenant-bound rows exist, an
+    operator must export/migrate that state explicitly rather than making an
+    older binary reinterpret it as unbound legacy data.
+    """
+
     from deerflow.persistence.migrations._helpers import safe_drop_column
 
     bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    table_names = set(inspector.get_table_names())
+    if "hartmesh_deployment_identity" in table_names and bind.execute(sa.text("SELECT 1 FROM hartmesh_deployment_identity LIMIT 1")).first() is not None:
+        raise RuntimeError("tenant_identity_downgrade_blocked")
+    for table_name in ("runs", "run_lifecycle_events", "run_events"):
+        if table_name not in table_names:
+            continue
+        columns = {column["name"] for column in sa.inspect(bind).get_columns(table_name)}
+        if not {"tenant_ref", "tenant_digest"} <= columns:
+            continue
+        if bind.execute(sa.text(f"SELECT 1 FROM {table_name} WHERE tenant_ref IS NOT NULL OR tenant_digest IS NOT NULL LIMIT 1")).first() is not None:
+            raise RuntimeError("tenant_identity_downgrade_blocked")
     for table_name, constraint_name, index_name in (
         ("run_events", "ck_run_events_tenant_pair", "ix_run_events_tenant_digest"),
         (

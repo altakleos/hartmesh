@@ -465,7 +465,9 @@ and profile material remain accepted effective execution. Replay never starts wi
 effective values and overwrites only fields present on the retry. Rows written before
 caller-intent evidence exists remain readable, but a keyed replay conflicts because equality
 cannot be proven. A different key still follows the independent active-thread rule (`reject`
-is thread-busy; `interrupt`/`rollback` supersede atomically). The replay guarantee ends when
+is thread-busy; with durable run events, `interrupt`/`rollback` also fail closed until the
+predecessor is explicitly cancelled and its terminal delivery receipt is observable).
+Receiptless compatibility stores retain atomic supersession. The replay guarantee ends when
 the retained row is deleted.
 
 ## Durability boundaries
@@ -777,10 +779,11 @@ the real durable-invocation predecessor `0011_mcp_tasks` with representative
 normal, auxiliary, and MCP-task rows. It applies every invocation revision through
 `0019_inbound_event_identity`, joins the result, managed-subagent, and scheduled-enqueue
 branches through `0022_merge_scheduled_enqueue`, and verifies the single
-`0026_mcp_task_lineage` head plus accepted/idempotency/caller-intent/assembly/tenant
-and MCP-task lineage columns, the schema-identity singleton, the nullable run-event
-receipt idempotency key/partial unique index, and tenant-scoped MCP-task lineage,
-parent, notification, and due-work indexes and checks, validates lifecycle
+`0030_run_delivery_owner_backfill` head plus accepted/idempotency/caller-intent/
+assembly/tenant and MCP-task lineage/request-commitment columns, recovery-policy
+and admission-cursor constraints, the schema-identity singleton, the nullable
+run-event receipt idempotency key/partial unique index, and tenant-scoped MCP-task
+lineage, parent, notification, and due-work indexes and checks, validates lifecycle
 singleton/journal/index/retained-cardinality
 and inbound receipt arbitration, and then uses `RunRepository` for
 replay, cancellation, orphan recovery, lifecycle, and summary reads/writes. The
@@ -789,14 +792,17 @@ assembly bind, lifecycle CAS/cursor ordering, and repeatable-read query races. W
 `DEERFLOW_TEST_POSTGRES_URL` configured, any marked skip fails the session;
 SQLite remains a fast compatibility tier rather than PostgreSQL evidence.
 
-The supported feature-tail downgrade stops at `0011_mcp_tasks` and re-upgrade proves the
-representative core MCP task survives; bounded result columns from the sibling branch are
-also outside that predecessor. It cannot represent accepted evidence,
-external retry keys, canonical caller intent, state versions, lifecycle events, inbound
-receipts, execution evidence, or assembly evidence, so those feature facts are deliberately lost and are not
-invented on re-upgrade. A further technical downgrade to `0010_run_cancel_request` executes
-the unrelated MCP-task downgrade and destroys MCP-task state; it is not the supported
-invocation rollback. Operators must quiesce writers and back up PostgreSQL before rollback.
+The structural feature-tail downgrade stops at `0011_mcp_tasks` and is supported
+only before MCP lineage/request-commitment writers or recovery/admission-cursor
+semantics have been used. PostgreSQL qualification proves that pre-use downgrade
+and re-upgrade preserve representative legacy run and core MCP-task state. Once
+those durable semantics exist, their owning revisions abort downgrade instead of
+silently erasing evidence. Operational rollback to `durable_one_replica` keeps the
+additive schema and uses a forward-compatible image; it is not a database
+downgrade. A further technical downgrade to `0010_run_cancel_request` executes the
+unrelated MCP-task downgrade and destroys MCP-task state, so it is not a supported
+invocation rollback. Operators must quiesce writers and back up PostgreSQL before
+any pre-use maintenance downgrade.
 
 ## Graceful Gateway shutdown
 

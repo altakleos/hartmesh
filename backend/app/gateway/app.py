@@ -245,12 +245,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             GitHubWebhookAuthMode,
             resolve_github_webhook_auth,
         )
+        from app.mcp_tasks.replay_commitment import (
+            McpTaskReplayCommitmentError,
+            McpTaskReplayKeyring,
+        )
         from app.runtime.deployment import (
             DeploymentProfile,
             DeploymentQualification,
             describe_native_ingress,
             validate_deployment_profile,
         )
+        from deerflow.config.mcp_tasks_config import McpTasksConfig
 
         startup_deployment = getattr(startup_config, "deployment", None)
         tenant_identity = getattr(app.state, "tenant_identity", None)
@@ -291,6 +296,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             DeploymentProfile.durable_two_gateway_v1.value,
         } and bool(startup_native_ingress.sources)
         app.state.deployment_profile = startup_profile
+        configured_mcp_tasks = getattr(startup_config, "mcp_tasks", None)
+        mcp_tasks_config = configured_mcp_tasks if isinstance(configured_mcp_tasks, McpTasksConfig) else McpTasksConfig()
+        try:
+            mcp_request_commitment_keyring = McpTaskReplayKeyring.from_environment(
+                required=mcp_tasks_config.enabled,
+            )
+        except McpTaskReplayCommitmentError as exc:
+            raise RuntimeError(exc.code) from exc
+        app.state.mcp_task_replay_keyring = mcp_request_commitment_keyring
+        app.state.mcp_task_replay_keyring_confirmation = mcp_request_commitment_keyring.confirmation() if mcp_request_commitment_keyring is not None else None
         logger.info(
             "Configuration loaded successfully tenant_ref=%s tenant_digest_prefix=%s",
             tenant_identity.public_ref,
@@ -475,7 +490,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from app.gateway.services import launch_mcp_task_notification_run
         from app.mcp_tasks import McpTaskService
         from deerflow.config.extensions_config import ExtensionsConfig
-        from deerflow.config.mcp_tasks_config import McpTasksConfig
         from deerflow.mcp.task_tool_caller import McpTaskToolCaller
         from deerflow.mcp.tasks import (
             ORDINARY_MCP_TASK_DRIVER,
@@ -527,6 +541,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     raise_on_store_error=True,
                     **kwargs,
                 ),
+                request_commitment_keyring=mcp_request_commitment_keyring,
             )
             app.state.mcp_task_drivers = mcp_task_drivers
             app.state.mcp_task_service = mcp_task_service
@@ -1151,6 +1166,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             return await supervisor.status()
 
         async def topology_dependencies_ready() -> bool:
+            from deerflow.deployment.topology import (
+                multi_gateway_run_store_ready,
+            )
             from deerflow.runtime.tenant_identity import (
                 TenantIdentityV1,
                 TenantSubsystem,
@@ -1171,6 +1189,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 or getattr(scheduler_service, "running", False) is not True
                 or getattr(mcp_task_service, "running", False) is not True
                 or getattr(app.state, "mcp_tasks_available", False) is not True
+                or not multi_gateway_run_store_ready(
+                    getattr(app.state, "run_store", None),
+                )
             ):
                 return False
             return await probe(

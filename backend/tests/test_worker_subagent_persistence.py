@@ -17,6 +17,7 @@ import sys
 
 import pytest
 
+from deerflow.runtime.events.appender import RuntimeEventOwnershipLost
 from deerflow.runtime.runs.worker import _SubagentEventBuffer
 
 
@@ -56,6 +57,11 @@ class _FakeStore:
 class _BoomStore:
     async def put_batch(self, events):
         raise RuntimeError("db down")
+
+
+class _StaleWriterStore:
+    async def put_batch(self, events):
+        raise RuntimeEventOwnershipLost("runtime_event_ownership_lost")
 
 
 def _running_step(task_id="call_1", message_index=1):
@@ -152,6 +158,17 @@ async def test_store_errors_do_not_propagate():
     buffer = _SubagentEventBuffer(_BoomStore(), "t", "r")
     await buffer.add(_running_step())
     await buffer.flush()  # BoomStore raises inside; must be swallowed
+
+
+@pytest.mark.asyncio
+async def test_ownership_loss_propagates_out_of_subagent_flush() -> None:
+    buffer = _SubagentEventBuffer(_StaleWriterStore(), "t", "r")
+    await buffer.add(_running_step())
+
+    with pytest.raises(RuntimeEventOwnershipLost, match="runtime_event_ownership_lost"):
+        await buffer.flush()
+
+    assert len(buffer._pending) == 1
 
 
 @pytest.mark.asyncio

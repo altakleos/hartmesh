@@ -137,7 +137,7 @@ async def test_remote_cancel_wins_when_graph_finishes_before_owner_heartbeat():
             record,
             ctx=RunContext(
                 checkpointer=None,
-                event_store=MemoryRunEventStore(),
+                event_store=MemoryRunEventStore(run_store=store),
             ),
             agent_factory=lambda **_kwargs: _FinishingAgent(),
             graph_input={},
@@ -582,7 +582,9 @@ async def test_run_agent_handles_pending_file_args_when_stream_or_flush_raises(s
     assert len(message_events) == 1
     assert message_events[0][2][0]["tool_call_chunks"][0]["args"].endswith('"content":"partial')
     error_events = [call.args for call in bridge.publish.await_args_list if call.args[1] == "error"]
-    assert error_events[0][2]["message"] == expected_error
+    assert error_events[0][2]["message"].startswith("Runtime operation failed (reference: ")
+    assert expected_error not in error_events[0][2]["message"]
+    assert error_events[0][2]["name"] == "RuntimeFailure"
 
 
 @pytest.mark.anyio
@@ -881,7 +883,9 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
     fetched = await run_manager.get(record.run_id)
     assert fetched is not None
     assert fetched.status == RunStatus.error
-    assert fetched.error == "Connection error."
+    assert fetched.error is not None
+    assert fetched.error.startswith("Runtime operation failed (reference: ")
+    assert "Connection error." not in fetched.error
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
@@ -3005,7 +3009,7 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
 
     monkeypatch.setattr(worker_module, "_ensure_interrupted_title", _boom)
 
-    run_manager = RunManager()
+    run_manager = RunManager(store=MemoryRunStore())
     record = await run_manager.create("thread-1")
 
     bridge = SimpleNamespace(
@@ -3021,14 +3025,13 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
         async def aput(self, *args, **kwargs):
             return {}
 
-    captured_status: dict[str, Any] = {}
+    captured_projections: list[Any] = []
 
     class _ThreadStore:
-        async def update_display_name(self, thread_id, title):
-            captured_status["display_name"] = (thread_id, title)
-
-        async def update_status(self, thread_id, status):
-            captured_status["status"] = (thread_id, status)
+        async def project_run(self, projection, *, user_id):
+            del user_id
+            captured_projections.append(projection)
+            return True
 
     class _AbortingAgent:
         def __init__(self) -> None:
@@ -3063,13 +3066,16 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
     # and ``publish_end`` — i.e. the SSE stream is closed cleanly and the row
     # reflects the run outcome.
     assert helper_called.is_set()
-    assert captured_status.get("status") == ("thread-1", "interrupted")
+    assert [projection.status for projection in captured_projections] == [
+        "running",
+        "interrupted",
+    ]
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
 @pytest.mark.anyio
 async def test_worker_skips_execution_and_finalization_after_ownership_loss():
-    """A fenced worker closes its stream without starting or finalizing work."""
+    """A fenced worker cannot start work or close the replacement owner's stream."""
     run_manager = RunManager()
     record = await run_manager.create("thread-lease-lost")
     record.ownership_lost = True
@@ -3081,10 +3087,7 @@ async def test_worker_skips_execution_and_finalization_after_ownership_loss():
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
-    thread_store = SimpleNamespace(
-        update_display_name=AsyncMock(),
-        update_status=AsyncMock(),
-    )
+    thread_store = SimpleNamespace(project_run=AsyncMock())
     on_run_completed = AsyncMock()
     agent_factory = MagicMock(side_effect=AssertionError("fenced worker started the agent"))
 
@@ -3103,7 +3106,7 @@ async def test_worker_skips_execution_and_finalization_after_ownership_loss():
     )
 
     agent_factory.assert_not_called()
-    thread_store.update_display_name.assert_not_awaited()
-    thread_store.update_status.assert_not_awaited()
+    thread_store.project_run.assert_not_awaited()
     on_run_completed.assert_not_awaited()
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.publish_end.assert_not_awaited()
+    bridge.cleanup.assert_not_awaited()

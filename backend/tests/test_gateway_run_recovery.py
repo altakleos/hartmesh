@@ -38,7 +38,15 @@ class _FakeRunManager:
     """RunManager double that records startup reconciliation calls."""
 
     instances: list[_FakeRunManager] = []
-    recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
+    recovered_runs = [
+        SimpleNamespace(
+            run_id="run-1",
+            thread_id="thread-1",
+            recovery_projection_owner_worker_id="dead-worker",
+            recovery_projection_active_state_version=1,
+            checkpoint_terminal_state_version=2,
+        )
+    ]
     latest_by_thread: dict[str, list[SimpleNamespace]] = {}
 
     def __init__(
@@ -88,11 +96,17 @@ class _FakeRunManager:
 
 
 class _FakeThreadStore:
-    def __init__(self) -> None:
+    def __init__(self, *, project_result: bool = True) -> None:
+        self.project_result = project_result
+        self.run_projections: list[tuple[object, str | None]] = []
         self.status_updates: list[tuple[str, str, str | None]] = []
 
     async def update_status(self, thread_id: str, status: str, *, user_id=None) -> None:
         self.status_updates.append((thread_id, status, user_id))
+
+    async def project_run(self, projection, *, user_id=None) -> bool:
+        self.run_projections.append((projection, user_id))
+        return self.project_result
 
 
 class _FakeStreamBridge:
@@ -176,8 +190,8 @@ async def test_shutdown_flushes_delayed_recovered_stream_cleanup_immediately():
 
 
 @pytest.mark.anyio
-async def test_periodic_recovery_terminalizes_stream_without_thread_projection():
-    """Periodic recovery must close streams without racing thread projection."""
+async def test_periodic_recovery_terminalizes_stream_and_projects_with_exact_authority():
+    """Periodic recovery must close streams and use its exact terminal fence."""
     store = MemoryRunStore()
     stream_bridge = _RetainedMemoryStreamBridge()
     thread_store = _FakeThreadStore()
@@ -197,6 +211,10 @@ async def test_periodic_recovery_terminalizes_stream_without_thread_projection()
             stream_bridge,
             recovered_runs,
             cleanup_delay=60.0,
+        )
+        await gateway_deps._project_recovered_threads_error(
+            thread_store,
+            recovered_runs,
         )
 
     manager = RunManager(
@@ -224,6 +242,15 @@ async def test_periodic_recovery_terminalizes_stream_without_thread_projection()
     assert received[-1] is END_SENTINEL
     assert stream_bridge.cleanup_calls == [("periodic-orphan", 60.0)]
     assert thread_store.status_updates == []
+    assert len(thread_store.run_projections) == 1
+    projection, user_id = thread_store.run_projections[0]
+    assert projection.run_id == "periodic-orphan"
+    assert projection.thread_id == "thread-1"
+    assert projection.owner_worker_id == "dead-worker"
+    assert projection.active_state_version == 2
+    assert projection.terminal_state_version == 3
+    assert projection.status == "error"
+    assert user_id is None
 
 
 @pytest.mark.anyio
@@ -341,7 +368,15 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     thread_store = _FakeThreadStore()
     stream_bridge = _FakeStreamBridge(existing_streams={"run-1"})
     _FakeRunManager.instances.clear()
-    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
+    _FakeRunManager.recovered_runs = [
+        SimpleNamespace(
+            run_id="run-1",
+            thread_id="thread-1",
+            recovery_projection_owner_worker_id="dead-worker",
+            recovery_projection_active_state_version=4,
+            checkpoint_terminal_state_version=5,
+        )
+    ]
     _FakeRunManager.latest_by_thread = {}
 
     async def fake_init_engine_from_config(_database):
@@ -356,7 +391,11 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config, **_kwargs: _fake_context(stream_bridge))
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config, **_kwargs: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
-    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
+    monkeypatch.setattr(
+        thread_meta_module,
+        "make_thread_store",
+        lambda _sf, _store, *, run_store=None: thread_store,
+    )
     monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
     async with gateway_deps.langgraph_runtime(app, config):
@@ -367,8 +406,17 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     assert _FakeRunManager.instances[0].reconcile_calls
     assert _FakeRunManager.instances[0].reconcile_calls[0]["error"]
     assert _FakeRunManager.instances[0].reconcile_calls[0]["stop_reason"] == runtime_module.ORPHAN_RECOVERY_STOP_REASON
-    assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
-    assert thread_store.status_updates == [("thread-1", "error", None)]
+    assert _FakeRunManager.instances[0].list_by_thread_calls == []
+    assert thread_store.status_updates == []
+    assert len(thread_store.run_projections) == 1
+    projection, user_id = thread_store.run_projections[0]
+    assert projection.run_id == "run-1"
+    assert projection.thread_id == "thread-1"
+    assert projection.owner_worker_id == "dead-worker"
+    assert projection.active_state_version == 4
+    assert projection.terminal_state_version == 5
+    assert projection.status == "error"
+    assert user_id is None
     assert stream_bridge.publish_end_calls == ["run-1"]
     assert stream_bridge.cleanup_calls == [("run-1", 60.0)]
 
@@ -398,7 +446,11 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
     monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config, **_kwargs: _fake_context(_FakeStreamBridge()))
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config, **_kwargs: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
-    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: _FakeThreadStore())
+    monkeypatch.setattr(
+        thread_meta_module,
+        "make_thread_store",
+        lambda _sf, _store, *, run_store=None: _FakeThreadStore(),
+    )
     monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
     monkeypatch.setattr(
@@ -420,8 +472,8 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_success(monkeypatch):
-    """Startup recovery should not let an old orphaned run overwrite a newer terminal thread state."""
+async def test_sqlite_runtime_delegates_stale_recovery_to_projection_authority(monkeypatch):
+    """Gateway must let the atomic store seam reject an older recovered run."""
     app = FastAPI()
     app.state.tenant_identity = _TENANT_IDENTITY
     config = SimpleNamespace(
@@ -429,10 +481,18 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
         run_events=SimpleNamespace(backend="memory"),
         stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
     )
-    thread_store = _FakeThreadStore()
+    thread_store = _FakeThreadStore(project_result=False)
     stream_bridge = _FakeStreamBridge(existing_streams={"old-running"})
     _FakeRunManager.instances.clear()
-    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="old-running", thread_id="thread-1")]
+    _FakeRunManager.recovered_runs = [
+        SimpleNamespace(
+            run_id="old-running",
+            thread_id="thread-1",
+            recovery_projection_owner_worker_id="dead-worker",
+            recovery_projection_active_state_version=9,
+            checkpoint_terminal_state_version=10,
+        )
+    ]
     _FakeRunManager.latest_by_thread = {"thread-1": [SimpleNamespace(run_id="newer-success", thread_id="thread-1", status="success")]}
 
     async def fake_init_engine_from_config(_database):
@@ -447,7 +507,11 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
     monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config, **_kwargs: _fake_context(stream_bridge))
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config, **_kwargs: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
-    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
+    monkeypatch.setattr(
+        thread_meta_module,
+        "make_thread_store",
+        lambda _sf, _store, *, run_store=None: thread_store,
+    )
     monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 
@@ -456,7 +520,14 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
     await anyio.sleep(0)
 
     assert len(_FakeRunManager.instances) == 1
-    assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
+    assert _FakeRunManager.instances[0].list_by_thread_calls == []
     assert thread_store.status_updates == []
+    assert len(thread_store.run_projections) == 1
+    projection, user_id = thread_store.run_projections[0]
+    assert projection.run_id == "old-running"
+    assert projection.owner_worker_id == "dead-worker"
+    assert projection.active_state_version == 9
+    assert projection.terminal_state_version == 10
+    assert user_id is None
     assert stream_bridge.publish_end_calls == ["old-running"]
     assert stream_bridge.cleanup_calls == [("old-running", 60.0)]

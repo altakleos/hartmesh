@@ -528,7 +528,16 @@ class _GateHandler(http.server.BaseHTTPRequestHandler):
         return None
 
     def _handle(self) -> None:
-        expected = self.server.attempt_capability  # type: ignore[attr-defined]
+        capability_file = self.server.capability_file  # type: ignore[attr-defined]
+        try:
+            expected = _bounded_text(
+                capability_file.read_text(encoding="utf-8").strip(),
+                field="capability",
+                maximum=128,
+            )
+        except (OSError, UnicodeError, AcceptedSkillMaterializationError):
+            self.send_error(503, "Service Unavailable")
+            return
         authorization = self.headers.get("Authorization", "")
         supplied = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
         if not supplied or not hmac.compare_digest(supplied, expected):
@@ -638,7 +647,8 @@ def serve_gate(
 ) -> None:
     capability = _bounded_text(capability_file.read_text(encoding="utf-8").strip(), field="capability", maximum=128)
     server = _BoundedThreadingHTTPServer((listen_host, listen_port), _GateHandler)
-    server.attempt_capability = capability  # type: ignore[attr-defined]
+    del capability
+    server.capability_file = capability_file  # type: ignore[attr-defined]
     server.upstream = upstream  # type: ignore[attr-defined]
     server.receipt_file = receipt_file  # type: ignore[attr-defined]
     server.opener = urllib.request.build_opener(_NoRedirect())  # type: ignore[attr-defined]

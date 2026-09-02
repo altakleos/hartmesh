@@ -6,16 +6,22 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import case, select, text, update
+from sqlalchemy import case, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
 from deerflow.persistence.json_compat import json_match
+from deerflow.persistence.run.model import RunAdmissionCursorStateRow, RunRow
+from deerflow.persistence.sql_clock import (
+    coerce_database_wall_clock,
+    database_wall_clock_expression,
+)
 from deerflow.persistence.thread_meta.base import (
     THREAD_PINNED_METADATA_KEY,
     InvalidMetadataFilterError,
     ThreadMetaAlreadyExistsError,
+    ThreadMetaRunProjection,
     ThreadMetaStore,
 )
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -203,6 +209,108 @@ class ThreadMetaRepository(ThreadMetaStore):
                 return
             await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(status=status, updated_at=datetime.now(UTC)))
             await session.commit()
+
+    async def project_run(
+        self,
+        projection: ThreadMetaRunProjection,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> bool:
+        """Atomically project only the latest authoritative normal run."""
+
+        resolved_user_id = resolve_user_id(
+            user_id,
+            method_name="ThreadMetaRepository.project_run",
+        )
+        values: dict[str, Any] = {
+            "status": projection.status,
+        }
+        if projection.display_name is not None:
+            values["display_name"] = projection.display_name
+
+        async with self._sf() as session:
+            dialect = session.get_bind().dialect.name
+            if dialect == "sqlite":
+                # SQLite has no row-level locks. Reserve the sole writer before
+                # reading run authority so admission/takeover cannot interleave
+                # between the decision and metadata write.
+                await session.execute(text("BEGIN IMMEDIATE"))
+            candidate_statement = select(RunRow).where(
+                RunRow.run_id == projection.run_id,
+                RunRow.thread_id == projection.thread_id,
+                RunRow.operation_kind == "run",
+            )
+            if dialect == "postgresql":
+                candidate_statement = candidate_statement.with_for_update()
+            candidate = (await session.execute(candidate_statement)).scalar_one_or_none()
+            if candidate is None or candidate.admission_cursor is None:
+                await session.rollback()
+                return False
+
+            # Every admission locks/increments this singleton in its own
+            # transaction. Holding it after the candidate row uses the same
+            # lock order as interrupt/rollback admission and prevents a newer
+            # run from appearing after the latest-run check below.
+            cursor_statement = select(RunAdmissionCursorStateRow).where(RunAdmissionCursorStateRow.singleton_id == 1)
+            if dialect == "postgresql":
+                cursor_statement = cursor_statement.with_for_update()
+            cursor_state = (await session.execute(cursor_statement)).scalar_one_or_none()
+            if cursor_state is None:
+                await session.rollback()
+                return False
+
+            cursor_summary = (
+                await session.execute(
+                    select(
+                        func.max(RunRow.admission_cursor),
+                        func.count().filter(RunRow.admission_cursor.is_(None)),
+                    ).where(
+                        RunRow.thread_id == projection.thread_id,
+                        RunRow.operation_kind == "run",
+                    )
+                )
+            ).one()
+            latest_cursor, unordered_count = cursor_summary
+            if unordered_count or latest_cursor != candidate.admission_cursor or candidate.status != projection.run_status:
+                await session.rollback()
+                return False
+
+            if projection.terminal_state_version is None:
+                if candidate.owner_worker_id != projection.owner_worker_id or candidate.state_version != projection.active_state_version:
+                    await session.rollback()
+                    return False
+                if candidate.lease_expires_at is not None:
+                    database_now = await session.scalar(select(database_wall_clock_expression(dialect)))
+                    if database_now is None:
+                        await session.rollback()
+                        return False
+                    lease_expires_at = candidate.lease_expires_at
+                    if lease_expires_at.tzinfo is None:
+                        lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
+                    database_now = coerce_database_wall_clock(database_now)
+                    if lease_expires_at <= database_now:
+                        await session.rollback()
+                        return False
+            elif (
+                candidate.state_version != projection.terminal_state_version
+                or candidate.terminal_projection_owner_worker_id != projection.owner_worker_id
+                or candidate.terminal_projection_active_state_version != projection.active_state_version
+                or candidate.owner_worker_id is not None
+                or candidate.lease_expires_at is not None
+            ):
+                await session.rollback()
+                return False
+
+            # Run-derived recency is shared ordering evidence. Mint it from
+            # the database clock only after the run/cursor authority checks
+            # and their locks, never from a potentially skewed pod clock.
+            values["updated_at"] = database_wall_clock_expression(dialect)
+            statement = update(ThreadMetaRow).where(ThreadMetaRow.thread_id == projection.thread_id)
+            if resolved_user_id is not None:
+                statement = statement.where(ThreadMetaRow.user_id == resolved_user_id)
+            result = await session.execute(statement.values(**values))
+            await session.commit()
+            return result.rowcount == 1
 
     async def update_metadata(
         self,

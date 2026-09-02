@@ -56,7 +56,12 @@ class RunEventPattern:
 
 
 RUN_START_EVENT = RunEventDefinition("run.start", "trace")
+RUN_EXECUTION_STARTED_EVENT = RunEventDefinition(
+    "run.execution.started.v1",
+    "trace",
+)
 RUN_END_EVENT = RunEventDefinition("run.end", "outputs")
+RUN_TERMINAL_EVENT = RunEventDefinition("run.terminal.v1", "trace")
 RUN_ERROR_EVENT = RunEventDefinition("run.error", "error")
 LLM_HUMAN_INPUT_EVENT = RunEventDefinition("llm.human.input", "message")
 LLM_AI_RESPONSE_EVENT = RunEventDefinition("llm.ai.response", "message")
@@ -96,6 +101,7 @@ MIDDLEWARE_EVENT_TAGS = (
 JOURNAL_RUN_EVENT_DEFINITIONS = (
     RUN_START_EVENT,
     RUN_END_EVENT,
+    RUN_TERMINAL_EVENT,
     RUN_ERROR_EVENT,
     LLM_HUMAN_INPUT_EVENT,
     LLM_AI_RESPONSE_EVENT,
@@ -104,6 +110,11 @@ JOURNAL_RUN_EVENT_DEFINITIONS = (
     MEMORY_CONTEXT_EVENT,
     MEMORY_OBSERVATION_EVENT,
 )
+
+# Dispatch markers are emitted directly by the fenced worker immediately
+# before graph execution. They are fixed public events, but are not RunJournal
+# records and therefore must not expand the journal producer contract.
+WORKER_DISPATCH_RUN_EVENT_DEFINITIONS = (RUN_EXECUTION_STARTED_EVENT,)
 
 SUBAGENT_RUN_EVENT_DEFINITIONS = (
     SUBAGENT_START_EVENT,
@@ -120,6 +131,7 @@ WORKSPACE_RUN_EVENT_DEFINITIONS = (WORKSPACE_CHANGES_EVENT,)
 
 FIXED_RUN_EVENT_DEFINITIONS = (
     *JOURNAL_RUN_EVENT_DEFINITIONS,
+    *WORKER_DISPATCH_RUN_EVENT_DEFINITIONS,
     *SUBAGENT_RUN_EVENT_DEFINITIONS,
     *TOOL_RECEIPT_RUN_EVENT_DEFINITIONS,
     *WORKSPACE_RUN_EVENT_DEFINITIONS,

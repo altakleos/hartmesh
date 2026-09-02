@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
 from app.runtime.readiness import RuntimeReadinessCoordinator
-from deerflow.deployment.topology import TopologyStatusV1
+from deerflow.deployment.topology import (
+    TopologyStatusV1,
+    multi_gateway_run_store_ready,
+)
 from deerflow.extensions.capabilities import CapabilityReadinessSnapshot
-from deerflow.runtime.runs.store.base import LifecycleReadiness
+from deerflow.runtime.runs.store.base import (
+    LeaseClockAuthority,
+    LifecycleReadiness,
+)
 
 
 class _Health:
@@ -33,12 +40,17 @@ def _status(*, ready: bool, live: int, reason: str | None = None):
     )
 
 
-def _coordinator(status, *, dependency_ready=True):
+def _coordinator(status, *, dependency_ready=True, run_store=None):
+    if run_store is None:
+        run_store = SimpleNamespace(
+            lease_clock_authority=LeaseClockAuthority.database_v1,
+        )
+
     async def topology_status():
         return status
 
     async def topology_dependencies():
-        return dependency_ready
+        return dependency_ready and multi_gateway_run_store_ready(run_store)
 
     return RuntimeReadinessCoordinator(
         health_monitor=_Health(),
@@ -79,6 +91,21 @@ async def test_shared_topology_dependency_probe_is_fail_closed() -> None:
     coordinator = _coordinator(
         _status(ready=True, live=2),
         dependency_ready=False,
+    )
+
+    snapshot = await coordinator.readiness()
+
+    assert snapshot.status == "not_ready"
+    assert snapshot.reason_codes == ("topology_dependency_not_shared",)
+
+
+@pytest.mark.asyncio
+async def test_process_clock_run_store_blocks_exact_two_readiness() -> None:
+    coordinator = _coordinator(
+        _status(ready=True, live=2),
+        run_store=SimpleNamespace(
+            lease_clock_authority=LeaseClockAuthority.process_v1,
+        ),
     )
 
     snapshot = await coordinator.readiness()

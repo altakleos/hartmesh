@@ -42,7 +42,9 @@ def _fingerprint(*, tenant_digest: str, config_digit: str = "1") -> TopologyFing
         extension_artifact_digest=f"sha256:{'f' * 64}",
         extension_configuration_digest=f"sha256:{'0' * 64}",
         capability_manifest_digest="2" * 64,
-        migration_head="0027_multi_gateway_topology",
+        mcp_task_replay_keyring_confirmation_version=1,
+        mcp_task_replay_keyring_confirmation_digest=f"sha256:{'7' * 64}",
+        migration_head="0030_run_delivery_owner_backfill",
         accepted_materialization_profile="rwx_verified_copy_v2",
     )
 
@@ -70,6 +72,31 @@ async def test_postgres_registry_rejects_non_postgres_authority(tmp_path) -> Non
         assert exc_info.value.code == "topology_dependency_not_shared"
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_postgres_registry_samples_statement_clock_after_lock() -> None:
+    statements: list[str] = []
+
+    class _Dialect:
+        name = "postgresql"
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _Session:
+        def get_bind(self):
+            return _Bind()
+
+        async def scalar(self, statement):
+            statements.append(str(statement))
+            return datetime.now(UTC)
+
+    observed = await PostgresTopologyRegistry._database_now(_Session())
+
+    assert observed.tzinfo is not None
+    assert len(statements) == 1
+    assert "clock_timestamp" in statements[0]
 
 
 @pytest.mark.asyncio

@@ -184,6 +184,10 @@ class PreparedLaunch:
     caller_intent_json: Mapping[str, Any] | None = None
     caller_intent_digest: str | None = None
     caller_intent_digest_version: str | None = None
+    recovery_payload_json: Mapping[str, Any] | None = field(
+        default=None,
+        repr=False,
+    )
     principal: InvocationPrincipal = field(default_factory=lambda: InvocationPrincipal())
     require_existing_thread: bool = False
 
@@ -197,6 +201,14 @@ class PreparedLaunch:
             if not isinstance(self.caller_intent_json, Mapping):
                 raise TypeError("caller_intent_json must be a mapping or None")
             object.__setattr__(self, "caller_intent_json", _freeze_host_value(self.caller_intent_json))
+        if self.recovery_payload_json is not None:
+            if not isinstance(self.recovery_payload_json, Mapping):
+                raise TypeError("recovery_payload_json must be a mapping or None")
+            object.__setattr__(
+                self,
+                "recovery_payload_json",
+                _freeze_host_value(self.recovery_payload_json),
+            )
 
 
 @dataclass(frozen=True)
