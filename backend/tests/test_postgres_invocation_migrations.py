@@ -1782,6 +1782,27 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
             ]
             assert await connection.scalar(sa.text("SELECT count(*) FROM run_lifecycle_events")) == 0
 
+        # The additive feature tail is structurally reversible before any
+        # recovery-policy, admission-cursor, or terminal-projection semantics
+        # have been used. Representative legacy run and MCP state must survive
+        # that maintenance rollback and re-upgrade unchanged.
+        await _downgrade(engine, schema, _PRE_FEATURE_REVISION)
+        downgraded_columns = await _column_contract(engine, schema, "runs")
+        assert _ACCEPTED_COLUMNS.keys().isdisjoint(downgraded_columns)
+        async with engine.connect() as connection:
+            table_names = set(await connection.run_sync(lambda sync: sa.inspect(sync).get_table_names()))
+            assert "run_lifecycle_events" not in table_names
+            assert "run_lifecycle_cursor_state" not in table_names
+            assert "mcp_tasks" in table_names
+            assert await connection.scalar(sa.text("SELECT count(*) FROM runs")) == 2
+        assert await _legacy_snapshot(engine) == legacy_before
+        assert await _mcp_task_snapshot(engine) == mcp_task_before
+
+        await _upgrade(engine, schema, "head")
+        await _assert_postgres_head_contract(engine, schema)
+        assert await _legacy_snapshot(engine) == legacy_before
+        assert await _mcp_task_snapshot(engine) == mcp_task_before
+
         repository = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
         legacy = await repository.get("legacy-normal", user_id=None)
         auxiliary = await repository.get("legacy-auxiliary", user_id=None)
@@ -1920,36 +1941,33 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
         assert summary["accepted_context_digest"] == "3" * 64
         assert summary["extension_manifest_digest"] == "7" * 64
 
-        # Feature-tail downgrade is structurally supported back to the real
-        # pre-invocation main-line schema. Invocation evidence and lifecycle
-        # history are not representable there, while unrelated MCP task state
-        # must survive unchanged.
-        await _downgrade(engine, schema, _PRE_FEATURE_REVISION)
-        downgraded_columns = await _column_contract(engine, schema, "runs")
-        assert _ACCEPTED_COLUMNS.keys().isdisjoint(downgraded_columns)
+        # Runtime admission consumed the recovery/cursor schema. A database
+        # downgrade would erase authoritative evidence, so the migration must
+        # now fail closed while leaving the head and every row intact.
+        with pytest.raises(
+            RuntimeError,
+            match="run_recovery_policy_rollback_blocked",
+        ):
+            await _downgrade(engine, schema, _PRE_FEATURE_REVISION)
         async with engine.connect() as connection:
-            table_names = set(await connection.run_sync(lambda sync: sa.inspect(sync).get_table_names()))
-            assert "run_lifecycle_events" not in table_names
-            assert "run_lifecycle_cursor_state" not in table_names
-            assert "mcp_tasks" in table_names
+            assert await connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == _HEAD_REVISION
             assert await connection.scalar(sa.text("SELECT count(*) FROM runs")) == 4
         assert await _legacy_snapshot(engine) == legacy_before
         assert await _mcp_task_snapshot(engine) == mcp_task_before
 
-        await _upgrade(engine, schema, "head")
         await _assert_postgres_head_contract(engine, schema)
-        assert await _legacy_snapshot(engine) == legacy_before
-        assert await _mcp_task_snapshot(engine) == mcp_task_before
-        reupgraded = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
-        retained = await reupgraded.get("qualified-run", user_id=None)
+        retained = await repository.get("qualified-run", user_id=None)
         assert retained is not None
-        assert retained["state_version"] == 0
-        assert retained["origin_json"] is None
-        assert retained["external_scope"] is None
-        assert retained["caller_intent_json"] is None
+        assert retained["state_version"] == 4
+        assert retained["origin_json"] == _accepted_fields()["origin_json"]
+        assert retained["external_scope"] == scope_for_http(
+            "user",
+            "qualified-owner",
+        )
+        assert retained["caller_intent_json"] == caller_intent.to_persisted()
 
         post_round_trip_intent = CanonicalCallerIntent({"input": {"messages": []}})
-        post_round_trip = await reupgraded.ensure_run_atomic(
+        post_round_trip = await repository.ensure_run_atomic(
             "post-round-trip",
             thread_id="thread-post-round-trip",
             owner_worker_id="worker-post-round-trip",
@@ -1966,5 +1984,5 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
         )
         assert post_round_trip.outcome is AdmissionOutcome.created
         assert post_round_trip.row["state_version"] == 1
-        post_events = await reupgraded.list_lifecycle_events(run_id="post-round-trip")
+        post_events = await repository.list_lifecycle_events(run_id="post-round-trip")
         assert [(event["lifecycle_type"], event["state_version"]) for event in post_events] == [(LifecycleType.accepted, 1)]
