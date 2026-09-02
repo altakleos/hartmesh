@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,7 @@ from deerflow.deployment.topology import (
     load_topology_inventory,
     validate_topology_inventory_runtime_state,
 )
+from deerflow.runtime.runs.store.base import LeaseClockAuthority
 
 _INVENTORY = Path(__file__).resolve().parents[2] / "contracts" / "deployment" / "durable_two_gateway_v1.topology.json"
 _BACKEND = Path(__file__).resolve().parents[1]
@@ -61,15 +63,50 @@ def test_inventory_has_no_duplicate_authorities_or_unbounded_text() -> None:
         assert len(dependency.requirement.encode("utf-8")) <= 512
 
 
+def test_run_store_inventory_pins_database_lease_clock_authority() -> None:
+    inventory = load_topology_inventory(_INVENTORY)
+    dependency = next(item for item in inventory.dependencies if item.id == "run_manager_store_and_worker_heartbeat")
+
+    assert "lease_clock=database_v1" in dependency.required_adapter
+    assert "PostgreSQL database time" in dependency.requirement
+
+
 def test_inventory_is_a_startup_guard_for_built_runtime_state() -> None:
     inventory = load_topology_inventory(_INVENTORY)
     required = {field for dependency in inventory.dependencies for field in dependency.runtime_state_fields}
     state = type("RuntimeState", (), {})()
     for field in required:
         setattr(state, field, object())
+    state.run_store = SimpleNamespace(
+        lease_clock_authority=LeaseClockAuthority.database_v1,
+    )
     state.topology_service_registry = build_multi_gateway_topology_service_registry()
 
     assert validate_topology_inventory_runtime_state(state, path=_INVENTORY) == inventory
     delattr(state, sorted(required)[0])
+    with pytest.raises(TopologyError, match="topology_dependency_not_shared"):
+        validate_topology_inventory_runtime_state(state, path=_INVENTORY)
+
+
+@pytest.mark.parametrize(
+    "run_store",
+    [
+        SimpleNamespace(
+            lease_clock_authority=LeaseClockAuthority.process_v1,
+        ),
+        SimpleNamespace(),
+    ],
+)
+def test_inventory_rejects_run_store_without_database_lease_clock(
+    run_store: object,
+) -> None:
+    inventory = load_topology_inventory(_INVENTORY)
+    required = {field for dependency in inventory.dependencies for field in dependency.runtime_state_fields}
+    state = type("RuntimeState", (), {})()
+    for field in required:
+        setattr(state, field, object())
+    state.run_store = run_store
+    state.topology_service_registry = build_multi_gateway_topology_service_registry()
+
     with pytest.raises(TopologyError, match="topology_dependency_not_shared"):
         validate_topology_inventory_runtime_state(state, path=_INVENTORY)

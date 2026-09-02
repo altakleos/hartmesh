@@ -27,9 +27,18 @@ from langgraph.types import Overwrite
 
 from deerflow.agents.thread_state import merge_message_writes
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
+from deerflow.runtime.events.catalog import RUN_EXECUTION_STARTED_EVENT
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
-from deerflow.runtime.runs.worker import RunContext, _checkpoint_thread_lock, _linearize_delta_checkpoint_resume, run_agent
+from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.runs.worker import (
+    RunContext,
+    _checkpoint_id,
+    _checkpoint_thread_lock,
+    _linearize_delta_checkpoint_resume,
+    run_agent,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -247,17 +256,14 @@ async def test_run_agent_streams_from_the_linearized_delta_resume(tmp_path):
         branch_history = await read_accessor.ahistory(_run_config("worker-branch"), limit=20)
         base = next(snapshot for snapshot in branch_history if "h2" not in _ids(snapshot))
 
-        run_manager = RunManager()
+        run_manager = RunManager(store=MemoryRunStore())
         record = await run_manager.create("worker-branch")
         bridge = SimpleNamespace(
             publish=AsyncMock(),
             publish_end=AsyncMock(),
             cleanup=AsyncMock(),
         )
-        thread_store = SimpleNamespace(
-            update_display_name=AsyncMock(),
-            update_status=AsyncMock(),
-        )
+        thread_store = SimpleNamespace(project_run=AsyncMock(return_value=True))
         created_graphs: list[Any] = []
 
         def agent_factory(*, config):
@@ -288,7 +294,82 @@ async def test_run_agent_streams_from_the_linearized_delta_resume(tmp_path):
         final = await final_accessor.aget(_run_config("worker-branch"))
         assert _ids(final) == ["h1", "a1", "h2", "a2-new"]
         assert final.values["title"] == "User renamed title"
-        thread_store.update_display_name.assert_awaited_once_with("worker-branch", "User renamed title")
+        terminal_projection = thread_store.project_run.await_args_list[-1].args[0]
+        assert terminal_projection.thread_id == "worker-branch"
+        assert terminal_projection.status == "idle"
+        assert terminal_projection.display_name == "User renamed title"
+
+
+async def test_dispatch_marker_uses_post_linearization_root_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A marker-only crash must not mistake linearization for graph progress."""
+
+    checkpointer = InMemorySaver()
+    _, original_head, selected = await _seed_two_turns(
+        checkpointer,
+        _DeltaChannelState,
+        "worker-marker-baseline",
+    )
+    original_head_id = original_head.config["configurable"]["checkpoint_id"]
+    selected_id = selected.config["configurable"]["checkpoint_id"]
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("worker-marker-baseline")
+    event_store = MemoryRunEventStore(run_store=run_store)
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    observed_dispatch_head: str | None = None
+
+    async def crash_after_marker(point, _record):
+        nonlocal observed_dispatch_head
+        if point != "post_dispatch_marker_before_graph":
+            return
+        observed_dispatch_head = _checkpoint_id(
+            await checkpointer.aget_tuple(
+                _run_config("worker-marker-baseline"),
+            )
+        )
+        raise RuntimeError("injected marker-only process loss")
+
+    monkeypatch.setattr(
+        "deerflow.runtime.kubernetes_qualification.qualification_barrier",
+        crash_after_marker,
+    )
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=checkpointer,
+            event_store=event_store,
+            checkpoint_channel_mode="delta",
+        ),
+        agent_factory=lambda *, config: _build_answer_graph(
+            _DeltaChannelState,
+            checkpointer,
+            "must-not-run",
+        ),
+        graph_input={
+            "messages": [HumanMessage(content="q2", id="h2")],
+        },
+        config=_run_config("worker-marker-baseline", selected_id),
+        stream_modes=["values"],
+    )
+
+    marker_events = await event_store.list_events(
+        "worker-marker-baseline",
+        record.run_id,
+        event_types=[RUN_EXECUTION_STARTED_EVENT.event_type],
+    )
+    assert len(marker_events) == 1
+    assert observed_dispatch_head is not None
+    assert observed_dispatch_head != original_head_id
+    assert marker_events[0]["content"]["pre_graph_checkpoint_id"] == (observed_dispatch_head)
 
 
 async def test_run_agent_serializes_resume_preparation_with_checkpoint_writes(monkeypatch):

@@ -3,20 +3,30 @@
 Uses a temp SQLite DB to test ORM-backed CRUD operations.
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from deerflow.persistence.base import Base
 from deerflow.persistence.run import RunRepository
-from deerflow.persistence.run import sql as run_sql
+from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.sql_clock import database_wall_clock_expression
 from deerflow.runtime import CancelOutcome, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.store.base import (
+    ExecutionTakeoverOutcome,
+    LeaseClockAuthority,
+    LifecycleTransition,
+    LifecycleType,
+    RecoveryPolicy,
     RunStore,
     ThreadOperationReleaseOutcome,
 )
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
 async def _make_repo(tmp_path):
@@ -36,22 +46,21 @@ async def _cleanup():
 def test_auxiliary_release_uses_statement_time_after_lock_acquisition() -> None:
     """Lease fencing cannot use PostgreSQL's transaction-start timestamp."""
 
-    wall_clock = getattr(run_sql, "_release_wall_clock_expression", None)
-    assert wall_clock is not None
     postgres_sql = str(
-        select(wall_clock("postgresql")).compile(
+        select(database_wall_clock_expression("postgresql")).compile(
             dialect=postgresql.dialect(),
         )
     ).lower()
     sqlite_sql = str(
-        select(wall_clock("sqlite")).compile(
+        select(database_wall_clock_expression("sqlite")).compile(
             dialect=sqlite.dialect(),
         )
     ).lower()
 
     assert "clock_timestamp" in postgres_sql
     assert "now()" not in postgres_sql
-    assert "current_timestamp" in sqlite_sql
+    assert "strftime" in sqlite_sql
+    assert "current_timestamp" not in sqlite_sql
 
 
 class _CustomRunStoreWithoutProgress(RunStore):
@@ -112,6 +121,348 @@ async def test_update_run_progress_defaults_to_noop_for_custom_store():
     await store.update_run_progress("r1", total_tokens=1)
 
 
+def test_run_store_lease_clock_authority_capabilities_are_explicit() -> None:
+    assert _CustomRunStoreWithoutProgress().lease_clock_authority is LeaseClockAuthority.process_v1
+    assert MemoryRunStore().lease_clock_authority is LeaseClockAuthority.process_v1
+    assert RunRepository.lease_clock_authority is LeaseClockAuthority.database_v1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("clock_offset_hours", (-24, 24))
+@pytest.mark.parametrize("keyed", (False, True))
+async def test_sql_duration_admission_uses_database_clock(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    clock_offset_hours: int,
+    keyed: bool,
+) -> None:
+    from deerflow.persistence.run import sql as run_sql
+
+    repo = await _make_repo(tmp_path)
+    actual_now = datetime.now(UTC)
+
+    class SkewedProcessDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = actual_now + timedelta(hours=clock_offset_hours)
+            return value if tz is not None else value.replace(tzinfo=None)
+
+    monkeypatch.setattr(run_sql, "datetime", SkewedProcessDateTime)
+    common = {
+        "thread_id": f"thread-duration-{clock_offset_hours}-{keyed}",
+        "owner_worker_id": "worker-duration",
+        "lease_duration_seconds": 60,
+    }
+    try:
+        if keyed:
+            result = await repo.ensure_run_atomic(
+                f"run-duration-{clock_offset_hours}-{keyed}",
+                external_scope="service:test",
+                external_key=f"key-{clock_offset_hours}",
+                request_digest="a" * 64,
+                request_digest_version="sha256-canonical-json-v1",
+                caller_intent_json={"version": 1},
+                caller_intent_digest="b" * 64,
+                caller_intent_digest_version="caller-intent-canonical-json-v1",
+                **common,
+            )
+            row = result.row
+        else:
+            row, _ = await repo.create_thread_operation_atomic(
+                f"run-duration-{clock_offset_hours}-{keyed}",
+                **common,
+            )
+
+        deadline = datetime.fromisoformat(row["lease_expires_at"])
+        assert actual_now + timedelta(seconds=55) <= deadline
+        assert deadline <= actual_now + timedelta(seconds=65)
+        admitted_at = datetime.fromisoformat(row["created_at"])
+        assert actual_now - timedelta(seconds=5) <= admitted_at
+        assert admitted_at <= actual_now + timedelta(seconds=5)
+
+        assert await repo.update_lease(
+            row["run_id"],
+            owner_worker_id="worker-duration",
+            lease_expires_at=(actual_now - timedelta(seconds=1)).isoformat(),
+        )
+        expired = await repo.list_inflight_with_expired_lease(grace_seconds=0)
+        assert row["run_id"] in {candidate["run_id"] for candidate in expired}
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("clock_offset_hours", (-24, 24))
+async def test_sql_duration_renewal_and_owner_authority_use_database_clock(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    clock_offset_hours: int,
+) -> None:
+    from deerflow.persistence.run import sql as run_sql
+
+    repo = await _make_repo(tmp_path)
+    actual_now = datetime.now(UTC)
+    try:
+        await repo.put(
+            "run-duration-renewal",
+            thread_id="thread-duration-renewal",
+            status="running",
+            owner_worker_id="worker-duration",
+            lease_expires_at=(actual_now + timedelta(minutes=5)).isoformat(),
+        )
+        admitted = await repo.get("run-duration-renewal")
+        assert admitted is not None
+
+        class SkewedProcessDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = actual_now + timedelta(hours=clock_offset_hours)
+                return value if tz is not None else value.replace(tzinfo=None)
+
+        monkeypatch.setattr(run_sql, "datetime", SkewedProcessDateTime)
+        assert await repo.execution_owner_authorized(
+            "run-duration-renewal",
+            owner_worker_id="worker-duration",
+            state_version=admitted["state_version"],
+        )
+
+        assert await repo.update_lease(
+            "run-duration-renewal",
+            owner_worker_id="worker-duration",
+            lease_duration_seconds=90,
+        )
+        updated = await repo.get("run-duration-renewal")
+        assert updated is not None
+        updated_deadline = datetime.fromisoformat(updated["lease_expires_at"])
+        assert actual_now + timedelta(seconds=85) <= updated_deadline
+        assert updated_deadline <= actual_now + timedelta(seconds=95)
+
+        renewal = await repo.renew_lease(
+            "run-duration-renewal",
+            owner_worker_id="worker-duration",
+            lease_duration_seconds=60,
+        )
+
+        assert renewal.renewed is True
+        assert renewal.lease_expires_at is not None
+        deadline = datetime.fromisoformat(renewal.lease_expires_at)
+        assert actual_now + timedelta(seconds=55) <= deadline
+        assert deadline <= actual_now + timedelta(seconds=65)
+        retained = await repo.get("run-duration-renewal")
+        assert retained is not None
+        assert retained["lease_expires_at"] == renewal.lease_expires_at
+
+        assert await repo.update_lease(
+            "run-duration-renewal",
+            owner_worker_id="worker-duration",
+            lease_expires_at=(actual_now - timedelta(seconds=1)).isoformat(),
+        )
+        assert not await repo.execution_owner_authorized(
+            "run-duration-renewal",
+            owner_worker_id="worker-duration",
+            state_version=admitted["state_version"],
+        )
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("clock_offset_hours", (-24, 24))
+async def test_sql_duration_takeover_uses_database_clock(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    clock_offset_hours: int,
+) -> None:
+    from deerflow.persistence.run import sql as run_sql
+
+    repo = await _make_repo(tmp_path)
+    actual_now = datetime.now(UTC)
+    try:
+        await repo.put(
+            "run-duration-takeover",
+            thread_id="thread-duration-takeover",
+            status="running",
+            owner_worker_id="worker-before",
+            lease_expires_at=(actual_now - timedelta(minutes=1)).isoformat(),
+            recovery_policy=RecoveryPolicy.exact_two_takeover_v1,
+            recovery_payload_json={"version": 1},
+        )
+        admitted = await repo.get("run-duration-takeover")
+        assert admitted is not None
+
+        class SkewedProcessDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = actual_now + timedelta(hours=clock_offset_hours)
+                return value if tz is not None else value.replace(tzinfo=None)
+
+        monkeypatch.setattr(run_sql, "datetime", SkewedProcessDateTime)
+        claim = await repo.claim_for_execution_takeover(
+            "run-duration-takeover",
+            new_owner_worker_id="worker-after",
+            lease_duration_seconds=60,
+            grace_seconds=0,
+            expected_state_version=admitted["state_version"],
+        )
+
+        assert claim.outcome is ExecutionTakeoverOutcome.claimed
+        assert claim.row is not None
+        deadline = datetime.fromisoformat(claim.row["lease_expires_at"])
+        assert actual_now + timedelta(seconds=55) <= deadline
+        assert deadline <= actual_now + timedelta(seconds=65)
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.anyio
+async def test_sql_duration_renewal_rechecks_expiry_after_lock_wait(tmp_path) -> None:
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'duration-renewal-lock.db'}",
+    )
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    store = RunRepository(session_factory)
+    original_deadline = datetime.now(UTC) + timedelta(milliseconds=250)
+    try:
+        await store.put(
+            "run-duration-renewal-lock",
+            thread_id="thread-duration-renewal-lock",
+            status="running",
+            owner_worker_id="worker-duration",
+            lease_expires_at=original_deadline.isoformat(),
+        )
+        async with session_factory() as blocker:
+            await blocker.execute(text("BEGIN IMMEDIATE"))
+            locked = await blocker.scalar(
+                select(RunRow).where(
+                    RunRow.run_id == "run-duration-renewal-lock",
+                )
+            )
+            assert locked is not None
+            renewal_task = asyncio.create_task(
+                store.renew_lease(
+                    "run-duration-renewal-lock",
+                    owner_worker_id="worker-duration",
+                    lease_duration_seconds=60,
+                )
+            )
+            await asyncio.sleep(0.4)
+            assert renewal_task.done() is False
+            await blocker.commit()
+
+        renewal = await asyncio.wait_for(renewal_task, timeout=2)
+        assert renewal.renewed is False
+        retained = await store.get("run-duration-renewal-lock")
+        assert retained is not None
+        assert datetime.fromisoformat(retained["lease_expires_at"]) == original_deadline
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_memory_duration_path_uses_process_clock_and_returns_deadlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.runtime.runs.store import memory as memory_store
+
+    actual_now = datetime.now(UTC)
+
+    class FastProcessDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = actual_now + timedelta(hours=24)
+            return value if tz is not None else value.replace(tzinfo=None)
+
+    monkeypatch.setattr(memory_store, "datetime", FastProcessDateTime)
+    store = MemoryRunStore()
+    row, _ = await store.create_thread_operation_atomic(
+        "run-memory-duration",
+        thread_id="thread-memory-duration",
+        owner_worker_id="worker-memory",
+        lease_duration_seconds=60,
+    )
+    deadline = datetime.fromisoformat(row["lease_expires_at"])
+    assert deadline == actual_now + timedelta(hours=24, seconds=60)
+
+    renewal = await store.renew_lease(
+        "run-memory-duration",
+        owner_worker_id="worker-memory",
+        lease_duration_seconds=120,
+    )
+    assert renewal.renewed is True
+    assert renewal.lease_expires_at == (actual_now + timedelta(hours=24, seconds=120)).isoformat()
+    assert await store.execution_owner_authorized(
+        "run-memory-duration",
+        owner_worker_id="worker-memory",
+        state_version=row["state_version"],
+    )
+
+    takeover_candidate, _ = await store.create_thread_operation_atomic(
+        "run-memory-duration-takeover",
+        thread_id="thread-memory-duration-takeover",
+        owner_worker_id="worker-before",
+        lease_expires_at=(actual_now - timedelta(seconds=1)).isoformat(),
+        recovery_policy=RecoveryPolicy.exact_two_takeover_v1,
+        recovery_payload_json={"version": 1},
+    )
+    takeover = await store.claim_for_execution_takeover(
+        "run-memory-duration-takeover",
+        new_owner_worker_id="worker-after",
+        lease_duration_seconds=60,
+        grace_seconds=0,
+        expected_state_version=takeover_candidate["state_version"],
+    )
+    assert takeover.outcome is ExecutionTakeoverOutcome.claimed
+    assert takeover.row is not None
+    assert takeover.row["lease_expires_at"] == (actual_now + timedelta(hours=24, seconds=60)).isoformat()
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        await store.update_lease(
+            "run-memory-duration",
+            owner_worker_id="worker-memory",
+            lease_expires_at=deadline.isoformat(),
+            lease_duration_seconds=60,
+        )
+    with pytest.raises(ValueError, match="positive integer"):
+        await store.update_lease(
+            "run-memory-duration",
+            owner_worker_id="worker-memory",
+            lease_duration_seconds=True,
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+async def test_memory_atomic_replacement_rejects_expired_exact_two_predecessor(
+    strategy: str,
+) -> None:
+    """Generic replacement cannot consume exact-two execution authority."""
+
+    store = MemoryRunStore()
+    predecessor, _ = await store.create_thread_operation_atomic(
+        "run-memory-exact-two-predecessor",
+        thread_id="thread-memory-exact-two-predecessor",
+        owner_worker_id="worker-before",
+        lease_expires_at=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+        recovery_policy=RecoveryPolicy.exact_two_takeover_v1,
+        recovery_payload_json={"version": 1},
+    )
+
+    with pytest.raises(ConflictError) as raised:
+        await store.create_thread_operation_atomic(
+            "run-memory-exact-two-replacement",
+            thread_id=predecessor["thread_id"],
+            owner_worker_id="worker-after",
+            multitask_strategy=strategy,
+            grace_seconds=0,
+        )
+
+    assert raised.value.active_run_id == predecessor["run_id"]
+    assert await store.get(predecessor["run_id"]) == predecessor
+    assert await store.get("run-memory-exact-two-replacement") is None
+
+
 @pytest.mark.anyio
 async def test_legacy_create_run_atomic_store_remains_compatible():
     store = _CustomRunStoreWithoutProgress()
@@ -145,6 +496,41 @@ class TestRunRepository:
         assert row["thread_id"] == "t1"
         assert row["status"] == "pending"
         await _cleanup()
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+    async def test_atomic_replacement_rejects_expired_exact_two_predecessor(
+        self,
+        tmp_path,
+        strategy: str,
+    ) -> None:
+        """SQL replacement leaves an expired exact-two row byte-for-byte intact."""
+
+        repo = await _make_repo(tmp_path)
+        try:
+            predecessor, _ = await repo.create_thread_operation_atomic(
+                "run-sql-exact-two-predecessor",
+                thread_id="thread-sql-exact-two-predecessor",
+                owner_worker_id="worker-before",
+                lease_expires_at=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+                recovery_policy=RecoveryPolicy.exact_two_takeover_v1,
+                recovery_payload_json={"version": 1},
+            )
+
+            with pytest.raises(ConflictError) as raised:
+                await repo.create_thread_operation_atomic(
+                    "run-sql-exact-two-replacement",
+                    thread_id=predecessor["thread_id"],
+                    owner_worker_id="worker-after",
+                    multitask_strategy=strategy,
+                    grace_seconds=0,
+                )
+
+            assert raised.value.active_run_id == predecessor["run_id"]
+            assert await repo.get(predecessor["run_id"]) == predecessor
+            assert await repo.get("run-sql-exact-two-replacement") is None
+        finally:
+            await _cleanup()
 
     @pytest.mark.anyio
     async def test_put_is_idempotent_for_retried_writes(self, tmp_path):
@@ -293,7 +679,7 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_update_run_completion(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.put("r1", thread_id="t1", status="running")
+        await repo.put("r1", thread_id="t1", status="success")
         updated = await repo.update_run_completion(
             "r1",
             status="success",
@@ -318,6 +704,83 @@ class TestRunRepository:
         assert row["last_ai_message"] == "The answer is 42"
         assert row["first_human_message"] == "What is the meaning?"
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_run_completion_requires_exact_terminal_projection(
+        self,
+        tmp_path,
+    ):
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "r1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+        )
+        active = await repo.get("r1")
+        transition = await repo.transition_owned_run_atomic(
+            "r1",
+            expected_state_version=active["state_version"],
+            expected_statuses=("running",),
+            expected_owner_worker_id="worker-a",
+            require_unexpired_lease=True,
+            transition=LifecycleTransition(
+                lifecycle_type=LifecycleType.succeeded,
+                status="success",
+            ),
+        )
+        assert transition.applied is True
+        terminal = transition.row
+        assert terminal is not None
+
+        assert (
+            await repo.update_run_completion(
+                "r1",
+                status="success",
+                total_tokens=999,
+            )
+            is False
+        )
+        assert (
+            await repo.update_run_completion(
+                "r1",
+                status="success",
+                total_tokens=999,
+                expected_owner_worker_id="worker-a",
+                expected_active_state_version=active["state_version"] + 1,
+                expected_terminal_state_version=terminal["state_version"],
+            )
+            is False
+        )
+        assert await repo.update_run_completion(
+            "r1",
+            status="success",
+            total_tokens=42,
+            expected_owner_worker_id="worker-a",
+            expected_active_state_version=active["state_version"],
+            expected_terminal_state_version=terminal["state_version"],
+        )
+        stored = await repo.get("r1")
+        assert stored["total_tokens"] == 42
+
+    @pytest.mark.anyio
+    async def test_update_run_completion_never_terminalizes_active_row(
+        self,
+        tmp_path,
+    ):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="running")
+
+        assert (
+            await repo.update_run_completion(
+                "r1",
+                status="error",
+                total_tokens=1,
+            )
+            is False
+        )
+        assert (await repo.get("r1"))["status"] == "running"
 
     @pytest.mark.anyio
     async def test_update_run_completion_returns_false_for_missing_row(self, tmp_path):
@@ -367,6 +830,7 @@ class TestRunRepository:
         """update_run_completion does not overwrite thread_id or assistant_id."""
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", assistant_id="agent1", status="running")
+        await repo.update_status("r1", "success")
         await repo.update_run_completion("r1", status="success", total_tokens=100)
         row = await repo.get("r1")
         assert row["thread_id"] == "t1"
@@ -427,6 +891,7 @@ class TestRunRepository:
     async def test_update_run_progress_skips_terminal_runs(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", status="running")
+        await repo.update_status("r1", "success")
         await repo.update_run_completion("r1", status="success", total_tokens=100, llm_call_count=1)
 
         await repo.update_run_progress("r1", total_tokens=200, llm_call_count=2)
@@ -441,6 +906,7 @@ class TestRunRepository:
     async def test_aggregate_tokens_by_thread_counts_completed_runs_only(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("success-run", thread_id="t1", status="running")
+        await repo.update_status("success-run", "success")
         await repo.update_run_completion(
             "success-run",
             status="success",
@@ -452,6 +918,7 @@ class TestRunRepository:
             middleware_tokens=5,
         )
         await repo.put("error-run", thread_id="t1", status="running")
+        await repo.update_status("error-run", "error")
         await repo.update_run_completion(
             "error-run",
             status="error",
@@ -462,15 +929,15 @@ class TestRunRepository:
             subagent_tokens=10,
         )
         await repo.put("running-run", thread_id="t1", status="running")
-        await repo.update_run_completion(
+        await repo.update_run_progress(
             "running-run",
-            status="running",
             total_input_tokens=900,
             total_output_tokens=99,
             total_tokens=999,
             lead_agent_tokens=999,
         )
         await repo.put("other-thread-run", thread_id="t2", status="running")
+        await repo.update_status("other-thread-run", "success")
         await repo.update_run_completion(
             "other-thread-run",
             status="success",
@@ -496,6 +963,7 @@ class TestRunRepository:
     async def test_aggregate_tokens_by_thread_can_include_active_runs(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("success-run", thread_id="t1", status="running")
+        await repo.update_status("success-run", "success")
         await repo.update_run_completion("success-run", status="success", total_tokens=100, lead_agent_tokens=100)
         await repo.put("running-run", thread_id="t1", status="running")
         await repo.update_run_progress("running-run", total_tokens=25, lead_agent_tokens=20, subagent_tokens=5)
@@ -828,6 +1296,60 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_heartbeat_disabled_database_clock_store_keeps_null_lease_compatibility(self, tmp_path):
+        """Database-clock capability must not require leases in single-worker mode."""
+        from deerflow.config.run_ownership_config import RunOwnershipConfig
+
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(
+            store=repo,
+            worker_id="worker-heartbeat-disabled",
+            run_ownership_config=RunOwnershipConfig(
+                lease_seconds=30,
+                grace_seconds=10,
+                heartbeat_enabled=False,
+            ),
+        )
+        worker = asyncio.sleep(0)
+        try:
+            assert repo.lease_clock_authority is LeaseClockAuthority.database_v1
+            assert manager.heartbeat_enabled is False
+
+            record = await manager.create_or_reject(
+                "thread-heartbeat-disabled-run",
+                candidate_run_id="00000000-0000-4000-8000-000000000201",
+            )
+            assert record.lease_expires_at is None
+            persisted = await repo.get(record.run_id)
+            assert persisted is not None
+            assert persisted["lease_expires_at"] is None
+
+            task = await manager.attach_worker_once(
+                record.run_id,
+                worker,
+                asyncio.create_task,
+            )
+            await task
+            assert record.task is task
+            assert record.attachment_supervised is False
+
+            reservation_thread_id = "thread-heartbeat-disabled-reservation"
+            async with manager.reserve_thread_operation(
+                reservation_thread_id,
+                kind=ThreadOperationKind.checkpoint_write,
+            ):
+                reservations = [row for row in await repo.list_inflight() if row["thread_id"] == reservation_thread_id]
+                assert len(reservations) == 1
+                assert reservations[0]["operation_kind"] == ThreadOperationKind.checkpoint_write.value
+                assert reservations[0]["lease_expires_at"] is None
+
+            assert all(row["thread_id"] != reservation_thread_id for row in await repo.list_inflight())
+        finally:
+            if worker.cr_frame is not None:
+                worker.close()
+            await _cleanup()
+
+    @pytest.mark.anyio
     async def test_checkpoint_write_reservation_blocks_interrupt_run_on_sql_store(self, tmp_path):
         """An interrupt-strategy run cannot displace a durable checkpoint writer."""
         repo = await _make_repo(tmp_path)
@@ -914,6 +1436,50 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_exact_auxiliary_release_treats_database_clock_equality_as_expired(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A lease ending exactly at authoritative DB time no longer owns release."""
+        from sqlalchemy import literal
+
+        from deerflow.persistence.run import sql as run_sql
+
+        database_now = datetime(2040, 1, 2, 3, 4, 5, 678000, tzinfo=UTC)
+        monkeypatch.setattr(
+            run_sql,
+            "database_wall_clock_expression",
+            lambda _dialect_name: literal(database_now.isoformat()),
+        )
+        repo = await _make_repo(tmp_path)
+        run_id = "checkpoint-release-at-database-now"
+        thread_id = "thread-release-at-database-now"
+        try:
+            await repo.create_thread_operation_atomic(
+                run_id,
+                thread_id=thread_id,
+                owner_worker_id="worker-owner",
+                lease_expires_at=database_now.isoformat(),
+                operation_kind=ThreadOperationKind.checkpoint_write.value,
+                user_id="reservation-owner",
+            )
+
+            result = await repo.release_thread_operation_owned(
+                run_id,
+                thread_id=thread_id,
+                operation_kind=ThreadOperationKind.checkpoint_write.value,
+                user_id="reservation-owner",
+                expected_owner_worker_id="worker-owner",
+                require_unexpired_lease=True,
+            )
+
+            assert result.outcome is ThreadOperationReleaseOutcome.ownership_lost
+            assert await repo.get(run_id, user_id="reservation-owner") is not None
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
     async def test_interrupt_reclaims_expired_checkpoint_write_reservation_on_sql_store(self, tmp_path):
         """An expired durable checkpoint writer is immediately reclaimable."""
         repo = await _make_repo(tmp_path)
@@ -937,6 +1503,8 @@ class TestRunRepository:
         assert stale["status"] == "interrupted"
         assert stale["owner_worker_id"] is None
         assert stale["lease_expires_at"] is None
+        assert stale["terminal_projection_owner_worker_id"] is None
+        assert stale["terminal_projection_active_state_version"] is None
         await _cleanup()
 
     @pytest.mark.anyio
@@ -1066,6 +1634,99 @@ class TestRunRepository:
 
         await _cleanup()
 
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("multitask_strategy", "expected_status"),
+        (("interrupt", "interrupted"), ("rollback", "error")),
+    )
+    async def test_create_thread_operation_atomic_records_terminal_projection_epoch_before_flush(
+        self,
+        tmp_path,
+        multitask_strategy,
+        expected_status,
+    ):
+        """Replacement preserves the displaced owner's exact active epoch.
+
+        The terminal projection proof must become valid before any await that
+        can autoflush the row.  In particular, locking the lifecycle cursor
+        cannot observe ``active_state_version == state_version``.
+        """
+
+        repo = await _make_repo(tmp_path)
+        now = datetime.now(UTC)
+        try:
+            previous, _ = await repo.create_thread_operation_atomic(
+                "run-before-replacement",
+                thread_id="thread-replacement",
+                owner_worker_id="worker-owner",
+                lease_expires_at=(now + timedelta(minutes=5)).isoformat(),
+            )
+
+            replacement, displaced = await repo.create_thread_operation_atomic(
+                "run-after-replacement",
+                thread_id="thread-replacement",
+                owner_worker_id="worker-owner",
+                lease_expires_at=(now + timedelta(minutes=5)).isoformat(),
+                multitask_strategy=multitask_strategy,
+            )
+
+            assert replacement["status"] == "pending"
+            assert len(displaced) == 1
+            terminal = displaced[0]
+            assert terminal["status"] == expected_status
+            assert terminal["owner_worker_id"] is None
+            assert terminal["terminal_projection_owner_worker_id"] == "worker-owner"
+            assert terminal["terminal_projection_active_state_version"] == previous["state_version"]
+            assert terminal["state_version"] == previous["state_version"] + 1
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_create_thread_operation_atomic_uses_database_clock_for_live_peer_lease(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A fast process clock cannot interrupt a peer still live by DB time."""
+
+        from deerflow.persistence.run import sql as run_sql
+
+        repo = await _make_repo(tmp_path)
+        actual_now = datetime.now(UTC)
+
+        class FastProcessDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = actual_now + timedelta(hours=1)
+                return value if tz is not None else value.replace(tzinfo=None)
+
+        try:
+            original, _ = await repo.create_thread_operation_atomic(
+                "run-live-peer",
+                thread_id="thread-live-peer",
+                owner_worker_id="worker-peer",
+                lease_expires_at=(actual_now + timedelta(minutes=5)).isoformat(),
+            )
+            monkeypatch.setattr(run_sql, "datetime", FastProcessDateTime)
+
+            with pytest.raises(ConflictError, match="another worker"):
+                await repo.create_thread_operation_atomic(
+                    "run-fast-clock-claimant",
+                    thread_id="thread-live-peer",
+                    owner_worker_id="worker-claimant",
+                    lease_expires_at=(actual_now + timedelta(hours=2)).isoformat(),
+                    multitask_strategy="interrupt",
+                )
+
+            retained = await repo.get("run-live-peer")
+            assert retained is not None
+            assert retained["status"] == "pending"
+            assert retained["owner_worker_id"] == "worker-peer"
+            assert retained["state_version"] == original["state_version"]
+            assert await repo.get("run-fast-clock-claimant") is None
+        finally:
+            await _cleanup()
+
     # ------------------------------------------------------------------
     # claim_for_takeover SQL path
     # ------------------------------------------------------------------
@@ -1084,6 +1745,37 @@ class TestRunRepository:
         assert row["status"] == "error"
         assert row["error"] == "claimed"
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_generic_claim_for_takeover_rejects_exact_two_policy(
+        self,
+        tmp_path,
+    ):
+        repo = await _make_repo(tmp_path)
+        expired = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        try:
+            await repo.put(
+                "run-exact-two",
+                thread_id="t1",
+                status="running",
+                owner_worker_id="worker-a",
+                lease_expires_at=expired,
+                recovery_policy=RecoveryPolicy.exact_two_takeover_v1,
+                recovery_payload_json={"version": 1},
+            )
+            before = await repo.get("run-exact-two")
+
+            claimed = await repo.claim_for_takeover(
+                "run-exact-two",
+                grace_seconds=0,
+                error="legacy terminalization",
+            )
+            retained = await repo.get("run-exact-two")
+
+            assert claimed is False
+            assert retained == before
+        finally:
+            await _cleanup()
 
     @pytest.mark.anyio
     async def test_claim_for_takeover_fails_on_valid_lease(self, tmp_path):
@@ -1181,11 +1873,11 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_reconciliation_skips_run_renewed_after_scan(self, tmp_path):
-        """The SQL takeover CAS must reject a candidate renewed after its scan."""
+    async def test_reconciliation_rechecks_live_lease_after_stale_scan(self, tmp_path):
+        """The SQL takeover CAS must reject a stale scan of a live row."""
         repo = await _make_repo(tmp_path)
         grace = 10
-        run_id = "renewed-after-scan"
+        run_id = "live-after-stale-scan"
         owner_worker_id = "worker-alive"
         try:
             await repo.put(
@@ -1193,22 +1885,18 @@ class TestRunRepository:
                 thread_id="t1",
                 status="running",
                 owner_worker_id=owner_worker_id,
-                lease_expires_at=(datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat(),
+                lease_expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
                 created_at=(datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
             )
-            original_scan = repo.list_inflight_with_expired_lease
 
-            async def scan_then_renew(*, before=None, grace_seconds=10):
-                rows = await original_scan(before=before, grace_seconds=grace_seconds)
-                renewed = await repo.update_lease(
-                    run_id,
-                    owner_worker_id=owner_worker_id,
-                    lease_expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
-                )
-                assert renewed is True
-                return rows
+            async def stale_scan(*, before=None, grace_seconds=10):
+                del before, grace_seconds
+                stale = await repo.get(run_id)
+                assert stale is not None
+                stale["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+                return [stale]
 
-            repo.list_inflight_with_expired_lease = scan_then_renew
+            repo.list_inflight_with_expired_lease = stale_scan
             manager = RunManager(store=repo)
 
             recovered = await manager.reconcile_orphaned_inflight_runs(error="orphaned")
@@ -1218,6 +1906,41 @@ class TestRunRepository:
             assert row is not None
             assert row["status"] == "running"
             assert datetime.fromisoformat(row["lease_expires_at"]) > datetime.now(UTC)
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_sql_expired_owner_cannot_resurrect_lease(self, tmp_path):
+        """Expired SQL authority cannot renew itself after the deadline."""
+
+        repo = await _make_repo(tmp_path)
+        expired_lease = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        try:
+            await repo.put(
+                "expired-owner-run",
+                thread_id="thread-expired-owner",
+                status="running",
+                owner_worker_id="worker-expired",
+                lease_expires_at=expired_lease,
+            )
+            requested_lease = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+
+            updated = await repo.update_lease(
+                "expired-owner-run",
+                owner_worker_id="worker-expired",
+                lease_expires_at=requested_lease,
+            )
+            renewed = await repo.renew_lease(
+                "expired-owner-run",
+                owner_worker_id="worker-expired",
+                lease_expires_at=requested_lease,
+            )
+
+            assert updated is False
+            assert renewed.renewed is False
+            retained = await repo.get("expired-owner-run")
+            assert retained is not None
+            assert retained["lease_expires_at"] == expired_lease
         finally:
             await _cleanup()
 

@@ -36,7 +36,7 @@ def is_lease_expired(lease_expires_at: str | None, *, grace_seconds: int) -> boo
             dt = dt.replace(tzinfo=UTC)
     except (ValueError, TypeError):
         return True
-    return dt < datetime.now(UTC) - timedelta(seconds=grace_seconds)
+    return dt <= datetime.now(UTC) - timedelta(seconds=grace_seconds)
 
 
 _UNIX_TIMESTAMP_PATTERN = re.compile(r"^\d{10}(?:\.\d+)?$")

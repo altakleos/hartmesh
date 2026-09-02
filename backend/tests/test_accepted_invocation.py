@@ -860,6 +860,9 @@ async def test_accepted_durable_bare_graph_fails_before_graph_invocation() -> No
     calls = {"factory": 0, "astream": 0}
 
     class Agent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(config={}, values={}, metadata={})
+
         async def astream(self, *_args, **_kwargs):
             calls["astream"] += 1
             yield {"messages": []}
@@ -919,6 +922,9 @@ async def test_accepted_durable_evidence_is_bound_before_checkpoint_access_and_a
     )
 
     class Agent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(config={}, values={}, metadata={})
+
         async def astream(self, *_args, **_kwargs):
             nonlocal observed_bound_evidence
             row = await store.get(record.run_id)
@@ -936,8 +942,13 @@ async def test_accepted_durable_evidence_is_bound_before_checkpoint_access_and_a
         manager,
         record,
         ctx=RunContext(
-            checkpointer=object(),
-            event_store=MemoryRunEventStore(run_store=store),
+            checkpointer=SimpleNamespace(
+                aget_tuple=AsyncMock(return_value=None),
+            ),
+            event_store=MemoryRunEventStore(
+                run_store=store,
+                tenant=_TEST_TENANT,
+            ),
             tenant=_TEST_TENANT,
         ),
         agent_factory=factory,

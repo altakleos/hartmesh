@@ -25,6 +25,9 @@ MAX_LIFECYCLE_PAGE_SIZE = 500
 MAX_TOOL_RECEIPT_PAGE_SIZE = 100
 MAX_INVOCATION_SUMMARY_BYTES = 16 * 1024
 _MAX_CORRELATION_REFERENCES = 64
+_PRIVATE_LINKED_RESOURCE_REFERENCE_KEYS = frozenset(
+    {"parent_run_id", "parent_tool_receipt_id"},
+)
 _MAX_CORRELATION_VALUE_BYTES = 1024
 _MAX_VISIBILITY_SELECTORS = 128
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -580,6 +583,12 @@ def build_invocation_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
         for key, value in sorted(base.items(), key=lambda item: str(item[0])):
             if not isinstance(key, str) or _PUBLIC_IDENTIFIER_RE.fullmatch(key) is None:
                 return None
+            # A grant to observe this run does not imply visibility of a
+            # linked parent run or receipt. Their identifiers remain in the
+            # private accepted Origin for authorized lineage operations, but
+            # never enter the standalone public summary.
+            if key in _PRIVATE_LINKED_RESOURCE_REFERENCE_KEYS:
+                continue
             references.append(
                 {
                     "namespace": "origin",

@@ -22,7 +22,9 @@ from deerflow.runtime.events.catalog import (
     MIDDLEWARE_EVENT_TAGS,
     RUN_EVENT_CATEGORY_MAX_LENGTH,
     RUN_EVENT_TYPE_MAX_LENGTH,
+    RUN_EXECUTION_STARTED_EVENT,
     SUBAGENT_RUN_EVENT_DEFINITIONS,
+    WORKER_DISPATCH_RUN_EVENT_DEFINITIONS,
     WORKSPACE_RUN_EVENT_DEFINITIONS,
     RunEventDefinition,
     RunEventPattern,
@@ -206,6 +208,12 @@ def test_contract_and_runtime_catalog_have_the_same_fixed_events():
 
     assert RunEventRow.__table__.c.event_type.type.length == RUN_EVENT_TYPE_MAX_LENGTH
     assert RunEventRow.__table__.c.category.type.length == RUN_EVENT_CATEGORY_MAX_LENGTH
+
+
+def test_execution_started_is_a_worker_dispatch_event_not_a_journal_event():
+    assert WORKER_DISPATCH_RUN_EVENT_DEFINITIONS == (RUN_EXECUTION_STARTED_EVENT,)
+    assert RUN_EXECUTION_STARTED_EVENT not in JOURNAL_RUN_EVENT_DEFINITIONS
+    assert RUN_EXECUTION_STARTED_EVENT in FIXED_RUN_EVENT_DEFINITIONS
 
 
 @pytest.mark.parametrize(
@@ -392,6 +400,10 @@ async def test_run_journal_observed_events_exactly_match_its_catalog():
     journal.on_llm_error(RuntimeError("model failed"), run_id=uuid4())
     journal.on_chain_error(ValueError("run failed"), run_id=uuid4())
     journal.on_chain_end({"messages": []}, run_id=root_run_id, parent_run_id=None)
+    journal.record_terminal_summary(
+        status="error",
+        stop_reason="run_failed",
+    )
     journal.record_memory_context(content_sha256="a" * 64)
     await journal.persist_memory_observations(
         (

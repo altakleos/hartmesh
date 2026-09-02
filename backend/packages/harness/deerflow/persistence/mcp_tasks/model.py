@@ -22,13 +22,25 @@ class McpTaskRow(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     schema_writer_version: Mapped[int] = mapped_column(
         Integer,
-        default=2,
+        default=3,
         server_default="1",
     )
     tenant_ref: Mapped[str | None] = mapped_column(String(23), nullable=True)
     tenant_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lineage_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     lineage_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    request_commitment_version: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    request_commitment_key_id: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    request_commitment_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     parent_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     parent_tool_receipt_id: Mapped[str | None] = mapped_column(
         String(67),
@@ -122,6 +134,19 @@ class McpTaskRow(Base):
         CheckConstraint(
             "schema_writer_version < 2 OR (tenant_ref IS NOT NULL AND tenant_digest IS NOT NULL AND lineage_json IS NOT NULL AND lineage_digest IS NOT NULL)",
             name="ck_mcp_tasks_writer_lineage_required",
+        ),
+        CheckConstraint(
+            "(request_commitment_version IS NULL AND request_commitment_key_id IS NULL AND request_commitment_digest IS NULL) OR "
+            "(request_commitment_version IS NOT NULL AND request_commitment_key_id IS NOT NULL AND request_commitment_digest IS NOT NULL)",
+            name="ck_mcp_tasks_request_commitment_triple",
+        ),
+        CheckConstraint(
+            "schema_writer_version < 3 OR request_commitment_digest IS NOT NULL",
+            name="ck_mcp_tasks_writer_request_commitment",
+        ),
+        CheckConstraint(
+            "request_commitment_version IS NULL OR (request_commitment_version = 1 AND length(request_commitment_key_id) BETWEEN 1 AND 32 AND length(request_commitment_digest) = 64)",
+            name="ck_mcp_tasks_request_commitment_shape",
         ),
         CheckConstraint(
             "(cancel_actor_ref IS NULL) = (cancel_reason_code IS NULL)",

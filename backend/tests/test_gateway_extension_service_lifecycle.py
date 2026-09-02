@@ -120,7 +120,7 @@ async def test_later_startup_failure_stops_same_snapshot_and_appends_diagnostics
     _patch_runtime_resources(monkeypatch, events)
     monkeypatch.setattr(
         "deerflow.persistence.thread_meta.make_thread_store",
-        lambda _sf, _store: (_ for _ in ()).throw(RuntimeError("thread store failed")),
+        lambda _sf, _store, *, run_store: (_ for _ in ()).throw(RuntimeError("thread store failed")),
     )
 
     app = FastAPI()

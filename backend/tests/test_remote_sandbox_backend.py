@@ -359,6 +359,8 @@ def test_destroy_delegates_to_provisioner_destroy(monkeypatch):
 
 def test_provisioner_destroy_calls_delete(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._attempt_capabilities["abc123"] = "capability"
+    backend._attempt_execution_claims["abc123"] = object()
 
     def mock_delete(url: str, timeout: int, headers=None):
         assert url == "http://provisioner:8002/api/sandboxes/abc123"
@@ -369,9 +371,14 @@ def test_provisioner_destroy_calls_delete(monkeypatch):
 
     backend._provisioner_destroy("abc123")
 
+    assert "abc123" not in backend._attempt_capabilities
+    assert "abc123" not in backend._attempt_execution_claims
+
 
 def test_provisioner_destroy_swallows_request_exception(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._attempt_capabilities["abc123"] = "capability"
+    backend._attempt_execution_claims["abc123"] = object()
 
     def mock_delete(url: str, timeout: int, headers=None):
         raise requests.RequestException("network down")
@@ -379,6 +386,9 @@ def test_provisioner_destroy_swallows_request_exception(monkeypatch):
     monkeypatch.setattr(requests, "delete", mock_delete)
 
     backend._provisioner_destroy("abc123")
+
+    assert "abc123" in backend._attempt_capabilities
+    assert "abc123" in backend._attempt_execution_claims
 
 
 def test_is_alive_delegates_to_provisioner_is_alive(monkeypatch):

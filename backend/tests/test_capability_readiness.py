@@ -36,6 +36,7 @@ from deerflow.extensions.capabilities import (
 from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.persistence.base import Base
 from deerflow.persistence.run.model import (
+    RunAdmissionCursorStateRow,
     RunLifecycleCursorStateRow,
     RunLifecycleEventRow,
 )
@@ -526,6 +527,56 @@ async def test_lifecycle_readiness_rejects_invalid_pruning_and_event_bounds(
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_readiness_rejects_invalid_admission_cursor_authority(
+    tmp_path,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'readiness-admission-cursor.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    store = RunRepository(factory)
+    try:
+        await store.initialize_lifecycle()
+        await store.put("run-1", thread_id="thread-1")
+
+        async with factory.begin() as session:
+            await session.execute(update(RunAdmissionCursorStateRow).values(last_cursor=0))
+        stale = await store.lifecycle_readiness()
+        assert stale.ready is False
+        assert stale.reason_code == "admission_cursor_state_invalid"
+
+        async with factory.begin() as session:
+            await session.execute(update(RunAdmissionCursorStateRow).values(last_cursor=1))
+        assert (await store.lifecycle_readiness()).ready is True
+        await store.put("run-2", thread_id="thread-2")
+        second = await store.get("run-2")
+        assert second is not None
+        assert second["admission_cursor"] == 2
+
+        async with factory.begin() as session:
+            await session.execute(delete(RunAdmissionCursorStateRow))
+        missing = await store.lifecycle_readiness()
+        assert missing.ready is False
+        assert missing.reason_code == "admission_cursor_state_invalid"
+
+        await store.initialize_lifecycle()
+        assert (await store.lifecycle_readiness()).ready is True
+        async with factory.begin() as session:
+            await session.execute(text("PRAGMA ignore_check_constraints = ON"))
+            session.add(
+                RunAdmissionCursorStateRow(
+                    singleton_id=2,
+                    last_cursor=2,
+                )
+            )
+        duplicate = await store.lifecycle_readiness()
+        assert duplicate.ready is False
+        assert duplicate.reason_code == "admission_cursor_state_invalid"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_readiness_uses_only_bounded_edge_queries(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'readiness-query-bound.db'}")
     async with engine.begin() as connection:
@@ -559,7 +610,7 @@ async def test_lifecycle_readiness_uses_only_bounded_edge_queries(tmp_path) -> N
         assert (await store.lifecycle_readiness()).ready is True
 
         selects = [statement.upper() for statement in statements if statement.lstrip().upper().startswith("SELECT")]
-        assert len(selects) == 3
+        assert len(selects) == 4
         assert all(" LIMIT " in statement for statement in selects)
         assert all("COUNT(" not in statement for statement in selects)
     finally:

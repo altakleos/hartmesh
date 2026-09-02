@@ -18,11 +18,11 @@
       "id": "run_manager_store_and_worker_heartbeat",
       "classification": "local_substitutable_store",
       "authority": "runs table ownership lease, epoch, cancellation fence, and lifecycle rows",
-      "required_adapter": "PostgreSQL RunRepository with heartbeat enabled",
+      "required_adapter": "PostgreSQL RunRepository with heartbeat enabled and lease_clock=database_v1",
       "config_fields": ["database", "run_ownership"],
       "service_registrations": ["persistence_engine", "run_store", "run_manager"],
-      "runtime_state_fields": ["close_runtime_dependencies", "run_manager", "run_store", "shutdown_coordinator"],
-      "requirement": "Process-local RunRecord objects are caches only; every authoritative mutation is owner-fenced in PostgreSQL."
+      "runtime_state_fields": ["close_runtime_dependencies", "execution_recovery_coordinator", "run_manager", "run_store", "shutdown_coordinator"],
+      "requirement": "Process-local RunRecord objects are caches only; authoritative lease deadlines, renewals, and expired scans derive from PostgreSQL database time, and every mutation is owner-fenced."
     },
     {
       "id": "checkpoint_saver_and_channel_mode",
@@ -101,7 +101,7 @@
       "required_adapter": "PostgreSQL McpTaskRepository and fenced McpTaskService",
       "config_fields": ["mcp_tasks"],
       "service_registrations": ["mcp_task_repo", "mcp_task_service"],
-      "runtime_state_fields": ["mcp_task_drivers", "mcp_task_extensions_config", "mcp_task_repo", "mcp_task_service", "mcp_tasks_available"],
+      "runtime_state_fields": ["mcp_task_drivers", "mcp_task_extensions_config", "mcp_task_replay_keyring", "mcp_task_replay_keyring_confirmation", "mcp_task_repo", "mcp_task_service", "mcp_tasks_available"],
       "requirement": "Duplicate submissions reuse one row; stale pollers cannot finish or notify."
     },
     {

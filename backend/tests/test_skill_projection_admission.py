@@ -44,6 +44,7 @@ def _launch(*, thread_id: str, external_key: str):
         caller_intent_json={"version": 1},
         caller_intent_digest="b" * 64,
         caller_intent_digest_version="v1",
+        recovery_payload_json=None,
     )
 
 

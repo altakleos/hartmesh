@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 from deerflow_extension_api import TenantReferenceV1
 
+from deerflow.runtime.events.appender import RuntimeEventAuthority, RuntimeEventOwnershipLost
 from deerflow.runtime.events.store.base import AppendOutcome, RunEventStore, resolve_owned_run, validate_idempotent_append
 from deerflow.runtime.tool_evidence import (
     TOOL_RECEIPT_CATEGORY,
@@ -74,6 +75,7 @@ class MemoryRunEventStore(RunEventStore):
         content: str | dict = "",
         metadata: dict | None = None,
         created_at: str | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict:
         seq = self._next_seq(thread_id)
         record = {
@@ -88,6 +90,8 @@ class MemoryRunEventStore(RunEventStore):
             "seq": seq,
             "created_at": created_at or datetime.now(UTC).isoformat(),
         }
+        if not isinstance(user_id, _AutoSentinel):
+            record["user_id"] = user_id
         self._events.setdefault(thread_id, []).append(record)
         self._events_by_run.setdefault(thread_id, {}).setdefault(run_id, []).append(record)
         if category == "message":
@@ -133,6 +137,7 @@ class MemoryRunEventStore(RunEventStore):
         content="",
         metadata=None,
         created_at=None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ):
         # No await occurs between the lookup and append, so this is atomic for
         # the backend's documented single-event-loop concurrency model.
@@ -148,9 +153,57 @@ class MemoryRunEventStore(RunEventStore):
                 content=content,
                 metadata=metadata,
                 created_at=created_at,
+                user_id=user_id,
             ),
             True,
         )
+
+    async def _require_runtime_authority(
+        self,
+        authority: RuntimeEventAuthority,
+    ) -> dict:
+        configured_digest = None if self._tenant is None else self._tenant.digest
+        if authority.tenant_digest != configured_digest:
+            raise RuntimeEventOwnershipLost("runtime_event_ownership_lost")
+        try:
+            run = await resolve_owned_run(
+                self._run_store,
+                authority.run_id,
+                owner_id=authority.owner_id,
+                lease_epoch=authority.lease_epoch,
+                allowed_statuses=("pending", "running"),
+            )
+        except Exception:
+            raise RuntimeEventOwnershipLost("runtime_event_ownership_lost") from None
+        if run.get("thread_id") != authority.thread_id or run.get("tenant_digest") != authority.tenant_digest:
+            raise RuntimeEventOwnershipLost("runtime_event_ownership_lost")
+        return run
+
+    async def append_fenced_batch(
+        self,
+        authority: RuntimeEventAuthority,
+        events: list[dict],
+    ) -> list[dict]:
+        await self._require_runtime_authority(authority)
+        results: list[dict] = []
+        # No await occurs after validation, so validation and append are one
+        # critical section in this backend's single-event-loop model.
+        for event in events:
+            authority.require_event_identity(event)
+            results.append(self._put_one(**event))
+        return results
+
+    async def append_fenced_if_absent(
+        self,
+        authority: RuntimeEventAuthority,
+        event: dict,
+    ) -> tuple[dict, bool]:
+        await self._require_runtime_authority(authority)
+        authority.require_event_identity(event)
+        for existing in self._events_by_run.get(authority.thread_id, {}).get(authority.run_id, []):
+            if self._tenant_visible(existing) and existing["event_type"] == event["event_type"]:
+                return existing, False
+        return self._put_one(**event), True
 
     async def append_idempotent(
         self,

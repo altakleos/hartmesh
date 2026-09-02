@@ -169,6 +169,53 @@ class AcceptedMaterialError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class AcceptedMaterialExecutionClaimV1:
+    """Mutable owner/epoch authority kept outside immutable material evidence."""
+
+    version: Literal[1]
+    tenant_digest: str
+    run_id: str
+    owner_worker_id: str
+    state_version: int
+    execution_takeover: bool
+    expected_materialization_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.version) is not int or self.version != 1:
+            raise ValueError("accepted material execution claim version must be 1")
+        _require_digest(self.tenant_digest, "tenant_digest")
+        _require_reference(self.run_id, "run_id")
+        _require_reference(self.owner_worker_id, "owner_worker_id")
+        if type(self.state_version) is not int or self.state_version < 0:
+            raise ValueError("state_version must be a non-negative integer")
+        if type(self.execution_takeover) is not bool:
+            raise TypeError("execution_takeover must be bool")
+        if self.execution_takeover:
+            _require_digest(
+                self.expected_materialization_digest,
+                "expected_materialization_digest",
+            )
+        elif self.expected_materialization_digest is not None:
+            raise ValueError(
+                "initial execution claim cannot carry materialization evidence",
+            )
+
+    def binds(self, request: AcceptedMaterialRequestV1) -> bool:
+        return self.tenant_digest == request.tenant.digest and self.run_id == request.run_id
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "tenant_digest": self.tenant_digest,
+            "run_id": self.run_id,
+            "owner_worker_id": self.owner_worker_id,
+            "state_version": self.state_version,
+            "execution_takeover": self.execution_takeover,
+            "expected_materialization_digest": self.expected_materialization_digest,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AcceptedSkillExecutionEvidenceV1:
     """Legacy bounded proof retained for persisted v1 AIO records."""
 
@@ -923,6 +970,8 @@ class AcceptedMaterializer(Protocol):
     async def acquire_and_materialize(
         self,
         request: AcceptedMaterialRequestV1,
+        *,
+        execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
     ) -> tuple[Sandbox, AcceptedMaterialLeaseV1, AcceptedExecutionEvidenceV1]: ...
 
     async def validate(
@@ -1270,6 +1319,7 @@ __all__ = [
     "AcceptedFileV1",
     "AcceptedMaterialCapability",
     "AcceptedMaterialError",
+    "AcceptedMaterialExecutionClaimV1",
     "AcceptedMaterialLeaseV1",
     "AcceptedMaterialRequestV1",
     "AcceptedMaterializer",

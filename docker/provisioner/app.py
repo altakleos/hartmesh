@@ -205,6 +205,7 @@ ACCEPTED_SKILL_DESTINATION_MOUNT = "/accepted-destination"
 ACCEPTED_SKILL_SANDBOX_MOUNT = "/mnt/skills/.accepted"
 ACCEPTED_SKILL_EVIDENCE_MOUNT = "/var/run/hartmesh/accepted-evidence"
 ACCEPTED_SKILL_CAPABILITY_MOUNT = "/var/run/hartmesh/accepted-capability"
+ACCEPTED_EXECUTION_CLAIM_MOUNT = "/var/run/hartmesh/execution-claim"
 ACCEPTED_SKILL_RECEIPT_MOUNT = "/var/run/hartmesh/accepted-receipt"
 ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V1 = "rwx_verified_copy_v1"
 ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2 = "rwx_verified_copy_v2"
@@ -300,6 +301,19 @@ ACCEPTED_ATTEMPT_RECONCILE_LIMIT = _bounded_int_env(
     minimum=1,
     maximum=500,
 )
+_accepted_takeover_enabled_raw = (
+    os.environ.get(
+        "HARTMESH_EXECUTION_RECOVERY_CLAIMS_ENABLED",
+        "false",
+    )
+    .strip()
+    .lower()
+)
+if _accepted_takeover_enabled_raw not in {"true", "false"}:
+    raise RuntimeError(
+        "HARTMESH_EXECUTION_RECOVERY_CLAIMS_ENABLED must be a boolean",
+    )
+ACCEPTED_EXECUTION_TAKEOVER_ENABLED = _accepted_takeover_enabled_raw == "true"
 _accepted_reconcile_continue: str | None = None
 SANDBOX_CONTAINER_PORT_RAW = os.environ.get("SANDBOX_CONTAINER_PORT", "8080")
 SANDBOX_SERVICE_TYPE = os.environ.get("SANDBOX_SERVICE_TYPE", "NodePort")
@@ -775,6 +789,31 @@ class AcceptedSkillProjectionV2(AcceptedSkillProjectionV1):
 AcceptedSkillProjection = AcceptedSkillProjectionV1 | AcceptedSkillProjectionV2
 
 
+class AcceptedExecutionClaimV1(BaseModel):
+    """Server-owned mutable run authority, separate from material evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1]
+    tenant_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    run_id: str = Field(min_length=1, max_length=512)
+    owner_worker_id: str = Field(min_length=1, max_length=512)
+    state_version: int = Field(ge=0)
+    execution_takeover: bool
+    expected_materialization_digest: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def validate_takeover_anchor(self):
+        if self.execution_takeover != (self.expected_materialization_digest is not None):
+            raise ValueError(
+                "takeover claims require one exact materialization digest",
+            )
+        return self
+
+
 class CreateSandboxRequest(BaseModel):
     sandbox_id: str
     thread_id: str | None = Field(default=None, pattern=SAFE_THREAD_ID_PATTERN)
@@ -797,6 +836,7 @@ class CreateSandboxRequest(BaseModel):
         default=None,
         pattern=r"^[A-Za-z0-9_-]{43,128}$",
     )
+    accepted_execution_claim: AcceptedExecutionClaimV1 | None = None
 
     @model_validator(mode="after")
     def validate_accepted_projection_pair(self):
@@ -808,6 +848,12 @@ class CreateSandboxRequest(BaseModel):
             raise ValueError(
                 "accepted_skill_projection requires accepted_skills_only",
             )
+        if self.accepted_execution_claim is not None:
+            projection = self.accepted_skill_projection
+            if projection is None or self.accepted_execution_claim.run_id != projection.run_id:
+                raise ValueError(
+                    "accepted_execution_claim requires the same accepted run",
+                )
         return self
 
 
@@ -826,6 +872,23 @@ class RenewAcceptedAttemptRequest(BaseModel):
     pod_uid: str = Field(min_length=1, max_length=128)
     lease_uid: str = Field(min_length=1, max_length=128)
     materialization_evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    owner_worker_id: str | None = Field(default=None, min_length=1, max_length=512)
+    owner_state_version: int | None = Field(default=None, ge=0)
+    owner_capability: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_-]{43,128}$",
+    )
+
+    @model_validator(mode="after")
+    def validate_owner_claim(self):
+        values = (
+            self.owner_worker_id,
+            self.owner_state_version,
+            self.owner_capability,
+        )
+        if any(value is not None for value in values) and not all(value is not None for value in values):
+            raise ValueError("accepted execution owner claim must be complete")
+        return self
 
 
 # ── K8s resource helpers ─────────────────────────────────────────────────
@@ -861,12 +924,38 @@ def _build_accepted_attempt_lease(
     capability: str,
     *,
     isolation_digest: str = "0" * 64,
+    execution_claim: AcceptedExecutionClaimV1 | None = None,
     now: datetime | None = None,
 ) -> k8s_client.V1Lease:
     """Build the single owner root for one immutable sandbox attempt."""
 
     observed_at = now or datetime.now(UTC)
     identity = _accepted_attempt_identity(projection)
+    annotations = {
+        "hartmesh.io/accepted-attempt-identity": identity,
+        "hartmesh.io/accepted-capability-digest": _capability_digest(capability),
+        "hartmesh.io/accepted-skill-digest": projection.content_digest,
+        "hartmesh.io/accepted-skill-run": projection.run_id,
+        "hartmesh.io/accepted-skill-generation": str(projection.generation),
+        "hartmesh.io/accepted-isolation-digest": isolation_digest,
+        "hartmesh.io/accepted-attempt-state": "claimed",
+    }
+    if execution_claim is not None:
+        annotations.update(
+            {
+                "hartmesh.io/execution-claim-tenant-digest": execution_claim.tenant_digest,
+                "hartmesh.io/execution-claim-run": execution_claim.run_id,
+                "hartmesh.io/execution-claim-owner-digest": _capability_digest(
+                    execution_claim.owner_worker_id,
+                ),
+                "hartmesh.io/execution-claim-state-version": str(
+                    execution_claim.state_version,
+                ),
+                "hartmesh.io/execution-claim-capability-digest": _capability_digest(
+                    capability,
+                ),
+            },
+        )
     return k8s_client.V1Lease(
         metadata=k8s_client.V1ObjectMeta(
             name=_accepted_attempt_lease_name(sandbox_id),
@@ -876,19 +965,7 @@ def _build_accepted_attempt_lease(
                 "sandbox-id": sandbox_id,
                 "hartmesh.io/accepted-skill-attempt": "true",
             },
-            annotations={
-                "hartmesh.io/accepted-attempt-identity": identity,
-                "hartmesh.io/accepted-capability-digest": _capability_digest(
-                    capability,
-                ),
-                "hartmesh.io/accepted-skill-digest": projection.content_digest,
-                "hartmesh.io/accepted-skill-run": projection.run_id,
-                "hartmesh.io/accepted-skill-generation": str(
-                    projection.generation,
-                ),
-                "hartmesh.io/accepted-isolation-digest": isolation_digest,
-                "hartmesh.io/accepted-attempt-state": "claimed",
-            },
+            annotations=annotations,
         ),
         spec=k8s_client.V1LeaseSpec(
             acquire_time=observed_at,
@@ -944,6 +1021,7 @@ def _lease_matches_attempt(
     capability: str,
     *,
     isolation_digest: str = "0" * 64,
+    execution_claim: AcceptedExecutionClaimV1 | None = None,
 ) -> bool:
     annotations = getattr(getattr(lease, "metadata", None), "annotations", None)
     expected = {
@@ -956,6 +1034,22 @@ def _lease_matches_attempt(
         "hartmesh.io/accepted-skill-generation": str(projection.generation),
         "hartmesh.io/accepted-isolation-digest": isolation_digest,
     }
+    if execution_claim is not None:
+        expected.update(
+            {
+                "hartmesh.io/execution-claim-tenant-digest": execution_claim.tenant_digest,
+                "hartmesh.io/execution-claim-run": execution_claim.run_id,
+                "hartmesh.io/execution-claim-owner-digest": _capability_digest(
+                    execution_claim.owner_worker_id,
+                ),
+                "hartmesh.io/execution-claim-state-version": str(
+                    execution_claim.state_version,
+                ),
+                "hartmesh.io/execution-claim-capability-digest": _capability_digest(
+                    capability,
+                ),
+            },
+        )
     return isinstance(annotations, dict) and all(annotations.get(key) == value for key, value in expected.items()) and annotations.get("hartmesh.io/accepted-attempt-state") in {"claimed", "pod_creation_started", "materialized"}
 
 
@@ -965,6 +1059,7 @@ def _claim_accepted_attempt(
     capability: str,
     *,
     isolation_digest: str = "0" * 64,
+    execution_claim: AcceptedExecutionClaimV1 | None = None,
     now: datetime | None = None,
 ) -> k8s_client.V1Lease:
     """Create or replay one exact live attempt; never adopt another identity."""
@@ -979,6 +1074,7 @@ def _claim_accepted_attempt(
         projection,
         capability,
         isolation_digest=isolation_digest,
+        execution_claim=execution_claim,
         now=now,
     )
     try:
@@ -1007,6 +1103,7 @@ def _claim_accepted_attempt(
         projection,
         capability,
         isolation_digest=isolation_digest,
+        execution_claim=execution_claim,
     ):
         raise HTTPException(
             status_code=409,
@@ -1154,6 +1251,50 @@ def _bind_accepted_attempt_materialization(
     return _replace_attempt_lease(lease, annotations=annotations)
 
 
+def _bind_execution_claim_secret(
+    lease: object,
+    *,
+    sandbox_id: str,
+    secret_uid: str,
+    capability_digest: str,
+) -> object:
+    annotations = dict(getattr(lease.metadata, "annotations", None) or {})
+    fields = {
+        "hartmesh.io/execution-claim-secret-name": (_accepted_execution_claim_secret_name(sandbox_id)),
+        "hartmesh.io/execution-claim-secret-uid": secret_uid,
+        "hartmesh.io/execution-claim-capability-digest": capability_digest,
+    }
+    existing_uid = annotations.get("hartmesh.io/execution-claim-secret-uid")
+    if existing_uid is not None:
+        if any(annotations.get(key) != value for key, value in fields.items()):
+            raise HTTPException(
+                status_code=409,
+                detail="accepted_execution_claim_secret_conflict",
+            )
+        return lease
+    annotations.update(fields)
+    return _replace_attempt_lease(lease, annotations=annotations)
+
+
+def _takeover_accepted_attempt(
+    sandbox_id: str,
+    projection: AcceptedSkillProjection,
+    capability: str,
+    claim: AcceptedExecutionClaimV1,
+    *,
+    isolation_digest: str,
+) -> object:
+    """CAS one mutable owner epoch while preserving the accepted tuple."""
+
+    # Kubernetes Secret projection is eventual.  Reading the replacement back
+    # from the API server does not prove that the data-plane gate has revoked
+    # the previous token, so this candidate path must remain unavailable until
+    # the gate has a linearizable per-request owner/epoch authority.
+    raise HTTPException(
+        status_code=409,
+        detail="accepted_execution_takeover_unavailable",
+    )
+
 def _delete_lease_by_exact_uid(name: str, uid: str) -> None:
     if coordination_v1 is None:
         return
@@ -1237,6 +1378,10 @@ def _accepted_capability_secret_name(sandbox_id: str) -> str:
     return f"sandbox-{sandbox_id}-accepted-capability"
 
 
+def _accepted_execution_claim_secret_name(sandbox_id: str) -> str:
+    return f"sandbox-{sandbox_id}-execution-claim"
+
+
 def _accepted_subject_scope(user_id: str) -> str:
     return "subject-" + hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:32]
 
@@ -1298,6 +1443,7 @@ def _accepted_skill_volumes(
     user_id: str,
     *,
     projection: AcceptedSkillProjection | None,
+    mutable_execution_claim: bool = False,
     extra_mounts: list[ExtraMount] | None,
     provision_lark_cli_runtime: bool,
     provision_lark_cli_broker: bool,
@@ -1350,6 +1496,18 @@ def _accepted_skill_volumes(
                 ),
             ]
         )
+        if mutable_execution_claim:
+            volumes.append(
+                k8s_client.V1Volume(
+                    name="accepted-execution-claim",
+                    secret=k8s_client.V1SecretVolumeSource(
+                        secret_name=_accepted_execution_claim_secret_name(
+                            sandbox_id,
+                        ),
+                        default_mode=0o400,
+                    ),
+                ),
+            )
     return volumes
 
 
@@ -1428,7 +1586,12 @@ def _accepted_verifier_container(
     )
 
 
-def _accepted_gate_container() -> k8s_client.V1Container:
+def _accepted_gate_container(
+    *,
+    mutable_execution_claim: bool = False,
+) -> k8s_client.V1Container:
+    capability_volume = "accepted-execution-claim" if mutable_execution_claim else "accepted-skill-capability"
+    capability_mount = ACCEPTED_EXECUTION_CLAIM_MOUNT if mutable_execution_claim else ACCEPTED_SKILL_CAPABILITY_MOUNT
     return k8s_client.V1Container(
         name="accepted-skill-gate",
         image=ACCEPTED_SKILL_RUNTIME_IMAGE,
@@ -1441,7 +1604,7 @@ def _accepted_gate_container() -> k8s_client.V1Container:
             "--upstream",
             f"http://127.0.0.1:{SANDBOX_CONTAINER_PORT}",
             "--capability-file",
-            f"{ACCEPTED_SKILL_CAPABILITY_MOUNT}/capability",
+            f"{capability_mount}/capability",
             "--receipt-file",
             f"{ACCEPTED_SKILL_RECEIPT_MOUNT}/receipt.json",
         ],
@@ -1463,8 +1626,8 @@ def _accepted_gate_container() -> k8s_client.V1Container:
         ),
         volume_mounts=[
             k8s_client.V1VolumeMount(
-                name="accepted-skill-capability",
-                mount_path=ACCEPTED_SKILL_CAPABILITY_MOUNT,
+                name=capability_volume,
+                mount_path=capability_mount,
                 read_only=True,
             ),
             k8s_client.V1VolumeMount(
@@ -2064,6 +2227,7 @@ def _build_pod(
     accepted_skills_only: bool = False,
     accepted_skill_projection: AcceptedSkillProjection | None = None,
     attempt_capability: str | None = None,
+    accepted_execution_claim: AcceptedExecutionClaimV1 | None = None,
     accepted_attempt_owner: k8s_client.V1OwnerReference | None = None,
 ) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
@@ -2071,6 +2235,11 @@ def _build_pod(
         raise HTTPException(
             status_code=400,
             detail="accepted skill projection and capability must be supplied together",
+        )
+    if accepted_execution_claim is not None and accepted_skill_projection is None:
+        raise HTTPException(
+            status_code=400,
+            detail="accepted execution claim requires accepted material",
         )
     accepted_material = accepted_skill_projection is not None
     accepted_skills_only = accepted_skills_only or accepted_material
@@ -2096,6 +2265,7 @@ def _build_pod(
             thread_id,
             user_id,
             projection=accepted_skill_projection,
+            mutable_execution_claim=accepted_execution_claim is not None,
             extra_mounts=extra_mounts,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
             provision_lark_cli_broker=provision_lark_cli_broker,
@@ -2237,7 +2407,15 @@ def _build_pod(
                     volume_mounts=sandbox_mounts,
                     security_context=_restricted_container_security_context(),
                 ),
-                *([_accepted_gate_container()] if accepted_material else []),
+                *(
+                    [
+                        _accepted_gate_container(
+                            mutable_execution_claim=(accepted_execution_claim is not None),
+                        ),
+                    ]
+                    if accepted_material
+                    else []
+                ),
                 *_build_lark_cli_broker_sidecars(provision_lark_cli_broker, extra_mounts),
             ],
             init_containers=init_container_items or None,
@@ -2847,6 +3025,7 @@ def _delete_accepted_secrets(
     for name in (
         _accepted_evidence_secret_name(sandbox_id),
         _accepted_capability_secret_name(sandbox_id),
+        _accepted_execution_claim_secret_name(sandbox_id),
     ):
         try:
             if expected_owner_uid is None:
@@ -2880,7 +3059,8 @@ def _create_accepted_secrets(
     capability: str,
     *,
     accepted_attempt_owner: k8s_client.V1OwnerReference,
-) -> None:
+    execution_claim: AcceptedExecutionClaimV1 | None = None,
+) -> tuple[str, str] | None:
     evidence_json = json.dumps(
         projection.evidence_wire(),
         ensure_ascii=False,
@@ -2931,12 +3111,46 @@ def _create_accepted_secrets(
             ),
             owner_uid=accepted_attempt_owner.uid,
         )
+        if execution_claim is not None:
+            claim_digest = _capability_digest(capability)
+            _create_secret_exact(
+                k8s_client.V1Secret(
+                    metadata=k8s_client.V1ObjectMeta(
+                        name=_accepted_execution_claim_secret_name(sandbox_id),
+                        namespace=K8S_NAMESPACE,
+                        labels={
+                            "app": "deer-flow-sandbox",
+                            "sandbox-id": sandbox_id,
+                        },
+                        annotations={
+                            "hartmesh.io/execution-claim-capability-digest": claim_digest,
+                        },
+                        owner_references=[accepted_attempt_owner],
+                    ),
+                    immutable=False,
+                    string_data={"capability": capability},
+                    type="Opaque",
+                ),
+                owner_uid=accepted_attempt_owner.uid,
+            )
+            claim_secret = core_v1.read_namespaced_secret(
+                _accepted_execution_claim_secret_name(sandbox_id),
+                K8S_NAMESPACE,
+            )
+            return (
+                _resource_uid(
+                    claim_secret,
+                    code="accepted_execution_claim_secret_identity_invalid",
+                ),
+                claim_digest,
+            )
     except Exception:
         _delete_accepted_secrets(
             sandbox_id,
             expected_owner_uid=accepted_attempt_owner.uid,
         )
         raise
+    return None
 
 
 def _create_accepted_network_policy_exact(
@@ -3164,6 +3378,26 @@ def _renew_accepted_attempt(
             status_code=409,
             detail="accepted_attempt_fence_mismatch",
         )
+    annotations = dict(getattr(lease.metadata, "annotations", None) or {})
+    claimed_owner = annotations.get("hartmesh.io/execution-claim-owner-digest")
+    if claimed_owner is not None:
+        if (
+            request.owner_worker_id is None
+            or request.owner_state_version is None
+            or request.owner_capability is None
+            or claimed_owner != _capability_digest(request.owner_worker_id)
+            or annotations.get("hartmesh.io/execution-claim-state-version") != str(request.owner_state_version)
+            or annotations.get("hartmesh.io/execution-claim-capability-digest") != _capability_digest(request.owner_capability)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="accepted_execution_owner_fence_mismatch",
+            )
+    elif request.owner_worker_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="accepted_execution_owner_fence_mismatch",
+        )
     lease.spec.renew_time = now or datetime.now(UTC)
     lease.spec.lease_duration_seconds = ACCEPTED_ATTEMPT_LEASE_SECONDS
     try:
@@ -3343,19 +3577,30 @@ def create_sandbox(req: CreateSandboxRequest):
             accepted_skills_only=req.accepted_skills_only,
             accepted_skill_projection=accepted_projection,
             attempt_capability=req.attempt_capability,
+            accepted_execution_claim=req.accepted_execution_claim,
         )
         isolation_digest = accepted_pod.metadata.annotations["hartmesh.io/accepted-isolation-digest"]
-        attempt_lease = _claim_accepted_attempt(
-            sandbox_id,
-            accepted_projection,
-            req.attempt_capability,
-            isolation_digest=isolation_digest,
-        )
+        if req.accepted_execution_claim is not None and req.accepted_execution_claim.execution_takeover:
+            attempt_lease = _takeover_accepted_attempt(
+                sandbox_id,
+                accepted_projection,
+                req.attempt_capability,
+                req.accepted_execution_claim,
+                isolation_digest=isolation_digest,
+            )
+        else:
+            attempt_lease = _claim_accepted_attempt(
+                sandbox_id,
+                accepted_projection,
+                req.attempt_capability,
+                isolation_digest=isolation_digest,
+                execution_claim=req.accepted_execution_claim,
+            )
         attempt_owner = _accepted_attempt_owner_reference(attempt_lease)
         existing_accepted = _accepted_pod_response(
             sandbox_id,
             expected=accepted_projection,
-            expected_capability=req.attempt_capability,
+            expected_capability=(None if req.accepted_execution_claim is not None and req.accepted_execution_claim.execution_takeover else req.attempt_capability),
             expected_lease_uid=attempt_owner.uid,
             attempt_lease=attempt_lease,
         )
@@ -3371,12 +3616,20 @@ def create_sandbox(req: CreateSandboxRequest):
                 receipt,
             )
             return existing_accepted
-        _create_accepted_secrets(
+        claim_secret = _create_accepted_secrets(
             sandbox_id,
             accepted_projection,
             req.attempt_capability,
             accepted_attempt_owner=attempt_owner,
+            execution_claim=req.accepted_execution_claim,
         )
+        if claim_secret is not None:
+            attempt_lease = _bind_execution_claim_secret(
+                attempt_lease,
+                sandbox_id=sandbox_id,
+                secret_uid=claim_secret[0],
+                capability_digest=claim_secret[1],
+            )
         _create_accepted_network_policy_exact(
             sandbox_id,
             accepted_attempt_owner=attempt_owner,
@@ -3425,6 +3678,7 @@ def create_sandbox(req: CreateSandboxRequest):
                         accepted_skills_only=req.accepted_skills_only,
                         accepted_skill_projection=accepted_projection,
                         attempt_capability=req.attempt_capability,
+                        accepted_execution_claim=req.accepted_execution_claim,
                         accepted_attempt_owner=(attempt_owner if accepted else None),
                     )
                 ),

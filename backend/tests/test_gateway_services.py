@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from contextlib import suppress
 from types import SimpleNamespace
 
@@ -3771,14 +3772,18 @@ async def test_run_agent_invalid_stream_mode_finalizes_run_before_graph_invocati
     await asyncio.sleep(0)
 
     assert record.status == RunStatus.error
-    assert record.error == "Unsupported stream mode(s): events"
+    assert record.error is not None
+    assert re.fullmatch(
+        r"Runtime operation failed \(reference: [0-9a-f]{32}\)",
+        record.error,
+    )
     agent_factory.assert_not_called()
     bridge.publish.assert_awaited_once_with(
         record.run_id,
         "error",
         {
-            "message": "Unsupported stream mode(s): events",
-            "name": "UnsupportedStreamModeError",
+            "message": record.error,
+            "name": "RuntimeFailure",
         },
     )
     bridge.publish_end.assert_awaited_once_with(record.run_id)
@@ -3856,10 +3861,11 @@ async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
     assert config["configurable"][INTERNAL_CHECKPOINT_MODE_KEY] == "full"
     assert CHECKPOINT_MODE_METADATA_KEY not in config["metadata"]
     agent_factory.assert_not_called()
-    run_manager.set_status.assert_any_await(
-        record.run_id,
-        RunStatus.error,
-        error="Thread requires delta mode; materialize and convert its checkpoints before using full mode.",
+    terminal = run_manager.set_status.await_args_list[-1]
+    assert terminal.args == (record.run_id, RunStatus.error)
+    assert re.fullmatch(
+        r"Runtime operation failed \(reference: [0-9a-f]{32}\)",
+        terminal.kwargs["error"],
     )
 
 
@@ -3954,10 +3960,11 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
             }
         ),
     ]
-    run_manager.set_status.assert_any_await(
-        record.run_id,
-        RunStatus.error,
-        error="Thread requires delta mode; materialize and convert its checkpoints before using full mode.",
+    terminal = run_manager.set_status.await_args_list[-1]
+    assert terminal.args == (record.run_id, RunStatus.error)
+    assert re.fullmatch(
+        r"Runtime operation failed \(reference: [0-9a-f]{32}\)",
+        terminal.kwargs["error"],
     )
 
 

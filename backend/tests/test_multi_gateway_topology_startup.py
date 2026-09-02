@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import inspect
 import json
 from types import SimpleNamespace
 
 import pytest
 
+from app.gateway import app as gateway_app
+from app.gateway import deps as gateway_deps
 from deerflow.deployment.topology import (
     MULTI_GATEWAY_PROFILE,
     TopologyStartupFactsV1,
@@ -76,8 +79,38 @@ def test_fingerprint_builder_binds_runtime_manifests_and_expected_head() -> None
         redis_namespace_digest="3" * 64,
         capability_manifest=manifest,
         config=config,
+        mcp_task_replay_keyring_confirmation_version=1,
+        mcp_task_replay_keyring_confirmation_digest=f"sha256:{'4' * 64}",
     )
-    assert fingerprint.migration_head == "0027_multi_gateway_topology"
+    assert fingerprint.migration_head == "0030_run_delivery_owner_backfill"
     assert fingerprint.extension_artifact_digest == f"sha256:{'f' * 64}"
     assert fingerprint.redis_namespace_digest == f"sha256:{'3' * 64}"
     assert fingerprint.capability_manifest_digest == "1" * 64
+    assert fingerprint.mcp_task_replay_keyring_confirmation_version == 1
+    assert fingerprint.mcp_task_replay_keyring_confirmation_digest == f"sha256:{'4' * 64}"
+
+
+def test_exact_two_run_store_clock_gate_precedes_worker_activity() -> None:
+    source = inspect.getsource(gateway_deps.langgraph_runtime)
+
+    initialized = source.index(
+        "await app.state.run_store.initialize_lifecycle()",
+    )
+    validated = source.index(
+        "validate_multi_gateway_run_store(app.state.run_store)",
+    )
+    heartbeat_started = source.index(
+        "await app.state.run_manager.start_heartbeat()",
+    )
+    recovery_started = source.index(
+        "await app.state.run_manager.reconcile_orphaned_inflight_runs(",
+    )
+
+    assert initialized < validated < heartbeat_started < recovery_started
+
+
+def test_exact_two_readiness_checks_live_run_store_clock_authority() -> None:
+    source = inspect.getsource(gateway_app.create_app)
+
+    assert "multi_gateway_run_store_ready" in source
+    assert 'getattr(app.state, "run_store", None)' in source

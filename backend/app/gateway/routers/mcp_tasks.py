@@ -47,7 +47,12 @@ def _tracking_degraded(record: dict[str, Any], *, threshold: int) -> bool:
     return int(record.get("consecutive_poll_error_count") or 0) >= threshold
 
 
-def _list_item(record: dict[str, Any], *, threshold: int) -> dict[str, Any]:
+def _list_item(
+    record: dict[str, Any],
+    *,
+    threshold: int,
+    include_parent_lineage: bool = False,
+) -> dict[str, Any]:
     return {
         "task_id": record["id"],
         "task_name": record["task_name"],
@@ -57,37 +62,50 @@ def _list_item(record: dict[str, Any], *, threshold: int) -> dict[str, Any]:
         "error": _short_error(record.get("error")),
         "tracking_degraded": _tracking_degraded(record, threshold=threshold),
         "cancel_requested": record.get("cancel_requested_at") is not None,
-        "lineage": _lineage_summary(record),
+        "lineage": _lineage_summary(
+            record,
+            include_parent=include_parent_lineage,
+        ),
     }
 
 
-def _lineage_summary(record: dict[str, Any]) -> dict[str, Any]:
+def _lineage_summary(
+    record: dict[str, Any],
+    *,
+    include_parent: bool = False,
+) -> dict[str, Any]:
     status_value = str(record.get("lineage_status") or "legacy_unavailable")
     raw = record.get("lineage")
     if status_value != "verified" or not isinstance(raw, dict):
         return {"status": "legacy_unavailable"}
-    return {
+    summary = {
         "status": "verified",
         "kind": raw.get("kind"),
         "digest": raw.get("digest"),
         "principal_ref": raw.get("principal_ref"),
-        "parent_execution_task_id": raw.get("parent_execution_task_id"),
-        "parent_execution_kind": raw.get("parent_execution_kind"),
-        "parent_subagent_name": raw.get("parent_subagent_name"),
-        "parent_tool_receipt_id": raw.get("parent_tool_receipt_id"),
-        "agent_revision_digest": raw.get("agent_revision_digest"),
-        "assembly_fingerprint": raw.get("assembly_fingerprint"),
-        "subagent_catalog_digest": raw.get("subagent_catalog_digest"),
-        "subagent_definition_digest": raw.get("subagent_definition_digest"),
         "extension_generation": raw.get("extension_generation"),
         "extension_manifest_digest": raw.get("extension_manifest_digest"),
-        "accepted_origin_digest": raw.get("accepted_origin_digest"),
         "mcp_server_name": raw.get("mcp_server_name"),
         "mcp_tool_name": raw.get("mcp_tool_name"),
         "request_projection_digest": raw.get("request_projection_digest"),
         "credential_selector_ref": raw.get("credential_selector_ref"),
         "credential_selector_version": raw.get("credential_selector_version"),
     }
+    if include_parent:
+        summary.update(
+            {
+                "parent_execution_task_id": raw.get("parent_execution_task_id"),
+                "parent_execution_kind": raw.get("parent_execution_kind"),
+                "parent_subagent_name": raw.get("parent_subagent_name"),
+                "parent_tool_receipt_id": raw.get("parent_tool_receipt_id"),
+                "agent_revision_digest": raw.get("agent_revision_digest"),
+                "assembly_fingerprint": raw.get("assembly_fingerprint"),
+                "subagent_catalog_digest": raw.get("subagent_catalog_digest"),
+                "subagent_definition_digest": raw.get("subagent_definition_digest"),
+                "accepted_origin_digest": raw.get("accepted_origin_digest"),
+            }
+        )
+    return summary
 
 
 async def _authorized_links(
@@ -116,7 +134,10 @@ async def _authorized_links(
             )
         except Exception:
             run = None
-        if run is not None:
+        # Parent evidence is a separate authorization domain from the MCP task.
+        # Keep this explicit even though RunManager.get() also scopes local and
+        # durable records, so a custom manager cannot accidentally broaden it.
+        if run is not None and getattr(run, "user_id", None) == user_id:
             links[response_key] = run_id
     return links
 
@@ -127,8 +148,14 @@ def _detail(
     threshold: int,
     links: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    safe_links = dict(links or {})
+    include_parent_lineage = "parent_run_id" in safe_links
     return {
-        **_list_item(record, threshold=threshold),
+        **_list_item(
+            record,
+            threshold=threshold,
+            include_parent_lineage=include_parent_lineage,
+        ),
         "last_polled_at": record.get("last_polled_at"),
         "last_poll_error": _short_error(record.get("last_poll_error")),
         "last_cancel_error": _short_error(record.get("last_cancel_error")),
@@ -141,8 +168,11 @@ def _detail(
         "result_truncated": bool(record.get("result_truncated")),
         "result_artifact": record.get("result_artifact"),
         "input_required": record.get("input_required"),
-        "lineage": _lineage_summary(record),
-        "links": dict(links or {}),
+        "lineage": _lineage_summary(
+            record,
+            include_parent=include_parent_lineage,
+        ),
+        "links": safe_links,
     }
 
 

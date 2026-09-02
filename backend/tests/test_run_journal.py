@@ -444,16 +444,57 @@ class TestIdentifyCaller:
 
 class TestChainErrorCallback:
     @pytest.mark.anyio
-    async def test_on_chain_error_writes_run_error(self, journal_setup):
+    async def test_on_chain_error_writes_bounded_redacted_run_error(self, journal_setup):
         j, store = journal_setup
-        j.on_chain_error(ValueError("boom"), run_id=uuid4())
+        secret = "provider-token=super-secret-value"
+        j.on_chain_error(ValueError(secret), run_id=uuid4())
         await asyncio.sleep(0.05)
         await j.flush()
         events = await store.list_events("t1", "r1")
         error_events = [e for e in events if e["event_type"] == "run.error"]
         assert len(error_events) == 1
-        assert "boom" in error_events[0]["content"]
-        assert error_events[0]["metadata"]["error_type"] == "ValueError"
+        assert error_events[0]["content"] == {
+            "version": 1,
+            "code": "run_callback_failed",
+            "error_class": "ValueError",
+            "correlation_id": error_events[0]["content"]["correlation_id"],
+        }
+        assert len(error_events[0]["content"]["correlation_id"]) == 32
+        assert error_events[0]["metadata"] == {}
+        assert secret not in repr(error_events[0])
+
+    @pytest.mark.anyio
+    async def test_llm_error_uses_the_same_bounded_failure_shape(self, journal_setup):
+        j, store = journal_setup
+        secret = "https://user:secret@example.invalid/model"
+        j.on_llm_error(ConnectionError(secret), run_id=uuid4())
+        await j.flush()
+
+        [event] = await store.list_events("t1", "r1", event_types=["llm.error"])
+        assert event["content"]["version"] == 1
+        assert event["content"]["code"] == "llm_callback_failed"
+        assert event["content"]["error_class"] == "ConnectionError"
+        assert len(event["content"]["correlation_id"]) == 32
+        assert secret not in repr(event)
+
+    @pytest.mark.anyio
+    async def test_terminal_summary_is_bounded_without_changing_run_end_content(self, journal_setup):
+        j, store = journal_setup
+        authorized_output = {"messages": ["intentional user-visible content"]}
+        j.on_chain_end(authorized_output, run_id=uuid4())
+        j.record_terminal_summary(status="success", stop_reason=None)
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        run_end = next(event for event in events if event["event_type"] == "run.end")
+        summary = next(event for event in events if event["event_type"] == "run.terminal.v1")
+        assert run_end["content"] == authorized_output
+        assert summary["content"] == {
+            "version": 1,
+            "status": "success",
+            "stop_reason": None,
+            "failure": None,
+        }
 
 
 class TestTokenTrackingDisabled:

@@ -28,6 +28,7 @@ from pathlib import Path
 import requests
 
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.accepted_material import AcceptedMaterialExecutionClaimV1
 from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .backend import SandboxBackend
@@ -196,6 +197,10 @@ class RemoteSandboxBackend(SandboxBackend):
         self._api_key = api_key
         self._service_account_token_file = service_account_token_file
         self._attempt_capabilities: dict[str, str] = {}
+        self._attempt_execution_claims: dict[
+            str,
+            AcceptedMaterialExecutionClaimV1,
+        ] = {}
         self._attempt_capabilities_lock = threading.Lock()
 
     @property
@@ -302,6 +307,7 @@ class RemoteSandboxBackend(SandboxBackend):
         provision_lark_cli_broker: bool = False,
         accepted_skills_only: bool = False,
         accepted_skill_binding: object | None = None,
+        accepted_execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
     ) -> SandboxInfo:
         """Create a sandbox Pod + Service via the provisioner.
 
@@ -317,6 +323,8 @@ class RemoteSandboxBackend(SandboxBackend):
             kwargs["accepted_skills_only"] = True
         if accepted_skill_binding is not None:
             kwargs["accepted_skill_binding"] = accepted_skill_binding
+        if accepted_execution_claim is not None:
+            kwargs["accepted_execution_claim"] = accepted_execution_claim
         return self._provisioner_create(
             thread_id,
             sandbox_id,
@@ -405,6 +413,7 @@ class RemoteSandboxBackend(SandboxBackend):
         provision_lark_cli_broker: bool = False,
         accepted_skills_only: bool = False,
         accepted_skill_binding: object | None = None,
+        accepted_execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
     ) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
         accepted_skills_only = accepted_skills_only or accepted_skill_binding is not None
@@ -447,6 +456,12 @@ class RemoteSandboxBackend(SandboxBackend):
                     "file_count": evidence.file_count,
                     "total_bytes": evidence.total_bytes,
                 }
+                if accepted_execution_claim is not None:
+                    if accepted_execution_claim.run_id != accepted_skill_binding.run_id:
+                        raise RuntimeError(
+                            "accepted_material_execution_claim_mismatch",
+                        )
+                    payload["accepted_execution_claim"] = accepted_execution_claim.to_wire()
         provisioner_extra_mounts = _provisioner_extra_mounts_payload(
             extra_mounts,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
@@ -497,6 +512,9 @@ class RemoteSandboxBackend(SandboxBackend):
                     or not receipt.lease_uid
                 ):
                     raise RuntimeError("accepted_skill_snapshot_receipt_mismatch")
+                if accepted_execution_claim is not None:
+                    with self._attempt_capabilities_lock:
+                        self._attempt_execution_claims[sandbox_id] = accepted_execution_claim
             return SandboxInfo(
                 sandbox_id=sandbox_id,
                 sandbox_url=data["sandbox_url"],
@@ -537,6 +555,7 @@ class RemoteSandboxBackend(SandboxBackend):
             if resp.ok:
                 with self._attempt_capabilities_lock:
                     self._attempt_capabilities.pop(sandbox_id, None)
+                    self._attempt_execution_claims.pop(sandbox_id, None)
                 logger.info(f"Provisioner destroyed sandbox {sandbox_id}")
             else:
                 logger.warning(f"Provisioner destroy returned {resp.status_code}: {resp.text}")
@@ -577,14 +596,28 @@ class RemoteSandboxBackend(SandboxBackend):
         if receipt is None:
             return True
         try:
+            payload = {
+                "pod_uid": receipt.pod_uid,
+                "lease_uid": receipt.lease_uid,
+                "materialization_evidence_digest": (receipt.materialization_evidence_digest),
+            }
+            with self._attempt_capabilities_lock:
+                execution_claim = self._attempt_execution_claims.get(
+                    info.sandbox_id,
+                )
+                capability = self._attempt_capabilities.get(info.sandbox_id)
+            if execution_claim is not None and capability is not None:
+                payload.update(
+                    {
+                        "owner_worker_id": execution_claim.owner_worker_id,
+                        "owner_state_version": execution_claim.state_version,
+                        "owner_capability": capability,
+                    },
+                )
             response = requests.post(
                 f"{self._provisioner_url}/api/sandboxes/{info.sandbox_id}/accepted-attempt/renew",
                 headers=self._auth_headers(),
-                json={
-                    "pod_uid": receipt.pod_uid,
-                    "lease_uid": receipt.lease_uid,
-                    "materialization_evidence_digest": (receipt.materialization_evidence_digest),
-                },
+                json=payload,
                 timeout=10,
             )
         except requests.RequestException:

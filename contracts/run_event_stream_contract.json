@@ -91,6 +91,26 @@
       }
     },
     {
+      "event_type": "run.execution.started.v1",
+      "category": "trace",
+      "producer": "run_agent immediately before the first agent.astream dispatch",
+      "content_description": "Owner-fenced singleton proving graph execution crossed the durable dispatch boundary. The pre-graph checkpoint anchor lets recovery distinguish an earlier thread head from a checkpoint produced by this execution.",
+      "content_schema": {
+        "type": "object",
+        "required": ["version", "pre_graph_checkpoint_id"],
+        "properties": {
+          "version": {"const": 1},
+          "pre_graph_checkpoint_id": {"type": ["string", "null"]}
+        },
+        "additionalProperties": false
+      },
+      "metadata_schema": {"type": "object", "additionalProperties": false},
+      "storage_semantics": {
+        "singleton": "At most one event of this type is written per run via the live owner-fenced put-if-absent port.",
+        "dispatch_gate": "The event must commit before graph/model/tool work begins; failure prevents dispatch."
+      }
+    },
+    {
       "event_type": "run.end",
       "category": "outputs",
       "producer": "RunJournal.on_chain_end(parent_run_id=None)",
@@ -112,13 +132,56 @@
       "event_type": "run.error",
       "category": "error",
       "producer": "RunJournal.on_chain_error()",
-      "content_schema": {"type": "string"},
-      "metadata_schema": {
+      "content_description": "Bounded V1 failure evidence. Exception messages and tracebacks are deliberately excluded.",
+      "content_schema": {
         "type": "object",
-        "required": ["error_type"],
-        "properties": {"error_type": {"type": "string"}},
-        "additionalProperties": true
-      }
+        "required": ["version", "code", "error_class", "correlation_id"],
+        "properties": {
+          "version": {"const": 1},
+          "code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
+          "error_class": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
+          "correlation_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
+        },
+        "additionalProperties": false
+      },
+      "metadata_schema": {"type": "object", "additionalProperties": true}
+    },
+    {
+      "event_type": "run.terminal.v1",
+      "category": "trace",
+      "producer": "run_agent finalization via RunJournal.record_terminal_summary()",
+      "content_description": "Bounded terminal lifecycle evidence that supplements, and never rewrites, authorized opaque run.end graph output.",
+      "content_schema": {
+        "type": "object",
+        "required": ["version", "status", "stop_reason", "failure"],
+        "properties": {
+          "version": {"const": 1},
+          "status": {"enum": ["success", "error", "timeout", "interrupted"]},
+          "stop_reason": {
+            "type": ["string", "null"],
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_.:/@-]+$"
+          },
+          "failure": {
+            "anyOf": [
+              {"type": "null"},
+              {
+                "type": "object",
+                "required": ["version", "code", "error_class", "correlation_id"],
+                "properties": {
+                  "version": {"const": 1},
+                  "code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
+                  "error_class": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
+                  "correlation_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
+                },
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "metadata_schema": {"type": "object", "additionalProperties": true}
     },
     {
       "event_type": "llm.human.input",
@@ -189,7 +252,18 @@
       "event_type": "llm.error",
       "category": "trace",
       "producer": "RunJournal.on_llm_error()",
-      "content_schema": {"type": "string"},
+      "content_description": "The same bounded V1 failure shape used by run.error; provider exception messages and tracebacks are excluded.",
+      "content_schema": {
+        "type": "object",
+        "required": ["version", "code", "error_class", "correlation_id"],
+        "properties": {
+          "version": {"const": 1},
+          "code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
+          "error_class": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
+          "correlation_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
+        },
+        "additionalProperties": false
+      },
       "metadata_schema": {"type": "object", "additionalProperties": true}
     },
     {

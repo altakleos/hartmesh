@@ -15,6 +15,7 @@ from deerflow.sandbox.accepted_material import (
     AcceptedExecutionEvidenceV1,
     AcceptedMaterialCapability,
     AcceptedMaterialError,
+    AcceptedMaterialExecutionClaimV1,
     AcceptedMaterialLeaseV1,
     AcceptedMaterialRequestV1,
     AcceptedSkillExecutionEvidenceV2,
@@ -108,15 +109,29 @@ class AioAcceptedMaterializer:
         *,
         sandbox_id: str,
         legacy: AcceptedSkillExecutionEvidenceV2,
+        stable_execution_claim: bool = False,
     ) -> AcceptedExecutionEvidenceV1:
         if legacy.profile != "rwx_verified_copy_v2" or legacy.snapshot_id != request.skill_snapshot_digest or legacy.run_id != request.run_id:
             raise AcceptedMaterialError("accepted_material_evidence_mismatch")
         if legacy.sandbox_image_digest != request.runtime_image_digest:
             raise AcceptedMaterialError("accepted_material_image_digest_mismatch")
+        if stable_execution_claim:
+            request_commitment = {
+                "accepted_material_identity_digest": _canonical_digest(
+                    {key: value for key, value in request.to_persisted().items() if key not in {"digest", "lease_expires_at"}},
+                ),
+            }
+            verifier_contract_version = f"{legacy.profile}:accepted_execution_claim_v1"
+        else:
+            # Preserve the original persisted V1 proof contract exactly.
+            request_commitment = {
+                "accepted_material_request_digest": request.digest,
+            }
+            verifier_contract_version = legacy.profile
         read_only_proof_digest = _canonical_digest(
             {
                 "version": 1,
-                "accepted_material_request_digest": request.digest,
+                **request_commitment,
                 "profile": legacy.profile,
                 "provider_attempt_id": legacy.attempt_id,
                 "pod_isolation_digest": legacy.pod_isolation_digest,
@@ -138,7 +153,7 @@ class AioAcceptedMaterializer:
             skill_scope_digest=request.skill_scope_digest,
             materialization_digest=legacy.materialization_evidence_digest,
             verifier_image_digest=legacy.accepted_skill_runtime_image_digest,
-            verifier_contract_version=legacy.profile,
+            verifier_contract_version=verifier_contract_version,
             read_only_proof_digest=read_only_proof_digest,
             qualification_scope=ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
         )
@@ -146,11 +161,25 @@ class AioAcceptedMaterializer:
     async def acquire_and_materialize(
         self,
         request: AcceptedMaterialRequestV1,
+        *,
+        execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
     ) -> tuple[Sandbox, AcceptedMaterialLeaseV1, AcceptedExecutionEvidenceV1]:
         if not isinstance(request, AcceptedMaterialRequestV1):
             raise TypeError("request must be AcceptedMaterialRequestV1")
         if request.lease_expires_at <= self._clock():
             raise AcceptedMaterialError("accepted_material_lease_expired")
+        if execution_claim is not None and (not isinstance(execution_claim, AcceptedMaterialExecutionClaimV1) or not execution_claim.binds(request)):
+            raise AcceptedMaterialError("accepted_material_execution_claim_mismatch")
+        if execution_claim is not None and execution_claim.execution_takeover:
+            # A Kubernetes Secret update is visible to the API server before
+            # kubelet projects it into the gate sidecar.  Until AIO has a
+            # per-request linearizable owner/epoch authority, accepting a
+            # takeover would leave the prior credential usable and would let
+            # stale cleanup destroy the unchanged Pod.  Keep the provider
+            # seam explicit and fail before any remote or local mutation.
+            raise AcceptedMaterialError(
+                "accepted_material_execution_takeover_unavailable",
+            )
         key = self._key(request)
         async with self._lock_for(key):
             current = self._active.get(key)
@@ -171,11 +200,35 @@ class AioAcceptedMaterializer:
             thread_id, user_id = self._scope_resolver(request)
             if not isinstance(thread_id, str) or not thread_id or not isinstance(user_id, str) or not user_id:
                 raise AcceptedMaterialError("accepted_material_scope_unavailable")
-            sandbox_id = await self._provider.acquire_bound_accepted_skills_async(
-                thread_id,
-                user_id=user_id,
-                binding=binding,
-            )
+            if execution_claim is not None and execution_claim.execution_takeover:
+                recover = getattr(
+                    self._provider,
+                    "recover_bound_accepted_skills_async",
+                    None,
+                )
+                if not callable(recover):
+                    raise AcceptedMaterialError(
+                        "accepted_material_execution_takeover_unsupported",
+                    )
+                sandbox_id = await recover(
+                    thread_id,
+                    user_id=user_id,
+                    binding=binding,
+                    execution_claim=execution_claim,
+                )
+            elif execution_claim is None:
+                sandbox_id = await self._provider.acquire_bound_accepted_skills_async(
+                    thread_id,
+                    user_id=user_id,
+                    binding=binding,
+                )
+            else:
+                sandbox_id = await self._provider.acquire_bound_accepted_skills_async(
+                    thread_id,
+                    user_id=user_id,
+                    binding=binding,
+                    execution_claim=execution_claim,
+                )
             try:
                 sandbox = self._provider.get(sandbox_id)
                 legacy = self._provider.accepted_skill_execution_evidence(sandbox_id)
@@ -190,6 +243,7 @@ class AioAcceptedMaterializer:
                     request,
                     sandbox_id=sandbox_id,
                     legacy=legacy,
+                    stable_execution_claim=execution_claim is not None,
                 )
             except Exception:
                 try:

@@ -1015,8 +1015,9 @@ async def cancel_run(
     - wait=false: Return immediately with 202
 
     In multi-worker deployments, a cancel landing on a non-owning worker
-    durably notifies the owner when its lease is live, or takes over and
-    terminalizes the run when that lease has expired.
+    durably notifies a live owner. An expired ``terminalize_v1`` run is
+    terminalized; an exact-two store-only row returns a safe conflict without
+    mutation while execution takeover is unavailable.
     """
     result = await build_invocation_runtime(request).cancel_run(
         InternalCancelRequest(

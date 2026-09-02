@@ -12,21 +12,17 @@ class RunOwnershipConfig(BaseModel):
     the lease on its active runs. This is required for multi-worker
     deployments to detect orphaned runs from crashed workers.
 
-    Clock-sync assumption
-    ---------------------
-    Reconciliation compares another worker's UTC ``lease_expires_at`` against
-    this worker's ``datetime.now(UTC)``. The only skew budget between two
-    workers' clocks is ``grace_seconds`` (plus whatever heartbeat slop is
-    left in the current cycle — at most ``lease_seconds / 3``). Worst case,
-    if the owning worker's heartbeat is just about to fire, a peer whose
-    clock is more than ``grace_seconds`` ahead can mis-reclaim a still-live
-    run as an orphan.
+    Clock authority
+    ---------------
+    Qualified multi-Gateway stores advertise ``database_v1``. Callers pass a
+    duration and PostgreSQL mints, renews, and compares the absolute deadline
+    from one post-lock database-time sample. Pod UTC clocks are evidence-only;
+    each owner uses a conservative monotonic watchdog for local fail-stop.
 
-    Operators should ensure worker clocks are synchronised (NTP / chrony /
-    systemd-timesyncd in K8s nodes) within a few seconds. If the
-    environment cannot guarantee that, raise ``grace_seconds``; the cost is
-    longer recovery latency for genuinely dead workers
-    (``lease_seconds + grace_seconds`` from last heartbeat to reclaim).
+    Compatibility stores may retain ``process_v1`` and absolute process-clock
+    deadlines outside the qualified profile. ``grace_seconds`` is an explicit
+    recovery delay after authoritative expiry, never permission for an owner
+    to execute longer and never a substitute for shared clock authority.
     """
 
     lease_seconds: int = Field(
@@ -37,9 +33,7 @@ class RunOwnershipConfig(BaseModel):
     grace_seconds: int = Field(
         default=10,
         ge=0,
-        description=(
-            "Extra seconds past lease expiry before an orphaned run is reclaimed. Also the clock-skew budget between workers — raise it if worker clocks are not tightly synced; cost is slower recovery of genuinely dead-worker runs."
-        ),
+        description=("Recovery delay after authoritative lease expiry before an orphaned run is reclaimed. It is not extra owner execution time; larger values trade slower dead-worker recovery for a wider operational observation window."),
     )
     heartbeat_enabled: bool = Field(
         default=False,

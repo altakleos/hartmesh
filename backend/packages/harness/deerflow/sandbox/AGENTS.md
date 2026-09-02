@@ -16,6 +16,16 @@ epoch. Duplicate requests are idempotent only when their canonical digest is
 identical. The in-memory adapter and OpenSandbox stateful control-plane fake are
 contract-test tools, never production proof.
 
+The dormant exact-two AIO recovery seam keeps the immutable accepted resource
+tuple separate from mutable execution authority. Its candidate design retains
+the immutable capability Secret in the material receipt and projects a second,
+non-evidence execution-claim Secret for newly admitted exact-two runs. The
+claim's name and UID are Lease-anchored and its credential rotates under the
+tenant/run/owner/state/material CAS. This is not current recovery authority:
+Secret projection/rotation is not linearizable revocation, so every takeover
+claim is rejected before owner CAS. Never put renewable timestamps, current
+Gateway owners, or rotating claim credentials into immutable evidence.
+
 Adapters are opt-in rather than methods every ordinary `SandboxProvider` must
 fake. `resolve_accepted_materializer` discovers only the optional provider
 selection hook and returns the neutral port plus its pinned runtime/lease
@@ -29,6 +39,9 @@ atomic metadata claim and cannot report a separately resolved image digest;
 candidate trusted-setup surfaces remain live-unqualified. Never replace those controls with process-local locks,
 ordinary owner-controlled `chmod`, or echoed requested-image metadata. See
 `backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md`.
+The SDK remains an optional harness/runtime dependency; the backend `make test`
+recipe selects its exact lock-pinned extra solely for the offline Phase 0 byte
+and surface probe.
 
 **Interface**: Abstract `Sandbox` with `execute_command(command, env=None)`, `read_file`, `write_file`, `list_dir`, `glob`, and `grep`. `grep` accepts either one text file or a directory tree. The optional `env` injects per-call environment variables (request-scoped secrets — see Request-Scoped Secrets below); `LocalSandbox` merges it via `subprocess.run(env=...)` and `AioSandbox` routes env-bearing commands through the `bash.exec(env=...)` API on a fresh session.
 **Provider Pattern**: `SandboxProvider` with `acquire`, `acquire_async`, `get`, `release` lifecycle. Async agent/tool paths call async sandbox lifecycle hooks so Docker sandbox creation, discovery, cross-process locking, readiness polling, and release stay off the event loop.
@@ -119,8 +132,10 @@ ordinary owner-controlled `chmod`, or echoed requested-image metadata. See
 
 `durable_two_gateway_v1` admits only the AIO/Kubernetes provider with shared
 tenant-prefixed Redis ownership, existing RWX home/skills claims, projected
-ServiceAccount authentication, and `rwx_verified_copy_v2`. A takeover must claim
-the remote ownership fence and then revalidate the immutable accepted attempt's
-Lease/Pod/materialization tuple before graph or tool work. Process-local warm
-pools are caches only. OpenSandbox and every other materialization profile are
-excluded from this scope.
+ServiceAccount authentication, and `rwx_verified_copy_v2`. Execution takeover
+is currently unavailable for all exact-two orphans. Projected Secret rotation and
+Redis adoption are not linearizable per-request execution revocation, so the
+Gateway rejects the claim before owner CAS. Future activation requires a
+database-authoritative request gate plus owner-fenced destruction and fresh
+qualification. Process-local warm pools are caches only. OpenSandbox and every
+other materialization profile are excluded from this scope.

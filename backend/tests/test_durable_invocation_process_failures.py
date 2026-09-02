@@ -52,12 +52,7 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.mcp_tasks import McpTaskRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.run.sql import RunRepository
-from deerflow.runtime import (
-    DisconnectMode,
-    RunManager,
-    RunStatus,
-    ThreadOperationKind,
-)
+from deerflow.runtime import DisconnectMode, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.accepted_invocation import (
     AcceptedInvocation,
     InvocationOrigin,
@@ -88,6 +83,15 @@ from deerflow.runtime.tool_evidence import build_request_projection
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
 _TEST_TENANT = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
+
+
+@pytest.fixture(autouse=True)
+def _mcp_request_commitment_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "MCP_TASK_REPLAY_HMAC_KEYS",
+        '{"test-v1":"a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s"}',
+    )
+    monkeypatch.setenv("MCP_TASK_REPLAY_HMAC_ACTIVE_KEY_ID", "test-v1")
 
 
 class _TemporarilyUnavailableRunRepository:
@@ -311,7 +315,9 @@ async def _persist_mcp_task_before_process_kill(database_path: str, connection) 
     service = McpTaskService(
         repository=repository,
         drivers=registry,
-        poll_interval_seconds=1,
+        # Persist an immediately due row using database time so process-loss
+        # recovery never relies on the submitting process's wall clock.
+        poll_interval_seconds=0,
         lease_seconds=30,
         max_concurrent_polls=1,
     )
@@ -1126,7 +1132,10 @@ async def test_process_loss_during_execution_is_fenced_before_stale_completion()
             record,
             ctx=RunContext(
                 checkpointer=None,
-                event_store=MemoryRunEventStore(run_store=store),
+                event_store=MemoryRunEventStore(
+                    run_store=store,
+                    tenant=_TEST_TENANT,
+                ),
                 tenant=_TEST_TENANT,
             ),
             agent_factory=factory,

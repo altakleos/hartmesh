@@ -28,6 +28,7 @@ The profile is deliberately narrow:
 | Gateway | Two replicas; HPA disabled; `Recreate` strategy |
 | Tenant | One server-owned tenant identity per release |
 | Durable state | One tenant-bound PostgreSQL schema at the exact Alembic head |
+| Run ownership clock | `lease_clock=database_v1`; PostgreSQL time owns lease deadlines, renewals, and expired-run scans |
 | Redis | Shared, tenant-ACL-scoped stream/cache/ownership/notification keys and channels |
 | Scheduler | Enabled on both replicas; database-time leases and global capacity |
 | MCP tasks | Enabled, PostgreSQL-fenced, and exercised against the deterministic qualification service |
@@ -55,13 +56,72 @@ prefix; durable run history remains reconstructible from PostgreSQL after a
 Redis interruption. Accepted skill bytes remain immutable and are recovered
 through the already-qualified AIO/RWX materialization contract.
 
+The exact-two startup inventory and readiness probe inspect the constructed
+run store, not only its configured backend. They require the versioned
+`database_v1` lease-clock authority after store initialization and before run
+heartbeat or recovery begins. A missing or process-clock adapter fails closed.
+Other deployment profiles retain their compatible process-clock stores.
+
 Every Gateway registers a redacted topology fingerprint in PostgreSQL. It
 contains digests and safe references, never credentials, raw configuration, or
-the tenant ID. A different live fingerprint is rejected. Readiness requires the
-pod's own compatible registration and healthy shared dependencies; it does not
-wait for its peer. Therefore a surviving pod remains ready after peer loss while
-the administrator deployment report truthfully shows one compatible replica and
-`degraded_replicas=1`.
+the tenant ID. The fingerprint includes a versioned non-secret confirmation of
+the startup-frozen MCP replay keyring: all retained key IDs and bytes plus the
+active ID affect it, but no key material is serialized. A different live
+fingerprint is rejected. Readiness requires the pod's own compatible
+registration and healthy shared dependencies; it does not wait for its peer.
+Therefore a surviving pod remains ready after peer loss while the administrator
+deployment report truthfully shows one compatible replica and
+`degraded_replicas=1`. Adding, removing, or switching replay keys changes the
+fingerprint and must use the same quiesced stop/restart procedure as any other
+exact-two topology change.
+
+### Recovery is an admission-time, reversible policy
+
+Run recovery is deliberately narrower than generic retry. Every newly accepted
+run stores one server-selected policy. Ordinary and historical rows use
+`terminalize_v1`, preserving the existing orphan-terminalization behavior.
+Only an exact-two qualification candidate may stamp
+`exact_two_takeover_v1`, and a client cannot request or change that value.
+Changing the deployment profile affects later admissions only; it never
+retrofits an active or historical row.
+
+`HARTMESH_EXECUTION_RECOVERY_CLAIMS_ENABLED` is a reversible, process-local
+precondition and defaults to `false`. It is not an enablement switch in this
+checkout: the exact-two eligibility gate rejects every execution-takeover claim
+before any PostgreSQL owner/epoch compare-and-set, even when the variable is
+`true`. An expired `exact_two_takeover_v1` row therefore remains fail-closed
+and is not attached to a replacement worker or silently routed through legacy
+terminalization. Ordinary `terminalize_v1` behavior is unchanged.
+
+This is deliberate candidate-unavailable behavior. Absence of accepted-skill
+evidence does not prove that an ordinary AIO sandbox was unused, and projected
+Secret rotation is eventual rather than a linearizable revocation point. Safe
+enablement requires a per-request database-authoritative owner/epoch check,
+owner-fenced destruction, and durable reconstruction of checkpoint-aligned
+events, delivery state, output baseline, and cumulative usage before the first
+replacement side effect. The dormant coordinator/schema remains an additive
+two-way-door seam; it is not a supported capability claim.
+
+Tool recovery has two deliberately separate outcomes. An ordinary tool whose
+receipt is started without an outcome terminates with the bounded reason
+`recovery_tool_attempt_indeterminate`; HartMesh neither guesses whether its
+external side effect happened nor executes it again. A tool accepted with the
+fingerprinted `receipt_idempotent_reconcile_v1` contract may resume only after a
+trusted coordinator proves the exact open receipt, dispatch generation,
+accepted assembly digest, and current takeover epoch. The qualification tool
+uses that receipt as the idempotency key for a detached sandbox operation: the
+replacement wrapper reattaches to its durable result, while the external
+operation body remains exactly once. A tool name or mutable runtime metadata is
+never sufficient reconciliation proof. The host seals this finite map under
+the existing fingerprinted effective-policy key
+`hartmesh.tool_recovery.v1`; it does not change the public extension-api 0.13
+`ToolDescriptor` wire shape.
+
+This is a two-way operational door. Returning to `durable_one_replica` changes
+the policy stamped on future admissions back to `terminalize_v1`; the additive
+schema and existing evidence remain readable. Operators must drain or explicitly
+terminalize active exact-two-policy rows before the maintenance rollback. No
+down-migration, policy rewrite, or claim inheritance is required or permitted.
 
 The administrator report at `GET /api/runtime/v1/deployment` exposes the safe
 replica ID, topology digest, live/degraded counts, exact qualification scope and
@@ -116,6 +176,10 @@ PYTHONPATH=. uv run pytest -m kubernetes_contract -v -s \
 
 Missing inputs, tools, real PostgreSQL/Redis/Kubernetes routing, RWX behavior,
 or any scenario fail the enabled lane. They are never converted to a skip. The
+exact-two test file is itself scope-specific: once Kubernetes qualification is
+explicitly enabled, an absent or different `DEERFLOW_TEST_KUBERNETES_SCOPE`
+fails the entrypoint instead of reporting a passing no-op. Use the separate
+one-replica entrypoint for either one-replica scope. The
 harness exercises two directly addressable Gateway pods and their Service,
 deletes owners, interrupts dependencies, introduces a mismatched pod, and runs a
 second isolated tenant release. It must pass these exact scenarios in order:
@@ -124,12 +188,16 @@ second isolated tenant release. It must pass these exact scenarios in order:
 2. concurrent admission;
 3. execution ownership;
 4. owner SIGKILL at pre-materialization, post-materialization, post-checkpoint,
-   model, long sandbox-tool, and pre-terminal-commit windows;
+   post-dispatch-marker/pre-graph, model, long sandbox-tool, and
+   pre-terminal-commit windows, including checkpoint/event alignment and stale
+   owner rejection;
 5. SSE reconnect;
 6. scheduler occurrence/global cap;
 7. both scheduler owner-loss windows;
 8. nonempty accepted-skill sandbox recovery with exact resource identity,
-   revalidation, and single model/graph execution;
+   linearizable old-owner revocation, byte-identical accepted evidence,
+   revalidation, one durable tool outcome, and exactly one receipt-keyed
+   external operation body across takeover;
 9. MCP poller takeover/result/notification lineage;
 10. cross-pod cancel/fail/succeed finalization races, terminal owner/lease
     release, and accepted-material Lease/Pod cleanup;
@@ -139,12 +207,20 @@ second isolated tenant release. It must pass these exact scenarios in order:
 12. an owner-only PostgreSQL network partition, peer takeover, and a verified
     stop/continue of the original `uvicorn` process, with its real checkpoint,
     receipt, accepted-material renewal, and terminal mutations all rejected;
+    its controlled tool window also reconciles the same receipt without
+    repeating the external operation body;
 13. configuration and real incompatible-binary skew rejection;
 14. tenant separation across restricted database roles (including cross-database
     connection denial), Redis ACLs, Kubernetes, and HTTP;
 15. every unsupported chart/startup surface;
 16. mixed-version rejection and a stop/migrate/start transition from the
     pinned compatible predecessor to the target while preserving durable rows.
+
+Separate deterministic contract tests cover the negative half of the tool
+policy: a generic started-without-outcome receipt has no accepted reconciler,
+terminalizes with `recovery_tool_attempt_indeterminate`, keeps starts at one and
+outcomes at zero, and never attaches a replacement tool attempt. That negative
+does not substitute for the positive controlled live tool-recovery scenarios.
 
 The success file is published atomically only after the canonical artifact
 passes the offline verifier against independently supplied subjects. Failure
@@ -158,6 +234,11 @@ The Helm `deployment.qualificationCandidate` switch is test-only. It is accepted
 only in a disposable qualification namespace and only when the Gateway has the
 internal live-harness runtime flag. It cannot carry passing evidence and must
 never be used for production traffic.
+
+Scenarios 4 and 8 are mandatory and cannot pass with the current global
+takeover gate. Their negative result is not converted into passing evidence;
+consequently this checkout cannot emit a passing artifact or render the profile
+as production-supported.
 
 ## Future adoption contract: stop, migrate, start
 
@@ -190,6 +271,7 @@ Use a maintenance window. Mixed binaries/configuration are intentionally rejecte
    migration Job uses the exact Gateway digest and a PostgreSQL advisory lock.
    Gateway pods run `uv run --no-sync`, verify the head, and never race an
    application-start migration.
+
 7. Require two distinct compatible registrations, both readiness probes green,
    no degraded replica, and the exact artifact digest in the administrator
    report. Run bounded admission/SSE/scheduler smoke checks before restoring
@@ -200,14 +282,15 @@ Use a maintenance window. Mixed binaries/configuration are intentionally rejecte
 Rollback is another maintenance window, not a rolling downgrade.
 
 1. Disable traffic and pause new schedule admission; wait for the same ownership
-   conditions above.
+   conditions above. Confirm there are no active rows stamped
+   `exact_two_takeover_v1`; rows already terminal remain immutable history.
 2. Scale the two-Gateway deployment to zero and wait for graceful termination.
 3. Restore `durable_one_replica` with one of the identical compatible
    image/config replicas and `gateway.replicas=1`.
 4. Do not down-migrate the shared schema. Preserve topology and qualification
-   evidence records. If the previous one-replica binary cannot read the current
-   schema, restore a tested forward-compatible image instead of forcing a
-   database downgrade.
+   evidence records, including each run's recovery policy. If the previous
+   one-replica binary cannot read the current additive schema, restore a tested
+   forward-compatible image instead of forcing a database downgrade.
 5. Verify one-replica readiness and durable history before restoring traffic.
 
 ## Failure codes and troubleshooting

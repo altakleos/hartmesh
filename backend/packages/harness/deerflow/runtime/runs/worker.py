@@ -24,7 +24,7 @@ import os
 import sys
 import threading
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -57,6 +57,13 @@ from deerflow.runtime.checkpoint_state import (
 )
 from deerflow.runtime.constraints import ConstraintFenceError
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.events.appender import (
+    FencedRunEventAppender,
+    RuntimeEventAuthority,
+    RuntimeEventOwnershipLost,
+)
+from deerflow.runtime.events.catalog import RUN_EXECUTION_STARTED_EVENT
+from deerflow.runtime.failure_evidence import RuntimeFailureV1, map_runtime_failure
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -100,8 +107,14 @@ from deerflow.workspace_changes.types import WorkspaceSnapshot
 
 from .manager import RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
+from .recovery import (
+    RECOVERY_CHECKPOINT_UNAVAILABLE_STOP_REASON,
+    RECOVERY_TOOL_ATTEMPT_INDETERMINATE_STOP_REASON,
+    ExecutionRecoveryDecision,
+    ExecutionRecoveryDisposition,
+)
 from .schemas import RunStatus
-from .store.base import BindAssemblyEvidenceOutcome, LifecycleType
+from .store.base import BindAssemblyEvidenceOutcome, LifecycleType, RecoveryPolicy
 
 if TYPE_CHECKING:
     from deerflow.sandbox.accepted_material import (
@@ -113,6 +126,11 @@ if TYPE_CHECKING:
     from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 logger = logging.getLogger(__name__)
+
+
+class _ExecutionRecoveryTerminalized(RuntimeError):
+    """The manager durably closed a takeover after worker preflight."""
+
 
 _checkpoint_locks_guard = threading.Lock()
 _checkpoint_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
@@ -258,6 +276,7 @@ async def _materialize_accepted_skill_projection(
     runtime: object,
     *,
     user_id: str,
+    record: RunRecord | None = None,
 ) -> _AcceptedMaterializationResult:
     """Prove accepted material before the authoritative running transition."""
 
@@ -290,6 +309,7 @@ async def _materialize_accepted_skill_projection(
     materialization_lease = None
     try:
         from deerflow.sandbox.accepted_material import (
+            AcceptedMaterialExecutionClaimV1,
             AcceptedMaterialRequestV1,
             capture_accepted_file_manifest,
             resolve_accepted_materializer,
@@ -346,11 +366,48 @@ async def _materialize_accepted_skill_projection(
                 lease_expires_at=datetime.now(UTC) + selection.lease_duration,
             )
             materializer = selection.materializer
-            (
-                sandbox,
-                materialization_lease,
-                evidence,
-            ) = await materializer.acquire_and_materialize(request)
+            execution_claim = None
+            if record is not None and record.recovery_policy is RecoveryPolicy.exact_two_takeover_v1:
+                owner_worker_id = record.owner_worker_id
+                if not isinstance(owner_worker_id, str) or not owner_worker_id:
+                    raise RuntimeError(
+                        "accepted_material_execution_owner_unavailable",
+                    )
+                expected_materialization_digest = None
+                if record.execution_takeover:
+                    persisted_evidence = record.execution_evidence_json
+                    if isinstance(persisted_evidence, dict):
+                        expected_materialization_digest = persisted_evidence.get(
+                            "materialization_digest",
+                        )
+                    if not isinstance(expected_materialization_digest, str):
+                        raise RuntimeError(
+                            "accepted_material_recovery_evidence_unavailable",
+                        )
+                execution_claim = AcceptedMaterialExecutionClaimV1(
+                    version=1,
+                    tenant_digest=tenant.digest,
+                    run_id=binding.run_id,
+                    owner_worker_id=owner_worker_id,
+                    state_version=record.state_version,
+                    execution_takeover=record.execution_takeover,
+                    expected_materialization_digest=(expected_materialization_digest),
+                )
+            if execution_claim is None:
+                (
+                    sandbox,
+                    materialization_lease,
+                    evidence,
+                ) = await materializer.acquire_and_materialize(request)
+            else:
+                (
+                    sandbox,
+                    materialization_lease,
+                    evidence,
+                ) = await materializer.acquire_and_materialize(
+                    request,
+                    execution_claim=execution_claim,
+                )
             sandbox_id = sandbox.id
         else:
             sandbox_id = await provider.acquire_bound_accepted_skills_async(
@@ -454,23 +511,33 @@ async def _persist_delivery_receipt(
                 content=content,
             )
             return True
-        except Exception:
+        except RuntimeEventOwnershipLost:
+            raise
+        except Exception as exc:
+            failure = map_runtime_failure(
+                code="delivery_receipt_write_failed",
+                error=exc,
+            )
             if attempt == attempts - 1:
                 logger.warning(
-                    "Failed to persist delivery receipt for run %s after %d attempts; applying terminal delivery semantics without a receipt",
+                    "Delivery receipt write failed run_id=%s attempts=%d code=%s error_class=%s correlation_id=%s; applying terminal delivery semantics without a receipt",
                     run_id,
                     attempts,
-                    exc_info=True,
+                    failure.code,
+                    failure.error_class,
+                    failure.correlation_id,
                 )
                 return False
             delay = _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS[attempt]
             logger.warning(
-                "Failed to persist delivery receipt for run %s (attempt %d/%d); retrying in %.1fs",
+                "Delivery receipt write failed run_id=%s attempt=%d/%d retry_seconds=%.1f code=%s error_class=%s correlation_id=%s",
                 run_id,
                 attempt + 1,
                 attempts,
                 delay,
-                exc_info=True,
+                failure.code,
+                failure.error_class,
+                failure.correlation_id,
             )
             await asyncio.sleep(delay)
 
@@ -808,6 +875,17 @@ class RunContext:
     agent_revision_resolver: Any | None = field(default=None, repr=False)
     # Host-owned clock used by both accepted-constraint worker fences.
     constraint_clock: Any | None = field(default=None, repr=False)
+    # Exact-two recovery only: called after accepted material and assembly
+    # revalidation, but before the durable graph-dispatch marker and any
+    # model/tool work. The callback waits for RunManager to validate/release
+    # the returned decision.
+    execution_recovery_gate: (
+        Callable[
+            [RunRecord, object],
+            Awaitable[ExecutionRecoveryDecision],
+        ]
+        | None
+    ) = field(default=None, repr=False)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -1034,15 +1112,24 @@ class _SubagentEventBuffer:
         self._pending = []
         try:
             await self._event_store.put_batch(batch)
-        except Exception:
+        except RuntimeEventOwnershipLost:
+            self._pending = batch + self._pending
+            raise
+        except Exception as exc:
             # Re-buffer the failed batch (ahead of any events queued since) so a
             # transient store error does not silently drop subagent step events.
             self._pending = batch + self._pending
+            failure = map_runtime_failure(
+                code="subagent_event_write_failed",
+                error=exc,
+            )
             logger.warning(
-                "Run %s: failed to persist %d subagent step event(s)",
+                "Subagent event write failed run_id=%s events=%d code=%s error_class=%s correlation_id=%s",
                 self._run_id,
                 len(batch),
-                exc_info=True,
+                failure.code,
+                failure.error_class,
+                failure.correlation_id,
             )
 
 
@@ -1082,6 +1169,7 @@ async def run_agent(
         notify_task_start,
         notify_task_stop,
     )
+    from deerflow.persistence.thread_meta.base import ThreadMetaRunProjection
 
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
     task_store: ExtensionData | None = None
@@ -1106,6 +1194,9 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    event_appender: Any | None = None
+    terminal_failure: RuntimeFailureV1 | None = None
+    runtime_event_authority_rejected = False
     delivery_content: dict[str, Any] | None = None
     produced_output_paths: list[str] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
@@ -1129,6 +1220,8 @@ async def run_agent(
     materialization: _AcceptedMaterializationResult | None = None
     materialization_evidence = None
     dispatch_ledger = None
+    thread_projection_owner_id: str | None = None
+    thread_projection_active_state_version: int | None = None
 
     if ctx.mcp_task_repo is not None and record.user_id is not None:
         try:
@@ -1207,10 +1300,53 @@ async def run_agent(
         if event_store is not None:
             from deerflow.runtime.journal import RunJournal
 
+            owner_id = record.owner_worker_id
+            lease_epoch = record.state_version
+            if not isinstance(owner_id, str) or not owner_id or type(lease_epoch) is not int:
+                raise RuntimeEventOwnershipLost("runtime_event_authority_unavailable")
+            authority = RuntimeEventAuthority(
+                tenant=ctx.tenant,
+                thread_id=thread_id,
+                run_id=run_id,
+                owner_id=owner_id,
+                lease_epoch=lease_epoch,
+            )
+
+            async def _current_runtime_event_authority() -> RuntimeEventAuthority:
+                current_owner = record.owner_worker_id
+                current_epoch = record.state_version
+                if record.ownership_lost or not isinstance(current_owner, str) or not current_owner or type(current_epoch) is not int:
+                    raise RuntimeEventOwnershipLost("runtime_event_ownership_lost")
+                return RuntimeEventAuthority(
+                    tenant=ctx.tenant,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    owner_id=current_owner,
+                    lease_epoch=current_epoch,
+                )
+
+            async def _process_local_authority_is_current(
+                candidate: RuntimeEventAuthority,
+            ) -> bool:
+                return bool(
+                    not record.ownership_lost
+                    and candidate.run_id == record.run_id
+                    and candidate.thread_id == record.thread_id
+                    and candidate.owner_id == record.owner_worker_id
+                    and candidate.lease_epoch == record.state_version
+                    and candidate.tenant == ctx.tenant
+                )
+
+            event_appender = FencedRunEventAppender(
+                event_store,
+                authority,
+                process_local_validator=(None if run_manager.heartbeat_enabled else _process_local_authority_is_current),
+                authority_provider=_current_runtime_event_authority,
+            )
             journal = RunJournal(
                 run_id=run_id,
                 thread_id=thread_id,
-                event_store=event_store,
+                event_store=event_appender,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
@@ -1654,6 +1790,7 @@ async def run_agent(
             raw_materialization = await _materialize_accepted_skill_projection(
                 runtime,
                 user_id=skill_binding_user_id,
+                record=record,
             )
             if isinstance(raw_materialization, _AcceptedMaterializationResult):
                 materialization = raw_materialization
@@ -1699,6 +1836,9 @@ async def run_agent(
                 )
             return
         started = True
+        if isinstance(record.owner_worker_id, str) and record.owner_worker_id and type(record.state_version) is int:
+            thread_projection_owner_id = record.owner_worker_id
+            thread_projection_active_state_version = record.state_version
 
         if checkpointer is not None and getattr(
             run_manager,
@@ -1754,31 +1894,6 @@ async def run_agent(
                 "post_materialization_before_checkpoint",
                 record,
             )
-
-        if extensions.has_task_lifecycle:
-            task_info = TaskInfo(
-                task_id=task_id,
-                run_id=run_id,
-                thread_id=thread_id,
-                kind="lead",
-                agent_name=record.assistant_id,
-            )
-            assert task_store is not None
-            await notify_task_start(
-                extensions,
-                task_store,
-                task_info,
-                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
-            )
-
-        if not record.ownership_lost and thread_store is not None:
-            try:
-                await thread_store.update_status(thread_id, "running")
-            except Exception:
-                logger.debug(
-                    "Failed to update thread_meta status for %s (non-fatal)",
-                    thread_id,
-                )
 
         assembly_anchors = None
         if requires_assembly_evidence:
@@ -1890,6 +2005,83 @@ async def run_agent(
                         mode,
                     )
 
+        # A takeover worker is attached behind the manager's release barrier.
+        # Only after accepted material and the rebuilt assembly have validated
+        # may Gateway inspect the actual host-sealed tool recovery policy. The
+        # gate owns any unsafe terminal CAS; no lifecycle observer, mutable
+        # thread projection, graph, model, or tool work precedes this decision.
+        execution_recovery_decision: ExecutionRecoveryDecision | None = None
+        execution_dispatch_marked = False
+        if record.execution_takeover:
+            recovery_gate = ctx.execution_recovery_gate
+            if recovery_gate is None:
+                raise RuntimeError(
+                    "execution_recovery_coordinator_unavailable",
+                )
+            execution_recovery_decision = await recovery_gate(
+                record,
+                assembly_descriptor,
+            )
+            if execution_recovery_decision.disposition in {
+                ExecutionRecoveryDisposition.terminalize_checkpoint_unavailable,
+                ExecutionRecoveryDisposition.terminalize_tool_attempt_indeterminate,
+            }:
+                raise _ExecutionRecoveryTerminalized(
+                    execution_recovery_decision.disposition.value,
+                )
+            if execution_recovery_decision.disposition in {
+                ExecutionRecoveryDisposition.resume_checkpoint,
+                ExecutionRecoveryDisposition.resume_reconciled_tool,
+            }:
+                # Continue the stored graph state; applying accepted caller
+                # input or attempting to rewrite the already-durable dispatch
+                # singleton would duplicate/conflict with this turn.
+                graph_input = None
+                recovery_configurable = dict(
+                    config.get("configurable", {}) or {},
+                )
+                recovery_configurable["checkpoint_ns"] = ""
+                recovery_configurable.pop("checkpoint_id", None)
+                recovery_configurable.pop("checkpoint_map", None)
+                config["configurable"] = recovery_configurable
+                initial_runnable_config = RunnableConfig(**config)
+                execution_dispatch_marked = True
+
+        if extensions.has_task_lifecycle:
+            task_info = TaskInfo(
+                task_id=task_id,
+                run_id=run_id,
+                thread_id=thread_id,
+                kind="lead",
+                agent_name=record.assistant_id,
+                resumed=record.execution_takeover,
+            )
+            assert task_store is not None
+            await notify_task_start(
+                extensions,
+                task_store,
+                task_info,
+                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+            )
+
+        if not record.ownership_lost and thread_store is not None and thread_projection_owner_id is not None and thread_projection_active_state_version is not None:
+            try:
+                await thread_store.project_run(
+                    ThreadMetaRunProjection(
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        owner_worker_id=thread_projection_owner_id,
+                        active_state_version=(thread_projection_active_state_version),
+                        status="running",
+                    ),
+                    user_id=record.user_id,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to project running thread_meta status for %s (non-fatal)",
+                    thread_id,
+                )
+
         accessor = CheckpointStateAccessor.bind(
             agent,
             checkpointer,
@@ -1989,7 +2181,7 @@ async def run_agent(
         # Buffer subagent step events and persist them in batches (#3779) instead
         # of one low-frequency put() per step on the hot stream loop. Flushed in
         # the finally block so buffered steps survive abort/exception paths too.
-        subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id)
+        subagent_events = _SubagentEventBuffer(event_appender, thread_id, run_id)
 
         goal_evaluator_model: Any | None = None
 
@@ -2004,9 +2196,10 @@ async def run_agent(
 
         constraint_start_validated = False
         qualification_graph_start_recorded = False
+        execution_recovery_resume_counted = False
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
-            nonlocal llm_error_fallback_message, constraint_start_validated, qualification_graph_start_recorded
+            nonlocal llm_error_fallback_message, constraint_start_validated, qualification_graph_start_recorded, execution_dispatch_marked, execution_recovery_resume_counted
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
@@ -2021,6 +2214,51 @@ async def run_agent(
                             clock=ctx.constraint_clock,
                         )
                         constraint_start_validated = True
+                    if not execution_dispatch_marked:
+                        if event_appender is None:
+                            if record.execution_takeover:
+                                raise RuntimeError(
+                                    "execution_dispatch_marker_unavailable",
+                                )
+                        else:
+                            dispatch_baseline_checkpoint_id = None
+                            if checkpointer is not None:
+                                dispatch_baseline_checkpoint_id = _checkpoint_id(
+                                    await checkpointer.aget_tuple(
+                                        checkpoint_config,
+                                    )
+                                )
+                            await event_appender.put_if_absent(
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                event_type=(RUN_EXECUTION_STARTED_EVENT.event_type),
+                                category=(RUN_EXECUTION_STARTED_EVENT.category),
+                                content={
+                                    "version": 1,
+                                    "pre_graph_checkpoint_id": (dispatch_baseline_checkpoint_id),
+                                },
+                                metadata={},
+                            )
+                        execution_dispatch_marked = True
+                        # This qualification-only seam is deliberately after
+                        # the durable singleton and before every graph/model
+                        # or takeover-resume counter. A replacement that sees
+                        # the marker without a newer checkpoint must fail
+                        # closed; it must not re-enter this barrier.
+                        await qualification_barrier(
+                            "post_dispatch_marker_before_graph",
+                            record,
+                        )
+                    if record.execution_takeover and not execution_recovery_resume_counted:
+                        from deerflow.runtime.kubernetes_qualification import (
+                            qualification_counter,
+                        )
+
+                        await qualification_counter(
+                            "execution_takeover_resumes",
+                            record,
+                        )
+                        execution_recovery_resume_counted = True
                     if not qualification_graph_start_recorded:
                         from deerflow.runtime.kubernetes_qualification import (
                             qualification_counter,
@@ -2144,10 +2382,11 @@ async def run_agent(
         if record.abort_event.is_set():
             await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
-            error_msg = llm_error_fallback_message
-            if error_msg is None and journal is not None:
-                error_msg = journal.llm_error_fallback_message
-            error_msg = error_msg or "LLM provider failed after retries"
+            terminal_failure = map_runtime_failure(
+                code="llm_provider_failed",
+                error_class="LLMProviderFailure",
+            )
+            error_msg = terminal_failure.public_message
             await _ensure_finalizing_before_edit_failure(run_manager, record)
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
@@ -2185,6 +2424,11 @@ async def run_agent(
                 produced_output_paths,
             )
             delivery_error = _delivery_error(delivery_content)
+            if delivery_error is not None:
+                terminal_failure = map_runtime_failure(
+                    code="artifact_delivery_incomplete",
+                    error_class="ArtifactDeliveryFailure",
+                )
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error if delivery_error else RunStatus.success,
@@ -2194,6 +2438,29 @@ async def run_agent(
             )
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
+
+    except _ExecutionRecoveryTerminalized as exc:
+        # RunManager already committed the bounded terminal lifecycle under
+        # this takeover's exact owner/epoch fence. The worker must release
+        # material and end the stream without attempting a second status,
+        # receipt outcome, checkpoint, or thread projection write.
+        record.ownership_lost = True
+        disposition = ExecutionRecoveryDisposition(str(exc))
+        if disposition is ExecutionRecoveryDisposition.terminalize_tool_attempt_indeterminate:
+            message = "Recovery stopped because a prior tool attempt could not be safely reconciled."
+            stop_reason = RECOVERY_TOOL_ATTEMPT_INDETERMINATE_STOP_REASON
+        else:
+            message = "Recovery stopped because no safe durable execution checkpoint is available."
+            stop_reason = RECOVERY_CHECKPOINT_UNAVAILABLE_STOP_REASON
+        await bridge.publish(
+            run_id,
+            "error",
+            {
+                "message": message,
+                "name": "ExecutionRecoveryError",
+                "stop_reason": stop_reason,
+            },
+        )
 
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
@@ -2281,9 +2548,26 @@ async def run_agent(
                     },
                 )
 
+    except RuntimeEventOwnershipLost:
+        runtime_event_authority_rejected = True
+        logger.warning(
+            "Run %s stopped after its runtime-event write authority changed",
+            run_id,
+        )
+
     except Exception as exc:
-        error_msg = f"{exc}"
-        logger.exception("Run %s failed: %s", run_id, error_msg)
+        terminal_failure = map_runtime_failure(
+            code="run_execution_failed",
+            error=exc,
+        )
+        error_msg = terminal_failure.public_message
+        logger.error(
+            "Run failed run_id=%s code=%s error_class=%s correlation_id=%s",
+            run_id,
+            terminal_failure.code,
+            terminal_failure.error_class,
+            terminal_failure.correlation_id,
+        )
         await _ensure_finalizing_before_edit_failure(run_manager, record)
         cancel_action = await run_manager.set_status_if_not_cancelled(
             run_id,
@@ -2299,11 +2583,32 @@ async def run_agent(
                 "error",
                 {
                     "message": error_msg,
-                    "name": type(exc).__name__,
+                    "name": "RuntimeFailure",
                 },
             )
 
     finally:
+        if started and run_manager.heartbeat_enabled and not record.ownership_lost:
+            try:
+                refreshed_cancel = await run_manager.refresh_owned_cancellation(run_id)
+            except Exception as exc:
+                failure = map_runtime_failure(
+                    code="runtime_event_authority_refresh_failed",
+                    error=exc,
+                )
+                logger.warning(
+                    "Runtime-event authority refresh failed run_id=%s code=%s error_class=%s correlation_id=%s",
+                    run_id,
+                    failure.code,
+                    failure.error_class,
+                    failure.correlation_id,
+                )
+                refreshed_cancel = None
+            if refreshed_cancel is not None:
+                await _finish_cancellation(refreshed_cancel)
+            elif runtime_event_authority_rejected:
+                record.ownership_lost = True
+
         if materialization_evidence is not None:
             try:
                 await run_manager.set_execution_lease_renewal(run_id, None)
@@ -2319,7 +2624,9 @@ async def run_agent(
                 run_id,
             )
 
-        if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success:
+        checkpoint_access_authorized = not requires_assembly_evidence or assembly_evidence_bound
+
+        if not record.ownership_lost and checkpoint_access_authorized and _is_edit_replay_run(record) and record.status != RunStatus.success:
             if not record.finalizing:
                 await run_manager.set_finalizing(run_id, True)
             try:
@@ -2350,23 +2657,34 @@ async def run_agent(
         # Persist any subagent step events still buffered (#3779) — including on
         # abort/exception paths, where the stream loop broke before its own flush.
         if not record.ownership_lost and subagent_events is not None:
-            await subagent_events.flush()
+            try:
+                await subagent_events.flush()
+            except RuntimeEventOwnershipLost:
+                record.ownership_lost = True
 
         if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
             try:
                 await record_workspace_changes(
-                    event_store,
+                    event_appender,
                     thread_id,
                     run_id,
                     pre_run_workspace_snapshot,
                     user_id=workspace_changes_user_id,
                     extra_excluded_dir_names=workspace_excluded_dir_names,
                 )
-            except Exception:
+            except RuntimeEventOwnershipLost:
+                record.ownership_lost = True
+            except Exception as exc:
+                failure = map_runtime_failure(
+                    code="workspace_event_write_failed",
+                    error=exc,
+                )
                 logger.warning(
-                    "Failed to record workspace changes for run %s",
+                    "Workspace event write failed run_id=%s code=%s error_class=%s correlation_id=%s",
                     run_id,
-                    exc_info=True,
+                    failure.code,
+                    failure.error_class,
+                    failure.correlation_id,
                 )
 
         # Flush buffered journal events before the terminal receipt. The
@@ -2377,10 +2695,22 @@ async def run_agent(
         if not record.ownership_lost and journal is not None:
             try:
                 await journal.flush()
-            except Exception:
-                logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
+            except RuntimeEventOwnershipLost:
+                record.ownership_lost = True
+            except Exception as exc:
+                failure = map_runtime_failure(
+                    code="run_journal_write_failed",
+                    error=exc,
+                )
+                logger.warning(
+                    "Run journal write failed run_id=%s code=%s error_class=%s correlation_id=%s",
+                    run_id,
+                    failure.code,
+                    failure.error_class,
+                    failure.correlation_id,
+                )
 
-            if delivery_content is None:
+            if not record.ownership_lost and delivery_content is None:
                 if produced_output_paths is None:
                     produced_output_paths = await _produced_output_paths(
                         pre_run_workspace_snapshot,
@@ -2389,19 +2719,51 @@ async def run_agent(
                         extra_excluded_dir_names=workspace_excluded_dir_names,
                     )
                 delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
-            receipt_persisted = await _persist_delivery_receipt(
-                event_store,
-                thread_id=thread_id,
-                run_id=run_id,
-                content=delivery_content,
-            )
-            if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
+            if not record.ownership_lost:
+                try:
+                    receipt_persisted = await _persist_delivery_receipt(
+                        event_appender,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        content=delivery_content,
+                    )
+                except RuntimeEventOwnershipLost:
+                    record.ownership_lost = True
+                    receipt_persisted = False
+            if not record.ownership_lost and produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
+                terminal_failure = map_runtime_failure(
+                    code="delivery_receipt_failed",
+                    error_class="DeliveryReceiptFailure",
+                )
                 await run_manager.set_status(
                     run_id,
                     RunStatus.error,
                     error=_DELIVERY_RECEIPT_FAILED_ERROR,
                     persist=False,
                 )
+
+            if not record.ownership_lost:
+                journal.record_terminal_summary(
+                    status=record.status.value,
+                    stop_reason=record.stop_reason,
+                    failure=terminal_failure,
+                )
+                try:
+                    await journal.flush()
+                except RuntimeEventOwnershipLost:
+                    record.ownership_lost = True
+                except Exception as exc:
+                    failure = map_runtime_failure(
+                        code="terminal_summary_write_failed",
+                        error=exc,
+                    )
+                    logger.warning(
+                        "Terminal summary write failed run_id=%s code=%s error_class=%s correlation_id=%s",
+                        run_id,
+                        failure.code,
+                        failure.error_class,
+                        failure.correlation_id,
+                    )
 
         if not record.ownership_lost and event_store is not None:
             try:
@@ -2450,7 +2812,7 @@ async def run_agent(
                     exc_info=True,
                 )
 
-        if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+        if started and not record.ownership_lost and checkpoint_access_authorized and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
             try:
                 await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                 if not await run_manager.has_later_started_run(thread_id, run_id):
@@ -2466,22 +2828,25 @@ async def run_agent(
                     thread_id,
                 )
 
-        # Sync title from checkpoint to threads_meta.display_name
-        if started and not record.ownership_lost and checkpointer is not None and thread_store is not None:
+        projected_title: str | None = None
+        if started and not record.ownership_lost and checkpoint_access_authorized and checkpointer is not None:
             try:
                 ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
                 ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
                 if ckpt_tuple is not None:
                     ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
                     title = ckpt.get("channel_values", {}).get("title")
-                    if title:
-                        await thread_store.update_display_name(thread_id, title)
+                    if isinstance(title, str) and title:
+                        projected_title = title
             except Exception:
-                logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
+                logger.debug(
+                    "Failed to read projected title for thread %s (non-fatal)",
+                    thread_id,
+                )
 
         # Persist run duration to checkpoint metadata so history reads
         # don't need to correlate runs and events.
-        if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
+        if started and not record.ownership_lost and checkpoint_access_authorized and checkpointer is not None and record.status == RunStatus.success:
             try:
                 created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
                 updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
@@ -2502,13 +2867,30 @@ async def run_agent(
                     run_id,
                 )
 
-        # Update threads_meta status based on run outcome
-        if started and not record.ownership_lost and thread_store is not None:
+        # Project title/status together only when this worker owns the exact
+        # terminal capability and this run remains the latest admission.
+        terminal_projection_owner_id = record.terminal_projection_owner_worker_id
+        terminal_projection_active_version = record.terminal_projection_active_state_version
+        if started and not record.ownership_lost and thread_store is not None and terminal_projection_owner_id is not None and terminal_projection_active_version is not None and type(record.checkpoint_terminal_state_version) is int:
             try:
                 final_status = "idle" if record.status == RunStatus.success else record.status.value
-                await thread_store.update_status(thread_id, final_status)
+                await thread_store.project_run(
+                    ThreadMetaRunProjection(
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        owner_worker_id=terminal_projection_owner_id,
+                        active_state_version=(terminal_projection_active_version),
+                        terminal_state_version=(record.checkpoint_terminal_state_version),
+                        status=final_status,
+                        display_name=projected_title,
+                    ),
+                    user_id=record.user_id,
+                )
             except Exception:
-                logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
+                logger.debug(
+                    "Failed to project terminal thread_meta fields for %s (non-fatal)",
+                    thread_id,
+                )
 
         if not record.ownership_lost and ctx.on_run_completed is not None:
             try:
@@ -2520,7 +2902,7 @@ async def run_agent(
                     exc_info=True,
                 )
 
-        if task_info is not None and task_store is not None:
+        if not record.ownership_lost and task_info is not None and task_store is not None:
             # Keep the finalizing barrier held until stop observers finish, so
             # a same-thread replacement cannot overlap this task's lifecycle.
             try:
@@ -2606,8 +2988,9 @@ async def run_agent(
                 )
         if dispatch_ledger is not None:
             dispatch_ledger.close()
-        await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        if not record.ownership_lost:
+            await bridge.publish_end(run_id)
+            asyncio.create_task(bridge.cleanup(run_id, delay=60))
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt

@@ -465,7 +465,9 @@ and profile material remain accepted effective execution. Replay never starts wi
 effective values and overwrites only fields present on the retry. Rows written before
 caller-intent evidence exists remain readable, but a keyed replay conflicts because equality
 cannot be proven. A different key still follows the independent active-thread rule (`reject`
-is thread-busy; `interrupt`/`rollback` supersede atomically). The replay guarantee ends when
+is thread-busy; with durable run events, `interrupt`/`rollback` also fail closed until the
+predecessor is explicitly cancelled and its terminal delivery receipt is observable).
+Receiptless compatibility stores retain atomic supersession. The replay guarantee ends when
 the retained row is deleted.
 
 ## Durability boundaries

@@ -52,7 +52,10 @@ The missing primitives are tracked upstream in
 
 ## Reproduce and verify
 
-From `backend/`, install the exact optional dependency from the lock and run:
+The documented backend `make test` recipe selects the exact optional SDK from
+the lock so this offline probe is reproducible after the default `make install`.
+That test-only selection does not promote OpenSandbox into the harness or
+production dependency set. To run the probe directly from `backend/`:
 
 ```bash
 uv run --project packages/harness --extra opensandbox \

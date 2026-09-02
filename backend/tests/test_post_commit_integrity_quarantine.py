@@ -254,12 +254,17 @@ async def _create_durable_row(
         operation_kind=operation_kind.value,
         user_id=user_id,
     )
-    row["status"] = status.value
-    row["error"] = "foreign-durable-evidence"
+    # ``MemoryRunStore`` returns defensive copies from admission.  These tests
+    # deliberately install authoritative-store shapes (including otherwise
+    # impossible cross-type terminal rows), so mutate the controlled fixture's
+    # backing row rather than the returned snapshot.
+    backing_row = store._runs[run_id]
+    backing_row["status"] = status.value
+    backing_row["error"] = "foreign-durable-evidence"
     if status not in {RunStatus.pending, RunStatus.running}:
-        row["owner_worker_id"] = None
-        row["lease_expires_at"] = None
-    return row
+        backing_row["owner_worker_id"] = None
+        backing_row["lease_expires_at"] = None
+    return copy.deepcopy(backing_row)
 
 
 async def _cancel_compensator(manager: RunManager) -> None:

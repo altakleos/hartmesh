@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -30,7 +32,9 @@ def _fingerprint(**overrides: object) -> TopologyFingerprintV1:
         "extension_artifact_digest": "sha256:" + ("8" * 64),
         "extension_configuration_digest": "sha256:" + ("9" * 64),
         "capability_manifest_digest": "a" * 64,
-        "migration_head": "0027_multi_gateway_topology",
+        "mcp_task_replay_keyring_confirmation_version": 1,
+        "mcp_task_replay_keyring_confirmation_digest": "sha256:" + ("d" * 64),
+        "migration_head": "0030_run_delivery_owner_backfill",
         "accepted_materialization_profile": "rwx_verified_copy_v2",
     }
     values.update(overrides)
@@ -52,7 +56,7 @@ def test_fingerprint_is_canonical_complete_and_mapping_order_independent() -> No
     )
 
     assert first == second
-    assert first.digest == "b7eacdb378cdca42ffa5292424a12e46f7b6816632d8b57ba1775aeef4696c12"
+    assert first.digest == "cff382b609fdec9ad064205fd6706f85bf9d40728f89895f998915492a0fc58b"
     assert first.to_dict() == {
         "version": 1,
         "profile": "durable_two_gateway_v1",
@@ -72,7 +76,9 @@ def test_fingerprint_is_canonical_complete_and_mapping_order_independent() -> No
         "extension_artifact_digest": "sha256:" + ("8" * 64),
         "extension_configuration_digest": "sha256:" + ("9" * 64),
         "capability_manifest_digest": "a" * 64,
-        "migration_head": "0027_multi_gateway_topology",
+        "mcp_task_replay_keyring_confirmation_version": 1,
+        "mcp_task_replay_keyring_confirmation_digest": "sha256:" + ("d" * 64),
+        "migration_head": "0030_run_delivery_owner_backfill",
         "accepted_materialization_profile": "rwx_verified_copy_v2",
         "digest": first.digest,
     }
@@ -127,6 +133,8 @@ def test_fingerprint_rejects_any_image_set_outside_exact_profile(
         ("config_digest", "sha256:not-a-digest"),
         ("redis_namespace_digest", "7" * 64),
         ("capability_manifest_digest", "sha256:short"),
+        ("mcp_task_replay_keyring_confirmation_version", 2),
+        ("mcp_task_replay_keyring_confirmation_digest", "sha256:short"),
         ("migration_head", "../../secret"),
         ("accepted_materialization_profile", "disabled"),
     ],
@@ -137,6 +145,61 @@ def test_fingerprint_rejects_incomplete_or_unqualified_subjects(
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
         _fingerprint(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (
+            "mcp_task_replay_keyring_confirmation_digest",
+            "sha256:" + ("e" * 64),
+        ),
+        ("mcp_task_replay_keyring_confirmation_version", 2),
+    ],
+)
+def test_fingerprint_detects_mcp_replay_keyring_skew(
+    field: str,
+    value: object,
+) -> None:
+    baseline = _fingerprint()
+
+    if field.endswith("version"):
+        with pytest.raises(ValueError):
+            _fingerprint(**{field: value})
+        return
+
+    skewed = _fingerprint(**{field: value})
+    assert skewed.digest != baseline.digest
+
+
+def test_fingerprint_reader_preserves_legacy_v1_without_keyring_confirmation() -> None:
+    legacy = _fingerprint().to_dict()
+    legacy.pop("mcp_task_replay_keyring_confirmation_version")
+    legacy.pop("mcp_task_replay_keyring_confirmation_digest")
+    legacy.pop("digest")
+    legacy["digest"] = hashlib.sha256(
+        json.dumps(
+            legacy,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8"),
+    ).hexdigest()
+
+    parsed = TopologyFingerprintV1.from_dict(legacy)
+
+    assert parsed.mcp_task_replay_keyring_confirmation_version is None
+    assert parsed.mcp_task_replay_keyring_confirmation_digest is None
+    assert parsed.to_dict() == legacy
+
+
+def test_fingerprint_reader_rejects_half_present_keyring_confirmation() -> None:
+    payload = _fingerprint().to_dict()
+    payload.pop("mcp_task_replay_keyring_confirmation_digest")
+
+    with pytest.raises(ValueError, match="fields are invalid"):
+        TopologyFingerprintV1.from_dict(payload)
 
 
 def test_replica_registration_is_bounded_aware_and_round_trips() -> None:

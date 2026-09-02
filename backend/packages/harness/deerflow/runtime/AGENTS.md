@@ -6,8 +6,14 @@ trusted context, restrictive constraints, pinned agent/extension revision, and
 immutable effective skills. Start authorization happens before admission; a
 known external key first passes current visibility/observe authorization and
 must match the stored request evidence. State changes and lifecycle events are
-transactional, cancellation is fenced, and an active row lost with its process
-is terminalized rather than resuming model execution.
+transactional, cancellation is fenced, and the server-selected recovery policy
+is persisted at first admission. `terminalize_v1` remains the default. The
+candidate-only `exact_two_takeover_v1` schema/coordinator is dormant: Gateway's
+eligibility gate rejects every execution-takeover claim before owner CAS, regardless
+of its process-local environment flag. Expired exact-two rows stay fail-closed.
+Future activation requires the linearizable authority and reconstructible
+checkpoint/event/delivery state defined in the multi-Gateway qualification
+guide; existing markers and fault barriers do not constitute support.
 
 `subagent_snapshot.py` is the sole live-to-immutable seam for durable subagents.
 Admission captures a bounded `ResolvedSubagentCatalogV1` plus a digest-scoped
@@ -30,10 +36,76 @@ calling `astream`. `assembly_evidence_unavailable` covers a missing descriptor;
 `agent_assembly_drift` covers invalid, contradictory, or changed evidence. Bound
 evidence is immutable and survives every terminal outcome. It proves only which
 assembly the runtime admitted, not the integrity of the Python code that produced it.
+The host reserves the fingerprinted effective-policy key
+`hartmesh.tool_recovery.v1`; its value is a finite tool-name-to-recovery-kind
+map. Absence means no reconciliation capability. Do not add this declaration to
+the public extension-api `ToolDescriptor` wire shape or infer it from a tool
+name. A started receipt may resume only when a trusted recovery coordinator
+binds proof to that policy, receipt, dispatch generation, assembly digest, and
+the current takeover fence.
 
 Lifecycle summaries expose only catalog version, digest, entry count, and allowed
 names after strict revalidation. Prompts, descriptions, models, tools, skills,
 policy settings, source records, and user identifiers never enter that projection.
+
+Live rich run-event writes use `events/appender.py`. A
+`FencedRunEventAppender` binds tenant, thread, run, worker owner, and lifecycle
+epoch for journal, subagent, workspace, and delivery writes; DB stores validate
+the fence in the insert transaction. For DB runtime-event and durable-receipt
+writes, every non-null lease expiry is compared with the shared database wall
+clock sampled after the owner row lock; a worker process clock is never lease
+authority, while a null expiry remains valid for heartbeat-disabled single-node
+operation. JSONL retains the run-store fence until its off-thread rename
+completes even under cancellation. Pre-admission and recovery code must opt into
+`AdministrativeRunEventAppender`. Runtime exception messages and tracebacks
+cross no persistence/SSE/log boundary: map them once via
+`failure_evidence.py`, while leaving intentional `run.end` and conversation
+content untouched. `run.terminal.v1` supplements opaque `run.end` with bounded
+versioned terminal facts.
+
+Run-state and delivery-event stores do not yet share a prepared-replacement
+transaction. When a durable event store is configured, interrupt/rollback
+admission therefore resolves existing replay identities read-only, then rejects
+any novel candidate while a predecessor is active. The official run stores
+repeat this through `require_predecessor_inactive` under their mutation lock;
+clients cancel, await terminal `run.delivery`, and retry. Receiptless
+compatibility configurations retain legacy atomic replacement. Exact-two rows
+reject generic replacement unconditionally. Reopening durable replacement
+requires an additive prepared intent that first reserves candidate identity and
+predecessor epoch, not cross-store ordering in `RunManager`.
+
+Runtime-owned progress snapshots and effective-model observations are also
+owner/epoch writes. `RunManager` captures the current owner and state version,
+waits for the store CAS before changing its local mirror, and requires a live
+lease whenever the row has one. SQL validates that lease from the shared
+database wall clock after locking the row. Omitting the fence remains compatible
+only for a genuinely null-lease single-node row; it never authorizes an actively
+leased row. A same-owner cancellation may advance the epoch before either write,
+so a rejected observation first refreshes the durable cancellation and signals
+the local abort rather than misclassifying it as a takeover.
+
+Qualified run ownership uses the versioned `database_v1` clock capability.
+Admission, renewal, and takeover accept a duration; SQL mints the persisted
+deadline from the same post-lock database-time sample used by its authority
+predicate. The persisted timestamp remains evidence, while `RunManager` anchors
+a conservative monotonic budget before the store call and arms a process-local
+watchdog so late results or renewal errors cannot extend execution. The additive
+absolute timestamp arguments and `process_v1` behavior remain compatibility
+seams for non-qualified stores. `grace_seconds` delays recovery after database-
+authoritative expiry and grants no additional execution authority.
+
+Run-derived title/status writes use `ThreadMetaRunProjection`; the worker must
+not call the human/admin thread-metadata update methods. The projection store
+accepts only the latest normal run by its database-assigned monotonic
+`admission_cursor` (never process timestamps or run IDs), fails closed if any
+relevant cursor is missing, and holds that ordering authority through the
+metadata write. A running projection requires the exact active owner and state
+version (plus an unexpired lease when present); a terminal projection requires
+the exact displaced owner, its last active state version, and the terminal state
+version minted by the successful lifecycle CAS. Title and terminal status are
+one conditional mutation. Explicit human/admin updates remain independent APIs,
+and the memory adapter serializes them with projection writes so neither can
+resurrect a deleted row or overwrite a disjoint concurrent update.
 
 `runtime/tool_evidence.py` is the deep module for durable tool-attempt evidence.
 It owns the V1 context/receipt schemas, canonical full SHA-256 identities and

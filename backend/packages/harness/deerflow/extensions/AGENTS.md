@@ -95,7 +95,8 @@ package, install the new source pin, and restore that config.
 Local-directory installs are snapshots, not editable links. The manager validates the
 source, derives the destination from the normalized distribution name, and copies it to
 `backend/extensions/sources/<distribution>/`. It ignores Git metadata, virtual
-environments, Python caches, and bytecode; rejects symbolic links, path-escaping
+environments, `__pycache__`, generated `.ruff_cache`, and bytecode in both
+copying and hashing; rejects symbolic links, path-escaping
 distribution names, and likely credential files; and the root `.dockerignore` explicitly
 re-includes the entire managed tree so package READMEs, native modules, and assets reach
 the backend builder. These checks prevent common packaging accidents, not malicious
@@ -206,6 +207,11 @@ host build would move every agent's fingerprint on every redeploy and make that
 finer question unanswerable — `build` stays a reported field a consumer can
 compare directly. Registered `AgentAssemblyObserver`s are notified
 synchronously at the end of construction; failures are contained per observer.
+The host may add reserved, fingerprinted effective policies without changing
+the public descriptor member types. In particular,
+`hartmesh.tool_recovery.v1` is a host-derived map for explicitly reconcilable
+tools. It is not an extension-authored retry promise and must not be added to
+the extension-api 0.13 `ToolDescriptor` wire shape.
 
 Assembly observers remain observational and fail-open. Accepted durable runs
 independently request the same descriptor through a server-owned opaque context

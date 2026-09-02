@@ -23,7 +23,7 @@ from deerflow.runtime.runs.manager import (
     _AdmissionTerminalDisposition,
     _UnresolvedAdmissionCandidate,
 )
-from deerflow.runtime.runs.store.base import CancellationRequestOutcome
+from deerflow.runtime.runs.store.base import CancellationRequestOutcome, LeaseRenewal
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -131,8 +131,8 @@ class FailingDeleteRunStore(MemoryRunStore):
 class LostLeaseRunStore(MemoryRunStore):
     """Run store that reports a reservation was taken over."""
 
-    async def update_lease(self, run_id, *, owner_worker_id, lease_expires_at):
-        return False
+    async def renew_lease(self, run_id, *, owner_worker_id, **kwargs):
+        return LeaseRenewal(renewed=False)
 
 
 class PausedLostLeaseRunStore(MemoryRunStore):
@@ -143,10 +143,30 @@ class PausedLostLeaseRunStore(MemoryRunStore):
         self.renewal_started = asyncio.Event()
         self.finish_renewal = asyncio.Event()
 
-    async def update_lease(self, run_id, *, owner_worker_id, lease_expires_at):
+    async def renew_lease(self, run_id, *, owner_worker_id, **kwargs):
         self.renewal_started.set()
         await self.finish_renewal.wait()
-        return False
+        return LeaseRenewal(renewed=False)
+
+
+class LegacyObservationSignatureRunStore(MemoryRunStore):
+    """A pre-fence custom store with exact legacy observation signatures."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model_updates: list[tuple[str, str | None]] = []
+        self.progress_updates: list[tuple[str, int | None]] = []
+
+    async def update_model_name(self, run_id, model_name):
+        self.model_updates.append((run_id, model_name))
+        return await super().update_model_name(run_id, model_name)
+
+    async def update_run_progress(self, run_id, *, total_tokens=None):
+        self.progress_updates.append((run_id, total_tokens))
+        return await super().update_run_progress(
+            run_id,
+            total_tokens=total_tokens,
+        )
 
 
 class CommitBeforeReturnRunStore(MemoryRunStore):
@@ -726,6 +746,35 @@ async def test_create_and_get(manager: RunManager):
 
     fetched = await manager.get(record.run_id)
     assert fetched is record
+
+
+@pytest.mark.anyio
+async def test_get_scopes_active_in_memory_run_by_user(manager: RunManager):
+    record = await manager.create("private-thread", user_id="user-b")
+
+    assert await manager.get(record.run_id, user_id="user-a") is None
+    assert await manager.get(record.run_id, user_id="user-b") is record
+    assert await manager.get(record.run_id, user_id=None) is record
+
+
+@pytest.mark.anyio
+async def test_single_node_manager_preserves_legacy_observation_store_signatures():
+    """Null-lease compatibility must not pass new fence keywords downstream."""
+
+    store = LegacyObservationSignatureRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-legacy-observations")
+    await run_manager.set_status(record.run_id, RunStatus.running)
+
+    await run_manager.update_model_name(record.run_id, "legacy-model")
+    await run_manager.update_run_progress(record.run_id, total_tokens=17)
+
+    assert store.model_updates == [(record.run_id, "legacy-model")]
+    assert store.progress_updates == [(record.run_id, 17)]
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert persisted["model_name"] == "legacy-model"
+    assert persisted["total_tokens"] == 17
 
 
 @pytest.mark.anyio

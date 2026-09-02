@@ -614,6 +614,8 @@ async def test_run_agent_does_not_stream_continuation_after_abort(monkeypatch):
             return _gen()
 
     class FakeRunManager:
+        heartbeat_enabled = False
+
         async def try_start(self, _run_id):
             record.status = RunStatus.running
             return RunStartOutcome.started
@@ -699,6 +701,8 @@ async def test_run_agent_reuses_goal_evaluator_model_for_goal_loop(monkeypatch):
             return _gen()
 
     class FakeRunManager:
+        heartbeat_enabled = False
+
         async def try_start(self, _run_id):
             record.status = RunStatus.running
             return RunStartOutcome.started
@@ -883,6 +887,8 @@ async def test_run_agent_strips_branch_checkpoint_for_goal_continuation(monkeypa
             return _gen()
 
     class FakeRunManager:
+        heartbeat_enabled = False
+
         async def try_start(self, _run_id):
             record.status = RunStatus.running
             return RunStartOutcome.started

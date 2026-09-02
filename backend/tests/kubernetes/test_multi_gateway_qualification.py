@@ -21,9 +21,6 @@ pytestmark = pytest.mark.kubernetes_contract
 def test_exact_two_gateway_kubernetes_qualification() -> None:
     """Run all 16 mandatory scenarios against real cluster dependencies."""
 
-    if os.environ.get("DEERFLOW_TEST_KUBERNETES_SCOPE") != (MULTI_GATEWAY_QUALIFICATION_SCOPE):
-        return
-
     config = KubernetesMultiGatewayQualificationConfigV1.from_environment(os.environ)
     evidence = KubernetesMultiGatewayQualificationRunnerV1(config).qualify()
 

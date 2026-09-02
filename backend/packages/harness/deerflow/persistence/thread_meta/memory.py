@@ -8,21 +8,25 @@ router for thread records.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langgraph.store.base import BaseStore
 
-from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, ThreadMetaAlreadyExistsError, ThreadMetaStore
+from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, ThreadMetaAlreadyExistsError, ThreadMetaRunProjection, ThreadMetaStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
 THREADS_NS: tuple[str, ...] = ("threads",)
 SEARCH_PAGE_SIZE = 500
 
+if TYPE_CHECKING:
+    from deerflow.runtime.runs.store.base import RunStore
+
 
 class MemoryThreadMetaStore(ThreadMetaStore):
-    def __init__(self, store: BaseStore) -> None:
+    def __init__(self, store: BaseStore, *, run_store: RunStore | None = None) -> None:
         self._store = store
+        self._run_store = run_store
         self._ownership_lock = asyncio.Lock()
 
     async def _get_owned_record(
@@ -126,39 +130,82 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         return record_user_id == user_id
 
     async def update_display_name(self, thread_id: str, display_name: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
-        record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_display_name")
-        if record is None:
-            return
-        record["display_name"] = display_name
-        record["updated_at"] = now_iso()
-        await self._store.aput(THREADS_NS, thread_id, record)
+        async with self._ownership_lock:
+            record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_display_name")
+            if record is None:
+                return
+            record["display_name"] = display_name
+            record["updated_at"] = now_iso()
+            await self._store.aput(THREADS_NS, thread_id, record)
 
     async def update_status(self, thread_id: str, status: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
-        record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_status")
-        if record is None:
-            return
-        record["status"] = status
-        record["updated_at"] = now_iso()
-        await self._store.aput(THREADS_NS, thread_id, record)
+        async with self._ownership_lock:
+            record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_status")
+            if record is None:
+                return
+            record["status"] = status
+            record["updated_at"] = now_iso()
+            await self._store.aput(THREADS_NS, thread_id, record)
+
+    async def project_run(
+        self,
+        projection: ThreadMetaRunProjection,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> bool:
+        """Apply a process-local projection only under durable run authority."""
+
+        if self._run_store is None:
+            return False
+        async with self._ownership_lock:
+            async with self._run_store.hold_thread_projection_authority(
+                run_id=projection.run_id,
+                thread_id=projection.thread_id,
+                owner_worker_id=projection.owner_worker_id,
+                active_state_version=projection.active_state_version,
+                terminal_state_version=projection.terminal_state_version,
+                run_status=projection.run_status,
+            ) as authorized:
+                if not authorized:
+                    return False
+                record = await self._get_owned_record(
+                    projection.thread_id,
+                    user_id,
+                    "MemoryThreadMetaStore.project_run",
+                )
+                if record is None:
+                    return False
+                if projection.display_name is not None:
+                    record["display_name"] = projection.display_name
+                record["status"] = projection.status
+                record["updated_at"] = now_iso()
+                await self._store.aput(
+                    THREADS_NS,
+                    projection.thread_id,
+                    record,
+                )
+                return True
 
     async def update_metadata(self, thread_id: str, metadata: dict, *, touch: bool = True, user_id: str | None | _AutoSentinel = AUTO) -> None:
-        record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_metadata")
-        if record is None:
-            return
-        merged = dict(record.get("metadata") or {})
-        merged.update(metadata)
-        record["metadata"] = merged
-        if touch:
-            record["updated_at"] = now_iso()
-        await self._store.aput(THREADS_NS, thread_id, record)
+        async with self._ownership_lock:
+            record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_metadata")
+            if record is None:
+                return
+            merged = dict(record.get("metadata") or {})
+            merged.update(metadata)
+            record["metadata"] = merged
+            if touch:
+                record["updated_at"] = now_iso()
+            await self._store.aput(THREADS_NS, thread_id, record)
 
     async def update_owner(self, thread_id: str, owner_user_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
-        record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_owner")
-        if record is None:
-            return
-        record["user_id"] = owner_user_id
-        record["updated_at"] = now_iso()
-        await self._store.aput(THREADS_NS, thread_id, record)
+        async with self._ownership_lock:
+            record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_owner")
+            if record is None:
+                return
+            record["user_id"] = owner_user_id
+            record["updated_at"] = now_iso()
+            await self._store.aput(THREADS_NS, thread_id, record)
 
     async def claim_unowned(self, thread_id: str, owner_user_id: str) -> bool:
         """Assign an owner only while the process-local row is unowned."""
@@ -173,10 +220,11 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             return True
 
     async def delete(self, thread_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
-        record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.delete")
-        if record is None:
-            return
-        await self._store.adelete(THREADS_NS, thread_id)
+        async with self._ownership_lock:
+            record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.delete")
+            if record is None:
+                return
+            await self._store.adelete(THREADS_NS, thread_id)
 
     @staticmethod
     def _item_to_dict(item) -> dict[str, Any]:

@@ -13,9 +13,9 @@ high-concurrency deployments.
 
 Bulk file I/O is offloaded to a thread pool via ``asyncio.to_thread``.
 Per-thread ``asyncio.Lock`` objects serialise writes within a single process
-to prevent interleaved JSONL lines. Fenced receipt writes prepare a complete
-replacement off-loop, then perform only the final atomic rename synchronously
-after the last ownership validation.
+to prevent interleaved JSONL lines. Fenced writes prepare a complete
+replacement off-loop, then hold the run-store execution fence until the
+off-loop atomic rename has finished, including when the caller is cancelled.
 
 Known trade-off: ``list_messages()`` must scan all run files for a
 thread since messages from multiple runs need unified seq ordering.
@@ -38,6 +38,7 @@ from typing import Any
 
 from deerflow_extension_api import TenantReferenceV1
 
+from deerflow.runtime.events.appender import RuntimeEventAuthority, RuntimeEventOwnershipLost
 from deerflow.runtime.events.store.base import AppendOutcome, RunEventStore, resolve_owned_run, validate_idempotent_append
 from deerflow.runtime.tool_evidence import (
     TOOL_RECEIPT_CATEGORY,
@@ -142,6 +143,17 @@ class JsonlRunEventStore(RunEventStore):
     def _prepare_record_replace(self, record: dict) -> tuple[Path, Path]:
         """Prepare an fsynced whole-file replacement without committing it."""
 
+        return self._prepare_records_replace([record])
+
+    def _prepare_records_replace(self, records: list[dict]) -> tuple[Path, Path]:
+        """Prepare an fsynced whole-file replacement for one run."""
+
+        if not records:
+            raise ValueError("records must not be empty")
+        identity = {(record["thread_id"], record["run_id"]) for record in records}
+        if len(identity) != 1:
+            raise ValueError("prepared records must belong to one run")
+        record = records[0]
         target = self._run_file(record["thread_id"], record["run_id"])
         target.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temp_name = tempfile.mkstemp(
@@ -155,7 +167,8 @@ class JsonlRunEventStore(RunEventStore):
                 if target.exists():
                     with target.open("rb") as source:
                         shutil.copyfileobj(source, destination)
-                destination.write((json.dumps(record, default=str, ensure_ascii=False) + "\n").encode("utf-8"))
+                for item in records:
+                    destination.write((json.dumps(item, default=str, ensure_ascii=False) + "\n").encode("utf-8"))
                 destination.flush()
                 os.fsync(destination.fileno())
         except Exception:
@@ -173,6 +186,110 @@ class JsonlRunEventStore(RunEventStore):
 
         os.replace(temp_path, target)
 
+    @staticmethod
+    async def _finish_off_thread(
+        function,
+        /,
+        *args,
+        _on_success=None,
+        **kwargs,
+    ):
+        """Finish one blocking mutation before propagating cancellation.
+
+        Cancelling ``asyncio.to_thread`` only cancels the awaiter; its worker
+        thread keeps running.  A fenced publication therefore must drain the
+        worker while the database execution fence remains held.
+        """
+
+        worker = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        cancellation: asyncio.CancelledError | None = None
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+        result = worker.result()
+        if _on_success is not None:
+            _on_success()
+        if cancellation is not None:
+            raise cancellation
+        return result
+
+    @staticmethod
+    async def _prepare_replace_off_thread(
+        function,
+        /,
+        *args,
+    ) -> tuple[Path, Path]:
+        """Drain preparation and remove its temp file before cancellation.
+
+        Preparation returns the temp-file identity needed for cleanup. A raw
+        ``asyncio.to_thread`` await loses that result when its caller is
+        cancelled even though the worker thread continues running.
+        """
+
+        worker = asyncio.create_task(asyncio.to_thread(function, *args))
+        cancellation: asyncio.CancelledError | None = None
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+        try:
+            target, temp_path = worker.result()
+        except BaseException:
+            if cancellation is not None:
+                raise cancellation
+            raise
+        if cancellation is not None:
+            try:
+                await JsonlRunEventStore._finish_off_thread(
+                    temp_path.unlink,
+                    missing_ok=True,
+                )
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+            raise cancellation
+        return target, temp_path
+
+    async def _commit_under_execution_fence(
+        self,
+        target: Path,
+        temp_path: Path,
+        *,
+        run_id: str,
+        owner_id: str,
+        lease_epoch: int,
+        ownership_error: type[Exception],
+        committed_thread_id: str,
+        committed_seq: int,
+        allowed_active_statuses: tuple[str, ...] = ("running",),
+    ) -> None:
+        holder = getattr(self._run_store, "hold_execution_fence", None)
+        if not callable(holder):
+            raise ownership_error("runtime_event_store_unfenced")
+        async with holder(
+            run_id,
+            owner_worker_id=owner_id,
+            state_version=lease_epoch,
+            allowed_active_statuses=allowed_active_statuses,
+        ) as active:
+            if not active:
+                raise ownership_error("runtime_event_ownership_lost")
+
+            def advance_committed_sequence() -> None:
+                self._seq_counters[committed_thread_id] = max(
+                    self._seq_counters.get(committed_thread_id, 0),
+                    committed_seq,
+                )
+
+            await self._finish_off_thread(
+                self._commit_prepared_record,
+                target,
+                temp_path,
+                _on_success=advance_committed_sequence,
+            )
+
     async def _publish_fenced_record(
         self,
         record: dict,
@@ -180,9 +297,9 @@ class JsonlRunEventStore(RunEventStore):
         owner_id: str,
         lease_epoch: int,
     ) -> None:
-        """Prepare off-loop, then publish without yielding past the fence."""
+        """Prepare and publish off-loop while retaining the execution fence."""
 
-        target, temp_path = await asyncio.to_thread(
+        target, temp_path = await self._prepare_replace_off_thread(
             self._prepare_record_replace,
             record,
         )
@@ -195,13 +312,19 @@ class JsonlRunEventStore(RunEventStore):
             )
             if run["thread_id"] != record["thread_id"]:
                 raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
-            # JSONL is single-process. No await may occur between this final
-            # validation and the atomic commit point.
-            self._commit_prepared_record(target, temp_path)
+            await self._commit_under_execution_fence(
+                target,
+                temp_path,
+                run_id=record["run_id"],
+                owner_id=owner_id,
+                lease_epoch=lease_epoch,
+                ownership_error=ToolReceiptOwnershipLost,
+                committed_thread_id=record["thread_id"],
+                committed_seq=record["seq"],
+            )
         except BaseException:
-            temp_path.unlink(missing_ok=True)
+            await self._finish_off_thread(temp_path.unlink, missing_ok=True)
             raise
-        self._seq_counters[record["thread_id"]] = record["seq"]
 
     def _read_thread_events(self, thread_id: str) -> list[dict]:
         """Read all events for a thread, sorted by seq (blocking I/O)."""
@@ -326,6 +449,7 @@ class JsonlRunEventStore(RunEventStore):
         content="",
         metadata=None,
         created_at=None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ):
         async with self._get_write_lock(thread_id):
             existing = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
@@ -345,7 +469,125 @@ class JsonlRunEventStore(RunEventStore):
                 "seq": self._next_seq(thread_id),
                 "created_at": created_at or datetime.now(UTC).isoformat(),
             }
+            if not isinstance(user_id, _AutoSentinel):
+                record["user_id"] = user_id
             await asyncio.to_thread(self._write_record, record)
+            return record, True
+
+    async def _require_runtime_authority(
+        self,
+        authority: RuntimeEventAuthority,
+    ) -> dict:
+        configured_digest = None if self._tenant is None else self._tenant.digest
+        if authority.tenant_digest != configured_digest:
+            raise RuntimeEventOwnershipLost("runtime_event_ownership_lost")
+        try:
+            run = await resolve_owned_run(
+                self._run_store,
+                authority.run_id,
+                owner_id=authority.owner_id,
+                lease_epoch=authority.lease_epoch,
+                allowed_statuses=("pending", "running"),
+            )
+        except Exception:
+            raise RuntimeEventOwnershipLost("runtime_event_ownership_lost") from None
+        if run.get("thread_id") != authority.thread_id or run.get("tenant_digest") != authority.tenant_digest:
+            raise RuntimeEventOwnershipLost("runtime_event_ownership_lost")
+        return run
+
+    def _runtime_records(
+        self,
+        authority: RuntimeEventAuthority,
+        events: list[dict],
+    ) -> list[dict]:
+        next_seq = self._seq_counters[authority.thread_id]
+        records: list[dict] = []
+        for event in events:
+            authority.require_event_identity(event)
+            next_seq += 1
+            records.append(
+                {
+                    "thread_id": authority.thread_id,
+                    "run_id": authority.run_id,
+                    "tenant_ref": None if self._tenant is None else self._tenant.public_ref,
+                    "tenant_digest": None if self._tenant is None else self._tenant.digest,
+                    "event_type": event["event_type"],
+                    "category": event.get("category", "trace"),
+                    "content": event.get("content", ""),
+                    "metadata": event.get("metadata") or {},
+                    "seq": next_seq,
+                    "created_at": event.get("created_at") or datetime.now(UTC).isoformat(),
+                }
+            )
+        return records
+
+    async def _publish_runtime_records(
+        self,
+        authority: RuntimeEventAuthority,
+        records: list[dict],
+    ) -> None:
+        target, temp_path = await self._prepare_replace_off_thread(
+            self._prepare_records_replace,
+            records,
+        )
+        try:
+            await self._require_runtime_authority(authority)
+            await self._commit_under_execution_fence(
+                target,
+                temp_path,
+                run_id=authority.run_id,
+                owner_id=authority.owner_id,
+                lease_epoch=authority.lease_epoch,
+                ownership_error=RuntimeEventOwnershipLost,
+                committed_thread_id=authority.thread_id,
+                committed_seq=records[-1]["seq"],
+                allowed_active_statuses=("pending", "running"),
+            )
+        except BaseException:
+            await self._finish_off_thread(temp_path.unlink, missing_ok=True)
+            raise
+
+    async def append_fenced_batch(
+        self,
+        authority: RuntimeEventAuthority,
+        events: list[dict],
+    ) -> list[dict]:
+        if not events:
+            return []
+        async with self._get_write_lock(authority.thread_id):
+            await self._require_runtime_authority(authority)
+            await self._ensure_seq_loaded(authority.thread_id)
+            records = self._runtime_records(authority, events)
+            await self._publish_runtime_records(authority, records)
+            return records
+
+    async def append_fenced_if_absent(
+        self,
+        authority: RuntimeEventAuthority,
+        event: dict,
+    ) -> tuple[dict, bool]:
+        authority.require_event_identity(event)
+        async with self._get_write_lock(authority.thread_id):
+            await self._require_runtime_authority(authority)
+            persisted = [
+                item
+                for item in await asyncio.to_thread(
+                    self._read_run_events,
+                    authority.thread_id,
+                    authority.run_id,
+                )
+                if self._tenant_visible(item)
+            ]
+            existing = next(
+                (item for item in persisted if item.get("event_type") == event["event_type"]),
+                None,
+            )
+            if existing is not None:
+                await self._require_runtime_authority(authority)
+                return existing, False
+            await self._ensure_seq_loaded(authority.thread_id)
+            [record] = self._runtime_records(authority, [event])
+            await self._publish_runtime_records(authority, [record])
             return record, True
 
     async def append_idempotent(

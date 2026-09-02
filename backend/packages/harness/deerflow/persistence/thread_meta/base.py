@@ -15,6 +15,7 @@ three-state semantics (see :mod:`deerflow.runtime.user_context`):
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
 from typing import Any
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
@@ -31,6 +32,47 @@ class InvalidMetadataFilterError(ValueError):
 
 class ThreadMetaAlreadyExistsError(RuntimeError):
     """Raised when a create would replace an existing thread metadata row."""
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadMetaRunProjection:
+    """One authority-bound run projection into mutable thread metadata.
+
+    ``active_state_version`` identifies the execution epoch owned by
+    ``owner_worker_id``.  A terminal projection additionally carries the exact
+    terminal version plus the prior owner/active epoch captured by that
+    owner's successful status transition. The store independently proves that
+    full authority tuple and that this is still the latest admitted normal run
+    before applying either field.
+    """
+
+    run_id: str
+    thread_id: str
+    owner_worker_id: str
+    active_state_version: int
+    status: str
+    terminal_state_version: int | None = None
+    display_name: str | None = None
+
+    @property
+    def run_status(self) -> str:
+        """Return the exact durable run status this projection represents."""
+
+        return "success" if self.status == "idle" else self.status
+
+    def __post_init__(self) -> None:
+        if not self.run_id or not self.thread_id or not self.owner_worker_id:
+            raise ValueError("run, thread, and owner identifiers are required")
+        if type(self.active_state_version) is not int or self.active_state_version < 0:
+            raise ValueError("active_state_version must be a non-negative integer")
+        if self.status == "running":
+            if self.terminal_state_version is not None:
+                raise ValueError("a running projection cannot carry a terminal version")
+        elif self.status in {"idle", "error", "timeout", "interrupted"}:
+            if type(self.terminal_state_version) is not int or self.terminal_state_version <= self.active_state_version:
+                raise ValueError("a terminal projection requires a later terminal version")
+        else:
+            raise ValueError("unsupported run-derived thread status")
 
 
 class ThreadMetaStore(abc.ABC):
@@ -80,6 +122,22 @@ class ThreadMetaStore(abc.ABC):
     @abc.abstractmethod
     async def update_status(self, thread_id: str, status: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
         pass
+
+    async def project_run(
+        self,
+        projection: ThreadMetaRunProjection,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> bool:
+        """Conditionally project one authoritative latest run.
+
+        Return ``True`` only when the title/status mutation was applied.  A
+        missing row, failed owner check, stale execution fence, or older run is
+        a fail-closed ``False``.  Human/admin mutation methods remain separate.
+        """
+
+        del projection, user_id
+        return False
 
     @abc.abstractmethod
     async def update_metadata(self, thread_id: str, metadata: dict, *, touch: bool = True, user_id: str | None | _AutoSentinel = AUTO) -> None:

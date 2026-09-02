@@ -14,6 +14,7 @@ from deerflow.community.aio_sandbox.accepted_materializer import (
 from deerflow.sandbox.accepted_material import (
     AcceptedMaterialCapability,
     AcceptedMaterialError,
+    AcceptedMaterialExecutionClaimV1,
     AcceptedMaterialRequestV1,
     AcceptedSkillExecutionEvidenceV2,
     AcceptedSkillSandboxBindingV1,
@@ -85,6 +86,7 @@ class _AioProviderPort:
         *,
         user_id: str,
         binding: AcceptedSkillSandboxBindingV1,
+        execution_claim: object | None = None,
     ) -> str:
         self.acquire_calls += 1
         assert (thread_id, user_id) == ("thread-ref", "user-ref")
@@ -105,6 +107,27 @@ class _AioProviderPort:
 
     def destroy(self, sandbox_id: str) -> None:
         self.destroyed.append(sandbox_id)
+
+
+class _FreshTakeoverProviderPort(_AioProviderPort):
+    """A new Gateway process with no process-local accepted-attempt secret."""
+
+    def __init__(self, evidence: AcceptedSkillExecutionEvidenceV2) -> None:
+        super().__init__(evidence)
+        self.takeover_claims: list[object] = []
+
+    async def recover_bound_accepted_skills_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+        execution_claim: object,
+    ) -> str:
+        self.takeover_claims.append(execution_claim)
+        assert (thread_id, user_id) == ("thread-ref", "user-ref")
+        assert binding.snapshot_id == "3" * 64
+        return self.sandbox.id
 
 
 @pytest.mark.asyncio
@@ -241,3 +264,78 @@ async def test_aio_release_for_stale_provider_tuple_forgets_local_active_state()
     assert provider.acquire_calls == 2
     await adapter.release(recovered_lease)
     assert provider.destroyed == ["sandbox-1"]
+
+
+@pytest.mark.asyncio
+async def test_aio_fresh_process_takeover_is_unavailable_without_linearizable_revocation() -> None:
+    """Projected Secret rotation cannot authorize a cross-process takeover."""
+
+    now = datetime(2026, 8, 31, 12, tzinfo=UTC)
+    legacy = _legacy_evidence()
+    binding = AcceptedSkillSandboxBindingV1(
+        snapshot_id=legacy.snapshot_id,
+        run_id=legacy.run_id,
+        generation=legacy.generation,
+        evidence=object(),
+    )
+    first = AioAcceptedMaterializer(
+        provider=_AioProviderPort(legacy),
+        binding_resolver=lambda _request: binding,
+        clock=lambda: now,
+    )
+    original_request = _request(now)
+    original_claim = AcceptedMaterialExecutionClaimV1(
+        version=1,
+        tenant_digest=original_request.tenant.digest,
+        run_id=original_request.run_id,
+        owner_worker_id="gateway-a",
+        state_version=9,
+        execution_takeover=False,
+    )
+    _sandbox, _lease, original_evidence = await first.acquire_and_materialize(
+        original_request,
+        execution_claim=original_claim,
+    )
+
+    # Discard both the materializer and provider: no in-memory capability survives.
+    fresh_provider = _FreshTakeoverProviderPort(legacy)
+    recovered = AioAcceptedMaterializer(
+        provider=fresh_provider,
+        binding_resolver=lambda _request: binding,
+        clock=lambda: now + timedelta(seconds=30),
+    )
+    recovered_request = AcceptedMaterialRequestV1.build(
+        run_id=original_request.run_id,
+        attempt_id=original_request.attempt_id,
+        tenant=original_request.tenant,
+        user_ref=original_request.user_ref,
+        thread_ref=original_request.thread_ref,
+        agent_revision_digest=original_request.agent_revision_digest,
+        skill_snapshot_digest=original_request.skill_snapshot_digest,
+        skill_scope_digest=original_request.skill_scope_digest,
+        file_manifest=original_request.file_manifest,
+        runtime_image_digest=original_request.runtime_image_digest,
+        lease_expires_at=original_request.lease_expires_at + timedelta(seconds=30),
+    )
+    claim = AcceptedMaterialExecutionClaimV1(
+        version=1,
+        tenant_digest=original_request.tenant.digest,
+        run_id=original_request.run_id,
+        owner_worker_id="gateway-b",
+        state_version=12,
+        expected_materialization_digest=legacy.materialization_evidence_digest,
+        execution_takeover=True,
+    )
+
+    with pytest.raises(
+        AcceptedMaterialError,
+        match="accepted_material_execution_takeover_unavailable",
+    ):
+        await recovered.acquire_and_materialize(
+            recovered_request,
+            execution_claim=claim,
+        )
+
+    assert fresh_provider.acquire_calls == 0
+    assert fresh_provider.takeover_claims == []
+    assert original_evidence.provider_kind == "aio_kubernetes"

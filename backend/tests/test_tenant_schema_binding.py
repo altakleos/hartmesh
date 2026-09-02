@@ -53,6 +53,24 @@ async def test_empty_schema_binds_once_without_raw_operator_id(tmp_path) -> None
 
 
 @pytest.mark.asyncio
+async def test_admission_cursor_singleton_is_empty_schema_metadata(
+    tmp_path,
+) -> None:
+    engine, sessions = await _database(tmp_path, "admission-cursor-metadata.db")
+    identity = TenantIdentityV1.from_canonical_id("tenant-a")
+    try:
+        async with sessions() as session:
+            last_cursor = await session.scalar(text("SELECT last_cursor FROM run_admission_cursor_state WHERE singleton_id = 1"))
+        assert last_cursor == 0
+
+        result = await ensure_schema_tenant_binding(sessions, identity)
+
+        assert result.action is TenantSchemaBindingAction.bound_empty_schema
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_different_process_identity_fails_against_bound_schema(tmp_path) -> None:
     engine, sessions = await _database(tmp_path, "mismatch.db")
     try:
@@ -178,6 +196,30 @@ async def test_langgraph_migration_metadata_does_not_make_schema_nonempty(
         result = await ensure_schema_tenant_binding(sessions, identity)
 
         assert result.action is TenantSchemaBindingAction.bound_empty_schema
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "table_name",
+    ("acme_extension_jobs", "unknown_application_table"),
+)
+async def test_populated_extension_or_unknown_table_requires_explicit_binding(
+    tmp_path,
+    table_name: str,
+) -> None:
+    engine, sessions = await _database(tmp_path, f"{table_name}.db")
+    identity = TenantIdentityV1.from_canonical_id("tenant-a")
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text(f'CREATE TABLE "{table_name}" (item_id TEXT PRIMARY KEY)'))
+            await connection.execute(text(f"INSERT INTO \"{table_name}\" (item_id) VALUES ('legacy')"))
+
+        with pytest.raises(TenantIdentityError) as error:
+            await ensure_schema_tenant_binding(sessions, identity)
+
+        assert error.value.code == "tenant_schema_unbound"
     finally:
         await engine.dispose()
 

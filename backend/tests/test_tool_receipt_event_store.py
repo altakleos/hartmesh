@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
@@ -9,6 +12,7 @@ import pytest
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.tool_evidence import (
+    TOOL_RECEIPT_STARTED_EVENT,
     DurableToolReceiptV1,
     RunEventToolReceiptSink,
     ToolAttemptContextV1,
@@ -30,6 +34,7 @@ _DISPATCH_2 = ToolDispatchObservationV1(
 
 class _OwnedRunStore:
     def __init__(self) -> None:
+        self.fence_active = False
         self.row = {
             "run_id": "run-1",
             "thread_id": "thread-1",
@@ -43,6 +48,24 @@ class _OwnedRunStore:
 
     async def authoritative_get(self, run_id: str) -> dict | None:
         return dict(self.row) if run_id == self.row["run_id"] else None
+
+    @asynccontextmanager
+    async def hold_execution_fence(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        state_version: int,
+        terminal_state_version: int | None = None,
+        allowed_active_statuses: tuple[str, ...] = ("running",),
+    ):
+        del terminal_state_version
+        active = bool(run_id == self.row["run_id"] and owner_worker_id == self.row["owner_worker_id"] and state_version == self.row["state_version"] and self.row["status"] in allowed_active_statuses)
+        self.fence_active = active
+        try:
+            yield active
+        finally:
+            self.fence_active = False
 
 
 def _binding(runs: _OwnedRunStore) -> ToolEvidenceRuntimeBinding:
@@ -61,14 +84,18 @@ def _binding(runs: _OwnedRunStore) -> ToolEvidenceRuntimeBinding:
     )
 
 
-def _body(phase: str = "started") -> dict[str, object]:
+def _body(
+    phase: str = "started",
+    *,
+    tool_call_id: str = "call-1",
+) -> dict[str, object]:
     started = DurableToolReceiptV1.started(
         context=ToolAttemptContextV1(
             run_id="run-1",
             execution_task_id="run-1",
             execution_kind="lead",
             subagent_name=None,
-            tool_call_id="call-1",
+            tool_call_id=tool_call_id,
             attempt=1,
             owner_id="worker-1",
             lease_epoch=5,
@@ -294,6 +321,79 @@ async def test_jsonl_ownership_transfer_during_prepare_cannot_commit_receipt(
         await _append(store)
     assert await store.list_events("thread-1", "run-1") == []
     assert list((tmp_path / "events").rglob("*.tmp")) == []
+
+
+@pytest.mark.anyio
+async def test_jsonl_fenced_publish_keeps_blocking_rename_off_the_event_loop(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runs = _OwnedRunStore()
+    store = JsonlRunEventStore(base_dir=tmp_path / "events", run_store=runs)
+    original_commit = store._commit_prepared_record
+
+    def slow_commit(target, temp_path) -> None:
+        time.sleep(0.15)
+        original_commit(target, temp_path)
+
+    monkeypatch.setattr(store, "_commit_prepared_record", slow_commit)
+    ticks = 0
+    stopped = asyncio.Event()
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while not stopped.is_set():
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    ticker_task = asyncio.create_task(ticker())
+    try:
+        await _append(store)
+    finally:
+        stopped.set()
+        await ticker_task
+
+    assert ticks >= 5
+
+
+@pytest.mark.anyio
+async def test_jsonl_cancelled_publish_holds_fence_until_rename_finishes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runs = _OwnedRunStore()
+    store = JsonlRunEventStore(base_dir=tmp_path / "events", run_store=runs)
+    original_commit = store._commit_prepared_record
+    commit_started = threading.Event()
+    allow_commit = threading.Event()
+
+    def blocked_commit(target, temp_path) -> None:
+        commit_started.set()
+        assert allow_commit.wait(timeout=5)
+        original_commit(target, temp_path)
+
+    monkeypatch.setattr(store, "_commit_prepared_record", blocked_commit)
+    append_task = asyncio.create_task(_append(store))
+    assert await asyncio.to_thread(commit_started.wait, 2)
+    assert runs.fence_active is True
+
+    append_task.cancel()
+    await asyncio.sleep(0.05)
+    assert append_task.done() is False
+    assert runs.fence_active is True
+
+    allow_commit.set()
+    with pytest.raises(asyncio.CancelledError):
+        await append_task
+
+    assert runs.fence_active is False
+    events = await store.list_events("thread-1", "run-1")
+    assert [event["event_type"] for event in events] == [TOOL_RECEIPT_STARTED_EVENT]
+    assert list((tmp_path / "events").rglob("*.tmp")) == []
+
+    await _append(store, body=_body(tool_call_id="call-after-cancel"))
+    events = await store.list_events("thread-1", "run-1")
+    assert [event["seq"] for event in events] == [1, 2]
 
 
 @pytest.mark.anyio
@@ -779,3 +879,108 @@ async def test_database_append_is_fenced_idempotent_and_recoverable(tmp_path) ->
             await _append(reopened, event_type="tool_receipt.outcome.v1", body=_body("succeeded"))
     finally:
         await close_engine()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("write_kind", ["append", "reservation"])
+async def test_database_receipt_write_rejects_a_database_expired_lease_when_process_clock_lags(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_kind: str,
+) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.runtime.events.store import db as db_event_store
+
+    class _LaggingProcessDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            observed = datetime(1999, 1, 1, tzinfo=UTC)
+            return observed if tz is not None else observed.replace(tzinfo=None)
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'database-clock-receipts.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        async with session_factory.begin() as session:
+            session.add(
+                RunRow(
+                    run_id="run-1",
+                    thread_id="thread-1",
+                    user_id="user-1",
+                    operation_kind="run",
+                    status="running",
+                    owner_worker_id="worker-1",
+                    state_version=5,
+                    lease_expires_at=datetime(2000, 1, 1, tzinfo=UTC),
+                )
+            )
+        monkeypatch.setattr(db_event_store, "datetime", _LaggingProcessDateTime)
+        store = db_event_store.DbRunEventStore(session_factory)
+
+        with pytest.raises(ToolReceiptOwnershipLost, match="tool_receipt_ownership_lost"):
+            if write_kind == "append":
+                await _append(store)
+            else:
+                runs = _OwnedRunStore()
+                await RunEventToolReceiptSink(store).reserve_started(
+                    binding=_binding(runs),
+                    tool_call_id="call-database-clock",
+                    tool_name="web_search",
+                    request_projection_digest="e" * 64,
+                    dispatch=_DISPATCH_1,
+                )
+
+        assert await store.list_events("thread-1", "run-1", user_id=None) == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_database_receipt_writes_accept_a_single_node_null_lease(tmp_path) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.runtime.events.store.db import DbRunEventStore
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'null-lease-receipts.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        async with session_factory.begin() as session:
+            session.add(
+                RunRow(
+                    run_id="run-1",
+                    thread_id="thread-1",
+                    user_id="user-1",
+                    operation_kind="run",
+                    status="running",
+                    owner_worker_id="worker-1",
+                    state_version=5,
+                    lease_expires_at=None,
+                )
+            )
+        store = DbRunEventStore(session_factory)
+
+        appended = await _append(store)
+        reserved = await RunEventToolReceiptSink(store).reserve_started(
+            binding=_binding(_OwnedRunStore()),
+            tool_call_id="call-null-lease",
+            tool_name="web_search",
+            request_projection_digest="e" * 64,
+            dispatch=_DISPATCH_1,
+        )
+
+        assert appended.created is True
+        assert reserved.started.context.tool_call_id == "call-null-lease"
+        assert [event["event_type"] for event in await store.list_events("thread-1", "run-1", user_id=None)] == [
+            "tool_receipt.started.v1",
+            "tool_receipt.started.v1",
+        ]
+    finally:
+        await engine.dispose()

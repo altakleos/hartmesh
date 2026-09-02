@@ -118,6 +118,15 @@ def test_backend_ci_installs_the_optional_sdk_for_the_executable_probe() -> None
     assert "--extra opensandbox" in install_step
 
 
+def test_documented_backend_test_command_selects_the_locked_probe_sdk() -> None:
+    makefile = (Path(__file__).resolve().parents[1] / "Makefile").read_text(
+        encoding="utf-8",
+    )
+    test_recipe = makefile.split("\ntest:\n", maxsplit=1)[1].split("\ntest-live:\n", maxsplit=1)[0]
+
+    assert "uv run --locked --extra opensandbox pytest" in test_recipe
+
+
 def test_root_project_exports_the_optional_sdk_extra() -> None:
     pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))

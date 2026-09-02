@@ -32,6 +32,12 @@ from typing import Any
 
 import yaml
 
+from app.mcp_tasks.replay_commitment import (
+    MCP_TASK_REPLAY_HMAC_ACTIVE_KEY_ID_ENV,
+    MCP_TASK_REPLAY_HMAC_KEYS_ENV,
+    McpTaskReplayKeyring,
+    McpTaskReplayKeyringConfirmation,
+)
 from deerflow.deployment.topology import (
     MULTI_GATEWAY_QUALIFICATION_SCOPE,
     ReplicaRegistrationV1,
@@ -321,6 +327,7 @@ class KubernetesMultiGatewayQualificationDriverV1:
         self.gateway_service = f"{self.fullname}-gateway"
         self.gateway_deployment = f"{self.fullname}-gateway"
         self.store_secret = "hartmesh-multi-gateway-stores"
+        self.replay_keyring_secret = "hartmesh-multi-gateway-mcp-replay"
         self.runtime_config_map = "hartmesh-multi-gateway-runtime"
         self.home_claim = "hartmesh-multi-gateway-home"
         self.skills_claim = "hartmesh-multi-gateway-skills"
@@ -334,6 +341,25 @@ class KubernetesMultiGatewayQualificationDriverV1:
         self._redis_password = secrets.token_urlsafe(32)
         self._redis_admin_password = secrets.token_urlsafe(32)
         self._admin_password = secrets.token_urlsafe(24) + "Aa1!"
+        self._replay_keyring_active_key_id = "qualification-active-v2"
+        self._replay_keyring_keys = {
+            "qualification-retained-v1": secrets.token_urlsafe(32),
+            self._replay_keyring_active_key_id: secrets.token_urlsafe(32),
+        }
+        replay_keyring = McpTaskReplayKeyring.from_environment(
+            required=True,
+            environ={
+                MCP_TASK_REPLAY_HMAC_KEYS_ENV: json.dumps(
+                    self._replay_keyring_keys,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                MCP_TASK_REPLAY_HMAC_ACTIVE_KEY_ID_ENV: (self._replay_keyring_active_key_id),
+            },
+        )
+        if replay_keyring is None:  # pragma: no cover - required=True invariant
+            raise AssertionError("qualification replay keyring was not constructed")
+        self._replay_keyring_confirmation = replay_keyring.confirmation()
         self._owned_namespace_uid: str | None = None
         self._namespace_owner = hashlib.sha256(
             f"{config.namespace}:{config.qualification_id}".encode(),
@@ -375,6 +401,30 @@ class KubernetesMultiGatewayQualificationDriverV1:
                 "multi-Gateway qualification subjects are not available",
             )
         return self._subjects
+
+    @property
+    def replay_keyring_confirmation(self) -> McpTaskReplayKeyringConfirmation:
+        """Return only the non-secret startup confirmation used by topology."""
+
+        return self._replay_keyring_confirmation
+
+    def replay_keyring_secret_manifest(self) -> dict[str, object]:
+        """Return the namespace-scoped disposable replay-key Secret."""
+
+        return {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": self.replay_keyring_secret},
+            "type": "Opaque",
+            "stringData": {
+                MCP_TASK_REPLAY_HMAC_KEYS_ENV: json.dumps(
+                    self._replay_keyring_keys,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                MCP_TASK_REPLAY_HMAC_ACTIVE_KEY_ID_ENV: (self._replay_keyring_active_key_id),
+            },
+        }
 
     def _application_config(self) -> str:
         config = {
@@ -534,7 +584,10 @@ class KubernetesMultiGatewayQualificationDriverV1:
                     "repository": self.config.image_repository,
                     "digest": self.config.image_digest,
                 },
-                "extraEnvFrom": [{"configMapRef": {"name": self.runtime_config_map}}],
+                "extraEnvFrom": [
+                    {"configMapRef": {"name": self.runtime_config_map}},
+                    {"secretRef": {"name": self.replay_keyring_secret}},
+                ],
             },
             "frontend": {
                 "replicas": 0,
@@ -1139,6 +1192,7 @@ class KubernetesMultiGatewayQualificationDriverV1:
                 },
             }
         )
+        self._apply(self.replay_keyring_secret_manifest())
         self._apply(
             {
                 "apiVersion": "v1",
@@ -1868,6 +1922,53 @@ class KubernetesMultiGatewayQualificationDriverV1:
             )
         return status, epoch
 
+    def _accepted_run_commitment(self, run_id: str) -> tuple[str, str]:
+        """Return the recovery policy and a canonical digest of immutable admission.
+
+        Execution, assembly, ownership, progress, and terminal fields are
+        deliberately excluded: those are expected to advance. Everything in
+        this projection was sealed by admission and must survive takeover
+        byte-for-byte after canonical JSON encoding.
+        """
+
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id) is None:
+            raise QualificationCommandError("qualification run id is unsafe")
+        payload = json.loads(
+            self._postgres(
+                "SELECT json_build_object("
+                "'recovery_policy',recovery_policy,"
+                "'tenant_ref',tenant_ref,'tenant_digest',tenant_digest,"
+                "'origin_json',origin_json,"
+                "'principal_projection_json',principal_projection_json,"
+                "'principal_projection_digest',principal_projection_digest,"
+                "'base_origin_digest',base_origin_digest,"
+                "'accepted_context_digest',accepted_context_digest,"
+                "'agent_revision_json',agent_revision_json,"
+                "'agent_revision_digest',agent_revision_digest,"
+                "'extension_generation',extension_generation,"
+                "'decision_evidence_json',decision_evidence_json,"
+                "'external_scope',external_scope,'external_key',external_key,"
+                "'request_digest',request_digest,"
+                "'request_digest_version',request_digest_version,"
+                "'caller_intent_json',caller_intent_json,"
+                "'caller_intent_digest',caller_intent_digest,"
+                "'caller_intent_digest_version',caller_intent_digest_version"
+                f")::text FROM runs WHERE run_id='{run_id}'",
+            )
+        )
+        policy = payload.get("recovery_policy") if isinstance(payload, dict) else None
+        if policy != "exact_two_takeover_v1":
+            raise QualificationCommandError(
+                "exact-two admission omitted its immutable recovery policy",
+            )
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return policy, "sha256:" + hashlib.sha256(encoded).hexdigest()
+
     def _wait_for_gateway_replacement(
         self,
         old_uid: str,
@@ -2294,11 +2395,109 @@ class KubernetesMultiGatewayQualificationDriverV1:
             raise QualificationCommandError("accepted-skill durable ledger differs from live material")
         return {
             "sandbox_id": str(sandbox_id),
+            "sandbox_pod_name": str(pod_name),
             "sandbox_pod_uid": str(pod_uid),
             "accepted_lease_uid": str(lease_uid),
             "snapshot_digest": snapshot_id,
             "execution_evidence_digest": evidence_digest,
             "ownership_epoch": int(str(epoch)),
+        }
+
+    def _reconciled_tool_operation_facts(
+        self,
+        run_id: str,
+        *,
+        sandbox_pod_name: str,
+        require_result: bool,
+    ) -> dict[str, str | int]:
+        """Prove that takeover reattached to one receipt-keyed sandbox body."""
+
+        if _SAFE_RESOURCE.fullmatch(run_id) is None:
+            raise QualificationCommandError("qualification run id is unsafe")
+        if _SAFE_RESOURCE.fullmatch(sandbox_pod_name) is None:
+            raise QualificationCommandError(
+                "qualification sandbox pod name is unsafe",
+            )
+        receipt_payload = json.loads(
+            self._postgres(
+                f"SELECT json_build_object('starts',count(*),'receipt_ids',json_agg(DISTINCT content::jsonb->>'receipt_id'))::text FROM run_events WHERE run_id='{run_id}' AND event_type='tool_receipt.started.v1'",
+            )
+        )
+        receipt_ids = receipt_payload.get("receipt_ids") if isinstance(receipt_payload, dict) else None
+        if (
+            not isinstance(receipt_payload, dict)
+            or receipt_payload.get("starts") != 1
+            or not isinstance(receipt_ids, list)
+            or len(receipt_ids) != 1
+            or not isinstance(receipt_ids[0], str)
+            or re.fullmatch(r"tr_[0-9a-f]{64}", receipt_ids[0]) is None
+        ):
+            raise QualificationCommandError(
+                "reconciled qualification tool lacks one durable receipt",
+            )
+        receipt_id = receipt_ids[0]
+        operation_dir = f"/mnt/user-data/workspace/.hartmesh-qualification-operations/{receipt_id}"
+
+        execution_count = ""
+
+        def execution_body_recorded() -> bool:
+            nonlocal execution_count
+            try:
+                execution_count = self._kubectl(
+                    "exec",
+                    sandbox_pod_name,
+                    "-c",
+                    "sandbox",
+                    "--",
+                    "cat",
+                    f"{operation_dir}/execution-count",
+                )
+            except QualificationCommandError:
+                return False
+            return execution_count == "1"
+
+        wait_until(
+            execution_body_recorded,
+            description="one receipt-keyed sandbox execution body",
+            timeout_seconds=15,
+            interval_seconds=0.25,
+        )
+        result_digest = ""
+        if require_result:
+            result = ""
+
+            def reconciled_result_available() -> bool:
+                nonlocal result
+                try:
+                    result = self._kubectl(
+                        "exec",
+                        sandbox_pod_name,
+                        "-c",
+                        "sandbox",
+                        "--",
+                        "cat",
+                        f"{operation_dir}/result",
+                    )
+                except QualificationCommandError:
+                    return False
+                return result == "qualification-complete"
+
+            wait_until(
+                reconciled_result_available,
+                description="receipt-keyed sandbox operation result",
+                timeout_seconds=45,
+                interval_seconds=0.5,
+            )
+            result_digest = (
+                "sha256:"
+                + hashlib.sha256(
+                    b"qualification-complete\n",
+                ).hexdigest()
+            )
+        return {
+            "tool_receipt_id": receipt_id,
+            "external_tool_executions": int(execution_count),
+            "reconciled_result_digest": result_digest,
         }
 
     def _barrier_invocation(
@@ -2309,6 +2508,7 @@ class KubernetesMultiGatewayQualificationDriverV1:
         cancel: bool = False,
         require_conflict: bool = False,
         barrier_probe: Callable[[str], None] | None = None,
+        takeover_probe: Callable[[str], None] | None = None,
         barrier_fault: Callable[[str], None] | None = None,
         terminal_probe: Callable[[str, Mapping[str, object]], None] | None = None,
         require_stale_rejection: bool = False,
@@ -2319,7 +2519,24 @@ class KubernetesMultiGatewayQualificationDriverV1:
         partition_owner: bool = False,
         stale_counter_names: tuple[str, ...] = (),
         arm_stale_external_renewal: bool = False,
+        expect_takeover_barrier_reentry: bool = True,
+        expected_takeover_resumes: int = 1,
+        expected_graph_starts: int | None = None,
+        expected_model_starts: int | None = None,
     ) -> MultiGatewayScenarioObservationV1:
+        if (
+            type(expect_takeover_barrier_reentry) is not bool
+            or type(expected_takeover_resumes) is not int
+            or expected_takeover_resumes != int(expect_takeover_barrier_reentry)
+            or any(
+                value is not None and (type(value) is not int or value < 0)
+                for value in (
+                    expected_graph_starts,
+                    expected_model_starts,
+                )
+            )
+        ):
+            raise ValueError("qualification takeover expectation is invalid")
         started = time.monotonic()
         barrier_hits_before = self._arm_invocation_barrier(
             scenario_id,
@@ -2342,6 +2559,25 @@ class KubernetesMultiGatewayQualificationDriverV1:
         paused_owner_pid: int | None = None
         partition_policy_name: str | None = None
         stale_counter_baselines = {name: self._counter(scenario_id, name) for name in stale_counter_names}
+        execution_counter_names = (
+            "materialization_starts",
+            "materialization_validations",
+            "graph_starts",
+            "model_starts",
+            "tool_starts",
+            "tool_completions",
+        )
+        execution_counter_baselines = {name: self._counter(scenario_id, name) for name in execution_counter_names}
+        takeover_wins_before = self._counter(
+            scenario_id,
+            "execution_takeover_wins",
+        )
+        takeover_resumes_before = self._counter(
+            scenario_id,
+            "execution_takeover_resumes",
+        )
+        accepted_recovery_policy = ""
+        accepted_commitment_before = ""
         with ExitStack() as stack:
             forwards = tuple(
                 stack.enter_context(
@@ -2389,6 +2625,10 @@ class KubernetesMultiGatewayQualificationDriverV1:
                     )
                 self._scenario_run_ids[scenario_id] = run_id
                 epoch_before = self._run_state_version(run_id)
+                (
+                    accepted_recovery_policy,
+                    accepted_commitment_before,
+                ) = self._accepted_run_commitment(run_id)
                 if barrier_probe is not None:
                     barrier_probe(run_id)
                 replay_status, replay = clients[1].request(
@@ -2467,7 +2707,17 @@ class KubernetesMultiGatewayQualificationDriverV1:
 
                 if kill_owner or partition_owner:
                     prefix = self._qualification_prefix(scenario_id)
-                    if self._redis("SET", f"{prefix}:arm", "1", "EX", "300") != "OK":
+                    if (
+                        expect_takeover_barrier_reentry
+                        and self._redis(
+                            "SET",
+                            f"{prefix}:arm",
+                            "1",
+                            "EX",
+                            "300",
+                        )
+                        != "OK"
+                    ):
                         raise QualificationCommandError(
                             "takeover barrier could not be re-armed",
                         )
@@ -2486,21 +2736,45 @@ class KubernetesMultiGatewayQualificationDriverV1:
                             "stale external renewal probe could not be armed",
                         )
 
-                    def takeover_reached() -> bool:
+                    def takeover_claimed() -> bool:
                         return (
                             self._counter(
                                 scenario_id,
-                                "barrier_hits",
+                                "execution_takeover_wins",
                             )
-                            >= barrier_hits_before + 2
+                            > takeover_wins_before
                         )
 
                     wait_until(
-                        takeover_reached,
-                        description=f"takeover barrier {scenario_id}",
+                        takeover_claimed,
+                        description=f"execution takeover claim {scenario_id}",
                         timeout_seconds=120,
                         interval_seconds=1,
                     )
+
+                    if expect_takeover_barrier_reentry:
+
+                        def takeover_reached() -> bool:
+                            return (
+                                self._counter(
+                                    scenario_id,
+                                    "barrier_hits",
+                                )
+                                >= barrier_hits_before + 2
+                            )
+
+                        wait_until(
+                            takeover_reached,
+                            description=f"takeover barrier {scenario_id}",
+                            timeout_seconds=120,
+                            interval_seconds=1,
+                        )
+                        if takeover_probe is not None:
+                            takeover_probe(run_id)
+                    elif takeover_probe is not None:
+                        raise QualificationCommandError(
+                            "a non-resuming takeover cannot have a takeover probe",
+                        )
                     takeover_count = 1
                     if partition_owner:
                         paused_owner_name = owner
@@ -2598,6 +2872,37 @@ class KubernetesMultiGatewayQualificationDriverV1:
                 stale_rejections = 1
             stale_counter_rejections = sum(self._counter(scenario_id, name) - baseline for name, baseline in stale_counter_baselines.items())
             stale_rejections += stale_counter_rejections
+            takeover_wins = (
+                self._counter(
+                    scenario_id,
+                    "execution_takeover_wins",
+                )
+                - takeover_wins_before
+            )
+            takeover_resumes = (
+                self._counter(
+                    scenario_id,
+                    "execution_takeover_resumes",
+                )
+                - takeover_resumes_before
+            )
+            if kill_owner or partition_owner:
+                if takeover_wins != 1 or takeover_resumes != expected_takeover_resumes:
+                    raise QualificationCommandError(
+                        "execution takeover was not one-winner or violated its resume disposition",
+                    )
+            elif takeover_wins != 0 or takeover_resumes != 0:
+                raise QualificationCommandError(
+                    "an unfaulted invocation unexpectedly entered recovery",
+                )
+            (
+                final_recovery_policy,
+                accepted_commitment_after,
+            ) = self._accepted_run_commitment(run_id)
+            if final_recovery_policy != accepted_recovery_policy or accepted_commitment_after != accepted_commitment_before:
+                raise QualificationCommandError(
+                    "execution takeover changed immutable accepted evidence",
+                )
             final_status, final_replay = client.request(
                 "POST",
                 "/api/runtime/v1/invocations/ensure",
@@ -2612,6 +2917,15 @@ class KubernetesMultiGatewayQualificationDriverV1:
             raise QualificationCommandError("invocation lifecycle is not single-authority")
         if scenario_id == "execution_ownership" and (self._counter(scenario_id, "model_starts") != 1 or self._counter(scenario_id, "graph_starts") != 1):
             raise QualificationCommandError("execution was performed by more than one worker")
+        execution_counter_deltas = {name: self._counter(scenario_id, name) - baseline for name, baseline in execution_counter_baselines.items()}
+        if expected_graph_starts is not None and execution_counter_deltas["graph_starts"] != expected_graph_starts:
+            raise QualificationCommandError(
+                "qualification graph-start count violated the selected crash window",
+            )
+        if expected_model_starts is not None and execution_counter_deltas["model_starts"] != expected_model_starts:
+            raise QualificationCommandError(
+                "qualification model-start count violated the selected crash window",
+            )
         return MultiGatewayScenarioObservationV1(
             scenario_id=scenario_id,
             input_facts={
@@ -2625,7 +2939,16 @@ class KubernetesMultiGatewayQualificationDriverV1:
                 "run_id": run_id,
                 "terminal_status": str(observation.get("status")),
                 "topology_digest": (self._subjects.topology_registrations[0].topology_fingerprint.digest if self._subjects is not None else "unavailable"),
-                "model_starts": self._counter(scenario_id, "model_starts"),
+                "accepted_evidence_digest": accepted_commitment_before,
+                "recovery_policy": accepted_recovery_policy,
+                "materialization_starts": execution_counter_deltas["materialization_starts"],
+                "materialization_validations": execution_counter_deltas["materialization_validations"],
+                "graph_starts": execution_counter_deltas["graph_starts"],
+                "model_starts": execution_counter_deltas["model_starts"],
+                "tool_starts": execution_counter_deltas["tool_starts"],
+                "tool_completions": execution_counter_deltas["tool_completions"],
+                "execution_takeover_wins": takeover_wins,
+                "execution_takeover_resumes": takeover_resumes,
                 "stale_counter_rejections": stale_counter_rejections,
                 "owner_process_stop_verified": bool(partition_owner and paused_owner_pid is not None),
             },
@@ -2887,6 +3210,8 @@ class KubernetesMultiGatewayQualificationDriverV1:
 
     def _owner_sigkill(self) -> MultiGatewayScenarioObservationV1:
         started = time.monotonic()
+        reconciled_before: dict[str, str | int] = {}
+        reconciled_after: dict[str, str | int] = {}
         windows = (
             ("accepted_before_materialization", "before-materialization"),
             (
@@ -2894,23 +3219,89 @@ class KubernetesMultiGatewayQualificationDriverV1:
                 "after-materialization",
             ),
             ("post_checkpoint_before_graph", "after-checkpoint"),
+            (
+                "post_dispatch_marker_before_graph",
+                "after-dispatch-marker",
+            ),
             ("during_model_execution", "during-model"),
             ("during_tool_execution", "during-tool"),
             ("terminal_before_lifecycle_commit", "before-terminal"),
         )
-        observations = tuple(
-            self._barrier_invocation(
-                "owner_sigkill",
-                kill_owner=True,
-                barrier_point=point,
-                delivery_id=delivery_id,
+        observations: list[MultiGatewayScenarioObservationV1] = []
+
+        def capture_reconciled_operation(run_id: str) -> None:
+            reconciled_before.update(
+                self._accepted_skill_attempt_facts(run_id),
             )
-            for point, delivery_id in windows
-        )
+            reconciled_before.update(
+                self._reconciled_tool_operation_facts(
+                    run_id,
+                    sandbox_pod_name=str(
+                        reconciled_before["sandbox_pod_name"],
+                    ),
+                    require_result=False,
+                )
+            )
+
+        def verify_reconciled_operation(run_id: str) -> None:
+            reconciled_after.update(
+                self._reconciled_tool_operation_facts(
+                    run_id,
+                    sandbox_pod_name=str(
+                        reconciled_before["sandbox_pod_name"],
+                    ),
+                    require_result=True,
+                )
+            )
+
+        def verify_dispatch_gap_failed_closed(
+            run_id: str,
+            observation: Mapping[str, object],
+        ) -> None:
+            if observation.get("status") != "error":
+                raise QualificationCommandError(
+                    "dispatch-marker gap did not fail closed",
+                )
+            stop_reason = self._postgres(
+                f"SELECT COALESCE(stop_reason,'') FROM runs WHERE run_id='{run_id}'",
+            )
+            if stop_reason != "recovery_checkpoint_unavailable":
+                raise QualificationCommandError(
+                    "dispatch-marker gap used an unexpected terminal reason",
+                )
+
+        for point, delivery_id in windows:
+            is_tool_window = point == "during_tool_execution"
+            if point == "post_dispatch_marker_before_graph":
+                observations.append(
+                    self._barrier_invocation(
+                        "owner_sigkill",
+                        kill_owner=True,
+                        terminal_probe=verify_dispatch_gap_failed_closed,
+                        barrier_point=point,
+                        delivery_id=delivery_id,
+                        expect_takeover_barrier_reentry=False,
+                        expected_takeover_resumes=0,
+                        expected_graph_starts=0,
+                        expected_model_starts=0,
+                    )
+                )
+                continue
+            observations.append(
+                self._barrier_invocation(
+                    "owner_sigkill",
+                    kill_owner=True,
+                    barrier_probe=(capture_reconciled_operation if is_tool_window else None),
+                    takeover_probe=(verify_reconciled_operation if is_tool_window else None),
+                    barrier_point=point,
+                    delivery_id=delivery_id,
+                )
+            )
         run_ids = tuple(str(observation.evidence_facts["run_id"]) for observation in observations)
+        fail_closed = next(observation for observation in observations if observation.input_facts["barrier_point"] == "post_dispatch_marker_before_graph")
         tool_starts = self._counter("owner_sigkill", "tool_starts")
         tool_completions = self._counter("owner_sigkill", "tool_completions")
-        if tool_starts < 2 or tool_completions != 1:
+        if tool_starts < 2 or tool_completions != 1 or reconciled_before.get("tool_receipt_id") != reconciled_after.get("tool_receipt_id") or reconciled_after.get("external_tool_executions") != 1:
             raise QualificationCommandError(
                 "tool-window recovery lacked one completed fenced attempt",
             )
@@ -2924,11 +3315,24 @@ class KubernetesMultiGatewayQualificationDriverV1:
             },
             evidence_facts={
                 "run_id_digest": "sha256:" + hashlib.sha256("\n".join(run_ids).encode()).hexdigest(),
-                "recovered_window_count": len(observations),
+                "accepted_evidence_set_digest": "sha256:"
+                + hashlib.sha256(
+                    "\n".join(str(observation.evidence_facts["accepted_evidence_digest"]) for observation in observations).encode(),
+                ).hexdigest(),
+                "recovered_window_count": len(observations) - 1,
+                "fail_closed_window_count": 1,
+                "fail_closed_stop_reason": ("recovery_checkpoint_unavailable"),
+                "fail_closed_takeover_wins": int(fail_closed.evidence_facts["execution_takeover_wins"]),
+                "fail_closed_takeover_resumes": int(fail_closed.evidence_facts["execution_takeover_resumes"]),
+                "fail_closed_graph_starts": int(fail_closed.evidence_facts["graph_starts"]),
+                "fail_closed_model_starts": int(fail_closed.evidence_facts["model_starts"]),
                 "stale_owner_probe_count": sum(observation.stale_write_rejections for observation in observations),
                 "terminal_states": ",".join(str(observation.evidence_facts["terminal_status"]) for observation in observations),
                 "tool_starts": tool_starts,
                 "tool_completions": tool_completions,
+                "tool_receipt_id": str(reconciled_before["tool_receipt_id"]),
+                "external_tool_executions": int(reconciled_after["external_tool_executions"]),
+                "reconciled_result_digest": str(reconciled_after["reconciled_result_digest"]),
             },
             authoritative_count=len(observations),
             stale_write_rejections=sum(observation.stale_write_rejections for observation in observations),
@@ -3280,9 +3684,30 @@ class KubernetesMultiGatewayQualificationDriverV1:
 
     def _sandbox_recovery(self) -> MultiGatewayScenarioObservationV1:
         before: dict[str, str | int] = {}
+        after_takeover: dict[str, str | int] = {}
 
         def inspect_material(run_id: str) -> None:
             before.update(self._accepted_skill_attempt_facts(run_id))
+            before.update(
+                self._reconciled_tool_operation_facts(
+                    run_id,
+                    sandbox_pod_name=str(before["sandbox_pod_name"]),
+                    require_result=False,
+                )
+            )
+
+        def inspect_reconciled_operation(run_id: str) -> None:
+            after_takeover.update(
+                self._reconciled_tool_operation_facts(
+                    run_id,
+                    sandbox_pod_name=str(before["sandbox_pod_name"]),
+                    require_result=True,
+                )
+            )
+            if after_takeover.get("tool_receipt_id") != before.get("tool_receipt_id") or after_takeover.get("external_tool_executions") != 1:
+                raise QualificationCommandError(
+                    "sandbox takeover did not reattach to the accepted tool receipt",
+                )
 
         def inspect_ledger(
             run_id: str,
@@ -3302,6 +3727,7 @@ class KubernetesMultiGatewayQualificationDriverV1:
             "sandbox_recovery",
             kill_owner=True,
             barrier_probe=inspect_material,
+            takeover_probe=inspect_reconciled_operation,
             terminal_probe=inspect_ledger,
             barrier_point="during_tool_execution",
             delivery_id="during-tool",
@@ -3337,12 +3763,14 @@ class KubernetesMultiGatewayQualificationDriverV1:
             or materialization_validations != 2
             or graph_starts != 2
             or model_starts != 1
-            or tool_starts < 2
+            or tool_starts != 2
             or tool_completions != 1
             or not isinstance(receipt_counts, dict)
-            or receipt_counts.get("starts", 0) < 1
+            or receipt_counts.get("starts") != 1
             or receipt_counts.get("outcomes") != 1
             or receipt_counts.get("rows") != receipt_counts.get("distinct_keys")
+            or before.get("external_tool_executions") != 1
+            or after_takeover.get("external_tool_executions") != 1
         ):
             raise QualificationCommandError(
                 "sandbox recovery duplicated execution or skipped accepted-material revalidation",
@@ -3354,7 +3782,7 @@ class KubernetesMultiGatewayQualificationDriverV1:
                 "materialization_profile": "rwx_verified_copy_v2",
                 "fault": "owning_gateway_sigkill",
                 "fault_window": "during_long_sandbox_operation",
-                "external_side_effect_contract": "at_least_once_indeterminate",
+                "external_side_effect_contract": ("receipt_idempotent_reconcile_v1"),
             },
             evidence_facts={
                 "run_id": run_id,
@@ -3367,6 +3795,9 @@ class KubernetesMultiGatewayQualificationDriverV1:
                 "model_starts": model_starts,
                 "tool_starts": tool_starts,
                 "tool_completions": tool_completions,
+                "tool_receipt_id": str(before["tool_receipt_id"]),
+                "external_tool_executions": int(after_takeover["external_tool_executions"]),
+                "reconciled_result_digest": str(after_takeover["reconciled_result_digest"]),
                 "durable_tool_attempts": int(receipt_counts["starts"]),
                 "durable_tool_outcomes": int(receipt_counts["outcomes"]),
             },
@@ -3732,6 +4163,8 @@ class KubernetesMultiGatewayQualificationDriverV1:
 
     def _postgresql_interruption(self) -> MultiGatewayScenarioObservationV1:
         started = time.monotonic()
+        reconciled_before: dict[str, str | int] = {}
+        reconciled_after: dict[str, str | int] = {}
         cases = (
             (
                 "post_checkpoint_before_graph",
@@ -3755,19 +4188,58 @@ class KubernetesMultiGatewayQualificationDriverV1:
                 False,
             ),
         )
-        observations = tuple(
-            self._barrier_invocation(
-                "postgresql_interruption",
-                require_stale_rejection=True,
-                dependency_interruption_count=1 if index == 0 else 0,
-                barrier_point=point,
-                delivery_id=delivery_id,
-                partition_owner=True,
-                stale_counter_names=counters,
-                arm_stale_external_renewal=arm_external,
+
+        def capture_reconciled_operation(run_id: str) -> None:
+            reconciled_before.update(
+                self._accepted_skill_attempt_facts(run_id),
             )
-            for index, (point, delivery_id, counters, arm_external) in enumerate(cases)
-        )
+            reconciled_before.update(
+                self._reconciled_tool_operation_facts(
+                    run_id,
+                    sandbox_pod_name=str(
+                        reconciled_before["sandbox_pod_name"],
+                    ),
+                    require_result=False,
+                )
+            )
+
+        def verify_reconciled_operation(run_id: str) -> None:
+            reconciled_after.update(
+                self._reconciled_tool_operation_facts(
+                    run_id,
+                    sandbox_pod_name=str(
+                        reconciled_before["sandbox_pod_name"],
+                    ),
+                    require_result=True,
+                )
+            )
+
+        observations: list[MultiGatewayScenarioObservationV1] = []
+        for index, (
+            point,
+            delivery_id,
+            counters,
+            arm_external,
+        ) in enumerate(cases):
+            is_tool_window = point == "during_tool_execution"
+            observations.append(
+                self._barrier_invocation(
+                    "postgresql_interruption",
+                    require_stale_rejection=True,
+                    dependency_interruption_count=1 if index == 0 else 0,
+                    barrier_probe=(capture_reconciled_operation if is_tool_window else None),
+                    takeover_probe=(verify_reconciled_operation if is_tool_window else None),
+                    barrier_point=point,
+                    delivery_id=delivery_id,
+                    partition_owner=True,
+                    stale_counter_names=counters,
+                    arm_stale_external_renewal=arm_external,
+                )
+            )
+        if reconciled_before.get("tool_receipt_id") != reconciled_after.get("tool_receipt_id") or reconciled_after.get("external_tool_executions") != 1:
+            raise QualificationCommandError(
+                "PostgreSQL interruption replayed the reconciled tool body",
+            )
         counter_names = tuple(name for _point, _delivery, names, _arm_external in cases for name in names)
         return self._observation(
             "postgresql_interruption",
@@ -3787,6 +4259,9 @@ class KubernetesMultiGatewayQualificationDriverV1:
                 "peer_ready_during_partition_count": len(observations),
                 "stale_rejection_kinds": len(counter_names),
                 "stale_rejection_count": sum(self._counter("postgresql_interruption", name) for name in counter_names),
+                "tool_receipt_id": str(reconciled_before["tool_receipt_id"]),
+                "external_tool_executions": int(reconciled_after["external_tool_executions"]),
+                "reconciled_result_digest": str(reconciled_after["reconciled_result_digest"]),
             },
             authoritative_count=len(observations),
             stale_write_rejections=sum(observation.stale_write_rejections for observation in observations),
@@ -4075,6 +4550,10 @@ class KubernetesMultiGatewayQualificationDriverV1:
                         "redis-url": redis_url,
                     },
                 },
+            )
+            self._apply_for(
+                secondary,
+                self.replay_keyring_secret_manifest(),
             )
             self._apply_for(
                 secondary,
@@ -4884,6 +5363,7 @@ class KubernetesMultiGatewayQualificationRunnerV1:
             ).digest
         )
         migration_head = get_expected_migration_head()
+        replay_keyring_confirmation = self.driver.replay_keyring_confirmation
         expected_fingerprint = TopologyFingerprintV1.create(
             profile="durable_two_gateway_v1",
             tenant_digest=tenant.digest,
@@ -4894,6 +5374,8 @@ class KubernetesMultiGatewayQualificationRunnerV1:
             extension_artifact_digest=self.config.extension_artifact_digest,
             extension_configuration_digest=(self.config.extension_configuration_digest),
             capability_manifest_digest=(self.config.capability_manifest_digest.removeprefix("sha256:")),
+            mcp_task_replay_keyring_confirmation_version=(replay_keyring_confirmation.version),
+            mcp_task_replay_keyring_confirmation_digest=(replay_keyring_confirmation.digest),
             migration_head=migration_head,
             accepted_materialization_profile="rwx_verified_copy_v2",
         )

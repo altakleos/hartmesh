@@ -15,6 +15,10 @@ from deerflow.deployment.topology import (
     TopologyFingerprintV1,
     TopologyStatusV1,
 )
+from deerflow.persistence.sql_clock import (
+    coerce_database_wall_clock,
+    database_wall_clock_expression,
+)
 from deerflow.persistence.topology.model import TopologyReplicaRow
 
 
@@ -56,10 +60,17 @@ class PostgresTopologyRegistry:
 
     @staticmethod
     async def _database_now(session: AsyncSession) -> datetime:
-        value = await session.scalar(text("SELECT CURRENT_TIMESTAMP"))
-        if not isinstance(value, datetime):
+        try:
+            value = await session.scalar(
+                select(
+                    database_wall_clock_expression(
+                        session.get_bind().dialect.name,
+                    )
+                )
+            )
+            return coerce_database_wall_clock(value)
+        except (TypeError, ValueError):
             raise TopologyError("topology_dependency_not_shared")
-        return _aware(value)
 
     @staticmethod
     async def _lock(

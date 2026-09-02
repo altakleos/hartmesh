@@ -5,6 +5,7 @@ Equivalent to the original RunManager._runs dict behavior.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -42,10 +43,15 @@ from deerflow.runtime.runs.store.base import (
     CancellationRequestOutcome,
     CancellationRequestResult,
     DuplicateRunIdentityError,
+    ExecutionTakeoverClaim,
+    ExecutionTakeoverOutcome,
+    LeaseClockAuthority,
     LeaseRenewal,
     LifecycleTransition,
     LifecycleTransitionResult,
     LifecycleType,
+    RecoveryPayloadIntegrityError,
+    RecoveryPolicy,
     RunEnsureResult,
     RunIdempotencyConflict,
     RunStore,
@@ -57,42 +63,125 @@ from deerflow.runtime.runs.store.base import (
     lifecycle_type_for_status,
     tenant_store_columns,
     validate_execution_evidence_run,
+    validate_lease_deadline_request,
 )
 from deerflow.runtime.tenant_identity import TenantIdentityError
+from deerflow.utils.time import is_lease_expired
 
 _TERMINAL_STATUSES = {"success", "error", "timeout", "interrupted"}
+
+
+def _lease_expired_at(
+    lease_expires_at: str | None,
+    *,
+    observed_at: datetime,
+    grace_seconds: int,
+) -> bool:
+    if lease_expires_at is None:
+        return True
+    try:
+        deadline = datetime.fromisoformat(lease_expires_at)
+    except (TypeError, ValueError):
+        return True
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
+    return deadline <= observed_at - timedelta(seconds=grace_seconds)
+
+
+def _process_lease_deadline(
+    *,
+    lease_expires_at: str | None,
+    lease_duration_seconds: int | None,
+    observed_at: datetime,
+    required: bool,
+) -> str | None:
+    validate_lease_deadline_request(
+        lease_expires_at=lease_expires_at,
+        lease_duration_seconds=lease_duration_seconds,
+        required=required,
+    )
+    if lease_duration_seconds is not None:
+        return (observed_at + timedelta(seconds=lease_duration_seconds)).isoformat()
+    return lease_expires_at
+
+
+class _ReentrantMutationLock:
+    """Task-reentrant lock shared by run mutation and derived projections."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task[Any] | None = None
+        self._depth = 0
+
+    @asynccontextmanager
+    async def hold(self) -> AsyncIterator[None]:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("memory run mutation requires an asyncio task")
+        if self._owner is task:
+            self._depth += 1
+        else:
+            await self._lock.acquire()
+            self._owner = task
+            self._depth = 1
+        try:
+            yield
+        finally:
+            self._depth -= 1
+            if self._depth == 0:
+                self._owner = None
+                self._lock.release()
 
 
 def _atomic_memory_mutation[**P, R](method: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
     @wraps(method)
     async def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
         self = args[0]
-        snapshot = (
-            copy.deepcopy(self._runs),
-            copy.deepcopy(self._runs_by_thread),
-            copy.deepcopy(self._runs_by_external_identity),
-            copy.deepcopy(self._lifecycle_events),
-            self._lifecycle_cursor,
-            self._lifecycle_pruned_through,
-        )
-        try:
-            return await method(*args, **kwargs)
-        except BaseException:
-            (
-                self._runs,
-                self._runs_by_thread,
-                self._runs_by_external_identity,
-                self._lifecycle_events,
+        async with self._mutation_lock.hold():
+            snapshot = (
+                copy.deepcopy(self._runs),
+                copy.deepcopy(self._runs_by_thread),
+                copy.deepcopy(self._runs_by_external_identity),
+                copy.deepcopy(self._lifecycle_events),
                 self._lifecycle_cursor,
                 self._lifecycle_pruned_through,
-            ) = snapshot
-            raise
+                self._admission_cursor,
+            )
+            try:
+                # Match the SQL repository boundary: callers receive a
+                # detached materialization, never a reference into the
+                # authoritative in-memory row or its nested evidence.
+                return copy.deepcopy(await method(*args, **kwargs))
+            except BaseException:
+                (
+                    self._runs,
+                    self._runs_by_thread,
+                    self._runs_by_external_identity,
+                    self._lifecycle_events,
+                    self._lifecycle_cursor,
+                    self._lifecycle_pruned_through,
+                    self._admission_cursor,
+                ) = snapshot
+                raise
+
+    return wrapped
+
+
+def _locked_memory_mutation[**P, R](method: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+    """Serialize one simple mutation with held execution/projection fences."""
+
+    @wraps(method)
+    async def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        self = args[0]
+        async with self._mutation_lock.hold():
+            return copy.deepcopy(await method(*args, **kwargs))
 
     return wrapped
 
 
 class MemoryRunStore(RunStore):
     durable_lifecycle = True
+    lease_clock_authority = LeaseClockAuthority.process_v1
 
     def __init__(self, *, tenant: TenantReferenceV1 | None = None) -> None:
         if tenant is not None and not isinstance(tenant, TenantReferenceV1):
@@ -108,6 +197,12 @@ class MemoryRunStore(RunStore):
         self._lifecycle_events: list[dict[str, Any]] = []
         self._lifecycle_cursor = 0
         self._lifecycle_pruned_through = 0
+        self._admission_cursor = 0
+        self._mutation_lock = _ReentrantMutationLock()
+
+    def _next_admission_cursor(self) -> int:
+        self._admission_cursor += 1
+        return self._admission_cursor
 
     def _tenant_visible(self, row: Mapping[str, Any]) -> bool:
         return self._tenant is None or row.get("tenant_digest") == self._tenant.digest
@@ -125,7 +220,7 @@ class MemoryRunStore(RunStore):
         run_id: str | None = None,
         thread_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        return [dict(event) for event in self._lifecycle_events if self._tenant_visible(event) and (run_id is None or event["run_id"] == run_id) and (thread_id is None or event["thread_id"] == thread_id)]
+        return [copy.deepcopy(event) for event in self._lifecycle_events if self._tenant_visible(event) and (run_id is None or event["run_id"] == run_id) and (thread_id is None or event["thread_id"] == thread_id)]
 
     async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage:
         requested = validate_cursor_window(
@@ -297,11 +392,32 @@ class MemoryRunStore(RunStore):
         owner_worker_id: str,
         state_version: int,
         terminal_state_version: int | None = None,
+        allowed_active_statuses: tuple[str, ...] = ("running",),
     ) -> AsyncIterator[bool]:
-        """Fail closed: this store cannot lock ownership across a mutation."""
+        """Hold process-local ownership authority across one external mutation."""
 
-        del run_id, owner_worker_id, state_version, terminal_state_version
-        yield False
+        if not allowed_active_statuses or any(status not in {"pending", "running"} for status in allowed_active_statuses):
+            raise ValueError("allowed_active_statuses must contain active run states")
+        async with self._mutation_lock.hold():
+            row = self._visible_run(run_id)
+            active = bool(
+                row is not None
+                and row.get("operation_kind", "run") == "run"
+                and terminal_state_version is not None
+                and row.get("state_version") == terminal_state_version
+                and row.get("status") in _TERMINAL_STATUSES
+                and row.get("terminal_projection_owner_worker_id") == owner_worker_id
+                and row.get("terminal_projection_active_state_version") == state_version
+                and row.get("owner_worker_id") is None
+                and row.get("lease_expires_at") is None
+            )
+            if row is not None and row.get("operation_kind", "run") == "run" and row.get("status") in allowed_active_statuses and row.get("owner_worker_id") == owner_worker_id and row.get("state_version") == state_version:
+                lease_expires_at = row.get("lease_expires_at")
+                active = lease_expires_at is None or not is_lease_expired(
+                    lease_expires_at,
+                    grace_seconds=0,
+                )
+            yield active
 
     def _transition_run_atomic(
         self,
@@ -330,6 +446,12 @@ class MemoryRunStore(RunStore):
             return LifecycleTransitionResult(applied=False, row=row)
         if expected_statuses is not None and row["status"] not in expected_statuses:
             return LifecycleTransitionResult(applied=False, row=row)
+        if transition.status in _TERMINAL_STATUSES:
+            row["terminal_projection_owner_worker_id"] = row.get("owner_worker_id")
+            row["terminal_projection_active_state_version"] = row["state_version"] if row.get("owner_worker_id") is not None else None
+        else:
+            row["terminal_projection_owner_worker_id"] = None
+            row["terminal_projection_active_state_version"] = None
         row["status"] = transition.status
         row["state_version"] += 1
         if transition.status in _TERMINAL_STATUSES:
@@ -547,18 +669,36 @@ class MemoryRunStore(RunStore):
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
         idempotency_key: str | None = None,
+        recovery_policy: RecoveryPolicy = RecoveryPolicy.terminalize_v1,
+        recovery_payload_json: dict[str, Any] | None = None,
     ) -> None:
         thread_id = validate_thread_identifier(thread_id)
         tenant_ref, tenant_digest = tenant_store_columns(self._tenant, tenant)
         if model_name is not None:
             model_name = validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
         now = datetime.now(UTC).isoformat()
+        recovery_policy = RecoveryPolicy(recovery_policy)
+        if operation_kind != "run" and recovery_policy is not RecoveryPolicy.terminalize_v1:
+            raise ValueError("execution recovery policy applies only to normal runs")
+        if (recovery_policy is RecoveryPolicy.exact_two_takeover_v1) != (recovery_payload_json is not None):
+            raise ValueError("execution recovery policy and payload must be admitted together")
         existing = self._runs.get(run_id)
         if existing is not None and not self._tenant_visible(existing):
             raise TenantIdentityError(
                 "tenant_identity_mismatch",
                 "run identity is already bound to a different tenant",
             )
+        normalized_recovery_payload = copy.deepcopy(recovery_payload_json) if operation_kind == "run" else None
+        if existing is not None and existing.get("operation_kind", "run") == "run":
+            if (
+                existing.get(
+                    "recovery_policy",
+                    RecoveryPolicy.terminalize_v1.value,
+                )
+                != recovery_policy.value
+                or existing.get("recovery_payload_json") != normalized_recovery_payload
+            ):
+                raise RecoveryPayloadIntegrityError()
         lifecycle_row = operation_kind == "run" and status is not None
         terminal_statuses = {
             "success",
@@ -569,12 +709,15 @@ class MemoryRunStore(RunStore):
         terminal_status = status in terminal_statuses
         new_row = {
             "run_id": run_id,
+            "admission_cursor": (existing.get("admission_cursor") if existing is not None else self._next_admission_cursor()),
             "thread_id": thread_id,
             "assistant_id": assistant_id,
             "user_id": user_id,
             "model_name": model_name,
             "status": "pending" if lifecycle_row else status,
             "operation_kind": operation_kind,
+            "recovery_policy": recovery_policy.value,
+            "recovery_payload_json": (normalized_recovery_payload),
             "multitask_strategy": multitask_strategy,
             "metadata": metadata or {},
             "kwargs": kwargs or {},
@@ -586,6 +729,8 @@ class MemoryRunStore(RunStore):
             "updated_at": now,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
+            "terminal_projection_owner_worker_id": (existing.get("terminal_projection_owner_worker_id") if existing else None),
+            "terminal_projection_active_state_version": (existing.get("terminal_projection_active_state_version") if existing else None),
             "origin_json": origin_json if operation_kind == "run" else None,
             "principal_projection_json": principal_projection_json if operation_kind == "run" else None,
             "principal_projection_digest": principal_projection_digest if operation_kind == "run" else None,
@@ -623,6 +768,11 @@ class MemoryRunStore(RunStore):
                 new_row["stop_reason"] = existing.get("stop_reason")
                 new_row["owner_worker_id"] = existing.get("owner_worker_id")
                 new_row["lease_expires_at"] = existing.get("lease_expires_at")
+                new_row["recovery_policy"] = existing.get(
+                    "recovery_policy",
+                    RecoveryPolicy.terminalize_v1.value,
+                )
+                new_row["recovery_payload_json"] = copy.deepcopy(existing.get("recovery_payload_json"))
         self._runs[run_id] = new_row
         self._index_run(run_id, thread_id)
         if operation_kind == "run" and external_scope is not None and external_key is not None:
@@ -633,6 +783,9 @@ class MemoryRunStore(RunStore):
                 LifecycleTransition(lifecycle_type=LifecycleType.accepted, status="pending"),
             )
             if status != "pending":
+                if terminal_status:
+                    new_row["terminal_projection_owner_worker_id"] = new_row.get("owner_worker_id")
+                    new_row["terminal_projection_active_state_version"] = new_row["state_version"] if new_row.get("owner_worker_id") is not None else None
                 new_row["status"] = status
                 new_row["state_version"] += 1
                 if terminal_status:
@@ -667,12 +820,81 @@ class MemoryRunStore(RunStore):
             return None
         if user_id is not None and run.get("user_id") != user_id:
             return None
-        return run
+        return copy.deepcopy(run)
+
+    async def thread_projection_authorized(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        run_status: str,
+        owner_worker_id: str,
+        active_state_version: int,
+        terminal_state_version: int | None = None,
+    ) -> bool:
+        row = self._visible_run(run_id)
+        if row is None or row.get("operation_kind", "run") != "run" or row.get("thread_id") != thread_id or row.get("status") != run_status:
+            return False
+        normal_rows = [candidate for candidate in self._runs.values() if self._tenant_visible(candidate) and candidate.get("operation_kind", "run") == "run" and candidate.get("thread_id") == thread_id]
+        if (
+            not normal_rows
+            or any(candidate.get("admission_cursor") is None for candidate in normal_rows)
+            or row.get("admission_cursor") is None
+            or max(
+                normal_rows,
+                key=lambda candidate: candidate["admission_cursor"],
+            ).get("run_id")
+            != run_id
+        ):
+            return False
+        if terminal_state_version is None:
+            return bool(
+                run_status == "running"
+                and row.get("owner_worker_id") == owner_worker_id
+                and row.get("state_version") == active_state_version
+                and (
+                    row.get("lease_expires_at") is None
+                    or not is_lease_expired(
+                        row.get("lease_expires_at"),
+                        grace_seconds=0,
+                    )
+                )
+            )
+        return bool(
+            run_status in _TERMINAL_STATUSES
+            and terminal_state_version > active_state_version
+            and row.get("state_version") == terminal_state_version
+            and row.get("terminal_projection_owner_worker_id") == owner_worker_id
+            and row.get("terminal_projection_active_state_version") == active_state_version
+            and row.get("owner_worker_id") is None
+            and row.get("lease_expires_at") is None
+        )
+
+    @asynccontextmanager
+    async def hold_thread_projection_authority(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        run_status: str,
+        owner_worker_id: str,
+        active_state_version: int,
+        terminal_state_version: int | None = None,
+    ) -> AsyncIterator[bool]:
+        async with self._mutation_lock.hold():
+            yield await self.thread_projection_authorized(
+                run_id=run_id,
+                thread_id=thread_id,
+                run_status=run_status,
+                owner_worker_id=owner_worker_id,
+                active_state_version=active_state_version,
+                terminal_state_version=terminal_state_version,
+            )
 
     async def authoritative_get(self, run_id: str) -> dict[str, Any] | None:
         """Return one row by primary identity without applying owner scope."""
 
-        return self._visible_run(run_id)
+        return copy.deepcopy(self._visible_run(run_id))
 
     async def get_by_external_identity(
         self,
@@ -680,7 +902,16 @@ class MemoryRunStore(RunStore):
         external_key: str,
     ) -> dict[str, Any] | None:
         run_id = self._runs_by_external_identity.get((external_scope, external_key))
-        return self._visible_run(run_id) if run_id is not None else None
+        return copy.deepcopy(self._visible_run(run_id)) if run_id is not None else None
+
+    async def get_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        for row in self._runs.values():
+            if self._tenant_visible(row) and row.get("idempotency_key") == idempotency_key:
+                return copy.deepcopy(row)
+        return None
 
     async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
         # Use the thread index for an O(runs-in-thread) lookup instead of
@@ -691,7 +922,7 @@ class MemoryRunStore(RunStore):
             return []
         results = [run for run_id in run_ids if (run := self._visible_run(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)]
         results.sort(key=lambda r: r["created_at"], reverse=True)
-        return results[:limit]
+        return copy.deepcopy(results[:limit])
 
     async def list_successful_regenerate_sources(self, thread_id, *, user_id=None):
         run_ids = self._runs_by_thread.get(thread_id) or ()
@@ -721,12 +952,15 @@ class MemoryRunStore(RunStore):
             if metadata.get("replay_kind") == "edit" and isinstance(source, str) and source:
                 results.append(run)
         results.sort(key=lambda r: r["created_at"])
-        return results
+        return copy.deepcopy(results)
 
     async def get_many_by_thread(self, thread_id, run_ids, *, user_id=None):
         thread_run_ids = self._runs_by_thread.get(thread_id) or ()
-        return {run_id: run for run_id in thread_run_ids if run_id in run_ids and (run := self._visible_run(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)}
+        return copy.deepcopy(
+            {run_id: run for run_id in thread_run_ids if run_id in run_ids and (run := self._visible_run(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)}
+        )
 
+    @_locked_memory_mutation
     async def update_status(self, run_id, status, *, error=None, stop_reason=None):
         run = self._visible_run(run_id)
         if run is None:
@@ -758,6 +992,7 @@ class MemoryRunStore(RunStore):
         )
         return result.applied
 
+    @_locked_memory_mutation
     async def start_run(
         self,
         run_id: str,
@@ -782,14 +1017,56 @@ class MemoryRunStore(RunStore):
         )
         return result.applied
 
-    async def update_model_name(self, run_id, model_name):
+    @staticmethod
+    def _owned_observation_fence_matches(
+        run: Mapping[str, Any],
+        *,
+        expected_owner_worker_id: str | None,
+        expected_state_version: int | None,
+        require_unexpired_lease: bool,
+    ) -> bool:
+        fenced = expected_owner_worker_id is not None or expected_state_version is not None or require_unexpired_lease
+        lease_expires_at = run.get("lease_expires_at")
+        if not fenced:
+            return lease_expires_at is None
+        if expected_owner_worker_id is None or expected_state_version is None:
+            return False
+        if run.get("owner_worker_id") != expected_owner_worker_id or run.get("state_version") != expected_state_version:
+            return False
+        if lease_expires_at is None:
+            return not require_unexpired_lease
+        if not require_unexpired_lease:
+            return False
+        return not is_lease_expired(
+            lease_expires_at,
+            grace_seconds=0,
+        )
+
+    @_locked_memory_mutation
+    async def update_model_name(
+        self,
+        run_id,
+        model_name,
+        *,
+        expected_owner_worker_id=None,
+        expected_state_version=None,
+        require_unexpired_lease=False,
+    ):
         if model_name is not None:
             model_name = validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
         run = self._visible_run(run_id)
-        if run is not None:
-            run["model_name"] = model_name
-            run["updated_at"] = datetime.now(UTC).isoformat()
+        if run is None or not self._owned_observation_fence_matches(
+            run,
+            expected_owner_worker_id=expected_owner_worker_id,
+            expected_state_version=expected_state_version,
+            require_unexpired_lease=require_unexpired_lease,
+        ):
+            return False
+        run["model_name"] = model_name
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return True
 
+    @_locked_memory_mutation
     async def delete(self, run_id, *, user_id=None):
         run = self._visible_run(run_id)
         if run is not None:
@@ -801,59 +1078,88 @@ class MemoryRunStore(RunStore):
                 self._runs_by_external_identity.pop((scope, key), None)
             self._lifecycle_events = [event for event in self._lifecycle_events if event["run_id"] != run_id]
 
-    async def update_run_completion(self, run_id, *, status, **kwargs):
+    @_locked_memory_mutation
+    async def update_run_completion(
+        self,
+        run_id,
+        *,
+        status,
+        expected_owner_worker_id=None,
+        expected_active_state_version=None,
+        expected_terminal_state_version=None,
+        **kwargs,
+    ):
         run = self._visible_run(run_id)
-        if run is None:
-            return False
-        current_status = run.get("status")
-        allowed_sources = {"pending", "running", status}
-        if status == "error":
-            allowed_sources.add("interrupted")
-        if current_status not in allowed_sources:
-            return False
-        if current_status != status and run.get("operation_kind", "run") == "run":
-            lifecycle_type = lifecycle_type_for_status(status)
-            result = await self.transition_run_atomic(
-                run_id,
-                expected_state_version=run["state_version"],
-                expected_statuses=(current_status,),
-                transition=LifecycleTransition(
-                    lifecycle_type=lifecycle_type,
-                    status=status,
-                    error=kwargs.get("error"),
-                    stop_reason=kwargs.get("stop_reason"),
-                    reason=kwargs.get("stop_reason"),
-                ),
+        capability = (
+            expected_owner_worker_id,
+            expected_active_state_version,
+            expected_terminal_state_version,
+        )
+        if any(value is not None for value in capability) and not all(value is not None for value in capability):
+            raise ValueError(
+                "terminal completion authority must be supplied together",
             )
-            if not result.applied:
+        if run is None or status not in _TERMINAL_STATUSES or run.get("status") != status:
+            return False
+        if all(value is not None for value in capability):
+            if (
+                run.get("owner_worker_id") is not None
+                or run.get("lease_expires_at") is not None
+                or run.get("terminal_projection_owner_worker_id") != expected_owner_worker_id
+                or run.get("terminal_projection_active_state_version") != expected_active_state_version
+                or run.get("state_version") != expected_terminal_state_version
+            ):
                 return False
         else:
-            run["status"] = status
+            # Compatibility applies only to legacy/lease-less terminal rows;
+            # omitting the capability can never edit a peer-owned projection.
+            if run.get("terminal_projection_owner_worker_id") is not None or run.get("terminal_projection_active_state_version") is not None:
+                return False
         for key, value in kwargs.items():
             if value is not None:
                 run[key] = value
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
 
-    async def update_run_progress(self, run_id, **kwargs):
+    @_locked_memory_mutation
+    async def update_run_progress(
+        self,
+        run_id,
+        *,
+        expected_owner_worker_id=None,
+        expected_state_version=None,
+        require_unexpired_lease=False,
+        **kwargs,
+    ):
         run = self._visible_run(run_id)
-        if run is not None and run.get("status") == "running":
-            for key, value in kwargs.items():
-                if value is not None:
-                    run[key] = value
-            run["updated_at"] = datetime.now(UTC).isoformat()
+        if (
+            run is None
+            or run.get("status") != "running"
+            or not self._owned_observation_fence_matches(
+                run,
+                expected_owner_worker_id=expected_owner_worker_id,
+                expected_state_version=expected_state_version,
+                require_unexpired_lease=require_unexpired_lease,
+            )
+        ):
+            return False
+        for key, value in kwargs.items():
+            if value is not None:
+                run[key] = value
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return True
 
     async def list_pending(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()
         results = [r for r in self._runs.values() if self._tenant_visible(r) and r.get("operation_kind", "run") == "run" and r["status"] == "pending" and r["created_at"] <= now]
         results.sort(key=lambda r: r["created_at"])
-        return results
+        return copy.deepcopy(results)
 
     async def list_inflight(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()
         results = [r for r in self._runs.values() if self._tenant_visible(r) and r["status"] in ("pending", "running") and r["created_at"] <= now]
         results.sort(key=lambda r: r["created_at"])
-        return results
+        return copy.deepcopy(results)
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
         statuses = ("success", "error", "running") if include_active else ("success", "error")
@@ -895,13 +1201,22 @@ class MemoryRunStore(RunStore):
     # Multi-worker run ownership methods
     # ------------------------------------------------------------------
 
+    @_locked_memory_mutation
     async def update_lease(
         self,
         run_id: str,
         *,
         owner_worker_id: str,
-        lease_expires_at: str,
+        lease_expires_at: str | None = None,
+        lease_duration_seconds: int | None = None,
     ) -> bool:
+        observed_at = datetime.now(UTC)
+        new_expiry = _process_lease_deadline(
+            lease_expires_at=lease_expires_at,
+            lease_duration_seconds=lease_duration_seconds,
+            observed_at=observed_at,
+            required=True,
+        )
         run = self._visible_run(run_id)
         if run is None:
             return False
@@ -909,33 +1224,84 @@ class MemoryRunStore(RunStore):
             return False
         if run.get("owner_worker_id") != owner_worker_id:
             return False
+        current_lease = run.get("lease_expires_at")
+        if current_lease is not None and _lease_expired_at(
+            current_lease,
+            observed_at=observed_at,
+            grace_seconds=0,
+        ):
+            return False
         run["owner_worker_id"] = owner_worker_id
-        run["lease_expires_at"] = lease_expires_at
-        run["updated_at"] = datetime.now(UTC).isoformat()
+        run["lease_expires_at"] = new_expiry
+        run["updated_at"] = observed_at.isoformat()
         return True
 
+    @_locked_memory_mutation
     async def renew_lease(
         self,
         run_id: str,
         *,
         owner_worker_id: str,
-        lease_expires_at: str,
+        lease_expires_at: str | None = None,
+        lease_duration_seconds: int | None = None,
     ) -> LeaseRenewal:
-        # Delegate through ``update_lease`` so lightweight subclasses and tests
-        # that override the legacy primitive keep the same behavior.
-        renewed = await self.update_lease(
-            run_id,
-            owner_worker_id=owner_worker_id,
+        observed_at = datetime.now(UTC)
+        new_expiry = _process_lease_deadline(
             lease_expires_at=lease_expires_at,
+            lease_duration_seconds=lease_duration_seconds,
+            observed_at=observed_at,
+            required=True,
         )
-        if not renewed:
-            return LeaseRenewal(renewed=False)
         run = self._visible_run(run_id)
+        if (
+            run is None
+            or run["status"] not in ("pending", "running")
+            or run.get("owner_worker_id") != owner_worker_id
+            or (
+                run.get("lease_expires_at") is not None
+                and _lease_expired_at(
+                    run["lease_expires_at"],
+                    observed_at=observed_at,
+                    grace_seconds=0,
+                )
+            )
+        ):
+            return LeaseRenewal(renewed=False)
+        run["lease_expires_at"] = new_expiry
+        run["updated_at"] = observed_at.isoformat()
         return LeaseRenewal(
             renewed=True,
-            cancel_action=run.get("cancel_action") if run is not None else None,
+            cancel_action=run.get("cancel_action"),
+            lease_expires_at=new_expiry,
         )
 
+    @_locked_memory_mutation
+    async def execution_owner_authorized(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        state_version: int,
+    ) -> bool:
+        observed_at = datetime.now(UTC)
+        run = self._visible_run(run_id)
+        return bool(
+            run is not None
+            and run.get("operation_kind", "run") == "run"
+            and run.get("status") in ("pending", "running")
+            and run.get("owner_worker_id") == owner_worker_id
+            and run.get("state_version") == state_version
+            and (
+                run.get("lease_expires_at") is None
+                or not _lease_expired_at(
+                    run["lease_expires_at"],
+                    observed_at=observed_at,
+                    grace_seconds=0,
+                )
+            )
+        )
+
+    @_locked_memory_mutation
     async def request_cancel(self, run_id: str, *, action: str) -> str | None:
         result = await self.request_cancel_compat(run_id, action=action)
         if result.outcome in (
@@ -946,6 +1312,7 @@ class MemoryRunStore(RunStore):
             return result.row.get("cancel_action") if result.row is not None else None
         return None
 
+    @_locked_memory_mutation
     async def finalize_if_not_cancelled(
         self,
         run_id: str,
@@ -1004,6 +1371,7 @@ class MemoryRunStore(RunStore):
             )
         return StatusFinalization(finalized=result.applied)
 
+    @_locked_memory_mutation
     async def claim_for_takeover(
         self,
         run_id: str,
@@ -1021,6 +1389,8 @@ class MemoryRunStore(RunStore):
         if run["status"] not in ("pending", "running"):
             return False
         if expected_state_version is not None and run["state_version"] != expected_state_version:
+            return False
+        if run.get("recovery_policy", RecoveryPolicy.terminalize_v1.value) == RecoveryPolicy.exact_two_takeover_v1.value:
             return False
         lease = run.get("lease_expires_at")
         if not is_lease_expired(lease, grace_seconds=grace_seconds):
@@ -1048,14 +1418,62 @@ class MemoryRunStore(RunStore):
         )
         return result.applied
 
+    @_atomic_memory_mutation
+    async def claim_for_execution_takeover(
+        self,
+        run_id: str,
+        *,
+        new_owner_worker_id: str,
+        lease_expires_at: str | None = None,
+        lease_duration_seconds: int | None = None,
+        grace_seconds: int,
+        expected_state_version: int,
+    ) -> ExecutionTakeoverClaim:
+        observed_at = datetime.now(UTC)
+        new_expiry = _process_lease_deadline(
+            lease_expires_at=lease_expires_at,
+            lease_duration_seconds=lease_duration_seconds,
+            observed_at=observed_at,
+            required=True,
+        )
+        run = self._visible_run(run_id)
+        if run is None:
+            return ExecutionTakeoverClaim(ExecutionTakeoverOutcome.not_eligible)
+        eligible = (
+            run.get("operation_kind", "run") == "run"
+            and run.get("recovery_policy", RecoveryPolicy.terminalize_v1.value) == RecoveryPolicy.exact_two_takeover_v1.value
+            and run.get("status") in ("pending", "running")
+            and run.get("cancel_action") is None
+            and run.get("state_version") == expected_state_version
+            and _lease_expired_at(
+                run.get("lease_expires_at"),
+                observed_at=observed_at,
+                grace_seconds=grace_seconds,
+            )
+        )
+        if not eligible:
+            return ExecutionTakeoverClaim(
+                ExecutionTakeoverOutcome.not_eligible,
+                copy.deepcopy(run),
+            )
+        run["owner_worker_id"] = new_owner_worker_id
+        run["lease_expires_at"] = new_expiry
+        run["state_version"] += 1
+        run["updated_at"] = observed_at.isoformat()
+        return ExecutionTakeoverClaim(
+            ExecutionTakeoverOutcome.claimed,
+            copy.deepcopy(run),
+        )
+
     async def list_inflight_with_expired_lease(
         self,
         *,
         before: str | None = None,
         grace_seconds: int = 10,
     ) -> list[dict[str, Any]]:
-        now_dt = datetime.fromisoformat(before) if before else datetime.now(UTC)
-        cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+        observed_at = datetime.now(UTC)
+        now_dt = datetime.fromisoformat(before) if before else observed_at
+        cutoff = observed_at - timedelta(seconds=grace_seconds)
         results = []
         for r in self._runs.values():
             if not self._tenant_visible(r):
@@ -1074,7 +1492,7 @@ class MemoryRunStore(RunStore):
             lease = r.get("lease_expires_at")
             if lease is None:
                 # Pre-ownership rows: no lease means orphaned
-                results.append(r)
+                results.append(copy.deepcopy(r))
             else:
                 try:
                     lease_dt = datetime.fromisoformat(lease)
@@ -1085,10 +1503,10 @@ class MemoryRunStore(RunStore):
                     # (which drops tzinfo on read).
                     if lease_dt.tzinfo is None:
                         lease_dt = lease_dt.replace(tzinfo=UTC)
-                    if lease_dt < cutoff:
-                        results.append(r)
+                    if lease_dt <= cutoff:
+                        results.append(copy.deepcopy(r))
                 except (ValueError, TypeError):
-                    results.append(r)
+                    results.append(copy.deepcopy(r))
         results.sort(key=lambda r: r["created_at"])
         return results
 
@@ -1099,7 +1517,8 @@ class MemoryRunStore(RunStore):
         *,
         thread_id: str,
         owner_worker_id: str,
-        lease_expires_at: str | None,
+        lease_expires_at: str | None = None,
+        lease_duration_seconds: int | None = None,
         operation_kind: str = "run",
         multitask_strategy: str = "reject",
         assistant_id: str | None = None,
@@ -1127,6 +1546,9 @@ class MemoryRunStore(RunStore):
         caller_intent_digest: str | None = None,
         caller_intent_digest_version: str | None = None,
         idempotency_key: str | None = None,
+        recovery_policy: RecoveryPolicy = RecoveryPolicy.terminalize_v1,
+        recovery_payload_json: dict[str, Any] | None = None,
+        require_predecessor_inactive: bool = False,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
 
@@ -1137,8 +1559,20 @@ class MemoryRunStore(RunStore):
         tenant_ref, tenant_digest = tenant_store_columns(self._tenant, tenant)
         if model_name is not None:
             model_name = validate_model_profile_identifier(model_name, field_name="run model_name profile identifier")
-        now = datetime.now(UTC).isoformat()
-        cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+        observed_at = datetime.now(UTC)
+        now = observed_at.isoformat()
+        lease_expires_at = _process_lease_deadline(
+            lease_expires_at=lease_expires_at,
+            lease_duration_seconds=lease_duration_seconds,
+            observed_at=observed_at,
+            required=False,
+        )
+        recovery_policy = RecoveryPolicy(recovery_policy)
+        if operation_kind != "run" and recovery_policy is not RecoveryPolicy.terminalize_v1:
+            raise ValueError("execution recovery policy applies only to normal runs")
+        if (recovery_policy is RecoveryPolicy.exact_two_takeover_v1) != (recovery_payload_json is not None):
+            raise ValueError("execution recovery policy and payload must be admitted together")
+        cutoff = observed_at - timedelta(seconds=grace_seconds)
 
         if idempotency_key is not None:
             for existing in self._runs.values():
@@ -1155,7 +1589,8 @@ class MemoryRunStore(RunStore):
                 if r["thread_id"] == thread_id and r["status"] in ("pending", "running"):
                     raise ConflictError(f"Thread {thread_id} already has an active run")
 
-        # For interrupt/rollback: claim inflight runs.
+        # For interrupt/rollback: claim inflight runs only for the legacy
+        # receiptless contract. Evidence-requiring callers fail closed below.
         # Two-pass so the memory path mirrors the SQL store's transactional
         # semantics — if any candidate is a live run owned by another worker
         # we must raise ConflictError WITHOUT having already mutated earlier
@@ -1172,6 +1607,20 @@ class MemoryRunStore(RunStore):
                     continue
                 if r["status"] not in ("pending", "running"):
                     continue
+                if r.get("recovery_policy") == RecoveryPolicy.exact_two_takeover_v1.value:
+                    # Exact-two execution authority may move only through its
+                    # dedicated, qualified takeover primitive. Replacement is
+                    # a generic terminalization path, even when the lease is
+                    # expired or the candidate reports the same worker ID.
+                    raise ConflictError(
+                        f"Thread {thread_id} has an active exact-two run",
+                        active_run_id=r["run_id"],
+                    )
+                if require_predecessor_inactive:
+                    raise ConflictError(
+                        f"Thread {thread_id} requires explicit predecessor cancellation",
+                        active_run_id=r["run_id"],
+                    )
                 lease_expired = False
                 existing_lease = r.get("lease_expires_at")
                 if existing_lease is not None:
@@ -1183,8 +1632,8 @@ class MemoryRunStore(RunStore):
                         # raise ``TypeError``.
                         if lease_dt.tzinfo is None:
                             lease_dt = lease_dt.replace(tzinfo=UTC)
-                        lease_expired = lease_dt < cutoff
-                        if lease_dt >= cutoff and r.get("owner_worker_id") != owner_worker_id:
+                        lease_expired = lease_dt <= cutoff
+                        if lease_dt > cutoff and r.get("owner_worker_id") != owner_worker_id:
                             # Live run owned by another worker — cannot
                             # interrupt, and the partial unique index would
                             # reject the INSERT anyway. Surface as ConflictError
@@ -1200,6 +1649,12 @@ class MemoryRunStore(RunStore):
             for r in candidates:
                 replacement_status = "error" if multitask_strategy == "rollback" else "interrupted"
                 replacement_error = "Rolled back by user" if multitask_strategy == "rollback" else "Cancelled by newer run"
+                if r.get("operation_kind", "run") == "run":
+                    r["terminal_projection_owner_worker_id"] = r.get("owner_worker_id")
+                    r["terminal_projection_active_state_version"] = r["state_version"] if r.get("owner_worker_id") is not None else None
+                else:
+                    r["terminal_projection_owner_worker_id"] = None
+                    r["terminal_projection_active_state_version"] = None
                 r["status"] = replacement_status
                 r["error"] = replacement_error
                 r["owner_worker_id"] = None
@@ -1220,18 +1675,23 @@ class MemoryRunStore(RunStore):
 
         new_row = {
             "run_id": run_id,
+            "admission_cursor": self._next_admission_cursor(),
             "thread_id": thread_id,
             "assistant_id": assistant_id,
             "user_id": user_id,
             "model_name": model_name,
             "status": "pending",
             "operation_kind": operation_kind,
+            "recovery_policy": recovery_policy.value,
+            "recovery_payload_json": (copy.deepcopy(recovery_payload_json) if operation_kind == "run" else None),
             "multitask_strategy": multitask_strategy,
             "metadata": metadata or {},
             "kwargs": kwargs or {},
             "error": None,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
+            "terminal_projection_owner_worker_id": None,
+            "terminal_projection_active_state_version": None,
             "idempotency_key": idempotency_key,
             "cancel_action": None,
             "cancel_requested_at": None,
@@ -1319,6 +1779,7 @@ class MemoryRunStore(RunStore):
             outcome=ThreadOperationReleaseOutcome.released,
         )
 
+    @_locked_memory_mutation
     async def ensure_run_atomic(
         self,
         run_id: str,

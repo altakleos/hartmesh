@@ -23,6 +23,15 @@ from deerflow.runtime.tool_evidence import build_request_projection
 _TENANT = TenantIdentityV1.from_canonical_id("test").to_persisted_reference()
 
 
+@pytest.fixture(autouse=True)
+def _mcp_request_commitment_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "MCP_TASK_REPLAY_HMAC_KEYS",
+        '{"test-v1":"a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s"}',
+    )
+    monkeypatch.setenv("MCP_TASK_REPLAY_HMAC_ACTIVE_KEY_ID", "test-v1")
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _close_persistence_engine():
     yield
@@ -66,7 +75,9 @@ def _service(repo, fake_server) -> McpTaskService:
     return McpTaskService(
         repository=repo,
         drivers=registry,
-        poll_interval_seconds=1,
+        # Make rows immediately due according to the repository's database
+        # clock; caller-supplied ``run_once(now=...)`` is not lease authority.
+        poll_interval_seconds=0,
         lease_seconds=120,
         max_concurrent_polls=8,
     )
@@ -124,7 +135,6 @@ async def test_submit_poll_restart_recovery_complete_and_fail(tmp_path) -> None:
             {
                 "task_id": "remote-complete",
                 "status": "running",
-                "poll_after_seconds": 1,
             },
             {
                 "task_id": "remote-complete",

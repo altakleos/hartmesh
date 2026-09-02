@@ -41,7 +41,9 @@ from deerflow.runtime.events.catalog import (
     RUN_END_EVENT,
     RUN_ERROR_EVENT,
     RUN_START_EVENT,
+    RUN_TERMINAL_EVENT,
 )
+from deerflow.runtime.failure_evidence import RuntimeFailureV1, TerminalSummaryV1, map_runtime_failure
 from deerflow.utils.messages import message_to_text, restore_original_human_message
 
 if TYPE_CHECKING:
@@ -354,11 +356,11 @@ class RunJournal(BaseCallbackHandler):
         self._flush_sync()
 
     def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        failure = map_runtime_failure(code="run_callback_failed", error=error)
         self._put(
             event_type=RUN_ERROR_EVENT.event_type,
             category=RUN_ERROR_EVENT.category,
-            content=str(error),
-            metadata={"error_type": type(error).__name__},
+            content=failure.to_event_body(),
         )
         self._flush_sync()
 
@@ -517,10 +519,11 @@ class RunJournal(BaseCallbackHandler):
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._llm_start_times.pop(str(run_id), None)
+        failure = map_runtime_failure(code="llm_callback_failed", error=error)
         self._put(
             event_type=LLM_ERROR_EVENT.event_type,
             category=LLM_ERROR_EVENT.category,
-            content=str(error),
+            content=failure.to_event_body(),
         )
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
@@ -919,6 +922,44 @@ class RunJournal(BaseCallbackHandler):
             category="outputs",
             content=self.get_delivery_content(),
         )
+
+    def record_terminal_summary(
+        self,
+        *,
+        status: str,
+        stop_reason: str | None,
+        failure: RuntimeFailureV1 | None = None,
+    ) -> None:
+        """Buffer one bounded V1 terminal summary.
+
+        This deliberately supplements rather than replaces ``run.end``: graph
+        outputs remain authorized conversation content, while lifecycle and
+        diagnostic consumers get a backend-stable, bounded fact.
+        """
+
+        summary = TerminalSummaryV1(
+            version=1,
+            status=status,
+            stop_reason=stop_reason,
+            failure=failure,
+        )
+        self._put(
+            event_type=RUN_TERMINAL_EVENT.event_type,
+            category=RUN_TERMINAL_EVENT.category,
+            content=summary.to_event_body(),
+        )
+
+    def bind_event_appender(self, event_appender: Any) -> None:
+        """Replace the pre-admission administrative port with live authority.
+
+        The worker calls this exactly once after admission succeeds and before
+        the graph can invoke any callback. Refusing a buffered handoff prevents
+        pre-admission events from being silently published under a later lease.
+        """
+
+        if self._buffer or self._pending_flush_tasks:
+            raise RuntimeError("run_journal_event_appender_already_active")
+        self._store = event_appender
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""

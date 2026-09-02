@@ -69,6 +69,12 @@ a different digest fails startup. A nonempty schema created before this
 feature fails with `tenant_schema_unbound`; the first request never infers its
 owner.
 
+Occupancy inspection is deliberately conservative: every populated table is
+tenant-bearing unless it is one of the narrow Alembic/checkpoint/cursor metadata
+tables. This includes extension-owned and otherwise unknown tables whose
+SQLAlchemy metadata is not loaded by the host. Empty tables alone do not force
+legacy binding, but any row requires the explicit operator acknowledgement.
+
 Use this migration sequence for an existing deployment:
 
 1. Choose the canonical `tenant_id` and record it in the deployment's operator
@@ -131,8 +137,11 @@ compatibility path. Plan the Redis copy during this window.
 
 Rollback after binding requires either code that understands the new nullable
 tenant columns and singleton table or restoration of the database backup. Do
-not delete the identity row to make older code start. Restore/copy Redis from
-the pre-migration backup if the rollback expects legacy names.
+not delete the identity row to make older code start. Revision 0025 refuses its
+destructive downgrade with `tenant_identity_downgrade_blocked` when the
+singleton or any tenant-anchored row exists; an unused, never-bound schema
+remains reversible. Restore/copy Redis from the pre-migration backup if the
+rollback expects legacy names.
 
 ## Redis namespaces and ACLs
 

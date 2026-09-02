@@ -20,6 +20,7 @@ import yaml
 from deerflow.extensions.artifacts import (
     extension_configuration_digest,
     read_source_lock,
+    verify_source_lock_current,
 )
 from deerflow.extensions.cli import find_project_root
 from deerflow.extensions.loader import ExtensionSpec
@@ -278,6 +279,32 @@ def test_install_local_directory_makes_it_deployable_and_enabled(
     assert source_lock_path.read_bytes() == source_lock_bytes
 
     _assert_demo_entry_point_loads(root / "backend")
+
+
+def test_local_install_ignores_generated_ruff_cache_for_snapshot_provenance(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    source_cache = source / ".ruff_cache"
+    source_cache.mkdir()
+    (source_cache / "CACHEDIR.TAG").write_text("generated before install", encoding="utf-8")
+
+    ExtensionManager(root).install(str(source), yes=True)
+
+    backend = root / "backend"
+    managed_source = backend / "extensions" / "sources" / "deerflow-extension-demo"
+    assert not (managed_source / ".ruff_cache").exists()
+
+    managed_cache = managed_source / ".ruff_cache"
+    managed_cache.mkdir()
+    (managed_cache / "CACHEDIR.TAG").write_text("generated after install", encoding="utf-8")
+    source_lock = read_source_lock(backend / "extensions.lock.json")
+    assert verify_source_lock_current(source_lock, backend) is source_lock
 
 
 def test_install_defaults_to_a_fail_open_plugin_record(tmp_path: Path) -> None:
