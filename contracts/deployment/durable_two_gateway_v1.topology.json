@@ -107,29 +107,29 @@
     {
       "id": "thread_feedback_and_user_metadata",
       "classification": "local_substitutable_store",
-      "authority": "thread metadata, users, sessions, feedback, and ownership projections",
+      "authority": "thread metadata, users, sessions, feedback, personal access tokens, and ownership projections",
       "required_adapter": "shared PostgreSQL repositories",
       "config_fields": ["auth", "database"],
-      "service_registrations": ["thread_store", "feedback_repo", "user_store"],
-      "runtime_state_fields": ["feedback_repo", "service_observation_visibility_resolver", "thread_store"],
+      "service_registrations": ["thread_store", "feedback_repo", "personal_access_token_repo", "user_store"],
+      "runtime_state_fields": ["feedback_repo", "pat_repo", "service_observation_visibility_resolver", "thread_store"],
       "requirement": "Filesystem and process-memory metadata cannot decide visibility or lifecycle."
     },
     {
       "id": "agent_and_managed_subagent_definitions",
       "classification": "local_substitutable_store",
-      "authority": "custom-agent and managed-subagent definitions",
-      "required_adapter": "PostgreSQL agent_storage backend",
-      "config_fields": ["agent_storage"],
-      "service_registrations": ["agent_store"],
-      "runtime_state_fields": [],
-      "requirement": "Per-node file catalogs are forbidden; local descriptor caches are reconstructible."
+      "authority": "custom-agent definitions and durable native-subagent batches",
+      "required_adapter": "PostgreSQL agent_storage and subagent-batch repositories",
+      "config_fields": ["agent_storage", "subagent_runtime", "subagent_batches"],
+      "service_registrations": ["agent_store", "subagent_batch_repo", "subagent_batch_service"],
+      "runtime_state_fields": ["subagent_batch_repo", "subagent_batch_service", "subagent_batches_available"],
+      "requirement": "Per-node file catalogs are forbidden; definitions and batch claims are shared while local execution slots remain reconstructible."
     },
     {
       "id": "accepted_skill_snapshots_materialization_and_leases",
       "classification": "remote_owned_service",
       "authority": "immutable accepted snapshot plus fenced Lease/Pod/materialization evidence",
       "required_adapter": "AIO/Kubernetes rwx_verified_copy_v2 AcceptedMaterializer",
-      "config_fields": ["sandbox"],
+      "config_fields": ["sandbox", "skills.container_path"],
       "service_registrations": ["accepted_materializer", "provisioner"],
       "runtime_state_fields": [],
       "requirement": "A stale Gateway cannot validate, renew, execute, or destroy a newer accepted-material epoch."

@@ -86,6 +86,8 @@ APP_CONFIG_FACTORY_EXCLUDED_FIELDS = frozenset(
         "stream_bridge",
         "run_ownership",
         "dedupe_storage",
+        "subagent_runtime",
+        "subagent_batches",
     }
 )
 

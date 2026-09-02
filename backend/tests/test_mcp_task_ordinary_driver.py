@@ -102,6 +102,9 @@ async def test_submit_uses_structured_content_and_keeps_remote_id_out_of_driver_
     assert call["thread_id"] == "thread-1"
     assert call["lineage"] == _request().lineage
     assert call["operation"] == "submit"
+    # Submit is the one durable-task call awaited inside the Agent run, so it
+    # is the only one that may carry request-scoped credentials.
+    assert call["request_scoped_headers"] is True
 
 
 @pytest.mark.asyncio

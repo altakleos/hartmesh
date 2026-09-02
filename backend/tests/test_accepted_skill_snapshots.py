@@ -73,6 +73,7 @@ def snapshot_paths(monkeypatch, tmp_path: Path) -> Paths:
     """Keep process-local snapshot resources inside each test directory."""
     from deerflow.runtime import skill_snapshot as snapshot_module
 
+    monkeypatch.delattr(sandbox_tools._get_skills_container_path, "_cached", raising=False)
     paths = Paths(tmp_path / "state")
     monkeypatch.setattr(snapshot_module, "get_paths", lambda: paths)
     yield paths
@@ -247,8 +248,8 @@ def test_accepted_execution_rejects_live_skill_reads_before_sandbox_io(
 
     result = sandbox_tools.read_file_tool.func(
         runtime,
-        "read mutable instructions",
         "/mnt/skills/custom/immutable-skill/SKILL.md",
+        "read mutable instructions",
     )
 
     assert result == "Error: Permission denied reading file: /mnt/skills/custom/immutable-skill/SKILL.md"
@@ -260,26 +261,26 @@ def test_accepted_execution_rejects_live_skill_reads_before_sandbox_io(
     ("invoke", "expected"),
     [
         (
-            lambda runtime: sandbox_tools.ls_tool.func(runtime, "list mutable skills", "/mnt/skills"),
+            lambda runtime: sandbox_tools.ls_tool.func(runtime, "/mnt/skills", "list mutable skills"),
             "Error: Permission denied: /mnt/skills",
         ),
         (
-            lambda runtime: sandbox_tools.glob_tool.func(runtime, "find mutable skills", "**/*", "/mnt/skills/custom"),
+            lambda runtime: sandbox_tools.glob_tool.func(runtime, "**/*", "/mnt/skills/custom", "find mutable skills"),
             "Error: Permission denied: /mnt/skills/custom",
         ),
         (
-            lambda runtime: sandbox_tools.grep_tool.func(runtime, "search mutable skills", "secret", "/mnt/skills/public"),
+            lambda runtime: sandbox_tools.grep_tool.func(runtime, "secret", "/mnt/skills/public", "search mutable skills"),
             "Error: Permission denied: /mnt/skills/public",
         ),
         (
-            lambda runtime: sandbox_tools.bash_tool.func(runtime, "execute mutable script", "bash /mnt/skills/custom/tool/run.sh"),
+            lambda runtime: sandbox_tools.bash_tool.func(runtime, "bash /mnt/skills/custom/tool/run.sh", "execute mutable script"),
             "Error: Durable invocation may access only its accepted skill snapshot",
         ),
         (
             lambda runtime: sandbox_tools.bash_tool.func(
                 runtime,
-                "escape accepted tree",
                 "cd /mnt/skills/.accepted/" + "a" * 64 + "; cat ../../custom/tool/SKILL.md",
+                "escape accepted tree",
             ),
             "Error: Durable invocation may access only its accepted skill snapshot",
         ),

@@ -819,15 +819,23 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize repositories — one get_session_factory() call for all.
         if sf is not None:
             from deerflow.persistence.feedback import FeedbackRepository
+            from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf, tenant=tenant_reference)
             app.state.feedback_repo = FeedbackRepository(sf)
+            from app.gateway.auth.pat import PAT_LAST_USED_WRITE_INTERVAL_SECONDS
+
+            app.state.pat_repo = PersonalAccessTokenRepository(sf, last_used_write_interval_seconds=PAT_LAST_USED_WRITE_INTERVAL_SECONDS)
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore(tenant=tenant_reference)
             app.state.feedback_repo = None
+            # Memory backend has no durable PAT store, so Bearer credentials
+            # cannot be validated there and are rejected by the middleware.
+            app.state.pat_repo = None
+
         await app.state.run_store.initialize_lifecycle()
         if is_multi_gateway_profile:
             from deerflow.deployment.topology import (
@@ -885,6 +893,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 ScheduledTaskRunRepository,
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+            from deerflow.persistence.subagent_batches import SubagentBatchRepository
 
             app.state.scheduled_task_repo = ScheduledTaskRepository(
                 sf,
@@ -899,8 +908,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 tenant=tenant_reference,
             )
             await app.state.mcp_task_repo.verify_schema_writer_compatibility()
+            app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:
             app.state.mcp_task_repo = None
+            app.state.subagent_batch_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
 
@@ -1133,6 +1144,10 @@ def build_multi_gateway_topology_service_registry():
         construction_ref="app.mcp_tasks.service:McpTaskService",
     )
     registry.register(
+        "personal_access_token_repo",
+        construction_ref="deerflow.persistence.personal_access_tokens:PersonalAccessTokenRepository",
+    )
+    registry.register(
         "memory_manager",
         construction_ref="deerflow.agents.memory:get_memory_manager",
     )
@@ -1195,6 +1210,14 @@ def build_multi_gateway_topology_service_registry():
     registry.register(
         "stream_cleanup",
         construction_ref="deerflow.runtime.stream_bridge",
+    )
+    registry.register(
+        "subagent_batch_repo",
+        construction_ref="deerflow.persistence.subagent_batches:SubagentBatchRepository",
+    )
+    registry.register(
+        "subagent_batch_service",
+        construction_ref="app.subagent_batches:SubagentBatchService",
     )
     registry.register(
         "thread_store",
@@ -1290,6 +1313,20 @@ def get_mcp_task_service(request: Request) -> McpTaskService:
     val = getattr(request.app.state, "mcp_task_service", None)
     if val is None:
         raise HTTPException(status_code=503, detail="MCP task service not available")
+    return val
+
+
+def get_subagent_batch_repo(request: Request):
+    val = getattr(request.app.state, "subagent_batch_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Subagent batch repository not available")
+    return val
+
+
+def get_subagent_batch_service(request: Request):
+    val = getattr(request.app.state, "subagent_batch_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Subagent batch service not available")
     return val
 
 
@@ -1407,6 +1444,19 @@ def get_local_provider() -> LocalAuthProvider:
     return _cached_local_provider
 
 
+def get_pat_repo(request: Request):
+    """Return the personal-access-token repository from app state.
+
+    Raises 503 when the process runs on the memory backend (no durable PAT
+    storage), so PAT management routes fail explicitly instead of silently
+    accepting tokens nobody can validate.
+    """
+    pat_repo = getattr(request.app.state, "pat_repo", None)
+    if pat_repo is None:
+        raise HTTPException(status_code=503, detail="Personal access tokens require a configured database")
+    return pat_repo
+
+
 async def get_current_user_from_request(request: Request):
     """Get the current authenticated user from the request cookie.
 
@@ -1417,6 +1467,7 @@ async def get_current_user_from_request(request: Request):
     from app.gateway.auth_disabled import (
         AUTH_SOURCE_AUTH_DISABLED,
         AUTH_SOURCE_INTERNAL,
+        AUTH_SOURCE_PAT,
         AUTH_SOURCE_SESSION,
     )
 
@@ -1424,6 +1475,7 @@ async def get_current_user_from_request(request: Request):
         AUTH_SOURCE_SESSION,
         AUTH_SOURCE_AUTH_DISABLED,
         AUTH_SOURCE_INTERNAL,
+        AUTH_SOURCE_PAT,
     }:
         return state_user
 
@@ -1487,6 +1539,13 @@ async def is_admin_user(request: Request) -> bool:
     per-router copies that previously existed in ``mcp``, ``channel_connections``
     and ``channels``.
     """
+    # PAT credentials never carry admin capability: no scope in the PAT
+    # universe grants it, so an admin's automation token must not unlock
+    # admin-only routes (skill installs, integration credentials, MCP config).
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+    if getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+        return False
     user = getattr(request.state, "user", None)
     if user is None:
         user = await get_current_user_from_request(request)

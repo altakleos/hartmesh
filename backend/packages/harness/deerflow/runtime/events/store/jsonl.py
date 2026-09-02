@@ -39,7 +39,15 @@ from typing import Any
 from deerflow_extension_api import TenantReferenceV1
 
 from deerflow.runtime.events.appender import RuntimeEventAuthority, RuntimeEventOwnershipLost
-from deerflow.runtime.events.store.base import AppendOutcome, RunEventStore, resolve_owned_run, validate_idempotent_append
+from deerflow.runtime.events.message_identity import message_identity
+from deerflow.runtime.events.store.base import (
+    AppendOutcome,
+    RunEventStore,
+    match_ai_message_run_id,
+    normalize_message_ids,
+    resolve_owned_run,
+    validate_idempotent_append,
+)
 from deerflow.runtime.tool_evidence import (
     TOOL_RECEIPT_CATEGORY,
     TOOL_RECEIPT_STARTED_EVENT,
@@ -835,6 +843,35 @@ class JsonlRunEventStore(RunEventStore):
         else:
             return messages[-limit:]
 
+    async def find_latest_ai_message_run_ids(
+        self,
+        thread_id: str,
+        message_ids: set[str],
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict[str, str]:
+        pending = normalize_message_ids(message_ids)
+        if not pending:
+            return {}
+
+        # Keep the one-pass view stable against this backend's supported
+        # single-process writers. Without the write lock, reading run files one
+        # by one can mix events from opposite sides of a concurrent append.
+        async with self._get_write_lock(thread_id):
+            events = await asyncio.to_thread(self._read_thread_events, thread_id)
+        events = [event for event in events if self._tenant_visible(event)]
+        result: dict[str, str] = {}
+        for event in reversed(events):
+            match = match_ai_message_run_id(event, pending)
+            if match is None:
+                continue
+            message_id, run_id = match
+            result[message_id] = run_id
+            pending.remove(message_id)
+            if not pending:
+                break
+        return result
+
     async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         events = [event for event in await asyncio.to_thread(self._read_run_events, thread_id, run_id) if self._tenant_visible(event)]
         if event_types is not None:
@@ -875,6 +912,29 @@ class JsonlRunEventStore(RunEventStore):
     async def count_messages(self, thread_id):
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
         return sum(1 for event in all_events if self._tenant_visible(event) and event.get("category") == "message")
+
+    async def get_message_seqs(self, thread_id, identities, *, user_id: str | None | _AutoSentinel = AUTO):
+        wanted = set(identities)
+        if not wanted:
+            return {}
+        all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
+        found: dict[str, int] = {}
+        for event in all_events:
+            if event.get("category") != "message":
+                continue
+            content = event.get("content")
+            if not isinstance(content, dict):
+                continue
+            identity = message_identity(content)
+            # Earliest seq wins: a message re-persisted later keeps the position
+            # it first occupied in the feed.
+            if identity in wanted and identity not in found:
+                found[identity] = event["seq"]
+                # Later events can only be re-persisted copies that already lose
+                # that tiebreak, so the scan ends with the last wanted seq.
+                if len(found) == len(wanted):
+                    break
+        return found
 
     async def delete_by_thread(self, thread_id):
         async with self._get_write_lock(thread_id):

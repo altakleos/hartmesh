@@ -1,10 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with code in this repository. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
-
-It is the **monorepo orientation layer**: it maps the whole repo and points to the
-module guides that own the depth. For anything inside a module, read that module's
-guide rather than expecting full detail here:
+Coding-agent source of truth; `CLAUDE.md` imports it. Module guides own depth:
 
 - **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
   middleware chain, sandbox, MCP, skills, memory, IM channels, persistence/migrations,
@@ -131,6 +127,14 @@ Durable MCP task note:
   require its quiesced restart procedure. Public lineage stays redacted, and
   parent evidence requires independent parent-run authorization. See
   [backend/AGENTS.md](backend/AGENTS.md) for the full contract.
+- CI waivers live in `.github/skill-review-waivers.v1.json` and are enforced by
+  `scripts/review_changed_public_skills.py`. Pull requests may validate waiver
+  edits from their head revision, but only the manifest from the trusted base
+  revision can suppress that run. Entries match one error finding exactly,
+  include the reviewed file's SHA-256 and an expiry date, remain visible in CI
+  output, and can never waive blocker findings. Adding a waiver and relying on
+  it therefore requires two steps: merge the reviewed waiver first, then update
+  the affected public skill in a later pull request.
 
 Scheduled-task note:
 - `/workspace/scheduled-tasks` and its service are gated by `scheduler.enabled`.
@@ -156,7 +160,7 @@ make extension-enable NAME=...     # Enable an installed extension (restart requ
 make extension-disable NAME=...    # Disable without uninstalling (restart required)
 make extension-remove NAME=...     # Remove package and config entry (restart required)
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
-make start       # Start all services in production mode (local, optimized)
+make start       # Start all services in production mode (local, optimized); SKIP_FRONTEND_BUILD=1 reuses the last frontend build
 make stop        # Stop all running services
 make up / down   # Build/stop the production Docker stack (browser at localhost:2026)
 make docker-start / docker-stop / docker-logs   # Docker development environment
@@ -178,12 +182,13 @@ Run `make help` for the full list.
 ```bash
 # Backend (see backend/AGENTS.md for the full set)
 cd backend && make dev        # Gateway API with reload (port 8001)
-cd backend && make test       # Backend test suite
+cd backend && make test       # Default backend suite; excludes live and blocking-I/O tests
+cd backend && make test-blocking-io  # Strict blocking-I/O suite
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
 # Frontend (see frontend/AGENTS.md for the full set)
-cd frontend && pnpm dev       # Dev server with Turbopack (port 3000)
+cd frontend && pnpm dev       # Dev server: Webpack by default (override with DEER_FLOW_DEV_BUNDLER=turbo)
 cd frontend && pnpm check     # Lint + type check (run before committing)
 cd frontend && pnpm test      # Unit tests
 ```
@@ -220,7 +225,7 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ### Logs
 
 - Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
-- Local `make dev`: each service logs to its own terminal pane. Frontend Turbopack
+- Local `make dev`: each service logs to its own terminal pane. Frontend dev-server
   errors surface in the browser console at `localhost:3000`; backend tracebacks appear
   in the Gateway terminal.
 

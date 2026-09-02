@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0030_run_delivery_owner_backfill"
+HEAD = "0031_merge_upstream_0017"
 BASELINE = "0001_baseline"
 
 

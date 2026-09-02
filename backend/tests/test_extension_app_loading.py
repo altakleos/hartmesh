@@ -253,8 +253,8 @@ def test_create_app_tolerates_a_missing_config_file_and_loads_no_extensions(
 ):
     """``create_app()`` runs at import time, so an absent config.yaml must not break it.
 
-    Mirrors ``_resolve_trace_enabled_for_app_construction()``: lifespan still
-    performs strict config loading before the Gateway serves traffic.
+    Only an absent config.yaml is tolerated; lifespan still performs strict
+    config loading before the Gateway serves traffic.
     """
     import app.gateway.app as app_module
     import deerflow.extensions as extensions_module

@@ -232,12 +232,19 @@ neither is present. Use explicit `hostpath` only for local or hybrid deployments
 that intentionally mount node filesystem paths—the claim values, if present,
 are ignored in that mode.
 
+The default ingress annotations permit a 100 MiB local `.skill` archive plus
+multipart framing, stream request bodies without ingress buffering, and allow
+up to 600 seconds for validation. If you replace `ingress.annotations`,
+preserve equivalent size, streaming, and response-timeout settings for your
+ingress controller or local skill uploads may fail before DeerFlow completes
+the installation.
+
 Provide your model config under `config` (keep secrets as `$VAR` references —
 they resolve from the selected Secret):
 
 ```yaml
 config: |
-  config_version: 47
+  config_version: 48
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI

@@ -134,11 +134,11 @@ async def test_scheduler_submit_failure_offloads_material_cleanup(
             cleanup_threads.append(threading.get_ident())
             loop.call_soon_threadsafe(cleanup_done.set)
 
-        def reject_submit(*_args, **_kwargs):
+        def reject_submit(*_args: object, **_kwargs: object) -> None:
             raise RuntimeError("scheduler rejected task")
 
         monkeypatch.setattr(executor, "_release_owned_resolved_agent_material", blocking_cleanup)
-        monkeypatch.setattr(executor_module._scheduler_pool, "submit", reject_submit)
+        monkeypatch.setattr(executor_module, "_submit_to_isolated_loop_in_context", reject_submit)
 
         with pytest.raises(RuntimeError, match="scheduler rejected task"):
             executor.execute_async("task", task_id="scheduler-rejected")
@@ -197,7 +197,7 @@ async def test_scheduler_rejection_releases_byte_lease_when_projection_cleanup_f
             "release_accepted_skill_consumer",
             fail_projection_cleanup,
         )
-        monkeypatch.setattr(executor_module._scheduler_pool, "submit", reject_submit)
+        monkeypatch.setattr(executor_module, "_submit_to_isolated_loop_in_context", reject_submit)
 
         with caplog.at_level(logging.WARNING, logger=executor_module.__name__):
             with pytest.raises(RuntimeError, match="scheduler rejected task"):
@@ -206,7 +206,7 @@ async def test_scheduler_rejection_releases_byte_lease_when_projection_cleanup_f
             await asyncio.wait_for(byte_lease_released.wait(), timeout=1)
 
             async def cleanup_failure_was_logged() -> None:
-                while not any(record.message == "Subagent material cleanup failed after scheduler rejection" for record in caplog.records):
+                while not any(record.message == "Subagent material cleanup failed after submission rejection" for record in caplog.records):
                     await asyncio.sleep(0)
 
             await asyncio.wait_for(cleanup_failure_was_logged(), timeout=1)

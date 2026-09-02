@@ -588,6 +588,7 @@ class TestLocalSandboxProviderMounts:
             value.mkdir(parents=True, exist_ok=True)
         config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
         provider = LocalSandboxProvider.__new__(LocalSandboxProvider)
+        provider._skills_container_path = config.skills.container_path
         provider._path_mappings = []
         provider._generic_sandbox = None
         provider._thread_sandboxes = OrderedDict()
@@ -659,6 +660,7 @@ class TestLocalSandboxProviderMounts:
             value.mkdir(parents=True, exist_ok=True)
         config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
         provider = LocalSandboxProvider.__new__(LocalSandboxProvider)
+        provider._skills_container_path = config.skills.container_path
         provider._path_mappings = []
         provider._generic_sandbox = None
         provider._thread_sandboxes = OrderedDict()
@@ -718,6 +720,7 @@ class TestLocalSandboxProviderMounts:
             value.mkdir(parents=True, exist_ok=True)
         config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
         provider = LocalSandboxProvider.__new__(LocalSandboxProvider)
+        provider._skills_container_path = config.skills.container_path
         provider._path_mappings = [
             PathMapping("/mnt/skills/public", str(projection.public), True),
         ]
@@ -771,6 +774,21 @@ class TestLocalSandboxProviderMounts:
             assert "/mnt/skills/.accepted" in reacquired_paths
             assert "/mnt/skills/public" not in reacquired_paths
             assert "/mnt/skills/custom" not in reacquired_paths
+
+    def test_skill_isolation_capability_fails_closed_when_host_bash_is_enabled(self):
+        provider = LocalSandboxProvider.__new__(LocalSandboxProvider)
+
+        with patch(
+            "deerflow.sandbox.local.local_sandbox_provider.is_host_bash_allowed",
+            return_value=False,
+        ):
+            assert provider.supports_agent_skill_isolation is True
+
+        with patch(
+            "deerflow.sandbox.local.local_sandbox_provider.is_host_bash_allowed",
+            return_value=True,
+        ):
+            assert provider.supports_agent_skill_isolation is False
 
     def test_thread_mappings_mount_per_user_integration_projections(self, tmp_path):
         from deerflow.config.paths import Paths

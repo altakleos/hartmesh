@@ -73,7 +73,7 @@ _MULTI_GATEWAY_TOPOLOGY_REVISION = "0027_multi_gateway_topology"
 _MCP_REQUEST_COMMITMENT_REVISION = "0028_mcp_request_commitment"
 _RUN_RECOVERY_REVISION = "0029_run_recovery_policy"
 _DELIVERY_OWNER_BACKFILL_REVISION = "0030_run_delivery_owner_backfill"
-_HEAD_REVISION = _DELIVERY_OWNER_BACKFILL_REVISION
+_HEAD_REVISION = "0031_merge_upstream_0017"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
     "0012_invocation_idempotency",

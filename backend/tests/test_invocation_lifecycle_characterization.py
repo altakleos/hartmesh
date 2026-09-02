@@ -121,8 +121,10 @@ async def test_gateway_create_stream_wait_routes_share_durable_admission(monkeyp
     runtime_state = SimpleNamespace(stream_bridge=object(), run_manager=object())
     request = SimpleNamespace(
         app=SimpleNamespace(state=runtime_state),
+        cookies={},
         headers={},
         state=SimpleNamespace(),
+        _deerflow_test_bypass_auth=True,
     )
     stateless_body = RunCreateRequest(
         input={"messages": [{"role": "user", "content": "hello"}]},

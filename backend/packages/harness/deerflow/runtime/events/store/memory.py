@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from deerflow_extension_api import TenantReferenceV1
 
 from deerflow.runtime.events.appender import RuntimeEventAuthority, RuntimeEventOwnershipLost
+from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import AppendOutcome, RunEventStore, resolve_owned_run, validate_idempotent_append
 from deerflow.runtime.tool_evidence import (
     TOOL_RECEIPT_CATEGORY,
@@ -378,6 +379,26 @@ class MemoryRunEventStore(RunEventStore):
 
     async def count_messages(self, thread_id):
         return sum(1 for event in self._messages.get(thread_id, []) if self._tenant_visible(event))
+
+    async def get_message_seqs(self, thread_id, identities, *, user_id: str | None | _AutoSentinel = AUTO):
+        wanted = set(identities)
+        if not wanted:
+            return {}
+        found: dict[str, int] = {}
+        for record in self._messages.get(thread_id, []):
+            content = record.get("content")
+            if not isinstance(content, dict):
+                continue
+            identity = message_identity(content)
+            # Earliest seq wins: a message replaced later in the same thread
+            # keeps the position it first occupied in the feed.
+            if identity in wanted and identity not in found:
+                found[identity] = record["seq"]
+                # Later rows can only be re-persisted copies that already lose
+                # that tiebreak, so the scan ends with the last wanted seq.
+                if len(found) == len(wanted):
+                    break
+        return found
 
     async def delete_by_thread(self, thread_id):
         events = self._events.get(thread_id, [])

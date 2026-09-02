@@ -9,13 +9,18 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
-from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
+from deerflow.authz.sandbox_authz import (
+    authorize_sandbox_execution,
+    authorize_sandbox_execution_async,
+    safe_app_config,
+    safe_app_config_async,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
-from deerflow.sandbox.exceptions import SandboxAuthorizationError
+from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.sandbox_provider import (
     _NO_BINDING,
@@ -50,16 +55,67 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     state_schema = SandboxMiddlewareState
 
-    def __init__(self, lazy_init: bool = True):
+    def __init__(
+        self,
+        lazy_init: bool = True,
+        *,
+        available_skills: set[str] | None = None,
+        owns_agent_skill_projection: bool = True,
+    ):
         """Initialize sandbox middleware.
 
         Args:
             lazy_init: If True, defer sandbox acquisition until first tool call.
                       If False, acquire sandbox eagerly in before_agent().
                       Default is True for optimal performance.
+            owns_agent_skill_projection: Whether this middleware may create or
+                rebuild the thread's physical skill projection. Delegated
+                subagents share the lead thread sandbox and must preserve the
+                lead-owned view instead of applying their discovery policy to it.
         """
         super().__init__()
         self._lazy_init = lazy_init
+        self._available_skills = set(available_skills) if available_skills is not None else None
+        self._owns_agent_skill_projection = owns_agent_skill_projection
+
+    def _prepare_agent_skill_projection(self, thread_id: str, *, user_id: str):
+        """Build the run's physical skill view before any sandbox is reused."""
+        if not self._owns_agent_skill_projection:
+            # Subagents inherit the lead's thread id and sandbox state. Their
+            # skill lists scope discovery/activation only; rebuilding here
+            # would widen or narrow the shared filesystem for every concurrent
+            # agent using this sandbox.
+            return None
+
+        from deerflow.config.paths import get_paths
+
+        # Preserve the zero-copy shared view for ordinary threads. A thread
+        # that previously used a restricted Agent keeps its stable mount root;
+        # an unrestricted run repopulates that root with all enabled skills.
+        if self._available_skills is None and not get_paths().thread_skills_view_dir(thread_id, user_id=user_id).exists():
+            return None
+
+        provider = get_sandbox_provider()
+        if not provider.supports_agent_skill_isolation:
+            if self._available_skills is not None:
+                raise SandboxRuntimeError(f"Sandbox provider {provider.__class__.__name__} cannot enforce per-Agent skill filesystem isolation")
+            # The thread projection may have been created under a different
+            # provider. An unrestricted run does not need that policy view and
+            # may safely use this provider's ordinary shared skill behavior.
+            return None
+
+        from deerflow.config import get_app_config
+        from deerflow.skills.projection import ensure_thread_skill_projection
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        app_config = get_app_config()
+        storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
+        return ensure_thread_skill_projection(storage, thread_id, self._available_skills)
+
+    @staticmethod
+    def _require_projection_support(provider, projection) -> None:
+        if projection is not None and not provider.supports_agent_skill_isolation:
+            raise SandboxRuntimeError(f"Sandbox provider {provider.__class__.__name__} cannot enforce per-Agent skill filesystem isolation")
 
     def _acquire_sandbox(self, thread_id: str, *, user_id: str, accepted_skills_only: bool = False, runtime: Runtime | None = None) -> str:
         provider = get_sandbox_provider()
@@ -99,18 +155,21 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     @override
     def before_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
         has_accepted_binding = accepted_skill_snapshot_id_from_runtime(runtime) is not _NO_BINDING
-        # Durable accepted material must be projected before the first model.
-        # Legacy runs keep lazy sandbox initialization.
-        if self._lazy_init and not has_accepted_binding:
-            return super().before_agent(state, runtime)
-
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
             return super().before_agent(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
-        sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
-        sandbox_id = None if sandbox_state is None else sandbox_state.get("sandbox_id")
-        if isinstance(sandbox_id, str) and not has_accepted_binding:
+        projection = None if has_accepted_binding else self._prepare_agent_skill_projection(thread_id, user_id=user_id)
+
+        # Durable accepted material and policy-scoped legacy views must be
+        # projected before the first model. Ordinary shared-view runs keep
+        # lazy sandbox initialization.
+        if self._lazy_init and not has_accepted_binding and projection is None:
+            return super().before_agent(state, runtime)
+
+        existing_sandbox_id = self._read_sandbox_id_from_state(state)
+        sandbox_id = existing_sandbox_id
+        if isinstance(sandbox_id, str) and not has_accepted_binding and projection is None:
             return super().before_agent(state, runtime)
         try:
             authorize_sandbox_execution(
@@ -118,9 +177,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 app_config=safe_app_config(),
             )
         except SandboxAuthorizationError:
+            if projection is not None:
+                # An explicit skill policy cannot leave a checkpointed,
+                # previously shared sandbox reusable by downstream tools.
+                raise
             logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
             return None
         provider = get_sandbox_provider()
+        self._require_projection_support(provider, projection)
         prebound = False
         runtime_sandbox_id = (runtime.context or {}).get("sandbox_id")
         if has_accepted_binding and not isinstance(sandbox_id, str) and isinstance(runtime_sandbox_id, str) and provider.get(runtime_sandbox_id) is not None:
@@ -168,34 +232,60 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 if acquired and token is None and not released:
                     provider.release(sandbox_id)
                 raise
-        if acquired or prebound:
+        elif projection is not None:
+            provider.sync_agent_skills(
+                sandbox_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                projection=projection,
+            )
+        if acquired or prebound or projection is not None:
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
+            if existing_sandbox_id == sandbox_id:
+                return super().before_agent(state, runtime)
+            if existing_sandbox_id is not None:
+                return {
+                    "sandbox": Overwrite({"sandbox_id": sandbox_id}),
+                }
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return super().before_agent(state, runtime)
 
     @override
     async def abefore_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
         has_accepted_binding = accepted_skill_snapshot_id_from_runtime(runtime) is not _NO_BINDING
-        if self._lazy_init and not has_accepted_binding:
-            return await super().abefore_agent(state, runtime)
-
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
             return await super().abefore_agent(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
-        sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
-        sandbox_id = None if sandbox_state is None else sandbox_state.get("sandbox_id")
-        if isinstance(sandbox_id, str) and not has_accepted_binding:
+        projection = (
+            None
+            if has_accepted_binding
+            else await asyncio.to_thread(
+                self._prepare_agent_skill_projection,
+                thread_id,
+                user_id=user_id,
+            )
+        )
+
+        if self._lazy_init and not has_accepted_binding and projection is None:
+            return await super().abefore_agent(state, runtime)
+
+        existing_sandbox_id = self._read_sandbox_id_from_state(state)
+        sandbox_id = existing_sandbox_id
+        if isinstance(sandbox_id, str) and not has_accepted_binding and projection is None:
             return await super().abefore_agent(state, runtime)
         try:
-            authorize_sandbox_execution(
+            await authorize_sandbox_execution_async(
                 context=runtime.context or {},
-                app_config=safe_app_config(),
+                app_config=await safe_app_config_async(),
             )
         except SandboxAuthorizationError:
+            if projection is not None:
+                raise
             logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
             return None
         provider = get_sandbox_provider()
+        self._require_projection_support(provider, projection)
         prebound = False
         runtime_sandbox_id = (runtime.context or {}).get("sandbox_id")
         if has_accepted_binding and not isinstance(sandbox_id, str) and isinstance(runtime_sandbox_id, str) and provider.get(runtime_sandbox_id) is not None:
@@ -246,8 +336,21 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 if acquired and token is None and not released:
                     await self._release_sandbox_async(sandbox_id)
                 raise
-        if acquired or prebound:
+        elif projection is not None:
+            await provider.sync_agent_skills_async(
+                sandbox_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                projection=projection,
+            )
+        if acquired or prebound or projection is not None:
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
+            if existing_sandbox_id == sandbox_id:
+                return await super().abefore_agent(state, runtime)
+            if existing_sandbox_id is not None:
+                return {
+                    "sandbox": Overwrite({"sandbox_id": sandbox_id}),
+                }
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return await super().abefore_agent(state, runtime)
 
@@ -328,7 +431,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     def _read_sandbox_id_from_state(state: object) -> str | None:
         if not isinstance(state, dict):
             return None
-        sandbox_state = state.get("sandbox")
+        sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
         if not isinstance(sandbox_state, dict):
             return None
         sandbox_id = sandbox_state.get("sandbox_id")

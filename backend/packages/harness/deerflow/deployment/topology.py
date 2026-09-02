@@ -67,6 +67,9 @@ _MAX_INVENTORY_BYTES = 64 * 1024
 _MAX_DEPENDENCIES = 128
 _SAFE_ID = re.compile(r"[a-z][a-z0-9_]{0,127}\Z")
 _SAFE_FIELD = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+_SAFE_CONFIG_FIELD = re.compile(
+    r"(?=.{1,128}\Z)[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*\Z",
+)
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _RAW_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SCHEMA_REFERENCE = re.compile(r"schema:sha256:[0-9a-f]{64}\Z")
@@ -1026,11 +1029,12 @@ def _safe_identifiers(
     *,
     field_name: str,
     allow_empty: bool = False,
+    pattern: re.Pattern[str] = _SAFE_FIELD,
 ) -> tuple[str, ...]:
     if not isinstance(value, list) or (not value and not allow_empty):
         qualifier = "a list" if allow_empty else "a nonempty list"
         raise ValueError(f"topology inventory {field_name} must be {qualifier}")
-    if len(value) > 64 or any(not isinstance(item, str) or _SAFE_FIELD.fullmatch(item) is None for item in value):
+    if len(value) > 64 or any(not isinstance(item, str) or pattern.fullmatch(item) is None for item in value):
         raise ValueError(f"topology inventory {field_name} is invalid")
     normalized = tuple(value)
     if len(normalized) != len(set(normalized)):
@@ -1087,6 +1091,7 @@ class TopologyInventoryDependencyV1:
             config_fields=_safe_identifiers(
                 value["config_fields"],
                 field_name="config_fields",
+                pattern=_SAFE_CONFIG_FIELD,
             ),
             service_registrations=_safe_identifiers(
                 value["service_registrations"],
