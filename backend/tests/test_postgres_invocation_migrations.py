@@ -169,6 +169,7 @@ _ACCEPTED_COLUMNS = {
     "assembly_evidence_digest": ("character varying", 64, True),
 }
 _RUN_CHECKS = {
+    "ck_runs_admission_cursor_positive",
     "ck_runs_tenant_pair",
     "ck_runs_state_version_nonnegative",
     "ck_runs_external_key_pair",
@@ -187,6 +188,10 @@ _RUN_CHECKS = {
     "ck_runs_caller_intent_run_only",
     "ck_runs_caller_intent_digest_format",
     "ck_runs_caller_intent_digest_version_format",
+    "ck_runs_recovery_policy",
+    "ck_runs_recovery_payload_policy",
+    "ck_runs_terminal_projection_authority_pair",
+    "ck_runs_terminal_projection_authority_version",
 }
 _LIFECYCLE_INDEXES = {
     "ix_run_lifecycle_events_run_cursor": ("run_id", "cursor"),
