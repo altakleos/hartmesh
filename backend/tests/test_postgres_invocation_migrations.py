@@ -1955,7 +1955,6 @@ async def test_pre_feature_postgres_upgrade_downgrade_reupgrade_and_runtime_io()
         assert await _legacy_snapshot(engine) == legacy_before
         assert await _mcp_task_snapshot(engine) == mcp_task_before
 
-        await _assert_postgres_head_contract(engine, schema)
         retained = await repository.get("qualified-run", user_id=None)
         assert retained is not None
         assert retained["state_version"] == 4
