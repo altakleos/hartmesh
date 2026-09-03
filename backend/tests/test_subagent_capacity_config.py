@@ -59,9 +59,18 @@ def test_exact_two_profile_rejects_unqualified_batch_workers() -> None:
             "durable_two_gateway_v1",
         )
 
+    with pytest.raises(
+        ValueError,
+        match="subagent_batches_durable_one_unqualified",
+    ):
+        validate_subagent_batch_profile(
+            SubagentBatchesConfig(enabled=True),
+            "durable_production",
+        )
+
     validate_subagent_batch_profile(
         SubagentBatchesConfig(enabled=True),
-        "durable_production",
+        "local_development",
     )
 
 

@@ -184,6 +184,9 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                         include_mcp_tasks=request.include_mcp_tasks,
                         mcp_task_cursor=request.mcp_task_cursor,
                         mcp_task_limit=request.mcp_task_limit,
+                        include_subagent_batches=(request.include_subagent_batches),
+                        subagent_batch_cursor=request.subagent_batch_cursor,
+                        subagent_batch_limit=request.subagent_batch_limit,
                     )
                 )
                 thread_id = None
@@ -306,6 +309,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
                 summaries=summaries,
                 tool_receipts=(result.page.tool_receipts.to_dict() if result.page.tool_receipts is not None else None),
                 mcp_tasks=(dict(result.mcp_tasks) if result.mcp_tasks is not None else None),
+                subagent_batches=(dict(result.subagent_batches) if result.subagent_batches is not None else None),
             )
         except (KeyError, TypeError, ValueError):
             return unexpected_adapter_failure("observe", exc_info=False)

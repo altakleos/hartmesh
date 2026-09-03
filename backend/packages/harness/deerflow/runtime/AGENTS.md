@@ -132,10 +132,10 @@ The portable `deerflow-runtime-api` DTOs contain runtime operations only;
 deployment provenance and qualification are administrator-only. Memory-backed
 local development is explicitly unqualified. Real Postgres and opt-in
 Kubernetes suites are release gates, and neither establishes multi-replica HA.
-Invocation observation includes MCP children only when `include_mcp_tasks=true`;
-the adapter performs one owner/tenant-scoped indexed query and returns one
-bounded cursor page. Parent-run visibility is checked before that query, and
-parent cancellation never cascades into remote MCP-task cancellation.
+Invocation observation includes MCP children only when `include_mcp_tasks=true`
+and payload-free batch lifecycle only when `include_subagent_batches=true`;
+both use independent owner/tenant/parent-scoped cursor pages after parent
+visibility. Parent cancellation cascades to neither MCP tasks nor batches.
 
 ### Stream Bridge Heartbeats
 

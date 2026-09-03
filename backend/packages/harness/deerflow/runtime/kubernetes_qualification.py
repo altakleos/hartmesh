@@ -388,7 +388,7 @@ async def qualification_service_barrier(
     point: str,
     subject_id: str,
 ) -> bool:
-    """Pause a scheduler/MCP lease owner at an explicitly armed live point.
+    """Pause a scheduler, MCP, or batch lease owner at an armed live point.
 
     Unlike invocation barriers, these services do not own a ``RunRecord`` yet.
     The harness must atomically arm a named point in the tenant Redis prefix;
@@ -398,7 +398,11 @@ async def qualification_service_barrier(
     configuration = _runtime_configuration(require_fault_injection=True)
     if configuration is None:
         return False
-    if scenario not in {"scheduler_owner_loss", "mcp_task_notification"}:
+    if scenario not in {
+        "scheduler_owner_loss",
+        "mcp_task_notification",
+        "subagent_batch",
+    }:
         raise ValueError("qualification service scenario is invalid")
     if _SAFE_ID.fullmatch(point) is None or _SAFE_ID.fullmatch(subject_id) is None:
         raise ValueError("qualification service barrier identity is invalid")

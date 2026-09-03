@@ -47,26 +47,40 @@ def make_parent_batch_request(
     app_config=None,
     items: tuple[BatchItemRequestV1, ...] | None = None,
     tool_call_id: str = "call-1",
+    definition=None,
+    skill_snapshot=None,
+    skill_scope_digests: tuple[str, ...] = (),
+    extension_generation: int = 0,
+    capability_manifest_digest: str | None = None,
+    artifact_manifest_digest: str | None = None,
+    extension_configuration_digest: str | None = None,
+    extensions=None,
 ) -> ParentBoundBatchRequest:
     tenant = TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference()
-    definition = resolved_subagent_definition(
-        name="general-purpose",
-        source_kind="builtin",
-        source_version="v1",
-        description="General purpose",
-        system_prompt="Work carefully.",
-        model=None,
-        model_settings={},
-        tool_names=(),
-        skill_names=(),
-        max_turns=20,
-        timeout_seconds=300,
-    )
+    if definition is None:
+        definition = resolved_subagent_definition(
+            name="general-purpose",
+            source_kind="builtin",
+            source_version="v1",
+            description="General purpose",
+            system_prompt="Work carefully.",
+            model=None,
+            model_settings={},
+            tool_names=(),
+            skill_names=(),
+            max_turns=20,
+            timeout_seconds=300,
+        )
     catalog = ResolvedSubagentCatalogV1.from_entries(
         (definition,),
         allowed_names=(definition.name,),
     )
-    scopes = ResolvedSkillScopesV1.from_scopes({"lead": (), "subagent:general-purpose": ()})
+    scopes = ResolvedSkillScopesV1.from_scopes(
+        {
+            "lead": (),
+            f"subagent:{definition.name}": skill_scope_digests,
+        }
+    )
     material = ResolvedAgentMaterialV1(
         agent_id="default",
         storage_source="builtin",
@@ -80,6 +94,7 @@ def make_parent_batch_request(
         skill_scopes=scopes,
         user_id="user-1",
         app_config=app_config,
+        skill_snapshot=skill_snapshot,
     )
     accepted = AcceptedInvocation.seal(
         principal=PrincipalProjection(user_id="user-1", role="member"),
@@ -89,7 +104,10 @@ def make_parent_batch_request(
         agent_revision=ResolvedAgentRevision.from_material(material),
         normalized_input={"messages": []},
         execution_options={"multitask_strategy": "reject"},
-        extension_generation=0,
+        extension_generation=extension_generation,
+        extension_manifest_digest=capability_manifest_digest,
+        extension_artifact_manifest_digest=artifact_manifest_digest,
+        extension_configuration_digest=extension_configuration_digest,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
         tenant=tenant,
     )
@@ -102,7 +120,10 @@ def make_parent_batch_request(
         lease_epoch=4,
         agent_revision_digest=accepted.agent_revision.digest,
         assembly_fingerprint="a" * 64,
-        extension_generation=0,
+        extension_generation=extension_generation,
+        capability_manifest_digest=capability_manifest_digest,
+        artifact_manifest_digest=artifact_manifest_digest,
+        extension_configuration_digest=extension_configuration_digest,
         subagent_catalog_digest=catalog.digest,
         subagent_definition_digest=None,
         tenant=tenant,
@@ -124,7 +145,7 @@ def make_parent_batch_request(
         run_id="run-1",
         submission_key=f"{receipt.receipt_id}:{tool_call_id}",
         title="Records",
-        subagent_name="general-purpose",
+        subagent_name=definition.name,
         items=items or (BatchItemRequestV1(key="record-1", prompt="Process record 1"),),
         limits=BatchLimitsV1(
             max_live_items=20,
@@ -135,6 +156,7 @@ def make_parent_batch_request(
             max_total_runtime_seconds=86_400,
         ),
         app_config=app_config,
+        extensions=extensions,
     )
 
 

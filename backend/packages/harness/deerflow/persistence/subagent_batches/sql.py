@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import uuid
 from collections import Counter
 from datetime import UTC, datetime, timedelta
@@ -67,7 +69,6 @@ _ITEM_PUBLIC_FIELDS = (
     "request_digest",
     "lease_epoch",
     "model_name",
-    "result_preview",
     "result_truncated",
     "error",
     "stop_reason",
@@ -80,6 +81,8 @@ _ITEM_PUBLIC_FIELDS = (
     "updated_at",
 )
 _ITEM_TIMESTAMP_FIELDS = ("started_at", "completed_at", "created_at", "updated_at")
+_BATCH_PARENT_CURSOR_VERSION = "deerflow.subagent-batch-parent-cursor/v1"
+_MAX_BATCH_PARENT_PAGE_SIZE = 100
 
 
 class SubagentBatchRepository:
@@ -449,6 +452,7 @@ class SubagentBatchRepository:
         data = {key: getattr(row, key) for key in _ITEM_PUBLIC_FIELDS}
         if include_result:
             data["result"] = row.result
+            data["result_preview"] = row.result_preview
         for key in _ITEM_TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -1508,9 +1512,13 @@ class SubagentBatchRepository:
             item = await session.get(SubagentBatchItemRow, item_id, with_for_update=True)
             if item is None or item.batch_id != batch_id or item.status != "failed":
                 return None
+            if self._requires_attempt_fence(batch) and item.attempt >= batch.max_attempts:
+                return None
             now = await self._now(session, None)
             item.status = "pending"
-            item.attempt = 0
+            if not self._requires_attempt_fence(batch):
+                item.attempt = 0
+            item.started_at = None
             item.error = None
             item.result = None
             item.result_preview = None
@@ -1683,6 +1691,177 @@ class SubagentBatchRepository:
             if terminal_observation is not None and len(observations) < bounded_limit:
                 observations.append(terminal_observation)
             return observations
+
+    def _parent_cursor_scope(
+        self,
+        *,
+        parent_run_id: str,
+        user_id: str,
+    ) -> str:
+        if self._tenant is None:
+            raise BatchAdmissionError("legacy_batch_unbound")
+        return canonical_digest(
+            {
+                "version": 1,
+                "domain": "subagent_batch_parent_cursor_scope",
+                "tenant_digest": self._tenant.digest,
+                "parent_run_id": parent_run_id,
+                "user_id": user_id,
+            }
+        )
+
+    def _encode_parent_cursor(
+        self,
+        *,
+        parent_run_id: str,
+        user_id: str,
+        accepted_at: datetime,
+        batch_id: str,
+    ) -> str:
+        core = {
+            "version": _BATCH_PARENT_CURSOR_VERSION,
+            "scope": self._parent_cursor_scope(
+                parent_run_id=parent_run_id,
+                user_id=user_id,
+            ),
+            "accepted_at": _as_utc(accepted_at).isoformat(),
+            "batch_id": batch_id,
+        }
+        payload = {**core, "checksum": canonical_digest(core)}
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).rstrip(b"=")
+        return "sbc1." + encoded.decode("ascii")
+
+    def _decode_parent_cursor(
+        self,
+        cursor: str,
+        *,
+        parent_run_id: str,
+        user_id: str,
+    ) -> tuple[datetime, str]:
+        if not isinstance(cursor, str) or len(cursor.encode("utf-8")) > 4096 or not cursor.startswith("sbc1."):
+            raise BatchAdmissionError("subagent_batch_cursor_invalid")
+        try:
+            raw = cursor[5:]
+            payload = json.loads(
+                base64.b64decode(
+                    raw + "=" * (-len(raw) % 4),
+                    altchars=b"-_",
+                    validate=True,
+                )
+            )
+            expected = {
+                "version",
+                "scope",
+                "accepted_at",
+                "batch_id",
+                "checksum",
+            }
+            if not isinstance(payload, dict) or set(payload) != expected:
+                raise ValueError
+            core = {key: payload[key] for key in ("version", "scope", "accepted_at", "batch_id")}
+            if (
+                payload["version"] != _BATCH_PARENT_CURSOR_VERSION
+                or payload["scope"]
+                != self._parent_cursor_scope(
+                    parent_run_id=parent_run_id,
+                    user_id=user_id,
+                )
+                or payload["checksum"] != canonical_digest(core)
+                or not isinstance(payload["batch_id"], str)
+                or not payload["batch_id"]
+            ):
+                raise ValueError
+            accepted_at = datetime.fromisoformat(payload["accepted_at"])
+            if accepted_at.tzinfo is None:
+                raise ValueError
+            return accepted_at.astimezone(UTC), payload["batch_id"]
+        except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+            raise BatchAdmissionError("subagent_batch_cursor_invalid") from exc
+
+    async def list_lifecycle_by_parent_run(
+        self,
+        parent_run_id: str,
+        *,
+        user_id: str,
+        limit: int = 20,
+        cursor: str | None = None,
+        tenant_digest: str,
+    ) -> dict[str, Any]:
+        """Return owner-scoped child lifecycle through the portable run seam."""
+
+        if self._tenant is None:
+            raise BatchAdmissionError("legacy_batch_unbound")
+        if tenant_digest != self._tenant.digest:
+            raise BatchAdmissionError("batch_tenant_mismatch")
+        if type(limit) is not int or not 1 <= limit <= _MAX_BATCH_PARENT_PAGE_SIZE:
+            raise ValueError("subagent batch lineage limit must be between 1 and 100")
+        stmt = select(SubagentBatchRow).where(
+            SubagentBatchRow.tenant_digest == tenant_digest,
+            SubagentBatchRow.run_id == parent_run_id,
+            SubagentBatchRow.user_id == user_id,
+            SubagentBatchRow.schema_writer_version == 2,
+            SubagentBatchRow.acceptance_digest.is_not(None),
+            SubagentBatchRow.accepted_at.is_not(None),
+        )
+        if cursor is not None:
+            accepted_at, batch_id = self._decode_parent_cursor(
+                cursor,
+                parent_run_id=parent_run_id,
+                user_id=user_id,
+            )
+            stmt = stmt.where((SubagentBatchRow.accepted_at < accepted_at) | ((SubagentBatchRow.accepted_at == accepted_at) & (SubagentBatchRow.id < batch_id)))
+        stmt = stmt.order_by(
+            SubagentBatchRow.accepted_at.desc(),
+            SubagentBatchRow.id.desc(),
+        ).limit(limit + 1)
+        async with self._sf() as session:
+            rows = list((await session.execute(stmt)).scalars())
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            observations = await self.list_observations(
+                row.id,
+                user_id=user_id,
+                limit=100,
+            )
+            if observations is None:
+                continue
+            items.append(
+                {
+                    "batch_id": row.id,
+                    "acceptance_digest": row.acceptance_digest,
+                    "parent_tool_receipt_id": row.parent_tool_receipt_id,
+                    "status": row.status,
+                    "terminal_code": row.terminal_code,
+                    "total_items": row.total_items,
+                    "accepted_at": coerce_iso(row.accepted_at),
+                    "updated_at": coerce_iso(row.updated_at),
+                    "completed_at": (None if row.completed_at is None else coerce_iso(row.completed_at)),
+                    "observations": observations,
+                }
+            )
+        next_cursor = None
+        if has_more and rows:
+            tail = rows[-1]
+            assert tail.accepted_at is not None
+            next_cursor = self._encode_parent_cursor(
+                parent_run_id=parent_run_id,
+                user_id=user_id,
+                accepted_at=tail.accepted_at,
+                batch_id=tail.id,
+            )
+        return {
+            "items": items,
+            "next_cursor": next_cursor,
+            "pruning_status": "not_pruned",
+        }
 
 
 def _as_utc(value: datetime) -> datetime:

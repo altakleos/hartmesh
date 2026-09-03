@@ -396,6 +396,9 @@ class InternalInvocationLifecycleQuery:
     include_mcp_tasks: bool = False
     mcp_task_cursor: str | None = None
     mcp_task_limit: int = 100
+    include_subagent_batches: bool = False
+    subagent_batch_cursor: str | None = None
+    subagent_batch_limit: int = 20
 
 
 @dataclass(frozen=True)
@@ -414,6 +417,7 @@ class InternalLifecycleObservation:
     page: LifecyclePage
     authoritative_snapshot: Mapping[str, Any] | None = None
     mcp_tasks: Mapping[str, Any] | None = None
+    subagent_batches: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.authoritative_snapshot is not None:
@@ -424,6 +428,14 @@ class InternalLifecycleObservation:
             if not isinstance(self.mcp_tasks, Mapping):
                 raise TypeError("mcp_tasks must be a mapping or None")
             object.__setattr__(self, "mcp_tasks", _freeze_host_value(self.mcp_tasks))
+        if self.subagent_batches is not None:
+            if not isinstance(self.subagent_batches, Mapping):
+                raise TypeError("subagent_batches must be a mapping or None")
+            object.__setattr__(
+                self,
+                "subagent_batches",
+                _freeze_host_value(self.subagent_batches),
+            )
 
 
 class McpTaskLineageReader(Protocol):
@@ -432,6 +444,22 @@ class McpTaskLineageReader(Protocol):
     tenant: Any
 
     async def list_by_parent_run(
+        self,
+        parent_run_id: str,
+        *,
+        user_id: str,
+        limit: int,
+        cursor: str | None,
+        tenant_digest: str,
+    ) -> Mapping[str, Any]: ...
+
+
+class SubagentBatchLifecycleReader(Protocol):
+    """Tenant-bound child-batch reader for portable lifecycle observation."""
+
+    tenant: Any
+
+    async def list_lifecycle_by_parent_run(
         self,
         parent_run_id: str,
         *,
@@ -617,6 +645,7 @@ class InvocationRuntime:
         admission_fence: InvocationAdmissionFence | None = None,
         visibility: ObservationVisibilityResolver | None = None,
         mcp_tasks: McpTaskLineageReader | None = None,
+        subagent_batches: SubagentBatchLifecycleReader | None = None,
         task_factory: TaskFactory = asyncio.create_task,
     ) -> None:
         self._normalizer = normalizer
@@ -626,6 +655,7 @@ class InvocationRuntime:
         self._admission_fence = admission_fence
         self._visibility = visibility
         self._mcp_tasks = mcp_tasks
+        self._subagent_batches = subagent_batches
         self._task_factory = task_factory
 
     async def _observation_grant(
@@ -976,11 +1006,30 @@ class InvocationRuntime:
                 if getattr(exc, "code", None) == "mcp_task_cursor_invalid":
                     raise ValueError("invalid MCP task cursor") from exc
                 raise
+        subagent_batches: Mapping[str, Any] | None = None
+        if query.include_subagent_batches and self._subagent_batches is not None and record.user_id is not None:
+            tenant = getattr(self._subagent_batches, "tenant", None)
+            tenant_digest = getattr(tenant, "digest", None)
+            if not isinstance(tenant_digest, str):
+                raise RuntimeError("subagent batch repository has no tenant binding")
+            try:
+                subagent_batches = await self._subagent_batches.list_lifecycle_by_parent_run(
+                    query.run_id,
+                    user_id=record.user_id,
+                    limit=query.subagent_batch_limit,
+                    cursor=query.subagent_batch_cursor,
+                    tenant_digest=tenant_digest,
+                )
+            except Exception as exc:
+                if getattr(exc, "code", None) == "subagent_batch_cursor_invalid":
+                    raise ValueError("invalid subagent batch cursor") from exc
+                raise
         return InternalLifecycleObservation(
             record=record,
             page=page,
             authoritative_snapshot=authoritative_snapshot,
             mcp_tasks=mcp_tasks,
+            subagent_batches=subagent_batches,
         )
 
     async def observe_context_lifecycle(

@@ -14,7 +14,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     text,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -61,7 +63,7 @@ class SubagentBatchRow(Base):
     parent_cancellable: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
-        server_default=text("0"),
+        server_default=false(),
     )
     cancel_epoch: Mapped[int] = mapped_column(
         Integer,
@@ -189,7 +191,7 @@ class SubagentBatchAttemptRow(Base):
     consumed: Mapped[bool] = mapped_column(
         Boolean,
         default=True,
-        server_default=text("1"),
+        server_default=true(),
     )
     terminal_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     evidence_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

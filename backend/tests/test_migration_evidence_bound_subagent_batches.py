@@ -6,12 +6,36 @@ from pathlib import Path
 
 import pytest
 from alembic import command
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.schema import CreateTable
 
 from deerflow.persistence.bootstrap import _get_alembic_config
+from deerflow.persistence.subagent_batches.model import (
+    SubagentBatchAttemptRow,
+    SubagentBatchRow,
+)
 
 _REVISION = "0032_subagent_batch_evidence"
 _PREVIOUS_REVISION = "0031_merge_upstream_0017"
+
+
+def test_batch_model_boolean_defaults_render_for_postgres() -> None:
+    """Fresh PostgreSQL schemas must use native Boolean default literals."""
+
+    batch_ddl = str(
+        CreateTable(SubagentBatchRow.__table__).compile(
+            dialect=postgresql.dialect(),
+        )
+    ).lower()
+    attempt_ddl = str(
+        CreateTable(SubagentBatchAttemptRow.__table__).compile(
+            dialect=postgresql.dialect(),
+        )
+    ).lower()
+
+    assert "parent_cancellable boolean default false" in batch_ddl
+    assert "consumed boolean default true" in attempt_ddl
 
 
 def _legacy_batch(connection: sqlite3.Connection) -> None:

@@ -15,6 +15,11 @@ qualification candidate; production rendering stays blocked until a future
 release bundles authority for an independently verified artifact. Neither mode
 claims arbitrary scaling or rolling zero downtime.
 
+Durable subagent batches are not yet part of either production profile's
+qualified artifact. Setting `subagent_batches.enabled: true` is rejected in
+both production modes; use only local evaluation until the artifact-bound
+PostgreSQL process-restart/failover gate passes.
+
 Each chart release owns one server identity configured by `tenant.id`.
 Tenant identity is selected by the operator at service startup. It cannot be selected by an API caller and does not replace per-user authorization.
 The chart never derives it from the Helm release or Kubernetes namespace.
@@ -244,7 +249,7 @@ they resolve from the selected Secret):
 
 ```yaml
 config: |
-  config_version: 48
+  config_version: 49
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI

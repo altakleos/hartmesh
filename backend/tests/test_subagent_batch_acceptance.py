@@ -49,11 +49,18 @@ from deerflow.subagents.batch_acceptance import (
     BatchAdmissionConflict,
     BatchAdmissionError,
     BatchAttemptEvidenceV1,
+    BatchCancelled,
     BatchItemRequestV1,
     BatchLimitsV1,
+    BatchStaleAttempt,
     ParentBoundBatchExecutionV1,
     ParentBoundBatchRequest,
 )
+
+
+def test_mutation_rejections_have_stable_typed_reason_codes() -> None:
+    assert BatchStaleAttempt().code == "stale_attempt"
+    assert BatchCancelled().code == "batch_cancelled"
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -861,6 +868,22 @@ async def test_attempt_epoch_fences_stale_terminal_publication(tmp_path) -> None
         completed_at=None,
     )
 
+    status_items = await repository.list_items(
+        "subagent-batch-fenced",
+        user_id=request.user_id,
+    )
+    protected_items = await repository.list_items(
+        "subagent-batch-fenced",
+        user_id=request.user_id,
+        include_result=True,
+    )
+    assert status_items is not None
+    assert protected_items is not None
+    assert "result" not in status_items[0]
+    assert "result_preview" not in status_items[0]
+    assert protected_items[0]["result"] == "accepted private result"
+    assert protected_items[0]["result_preview"] == "accepted preview"
+
     attempts = await repository.list_attempts(
         "subagent-batch-fenced",
         user_id=request.user_id,
@@ -1493,6 +1516,46 @@ async def test_lifecycle_observations_are_bounded_and_payload_free(tmp_path) -> 
     assert "private-worker" not in serialized
     assert "private terminal result" not in serialized
     assert "Process record one" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_parent_run_lifecycle_page_is_scoped_bounded_and_payload_free(
+    tmp_path,
+) -> None:
+    repository, request, accepted = await _accepted_repository(tmp_path)
+
+    page = await repository.list_lifecycle_by_parent_run(
+        request.run_id,
+        user_id=request.user_id,
+        limit=20,
+        cursor=None,
+        tenant_digest=request.tenant.digest,
+    )
+    hidden = await repository.list_lifecycle_by_parent_run(
+        request.run_id,
+        user_id="other-user",
+        limit=20,
+        cursor=None,
+        tenant_digest=request.tenant.digest,
+    )
+
+    assert page["next_cursor"] is None
+    assert page["pruning_status"] == "not_pruned"
+    assert page["items"][0]["batch_id"] == accepted.batch_id
+    assert page["items"][0]["observations"][0]["event"] == "batch.accepted"
+    assert hidden["items"] == []
+    serialized = json.dumps(page)
+    assert request.items[0].prompt not in serialized
+    assert request.user_id not in serialized
+
+    with pytest.raises(BatchAdmissionError, match="subagent_batch_cursor_invalid"):
+        await repository.list_lifecycle_by_parent_run(
+            request.run_id,
+            user_id=request.user_id,
+            limit=20,
+            cursor="sbc1.invalid",
+            tenant_digest=request.tenant.digest,
+        )
 
 
 @pytest.mark.asyncio

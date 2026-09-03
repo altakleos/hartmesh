@@ -550,6 +550,17 @@ def test_production_mode_rejects_process_local_storage(
     assert "durable_one_replica requires shared_durable persistence" in result.stderr
 
 
+def test_production_mode_rejects_unqualified_subagent_batches(
+    tmp_path: Path,
+) -> None:
+    values = _production_values()
+    _set_config_value(values, ("subagent_batches", "enabled"), True)
+
+    result = _render(tmp_path, values, expect_success=False)
+
+    assert "subagent_batches_durable_one_unqualified" in result.stderr
+
+
 def test_production_mode_rejects_process_local_inbound_receipts(
     tmp_path: Path,
 ) -> None:

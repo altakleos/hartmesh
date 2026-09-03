@@ -102,13 +102,31 @@ class BatchAdmissionError(RuntimeError):
 
 
 class BatchAdmissionConflict(BatchAdmissionError):
+    """An idempotency key was reused with different accepted material."""
+
     def __init__(self) -> None:
         super().__init__("batch_admission_conflict")
 
 
 class BatchLeaseLost(BatchAdmissionError):
+    """The caller no longer owns the accepted item-attempt lease."""
+
     def __init__(self) -> None:
         super().__init__("lease_lost")
+
+
+class BatchStaleAttempt(BatchLeaseLost):
+    """A superseded attempt tried to mutate the durable item projection."""
+
+    def __init__(self) -> None:
+        BatchAdmissionError.__init__(self, "stale_attempt")
+
+
+class BatchCancelled(BatchLeaseLost):
+    """Durable batch cancellation won before an attempt publication."""
+
+    def __init__(self) -> None:
+        BatchAdmissionError.__init__(self, "batch_cancelled")
 
 
 def strip_parent_batch_acceptance_context(context: object) -> None:
@@ -262,6 +280,8 @@ class BatchItemRequestV1:
 
 @dataclass(frozen=True, slots=True)
 class BatchLimitsV1:
+    """Immutable execution, evidence, and concurrency limits for a batch."""
+
     max_live_items: int
     max_running_items: int
     max_attempts: int
@@ -518,6 +538,8 @@ class ParentBoundBatchRequest:
 
 @dataclass(frozen=True, slots=True)
 class AcceptedBatchItemV1:
+    """Payload-free immutable identity and request commitment for one item."""
+
     version: Literal[1]
     item_id: str
     ordinal: int
@@ -1548,6 +1570,8 @@ def _bounded_names(
 
 @runtime_checkable
 class AcceptedParentBatchService(Protocol):
+    """Small subordinate port for parent-bound acceptance and rehydration."""
+
     async def accept(self, request: ParentBoundBatchRequest) -> dict[str, Any]: ...
 
     async def load_execution(self, batch_id: str) -> object: ...
@@ -1562,9 +1586,11 @@ __all__ = [
     "BatchAdmissionConflict",
     "BatchAdmissionError",
     "BatchAttemptEvidenceV1",
+    "BatchCancelled",
     "BatchItemRequestV1",
     "BatchLeaseLost",
     "BatchLimitsV1",
+    "BatchStaleAttempt",
     "PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY",
     "ParentBoundBatchRequest",
     "ParentBoundBatchExecutionV1",

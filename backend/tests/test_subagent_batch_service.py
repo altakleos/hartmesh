@@ -1,20 +1,30 @@
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 from enum import Enum
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from _subagent_batch_helpers import (
     make_claimed_item,
     make_parent_batch_request,
 )
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import deerflow.persistence.models  # noqa: F401
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.persistence.base import Base
+from deerflow.persistence.subagent_batches import (
+    SubagentBatchItemRow,
+    SubagentBatchRepository,
+)
 from deerflow.runtime.skill_projection import SkillProjectionConsumerToken
+from deerflow.runtime.subagent_snapshot import resolved_subagent_definition
 from deerflow.runtime.tool_evidence import (
     NullDurableToolReceiptSink,
     ToolReceiptOwnershipLost,
@@ -24,7 +34,10 @@ from deerflow.subagents import batch_service as service_module
 from deerflow.subagents.batch_acceptance import (
     AcceptedBatchV1,
     BatchAdmissionError,
+    BatchCancelled,
     BatchItemRequestV1,
+    BatchStaleAttempt,
+    ParentBoundBatchExecutionV1,
 )
 from deerflow.subagents.batch_service import SubagentBatchService
 from deerflow.subagents.capacity import SubagentExecutionCapacity
@@ -45,9 +58,160 @@ def _app_config():
     return SimpleNamespace(get_model_config=lambda _name: {})
 
 
+def _install_successful_executor(monkeypatch, captured: dict[str, object]) -> None:
+    result = SimpleNamespace(
+        status=FakeStatus.PENDING,
+        result=None,
+        error=None,
+        stop_reason=None,
+        token_usage_records=None,
+    )
+
+    class Executor:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def execute_async(self, _prompt, task_id=None):
+            async def complete() -> None:
+                callback = captured["execution_admitted_callback"]
+                await callback()
+                result.status = FakeStatus.COMPLETED
+                result.result = "accepted result"
+
+            asyncio.create_task(complete())
+            return "execution-1"
+
+    monkeypatch.setattr(
+        service_module,
+        "resolve_subagent_model_name",
+        lambda *_args, **_kwargs: "model-a",
+    )
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(
+        service_module,
+        "get_background_task_result",
+        lambda _execution_id: result,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "cleanup_background_task",
+        lambda _execution_id: None,
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+
+
+def _persisted_claimed_item(request) -> dict:
+    item = make_claimed_item(request)
+    accepted = item["batch"]["acceptance"]
+    execution = item["batch"]["execution"]
+    item["batch"]["acceptance"] = AcceptedBatchV1.from_persisted_json(accepted.to_persisted_json())
+    item["batch"]["execution"] = ParentBoundBatchExecutionV1.from_persisted_json(execution.to_persisted_json())
+    return item
+
+
+class _TerminalRepository:
+    def __init__(self) -> None:
+        self.finalized = None
+
+    async def mark_item_running(self, *_args, **_kwargs):
+        return True
+
+    async def finalize_item(self, *_args, **kwargs):
+        self.finalized = kwargs
+        return True
+
+
+class _SkillProjection:
+    name = "worker-skill"
+    content_digest = "d" * 64
+
+    @staticmethod
+    def to_json() -> dict[str, object]:
+        return {
+            "name": "worker-skill",
+            "content_digest": "d" * 64,
+        }
+
+
+class _SkillSnapshot:
+    snapshot_id = "e" * 64
+    content_digest = "e" * 64
+    skills = (SimpleNamespace(name="worker-skill"),)
+    projections = (_SkillProjection(),)
+    file_count = 1
+    total_bytes = 1
+
+    def __init__(self) -> None:
+        self.drifted = False
+        self.verify_calls = 0
+
+    def verify(self) -> None:
+        self.verify_calls += 1
+        if self.drifted:
+            raise RuntimeError("changed accepted skill bytes")
+
+    def retain(self):
+        return self
+
+    def release(self) -> None:
+        return None
+
+
+def _skill_bound_request(snapshot: _SkillSnapshot):
+    definition = resolved_subagent_definition(
+        name="general-purpose",
+        source_kind="builtin",
+        source_version="skill-bound-v1",
+        description="Skill-bound worker",
+        system_prompt="Use only accepted skills.",
+        model=None,
+        model_settings={},
+        tool_names=(),
+        skill_names=("worker-skill",),
+        max_turns=20,
+        timeout_seconds=300,
+    )
+    return make_parent_batch_request(
+        app_config=_app_config(),
+        definition=definition,
+        skill_snapshot=snapshot,
+        skill_scope_digests=("d" * 64,),
+    )
+
+
 async def _accept_active(service, request):
     with active_tool_receipt_context(request.parent_tool_receipt):
         return await service.accept(request)
+
+
+@pytest.mark.asyncio
+async def test_rejected_attempt_mutation_distinguishes_cancellation_from_stale_fence() -> None:
+    repository = SimpleNamespace(
+        get_batch=AsyncMock(
+            side_effect=[
+                {"status": "cancelled"},
+                {"status": "running"},
+            ]
+        )
+    )
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+    )
+
+    cancelled = await service._attempt_mutation_rejection(
+        batch_id="batch-1",
+        user_id="user-1",
+    )
+    stale = await service._attempt_mutation_rejection(
+        batch_id="batch-1",
+        user_id="user-1",
+    )
+
+    assert isinstance(cancelled, BatchCancelled)
+    assert isinstance(stale, BatchStaleAttempt)
 
 
 @pytest.mark.asyncio
@@ -96,6 +260,343 @@ def test_live_app_execution_policy_drift_fails_closed() -> None:
     service._validate_app_execution_digest(execution, accepted_app)
     with pytest.raises(BatchAdmissionError, match="provider_not_qualified"):
         service._validate_app_execution_digest(execution, changed_app)
+
+
+@pytest.mark.asyncio
+async def test_restart_reuses_persisted_catalog_instead_of_live_catalog(
+    monkeypatch,
+) -> None:
+    from deerflow.runtime import subagent_snapshot as snapshot_module
+
+    request = make_parent_batch_request(app_config=_app_config())
+    item = _persisted_claimed_item(request)
+    changed_definition = resolved_subagent_definition(
+        name="general-purpose",
+        source_kind="managed",
+        source_version="changed-live-v2",
+        description="Changed live definition",
+        system_prompt="MUTATED LIVE CATALOG PROMPT",
+        model=None,
+        model_settings={},
+        tool_names=(),
+        skill_names=(),
+        max_turns=1,
+        timeout_seconds=1,
+    )
+    live_resolver = MagicMock(return_value=changed_definition)
+    monkeypatch.setattr(
+        snapshot_module,
+        "snapshot_effective_subagents",
+        live_resolver,
+    )
+    captured: dict[str, object] = {}
+    _install_successful_executor(monkeypatch, captured)
+
+    class Repository:
+        finalized = None
+
+        async def mark_item_running(self, *_args, **_kwargs):
+            return True
+
+        async def finalize_item(self, *_args, **kwargs):
+            self.finalized = kwargs
+            return True
+
+    repository = Repository()
+    restarted_service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+        app_config=_app_config(),
+    )
+
+    await restarted_service._execute_item(item)
+
+    live_resolver.assert_not_called()
+    assert captured["config"].system_prompt == "Work carefully."
+    material = captured["resolved_agent_material"]
+    assert material.subagent_catalog.digest == item["batch"]["acceptance"].subagent_catalog_digest
+    assert repository.finalized is not None
+    assert repository.finalized["succeeded"] is True
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_replace_unavailable_accepted_skill_with_live_skill(
+    monkeypatch,
+) -> None:
+    from deerflow.skills import storage as skill_storage_module
+
+    request = _skill_bound_request(_SkillSnapshot())
+    item = _persisted_claimed_item(request)
+    live_storage = MagicMock()
+    monkeypatch.setattr(
+        skill_storage_module,
+        "get_or_new_user_skill_storage",
+        live_storage,
+    )
+    repository = _TerminalRepository()
+    restarted_service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+        app_config=_app_config(),
+    )
+
+    await restarted_service._execute_item(item)
+
+    live_storage.assert_not_called()
+    assert repository.finalized is not None
+    assert repository.finalized["succeeded"] is False
+    assert repository.finalized["terminal_code"] == "execution_material_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_retained_accepted_skill_drift_fails_closed_without_live_fallback(
+    monkeypatch,
+) -> None:
+    from deerflow.skills import storage as skill_storage_module
+
+    snapshot = _SkillSnapshot()
+    request = _skill_bound_request(snapshot)
+    item = _persisted_claimed_item(request)
+    live_storage = MagicMock()
+    monkeypatch.setattr(
+        skill_storage_module,
+        "get_or_new_user_skill_storage",
+        live_storage,
+    )
+    repository = _TerminalRepository()
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+        app_config=_app_config(),
+    )
+    service._accepted_material[item["batch"]["id"]] = request.resolved_parent_material
+    snapshot.drifted = True
+
+    await service._execute_item(item)
+
+    live_storage.assert_not_called()
+    assert snapshot.verify_calls == 1
+    assert repository.finalized is not None
+    assert repository.finalized["terminal_code"] == "execution_material_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("drift_field", "drift_value"),
+    [
+        ("generation", 8),
+        ("artifact_manifest_digest", "sha256:" + "8" * 64),
+        ("extension_configuration_digest", "sha256:" + "9" * 64),
+    ],
+)
+@pytest.mark.asyncio
+async def test_restart_fails_closed_on_live_extension_anchor_drift(
+    monkeypatch,
+    drift_field: str,
+    drift_value: object,
+) -> None:
+    manifest_digest = "a" * 64
+    artifact_digest = "sha256:" + "b" * 64
+    configuration_digest = "sha256:" + "c" * 64
+    request = make_parent_batch_request(
+        app_config=_app_config(),
+        extension_generation=7,
+        capability_manifest_digest=manifest_digest,
+        artifact_manifest_digest=artifact_digest,
+        extension_configuration_digest=configuration_digest,
+    )
+    item = _persisted_claimed_item(request)
+    live_anchors = {
+        "generation": 7,
+        "artifact_manifest_digest": artifact_digest,
+        "extension_configuration_digest": configuration_digest,
+    }
+    live_anchors[drift_field] = drift_value
+    monkeypatch.setattr(
+        service_module,
+        "resolve_subagent_model_name",
+        lambda *_args, **_kwargs: "model-a",
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+    repository = _TerminalRepository()
+    restarted_service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+        app_config=_app_config(),
+        extensions=SimpleNamespace(**live_anchors),
+        capability_manifest_digest=manifest_digest,
+    )
+
+    await restarted_service._execute_item(item)
+
+    assert repository.finalized is not None
+    assert repository.finalized["succeeded"] is False
+    assert repository.finalized["terminal_code"] == "provider_not_qualified"
+
+
+@pytest.mark.parametrize("restart_state", ["pending", "running"])
+@pytest.mark.asyncio
+async def test_batch_worker_restart_recovers_pending_and_running_items(
+    monkeypatch,
+    tmp_path,
+    restart_state: str,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / f'batch-{restart_state}.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    request = make_parent_batch_request(app_config=_app_config())
+    batch_id = f"batch-restart-{restart_state}"
+    accepted = AcceptedBatchV1.from_parent_request(request, batch_id=batch_id)
+    execution = ParentBoundBatchExecutionV1.from_parent_request(
+        request,
+        accepted=accepted,
+    )
+    repository = SubagentBatchRepository(
+        session_factory,
+        tenant=request.tenant,
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await repository.accept_batch(
+        accepted=accepted,
+        execution=execution,
+        item_requests=request.items,
+        user_id=request.user_id,
+        submission_key=request.submission_key,
+        title=request.title,
+        subagent_type=request.subagent_name,
+    )
+
+    started = asyncio.Event()
+    execution_calls = 0
+    results: dict[str, SimpleNamespace] = {}
+
+    class Executor:
+        def __init__(self, **kwargs) -> None:
+            self._callback = kwargs["execution_admitted_callback"]
+
+        def execute_async(self, _prompt, task_id=None):
+            nonlocal execution_calls
+            execution_calls += 1
+            call_number = execution_calls
+            execution_id = f"execution-{call_number}"
+            result = SimpleNamespace(
+                status=FakeStatus.PENDING,
+                result=None,
+                error=None,
+                stop_reason=None,
+                token_usage_records=None,
+            )
+            results[execution_id] = result
+
+            async def execute() -> None:
+                await self._callback()
+                started.set()
+                if restart_state == "running" and call_number == 1:
+                    return
+                result.status = FakeStatus.COMPLETED
+                result.result = "recovered result"
+
+            asyncio.create_task(execute())
+            return execution_id
+
+    async def no_barrier(**_kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        service_module,
+        "resolve_subagent_model_name",
+        lambda *_args, **_kwargs: "model-a",
+    )
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(
+        service_module,
+        "get_background_task_result",
+        results.get,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "request_cancel_background_task",
+        lambda _execution_id: None,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "cleanup_background_task",
+        lambda _execution_id: None,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "qualification_service_barrier",
+        no_barrier,
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+
+    first_config = SubagentBatchesConfig(
+        poll_interval_seconds=0.1,
+        lease_seconds=10,
+    )
+    if restart_state == "pending":
+        claim_entered = asyncio.Event()
+
+        class BlockedRepository:
+            async def claim_items(self, **_kwargs):
+                claim_entered.set()
+                await asyncio.Event().wait()
+
+        first_service = SubagentBatchService(
+            repository=BlockedRepository(),
+            config=first_config,
+            runtime_config=SubagentRuntimeConfig(max_running=1),
+            app_config=_app_config(),
+        )
+        await first_service.start()
+        await asyncio.wait_for(claim_entered.wait(), timeout=1)
+        await first_service.stop()
+    else:
+        first_service = SubagentBatchService(
+            repository=repository,
+            config=first_config,
+            runtime_config=SubagentRuntimeConfig(max_running=1),
+            app_config=_app_config(),
+        )
+        await first_service.run_once(now=datetime.now(UTC))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await first_service.stop()
+        async with session_factory() as session:
+            await session.execute(update(SubagentBatchItemRow).where(SubagentBatchItemRow.batch_id == batch_id).values(lease_expires_at=datetime(2000, 1, 1, tzinfo=UTC)))
+            await session.commit()
+
+    restarted_service = SubagentBatchService(
+        repository=repository,
+        config=first_config,
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+        app_config=_app_config(),
+    )
+    try:
+        await restarted_service.run_once(now=datetime.now(UTC))
+        tasks = list(restarted_service._executions.values())
+        assert tasks
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
+
+        items = await repository.list_items(
+            batch_id,
+            user_id=request.user_id,
+            include_result=True,
+        )
+        attempts = await repository.list_attempts(
+            batch_id,
+            user_id=request.user_id,
+        )
+        assert items is not None
+        assert items[0]["result"] == "recovered result"
+        assert attempts is not None
+        assert [attempt["terminal_code"] for attempt in attempts] == (["succeeded"] if restart_state == "pending" else ["lease_expired", "succeeded"])
+    finally:
+        await restarted_service.stop()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -472,6 +973,92 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
     restored_material = executor_kwargs["resolved_agent_material"]
     accepted = make_claimed_item(repository.request)["batch"]["acceptance"]
     assert restored_material.subagent_catalog.digest == (accepted.subagent_catalog_digest)
+
+
+@pytest.mark.asyncio
+async def test_terminal_publication_crosses_the_service_fault_barrier(
+    monkeypatch,
+) -> None:
+    request = make_parent_batch_request(app_config=_app_config())
+    item = make_claimed_item(request)
+    result = SimpleNamespace(
+        status=FakeStatus.PENDING,
+        result=None,
+        error=None,
+        stop_reason=None,
+        token_usage_records=None,
+    )
+    transitions: list[str] = []
+
+    class Repository:
+        async def mark_item_running(self, *_args, **_kwargs):
+            transitions.append("started")
+            return True
+
+        async def finalize_item(self, *_args, **_kwargs):
+            transitions.append("published")
+            return True
+
+    callback = None
+
+    class Executor:
+        def __init__(self, **kwargs) -> None:
+            nonlocal callback
+            callback = kwargs["execution_admitted_callback"]
+
+        def execute_async(self, _prompt, task_id=None):
+            async def complete() -> None:
+                assert callback is not None
+                await callback()
+                result.status = FakeStatus.COMPLETED
+                result.result = "accepted result"
+
+            asyncio.create_task(complete())
+            return "execution-1"
+
+    async def barrier(**kwargs) -> bool:
+        assert kwargs == {
+            "scenario": "subagent_batch",
+            "point": "before_terminal_publication",
+            "subject_id": item["id"],
+        }
+        transitions.append("barrier")
+        return False
+
+    monkeypatch.setattr(
+        service_module,
+        "qualification_service_barrier",
+        barrier,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "resolve_subagent_model_name",
+        lambda *_args, **_kwargs: "model-a",
+    )
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(
+        service_module,
+        "get_background_task_result",
+        lambda _execution_id: result,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "cleanup_background_task",
+        lambda _execution_id: None,
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+    service = SubagentBatchService(
+        repository=Repository(),
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+        app_config=_app_config(),
+    )
+
+    await service._execute_item(item)
+
+    assert transitions == ["started", "barrier", "published"]
 
 
 @pytest.mark.asyncio

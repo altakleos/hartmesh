@@ -54,7 +54,7 @@ def test_invocation_operation_config_is_operator_only_and_versioned() -> None:
     root = Path(__file__).parents[2]
     example = yaml.safe_load((root / "config.example.yaml").read_text())
 
-    assert example["config_version"] == 48
+    assert example["config_version"] == 49
     assert example["authorization"]["invocation_operations"] == {
         "start_enabled": False,
         "observe_enabled": False,

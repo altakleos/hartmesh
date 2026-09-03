@@ -7,9 +7,12 @@ Without ``DEERFLOW_TEST_POSTGRES_URL`` these remain explicitly unpassed
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
 import os
 import uuid
 from dataclasses import replace
+from enum import Enum
+from types import SimpleNamespace
 
 import pytest
 from _subagent_batch_helpers import make_parent_batch_request
@@ -25,12 +28,331 @@ from deerflow.persistence.subagent_batches import (
     SubagentBatchRepository,
     SubagentBatchRow,
 )
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 from deerflow.subagents.batch_acceptance import (
     AcceptedBatchV1,
     ParentBoundBatchExecutionV1,
 )
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
+
+
+class _ProcessWorkerStatus(Enum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self is _ProcessWorkerStatus.COMPLETED
+
+
+def _claim_then_wait_for_process_kill(
+    postgres_url: str,
+    batch_id: str,
+    phase: str,
+    connection,
+) -> None:
+    """Run one real worker process up to the requested durable crash window."""
+
+    async def run() -> None:
+        from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents import batch_service as service_module
+        from deerflow.subagents.batch_service import SubagentBatchService
+
+        engine = create_async_engine(postgres_async_url(postgres_url))
+        repository = SubagentBatchRepository(
+            async_sessionmaker(engine, expire_on_commit=False),
+            tenant=TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference(),
+        )
+        lease_owner = f"crash-worker-{phase}"
+        claimed = (
+            await repository.claim_items(
+                now=None,
+                lease_owner=lease_owner,
+                lease_seconds=60,
+                limit=1,
+            )
+        )[0]
+        assert claimed["batch"]["id"] == batch_id
+        crash_evidence = {
+            "phase": phase,
+            "item_id": claimed["id"],
+            "attempt_id": claimed["attempt_id"],
+            "lease_epoch": claimed["lease_epoch"],
+        }
+        if phase == "after_claim":
+            connection.send(crash_evidence)
+            await asyncio.Event().wait()
+
+        result = SimpleNamespace(
+            status=_ProcessWorkerStatus.PENDING,
+            result=None,
+            error=None,
+            stop_reason=None,
+            token_usage_records=None,
+        )
+        callback = None
+
+        class Executor:
+            def __init__(self, **kwargs) -> None:
+                nonlocal callback
+                callback = kwargs["execution_admitted_callback"]
+
+            def execute_async(self, _prompt, task_id=None):
+                async def execute() -> None:
+                    assert callback is not None
+                    await callback()
+                    if phase == "after_start":
+                        connection.send(crash_evidence)
+                        await asyncio.Event().wait()
+                    result.status = _ProcessWorkerStatus.COMPLETED
+                    result.result = "unpublished result"
+
+                asyncio.create_task(execute())
+                return "crash-execution"
+
+        async def publication_barrier(**kwargs) -> bool:
+            assert kwargs == {
+                "scenario": "subagent_batch",
+                "point": "before_terminal_publication",
+                "subject_id": claimed["id"],
+            }
+            if phase == "before_terminal_publication":
+                connection.send(crash_evidence)
+                await asyncio.Event().wait()
+            return False
+
+        service_module.SubagentExecutor = Executor
+        service_module.SubagentStatus = _ProcessWorkerStatus
+        service_module.get_background_task_result = lambda _execution_id: result
+        service_module.cleanup_background_task = lambda _execution_id: None
+        service_module.resolve_subagent_model_name = lambda *_args, **_kwargs: "model-a"
+        service_module.qualification_service_barrier = publication_barrier
+        import deerflow.tools
+
+        deerflow.tools.get_available_tools = lambda **_kwargs: []
+        service = SubagentBatchService(
+            repository=repository,
+            config=SubagentBatchesConfig(poll_interval_seconds=0.1),
+            runtime_config=SubagentRuntimeConfig(max_running=1),
+            app_config=SimpleNamespace(get_model_config=lambda _name: {}),
+        )
+        service._lease_owner = lease_owner
+        await service._execute_item(claimed)
+
+    asyncio.run(run())
+
+
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason=("requires DEERFLOW_TEST_POSTGRES_URL for real batch worker process-kill qualification"),
+)
+@pytest.mark.parametrize(
+    "phase",
+    ["after_claim", "after_start", "before_terminal_publication"],
+)
+def test_postgres_process_kill_windows_recover_one_terminal_outcome(
+    phase: str,
+) -> None:
+    """Kill a real claimant process and recover through a fresh DB engine."""
+
+    assert _POSTGRES_URL is not None
+    unique = uuid.uuid4().hex
+    base_request = make_parent_batch_request()
+    request = replace(
+        base_request,
+        submission_key=f"process-crash:{phase}:{unique}",
+        limits=replace(base_request.limits, max_attempts=2),
+    )
+    batch_id = f"sb_{unique}"
+    accepted = AcceptedBatchV1.from_parent_request(request, batch_id=batch_id)
+    execution = ParentBoundBatchExecutionV1.from_parent_request(
+        request,
+        accepted=accepted,
+    )
+
+    async def prepare() -> None:
+        engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
+        repository = SubagentBatchRepository(
+            async_sessionmaker(engine, expire_on_commit=False),
+            tenant=request.tenant,
+        )
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            await repository.accept_batch(
+                accepted=accepted,
+                execution=execution,
+                item_requests=request.items,
+                user_id=request.user_id,
+                submission_key=request.submission_key,
+                title=request.title,
+                subagent_type=request.subagent_name,
+            )
+        finally:
+            await engine.dispose()
+
+    async def recover(first: dict[str, object]) -> None:
+        # A new engine, repository, and SubagentBatchService represent the
+        # restarted Gateway worker. PostgreSQL, not the replacement process
+        # clock, expires the killed worker's durable lease.
+        engine = create_async_engine(postgres_async_url(_POSTGRES_URL))
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        repository = SubagentBatchRepository(
+            session_factory,
+            tenant=request.tenant,
+        )
+        try:
+            async with session_factory() as session:
+                await session.execute(update(SubagentBatchItemRow).where(SubagentBatchItemRow.id == first["item_id"]).values(lease_expires_at=func.current_timestamp() - text("INTERVAL '1 second'")))
+                await session.commit()
+            replacement = (
+                await repository.claim_items(
+                    now=None,
+                    lease_owner="replacement-worker",
+                    lease_seconds=60,
+                    limit=1,
+                )
+            )[0]
+            assert replacement["lease_epoch"] == first["lease_epoch"] + 1
+            assert not await repository.finalize_item(
+                str(first["item_id"]),
+                attempt_id=str(first["attempt_id"]),
+                lease_epoch=int(first["lease_epoch"]),
+                lease_owner=f"crash-worker-{phase}",
+                succeeded=True,
+                result="stale private result",
+                result_preview="stale private preview",
+                result_truncated=False,
+                error=None,
+                stop_reason="completed",
+                token_usage=None,
+                model_name="model-a",
+                completed_at=None,
+            )
+            from deerflow.config.subagent_batches_config import (
+                SubagentBatchesConfig,
+            )
+            from deerflow.config.subagent_runtime_config import (
+                SubagentRuntimeConfig,
+            )
+            from deerflow.subagents import batch_service as service_module
+            from deerflow.subagents.batch_service import SubagentBatchService
+
+            result = SimpleNamespace(
+                status=_ProcessWorkerStatus.PENDING,
+                result=None,
+                error=None,
+                stop_reason=None,
+                token_usage_records=None,
+            )
+            callback = None
+
+            class Executor:
+                def __init__(self, **kwargs) -> None:
+                    nonlocal callback
+                    callback = kwargs["execution_admitted_callback"]
+
+                def execute_async(self, _prompt, task_id=None):
+                    async def execute() -> None:
+                        assert callback is not None
+                        await callback()
+                        result.status = _ProcessWorkerStatus.COMPLETED
+                        result.result = "accepted result"
+
+                    asyncio.create_task(execute())
+                    return "replacement-execution"
+
+            async def no_barrier(**_kwargs) -> bool:
+                return False
+
+            original_executor = service_module.SubagentExecutor
+            original_status = service_module.SubagentStatus
+            original_result = service_module.get_background_task_result
+            original_cleanup = service_module.cleanup_background_task
+            original_model = service_module.resolve_subagent_model_name
+            original_barrier = service_module.qualification_service_barrier
+            import deerflow.tools
+
+            original_tools = deerflow.tools.get_available_tools
+            try:
+                service_module.SubagentExecutor = Executor
+                service_module.SubagentStatus = _ProcessWorkerStatus
+                service_module.get_background_task_result = lambda _execution_id: result
+                service_module.cleanup_background_task = lambda _execution_id: None
+                service_module.resolve_subagent_model_name = lambda *_args, **_kwargs: "model-a"
+                service_module.qualification_service_barrier = no_barrier
+                deerflow.tools.get_available_tools = lambda **_kwargs: []
+                restarted_service = SubagentBatchService(
+                    repository=repository,
+                    config=SubagentBatchesConfig(poll_interval_seconds=0.1),
+                    runtime_config=SubagentRuntimeConfig(max_running=1),
+                    app_config=SimpleNamespace(
+                        get_model_config=lambda _name: {},
+                    ),
+                )
+                restarted_service._lease_owner = "replacement-worker"
+                await restarted_service._execute_item(replacement)
+            finally:
+                service_module.SubagentExecutor = original_executor
+                service_module.SubagentStatus = original_status
+                service_module.get_background_task_result = original_result
+                service_module.cleanup_background_task = original_cleanup
+                service_module.resolve_subagent_model_name = original_model
+                service_module.qualification_service_barrier = original_barrier
+                deerflow.tools.get_available_tools = original_tools
+            attempts = await repository.list_attempts(
+                batch_id,
+                user_id=request.user_id,
+            )
+            assert attempts is not None
+            assert [row["terminal_code"] for row in attempts] == [
+                "lease_expired",
+                "succeeded",
+            ]
+            items = await repository.list_items(
+                batch_id,
+                user_id=request.user_id,
+                include_result=True,
+            )
+            assert items is not None
+            assert items[0]["result"] == "accepted result"
+            assert "stale private" not in str(attempts)
+        finally:
+            async with session_factory() as session:
+                await session.execute(delete(SubagentBatchRow).where(SubagentBatchRow.id == batch_id))
+                await session.commit()
+            await engine.dispose()
+
+    asyncio.run(prepare())
+    context = multiprocessing.get_context("spawn")
+    parent_connection, child_connection = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_claim_then_wait_for_process_kill,
+        args=(
+            _POSTGRES_URL,
+            batch_id,
+            phase,
+            child_connection,
+        ),
+    )
+    try:
+        process.start()
+        child_connection.close()
+        assert parent_connection.poll(30), "worker did not reach crash window"
+        first = parent_connection.recv()
+        assert first["phase"] == phase
+        process.terminate()
+        process.join(timeout=10)
+        assert not process.is_alive()
+        asyncio.run(recover(first))
+    finally:
+        parent_connection.close()
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=10)
 
 
 @pytest.mark.postgres_contract

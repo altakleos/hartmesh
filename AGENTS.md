@@ -135,12 +135,8 @@ Durable MCP task note:
   it therefore requires two steps: merge the reviewed waiver first, then update
   the affected public skill in a later pull request.
 
-Durable batch note:
-- `batch_task` is subordinate to an accepted invocation and active durable tool
-  receipt. SQL acceptance, item, and attempt evidence is tenant-bound and
-  lease-epoch fenced. Retries may repeat external effects; recovery may use only
-  accepted catalog, tool-contract, skill, extension, model, and policy material.
-  Exact-two keeps batches disabled pending live failover qualification.
+Durable batches bind active parent receipts to immutable tenant material under
+database-time fences. Effects may repeat; production stays disabled.
 
 Scheduled-task note:
 - `/workspace/scheduled-tasks` and its service are gated by `scheduler.enabled`.

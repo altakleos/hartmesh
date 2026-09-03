@@ -3521,6 +3521,11 @@ def build_invocation_runtime(request: Request) -> InvocationRuntime:
         constraints=_build_invocation_constraints(request),
         visibility=_observation_visibility(request),
         mcp_tasks=getattr(request.app.state, "mcp_task_repo", None),
+        subagent_batches=getattr(
+            request.app.state,
+            "subagent_batch_repo",
+            None,
+        ),
         admission_fence=request.app.state.runtime_readiness,
     )
 
@@ -3546,6 +3551,7 @@ def build_scheduled_invocation_runtime(app: Any) -> InvocationRuntime:
         constraints=_build_invocation_constraints(request),
         visibility=_observation_visibility(request),
         mcp_tasks=getattr(app.state, "mcp_task_repo", None),
+        subagent_batches=getattr(app.state, "subagent_batch_repo", None),
         admission_fence=app.state.runtime_readiness,
     )
 
@@ -3571,6 +3577,7 @@ def build_channel_invocation_runtime(app: Any) -> InvocationRuntime:
         constraints=_build_invocation_constraints(request),
         visibility=_observation_visibility(request),
         mcp_tasks=getattr(app.state, "mcp_task_repo", None),
+        subagent_batches=getattr(app.state, "subagent_batch_repo", None),
         admission_fence=app.state.runtime_readiness,
     )
 
@@ -3608,6 +3615,7 @@ def build_service_invocation_runtime(
         constraints=_build_invocation_constraints(request),
         visibility=_observation_visibility(request),
         mcp_tasks=getattr(app.state, "mcp_task_repo", None),
+        subagent_batches=getattr(app.state, "subagent_batch_repo", None),
         admission_fence=app.state.runtime_readiness,
     )
 

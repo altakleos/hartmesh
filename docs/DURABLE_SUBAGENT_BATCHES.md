@@ -45,7 +45,8 @@ is recorded as `queue_rejected`, and does not consume the execution-attempt
 budget. It does consume one of the separately accepted attempt-record slots;
 exhausting that evidence ceiling stops the item as `evidence_limit_exhausted`.
 Execution failure and a lease that expires after start do consume the execution
-budget.
+budget. Manual retry preserves that cumulative count and returns `409` once the
+accepted `max_attempts` limit is exhausted; it cannot create a fresh budget.
 After a process crash, an expired item may execute again with the same stable
 item key.
 
@@ -64,6 +65,12 @@ only the accepted names, then requires their persisted schema, description,
 source, and transport contract digests to match. Model, tool, catalog, skill,
 extension, authorization configuration, or constraint drift fails closed as
 `provider_not_qualified` or `execution_material_unavailable`.
+
+The regression matrix replaces the live catalog after admission, removes or
+changes accepted skill material, and changes each extension generation,
+artifact, and configuration anchor. Recovery either uses the protected accepted
+record and retained snapshot or fails closed; it never consults those changed
+live sources as a substitute.
 
 ## Cancellation policy
 
@@ -89,6 +96,12 @@ Owner-scoped routes expose:
 - additive `batch.accepted`, `batch.item_attempt`, and `batch.terminal`
   observations at `/{batch_id}/observations`;
 - protected results at `/{batch_id}/results.jsonl`.
+
+Portable invocation consumers can opt into the same durable projections with
+`include_subagent_batches=true` on
+`GET /api/runtime/v1/invocations/{parent_run_id}`. That independently paged
+view is authorized only after the parent run is visible and carries the
+parent-receipt link plus bounded lifecycle observations, never results.
 
 Lifecycle evidence contains stable IDs, digests, counts, timestamps, and safe
 reason codes only. Raw prompts, model output, tool arguments, exception text,
@@ -122,11 +135,17 @@ subagent_batches:
   max_evidence_bytes: 16384
 ```
 
-`durable_one_replica` is the supported deployment shape only when its real
-PostgreSQL restart/fencing qualification suite passes for the deployed artifact.
-SQLite is a local/test adapter; it does not establish shared-durable or failover
-qualification. Tenant-bound rows still use database-owned time on SQLite, but
-SQLite's concurrency model is weaker than PostgreSQL's.
+This checkout rejects enabled batches in `durable_one_replica`: no passing
+artifact exists for the required real-PostgreSQL process-kill and
+Gateway/worker restart suite. The checked-in opt-in PostgreSQL repository and
+process-kill contracts drive the real batch service after claim, after start,
+and at a production-inert fault barrier immediately before `finalize_item`.
+Gateway lifespan coverage also proves a restart constructs a new worker against
+the shared repository. These remain an unpassed gate when their PostgreSQL
+infrastructure is absent. SQLite and local PostgreSQL may be used under
+`local_development` for evaluation only. Tenant-bound rows still use
+database-owned time on SQLite, but SQLite's concurrency model is weaker than
+PostgreSQL's.
 
 `durable_two_gateway_v1` rejects startup when batches are enabled. The exact-two
 batch failover gate remains unpassed until a real PostgreSQL and Kubernetes

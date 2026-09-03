@@ -51,8 +51,12 @@ def validate_subagent_batch_profile(
     """Reject topology claims whose batch failover gate has not passed."""
 
     value = getattr(profile, "value", profile)
-    if config.enabled and value == "durable_two_gateway_v1":
+    if not config.enabled:
+        return
+    if value == "durable_two_gateway_v1":
         raise ValueError("subagent_batches_exact_two_unqualified")
+    if value == "durable_production":
+        raise ValueError("subagent_batches_durable_one_unqualified")
 
 
 __all__ = ["SubagentBatchesConfig", "validate_subagent_batch_profile"]

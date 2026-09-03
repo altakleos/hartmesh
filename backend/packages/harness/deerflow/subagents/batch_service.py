@@ -17,6 +17,7 @@ from deerflow.runtime.accepted_invocation import (
     canonical_digest,
 )
 from deerflow.runtime.agent_revision import app_config_execution_digest
+from deerflow.runtime.kubernetes_qualification import qualification_service_barrier
 from deerflow.runtime.skill_projection import (
     SkillProjectionConsumerToken,
     get_skill_projection_coordinator,
@@ -35,7 +36,9 @@ from deerflow.subagents.batch_acceptance import (
     AcceptedBatchV1,
     BatchAdmissionConflict,
     BatchAdmissionError,
+    BatchCancelled,
     BatchItemRequestV1,
+    BatchStaleAttempt,
     ParentBoundBatchExecutionV1,
     ParentBoundBatchRequest,
 )
@@ -150,8 +153,8 @@ class SubagentBatchService:
                     projection_token,
                 )
             except Exception:
-                logger.exception(
-                    "Failed to release durable subagent batch skill projection (batch_id=%s)",
+                logger.error(
+                    "Durable subagent batch cleanup failed (batch_id=%s reason_code=skill_projection_release_failed)",
                     batch_id,
                 )
                 return
@@ -163,8 +166,8 @@ class SubagentBatchService:
             try:
                 await asyncio.to_thread(material.release_process_material)
             except Exception:
-                logger.exception(
-                    "Failed to release durable subagent batch material (batch_id=%s)",
+                logger.error(
+                    "Durable subagent batch cleanup failed (batch_id=%s reason_code=process_material_release_failed)",
                     batch_id,
                 )
                 return
@@ -188,8 +191,8 @@ class SubagentBatchService:
                 try:
                     batch = await getter(batch_id, user_id=user_id)
                 except Exception:
-                    logger.exception(
-                        "Failed to inspect durable subagent batch material (batch_id=%s)",
+                    logger.error(
+                        "Durable subagent batch cleanup failed (batch_id=%s reason_code=terminal_state_read_failed)",
                         batch_id,
                     )
                     continue
@@ -203,7 +206,7 @@ class SubagentBatchService:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Subagent batch scheduler pass failed")
+                logger.error("Durable subagent batch scheduler pass failed (reason_code=scheduler_pass_failed)")
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
@@ -443,6 +446,25 @@ class SubagentBatchService:
         # what lets another worker own the HTTP control request safely.
         return batch
 
+    async def _attempt_mutation_rejection(
+        self,
+        *,
+        batch_id: str,
+        user_id: str,
+    ) -> BatchAdmissionError:
+        """Classify a rejected fence without exposing mutable row details."""
+
+        try:
+            batch = await self._repository.get_batch(
+                batch_id,
+                user_id=user_id,
+            )
+        except Exception:
+            batch = None
+        if isinstance(batch, dict) and batch.get("status") == "cancelled":
+            return BatchCancelled()
+        return BatchStaleAttempt()
+
     async def _execution_material(
         self,
         *,
@@ -644,7 +666,10 @@ class SubagentBatchService:
                         now=None,
                     )
                     if not marked_running:
-                        raise BatchAdmissionError("lease_lost")
+                        raise await self._attempt_mutation_rejection(
+                            batch_id=batch["id"],
+                            user_id=batch["user_id"],
+                        )
 
                 if asyncio.get_running_loop() is service_loop:
                     await mark_on_service_loop()
@@ -726,7 +751,7 @@ class SubagentBatchService:
 
             raw_result = result.result or ""
             if getattr(result, "admission_failure", False):
-                await self._repository.requeue_item_after_admission_failure(
+                requeued = await self._repository.requeue_item_after_admission_failure(
                     item_id,
                     attempt_id=item.get("attempt_id"),
                     lease_epoch=item.get("lease_epoch"),
@@ -734,6 +759,11 @@ class SubagentBatchService:
                     error="queue_rejected",
                     now=None,
                 )
+                if not requeued:
+                    raise await self._attempt_mutation_rejection(
+                        batch_id=batch["id"],
+                        user_id=batch["user_id"],
+                    )
                 return
             result_limit = acceptance.limits.max_result_chars
             truncated = len(raw_result) > result_limit
@@ -741,7 +771,12 @@ class SubagentBatchService:
             preview = raw_result[: self._config.result_preview_max_chars] if raw_result else None
             succeeded = result.status is SubagentStatus.COMPLETED and not truncated
             terminal_code = "result_too_large" if truncated else "cancelled" if getattr(result.status, "value", None) == "cancelled" else None
-            await self._repository.finalize_item(
+            await qualification_service_barrier(
+                scenario="subagent_batch",
+                point="before_terminal_publication",
+                subject_id=item_id,
+            )
+            published = await self._repository.finalize_item(
                 item_id,
                 attempt_id=item.get("attempt_id"),
                 lease_epoch=item.get("lease_epoch"),
@@ -757,12 +792,23 @@ class SubagentBatchService:
                 completed_at=None,
                 terminal_code=terminal_code,
             )
+            if not published:
+                raise await self._attempt_mutation_rejection(
+                    batch_id=batch["id"],
+                    user_id=batch["user_id"],
+                )
         except asyncio.CancelledError:
             if execution_id is not None:
                 request_cancel_background_task(execution_id)
             # Do not finalize on process shutdown. The durable lease expires and
             # another worker reclaims the same stable item key.
             raise
+        except (BatchStaleAttempt, BatchCancelled) as exc:
+            logger.warning(
+                "Durable subagent batch publication rejected (item_id=%s reason_code=%s)",
+                item_id,
+                exc.code,
+            )
         except Exception as exc:
             reason_code = exc.code if isinstance(exc, BatchAdmissionError) else "execution_failed"
             logger.error(

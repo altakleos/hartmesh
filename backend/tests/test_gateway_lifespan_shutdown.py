@@ -297,6 +297,106 @@ def test_lifespan_sets_and_clears_mcp_task_config_snapshot() -> None:
     asyncio.run(_run_lifespan_with_mcp_task_config_snapshot())
 
 
+@pytest.mark.asyncio
+async def test_gateway_restart_recreates_the_batch_worker_against_shared_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.gateway.app import lifespan
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.subagents.batch_service import (
+        SubagentBatchService as RealSubagentBatchService,
+    )
+
+    startup_config = AppConfig(sandbox=SandboxConfig(use="test"))
+    startup_config.subagent_batches.enabled = True
+    startup_config.subagent_batches.poll_interval_seconds = 0.1
+    services: list[RealSubagentBatchService] = []
+
+    class SharedRepository:
+        def __init__(self) -> None:
+            self.lease_owners: list[str] = []
+            self.claimed = asyncio.Event()
+
+        async def claim_items(self, **kwargs):
+            self.lease_owners.append(kwargs["lease_owner"])
+            self.claimed.set()
+            return []
+
+    repository = SharedRepository()
+
+    @asynccontextmanager
+    async def runtime(runtime_app, _startup_config):
+        runtime_app.state.subagent_batch_repo = repository
+        async with _noop_langgraph_runtime(runtime_app, _startup_config):
+            yield
+
+    def build_service(**kwargs):
+        service = RealSubagentBatchService(**kwargs)
+        services.append(service)
+        return service
+
+    channel_service = MagicMock()
+    channel_service.get_status.return_value = {}
+    memory_manager = MagicMock()
+    memory_manager.warm.return_value = None
+    monkeypatch.setattr("app.gateway.app.get_app_config", lambda: startup_config)
+    monkeypatch.setattr(
+        "app.gateway.app.get_gateway_config",
+        lambda: SimpleNamespace(host="x", port=0),
+    )
+    monkeypatch.setattr("app.gateway.app.langgraph_runtime", runtime)
+    monkeypatch.setattr("app.gateway.app.ensure_browser_runtime_available", lambda _config: None)
+    monkeypatch.setattr("app.gateway.app.cleanup_stale_upload_staging_files", lambda: 0)
+    monkeypatch.setattr("app.gateway.app._ensure_admin_user", AsyncMock())
+    monkeypatch.setattr(
+        "deerflow.runtime.skill_snapshot.cleanup_abandoned_skill_snapshots",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "deerflow.skills.projection.ensure_public_skill_projection",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.get_memory_manager",
+        lambda **_kwargs: memory_manager,
+    )
+    monkeypatch.setattr(
+        "app.channels.service.start_channel_service",
+        AsyncMock(return_value=channel_service),
+    )
+    monkeypatch.setattr("app.channels.service.stop_channel_service", AsyncMock())
+    monkeypatch.setattr(
+        "app.gateway.services.build_channel_invocation_runtime",
+        lambda _app: object(),
+    )
+    monkeypatch.setattr("app.gateway.app.auth.close_oidc_service", AsyncMock())
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        lambda: ExtensionsConfig(),
+    )
+    monkeypatch.setattr(
+        "app.subagent_batches.SubagentBatchService",
+        build_service,
+    )
+
+    for restart_number in (1, 2):
+        repository.claimed.clear()
+        app = _gateway_test_app()
+        async with lifespan(app):
+            await asyncio.wait_for(repository.claimed.wait(), timeout=1)
+            assert app.state.subagent_batches_available is True
+            assert app.state.subagent_batch_service is services[-1]
+            assert services[-1]._poller is not None
+        assert app.state.subagent_batches_available is False
+        assert services[-1]._poller is None
+        assert len(services) == restart_number
+
+    assert len(set(repository.lease_owners)) == 2
+    assert services[0] is not services[1]
+
+
 async def _run_lifespan_with_memory_flush(
     *,
     enabled: bool,

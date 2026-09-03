@@ -13,6 +13,7 @@ from deerflow.runtime.kubernetes_qualification import (
     KubernetesQualificationChatModel,
     KubernetesQualificationHooks,
     qualification_barrier,
+    qualification_service_barrier,
     scenario_from_external_key,
 )
 from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
@@ -86,6 +87,38 @@ async def test_fault_barrier_requires_the_separate_fault_injection_gate(
     )
 
     assert await qualification_barrier("during_model_execution", record) is False
+
+
+@pytest.mark.anyio
+async def test_subagent_batch_terminal_publication_is_a_valid_service_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        async def getdel(self, _key: str):
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        qualification_module,
+        "_runtime_configuration",
+        lambda **_kwargs: ("qual-1", "redis://fixture", 1.0),
+    )
+    monkeypatch.setenv("DEER_FLOW_TENANT_ID", "qualification")
+    monkeypatch.setattr(
+        "redis.asyncio.Redis.from_url",
+        lambda *_args, **_kwargs: Client(),
+    )
+
+    assert (
+        await qualification_service_barrier(
+            scenario="subagent_batch",
+            point="before_terminal_publication",
+            subject_id="bi_" + "a" * 48,
+        )
+        is False
+    )
 
 
 @pytest.mark.anyio

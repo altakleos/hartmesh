@@ -113,6 +113,7 @@ def _paging_values(
     allow_source_kind: bool = False,
     allow_tool_receipts: bool = False,
     allow_mcp_tasks: bool = False,
+    allow_subagent_batches: bool = False,
 ) -> tuple[str | None, int, str | None] | JSONResponse:
     items = list(request.query_params.multi_items())
     allowed = {"cursor", "limit"}
@@ -132,6 +133,14 @@ def _paging_values(
                 "include_mcp_tasks",
                 "mcp_task_cursor",
                 "mcp_task_limit",
+            }
+        )
+    if allow_subagent_batches:
+        allowed.update(
+            {
+                "include_subagent_batches",
+                "subagent_batch_cursor",
+                "subagent_batch_limit",
             }
         )
     if any(key not in allowed for key, _value in items):
@@ -178,6 +187,26 @@ def _mcp_task_paging(request: Request) -> tuple[bool, str | None, int] | JSONRes
     if cursor == "" or (cursor is not None and not include):
         return runtime_error_response(422, FailureCode.invalid_request)
     raw_limit = request.query_params.get("mcp_task_limit", "100")
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        return runtime_error_response(422, FailureCode.invalid_request)
+    if str(limit) != raw_limit or not 1 <= limit <= 100:
+        return runtime_error_response(422, FailureCode.invalid_request)
+    return include, cursor, limit
+
+
+def _subagent_batch_paging(
+    request: Request,
+) -> tuple[bool, str | None, int] | JSONResponse:
+    raw_include = request.query_params.get("include_subagent_batches", "false")
+    if raw_include not in {"true", "false"}:
+        return runtime_error_response(422, FailureCode.invalid_request)
+    include = raw_include == "true"
+    cursor = request.query_params.get("subagent_batch_cursor")
+    if cursor == "" or (cursor is not None and not include):
+        return runtime_error_response(422, FailureCode.invalid_request)
+    raw_limit = request.query_params.get("subagent_batch_limit", "20")
     try:
         limit = int(raw_limit)
     except (TypeError, ValueError):
@@ -284,6 +313,7 @@ async def observe_invocation(
         request,
         allow_tool_receipts=True,
         allow_mcp_tasks=True,
+        allow_subagent_batches=True,
     )
     if isinstance(paging, JSONResponse):
         return paging
@@ -296,6 +326,14 @@ async def observe_invocation(
     if isinstance(mcp_task_paging, JSONResponse):
         return mcp_task_paging
     include_mcp_tasks, mcp_task_cursor, mcp_task_limit = mcp_task_paging
+    subagent_batch_paging = _subagent_batch_paging(request)
+    if isinstance(subagent_batch_paging, JSONResponse):
+        return subagent_batch_paging
+    (
+        include_subagent_batches,
+        subagent_batch_cursor,
+        subagent_batch_limit,
+    ) = subagent_batch_paging
     try:
         query = InvocationQuery(
             run_id=run_id,
@@ -307,6 +345,9 @@ async def observe_invocation(
             include_mcp_tasks=include_mcp_tasks,
             mcp_task_cursor=mcp_task_cursor,
             mcp_task_limit=mcp_task_limit,
+            include_subagent_batches=include_subagent_batches,
+            subagent_batch_cursor=subagent_batch_cursor,
+            subagent_batch_limit=subagent_batch_limit,
         )
     except (TypeError, ValueError):
         return runtime_error_response(422, FailureCode.invalid_request)

@@ -369,9 +369,9 @@ initial cancellation policy is non-cascading, so cancelling a parent run does
 not cancel its batch. Use the explicit batch cancellation tool or API.
 
 Owner-scoped APIs expose batch/item progress, payload-free attempt and lifecycle
-evidence, and a separate protected JSONL result export. The exact-two profile
-rejects enabled batches until its real PostgreSQL/Kubernetes failover gate has
-passed. See the [durable subagent batch guide](docs/DURABLE_SUBAGENT_BATCHES.md)
+evidence, and a separate protected JSONL result export. Durable production
+profiles reject enabled batches until their artifact-bound PostgreSQL process-
+restart/failover gates have passed. See the [durable subagent batch guide](docs/DURABLE_SUBAGENT_BATCHES.md)
 for limits, recovery, legacy cleanup, qualification status, and guarantees.
 
 Live rich-event writes are likewise bound to the admitted tenant, run, worker,
