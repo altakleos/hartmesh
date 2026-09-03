@@ -638,6 +638,7 @@ imagePullSecrets:
   {{- $agentStorageConfig := (index $appConfig "agent_storage") | default dict -}}
   {{- $streamBridgeConfig := (index $appConfig "stream_bridge") | default dict -}}
   {{- $schedulerConfig := (index $appConfig "scheduler") | default dict -}}
+  {{- $subagentBatchesConfig := (index $appConfig "subagent_batches") | default dict -}}
   {{- $mcpTasksConfig := (index $appConfig "mcp_tasks") | default dict -}}
   {{- $sandboxConfig := (index $appConfig "sandbox") | default dict -}}
   {{- $sandboxOwnership := (index $sandboxConfig "ownership") | default dict -}}
@@ -723,6 +724,9 @@ imagePullSecrets:
   {{- end -}}
   {{- if or (not ((index $schedulerConfig "enabled") | default false)) (not ((index $schedulerConfig "multi_instance") | default false)) -}}
   {{- fail "durable_two_gateway_v1 requires scheduler.enabled and scheduler.multi_instance" -}}
+  {{- end -}}
+  {{- if ((index $subagentBatchesConfig "enabled") | default false) -}}
+  {{- fail "subagent_batches_exact_two_unqualified: durable subagent batches are not qualified for durable_two_gateway_v1" -}}
   {{- end -}}
   {{- if not ((index $mcpTasksConfig "enabled") | default false) -}}
   {{- fail "durable_two_gateway_v1 requires mcp_tasks.enabled" -}}

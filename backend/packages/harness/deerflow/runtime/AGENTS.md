@@ -27,6 +27,12 @@ execution stops with `subagent_catalog_unavailable`. Do not install an older
 runtime that cannot validate the additive fields until all such nonterminal rows
 are drained or terminalized.
 
+Durable batches are subordinate to `InvocationRuntime`. The worker strips
+caller batch context; `batch_task` requires the accepted parent and active
+receipt. `AcceptedBatchV1` binds the assembly and execution snapshot without
+sealing another revision. Recovery does not rediscover subagents or skills;
+stable named tool adapters must match their accepted contract digests.
+
 Accepted durable lead execution also binds `AssemblyEvidenceV1` to the running
 owner/state-version fence. After accepted material is verified and the run starts,
 the worker assembles under the frozen extension generation, validates the actual

@@ -30,7 +30,11 @@ from deerflow.persistence.personal_access_tokens.model import PersonalAccessToke
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
-from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
+from deerflow.persistence.subagent_batches.model import (
+    SubagentBatchAttemptRow,
+    SubagentBatchItemRow,
+    SubagentBatchRow,
+)
 from deerflow.persistence.tenant_binding import DeploymentIdentityRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.topology.model import TopologyReplicaRow
@@ -53,6 +57,7 @@ __all__ = [
     "RunRow",
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
+    "SubagentBatchAttemptRow",
     "SubagentBatchRow",
     "SubagentBatchItemRow",
     "ThreadMetaRow",

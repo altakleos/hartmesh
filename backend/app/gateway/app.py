@@ -241,7 +241,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # snapshot on `app.state` to keep that contract enforceable.
     try:
         startup_config = get_app_config()
-        from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+        from deerflow.config.subagent_batches_config import (
+            SubagentBatchesConfig,
+            validate_subagent_batch_profile,
+        )
         from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
         from deerflow.subagents.capacity import configure_subagent_execution_capacity
 
@@ -281,6 +284,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 DeploymentProfile.local_development,
             ),
         )
+        try:
+            validate_subagent_batch_profile(
+                subagent_batches_config,
+                startup_profile,
+            )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
         webhook_auth = resolve_github_webhook_auth(
             deployment_profile=startup_profile,
         )
@@ -572,10 +582,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if subagent_batches_config.enabled and batch_repo is None:
             raise RuntimeError("subagent_batches.enabled requires database.backend sqlite or postgres")
         if batch_repo is not None:
+            authorization_provider = None
+            authorization_resolver = getattr(
+                app.state,
+                "authorization_provider_resolver",
+                None,
+            )
+            if authorization_resolver is not None:
+                authorization_provider = authorization_resolver.resolve(startup_config.authorization).provider
             batch_service = SubagentBatchService(
                 repository=batch_repo,
                 config=subagent_batches_config,
                 runtime_config=subagent_runtime_config,
+                app_config=startup_config,
+                extensions=getattr(app.state, "extensions", None),
+                authorization_provider=authorization_provider,
+                capability_manifest_digest=getattr(
+                    getattr(app.state, "capability_manifest", None),
+                    "digest",
+                    None,
+                ),
             )
             app.state.subagent_batch_service = batch_service
             if subagent_batches_config.enabled:

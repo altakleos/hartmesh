@@ -337,6 +337,14 @@ def test_operator_asserted_evidence_cannot_unlock_profile_without_bundled_artifa
             ),
             "requires scheduler.enabled and scheduler.multi_instance",
         ),
+        (
+            lambda values: _set_config(
+                values,
+                ("subagent_batches", "enabled"),
+                True,
+            ),
+            "subagent_batches_exact_two_unqualified",
+        ),
     ],
 )
 def test_two_gateway_profile_rejects_unsupported_surfaces(

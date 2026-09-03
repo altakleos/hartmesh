@@ -908,7 +908,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 tenant=tenant_reference,
             )
             await app.state.mcp_task_repo.verify_schema_writer_compatibility()
-            app.state.subagent_batch_repo = SubagentBatchRepository(sf)
+            app.state.subagent_batch_repo = SubagentBatchRepository(
+                sf,
+                tenant=tenant_reference,
+            )
+            await app.state.subagent_batch_repo.verify_schema_writer_compatibility()
         else:
             app.state.mcp_task_repo = None
             app.state.subagent_batch_repo = None

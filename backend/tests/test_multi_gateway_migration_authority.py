@@ -24,7 +24,7 @@ async def test_gateway_head_verifier_is_read_only_and_exact(tmp_path: Path) -> N
                 sa.text("INSERT INTO alembic_version VALUES (:head)"),
                 {"head": get_expected_migration_head()},
             )
-        assert await verify_schema_head(engine) == "0031_merge_upstream_0017"
+        assert await verify_schema_head(engine) == "0032_subagent_batch_evidence"
         async with engine.connect() as connection:
             tables = await connection.run_sync(lambda sync: set(sa.inspect(sync).get_table_names()))
         assert tables == {"alembic_version"}
@@ -49,7 +49,7 @@ async def test_gateway_head_verifier_rejects_missing_and_mismatched_heads(
             with pytest.raises(SchemaMigrationHeadError) as exc_info:
                 await verify_schema_head(engine)
             assert exc_info.value.code == "migration_head_mismatch"
-            assert exc_info.value.expected == "0031_merge_upstream_0017"
+            assert exc_info.value.expected == "0032_subagent_batch_evidence"
             assert exc_info.value.actual == actual
         finally:
             await engine.dispose()
@@ -69,7 +69,7 @@ async def test_migration_job_uses_the_normal_advisory_locked_bootstrap(
 
     async def verify(_engine):
         calls.append("verify")
-        return "0031_merge_upstream_0017"
+        return "0032_subagent_batch_evidence"
 
     async def close():
         calls.append("close")
@@ -80,5 +80,5 @@ async def test_migration_job_uses_the_normal_advisory_locked_bootstrap(
     monkeypatch.setattr(migration_job, "verify_schema_head", verify)
     monkeypatch.setattr(migration_job, "close_engine", close)
 
-    assert await migration_job.run() == "0031_merge_upstream_0017"
+    assert await migration_job.run() == "0032_subagent_batch_evidence"
     assert calls == [(config.database, "upgrade"), "verify", "close"]

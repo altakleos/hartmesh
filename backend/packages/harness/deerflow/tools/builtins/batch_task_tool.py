@@ -5,22 +5,44 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from contextvars import ContextVar
-from dataclasses import asdict, replace
 from typing import Annotated, Any, cast
 
+from deerflow_extension_api import TenantReferenceV1
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-from deerflow.authz.principal import normalize_authz_attributes
+from deerflow.authz.runtime import authorization_provider_from_context
+from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+from deerflow.extensions import resolve_run_extensions
+from deerflow.runtime.accepted_invocation import (
+    AcceptedInvocation,
+    ResolvedAgentMaterialV1,
+)
+from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+from deerflow.runtime.constraints import INVOCATION_CONSTRAINTS_CONTEXT_KEY
+from deerflow.runtime.skill_projection import (
+    SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
+    SkillProjectionConsumerToken,
+)
+from deerflow.runtime.tenant_identity import TENANT_REFERENCE_CONTEXT_KEY
+from deerflow.runtime.tool_evidence import (
+    get_active_tool_receipt,
+    resolve_tool_evidence_context,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.subagents.batch_acceptance import (
+    PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
+    BatchAdmissionError,
+    BatchItemRequestV1,
+    BatchLimitsV1,
+    ParentBoundBatchRequest,
+)
 from deerflow.subagents.batch_runtime import (
-    BatchSubmitRequest,
     SubagentBatchSubmitter,
     get_subagent_batch_submitter,
 )
-from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
 from deerflow.tools.types import Runtime
 
 
@@ -53,6 +75,15 @@ def _batch_app_config(runtime: Runtime) -> Any | None:
         return explicit
     context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
     return context.get("app_config")
+
+
+def _batch_thread_id(runtime: Runtime) -> str | None:
+    context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
+    accepted = context.get(PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY)
+    if isinstance(accepted, AcceptedInvocation):
+        return accepted.thread_id
+    value = context.get("thread_id")
+    return value if isinstance(value, str) and value else None
 
 
 def _bind_batch_tool(
@@ -121,15 +152,6 @@ def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = N
     )
 
 
-def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -> list[str] | None:
-    if parent is None:
-        return child
-    if child is None:
-        return list(parent)
-    allowed = set(parent)
-    return [name for name in child if name in allowed]
-
-
 @tool("batch_task", parse_docstring=True)
 async def batch_task(
     runtime: Runtime,
@@ -168,58 +190,74 @@ async def batch_task(
         return _result(tool_call_id, content="Batch item keys must be unique.", error=True)
 
     context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
-    metadata = runtime.config.get("metadata", {}) if runtime is not None else {}
     app_config = _batch_app_config(runtime)
-    allowed_subagents = metadata.get("allowed_subagents")
-    available = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents)
-    config = get_subagent_config(subagent_type, app_config=app_config)
-    if config is None or subagent_type not in available:
-        names = ", ".join(available) if available else "none"
+    accepted_parent = context.get(PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY)
+    material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+    tenant = context.get(TENANT_REFERENCE_CONTEXT_KEY)
+    binding, receipt_sink = resolve_tool_evidence_context(context)
+    receipt = get_active_tool_receipt()
+    if not isinstance(accepted_parent, AcceptedInvocation) or not isinstance(material, ResolvedAgentMaterialV1) or not isinstance(tenant, TenantReferenceV1) or binding is None:
         return _result(
             tool_call_id,
-            content=f"Unknown or disallowed subagent type {subagent_type!r}. Available: {names}",
+            content="Batch submission rejected: parent_not_accepted.",
             error=True,
         )
-
-    parent_skills = metadata.get("available_skills")
-    if parent_skills is not None:
-        config = replace(config, skills=_merge_skill_allowlists(list(parent_skills), config.skills))
-
-    thread_id = context.get("thread_id") or runtime.config.get("configurable", {}).get("thread_id")
-    if not thread_id:
-        return _result(tool_call_id, content="Durable batches require a thread_id.", error=True)
-    user_id = resolve_runtime_user_id(runtime)
-    run_id = context.get("run_id")
-    submission_key = f"{run_id or thread_id}:{tool_call_id}"
-    execution_spec = {
-        "subagent_config": asdict(config),
-        "parent_model": metadata.get("model_name"),
-        "tool_groups": metadata.get("tool_groups"),
-        "user_role": context.get("user_role"),
-        "oauth_provider": context.get("oauth_provider"),
-        "oauth_id": context.get("oauth_id"),
-        "channel_user_id": context.get("channel_user_id"),
-        "is_internal": context.get("is_internal") is True,
-        "authz_attributes": normalize_authz_attributes(context.get("authz_attributes")),
-    }
-    try:
-        batch = await submitter.submit(
-            BatchSubmitRequest(
-                user_id=user_id,
-                thread_id=str(thread_id),
-                run_id=str(run_id) if run_id else None,
-                tool_call_id=tool_call_id,
-                submission_key=submission_key,
-                title=title.strip()[:256] or "Subagent batch",
-                subagent_type=subagent_type,
-                items=[item.model_dump() for item in items],
-                max_live_items=max_live_items,
-                max_running_items=max_running_items,
-                execution_spec=execution_spec,
-            )
+    if receipt is None:
+        return _result(
+            tool_call_id,
+            content="Batch submission rejected: tool_attempt_not_active.",
+            error=True,
         )
-    except Exception as exc:
-        return _result(tool_call_id, content=f"Batch submission failed: {exc}", error=True)
+    configured = getattr(app_config, "subagent_batches", None)
+    batch_config = configured if isinstance(configured, SubagentBatchesConfig) else SubagentBatchesConfig()
+    max_live = batch_config.default_max_live_items if max_live_items is None else max_live_items
+    max_running = batch_config.default_max_running_items if max_running_items is None else max_running_items
+    skill_token = context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
+    try:
+        request = ParentBoundBatchRequest(
+            tenant=tenant,
+            accepted_parent=accepted_parent,
+            resolved_parent_material=material,
+            parent_tool_binding=binding,
+            parent_tool_receipt=receipt,
+            parent_tool_receipt_sink=receipt_sink,
+            user_id=accepted_parent.principal.user_id,
+            thread_id=accepted_parent.thread_id,
+            run_id=binding.run_id,
+            submission_key=f"{receipt.receipt_id}:{tool_call_id}",
+            title=title.strip()[:256] or "Subagent batch",
+            subagent_name=subagent_type,
+            items=tuple(BatchItemRequestV1(key=item.key, prompt=item.prompt) for item in items),
+            limits=BatchLimitsV1(
+                max_live_items=max_live,
+                max_running_items=max_running,
+                max_attempts=batch_config.max_attempts,
+                max_attempt_records_per_item=(batch_config.max_attempt_records_per_item),
+                max_result_chars=batch_config.max_result_chars,
+                max_total_runtime_seconds=(batch_config.max_total_runtime_seconds),
+            ),
+            # Initial policy is deliberately non-cascading: parent-run
+            # cancellation never mutates an independently accepted batch.
+            parent_cancellable=False,
+            app_config=app_config,
+            extensions=resolve_run_extensions(context),
+            authorization_provider=authorization_provider_from_context(context),
+            invocation_constraints=context.get(INVOCATION_CONSTRAINTS_CONTEXT_KEY),
+            skill_projection_token=(skill_token if isinstance(skill_token, SkillProjectionConsumerToken) else None),
+        )
+        batch = await submitter.accept(request)
+    except BatchAdmissionError as exc:
+        return _result(
+            tool_call_id,
+            content=f"Batch submission rejected: {exc.code}.",
+            error=True,
+        )
+    except Exception:
+        return _result(
+            tool_call_id,
+            content="Batch submission failed: batch_internal_error.",
+            error=True,
+        )
     return _result(
         tool_call_id,
         batch=batch,
@@ -238,7 +276,7 @@ async def batch_status(runtime: Runtime, batch_id: str) -> str:
     if submitter is None:
         return "Durable subagent batches are unavailable."
     batch = await submitter.get_batch(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime))
-    if batch is None:
+    if batch is None or batch.get("thread_id") != _batch_thread_id(runtime):
         return "Batch not found."
     return json.dumps(
         {
@@ -246,6 +284,8 @@ async def batch_status(runtime: Runtime, batch_id: str) -> str:
             "status": batch["status"],
             "total_items": batch["total_items"],
             "counts": batch["counts"],
+            "acceptance_digest": batch.get("acceptance_digest"),
+            "terminal_code": batch.get("terminal_code"),
         },
         ensure_ascii=False,
     )
@@ -261,7 +301,11 @@ async def cancel_batch(runtime: Runtime, batch_id: str) -> str:
     submitter = _batch_submitter()
     if submitter is None:
         return "Durable subagent batches are unavailable."
-    batch = await submitter.cancel_batch(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime))
+    user_id = resolve_runtime_user_id(runtime)
+    visible = await submitter.get_batch(batch_id=batch_id, user_id=user_id)
+    if visible is None or visible.get("thread_id") != _batch_thread_id(runtime):
+        return "Batch not found."
+    batch = await submitter.cancel_batch(batch_id=batch_id, user_id=user_id)
     if batch is None:
         return "Batch not found."
     return f"Batch {batch_id} cancellation requested."

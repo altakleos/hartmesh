@@ -1655,8 +1655,16 @@ subagent_batches:
   default_max_running_items: 3
   max_running_items_per_batch: 64
   max_attempts: 3
+  # Includes non-consuming queue rejections; prevents unbounded attempt evidence.
+  max_attempt_records_per_item: 64
   max_result_chars: 100000
   result_preview_max_chars: 2000
+  # A batch that has not reached terminal state by this database-time age is
+  # stopped before another item can be claimed.
+  max_total_runtime_seconds: 86400
+  # Lower configurable bound for the payload-free immutable acceptance record
+  # (the schema also enforces an absolute 64 KiB ceiling).
+  max_evidence_bytes: 16384
 
 # ============================================================================
 # Tool Result Verification

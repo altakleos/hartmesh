@@ -950,6 +950,39 @@ remove it. There is no list, bulk-requeue, bulk-discard, or raw-payload route.
 
 ---
 
+### Durable subagent batch operations
+
+Base URL: `/api/threads/{thread_id}/subagent-batches`
+
+These routes are available when `subagent_batches.enabled` starts a SQL-backed
+worker. All lookups require the authenticated owner and server-owned tenant; an
+invisible batch returns `404`. Batch creation is model-initiated through
+`batch_task` inside an accepted durable parent tool attempt, not through an HTTP
+create route.
+
+| Route | Contract |
+|---|---|
+| `GET /api/threads/{thread_id}/subagent-batches` | List up to 100 owner-scoped batch projections. |
+| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}` | Return safe aggregate status, counts, immutable evidence anchors, and terminal code. |
+| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/items` | Page item projections; optional finite `status` filter. Raw results are omitted. |
+| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/attempts` | Return at most 100 payload-free attempt evidence records, optionally for one item. |
+| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/observations` | Return at most 100 `batch.accepted`, item-attempt transition, and `batch.terminal` observations. |
+| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/pause` | Stop new claims without revoking an active lease. |
+| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/resume` | Make paused work claimable again. |
+| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/cancel` | Persist cancellation, increment its fence, and reject stale completions; returns `503` if no worker is running. |
+| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/items/{item_id}/retry` | Reset an owner-scoped failed item; otherwise returns `409`. |
+| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl` | Stream results through the protected owner-authorized channel. |
+
+Attempt and lifecycle routes never return prompts, results, tool arguments,
+exception text, credentials, worker names, or provider handles. Result export is
+separate because model output is operational data, not lifecycle evidence.
+Parent-run cancellation does not cascade into a batch in this release.
+
+See [Evidence-bound durable subagent batches](../../docs/DURABLE_SUBAGENT_BATCHES.md)
+for admission, retry, cancellation, limits, and qualification semantics.
+
+---
+
 ## Durable Invocation Runtime API
 
 Base URL: `/api/runtime/v1`

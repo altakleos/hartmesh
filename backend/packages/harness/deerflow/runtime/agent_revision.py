@@ -168,6 +168,26 @@ def _skills(app_config: AppConfig, *, user_id: str | None) -> tuple[tuple[Any, .
     return enabled, all_skills
 
 
+def app_config_execution_digest(app_config: AppConfig) -> str:
+    """Digest every app-config field that can affect an assembled agent."""
+
+    if not isinstance(app_config, AppConfig):
+        raise TypeError("app_config must be AppConfig")
+    assert_app_config_projection_complete()
+    return canonical_digest(
+        {
+            "version": 1,
+            "app_config": {
+                field_name: _safe_settings(
+                    getattr(app_config, field_name),
+                    path=f"app_config.{field_name}",
+                )
+                for field_name in sorted(APP_CONFIG_FACTORY_INCLUDED_FIELDS)
+            },
+        }
+    )
+
+
 def resolve_agent_revision(
     config: Mapping[str, Any],
     *,
@@ -212,18 +232,7 @@ def resolve_agent_revision(
         model_config = pinned_app_config.models[0]
     resolved_model_name = model_config.name if model_config is not None else selected_model
     model_profile = _safe_settings(model_config or {}, path="models.selected")
-    model_profile["app_execution_digest"] = canonical_digest(
-        {
-            "version": 1,
-            "app_config": {
-                field_name: _safe_settings(
-                    getattr(pinned_app_config, field_name),
-                    path=f"app_config.{field_name}",
-                )
-                for field_name in sorted(APP_CONFIG_FACTORY_INCLUDED_FIELDS)
-            },
-        }
-    )
+    model_profile["app_execution_digest"] = app_config_execution_digest(pinned_app_config)
 
     groups = tuple(pinned_agent_config.tool_groups or ()) if pinned_agent_config else ()
     configured_tools = tuple(sorted(tool.name for tool in pinned_app_config.tools if not groups or tool.group in groups))
@@ -337,6 +346,7 @@ __all__ = [
     "AGENT_CONFIG_FACTORY_INCLUDED_FIELDS",
     "APP_CONFIG_FACTORY_EXCLUDED_FIELDS",
     "APP_CONFIG_FACTORY_INCLUDED_FIELDS",
+    "app_config_execution_digest",
     "RESOLVED_AGENT_MATERIAL_CONTEXT_KEY",
     "assert_agent_config_projection_complete",
     "assert_app_config_projection_complete",
