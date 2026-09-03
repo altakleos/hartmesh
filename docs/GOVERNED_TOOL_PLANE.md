@@ -119,8 +119,11 @@ A user overlay names its validated base and only safe per-user choices:
 ```
 
 The archive staging response supplies the archive/tree/manifest digests needed
-by a skill entry. Archive staging and revision staging are both inert; promotion
-copies only the exact validated artifact bytes.
+by a skill entry. Every managed-integration entry additionally requires its
+provider identifier; projection preserves the canonical
+`<provider>/<skill>/` layout and provider-owned hidden manifests while replacing
+all governed package directories. Archive staging and revision staging are both
+inert; promotion copies only the exact validated artifact bytes.
 
 ## Secrets and credential selectors
 
@@ -159,8 +162,11 @@ Warnings remain visible but do not require an override in policy version 1.
 Errors reject the candidate. An unavailable or incomplete required validator is
 `unqualified`/failed in durable operation; it is never treated as a successful
 skip. Reports expose bounded safe codes, locations, counts, validator versions,
-policy identity, and digests. Raw unsafe scanner payloads and skill source bodies
-do not enter general audit projections.
+policy identity, and digests. Validator versions include SHA-256 identities for
+the canonicalizer, governed validator, shared MCP launch policy, MCP schema,
+SkillScan, and skill-review implementations, plus the review facts schema
+version; a mismatch makes a prior report stale at promotion. Raw unsafe scanner
+payloads and skill source bodies do not enter general audit projections.
 
 Validation means the candidate satisfied these deterministic checks. It does
 not prove that a skill is correct, that a remote MCP server is trustworthy, that

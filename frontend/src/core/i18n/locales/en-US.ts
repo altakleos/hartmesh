@@ -969,6 +969,8 @@ export const enUS: Translations = {
       noActiveRevision: "No active revision",
       latestRevision: "Latest",
       noRevision: "No staged revisions",
+      stagedBy: "Staged by",
+      promotedBy: "Promoted by",
       credentialNotice:
         "Only revision identifiers and secret-free evidence are shown here. Credential values are never included.",
       states: {

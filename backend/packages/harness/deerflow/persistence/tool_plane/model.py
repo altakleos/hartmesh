@@ -24,6 +24,8 @@ from deerflow.persistence.base import Base
 
 
 class ToolPlaneScopeRow(Base):
+    """Mutable active-pointer and generation fence for one tenant scope."""
+
     __tablename__ = "tool_plane_scopes"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -61,6 +63,8 @@ class ToolPlaneScopeRow(Base):
 
 
 class ToolPlaneRevisionRow(Base):
+    """Immutable revision material plus its monotonic lifecycle state."""
+
     __tablename__ = "tool_plane_revisions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -142,6 +146,8 @@ class ToolPlaneRevisionRow(Base):
 
 
 class ToolPlaneRevisionEventRow(Base):
+    """Append-only attributed transition event for one revision."""
+
     __tablename__ = "tool_plane_revision_events"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -172,6 +178,8 @@ class ToolPlaneRevisionEventRow(Base):
 
 
 class ToolPlaneOverlayCompatibilityRow(Base):
+    """Immutable base/overlay compatibility attestation row."""
+
     __tablename__ = "tool_plane_overlay_compatibility"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

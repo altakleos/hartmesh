@@ -56,6 +56,8 @@ def canonical_json_bytes(value: object) -> bytes:
 
 
 def canonical_tool_plane_digest(value: object) -> str:
+    """Return the lowercase SHA-256 digest of canonical tool-plane JSON."""
+
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
@@ -292,7 +294,12 @@ def _canonical_ordered_string_list(
     return result
 
 
-def _canonical_skill_entries(value: object, *, field_name: str) -> list[dict[str, object]]:
+def _canonical_skill_entries(
+    value: object,
+    *,
+    field_name: str,
+    require_provider: bool = False,
+) -> list[dict[str, object]]:
     if value is None:
         return []
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
@@ -320,6 +327,8 @@ def _canonical_skill_entries(value: object, *, field_name: str) -> list[dict[str
             "manifest_digest",
             "entry_points",
         }
+        if require_provider:
+            allowed.add("provider")
         if unknown := set(entry) - allowed:
             raise ToolPlaneRevisionError(
                 "validation_failed",
@@ -349,6 +358,11 @@ def _canonical_skill_entries(value: object, *, field_name: str) -> list[dict[str
                 maximum=32,
             ),
         }
+        if require_provider:
+            item["provider"] = _identifier(
+                entry.get("provider"),
+                field_name=f"{field_name}.{skill_name}.provider",
+            )
         version = entry.get("version")
         if version is not None:
             if not isinstance(version, str) or not version or len(version) > 128:
@@ -984,6 +998,8 @@ def _canonical_bool_map(value: object, *, field_name: str) -> list[dict[str, obj
 
 @dataclass(frozen=True, slots=True)
 class ToolPlaneRevisionScopeV1:
+    """Tenant-local deployment-base or opaque user-overlay scope."""
+
     kind: ToolPlaneScopeKind
     user_ref: str | None = None
 
@@ -998,15 +1014,21 @@ class ToolPlaneRevisionScopeV1:
             raise ValueError("unsupported tool-plane scope kind")
 
     def to_json(self) -> dict[str, object]:
+        """Return the canonical versioned scope projection."""
+
         return {"version": 1, "kind": self.kind, "user_ref": self.user_ref}
 
     @property
     def key(self) -> str:
+        """Return the repository key for this scope."""
+
         return self.kind if self.user_ref is None else f"{self.kind}:{self.user_ref}"
 
 
 @dataclass(frozen=True, slots=True)
 class DeploymentToolPlaneRevisionV1:
+    """Canonical immutable deployment-wide MCP and skill material."""
+
     mcp_servers: tuple[Mapping[str, object], ...] = ()
     public_skills: tuple[Mapping[str, object], ...] = ()
     managed_integrations: tuple[Mapping[str, object], ...] = ()
@@ -1015,6 +1037,8 @@ class DeploymentToolPlaneRevisionV1:
     change_summary: str | None = None
 
     def to_json(self) -> dict[str, object]:
+        """Return the canonical versioned deployment manifest."""
+
         return {
             "version": 1,
             "kind": "deployment_base",
@@ -1029,11 +1053,15 @@ class DeploymentToolPlaneRevisionV1:
 
     @property
     def digest(self) -> str:
+        """Return this canonical deployment manifest's identity."""
+
         return canonical_tool_plane_digest(self.to_json())
 
 
 @dataclass(frozen=True, slots=True)
 class UserToolPlaneOverlayV1:
+    """Canonical immutable per-user enablement and custom-skill material."""
+
     base_revision_digest: str
     custom_skills: tuple[Mapping[str, object], ...] = ()
     mcp_enablement: tuple[Mapping[str, object], ...] = ()
@@ -1044,6 +1072,8 @@ class UserToolPlaneOverlayV1:
     change_summary: str | None = None
 
     def to_json(self) -> dict[str, object]:
+        """Return the canonical versioned user-overlay manifest."""
+
         return {
             "version": 1,
             "kind": "user_overlay",
@@ -1060,10 +1090,14 @@ class UserToolPlaneOverlayV1:
 
     @property
     def digest(self) -> str:
+        """Return this canonical overlay manifest's identity."""
+
         return canonical_tool_plane_digest(self.to_json())
 
     @property
     def is_empty(self) -> bool:
+        """Return whether the overlay contributes no user-specific material."""
+
         return not any(
             (
                 self.custom_skills,
@@ -1078,6 +1112,8 @@ class UserToolPlaneOverlayV1:
 def canonicalize_deployment_candidate(
     value: Mapping[str, object],
 ) -> DeploymentToolPlaneRevisionV1:
+    """Validate and canonicalize a deployment-base candidate."""
+
     mapping = _require_mapping(value, field_name="candidate")
     allowed = {
         "version",
@@ -1101,6 +1137,7 @@ def canonicalize_deployment_candidate(
     integrations = _canonical_skill_entries(
         mapping.get("managed_integrations"),
         field_name="managed_integrations",
+        require_provider=True,
     )
     return DeploymentToolPlaneRevisionV1(
         mcp_servers=tuple(MappingProxyType(item) for item in _canonical_mcp_servers(mapping.get("mcp_servers"))),
@@ -1127,6 +1164,8 @@ def canonicalize_deployment_candidate(
 def canonicalize_user_overlay_candidate(
     value: Mapping[str, object],
 ) -> UserToolPlaneOverlayV1:
+    """Validate and canonicalize a user-overlay candidate."""
+
     mapping = _require_mapping(value, field_name="candidate")
     allowed = {
         "version",
@@ -1250,6 +1289,8 @@ EMPTY_OVERLAY_MARKER_V1 = canonical_tool_plane_digest({"version": 1, "kind": "em
 
 @dataclass(frozen=True, slots=True)
 class EffectiveToolPlaneRevisionV1:
+    """Canonical admitted composition of one base and one user overlay."""
+
     base_revision_digest: str
     user_overlay_digest: str
     base_generation: int
@@ -1305,6 +1346,8 @@ class EffectiveToolPlaneRevisionV1:
         object.__setattr__(self, "effective_digest", canonical_tool_plane_digest(projection))
 
     def to_json(self) -> dict[str, object]:
+        """Return the complete secret-safe accepted effective projection."""
+
         return {
             "version": 1,
             "base_revision_digest": self.base_revision_digest,

@@ -112,7 +112,12 @@ class ToolPlaneUserInventorySnapshot:
 
 
 class ToolPlaneUserInventory(Protocol):
-    async def snapshot(self) -> ToolPlaneUserInventorySnapshot: ...
+    """Port for enumerating authoritative user storage subjects."""
+
+    async def snapshot(self) -> ToolPlaneUserInventorySnapshot:
+        """Return one bounded generation-bound inventory snapshot."""
+
+        ...
 
 
 class StaticToolPlaneUserInventory:
@@ -122,6 +127,8 @@ class StaticToolPlaneUserInventory:
         self._subject_ids = subject_ids
 
     async def snapshot(self) -> ToolPlaneUserInventorySnapshot:
+        """Return the configured deterministic subject snapshot."""
+
         return ToolPlaneUserInventorySnapshot(self._subject_ids)
 
 
@@ -129,6 +136,8 @@ class RegisteredToolPlaneUserInventory:
     """Read the protected user-skill storage index."""
 
     async def snapshot(self) -> ToolPlaneUserInventorySnapshot:
+        """Read the current protected user-skill index."""
+
         from deerflow.skills.storage.user_inventory import (
             list_registered_user_skill_subjects,
         )
@@ -147,6 +156,8 @@ class CompositeToolPlaneUserInventory:
         self._inventories = tuple(inventories)
 
     async def snapshot(self) -> ToolPlaneUserInventorySnapshot:
+        """Return the canonical union of all configured inventories."""
+
         subject_ids: set[str] = set()
         for inventory in self._inventories:
             subject_ids.update((await inventory.snapshot()).subject_ids)
@@ -155,6 +166,8 @@ class CompositeToolPlaneUserInventory:
 
 @dataclass(frozen=True, slots=True)
 class ScopedStageRevisionRequest:
+    """One canonicalization request bound to an explicit authorized scope."""
+
     scope: ToolPlaneRevisionScopeV1
     candidate: Mapping[str, object]
 
@@ -168,6 +181,8 @@ class ScopedStageRevisionRequest:
 
 @dataclass(frozen=True, slots=True)
 class RevisionEventV1:
+    """Bounded append-only revision lifecycle evidence."""
+
     event_id: str
     revision_id: str
     state: RevisionState
@@ -176,6 +191,8 @@ class RevisionEventV1:
     safe_details: Mapping[str, object] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, object]:
+        """Return the versioned safe event projection."""
+
         return {
             "version": 1,
             "event_id": self.event_id,
@@ -189,11 +206,15 @@ class RevisionEventV1:
 
 @dataclass(frozen=True, slots=True)
 class ToolPlaneValidationFindingV1:
+    """One bounded safe validator finding without raw rejected material."""
+
     code: str
     severity: Literal["warning", "error"]
     location: str | None = None
 
     def to_json(self) -> dict[str, object]:
+        """Return the safe finding projection."""
+
         return {
             "code": self.code,
             "severity": self.severity,
@@ -203,6 +224,8 @@ class ToolPlaneValidationFindingV1:
 
 @dataclass(frozen=True, slots=True)
 class ToolPlaneValidationReportV1:
+    """Immutable validator result bound to exact candidate and policy bytes."""
+
     revision_digest: str
     content_digest: str
     validator_policy_digest: str
@@ -233,6 +256,8 @@ class ToolPlaneValidationReportV1:
         }
 
     def to_json(self) -> dict[str, object]:
+        """Return the canonical report with its integrity digest."""
+
         return {**self._projection(), "report_digest": self.report_digest}
 
 
@@ -270,6 +295,8 @@ class OverlayCompatibilityV1:
 
     @property
     def key(self) -> tuple[str, str, str]:
+        """Return the unique base, overlay, and policy identity tuple."""
+
         return (
             self.base_revision_digest,
             self.overlay_revision_digest,
@@ -288,6 +315,8 @@ class OverlayCompatibilityV1:
         }
 
     def to_json(self) -> dict[str, object]:
+        """Return the complete safe attestation projection."""
+
         return {
             **self._projection(),
             "attestation_digest": self.attestation_digest,
@@ -297,6 +326,8 @@ class OverlayCompatibilityV1:
 
 @dataclass(frozen=True, slots=True)
 class ToolPlaneRevisionRecord:
+    """Repository-neutral immutable view of one revision and its state."""
+
     revision_id: str
     revision_digest: str
     tenant_ref: str
@@ -322,6 +353,8 @@ class ToolPlaneRevisionRecord:
     bootstrap_inventory_subject_ids: tuple[str, ...] = field(default=(), repr=False)
 
     def to_safe_json(self, *, include_manifest: bool = True) -> dict[str, object]:
+        """Return a safe API view that omits protected routing facts."""
+
         result: dict[str, object] = {
             "version": 1,
             "revision_id": self.revision_id,
@@ -350,6 +383,8 @@ class ToolPlaneRevisionRecord:
 
 @dataclass(frozen=True, slots=True)
 class StagedRevision:
+    """Minimal safe result returned when inert material is staged."""
+
     revision_id: str
     revision_digest: str
     content_digest: str
@@ -368,31 +403,45 @@ class BootstrapStagingResult:
 
     @property
     def revision_id(self) -> str:
+        """Return the staged base revision identifier."""
+
         return self.base_revision.revision_id
 
     @property
     def revision_digest(self) -> str:
+        """Return the staged base revision digest."""
+
         return self.base_revision.revision_digest
 
     @property
     def content_digest(self) -> str:
+        """Return the staged base content digest."""
+
         return self.base_revision.content_digest
 
     @property
     def scope(self) -> ToolPlaneRevisionScopeV1:
+        """Return the deployment-base scope."""
+
         return self.base_revision.scope
 
     @property
     def state(self) -> RevisionState:
+        """Return the staged base lifecycle state."""
+
         return self.base_revision.state
 
     @property
     def staged_at(self) -> datetime:
+        """Return when the base bootstrap revision was staged."""
+
         return self.base_revision.staged_at
 
 
 @dataclass(frozen=True, slots=True)
 class PromotionResult:
+    """Safe result of one finalized promotion or rollback."""
+
     revision_id: str
     revision_digest: str
     state: RevisionState
@@ -402,9 +451,26 @@ class PromotionResult:
     observed_projection_digest: str
     promoted_at: datetime
 
+    def to_json(self) -> dict[str, object]:
+        """Return the bounded API-safe representation."""
+
+        return {
+            "version": 1,
+            "revision_id": self.revision_id,
+            "revision_digest": self.revision_digest,
+            "state": self.state,
+            "actor_digest": self.actor_digest,
+            "previous_revision_id": self.previous_revision_id,
+            "desired_projection_digest": self.desired_projection_digest,
+            "observed_projection_digest": self.observed_projection_digest,
+            "promoted_at": self.promoted_at.isoformat(),
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class ToolPlaneStatus:
+    """Safe observed governance and active-generation status for one scope."""
+
     scope: ToolPlaneRevisionScopeV1
     governance_state: Literal[
         "bootstrap_required",
@@ -420,6 +486,8 @@ class ToolPlaneStatus:
     drift: bool
 
     def to_json(self) -> dict[str, object]:
+        """Return the versioned status projection."""
+
         return {
             "version": 1,
             "scope": self.scope.to_json(),
@@ -433,35 +501,60 @@ class ToolPlaneStatus:
 
 
 class ToolPlaneValidator(Protocol):
+    """Validation port for exact candidates and base/overlay composition."""
+
     @property
-    def policy_digest(self) -> str: ...
+    def policy_digest(self) -> str:
+        """Return the active validation policy identity."""
+
+        ...
+
+    @property
+    def validator_versions(self) -> Mapping[str, str]:
+        """Return exact identities for every validator component."""
+
+        ...
 
     async def validate(
         self,
         revision: ToolPlaneRevisionRecord,
-    ) -> ToolPlaneValidationReportV1: ...
+    ) -> ToolPlaneValidationReportV1:
+        """Validate one immutable revision candidate."""
+
+        ...
 
     async def validate_compatibility(
         self,
         *,
         base: ToolPlaneRevisionRecord,
         overlay: ToolPlaneRevisionRecord,
-    ) -> ToolPlaneValidationReportV1: ...
+    ) -> ToolPlaneValidationReportV1:
+        """Validate that an overlay composes without widening its base."""
+
+        ...
 
 
 class ToolPlaneProjection(Protocol):
+    """Crash-observable projection port for promoted revision material."""
+
     async def project(
         self,
         scope: ToolPlaneRevisionScopeV1,
         manifest: Mapping[str, object],
         *,
         desired_digest: str,
-    ) -> str: ...
+    ) -> str:
+        """Project exact canonical material and return its observed digest."""
+
+        ...
 
     async def observed_digest(
         self,
         scope: ToolPlaneRevisionScopeV1,
-    ) -> str | None: ...
+    ) -> str | None:
+        """Return the exactly observed active projection identity."""
+
+        ...
 
 
 class DeterministicToolPlaneValidator:
@@ -479,12 +572,26 @@ class DeterministicToolPlaneValidator:
 
     @property
     def policy_digest(self) -> str:
+        """Return the configured structural-policy identity."""
+
         return self._policy_digest
+
+    @property
+    def validator_versions(self) -> Mapping[str, str]:
+        """Return the exact structural validator contract versions."""
+
+        return {
+            "canonicalizer": "deerflow-tool-plane/v1",
+            "mcp_schema": "extensions-config/v1",
+            "skill_review": "structural-only/v1",
+        }
 
     async def validate(
         self,
         revision: ToolPlaneRevisionRecord,
     ) -> ToolPlaneValidationReportV1:
+        """Validate structural and exact policy binding for one revision."""
+
         manifest_policy = revision.manifest.get("validation_policy_digest")
         findings: tuple[ToolPlaneValidationFindingV1, ...] = ()
         result: Literal["passed", "failed", "unqualified"] = "passed"
@@ -501,11 +608,7 @@ class DeterministicToolPlaneValidator:
             revision_digest=revision.revision_digest,
             content_digest=revision.content_digest,
             validator_policy_digest=self._policy_digest,
-            validator_versions={
-                "canonicalizer": "deerflow-tool-plane/v1",
-                "mcp_schema": "extensions-config/v1",
-                "skill_review": "structural-only/v1",
-            },
+            validator_versions=self.validator_versions,
             result=result,
             findings=findings,
         )
@@ -516,6 +619,8 @@ class DeterministicToolPlaneValidator:
         base: ToolPlaneRevisionRecord,
         overlay: ToolPlaneRevisionRecord,
     ) -> ToolPlaneValidationReportV1:
+        """Validate an overlay using the structural baseline validator."""
+
         del base
         return await self.validate(overlay)
 
@@ -536,6 +641,8 @@ class InMemoryToolPlaneProjection:
         *,
         desired_digest: str,
     ) -> str:
+        """Atomically replace the in-memory projection for one scope."""
+
         self.project_count += 1
         failure = self.fail_next
         self.fail_next = None
@@ -549,9 +656,13 @@ class InMemoryToolPlaneProjection:
         self,
         scope: ToolPlaneRevisionScopeV1,
     ) -> str | None:
+        """Return the in-memory observed digest for one scope."""
+
         return self._digests.get(scope.key)
 
     def inject_drift(self, scope: ToolPlaneRevisionScopeV1, digest: str) -> None:
+        """Replace an observed digest to exercise drift handling in tests."""
+
         self._digests[scope.key] = digest
 
 
@@ -577,15 +688,21 @@ class InMemoryToolPlaneRevisionRepository:
         return copy.deepcopy(record)
 
     async def initialize(self, *, existing_projection: bool) -> None:
+        """Initialize bootstrap state for a pre-governance projection."""
+
         async with self._lock:
             if not self._records and existing_projection:
                 self._bootstrap_required = True
 
     async def bootstrap_required(self) -> bool:
+        """Return whether existing mutable material still needs adoption."""
+
         async with self._lock:
             return self._bootstrap_required
 
     async def clear_bootstrap(self) -> None:
+        """Clear the bootstrap gate after exact inventory verification."""
+
         async with self._lock:
             self._bootstrap_required = False
 
@@ -609,6 +726,8 @@ class InMemoryToolPlaneRevisionRepository:
         )
 
     async def add(self, record: ToolPlaneRevisionRecord) -> None:
+        """Append one newly staged revision and its first event."""
+
         async with self._lock:
             self._add_unlocked(record)
 
@@ -651,6 +770,8 @@ class InMemoryToolPlaneRevisionRepository:
         self,
         attestation: OverlayCompatibilityV1,
     ) -> OverlayCompatibilityV1:
+        """Persist or return the exact immutable compatibility attestation."""
+
         async with self._lock:
             current = self._compatibilities.get(attestation.key)
             if current is not None:
@@ -665,6 +786,8 @@ class InMemoryToolPlaneRevisionRepository:
         overlay_revision_digest: str,
         validator_policy_digest: str,
     ) -> OverlayCompatibilityV1 | None:
+        """Look up one exact base/overlay/policy attestation."""
+
         async with self._lock:
             result = self._compatibilities.get(
                 (
@@ -676,6 +799,8 @@ class InMemoryToolPlaneRevisionRepository:
             return None if result is None else copy.deepcopy(result)
 
     async def get(self, revision_id: str) -> ToolPlaneRevisionRecord | None:
+        """Return a detached revision record by identifier."""
+
         async with self._lock:
             record = self._records.get(revision_id)
             return None if record is None else self._copy_record(record)
@@ -686,12 +811,16 @@ class InMemoryToolPlaneRevisionRepository:
         *,
         limit: int = 100,
     ) -> list[ToolPlaneRevisionRecord]:
+        """Return newest-first bounded revision history for a scope."""
+
         if limit < 1 or limit > 100:
             raise ValueError("limit must be between 1 and 100")
         async with self._lock:
             return [self._copy_record(record) for record in reversed(tuple(self._records.values())) if record.scope == scope][:limit]
 
     async def events(self, revision_id: str) -> list[RevisionEventV1]:
+        """Return append-order lifecycle events for one revision."""
+
         async with self._lock:
             return [copy.deepcopy(event) for event in self._events if event.revision_id == revision_id]
 
@@ -699,19 +828,27 @@ class InMemoryToolPlaneRevisionRepository:
         self,
         scope: ToolPlaneRevisionScopeV1,
     ) -> ToolPlaneRevisionRecord | None:
+        """Return the currently active revision for a scope."""
+
         async with self._lock:
             revision_id = self._active.get(scope.key)
             return None if revision_id is None else self._copy_record(self._records[revision_id])
 
     async def generation(self, scope: ToolPlaneRevisionScopeV1) -> int:
+        """Return the current active-pointer generation for a scope."""
+
         async with self._lock:
             return self._generations.get(scope.key, 0)
 
     async def overlay_set_generation(self) -> int:
+        """Return the generation of the active nonempty-overlay set."""
+
         async with self._lock:
             return self._overlay_set_generation
 
     async def active_overlays(self) -> tuple[int, tuple[ToolPlaneRevisionRecord, ...]]:
+        """Return one generation-bound snapshot of all active overlays."""
+
         async with self._lock:
             overlays = tuple(self._records[revision_id] for key, revision_id in sorted(self._active.items()) if key.startswith("user_overlay:"))
             return self._overlay_set_generation, tuple(self._copy_record(record) for record in overlays)
@@ -722,6 +859,8 @@ class InMemoryToolPlaneRevisionRepository:
         after_ref: str | None,
         limit: int,
     ) -> tuple[int, tuple[ToolPlaneRevisionRecord, ...], str | None]:
+        """Return one bounded keyset page of active overlays."""
+
         if limit < 1 or limit > 1_000:
             raise ValueError("limit must be between 1 and 1000")
         async with self._lock:
@@ -742,6 +881,8 @@ class InMemoryToolPlaneRevisionRepository:
         *,
         actor_digest: str,
     ) -> ToolPlaneRevisionRecord:
+        """Fence a staged revision into the validating state."""
+
         async with self._lock:
             record = self._records.get(revision_id)
             if record is None:
@@ -760,6 +901,8 @@ class InMemoryToolPlaneRevisionRepository:
         actor_digest: str,
         report: ToolPlaneValidationReportV1,
     ) -> ToolPlaneRevisionRecord:
+        """Persist the immutable report and terminal validation state."""
+
         async with self._lock:
             record = self._records.get(revision_id)
             if record is None or record.state != "validating":
@@ -787,6 +930,8 @@ class InMemoryToolPlaneRevisionRepository:
         expected_overlay_set_generation: int | None,
         required_compatibility: tuple[tuple[str, str, str], ...] = (),
     ) -> ToolPlaneRevisionRecord:
+        """Write the durable prepared journal under generation fences."""
+
         async with self._lock:
             record = self._records.get(revision_id)
             if record is None:
@@ -830,6 +975,8 @@ class InMemoryToolPlaneRevisionRepository:
         actor_digest: str,
         observed_projection_digest: str,
     ) -> ToolPlaneRevisionRecord:
+        """Advance the active pointer after exact projection verification."""
+
         async with self._lock:
             record = self._records.get(revision_id)
             if record is None or record.state not in {
@@ -877,6 +1024,8 @@ class InMemoryToolPlaneRevisionRepository:
         actor_digest: str,
         reason: str,
     ) -> None:
+        """Persist a typed recovery gate for an unfinished projection."""
+
         async with self._lock:
             record = self._records.get(revision_id)
             if record is None or record.state not in {
@@ -894,6 +1043,8 @@ class InMemoryToolPlaneRevisionRepository:
             )
 
     async def prepared_or_recovery(self) -> tuple[ToolPlaneRevisionRecord, ...]:
+        """Return all revisions that block new governed admission."""
+
         async with self._lock:
             return tuple(self._copy_record(record) for record in self._records.values() if record.state in {"prepared", "recovery_required"})
 
@@ -940,14 +1091,20 @@ class ToolPlaneRevisionService:
 
     @property
     def immutable(self) -> bool:
+        """Return whether mutation is disabled for this deployment profile."""
+
         return self._immutable
 
     @property
     def durable(self) -> bool:
+        """Return whether durable admission must fail closed."""
+
         return self._durable
 
     @property
     def validation_policy_digest(self) -> str:
+        """Return the active validator policy identity."""
+
         return self._validator.policy_digest
 
     def _verify_actor(self, actor: VerifiedActorContextV1) -> frozenset[str]:
@@ -995,6 +1152,8 @@ class ToolPlaneRevisionService:
             raise ToolPlaneRevisionError("promotion_not_authorized")
 
     async def initialize(self, *, existing_projection: bool) -> None:
+        """Initialize repository bootstrap state from authoritative material."""
+
         if not existing_projection and hasattr(self._projection, "has_existing_user_projection"):
             inventory = await self._user_inventory.snapshot()
             existing_projection = await self._projection.has_existing_user_projection(inventory.subject_ids)
@@ -1155,6 +1314,8 @@ class ToolPlaneRevisionService:
         request: ScopedStageRevisionRequest,
         actor: VerifiedActorContextV1,
     ) -> StagedRevision:
+        """Canonicalize and append inert candidate material for one scope."""
+
         self._authorize_scope(request.scope, actor, mutation=True)
         if request.scope.kind == "deployment_base":
             material: DeploymentToolPlaneRevisionV1 | UserToolPlaneOverlayV1 = canonicalize_deployment_candidate(request.candidate)
@@ -1223,6 +1384,8 @@ class ToolPlaneRevisionService:
         revision_ref: str,
         actor: VerifiedActorContextV1,
     ) -> ToolPlaneValidationReportV1:
+        """Validate a caller-owned staged revision without activating it."""
+
         record = await self._record_for_actor(revision_ref, actor, mutation=True)
         return await self._validate_record(record, actor)
 
@@ -1312,6 +1475,8 @@ class ToolPlaneRevisionService:
             validator_policy_digest=self._validator.policy_digest,
         )
         if existing is not None:
+            if dict(existing.report.validator_versions) != dict(self._validator.validator_versions):
+                raise ToolPlaneRevisionError("validation_stale")
             if not existing.compatible:
                 raise ToolPlaneRevisionError("overlay_preflight_failed")
             return existing
@@ -1327,6 +1492,8 @@ class ToolPlaneRevisionService:
             raise
         except Exception as exc:
             raise ToolPlaneRevisionError("overlay_preflight_incomplete") from exc
+        if dict(report.validator_versions) != dict(self._validator.validator_versions):
+            raise ToolPlaneRevisionError("validation_stale")
         try:
             attestation = OverlayCompatibilityV1(
                 base_revision_digest=base.revision_digest,
@@ -1491,6 +1658,8 @@ class ToolPlaneRevisionService:
         revision_ref: str,
         actor: VerifiedActorContextV1,
     ) -> PromotionResult:
+        """Promote a caller-owned validated revision under generation fences."""
+
         record = await self._record_for_actor(revision_ref, actor, mutation=True)
         return await self._promote_record(record, actor)
 
@@ -1516,7 +1685,11 @@ class ToolPlaneRevisionService:
     ) -> PromotionResult:
         if record.validation_report is None or record.validation_report.result != "passed":
             raise ToolPlaneRevisionError("validation_failed")
-        if record.validation_report.content_digest != record.content_digest:
+        if (
+            record.validation_report.content_digest != record.content_digest
+            or record.validation_report.validator_policy_digest != self._validator.policy_digest
+            or dict(record.validation_report.validator_versions) != dict(self._validator.validator_versions)
+        ):
             raise ToolPlaneRevisionError("validation_stale")
         if await self._repository.bootstrap_required():
             bootstrap_base = await self._bootstrap_base_for(record)
@@ -1622,6 +1795,8 @@ class ToolPlaneRevisionService:
         revision_ref: str,
         actor: VerifiedActorContextV1,
     ) -> PromotionResult:
+        """Create and promote a new revision from prior validated material."""
+
         target = await self._record_for_actor(revision_ref, actor, mutation=True)
         return await self._rollback_record(target, actor)
 
@@ -1696,6 +1871,8 @@ class ToolPlaneRevisionService:
         *,
         limit: int = 50,
     ) -> list[ToolPlaneRevisionRecord]:
+        """List the authenticated actor's bounded user-overlay history."""
+
         scope = ToolPlaneRevisionScopeV1(
             kind="user_overlay",
             user_ref=user_scope_reference(actor),
@@ -1708,6 +1885,8 @@ class ToolPlaneRevisionService:
         revision_ref: str,
         actor: VerifiedActorContextV1,
     ) -> ToolPlaneRevisionRecord:
+        """Inspect one revision after normal scope authorization."""
+
         return await self._record_for_actor(
             revision_ref,
             actor,
@@ -1719,6 +1898,8 @@ class ToolPlaneRevisionService:
         revision_ref: str,
         actor: VerifiedActorContextV1,
     ) -> ToolPlaneRevisionRecord:
+        """Inspect one explicitly administrator-authorized revision."""
+
         return await self._record_for_actor(
             revision_ref,
             actor,
@@ -1733,6 +1914,8 @@ class ToolPlaneRevisionService:
         *,
         limit: int = 50,
     ) -> list[ToolPlaneRevisionRecord]:
+        """List one explicitly administrator-authorized scope."""
+
         self._authorize_scope(scope, actor, mutation=False, administrative=True)
         return await self._repository.list_scope(scope, limit=limit)
 
@@ -1740,6 +1923,8 @@ class ToolPlaneRevisionService:
         self,
         actor: VerifiedActorContextV1,
     ) -> ToolPlaneStatus:
+        """Return observed status for the authenticated actor's overlay."""
+
         scope = ToolPlaneRevisionScopeV1(
             kind="user_overlay",
             user_ref=user_scope_reference(actor),
@@ -1752,6 +1937,8 @@ class ToolPlaneRevisionService:
         scope: ToolPlaneRevisionScopeV1,
         actor: VerifiedActorContextV1,
     ) -> ToolPlaneStatus:
+        """Return observed status for an administrator-selected scope."""
+
         self._authorize_scope(scope, actor, mutation=False, administrative=True)
         return await self._status(scope)
 
@@ -1784,6 +1971,8 @@ class ToolPlaneRevisionService:
         self,
         actor: VerifiedActorContextV1,
     ) -> EffectiveToolPlaneRevisionV1:
+        """Compose one coherent admission snapshot for an authenticated actor."""
+
         self._verify_actor(actor)
         if await self._repository.bootstrap_required():
             raise ToolPlaneRevisionError("tool_plane_bootstrap_required")
@@ -1793,6 +1982,8 @@ class ToolPlaneRevisionService:
             user_ref=user_scope_reference(actor),
         )
         for _ in range(3):
+            if await self._repository.prepared_or_recovery():
+                raise ToolPlaneRevisionError("recovery_required")
             base_generation = await self._repository.generation(base_scope)
             overlay_generation = await self._repository.generation(overlay_scope)
             overlay_set_generation = await self._repository.overlay_set_generation()
@@ -1802,7 +1993,12 @@ class ToolPlaneRevisionService:
             overlay = await self._repository.active(overlay_scope)
             base_observed = await self._observed_record(base)
             overlay_observed = await self._projection.observed_digest(overlay_scope) if overlay is None else await self._observed_record(overlay)
-            if base_generation == await self._repository.generation(base_scope) and overlay_generation == await self._repository.generation(overlay_scope) and overlay_set_generation == await self._repository.overlay_set_generation():
+            if (
+                base_generation == await self._repository.generation(base_scope)
+                and overlay_generation == await self._repository.generation(overlay_scope)
+                and overlay_set_generation == await self._repository.overlay_set_generation()
+                and not await self._repository.prepared_or_recovery()
+            ):
                 break
         else:
             raise ToolPlaneRevisionError("revision_conflict")

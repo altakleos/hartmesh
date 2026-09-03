@@ -822,6 +822,8 @@ export interface Translations {
       noActiveRevision: string;
       latestRevision: string;
       noRevision: string;
+      stagedBy: string;
+      promotedBy: string;
       credentialNotice: string;
       states: Record<
         | "bootstrap_required"

@@ -63,6 +63,8 @@ class SQLToolPlaneUserInventory:
         self._maximum_subjects = maximum_subjects
 
     async def snapshot(self) -> ToolPlaneUserInventorySnapshot:
+        """Read one bounded keyset-paged snapshot from registered users."""
+
         subject_ids: list[str] = []
         cursor: str | None = None
         async with self._sf() as session:
@@ -146,6 +148,8 @@ class SQLToolPlaneRevisionRepository:
         return row
 
     async def initialize(self, *, existing_projection: bool) -> None:
+        """Create base scope state and set the legacy bootstrap gate if needed."""
+
         scope = ToolPlaneRevisionScopeV1(kind="deployment_base")
         async with self._sf() as session, session.begin():
             row = await self._scope_row(session, scope, create=True, for_update=True)
@@ -156,12 +160,16 @@ class SQLToolPlaneRevisionRepository:
                 row.updated_at = _now()
 
     async def bootstrap_required(self) -> bool:
+        """Return the durable deployment bootstrap gate."""
+
         scope = ToolPlaneRevisionScopeV1(kind="deployment_base")
         async with self._sf() as session:
             row = await self._scope_row(session, scope, create=False)
             return bool(row is not None and row.bootstrap_required)
 
     async def clear_bootstrap(self) -> None:
+        """Clear the durable bootstrap gate after exact verification."""
+
         scope = ToolPlaneRevisionScopeV1(kind="deployment_base")
         async with self._sf() as session, session.begin():
             row = await self._scope_row(session, scope, create=True, for_update=True)
@@ -262,6 +270,8 @@ class SQLToolPlaneRevisionRepository:
         )
 
     async def add(self, record: ToolPlaneRevisionRecord) -> None:
+        """Append one staged revision and its first transition atomically."""
+
         if record.tenant_digest != self.tenant.digest or record.tenant_ref != self.tenant.public_ref:
             raise ToolPlaneRevisionError("promotion_not_authorized")
         async with self._sf() as session, session.begin():
@@ -313,6 +323,8 @@ class SQLToolPlaneRevisionRepository:
         base: ToolPlaneRevisionRecord,
         overlays: tuple[ToolPlaneRevisionRecord, ...],
     ) -> None:
+        """Append a base and all captured overlays in one transaction."""
+
         records = (base, *overlays)
         if any(record.tenant_digest != self.tenant.digest or record.tenant_ref != self.tenant.public_ref for record in records):
             raise ToolPlaneRevisionError("promotion_not_authorized")
@@ -346,6 +358,8 @@ class SQLToolPlaneRevisionRepository:
         self,
         attestation: OverlayCompatibilityV1,
     ) -> OverlayCompatibilityV1:
+        """Persist or return an identical immutable compatibility attestation."""
+
         try:
             async with self._sf() as session, session.begin():
                 existing = (
@@ -396,6 +410,8 @@ class SQLToolPlaneRevisionRepository:
         overlay_revision_digest: str,
         validator_policy_digest: str,
     ) -> OverlayCompatibilityV1 | None:
+        """Look up an exact base/overlay/policy attestation."""
+
         async with self._sf() as session:
             row = (
                 await session.scalars(
@@ -410,6 +426,8 @@ class SQLToolPlaneRevisionRepository:
             return None if row is None else self._compatibility(row)
 
     async def get(self, revision_id: str) -> ToolPlaneRevisionRecord | None:
+        """Return one tenant-bound revision by identifier."""
+
         async with self._sf() as session:
             row = (
                 await session.scalars(
@@ -427,6 +445,8 @@ class SQLToolPlaneRevisionRepository:
         *,
         limit: int = 100,
     ) -> list[ToolPlaneRevisionRecord]:
+        """Return bounded newest-first history for one tenant scope."""
+
         if type(limit) is not int or limit < 1 or limit > 100:
             raise ValueError("limit must be between 1 and 100")
         async with self._sf() as session:
@@ -434,6 +454,8 @@ class SQLToolPlaneRevisionRepository:
             return [self._record(row) for row in rows]
 
     async def events(self, revision_id: str) -> list[RevisionEventV1]:
+        """Return append-order transition evidence for one revision."""
+
         async with self._sf() as session:
             rows = (
                 await session.scalars(
@@ -464,6 +486,8 @@ class SQLToolPlaneRevisionRepository:
         self,
         scope: ToolPlaneRevisionScopeV1,
     ) -> ToolPlaneRevisionRecord | None:
+        """Return the revision selected by one scope's active pointer."""
+
         async with self._sf() as session:
             scope_row = await self._scope_row(session, scope, create=False)
             if scope_row is None or scope_row.active_revision_id is None:
@@ -474,17 +498,23 @@ class SQLToolPlaneRevisionRepository:
             return self._record(row)
 
     async def generation(self, scope: ToolPlaneRevisionScopeV1) -> int:
+        """Return one scope's current active-pointer generation."""
+
         async with self._sf() as session:
             row = await self._scope_row(session, scope, create=False)
             return 0 if row is None else int(row.generation)
 
     async def overlay_set_generation(self) -> int:
+        """Return the deployment's active-overlay-set generation."""
+
         base = ToolPlaneRevisionScopeV1(kind="deployment_base")
         async with self._sf() as session:
             row = await self._scope_row(session, base, create=False)
             return 0 if row is None else int(row.overlay_set_generation)
 
     async def active_overlays(self) -> tuple[int, tuple[ToolPlaneRevisionRecord, ...]]:
+        """Return a generation-bound snapshot of all active overlays."""
+
         base = ToolPlaneRevisionScopeV1(kind="deployment_base")
         async with self._sf() as session:
             base_row = await self._scope_row(session, base, create=False)
@@ -512,6 +542,8 @@ class SQLToolPlaneRevisionRepository:
         after_ref: str | None,
         limit: int,
     ) -> tuple[int, tuple[ToolPlaneRevisionRecord, ...], str | None]:
+        """Return one generation-bound keyset page of active overlays."""
+
         if limit < 1 or limit > 1_000:
             raise ValueError("limit must be between 1 and 1000")
         base = ToolPlaneRevisionScopeV1(kind="deployment_base")
@@ -549,6 +581,8 @@ class SQLToolPlaneRevisionRepository:
         *,
         actor_digest: str,
     ) -> ToolPlaneRevisionRecord:
+        """Transition a staged revision to validating under a row lock."""
+
         async with self._sf() as session, session.begin():
             row = (
                 await session.scalars(
@@ -578,6 +612,8 @@ class SQLToolPlaneRevisionRepository:
         actor_digest: str,
         report: ToolPlaneValidationReportV1,
     ) -> ToolPlaneRevisionRecord:
+        """Persist an immutable report and terminal validation state."""
+
         async with self._sf() as session, session.begin():
             row = (
                 await session.scalars(
@@ -617,6 +653,8 @@ class SQLToolPlaneRevisionRepository:
         expected_overlay_set_generation: int | None,
         required_compatibility: tuple[tuple[str, str, str], ...] = (),
     ) -> ToolPlaneRevisionRecord:
+        """Journal prepared intent after checking all optimistic fences."""
+
         async with self._prepare_lock:
             async with self._sf() as session, session.begin():
                 row = (
@@ -712,6 +750,8 @@ class SQLToolPlaneRevisionRepository:
         actor_digest: str,
         observed_projection_digest: str,
     ) -> ToolPlaneRevisionRecord:
+        """Move the active pointer after the projection digest is verified."""
+
         async with self._sf() as session, session.begin():
             row = (
                 await session.scalars(
@@ -790,6 +830,8 @@ class SQLToolPlaneRevisionRepository:
         actor_digest: str,
         reason: str,
     ) -> None:
+        """Persist a recovery gate for a prepared projection failure."""
+
         async with self._sf() as session, session.begin():
             row = (
                 await session.scalars(
@@ -814,6 +856,8 @@ class SQLToolPlaneRevisionRepository:
             )
 
     async def prepared_or_recovery(self) -> tuple[ToolPlaneRevisionRecord, ...]:
+        """Return every prepared or recovery-blocking revision for this tenant."""
+
         async with self._sf() as session:
             rows = (
                 await session.scalars(

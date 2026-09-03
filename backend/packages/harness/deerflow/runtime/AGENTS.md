@@ -1,20 +1,17 @@
 ### Durable Invocation Boundary
 
-Gateway-owned `InvocationRuntime` is the only durable admission module. Its
-accepted record binds the effective subject/acting service, sealed Origin, v4
-trusted context with credential evidence, restrictive constraints, pinned
-agent/extension revision, and immutable effective skills. Start authorization
-happens before admission; a known external key first passes current
-visibility/observe authorization and
-must match the stored request evidence. State changes and lifecycle events are
-transactional, cancellation is fenced, and the server-selected recovery policy
-persists at admission; recovery uses a distinct audited executor. `terminalize_v1`
-remains the default. Candidate `exact_two_takeover_v1` stays dormant: Gateway
-rejects every execution-takeover claim before owner CAS. Expired exact-two rows
-stay fail-closed.
-Future activation requires the linearizable authority and reconstructible
-checkpoint/event/delivery state defined in the multi-Gateway qualification
-guide; existing markers and fault barriers do not constitute support.
+Gateway-owned `InvocationRuntime` is the sole durable admission module. Its
+accepted record binds actor/credential/Origin/context/constraints, pinned
+agent/extensions, and immutable skills. Governed records additionally bind
+base/overlay digests and generations, projection/effective digests, secret-safe
+MCP structure/allowlists, integration IDs, MCP tool objects, and skill bytes;
+recovery verifies and reuses these snapshots instead of rediscovery. Authorization
+precedes admission; replay keys must match visible stored request evidence.
+Lifecycle writes are transactional, cancellation is fenced, and recovery uses
+the persisted policy plus a distinct audited executor. `terminalize_v1` remains
+default; `exact_two_takeover_v1` is dormant and every takeover claim is rejected.
+Activation requires the multi-Gateway guide's linearizable authority and fully
+reconstructible state; markers and fault barriers alone are not support.
 
 `subagent_snapshot.py` is the sole live-to-immutable seam for durable subagents.
 Admission captures a bounded `ResolvedSubagentCatalogV1` plus a digest-scoped

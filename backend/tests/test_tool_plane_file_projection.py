@@ -142,6 +142,12 @@ async def test_bootstrap_stage_captures_current_projection_without_activation(
         "---\nname: helper\ndescription: Helps safely\n---\n\n# Instructions\n",
         encoding="utf-8",
     )
+    integration_dir = tmp_path / "integrations" / "lark-cli" / "lark-helper"
+    integration_dir.mkdir(parents=True)
+    (integration_dir / "SKILL.md").write_text(
+        "---\nname: lark-helper\ndescription: Managed helper\n---\n\n# Instructions\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / ".deer-flow"))
     artifacts = GovernedSkillArtifactStore(tmp_path / "candidates")
@@ -173,8 +179,87 @@ async def test_bootstrap_stage_captures_current_projection_without_activation(
     assert record.bootstrap_inventory_digest is not None
     assert record.manifest["mcp_servers"][0]["secret_selectors"] == [{"field": "headers.authorization", "selector": "env:SEARCH_TOKEN"}]
     assert record.manifest["public_skills"][0]["name"] == "helper"
+    assert record.manifest["managed_integrations"][0]["name"] == "lark-helper"
+    assert record.manifest["managed_integrations"][0]["provider"] == "lark-cli"
     assert await repository.active(scope) is None
     assert (await service.admin_status(scope, admin)).governance_state == ("bootstrap_required")
+
+
+@pytest.mark.asyncio
+async def test_managed_integration_projection_preserves_provider_layout_and_metadata(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps({"mcpServers": {}, "skills": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / ".deer-flow"))
+    skills_root = tmp_path / "skills"
+    integrations_root = tmp_path / "integrations"
+    package_root = integrations_root / "lark-cli" / "managed-helper"
+    package_root.mkdir(parents=True)
+    (package_root / "SKILL.md").write_text(
+        "---\nname: managed-helper\ndescription: Managed helper\n---\n\n# Instructions\nHelp safely.\n",
+        encoding="utf-8",
+    )
+    provider_manifest = integrations_root / "lark-cli" / ".provider-manifest.json"
+    provider_manifest.write_text('{"version":"v1"}\n', encoding="utf-8")
+    artifacts = GovernedSkillArtifactStore(tmp_path / "candidates")
+    artifact = artifacts.stage_directory(package_root)
+    projection = LockedFileToolPlaneProjection(
+        config_path=config_path,
+        skills_root=skills_root,
+        integrations_root=integrations_root,
+        artifact_store=artifacts,
+    )
+    repository = InMemoryToolPlaneRevisionRepository(tenant=_TENANT)
+    service = ToolPlaneRevisionService(
+        repository=repository,
+        projection=projection,
+        validator=GovernedToolPlaneValidator(
+            policy_digest=_POLICY,
+            artifact_store=artifacts,
+            durable=True,
+        ),
+        artifact_store=artifacts,
+        durable=True,
+    )
+    admin = _actor("admin-1", "admin")
+    staged = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+            candidate={
+                "validation_policy_digest": _POLICY,
+                "mcp_servers": {},
+                "public_skills": {},
+                "managed_integrations": {
+                    "managed-helper": {
+                        "provider": "lark-cli",
+                        "enabled": True,
+                        "archive_digest": artifact.archive_digest,
+                        "tree_digest": artifact.tree_digest,
+                        "manifest_digest": artifact.manifest_digest,
+                        "entry_points": list(artifact.entry_points),
+                    }
+                },
+            },
+        ),
+        admin,
+    )
+    report = await service.validate(staged.revision_id, admin)
+    assert report.result == "passed"
+
+    await service.promote(staged.revision_id, admin)
+
+    active = await repository.active(ToolPlaneRevisionScopeV1(kind="deployment_base"))
+    assert active is not None
+    assert active.manifest["managed_integrations"][0]["provider"] == "lark-cli"
+    assert (integrations_root / "lark-cli" / "managed-helper" / "SKILL.md").is_file()
+    assert not (integrations_root / "managed-helper").exists()
+    assert provider_manifest.read_text(encoding="utf-8") == '{"version":"v1"}\n'
 
 
 @pytest.mark.asyncio

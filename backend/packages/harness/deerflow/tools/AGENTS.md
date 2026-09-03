@@ -1,6 +1,6 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
-`get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
+`get_available_tools(groups, include_mcp, model_name, subagent_enabled, *, include_upload_tool, app_config, allowed_mcp_server_ids, allowed_mcp_tools_by_server, mcp_tools_snapshot)` assembles. A supplied accepted `mcp_tools_snapshot` is authoritative; server/tool filters can only narrow it, and the live MCP cache is not consulted:
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`
 2. **MCP tools** - From enabled MCP servers (lazy initialized, cached with resolved-path + content-signature invalidation)
 3. **Built-in tools**:

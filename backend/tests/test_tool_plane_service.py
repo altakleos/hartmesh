@@ -137,6 +137,42 @@ async def test_stage_and_validate_do_not_activate_until_authorized_promotion() -
 
 
 @pytest.mark.asyncio
+async def test_promotion_rejects_report_from_prior_validator_implementation() -> None:
+    class ChangingValidator(DeterministicToolPlaneValidator):
+        version = "one"
+
+        @property
+        def validator_versions(self) -> dict[str, str]:
+            return {"pipeline": self.version}
+
+    repository = InMemoryToolPlaneRevisionRepository(tenant=_TENANT)
+    projection = InMemoryToolPlaneProjection()
+    validator = ChangingValidator(policy_digest=_POLICY)
+    service = ToolPlaneRevisionService(
+        repository=repository,
+        projection=projection,
+        validator=validator,
+        durable=True,
+    )
+    admin = _actor("admin-1", role="admin")
+    staged = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+            candidate=_base_candidate(),
+        ),
+        admin,
+    )
+    await service.validate(staged.revision_id, admin)
+    validator.version = "two"
+
+    with pytest.raises(ToolPlaneRevisionError) as caught:
+        await service.promote(staged.revision_id, admin)
+
+    assert caught.value.code == "validation_stale"
+    assert projection.project_count == 0
+
+
+@pytest.mark.asyncio
 async def test_rejected_validation_report_is_immutable() -> None:
     service, repository, _ = _service()
     admin = _actor("admin-1", role="admin")
@@ -935,6 +971,11 @@ async def test_prepared_revision_blocks_promotion_in_another_scope() -> None:
         expected_base_generation=None,
         expected_overlay_set_generation=0,
     )
+
+    with pytest.raises(ToolPlaneRevisionError) as admission_error:
+        await service.effective_for_actor(user)
+
+    assert admission_error.value.code == "recovery_required"
 
     overlay = await service.stage(
         ScopedStageRevisionRequest(

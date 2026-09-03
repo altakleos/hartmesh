@@ -130,6 +130,8 @@ class LockedFileToolPlaneProjection:
         *,
         desired_digest: str,
     ) -> str:
+        """Project exact deployment-base material under shared filesystem locks."""
+
         return await asyncio.to_thread(
             self._project_sync,
             scope,
@@ -146,6 +148,8 @@ class LockedFileToolPlaneProjection:
         desired_digest: str,
         storage_subject_id: str,
     ) -> str:
+        """Project exact overlay material into its protected subject store."""
+
         return await asyncio.to_thread(
             self._project_sync,
             scope,
@@ -258,7 +262,11 @@ class LockedFileToolPlaneProjection:
                 if not isinstance(raw_skill_states, Mapping):
                     raise ToolPlaneRevisionError("validation_failed")
 
-                def capture(root: Path) -> dict[str, dict[str, object]]:
+                def _capture(
+                    root: Path,
+                    *,
+                    managed_integration: bool = False,
+                ) -> dict[str, dict[str, object]]:
                     result: dict[str, dict[str, object]] = {}
                     for package_root in self._package_roots(root):
                         artifact = artifact_store.stage_directory(package_root)
@@ -273,13 +281,21 @@ class LockedFileToolPlaneProjection:
                             "manifest_digest": artifact.manifest_digest,
                             "entry_points": list(artifact.entry_points),
                         }
+                        if managed_integration:
+                            relative_parts = package_root.relative_to(root).parts
+                            if len(relative_parts) != 2:
+                                raise ToolPlaneRevisionError("validation_failed")
+                            result[artifact.skill_name]["provider"] = relative_parts[0]
                     return result
 
                 candidate: dict[str, object] = {
                     "version": 1,
                     "mcp_servers": copy.deepcopy(raw.get("mcpServers", raw.get("mcp_servers", {}))),
-                    "public_skills": capture(skills_root / "public"),
-                    "managed_integrations": capture(Path(integrations_root)),
+                    "public_skills": _capture(skills_root / "public"),
+                    "managed_integrations": _capture(
+                        Path(integrations_root),
+                        managed_integration=True,
+                    ),
                     "validation_policy_digest": validation_policy_digest,
                     "parent_revision_digest": None,
                     "change_summary": "Adopt the current tool-plane projection",
@@ -297,21 +313,12 @@ class LockedFileToolPlaneProjection:
 
         storage = self._user_storage_factory(storage_subject_id)
         custom_root = Path(storage.get_user_custom_root())
-        states_path = getattr(storage, "_skill_states_file", None)
         integrations_root = Path(self._integrations_root or storage.get_integrations_root())
         with skill_projection_mutation(storage, "user"):
-            states: dict[str, dict[str, bool]] = {}
-            if isinstance(states_path, Path) and states_path.exists():
-                try:
-                    raw_states = json.loads(states_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as exc:
-                    raise ToolPlaneRevisionError("validation_failed") from exc
-                if not isinstance(raw_states, Mapping):
-                    raise ToolPlaneRevisionError("validation_failed")
-                for raw_name, raw_state in raw_states.items():
-                    if not isinstance(raw_name, str) or not isinstance(raw_state, Mapping) or set(raw_state) != {"enabled"} or type(raw_state.get("enabled")) is not bool:
-                        raise ToolPlaneRevisionError("validation_failed")
-                    states[raw_name] = {"enabled": bool(raw_state["enabled"])}
+            try:
+                states = storage.capture_skill_state_projection()
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                raise ToolPlaneRevisionError("validation_failed") from exc
 
             custom_package_roots = self._package_roots(custom_root)
             if not custom_package_roots:
@@ -321,9 +328,9 @@ class LockedFileToolPlaneProjection:
                 # recording only their state would create an overlay that can
                 # never prove package compatibility. Promotion projects these
                 # bytes into the user root, completing the legacy migration.
-                legacy_root = getattr(storage, "_global_custom_root", None)
-                if isinstance(legacy_root, Path):
-                    custom_package_roots = self._package_roots(legacy_root)
+                custom_package_roots = self._package_roots(
+                    Path(storage.get_legacy_custom_root()),
+                )
 
             custom_skills: dict[str, dict[str, object]] = {}
             for package_root in custom_package_roots:
@@ -345,8 +352,7 @@ class LockedFileToolPlaneProjection:
             # Existing managed-integration credential trees contain resolved
             # secret values. Their mere presence blocks adoption; this adapter
             # never reads, hashes, or copies those bytes into evidence.
-            user_root = custom_root.parent.parent
-            credential_root = user_root / "integrations"
+            credential_root = Path(storage.get_user_integration_credentials_root())
             try:
                 has_credential_files = credential_root.exists() and any(path.is_file() for path in credential_root.rglob("*"))
             except OSError as exc:
@@ -393,18 +399,17 @@ class LockedFileToolPlaneProjection:
         for subject_id in subject_ids:
             storage = self._user_storage_factory(subject_id)
             custom_root = Path(storage.get_user_custom_root())
-            states_path = getattr(storage, "_skill_states_file", None)
             with skill_projection_mutation(storage, "user"):
                 if self._package_roots(custom_root):
                     return True
-                if isinstance(states_path, Path) and states_path.exists():
+                if storage.has_skill_state_projection():
                     try:
-                        raw_states = json.loads(states_path.read_text(encoding="utf-8"))
-                    except (OSError, json.JSONDecodeError):
+                        raw_states = storage.capture_skill_state_projection()
+                    except (OSError, json.JSONDecodeError, ValueError):
                         return True
                     if raw_states:
                         return True
-                credential_root = custom_root.parent.parent / "integrations"
+                credential_root = Path(storage.get_user_integration_credentials_root())
                 try:
                     if credential_root.exists() and any(path.is_file() for path in credential_root.rglob("*")):
                         return True
@@ -514,6 +519,7 @@ class LockedFileToolPlaneProjection:
                         self._project_skill_packages(
                             manifest.get("managed_integrations"),
                             Path(integrations_root),
+                            provider_field="provider",
                         )
                     if self._config_path.exists():
                         try:
@@ -562,7 +568,7 @@ class LockedFileToolPlaneProjection:
                             if not isinstance(identifier, str):
                                 raise ToolPlaneRevisionError("projection_failed")
                             states[identifier] = {"enabled": bool(value.get("enabled", True))}
-                    storage._write_skill_states(states)
+                    storage.replace_skill_state_projection(states)
                     atomic_write_extensions_config(
                         active_path,
                         {"version": 1, "content_digest": desired_digest},
@@ -576,6 +582,8 @@ class LockedFileToolPlaneProjection:
         self,
         scope: ToolPlaneRevisionScopeV1,
     ) -> str | None:
+        """Observe a deployment projection without exposing mismatching bytes."""
+
         return await asyncio.to_thread(self._observed_digest_sync, scope)
 
     async def observed_digest_for_actor(
@@ -648,6 +656,7 @@ class LockedFileToolPlaneProjection:
                         ) or not self._skill_packages_match(
                             manifest.get("managed_integrations"),
                             Path(integrations_root),
+                            provider_field="provider",
                         ):
                             return _DRIFT_DIGEST
                     except Exception:
@@ -680,13 +689,19 @@ class LockedFileToolPlaneProjection:
                         if not isinstance(identifier, str):
                             return _DRIFT_DIGEST
                         expected_states[identifier] = {"enabled": bool(value.get("enabled", True))}
-                if storage._read_skill_states() != expected_states:
+                if not storage.matches_skill_state_projection(expected_states):
                     return _DRIFT_DIGEST
             return digest
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
             return _DRIFT_DIGEST
 
-    def _project_skill_packages(self, entries: object, live_root: Path) -> None:
+    def _project_skill_packages(
+        self,
+        entries: object,
+        live_root: Path,
+        *,
+        provider_field: str | None = None,
+    ) -> None:
         if not isinstance(entries, list) or self._artifact_store is None:
             raise ToolPlaneRevisionError("projection_failed")
         live_root.parent.mkdir(parents=True, exist_ok=True)
@@ -701,6 +716,14 @@ class LockedFileToolPlaneProjection:
                 name = raw.get("name")
                 if not isinstance(name, str):
                     raise ToolPlaneRevisionError("projection_failed")
+                destination = staged_root / name
+                if provider_field is not None:
+                    provider = raw.get(provider_field)
+                    if not isinstance(provider, str):
+                        raise ToolPlaneRevisionError("projection_failed")
+                    destination = staged_root / provider / name
+                if destination.exists():
+                    raise ToolPlaneRevisionError("projection_failed")
                 try:
                     verified = self._artifact_store.verify(
                         tree_digest=str(raw.get("tree_digest")),
@@ -709,8 +732,12 @@ class LockedFileToolPlaneProjection:
                     )
                 except ToolPlaneRevisionError as exc:
                     raise ToolPlaneRevisionError("projection_failed") from exc
-                shutil.copytree(verified.package_root, staged_root / name)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(verified.package_root, destination)
             live_root.mkdir(parents=True, exist_ok=True)
+            if provider_field is not None:
+                self._replace_managed_integration_packages(staged_root, live_root)
+                return
             desired = {path.name for path in staged_root.iterdir()}
             for existing in live_root.iterdir():
                 if existing.name.startswith("."):
@@ -730,10 +757,62 @@ class LockedFileToolPlaneProjection:
                 os.replace(staged, target)
 
     @staticmethod
-    def _skill_packages_match(entries: object, live_root: Path) -> bool:
+    def _replace_managed_integration_packages(
+        staged_root: Path,
+        live_root: Path,
+    ) -> None:
+        """Replace provider/skill packages while retaining provider dotfiles.
+
+        Provider-owned hidden manifests and install locks are operational
+        metadata rather than model-visible skill package bytes. Keeping them
+        lets a governed projection preserve the integration installer's
+        health/version marker while every non-hidden skill package remains an
+        exact, drift-checked revision artifact.
+        """
+
+        desired = {provider.name: {skill.name for skill in provider.iterdir() if not skill.name.startswith(".")} for provider in staged_root.iterdir() if not provider.name.startswith(".")}
+        for existing_provider in tuple(live_root.iterdir()):
+            if existing_provider.name.startswith("."):
+                continue
+            if existing_provider.is_symlink() or not existing_provider.is_dir():
+                existing_provider.unlink()
+                continue
+            wanted_skills = desired.get(existing_provider.name, set())
+            for existing_skill in tuple(existing_provider.iterdir()):
+                if existing_skill.name.startswith("."):
+                    continue
+                if existing_skill.name not in wanted_skills:
+                    if existing_skill.is_dir() and not existing_skill.is_symlink():
+                        shutil.rmtree(existing_skill)
+                    else:
+                        existing_skill.unlink()
+            if not wanted_skills and not any(existing_provider.iterdir()):
+                existing_provider.rmdir()
+
+        for staged_provider in staged_root.iterdir():
+            target_provider = live_root / staged_provider.name
+            if target_provider.is_symlink() or (target_provider.exists() and not target_provider.is_dir()):
+                target_provider.unlink()
+            target_provider.mkdir(parents=True, exist_ok=True)
+            for staged_skill in staged_provider.iterdir():
+                target = target_provider / staged_skill.name
+                if target.exists() or target.is_symlink():
+                    if target.is_dir() and not target.is_symlink():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+                os.replace(staged_skill, target)
+
+    @staticmethod
+    def _skill_packages_match(
+        entries: object,
+        live_root: Path,
+        *,
+        provider_field: str | None = None,
+    ) -> bool:
         if not isinstance(entries, list):
             return False
-        expected: dict[str, str] = {}
+        expected: dict[tuple[str, ...], str] = {}
         for raw in entries:
             if not isinstance(raw, Mapping):
                 return False
@@ -741,13 +820,35 @@ class LockedFileToolPlaneProjection:
             digest = raw.get("tree_digest")
             if not isinstance(name, str) or not isinstance(digest, str):
                 return False
-            expected[name] = digest
+            key = (name,)
+            if provider_field is not None:
+                provider = raw.get(provider_field)
+                if not isinstance(provider, str):
+                    return False
+                key = (provider, name)
+            if key in expected:
+                return False
+            expected[key] = digest
         if not live_root.exists():
             return not expected
-        observed_names = {path.name for path in live_root.iterdir() if not path.name.startswith(".")}
-        if observed_names != set(expected):
+        if provider_field is None:
+            observed = {(path.name,): path for path in live_root.iterdir() if not path.name.startswith(".")}
+        else:
+            observed = {}
+            for provider in live_root.iterdir():
+                if provider.name.startswith("."):
+                    continue
+                if provider.is_symlink() or not provider.is_dir():
+                    return False
+                for package in provider.iterdir():
+                    if package.name.startswith("."):
+                        continue
+                    if package.is_symlink() or not package.is_dir():
+                        return False
+                    observed[(provider.name, package.name)] = package
+        if set(observed) != set(expected):
             return False
-        return all(compute_skill_tree_digest(live_root / name) == digest for name, digest in expected.items())
+        return all(compute_skill_tree_digest(observed[key]) == digest for key, digest in expected.items())
 
 
 __all__ = ["LockedFileToolPlaneProjection"]

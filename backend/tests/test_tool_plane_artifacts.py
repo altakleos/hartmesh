@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import ipaddress
 import json
 import stat
 import zipfile
@@ -83,6 +84,44 @@ def test_staged_archive_is_immutable_and_safe_result_contains_no_path_or_bytes(
     }
     assert str(tmp_path) not in str(payload)
     assert "Instructions" not in str(payload)
+
+
+def test_distinct_archives_for_the_same_tree_remain_independently_verifiable(
+    tmp_path,
+) -> None:
+    store = GovernedSkillArtifactStore(tmp_path / "candidates")
+    content = "---\nname: helper\ndescription: Helps safely\n---\n\n# Instructions\nDo the work.\n"
+
+    def archive_with(compression: int, timestamp: tuple[int, int, int, int, int, int]) -> io.BytesIO:
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression) as archive:
+            info = zipfile.ZipInfo("helper/SKILL.md", date_time=timestamp)
+            info.compress_type = compression
+            archive.writestr(info, content)
+        stream.seek(0)
+        return stream
+
+    compressed = store.stage_archive(archive_with(zipfile.ZIP_DEFLATED, (2020, 1, 1, 0, 0, 0)))
+    stored = store.stage_archive(archive_with(zipfile.ZIP_STORED, (2021, 1, 1, 0, 0, 0)))
+
+    assert compressed.tree_digest == stored.tree_digest
+    assert compressed.archive_digest != stored.archive_digest
+    assert (
+        store.verify(
+            tree_digest=compressed.tree_digest,
+            archive_digest=compressed.archive_digest,
+            manifest_digest=compressed.manifest_digest,
+        ).metadata
+        == compressed
+    )
+    assert (
+        store.verify(
+            tree_digest=stored.tree_digest,
+            archive_digest=stored.archive_digest,
+            manifest_digest=stored.manifest_digest,
+        ).metadata
+        == stored
+    )
 
 
 @pytest.mark.parametrize("unsafe_name", ["../escape", "/absolute"])
@@ -218,7 +257,10 @@ async def test_validator_rejects_public_and_integration_skill_name_collision(
     admin = _actor("admin-1", role="admin")
     candidate = _candidate(artifact)
     candidate["managed_integrations"] = {
-        "helper": candidate["public_skills"]["helper"],
+        "helper": {
+            **candidate["public_skills"]["helper"],
+            "provider": "example-provider",
+        },
     }
     staged = await service.stage(
         ScopedStageRevisionRequest(
@@ -246,6 +288,7 @@ async def test_validator_rejects_unsafe_mcp_execution_and_endpoint_policy(
             policy_digest=_POLICY,
             artifact_store=store,
             durable=True,
+            endpoint_resolver=lambda hostname: [ipaddress.ip_address("127.0.0.1" if hostname.endswith("attacker.example.com") else "8.8.8.8")],
         ),
         artifact_store=store,
         durable=True,
@@ -266,6 +309,36 @@ async def test_validator_rejects_unsafe_mcp_execution_and_endpoint_policy(
                         "type": "http",
                         "url": "http://127.0.0.1:8080/mcp",
                     },
+                    "path-launcher": {
+                        "type": "stdio",
+                        "command": "/usr/bin/npx",
+                        "args": ["server-package"],
+                    },
+                    "inline-eval": {
+                        "type": "stdio",
+                        "command": "npx",
+                        "args": ["--call=do-not-run"],
+                    },
+                    "environment-injection": {
+                        "type": "stdio",
+                        "command": "uvx",
+                        "args": ["server-package"],
+                        "env": {"PYTHONPATH": "$MCP_PYTHONPATH"},
+                    },
+                    "dns-rebind": {
+                        "type": "http",
+                        "url": "https://attacker.example.com/mcp",
+                    },
+                    "oauth-rebind": {
+                        "type": "http",
+                        "url": "https://mcp.example.test",
+                        "oauth": {
+                            "enabled": True,
+                            "token_url": "https://auth.attacker.example.com/token",
+                            "client_id": "client-id",
+                            "client_secret": "$OAUTH_CLIENT_SECRET",
+                        },
+                    },
                 },
                 "public_skills": {},
                 "managed_integrations": {},
@@ -279,8 +352,51 @@ async def test_validator_rejects_unsafe_mcp_execution_and_endpoint_policy(
     assert report.result == "failed"
     assert {finding.code for finding in report.findings} >= {
         "mcp_command_not_allowed",
+        "mcp_environment_not_allowed",
         "mcp_private_endpoint_not_allowed",
     }
+    private_locations = {finding.location for finding in report.findings if finding.code == "mcp_private_endpoint_not_allowed"}
+    assert "mcp_servers.dns-rebind" in private_locations
+    assert "mcp_servers.oauth-rebind.oauth.token_url" in private_locations
+
+
+@pytest.mark.asyncio
+async def test_validator_allows_server_flags_after_package_launcher_boundary(
+    tmp_path,
+) -> None:
+    store = GovernedSkillArtifactStore(tmp_path / "candidates")
+    service = ToolPlaneRevisionService(
+        repository=InMemoryToolPlaneRevisionRepository(tenant=_TENANT),
+        projection=InMemoryToolPlaneProjection(),
+        validator=GovernedToolPlaneValidator(
+            policy_digest=_POLICY,
+            artifact_store=store,
+            durable=True,
+        ),
+        artifact_store=store,
+        durable=True,
+    )
+    admin = _actor("admin-1", role="admin")
+    staged = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+            candidate={
+                "validation_policy_digest": _POLICY,
+                "mcp_servers": {
+                    "safe-launcher": {
+                        "type": "stdio",
+                        "command": "npx",
+                        "args": ["server-package", "-c", "config.json"],
+                    }
+                },
+            },
+        ),
+        admin,
+    )
+
+    report = await service.validate(staged.revision_id, admin)
+
+    assert report.result == "passed"
 
 
 @pytest.mark.asyncio
@@ -398,6 +514,130 @@ async def test_overlay_cannot_widen_base_or_select_another_credential_binding(
         await service.promote(overlay.revision_id, user)
 
     assert caught.value.code == "overlay_preflight_failed"
+
+
+@pytest.mark.asyncio
+async def test_overlay_cannot_override_deployment_public_skill_state(tmp_path) -> None:
+    store = GovernedSkillArtifactStore(tmp_path / "candidates")
+    artifact = store.stage_archive(_archive())
+    repository = InMemoryToolPlaneRevisionRepository(tenant=_TENANT)
+    service = ToolPlaneRevisionService(
+        repository=repository,
+        projection=InMemoryToolPlaneProjection(),
+        validator=GovernedToolPlaneValidator(
+            policy_digest=_POLICY,
+            artifact_store=store,
+            durable=True,
+        ),
+        artifact_store=store,
+        durable=True,
+    )
+    admin = _actor("admin-1", role="admin")
+    user = _actor("user-1")
+    base = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+            candidate=_candidate(artifact),
+        ),
+        admin,
+    )
+    await service.validate(base.revision_id, admin)
+    await service.promote(base.revision_id, admin)
+    overlay = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(
+                kind="user_overlay",
+                user_ref=user_scope_reference(user),
+            ),
+            candidate={
+                "base_revision_digest": base.revision_digest,
+                    "skill_states": {"helper": {"enabled": False}},
+            },
+        ),
+        user,
+    )
+    await service.validate(overlay.revision_id, user)
+
+    with pytest.raises(ToolPlaneRevisionError) as caught:
+        await service.promote(overlay.revision_id, user)
+
+    assert caught.value.code == "overlay_preflight_failed"
+    attestation = await repository.compatibility_attestation(
+        base_revision_digest=base.revision_digest,
+        overlay_revision_digest=overlay.revision_digest,
+        validator_policy_digest=_POLICY,
+    )
+    assert attestation is not None
+    assert "overlay_skill_missing_from_composition" in {finding.code for finding in attestation.report.findings}
+
+
+@pytest.mark.asyncio
+async def test_overlay_rejects_conflicting_duplicate_custom_skill_state(tmp_path) -> None:
+    store = GovernedSkillArtifactStore(tmp_path / "candidates")
+    artifact = store.stage_archive(_archive())
+    repository = InMemoryToolPlaneRevisionRepository(tenant=_TENANT)
+    service = ToolPlaneRevisionService(
+        repository=repository,
+        projection=InMemoryToolPlaneProjection(),
+        validator=GovernedToolPlaneValidator(
+            policy_digest=_POLICY,
+            artifact_store=store,
+            durable=True,
+        ),
+        artifact_store=store,
+        durable=True,
+    )
+    admin = _actor("admin-1", role="admin")
+    user = _actor("user-1")
+    base = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+            candidate={
+                "validation_policy_digest": _POLICY,
+                "mcp_servers": {},
+                "public_skills": {},
+                "managed_integrations": {},
+            },
+        ),
+        admin,
+    )
+    await service.validate(base.revision_id, admin)
+    await service.promote(base.revision_id, admin)
+    overlay = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(
+                kind="user_overlay",
+                user_ref=user_scope_reference(user),
+            ),
+            candidate={
+                "base_revision_digest": base.revision_digest,
+                "custom_skills": {
+                    "helper": {
+                        "enabled": True,
+                        "archive_digest": artifact.archive_digest,
+                        "tree_digest": artifact.tree_digest,
+                        "manifest_digest": artifact.manifest_digest,
+                        "entry_points": list(artifact.entry_points),
+                    }
+                },
+                    "skill_states": {"helper": {"enabled": False}},
+            },
+        ),
+        user,
+    )
+    await service.validate(overlay.revision_id, user)
+
+    with pytest.raises(ToolPlaneRevisionError) as caught:
+        await service.promote(overlay.revision_id, user)
+
+    assert caught.value.code == "overlay_preflight_failed"
+    attestation = await repository.compatibility_attestation(
+        base_revision_digest=base.revision_digest,
+        overlay_revision_digest=overlay.revision_digest,
+        validator_policy_digest=_POLICY,
+    )
+    assert attestation is not None
+    assert "overlay_skill_state_conflict" in {finding.code for finding in attestation.report.findings}
 
 
 @pytest.mark.asyncio

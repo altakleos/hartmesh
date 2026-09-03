@@ -70,14 +70,14 @@ drift.
 | Category | Methods | Return format |
 |----------|---------|---------------|
 | Models | `list_models()`, `get_model(name)` | `{"models": [...]}`, `{name, display_name, ...}` |
-| MCP | `get_mcp_config()`, `update_mcp_config(servers)` | `{"mcp_servers": {...}}` |
-| Skills | `list_skills()`, `get_skill(name)`, `update_skill(name, enabled)`, `install_skill(path)` | `{"skills": [...]}` |
+| MCP | `get_mcp_config()`, legacy `update_mcp_config(servers)` | `{"mcp_servers": {...}}` |
+| Skills | `list_skills()`, `get_skill(name)`, legacy `update_skill(name, enabled)` / `install_skill(path)` | `{"skills": [...]}` |
 | Goals | `get_goal(thread_id)`, `set_goal(thread_id, objective, max_continuations=8)`, `clear_goal(thread_id)` | `{"goal": {...}}` or `{"goal": None}` |
 | Memory | `get_memory()`, `reload_memory()`, `get_memory_config()`, `get_memory_status()` | dict |
 | Uploads | `upload_files(thread_id, files)`, `list_uploads(thread_id)`, `delete_upload(thread_id, filename)` | `{"success": true, "files": [...]}`, `{"files": [...], "count": N}` |
 | Artifacts | `get_artifact(thread_id, path)` → `(bytes, mime_type)` | tuple |
 
-**Key difference from Gateway**: Upload accepts local `Path` objects instead of HTTP `UploadFile`, rejects directory paths before copying, and reuses a single worker when document conversion must run inside an active event loop. Artifact returns `(bytes, mime_type)` instead of HTTP Response. The new Gateway-only thread cleanup route deletes `.deer-flow/threads/{thread_id}` after LangGraph thread deletion; there is no matching `DeerFlowClient` method yet. `update_mcp_config()` and `update_skill()` automatically invalidate the cached agent.
+**Key difference from Gateway**: Upload takes local `Path` objects, rejects directories, and reuses one conversion worker inside active event loops; artifacts return `(bytes, mime_type)`. Gateway-only thread cleanup has no client method. Embedded MCP/skill mutations are legacy-only: governance makes them fail, while permitted writes invalidate the agent cache.
 
 **Tests**: `tests/test_client.py` (offline unit tests including
 `TestGatewayConformance`), `tests/test_client_live.py` (live integration tests,

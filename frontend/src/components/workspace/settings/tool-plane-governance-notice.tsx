@@ -98,6 +98,22 @@ export function ToolPlaneGovernanceNotice({
             <span>{copy.noRevision}</span>
           )}
         </div>
+        {latest ? (
+          <p>
+            {copy.stagedBy}: <code>{shortDigest(latest.staging_actor_digest)}</code>{" "}
+            <time dateTime={latest.staged_at}>{formatTimestamp(latest.staged_at)}</time>
+            {latest.promotion_actor_digest && latest.promoted_at ? (
+              <>
+                {" · "}
+                {copy.promotedBy}:{" "}
+                <code>{shortDigest(latest.promotion_actor_digest)}</code>{" "}
+                <time dateTime={latest.promoted_at}>
+                  {formatTimestamp(latest.promoted_at)}
+                </time>
+              </>
+            ) : null}
+          </p>
+        ) : null}
         <p>{copy.credentialNotice}</p>
       </AlertDescription>
     </Alert>
@@ -106,6 +122,11 @@ export function ToolPlaneGovernanceNotice({
 
 function shortDigest(digest: string): string {
   return digest.slice(0, 12) + "…";
+}
+
+function formatTimestamp(timestamp: string): string {
+  const parsed = new Date(timestamp);
+  return Number.isNaN(parsed.valueOf()) ? timestamp : parsed.toLocaleString();
 }
 
 function revisionStateLabel(

@@ -369,7 +369,7 @@ def _source_signature(storage: SkillStorage, scope: str) -> str:
         # this signature.
         state = {
             "extensions": _extensions_state(),
-            "user": storage._read_skill_states(),
+            "user": storage.capture_skill_state_projection(),
         }
     else:  # pragma: no cover - internal invariant
         raise ValueError(f"Unknown skill projection scope: {scope}")

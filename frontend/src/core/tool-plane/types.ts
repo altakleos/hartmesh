@@ -45,7 +45,9 @@ export interface ToolPlaneRevisionSummary {
   scope: ToolPlaneScope;
   content_digest: string;
   state: ToolPlaneRevisionState;
+  staging_actor_digest: string;
   staged_at: string;
+  promotion_actor_digest: string | null;
   promoted_at: string | null;
 }
 

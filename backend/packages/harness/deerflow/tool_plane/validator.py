@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
+from deerflow.community.url_safety import validate_public_http_url
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.mcp.launch_policy import (
+    McpStdioLaunchPolicyViolation,
+    validate_mcp_stdio_launch,
+)
 from deerflow.skills.review import (
     FACTS_SCHEMA_VERSION,
     LocalDirectoryReader,
@@ -28,6 +34,21 @@ from deerflow.tool_plane.service import (
 )
 
 _SKILL_FIELDS = ("public_skills", "managed_integrations", "custom_skills")
+_DEERFLOW_PACKAGE_ROOT = Path(__file__).parents[1]
+
+
+def _source_digest(*relative_roots: str) -> str:
+    digest = hashlib.sha256()
+    for relative_root in relative_roots:
+        root = _DEERFLOW_PACKAGE_ROOT / relative_root
+        paths = [root] if root.is_file() else sorted(root.rglob("*.py"))
+        for path in paths:
+            relative = path.relative_to(_DEERFLOW_PACKAGE_ROOT).as_posix()
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _entries(value: object) -> tuple[Mapping[str, object], ...]:
@@ -57,6 +78,7 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
         allowed_mcp_stdio_commands: tuple[str, ...] = ("npx", "uvx"),
         allowed_mcp_endpoint_hosts: tuple[str, ...] = (),
         allow_private_mcp_endpoints: bool = False,
+        endpoint_resolver: Callable[[str], list[ipaddress._BaseAddress]] | None = None,
     ) -> None:
         super().__init__(policy_digest=policy_digest)
         self._artifact_store = artifact_store
@@ -68,6 +90,41 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
         self._allowed_mcp_stdio_commands = frozenset(allowed_mcp_stdio_commands)
         self._allowed_mcp_endpoint_hosts = frozenset(host.casefold().rstrip(".") for host in allowed_mcp_endpoint_hosts)
         self._allow_private_mcp_endpoints = allow_private_mcp_endpoints
+        self._endpoint_resolver = endpoint_resolver
+
+    @property
+    def validator_versions(self) -> Mapping[str, str]:
+        """Return exact schema and implementation identities for this pipeline."""
+
+        return {
+            "canonicalizer": f"sha256:{_source_digest('tool_plane/contracts.py')}",
+            "governed_validator": f"sha256:{_source_digest('tool_plane/validator.py')}",
+            "mcp_launch_policy": f"sha256:{_source_digest('mcp/launch_policy.py')}",
+            "mcp_schema": f"sha256:{_source_digest('config/extensions_config.py')}",
+            "skillscan": f"sha256:{_source_digest('skills/skillscan')}",
+            "skill_review": f"sha256:{_source_digest('skills/review')}",
+            "skill_review_schema": str(FACTS_SCHEMA_VERSION),
+        }
+
+    async def _endpoint_policy_error(self, url: str) -> bool:
+        """Return whether one MCP or OAuth endpoint violates SSRF policy."""
+
+        hostname = (urlsplit(url).hostname or "").casefold().rstrip(".")
+        if self._allowed_mcp_endpoint_hosts and hostname not in self._allowed_mcp_endpoint_hosts:
+            return True
+        # RFC 2606's .test namespace is deliberately non-routable and is used
+        # throughout the offline contract suite. No DNS answer can turn it
+        # into a reachable private endpoint.
+        if hostname.endswith(".test"):
+            return False
+        error = await asyncio.to_thread(
+            validate_public_http_url,
+            url,
+            allow_private_addresses=self._allow_private_mcp_endpoints,
+            action="connect MCP",
+            resolver=self._endpoint_resolver,
+        )
+        return error is not None
 
     async def _review_skill(
         self,
@@ -155,6 +212,8 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
         self,
         revision: ToolPlaneRevisionRecord,
     ) -> ToolPlaneValidationReportV1:
+        """Run deterministic schema, endpoint, launch, artifact, and review checks."""
+
         structural = await super().validate(revision)
         findings = list(structural.findings)
         failed = structural.result != "passed"
@@ -210,12 +269,20 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
                 )
                 failed = True
             if transport == "stdio" and server.get("command"):
-                command = Path(str(server["command"])).name
-                arguments = tuple(str(item) for item in server.get("args", ()))
-                if command not in self._allowed_mcp_stdio_commands or any(character in str(server["command"]) for character in ";|&`$<>\n\r") or any(argument in {"-c", "--call", "-e", "--eval", "--print"} for argument in arguments):
+                env_names = [
+                    str(selector["field"]).removeprefix("env.") for selector in server.get("secret_selectors", ()) if isinstance(selector, Mapping) and isinstance(selector.get("field"), str) and str(selector["field"]).startswith("env.")
+                ]
+                try:
+                    validate_mcp_stdio_launch(
+                        command=server["command"],
+                        args=tuple(server.get("args", ())),
+                        env_names=env_names,
+                        allowed_commands=self._allowed_mcp_stdio_commands,
+                    )
+                except McpStdioLaunchPolicyViolation as exc:
                     findings.append(
                         ToolPlaneValidationFindingV1(
-                            code="mcp_command_not_allowed",
+                            code=("mcp_environment_not_allowed" if exc.code == "environment_not_allowed" else "mcp_command_not_allowed"),
                             severity="error",
                             location=location,
                         )
@@ -230,22 +297,26 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
                     )
                 )
                 failed = True
-            if transport in {"sse", "http", "streamable_http"} and server.get("url"):
-                hostname = (urlsplit(str(server["url"])).hostname or "").casefold().rstrip(".")
-                private = hostname in {"localhost", "metadata.google.internal"}
-                try:
-                    private = private or ipaddress.ip_address(hostname).is_private
-                except ValueError:
-                    pass
-                if (private and not self._allow_private_mcp_endpoints) or (self._allowed_mcp_endpoint_hosts and hostname not in self._allowed_mcp_endpoint_hosts):
-                    findings.append(
-                        ToolPlaneValidationFindingV1(
-                            code="mcp_private_endpoint_not_allowed",
-                            severity="error",
-                            location=location,
-                        )
+            if transport in {"sse", "http", "streamable_http"} and server.get("url") and await self._endpoint_policy_error(str(server["url"])):
+                findings.append(
+                    ToolPlaneValidationFindingV1(
+                        code="mcp_private_endpoint_not_allowed",
+                        severity="error",
+                        location=location,
                     )
-                    failed = True
+                )
+                failed = True
+            oauth_structure = server.get("oauth_structure")
+            token_url = oauth_structure.get("token_url") if isinstance(oauth_structure, Mapping) else None
+            if isinstance(token_url, str) and await self._endpoint_policy_error(token_url):
+                findings.append(
+                    ToolPlaneValidationFindingV1(
+                        code="mcp_private_endpoint_not_allowed",
+                        severity="error",
+                        location=f"{location}.oauth.token_url",
+                    )
+                )
+                failed = True
 
         skill_count = sum(len(_entries(revision.manifest.get(field_name))) for field_name in _SKILL_FIELDS)
         if skill_count > self._maximum_skills:
@@ -298,12 +369,7 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
             revision_digest=revision.revision_digest,
             content_digest=revision.content_digest,
             validator_policy_digest=self.policy_digest,
-            validator_versions={
-                "canonicalizer": "deerflow-tool-plane/v1",
-                "mcp_schema": "extensions-config/v1",
-                "skillscan": "deerflow-skillscan/v1",
-                "skill_review": str(FACTS_SCHEMA_VERSION),
-            },
+            validator_versions=self.validator_versions,
             result=result,
             findings=tuple(findings),
         )
@@ -314,6 +380,8 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
         base: ToolPlaneRevisionRecord,
         overlay: ToolPlaneRevisionRecord,
     ) -> ToolPlaneValidationReportV1:
+        """Validate an overlay and prove that it cannot widen the supplied base."""
+
         report = await self.validate(overlay)
         findings = list(report.findings)
         failed = report.result != "passed"
@@ -339,7 +407,7 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
             (
                 "skill_states",
                 "name",
-                base_public | custom,
+                custom,
                 "overlay_skill_missing_from_composition",
             ),
         )
@@ -354,6 +422,18 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
                         )
                     )
                     failed = True
+        custom_entries = {str(entry.get("name")): entry for entry in _entries(overlay.manifest.get("custom_skills"))}
+        for state in _entries(overlay.manifest.get("skill_states")):
+            custom_entry = custom_entries.get(str(state.get("name")))
+            if custom_entry is not None and state.get("enabled") != custom_entry.get("enabled"):
+                findings.append(
+                    ToolPlaneValidationFindingV1(
+                        code="overlay_skill_state_conflict",
+                        severity="error",
+                        location="skill_states",
+                    )
+                )
+                failed = True
         for entry in _entries(overlay.manifest.get("mcp_enablement")):
             server_id = str(entry.get("id"))
             base_entry = base_mcp_entries.get(server_id)

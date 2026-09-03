@@ -928,6 +928,8 @@ export const zhCN: Translations = {
       noActiveRevision: "没有活动修订",
       latestRevision: "最新修订",
       noRevision: "没有已暂存修订",
+      stagedBy: "暂存操作者",
+      promotedBy: "提升操作者",
       credentialNotice: "此处仅显示修订标识和无密钥证据，绝不会包含凭证值。",
       states: {
         bootstrap_required: "需要引导",

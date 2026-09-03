@@ -13,6 +13,7 @@ from deerflow.tool_plane import (
     ScopedStageRevisionRequest,
     ToolPlaneRevisionError,
     ToolPlaneRevisionScopeV1,
+    ToolPlaneRevisionService,
     user_scope_reference,
 )
 
@@ -21,17 +22,21 @@ mutation_router = APIRouter(prefix="/api/tool-plane", tags=["tool-plane"])
 
 
 class StageToolPlaneRevisionRequest(BaseModel):
+    """Authenticated request to stage one scoped immutable candidate."""
+
     scope_kind: Literal["deployment_base", "user_overlay"]
     candidate: dict[str, Any]
     model_config = ConfigDict(extra="forbid")
 
 
 class ToolPlaneRevisionActionRequest(BaseModel):
+    """Scope discriminator required before a revision action is authorized."""
+
     scope_kind: Literal["deployment_base", "user_overlay"]
     model_config = ConfigDict(extra="forbid")
 
 
-def _service(request: Request):
+def _service(request: Request) -> ToolPlaneRevisionService:
     service = getattr(request.app.state, "tool_plane_revision_service", None)
     if service is None:
         raise HTTPException(
@@ -134,6 +139,8 @@ async def get_tool_plane_status(
     request: Request,
     scope_kind: Literal["deployment_base", "user_overlay"] = Query(default="user_overlay"),
 ) -> dict[str, object]:
+    """Return governance status for the caller's overlay or deployment base."""
+
     actor = await _actor(
         request,
         "admin" if scope_kind == "deployment_base" else "read",
@@ -163,6 +170,8 @@ async def list_tool_plane_revisions(
     scope_kind: Literal["deployment_base", "user_overlay"] = Query(default="user_overlay"),
     limit: int = Query(default=50, ge=1, le=100),
 ) -> dict[str, object]:
+    """List bounded revision history visible in the caller-selected scope."""
+
     actor = await _actor(
         request,
         "admin" if scope_kind == "deployment_base" else "read",
@@ -192,6 +201,8 @@ async def get_admin_tool_plane_status(
     scope_kind: Literal["deployment_base", "user_overlay"] = Query(...),
     user_ref: str | None = Query(default=None, min_length=1, max_length=256),
 ) -> dict[str, object]:
+    """Return status for an explicitly administrator-selected scope."""
+
     actor = await _actor(request, "admin")
     service = _service(request)
     try:
@@ -216,6 +227,8 @@ async def list_admin_tool_plane_revisions(
     user_ref: str | None = Query(default=None, min_length=1, max_length=256),
     limit: int = Query(default=50, ge=1, le=100),
 ) -> dict[str, object]:
+    """List history for an explicitly administrator-selected scope."""
+
     actor = await _actor(request, "admin")
     service = _service(request)
     try:
@@ -235,6 +248,8 @@ async def stage_tool_plane_revision(
     request: Request,
     body: StageToolPlaneRevisionRequest,
 ) -> dict[str, object]:
+    """Stage inert canonical material in the caller-authorized scope."""
+
     actor = await _action_actor(request, body.scope_kind)
     service = _service(request)
     try:
@@ -282,6 +297,8 @@ async def stage_tool_plane_skill_artifact(
 
 @mutation_router.post("/bootstrap/stage-current", status_code=201)
 async def stage_current_tool_plane_projection(request: Request) -> dict[str, object]:
+    """Capture current mutable installation state as inert bootstrap revisions."""
+
     actor = await _actor(request, "admin")
     try:
         staged = await _service(request).stage_current_projection(actor)
@@ -315,6 +332,8 @@ async def inspect_tool_plane_revision(
     request: Request,
     revision_id: str,
 ) -> dict[str, object]:
+    """Inspect safe manifest and evidence for a caller-owned revision."""
+
     actor = await _actor(request, "read")
     try:
         record = await _service(request).inspect_for_actor(revision_id, actor)
@@ -328,6 +347,8 @@ async def admin_inspect_tool_plane_revision(
     request: Request,
     revision_id: str,
 ) -> dict[str, object]:
+    """Inspect safe material for an administrator-authorized revision."""
+
     actor = await _actor(request, "admin")
     try:
         record = await _service(request).admin_inspect(revision_id, actor)
@@ -342,6 +363,8 @@ async def diff_tool_plane_revision(
     revision_id: str,
     against: str = Query(..., min_length=1, max_length=64),
 ) -> dict[str, object]:
+    """Return a bounded top-level field diff between same-scope revisions."""
+
     actor = await _actor(request, "read")
     service = _service(request)
     try:
@@ -392,6 +415,8 @@ async def validate_tool_plane_revision(
     revision_id: str,
     body: ToolPlaneRevisionActionRequest,
 ) -> dict[str, object]:
+    """Validate one caller-owned revision without activating it."""
+
     service, actor = await _verified_action_record(
         request,
         revision_id,
@@ -409,24 +434,15 @@ async def promote_tool_plane_revision(
     revision_id: str,
     body: ToolPlaneRevisionActionRequest,
 ) -> dict[str, object]:
+    """Promote one validated caller-owned revision."""
+
     service, actor = await _verified_action_record(
         request,
         revision_id,
         body.scope_kind,
     )
     try:
-        promoted = await service.promote(revision_id, actor)
-        return {
-            "version": 1,
-            "revision_id": promoted.revision_id,
-            "revision_digest": promoted.revision_digest,
-            "state": promoted.state,
-            "actor_digest": promoted.actor_digest,
-            "previous_revision_id": promoted.previous_revision_id,
-            "desired_projection_digest": promoted.desired_projection_digest,
-            "observed_projection_digest": promoted.observed_projection_digest,
-            "promoted_at": promoted.promoted_at.isoformat(),
-        }
+        return (await service.promote(revision_id, actor)).to_json()
     except ToolPlaneRevisionError as exc:
         _raise_http(exc)
 
@@ -437,24 +453,15 @@ async def rollback_tool_plane_revision(
     revision_id: str,
     body: ToolPlaneRevisionActionRequest,
 ) -> dict[str, object]:
+    """Create and promote a caller-attributed rollback revision."""
+
     service, actor = await _verified_action_record(
         request,
         revision_id,
         body.scope_kind,
     )
     try:
-        promoted = await service.rollback(revision_id, actor)
-        return {
-            "version": 1,
-            "revision_id": promoted.revision_id,
-            "revision_digest": promoted.revision_digest,
-            "state": promoted.state,
-            "actor_digest": promoted.actor_digest,
-            "previous_revision_id": promoted.previous_revision_id,
-            "desired_projection_digest": promoted.desired_projection_digest,
-            "observed_projection_digest": promoted.observed_projection_digest,
-            "promoted_at": promoted.promoted_at.isoformat(),
-        }
+        return (await service.rollback(revision_id, actor)).to_json()
     except ToolPlaneRevisionError as exc:
         _raise_http(exc)
 
@@ -464,6 +471,8 @@ async def admin_validate_tool_plane_revision(
     request: Request,
     revision_id: str,
 ) -> dict[str, object]:
+    """Validate an administrator-selected revision."""
+
     actor = await _actor(request, "admin")
     try:
         return (await _service(request).admin_validate(revision_id, actor)).to_json()
@@ -476,20 +485,11 @@ async def admin_promote_tool_plane_revision(
     request: Request,
     revision_id: str,
 ) -> dict[str, object]:
+    """Promote an administrator-selected validated revision."""
+
     actor = await _actor(request, "admin")
     try:
-        promoted = await _service(request).admin_promote(revision_id, actor)
-        return {
-            "version": 1,
-            "revision_id": promoted.revision_id,
-            "revision_digest": promoted.revision_digest,
-            "state": promoted.state,
-            "actor_digest": promoted.actor_digest,
-            "previous_revision_id": promoted.previous_revision_id,
-            "desired_projection_digest": promoted.desired_projection_digest,
-            "observed_projection_digest": promoted.observed_projection_digest,
-            "promoted_at": promoted.promoted_at.isoformat(),
-        }
+        return (await _service(request).admin_promote(revision_id, actor)).to_json()
     except ToolPlaneRevisionError as exc:
         _raise_http(exc)
 
@@ -499,20 +499,11 @@ async def admin_rollback_tool_plane_revision(
     request: Request,
     revision_id: str,
 ) -> dict[str, object]:
+    """Create and promote an administrator-attributed rollback revision."""
+
     actor = await _actor(request, "admin")
     try:
-        promoted = await _service(request).admin_rollback(revision_id, actor)
-        return {
-            "version": 1,
-            "revision_id": promoted.revision_id,
-            "revision_digest": promoted.revision_digest,
-            "state": promoted.state,
-            "actor_digest": promoted.actor_digest,
-            "previous_revision_id": promoted.previous_revision_id,
-            "desired_projection_digest": promoted.desired_projection_digest,
-            "observed_projection_digest": promoted.observed_projection_digest,
-            "promoted_at": promoted.promoted_at.isoformat(),
-        }
+        return (await _service(request).admin_rollback(revision_id, actor)).to_json()
     except ToolPlaneRevisionError as exc:
         _raise_http(exc)
 

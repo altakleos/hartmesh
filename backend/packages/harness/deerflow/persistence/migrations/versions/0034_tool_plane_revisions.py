@@ -28,6 +28,8 @@ _TABLES = frozenset(
 
 
 def upgrade() -> None:
+    """Create the governed revision, scope, event, and attestation tables."""
+
     # The supported legacy bootstrap tests and backfills schemas that were
     # originally created with current ORM metadata before Alembic ownership
     # was introduced. In that case all four exact tables already exist. Treat
@@ -221,6 +223,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Remove unused governed tables, refusing any data-bearing downgrade."""
+
     bind = op.get_bind()
     tables = set(sa.inspect(bind).get_table_names())
     for table in (

@@ -58,6 +58,8 @@ rs.mock("@/core/i18n/hooks", () => ({
           noActiveRevision: "No active revision",
           latestRevision: "Latest",
           noRevision: "No staged revisions",
+          stagedBy: "Staged by",
+          promotedBy: "Promoted by",
           credentialNotice: "Credential values are never included.",
           states: {
             bootstrap_required: "Bootstrap required",
@@ -188,6 +190,10 @@ describe("ToolSettingsPage MCP switches", () => {
         {
           revision_digest: "b".repeat(64),
           state: "prepared",
+          staging_actor_digest: "c".repeat(64),
+          staged_at: "2026-09-03T12:00:00Z",
+          promotion_actor_digest: "d".repeat(64),
+          promoted_at: "2026-09-03T12:01:00Z",
         },
       ],
     };
@@ -196,6 +202,8 @@ describe("ToolSettingsPage MCP switches", () => {
 
     expect(screen.getByText("Governed revisions")).toBeDefined();
     expect(screen.getByText("Prepared")).toBeDefined();
+    expect(screen.getByText("cccccccccccc…")).toBeDefined();
+    expect(screen.getByText("dddddddddddd…")).toBeDefined();
     expect(
       screen.getByText("Credential values are never included."),
     ).toBeDefined();

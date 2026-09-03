@@ -85,6 +85,8 @@ def _declared_name(skill_md: Path, tree_digest: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class StagedSkillArtifactV1:
+    """Bounded public metadata for one inert content-addressed skill artifact."""
+
     artifact_ref: str
     skill_name: str
     archive_digest: str
@@ -94,6 +96,8 @@ class StagedSkillArtifactV1:
     staged_at: datetime
 
     def to_safe_json(self) -> dict[str, object]:
+        """Return metadata without storage paths or package source bytes."""
+
         return {
             "version": 1,
             "artifact_ref": self.artifact_ref,
@@ -108,6 +112,8 @@ class StagedSkillArtifactV1:
 
 @dataclass(frozen=True, slots=True)
 class VerifiedSkillArtifact:
+    """Private verified artifact metadata and package-root handle."""
+
     metadata: StagedSkillArtifactV1
     package_root: Path
 
@@ -132,10 +138,14 @@ class GovernedSkillArtifactStore:
         self._max_expanded_bytes = max_expanded_bytes
         self._max_entries = max_entries
 
-    def _object_root(self, tree_digest: str) -> Path:
-        if _DIGEST.fullmatch(tree_digest) is None:
+    def _object_root(self, tree_digest: str, archive_digest: str) -> Path:
+        if _DIGEST.fullmatch(tree_digest) is None or _DIGEST.fullmatch(archive_digest) is None:
             raise ToolPlaneRevisionError("validation_failed")
-        return self._root / "objects" / tree_digest[:2] / tree_digest
+        # The archive digest is part of candidate identity even when two
+        # archives expand to the same tree. Keying only by the tree digest
+        # would make the first ZIP encoding prevent every later, byte-distinct
+        # candidate from being staged or verified.
+        return self._root / "objects" / tree_digest[:2] / tree_digest / archive_digest
 
     @staticmethod
     def _metadata(value: object) -> StagedSkillArtifactV1:
@@ -167,6 +177,8 @@ class GovernedSkillArtifactStore:
         return metadata
 
     def stage_archive(self, source: BinaryIO | Path) -> StagedSkillArtifactV1:
+        """Safely extract and persist one inert archive by exact byte identity."""
+
         self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
         staging_root = Path(tempfile.mkdtemp(prefix="candidate-", dir=self._root))
         try:
@@ -230,7 +242,7 @@ class GovernedSkillArtifactStore:
                 entry_points=entry_points,
                 staged_at=staged_at,
             )
-            object_root = self._object_root(tree_digest)
+            object_root = self._object_root(tree_digest, archive_digest)
             if object_root.exists():
                 existing = self.verify(
                     tree_digest=tree_digest,
@@ -301,7 +313,9 @@ class GovernedSkillArtifactStore:
         archive_digest: str,
         manifest_digest: str,
     ) -> VerifiedSkillArtifact:
-        object_root = self._object_root(tree_digest)
+        """Verify all supplied identities against protected persisted bytes."""
+
+        object_root = self._object_root(tree_digest, archive_digest)
         try:
             metadata = self._metadata(json.loads((object_root / "metadata.json").read_text(encoding="utf-8")))
             package_root = object_root / "package"

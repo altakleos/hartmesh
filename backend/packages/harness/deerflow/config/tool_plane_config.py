@@ -32,7 +32,7 @@ class ToolPlaneConfig(BaseModel):
     )
     allow_private_mcp_endpoints: bool = Field(
         default=False,
-        description="Permit literal private, loopback, and metadata MCP endpoint hosts.",
+        description="Permit private, loopback, or metadata MCP endpoint addresses after resolution.",
     )
     maximum_mcp_servers: int = Field(default=128, ge=1, le=1024)
     maximum_skills: int = Field(default=512, ge=1, le=4096)
@@ -41,6 +41,8 @@ class ToolPlaneConfig(BaseModel):
 
     @property
     def policy_digest(self) -> str:
+        """Return the canonical SHA-256 identity of this complete policy."""
+
         encoded = json.dumps(
             {"version": 1, **self.model_dump(mode="json")},
             ensure_ascii=False,
