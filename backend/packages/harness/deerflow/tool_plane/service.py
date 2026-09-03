@@ -348,6 +348,7 @@ class ToolPlaneRevisionRecord:
     promoted_at: datetime | None = None
     rollback_source_revision_id: str | None = None
     bootstrap_inventory_digest: str | None = None
+    bootstrap_source_digest: str | None = field(default=None, repr=False)
     storage_subject_id: str | None = field(default=None, repr=False)
     bootstrap_overlay_revision_ids: tuple[str, ...] = field(default=(), repr=False)
     bootstrap_inventory_subject_ids: tuple[str, ...] = field(default=(), repr=False)
@@ -556,6 +557,16 @@ class ToolPlaneProjection(Protocol):
 
         ...
 
+    async def empty_overlay_matches_for_actor(
+        self,
+        scope: ToolPlaneRevisionScopeV1,
+        *,
+        storage_subject_id: str,
+    ) -> bool:
+        """Return whether live user material matches the empty marker."""
+
+        ...
+
 
 class DeterministicToolPlaneValidator:
     """Built-in deterministic structural validator.
@@ -659,6 +670,17 @@ class InMemoryToolPlaneProjection:
         """Return the in-memory observed digest for one scope."""
 
         return self._digests.get(scope.key)
+
+    async def empty_overlay_matches_for_actor(
+        self,
+        scope: ToolPlaneRevisionScopeV1,
+        *,
+        storage_subject_id: str,
+    ) -> bool:
+        """Treat an absent in-memory user projection as canonically empty."""
+
+        del storage_subject_id
+        return scope.kind == "user_overlay" and scope.key not in self._digests
 
     def inject_drift(self, scope: ToolPlaneRevisionScopeV1, digest: str) -> None:
         """Replace an observed digest to exercise drift handling in tests."""
@@ -1208,7 +1230,7 @@ class ToolPlaneRevisionService:
         )
         overlay_records: list[ToolPlaneRevisionRecord] = []
         for subject_id in first_inventory.subject_ids:
-            overlay_candidate, _ = await self._projection.capture_current_user(
+            overlay_candidate, source_digest = await self._projection.capture_current_user(
                 storage_subject_id=subject_id,
                 base_revision_digest=base_revision_digest,
                 artifact_store=self._artifact_store,
@@ -1247,6 +1269,7 @@ class ToolPlaneRevisionService:
                     staging_actor_digest=actor.digest,
                     staged_at=_now(),
                     storage_subject_id=subject_id,
+                    bootstrap_source_digest=source_digest,
                 )
             )
         second_inventory = await self._user_inventory.snapshot()
@@ -1322,6 +1345,14 @@ class ToolPlaneRevisionService:
             base_digest = None
         else:
             material = canonicalize_user_overlay_candidate(request.candidate)
+            if material.is_empty:
+                raise ToolPlaneRevisionError(
+                    "validation_failed",
+                    safe_details={
+                        "field": "candidate",
+                        "reason": "empty_overlay_marker_required",
+                    },
+                )
             base_digest = material.base_revision_digest
         manifest = material.to_json()
         content_digest = material.digest
@@ -1569,30 +1600,63 @@ class ToolPlaneRevisionService:
         await self._assert_inventory_is_complete(inventory)
         if inventory.subject_ids != base.bootstrap_inventory_subject_ids:
             raise ToolPlaneRevisionError("bootstrap_inventory_changed")
+        bootstrap_overlays: dict[str, ToolPlaneRevisionRecord] = {}
+        for revision_id in base.bootstrap_overlay_revision_ids:
+            overlay = await self._repository.get(revision_id)
+            if overlay is None or overlay.storage_subject_id is None or overlay.bootstrap_source_digest is None or overlay.storage_subject_id in bootstrap_overlays:
+                raise ToolPlaneRevisionError("bootstrap_inventory_changed")
+            bootstrap_overlays[overlay.storage_subject_id] = overlay
+        active_base = await self._repository.active(base.scope)
+        base_is_active = active_base is not None and active_base.revision_id == base.revision_id
+        if active_base is not None and not base_is_active:
+            raise ToolPlaneRevisionError("bootstrap_inventory_changed")
+        if base_is_active and await self._observed_record(base) != base.content_digest:
+            raise ToolPlaneRevisionError("bootstrap_inventory_changed")
         candidate, _ = await self._projection.capture_current_deployment(
             validation_policy_digest=self._validator.policy_digest,
             artifact_store=self._artifact_store,
         )
         candidate["parent_revision_digest"] = base.parent_revision_digest
         current_base = canonicalize_deployment_candidate(candidate)
+        if current_base.digest != base.content_digest:
+            raise ToolPlaneRevisionError("bootstrap_inventory_changed")
         overlays: list[dict[str, object]] = []
         for subject_id in inventory.subject_ids:
-            overlay_candidate, _ = await self._projection.capture_current_user(
+            expected_overlay = bootstrap_overlays.get(subject_id)
+            if expected_overlay is not None:
+                active_overlay = await self._repository.active(expected_overlay.scope)
+                if active_overlay is not None:
+                    if active_overlay.revision_id != expected_overlay.revision_id:
+                        raise ToolPlaneRevisionError("bootstrap_inventory_changed")
+                    overlays.append(
+                        {
+                            "user_ref": expected_overlay.scope.user_ref,
+                            "content_digest": expected_overlay.content_digest,
+                        }
+                    )
+                    continue
+            overlay_candidate, source_digest = await self._projection.capture_current_user(
                 storage_subject_id=subject_id,
                 base_revision_digest=base.revision_digest,
                 artifact_store=self._artifact_store,
             )
             overlay = canonicalize_user_overlay_candidate(overlay_candidate)
-            if overlay.is_empty:
+            if expected_overlay is None:
+                if not overlay.is_empty:
+                    raise ToolPlaneRevisionError("bootstrap_inventory_changed")
                 continue
+            if source_digest != expected_overlay.bootstrap_source_digest:
+                raise ToolPlaneRevisionError("bootstrap_inventory_changed")
+            # Promoting the base intentionally removes legacy global custom
+            # state from extensions_config.json. The private source digest
+            # still fences the unchanged user bytes/state while the staged
+            # overlay preserves their captured effective enabled value.
+            if not base_is_active and overlay.digest != expected_overlay.content_digest:
+                raise ToolPlaneRevisionError("bootstrap_inventory_changed")
             overlays.append(
                 {
-                    "user_ref": user_scope_reference_for_subject(
-                        tenant_digest=base.tenant_digest,
-                        subject_kind="human",
-                        subject_id=subject_id,
-                    ),
-                    "content_digest": overlay.digest,
+                    "user_ref": expected_overlay.scope.user_ref,
+                    "content_digest": expected_overlay.content_digest,
                 }
             )
         observed = canonical_tool_plane_digest(
@@ -1790,6 +1854,26 @@ class ToolPlaneRevisionService:
             )
         return await self._projection.observed_digest(record.scope)
 
+    async def _empty_overlay_matches(
+        self,
+        scope: ToolPlaneRevisionScopeV1,
+        *,
+        storage_subject_id: str,
+    ) -> bool:
+        observer = getattr(
+            self._projection,
+            "empty_overlay_matches_for_actor",
+            None,
+        )
+        if observer is None:
+            return await self._projection.observed_digest(scope) is None
+        return bool(
+            await observer(
+                scope,
+                storage_subject_id=storage_subject_id,
+            )
+        )
+
     async def rollback(
         self,
         revision_ref: str,
@@ -1930,7 +2014,10 @@ class ToolPlaneRevisionService:
             user_ref=user_scope_reference(actor),
         )
         self._authorize_scope(scope, actor, mutation=False)
-        return await self._status(scope)
+        return await self._status(
+            scope,
+            storage_subject_id=actor.identity.effective_subject.subject_id,
+        )
 
     async def admin_status(
         self,
@@ -1940,18 +2027,57 @@ class ToolPlaneRevisionService:
         """Return observed status for an administrator-selected scope."""
 
         self._authorize_scope(scope, actor, mutation=False, administrative=True)
-        return await self._status(scope)
+        storage_subject_id = None
+        if scope.kind == "user_overlay":
+            inventory = await self._user_inventory.snapshot()
+            matches = tuple(
+                subject_id
+                for subject_id in inventory.subject_ids
+                if user_scope_reference_for_subject(
+                    tenant_digest=self._repository.tenant.digest,
+                    subject_kind="human",
+                    subject_id=subject_id,
+                )
+                == scope.user_ref
+            )
+            if not matches:
+                raise ToolPlaneRevisionError("revision_not_found")
+            if len(matches) != 1:
+                raise ToolPlaneRevisionError("bootstrap_inventory_changed")
+            storage_subject_id = matches[0]
+        return await self._status(
+            scope,
+            storage_subject_id=storage_subject_id,
+        )
 
-    async def _status(self, scope: ToolPlaneRevisionScopeV1) -> ToolPlaneStatus:
+    async def _status(
+        self,
+        scope: ToolPlaneRevisionScopeV1,
+        *,
+        storage_subject_id: str | None = None,
+    ) -> ToolPlaneStatus:
         active = await self._repository.active(scope)
         generation = await self._repository.generation(scope)
-        observed = await self._projection.observed_digest(scope) if active is None else await self._observed_record(active)
+        empty_overlay_matches = True
+        if active is None and scope.kind == "user_overlay" and storage_subject_id is not None:
+            empty_overlay_matches = await self._empty_overlay_matches(
+                scope,
+                storage_subject_id=storage_subject_id,
+            )
+            observed = EMPTY_OVERLAY_MARKER_V1 if empty_overlay_matches else None
+        else:
+            observed = await self._projection.observed_digest(scope) if active is None else await self._observed_record(active)
         if self._immutable:
             state = "immutable"
         elif await self._repository.bootstrap_required():
             state = "bootstrap_required"
         elif active is None:
-            state = "unmanaged"
+            base = await self._repository.active(ToolPlaneRevisionScopeV1(kind="deployment_base"))
+            state = (
+                "governed"
+                if scope.kind == "user_overlay" and storage_subject_id is not None and empty_overlay_matches and base is not None and base.state != "recovery_required" and await self._observed_record(base) == base.content_digest
+                else "unmanaged"
+            )
         elif active.state == "recovery_required":
             state = "recovery_required"
         else:
@@ -1964,7 +2090,7 @@ class ToolPlaneRevisionService:
             active_revision_digest=None if active is None else active.revision_digest,
             generation=generation,
             projection_digest=observed,
-            drift=active is not None and observed != expected,
+            drift=(not empty_overlay_matches if active is None and scope.kind == "user_overlay" else active is not None and observed != expected),
         )
 
     async def effective_for_actor(
@@ -1992,7 +2118,14 @@ class ToolPlaneRevisionService:
                 raise ToolPlaneRevisionError("tool_plane_bootstrap_required")
             overlay = await self._repository.active(overlay_scope)
             base_observed = await self._observed_record(base)
-            overlay_observed = await self._projection.observed_digest(overlay_scope) if overlay is None else await self._observed_record(overlay)
+            if overlay is None:
+                empty_overlay_matches = await self._empty_overlay_matches(
+                    overlay_scope,
+                    storage_subject_id=(actor.identity.effective_subject.subject_id),
+                )
+                overlay_observed = EMPTY_OVERLAY_MARKER_V1 if empty_overlay_matches else None
+            else:
+                overlay_observed = await self._observed_record(overlay)
             if (
                 base_generation == await self._repository.generation(base_scope)
                 and overlay_generation == await self._repository.generation(overlay_scope)
@@ -2010,7 +2143,8 @@ class ToolPlaneRevisionService:
             )
             if compatibility is None or not compatibility.compatible:
                 raise ToolPlaneRevisionError("base_revision_changed")
-        drift = base_observed != base.content_digest or (overlay is not None and overlay_observed != overlay.content_digest)
+        expected_overlay_projection = EMPTY_OVERLAY_MARKER_V1 if overlay is None else overlay.content_digest
+        drift = base_observed != base.content_digest or overlay_observed != expected_overlay_projection
         if drift and self._durable:
             raise ToolPlaneRevisionError("unmanaged_drift")
         overlay_digest = EMPTY_OVERLAY_MARKER_V1 if overlay is None else overlay.revision_digest
@@ -2048,23 +2182,26 @@ class ToolPlaneRevisionService:
             if selector is not None:
                 effective_server["credential_binding"] = selector
             effective_mcp_servers.append(effective_server)
-        effective_global_skill_states = tuple(
-            {
-                "name": str(item["name"]),
-                "enabled": bool(item.get("enabled", True)),
-            }
-            for item in sorted(
-                (
-                    item
-                    for item in (
-                        *base.manifest.get("public_skills", []),
-                        *base.manifest.get("managed_integrations", []),
-                    )
-                    if isinstance(item, Mapping) and isinstance(item.get("name"), str)
-                ),
-                key=lambda item: str(item["name"]),
-            )
-        )
+        effective_global_skill_states_by_name: dict[
+            str,
+            dict[str, object],
+        ] = {}
+        # Runtime discovery visits public packages before managed integrations,
+        # then de-duplicates by declared name. Preserve that established
+        # integration-over-public shadow precedence in accepted config too.
+        for field_name in ("public_skills", "managed_integrations"):
+            for item in base.manifest.get(field_name, []):
+                if not isinstance(item, Mapping) or not isinstance(
+                    item.get("name"),
+                    str,
+                ):
+                    continue
+                name = str(item["name"])
+                effective_global_skill_states_by_name[name] = {
+                    "name": name,
+                    "enabled": bool(item.get("enabled", True)),
+                }
+        effective_global_skill_states = tuple(effective_global_skill_states_by_name[name] for name in sorted(effective_global_skill_states_by_name))
         return EffectiveToolPlaneRevisionV1(
             base_revision_digest=base.revision_digest,
             user_overlay_digest=overlay_digest,
@@ -2106,6 +2243,27 @@ class ToolPlaneRevisionService:
                 )
                 if attestation is None or not attestation.compatible:
                     return "recovery_required"
+        try:
+            inventory = await self._user_inventory.snapshot()
+            await self._assert_inventory_is_complete(inventory)
+            for subject_id in inventory.subject_ids:
+                scope = ToolPlaneRevisionScopeV1(
+                    kind="user_overlay",
+                    user_ref=user_scope_reference_for_subject(
+                        tenant_digest=self._repository.tenant.digest,
+                        subject_kind="human",
+                        subject_id=subject_id,
+                    ),
+                )
+                if await self._repository.active(scope) is not None:
+                    continue
+                if not await self._empty_overlay_matches(
+                    scope,
+                    storage_subject_id=subject_id,
+                ):
+                    return "unmanaged_drift" if self._durable else None
+        except ToolPlaneRevisionError:
+            return "unmanaged_drift" if self._durable else None
         return None
 
     async def reconcile(self, actor: VerifiedActorContextV1) -> None:

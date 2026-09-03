@@ -7,6 +7,7 @@ import hashlib
 import ipaddress
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -15,6 +16,12 @@ from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.launch_policy import (
     McpStdioLaunchPolicyViolation,
     validate_mcp_stdio_launch,
+)
+from deerflow.skills.frontmatter import split_skill_markdown
+from deerflow.skills.parser import (
+    parse_allowed_tools,
+    parse_required_secrets,
+    parse_secrets_autonomous,
 )
 from deerflow.skills.review import (
     FACTS_SCHEMA_VERSION,
@@ -36,14 +43,70 @@ from deerflow.tool_plane.service import (
 _SKILL_FIELDS = ("public_skills", "managed_integrations", "custom_skills")
 _DEERFLOW_PACKAGE_ROOT = Path(__file__).parents[1]
 
+# This is deliberately a conservative source closure. A report may become
+# stale when validation gets stricter, but it must never remain promotable when
+# any behavior that produced it changed. The aggregate governed-validator
+# identity therefore covers structural validation, artifact verification,
+# endpoint/command policy, schema parsing, SkillScan, and skill review plus the
+# internal helpers those paths execute.
+_VALIDATOR_SOURCE_GROUPS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "canonicalizer": ("tool_plane/contracts.py",),
+        "governed_validator": (
+            "community/url_safety.py",
+            "config/extensions_config.py",
+            "config/tool_plane_config.py",
+            "constants.py",
+            "mcp/launch_policy.py",
+            "skills/frontmatter.py",
+            "skills/installer.py",
+            "skills/package_paths.py",
+            "skills/parser.py",
+            "skills/review",
+            "skills/skillscan",
+            "tool_plane/artifacts.py",
+            "tool_plane/contracts.py",
+            "tool_plane/service.py",
+            "tool_plane/validator.py",
+            "../../extension-api/deerflow_extension_api/__init__.py",
+            "../../extension-api/deerflow_extension_api/identifiers.py",
+        ),
+        "mcp_launch_policy": ("mcp/launch_policy.py",),
+        "mcp_schema": (
+            "config/extensions_config.py",
+            "constants.py",
+            "../../extension-api/deerflow_extension_api/__init__.py",
+            "../../extension-api/deerflow_extension_api/identifiers.py",
+        ),
+        "skillscan": (
+            "skills/package_paths.py",
+            "skills/skillscan",
+        ),
+        "skill_review": (
+            "skills/frontmatter.py",
+            "skills/package_paths.py",
+            "skills/parser.py",
+            "skills/review",
+            "skills/skillscan",
+        ),
+    }
+)
 
-def _source_digest(*relative_roots: str) -> str:
+
+def _source_digest(package_root: Path, *relative_roots: str) -> str:
     digest = hashlib.sha256()
     for relative_root in relative_roots:
-        root = _DEERFLOW_PACKAGE_ROOT / relative_root
-        paths = [root] if root.is_file() else sorted(root.rglob("*.py"))
+        root = package_root / relative_root
+        if root.is_file():
+            paths = [root]
+        elif root.is_dir():
+            paths = sorted(root.rglob("*.py"))
+        else:
+            raise RuntimeError(f"validator source root is missing: {relative_root}")
+        if not paths:
+            raise RuntimeError(f"validator source root is empty: {relative_root}")
         for path in paths:
-            relative = path.relative_to(_DEERFLOW_PACKAGE_ROOT).as_posix()
+            relative = (Path(relative_root) if root.is_file() else Path(relative_root) / path.relative_to(root)).as_posix()
             digest.update(relative.encode("utf-8"))
             digest.update(b"\0")
             digest.update(path.read_bytes())
@@ -51,10 +114,75 @@ def _source_digest(*relative_roots: str) -> str:
     return digest.hexdigest()
 
 
+def _validator_source_versions(
+    *,
+    package_root: Path = _DEERFLOW_PACKAGE_ROOT,
+    source_groups: Mapping[str, Sequence[str]] = _VALIDATOR_SOURCE_GROUPS,
+) -> dict[str, str]:
+    """Build exact source identities for a declared validator closure."""
+
+    return {component: f"sha256:{_source_digest(package_root, *relative_roots)}" for component, relative_roots in sorted(source_groups.items())}
+
+
+# Source discovery is intentionally import-time work. Async validation,
+# compatibility preflight, and promotion read this immutable build manifest;
+# they never traverse or read the filesystem merely to compare validator IDs.
+_VALIDATOR_VERSIONS: Mapping[str, str] = MappingProxyType(
+    {
+        **_validator_source_versions(),
+        "skill_review_schema": str(FACTS_SCHEMA_VERSION),
+    }
+)
+
+
 def _entries(value: object) -> tuple[Mapping[str, object], ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return ()
     return tuple(item for item in value if isinstance(item, Mapping))
+
+
+def _declared_skill_capabilities(
+    snapshot: Mapping[str, object],
+) -> frozenset[str]:
+    files = snapshot.get("files")
+    if not isinstance(files, Sequence) or isinstance(files, (str, bytes)):
+        return frozenset()
+    root = next(
+        (item for item in files if isinstance(item, Mapping) and item.get("path") == "SKILL.md" and item.get("kind") == "text" and isinstance(item.get("content"), str)),
+        None,
+    )
+    if root is None:
+        return frozenset()
+    parts, error = split_skill_markdown(str(root["content"]))
+    if error is not None or parts is None:
+        return frozenset()
+    capabilities: set[str] = set()
+    try:
+        allowed_tools = parse_allowed_tools(
+            parts.metadata.get("allowed-tools"),
+            Path("SKILL.md"),
+        )
+    except ValueError:
+        allowed_tools = ()
+    if allowed_tools is None:
+        capabilities.add("unrestricted-tools")
+    else:
+        capabilities.update(f"tool:{tool_name}" for tool_name in allowed_tools)
+    try:
+        required_secrets = parse_required_secrets(
+            parts.metadata.get("required-secrets"),
+            Path("SKILL.md"),
+        )
+    except ValueError:
+        required_secrets = ()
+    if required_secrets:
+        capabilities.add("declared-secrets")
+        if parse_secrets_autonomous(
+            parts.metadata.get("secrets-autonomous"),
+            Path("SKILL.md"),
+        ):
+            capabilities.add("autonomous-secrets")
+    return frozenset(capabilities)
 
 
 class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
@@ -78,6 +206,8 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
         allowed_mcp_stdio_commands: tuple[str, ...] = ("npx", "uvx"),
         allowed_mcp_endpoint_hosts: tuple[str, ...] = (),
         allow_private_mcp_endpoints: bool = False,
+        allowed_managed_integration_providers: tuple[str, ...] = (),
+        forbidden_skill_capabilities: tuple[str, ...] = (),
         endpoint_resolver: Callable[[str], list[ipaddress._BaseAddress]] | None = None,
     ) -> None:
         super().__init__(policy_digest=policy_digest)
@@ -90,21 +220,15 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
         self._allowed_mcp_stdio_commands = frozenset(allowed_mcp_stdio_commands)
         self._allowed_mcp_endpoint_hosts = frozenset(host.casefold().rstrip(".") for host in allowed_mcp_endpoint_hosts)
         self._allow_private_mcp_endpoints = allow_private_mcp_endpoints
+        self._allowed_managed_integration_providers = frozenset(allowed_managed_integration_providers)
+        self._forbidden_skill_capabilities = frozenset(forbidden_skill_capabilities)
         self._endpoint_resolver = endpoint_resolver
 
     @property
     def validator_versions(self) -> Mapping[str, str]:
         """Return exact schema and implementation identities for this pipeline."""
 
-        return {
-            "canonicalizer": f"sha256:{_source_digest('tool_plane/contracts.py')}",
-            "governed_validator": f"sha256:{_source_digest('tool_plane/validator.py')}",
-            "mcp_launch_policy": f"sha256:{_source_digest('mcp/launch_policy.py')}",
-            "mcp_schema": f"sha256:{_source_digest('config/extensions_config.py')}",
-            "skillscan": f"sha256:{_source_digest('skills/skillscan')}",
-            "skill_review": f"sha256:{_source_digest('skills/review')}",
-            "skill_review_schema": str(FACTS_SCHEMA_VERSION),
-        }
+        return dict(_VALIDATOR_VERSIONS)
 
     async def _endpoint_policy_error(self, url: str) -> bool:
         """Return whether one MCP or OAuth endpoint violates SSRF policy."""
@@ -164,6 +288,24 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
                 True,
                 False,
             )
+        identity_findings: list[ToolPlaneValidationFindingV1] = []
+        if entry.get("version") != verified.metadata.declared_version:
+            identity_findings.append(
+                ToolPlaneValidationFindingV1(
+                    code="skill_version_mismatch",
+                    severity="error",
+                    location=field_name,
+                )
+            )
+        supplied_entry_points = entry.get("entry_points")
+        if not isinstance(supplied_entry_points, Sequence) or isinstance(supplied_entry_points, (str, bytes)) or tuple(supplied_entry_points) != verified.metadata.entry_points:
+            identity_findings.append(
+                ToolPlaneValidationFindingV1(
+                    code="skill_entry_points_mismatch",
+                    severity="error",
+                    location=field_name,
+                )
+            )
         try:
             snapshot = await asyncio.to_thread(LocalDirectoryReader(verified.package_root).read)
             facts = await asyncio.to_thread(analyze_skill_package, snapshot)
@@ -179,8 +321,17 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
                 True,
                 True,
             )
-        findings: list[ToolPlaneValidationFindingV1] = []
-        failed = False
+        findings = identity_findings
+        failed = bool(identity_findings)
+        if self._forbidden_skill_capabilities.intersection(_declared_skill_capabilities(snapshot)):
+            findings.append(
+                ToolPlaneValidationFindingV1(
+                    code="skill_capability_forbidden",
+                    severity="error",
+                    location=field_name,
+                )
+            )
+            failed = True
         for raw in facts.get("findings", []):
             if not isinstance(raw, Mapping):
                 continue
@@ -328,17 +479,17 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
                 )
             )
             failed = True
-        public_skill_names = {str(entry.get("name")) for entry in _entries(revision.manifest.get("public_skills"))}
-        managed_integration_names = {str(entry.get("name")) for entry in _entries(revision.manifest.get("managed_integrations"))}
-        for skill_name in sorted(public_skill_names & managed_integration_names):
-            findings.append(
-                ToolPlaneValidationFindingV1(
-                    code="base_skill_name_conflict",
-                    severity="error",
-                    location=f"skills.{skill_name}"[:1024],
+        for entry in _entries(revision.manifest.get("managed_integrations")):
+            provider = entry.get("provider")
+            if self._allowed_managed_integration_providers and provider not in self._allowed_managed_integration_providers:
+                findings.append(
+                    ToolPlaneValidationFindingV1(
+                        code="managed_integration_provider_not_allowed",
+                        severity="error",
+                        location="managed_integrations",
+                    )
                 )
-            )
-            failed = True
+                failed = True
         for field_name in _SKILL_FIELDS:
             for entry in _entries(revision.manifest.get(field_name)):
                 skill_name = str(entry.get("name") or "skill")
@@ -387,7 +538,6 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
         failed = report.result != "passed"
         base_mcp_entries = {str(entry.get("server_id")): entry for entry in _entries(base.manifest.get("mcp_servers"))}
         base_mcp = set(base_mcp_entries)
-        base_public = {str(entry.get("name")) for entry in _entries(base.manifest.get("public_skills"))}
         base_integrations = {str(entry.get("name")) for entry in _entries(base.manifest.get("managed_integrations"))}
         custom = {str(entry.get("name")) for entry in _entries(overlay.manifest.get("custom_skills"))}
         checks = (
@@ -471,15 +621,6 @@ class GovernedToolPlaneValidator(DeterministicToolPlaneValidator):
                     )
                 )
                 failed = True
-        if custom & (base_public | base_integrations):
-            findings.append(
-                ToolPlaneValidationFindingV1(
-                    code="overlay_skill_name_conflict",
-                    severity="error",
-                    location="custom_skills",
-                )
-            )
-            failed = True
         return ToolPlaneValidationReportV1(
             revision_digest=overlay.revision_digest,
             content_digest=overlay.content_digest,

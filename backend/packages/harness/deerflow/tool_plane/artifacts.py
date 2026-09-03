@@ -21,7 +21,10 @@ from deerflow.skills.installer import (
     resolve_skill_dir_from_archive,
     safe_extract_skill_archive,
 )
-from deerflow.tool_plane.contracts import ToolPlaneRevisionError
+from deerflow.tool_plane.contracts import (
+    ToolPlaneRevisionError,
+    is_semantic_version,
+)
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -66,21 +69,36 @@ def compute_skill_tree_digest(root: Path) -> str:
     return _tree_digest(Path(root))
 
 
-def _declared_name(skill_md: Path, tree_digest: str) -> str:
+def _declared_metadata(
+    skill_md: Path,
+    tree_digest: str,
+) -> tuple[str, str | None]:
+    fallback = f"candidate-{tree_digest[:16]}"
     try:
         content = skill_md.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return f"candidate-{tree_digest[:16]}"
+        return fallback, None
     parts, _ = split_skill_markdown(content)
     if parts is None:
-        return f"candidate-{tree_digest[:16]}"
+        return fallback, None
     name = parts.metadata.get("name")
     if not isinstance(name, str):
-        return f"candidate-{tree_digest[:16]}"
+        return fallback, None
     normalized = name.strip()
     if _SAFE_SKILL_NAME.fullmatch(normalized) is None:
-        return f"candidate-{tree_digest[:16]}"
-    return normalized
+        return fallback, None
+    if "version" not in parts.metadata:
+        return normalized, None
+    declared_version = parts.metadata["version"]
+    if not is_semantic_version(declared_version):
+        raise ToolPlaneRevisionError(
+            "validation_failed",
+            safe_details={
+                "field": "SKILL.md.version",
+                "reason": "invalid_semantic_version",
+            },
+        )
+    return normalized, declared_version
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +107,7 @@ class StagedSkillArtifactV1:
 
     artifact_ref: str
     skill_name: str
+    declared_version: str | None
     archive_digest: str
     tree_digest: str
     manifest_digest: str
@@ -102,6 +121,7 @@ class StagedSkillArtifactV1:
             "version": 1,
             "artifact_ref": self.artifact_ref,
             "skill_name": self.skill_name,
+            "declared_version": self.declared_version,
             "archive_digest": self.archive_digest,
             "tree_digest": self.tree_digest,
             "manifest_digest": self.manifest_digest,
@@ -153,14 +173,18 @@ class GovernedSkillArtifactStore:
             raise ToolPlaneRevisionError("skill_artifact_not_staged")
         try:
             staged_at = datetime.fromisoformat(str(value["staged_at"]).replace("Z", "+00:00"))
-            entry_points = tuple(str(item) for item in value["entry_points"])
+            raw_entry_points = value["entry_points"]
+            raw_declared_version = value.get("declared_version")
+            if not isinstance(raw_entry_points, list) or any(not isinstance(item, str) for item in raw_entry_points) or (raw_declared_version is not None and not is_semantic_version(raw_declared_version)):
+                raise ValueError("invalid artifact metadata")
             metadata = StagedSkillArtifactV1(
                 artifact_ref=str(value["artifact_ref"]),
                 skill_name=str(value["skill_name"]),
+                declared_version=raw_declared_version,
                 archive_digest=str(value["archive_digest"]),
                 tree_digest=str(value["tree_digest"]),
                 manifest_digest=str(value["manifest_digest"]),
-                entry_points=entry_points,
+                entry_points=tuple(raw_entry_points),
                 staged_at=staged_at,
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -233,9 +257,11 @@ class GovernedSkillArtifactStore:
                 manifest_digest = hashlib.sha256(b"").hexdigest()
                 entry_points = ()
             staged_at = _now()
+            skill_name, version = _declared_metadata(skill_md, tree_digest)
             metadata = StagedSkillArtifactV1(
                 artifact_ref=f"skill-artifact:{uuid.uuid4()}",
-                skill_name=_declared_name(skill_md, tree_digest),
+                skill_name=skill_name,
+                declared_version=version,
                 archive_digest=archive_digest,
                 tree_digest=tree_digest,
                 manifest_digest=manifest_digest,
@@ -323,6 +349,11 @@ class GovernedSkillArtifactStore:
             observed_tree = _tree_digest(package_root)
             skill_md = package_root / "SKILL.md"
             observed_manifest = hashlib.sha256(skill_md.read_bytes()).hexdigest()
+            observed_name, observed_version = _declared_metadata(
+                skill_md,
+                observed_tree,
+            )
+            observed_entry_points = ("SKILL.md",)
         except ToolPlaneRevisionError:
             raise
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -334,6 +365,9 @@ class GovernedSkillArtifactStore:
             or observed_archive != archive_digest
             or observed_tree != tree_digest
             or observed_manifest != manifest_digest
+            or metadata.skill_name != observed_name
+            or metadata.declared_version != observed_version
+            or metadata.entry_points != observed_entry_points
         ):
             raise ToolPlaneRevisionError("skill_artifact_not_staged")
         return VerifiedSkillArtifact(metadata=metadata, package_root=package_root)

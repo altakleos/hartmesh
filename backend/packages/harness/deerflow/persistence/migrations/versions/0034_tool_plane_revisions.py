@@ -66,6 +66,7 @@ def upgrade() -> None:
         sa.Column("promoted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("rollback_source_revision_id", sa.String(length=36), nullable=True),
         sa.Column("bootstrap_inventory_digest", sa.String(length=64), nullable=True),
+        sa.Column("bootstrap_source_digest", sa.String(length=64), nullable=True),
         sa.Column("storage_subject_id", sa.String(length=512), nullable=True),
         sa.Column(
             "bootstrap_overlay_revision_ids_json",
@@ -96,6 +97,10 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "bootstrap_inventory_digest IS NULL OR length(bootstrap_inventory_digest) = 64",
             name="ck_tool_plane_revision_bootstrap_inventory",
+        ),
+        sa.CheckConstraint(
+            "bootstrap_source_digest IS NULL OR length(bootstrap_source_digest) = 64",
+            name="ck_tool_plane_revision_bootstrap_source",
         ),
         sa.CheckConstraint(
             "(scope_kind = 'deployment_base' AND storage_subject_id IS NULL) OR (scope_kind = 'user_overlay' AND length(storage_subject_id) BETWEEN 1 AND 512)",

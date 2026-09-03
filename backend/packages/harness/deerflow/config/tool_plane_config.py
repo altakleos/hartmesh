@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_FIXED_SKILL_CAPABILITIES = frozenset({"unrestricted-tools", "autonomous-secrets", "declared-secrets"})
+_TOOL_CAPABILITY = re.compile(r"tool:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 
 
 class ToolPlaneConfig(BaseModel):
@@ -34,10 +38,31 @@ class ToolPlaneConfig(BaseModel):
         default=False,
         description="Permit private, loopback, or metadata MCP endpoint addresses after resolution.",
     )
+    allowed_managed_integration_providers: tuple[str, ...] = Field(
+        default=(),
+        max_length=256,
+        description="Optional exact provider allowlist for governed managed-integration packages.",
+    )
+    forbidden_skill_capabilities: tuple[str, ...] = Field(
+        default=(),
+        max_length=1024,
+        description=("Exact derived skill capabilities rejected by policy: unrestricted-tools, autonomous-secrets, declared-secrets, or tool:<name>."),
+    )
     maximum_mcp_servers: int = Field(default=128, ge=1, le=1024)
     maximum_skills: int = Field(default=512, ge=1, le=4096)
     validation_requires_skill_review: bool = True
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("forbidden_skill_capabilities")
+    @classmethod
+    def _validate_forbidden_skill_capabilities(
+        cls,
+        values: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        for capability in values:
+            if capability not in _FIXED_SKILL_CAPABILITIES and _TOOL_CAPABILITY.fullmatch(capability) is None:
+                raise ValueError("forbidden skill capabilities must be unrestricted-tools, autonomous-secrets, declared-secrets, or tool:<name>")
+        return values
 
     @property
     def policy_digest(self) -> str:

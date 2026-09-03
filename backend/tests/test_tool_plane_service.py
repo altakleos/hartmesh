@@ -26,6 +26,10 @@ from deerflow.tool_plane import (
     ToolPlaneValidationReportV1,
     user_scope_reference,
 )
+from deerflow.tool_plane.validator import (
+    _VALIDATOR_SOURCE_GROUPS,
+    _validator_source_versions,
+)
 
 _TENANT = TenantReferenceV1(
     version=1,
@@ -170,6 +174,100 @@ async def test_promotion_rejects_report_from_prior_validator_implementation() ->
 
     assert caught.value.code == "validation_stale"
     assert projection.project_count == 0
+
+
+@pytest.mark.asyncio
+async def test_validator_dependency_change_stales_a_prior_report(tmp_path) -> None:
+    source_groups = {
+        "governed_validator": (
+            "tool_plane/validator.py",
+            "community/url_safety.py",
+        ),
+    }
+    validator_source = tmp_path / "tool_plane" / "validator.py"
+    url_safety_source = tmp_path / "community" / "url_safety.py"
+    validator_source.parent.mkdir(parents=True)
+    url_safety_source.parent.mkdir(parents=True)
+    validator_source.write_text("VALIDATOR = 1\n", encoding="utf-8")
+    url_safety_source.write_text("URL_POLICY = 1\n", encoding="utf-8")
+
+    class SourceBackedValidator(DeterministicToolPlaneValidator):
+        versions = _validator_source_versions(
+            package_root=tmp_path,
+            source_groups=source_groups,
+        )
+
+        @property
+        def validator_versions(self) -> dict[str, str]:
+            return dict(self.versions)
+
+    repository = InMemoryToolPlaneRevisionRepository(tenant=_TENANT)
+    projection = InMemoryToolPlaneProjection()
+    validator = SourceBackedValidator(policy_digest=_POLICY)
+    service = ToolPlaneRevisionService(
+        repository=repository,
+        projection=projection,
+        validator=validator,
+        durable=True,
+    )
+    admin = _actor("admin-1", role="admin")
+    staged = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+            candidate=_base_candidate(),
+        ),
+        admin,
+    )
+    await service.validate(staged.revision_id, admin)
+
+    await asyncio.to_thread(
+        url_safety_source.write_text,
+        "URL_POLICY = 2\n",
+        encoding="utf-8",
+    )
+    validator.versions = await asyncio.to_thread(
+        _validator_source_versions,
+        package_root=tmp_path,
+        source_groups=source_groups,
+    )
+
+    with pytest.raises(ToolPlaneRevisionError) as caught:
+        await service.promote(staged.revision_id, admin)
+
+    assert caught.value.code == "validation_stale"
+    assert projection.project_count == 0
+
+
+def test_validator_source_closure_covers_mcp_schema_dependencies(tmp_path) -> None:
+    assert "constants.py" in _VALIDATOR_SOURCE_GROUPS["mcp_schema"]
+    assert "../../extension-api/deerflow_extension_api/identifiers.py" in _VALIDATOR_SOURCE_GROUPS["mcp_schema"]
+
+    package_root = tmp_path / "packages" / "harness" / "deerflow"
+    extensions_config = package_root / "config" / "extensions_config.py"
+    constants = package_root / "constants.py"
+    identifiers = tmp_path / "packages" / "extension-api" / "deerflow_extension_api" / "identifiers.py"
+    for path in (extensions_config, constants, identifiers):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
+    source_groups = {
+        "mcp_schema": (
+            "config/extensions_config.py",
+            "constants.py",
+            "../../extension-api/deerflow_extension_api/identifiers.py",
+        )
+    }
+
+    first = _validator_source_versions(
+        package_root=package_root,
+        source_groups=source_groups,
+    )
+    identifiers.write_text("VALUE = 2\n", encoding="utf-8")
+    second = _validator_source_versions(
+        package_root=package_root,
+        source_groups=source_groups,
+    )
+
+    assert first != second
 
 
 @pytest.mark.asyncio
@@ -352,7 +450,14 @@ async def test_overlay_promotion_requires_the_current_base_generation() -> None:
             scope=overlay_scope,
             candidate={
                 "base_revision_digest": base.revision_digest,
-                "custom_skills": {},
+                "custom_skills": {
+                    "helper": {
+                        "enabled": True,
+                        "tree_digest": "d" * 64,
+                        "manifest_digest": "e" * 64,
+                        "entry_points": ["SKILL.md"],
+                    }
+                },
             },
         ),
         user,
@@ -418,7 +523,7 @@ async def test_concurrent_promotions_from_one_active_parent_have_one_winner() ->
 
 @pytest.mark.asyncio
 async def test_effective_revision_uses_canonical_empty_overlay_marker() -> None:
-    service, _, _ = _service()
+    service, repository, _ = _service()
     admin = _actor("admin-1", role="admin")
     user = _actor("user-1")
     staged = await service.stage(
@@ -436,6 +541,34 @@ async def test_effective_revision_uses_canonical_empty_overlay_marker() -> None:
     assert effective.base_revision_digest == staged.revision_digest
     assert effective.user_overlay_digest == EMPTY_OVERLAY_MARKER_V1
     assert len(effective.effective_digest) == 64
+
+    status = await service.status_for_actor(user)
+    assert status.governance_state == "governed"
+    assert status.projection_digest == EMPTY_OVERLAY_MARKER_V1
+    assert status.drift is False
+
+    overlay_scope = ToolPlaneRevisionScopeV1(
+        kind="user_overlay",
+        user_ref=user_scope_reference(user),
+    )
+    with pytest.raises(ToolPlaneRevisionError) as caught:
+        await service.stage(
+            ScopedStageRevisionRequest(
+                scope=overlay_scope,
+                candidate={
+                    "base_revision_digest": staged.revision_digest,
+                    "custom_skills": {},
+                },
+            ),
+            user,
+        )
+
+    assert caught.value.code == "validation_failed"
+    assert caught.value.safe_details == {
+        "field": "candidate",
+        "reason": "empty_overlay_marker_required",
+    }
+    assert await repository.list_scope(overlay_scope) == []
 
 
 @pytest.mark.asyncio
@@ -460,7 +593,14 @@ async def test_overlay_promotion_persists_exact_compatibility_attestation() -> N
             ),
             candidate={
                 "base_revision_digest": base.revision_digest,
-                "custom_skills": {},
+                "custom_skills": {
+                    "helper": {
+                        "enabled": True,
+                        "tree_digest": "d" * 64,
+                        "manifest_digest": "e" * 64,
+                        "entry_points": ["SKILL.md"],
+                    }
+                },
             },
         ),
         user,
@@ -985,7 +1125,14 @@ async def test_prepared_revision_blocks_promotion_in_another_scope() -> None:
             ),
             candidate={
                 "base_revision_digest": base.revision_digest,
-                "custom_skills": {},
+                "custom_skills": {
+                    "helper": {
+                        "enabled": True,
+                        "tree_digest": "d" * 64,
+                        "manifest_digest": "e" * 64,
+                        "entry_points": ["SKILL.md"],
+                    }
+                },
             },
         ),
         user,
@@ -1019,7 +1166,14 @@ async def test_overlay_rollback_revalidates_exact_old_overlay_against_current_ba
             scope=overlay_scope,
             candidate={
                 "base_revision_digest": base_one.revision_digest,
-                "mcp_enablement": {},
+                "custom_skills": {
+                    "helper": {
+                        "enabled": True,
+                        "tree_digest": "d" * 64,
+                        "manifest_digest": "e" * 64,
+                        "entry_points": ["SKILL.md"],
+                    }
+                },
             },
         ),
         user,
@@ -1044,7 +1198,14 @@ async def test_overlay_rollback_revalidates_exact_old_overlay_against_current_ba
             scope=overlay_scope,
             candidate={
                 "base_revision_digest": base_two.revision_digest,
-                "mcp_enablement": {},
+                "custom_skills": {
+                    "helper": {
+                        "enabled": True,
+                        "tree_digest": "d" * 64,
+                        "manifest_digest": "e" * 64,
+                        "entry_points": ["SKILL.md"],
+                    }
+                },
                 "parent_revision_digest": overlay_one.revision_digest,
                 "change_summary": "second overlay",
             },

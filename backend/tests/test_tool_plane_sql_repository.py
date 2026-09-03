@@ -179,7 +179,14 @@ async def test_sql_repository_persists_digest_bound_compatibility_attestation(
                 ),
                 candidate={
                     "base_revision_digest": base.revision_digest,
-                    "custom_skills": {},
+                    "custom_skills": {
+                        "helper": {
+                            "enabled": True,
+                            "tree_digest": "d" * 64,
+                            "manifest_digest": "e" * 64,
+                            "entry_points": ["SKILL.md"],
+                        }
+                    },
                 },
             ),
             user,
@@ -351,7 +358,17 @@ async def test_sql_overlay_prepare_and_finalize_use_base_then_overlay_lock_order
         overlay = await service.stage(
             ScopedStageRevisionRequest(
                 scope=overlay_scope,
-                candidate={"base_revision_digest": base.revision_digest},
+                candidate={
+                    "base_revision_digest": base.revision_digest,
+                    "custom_skills": {
+                        "helper": {
+                            "enabled": True,
+                            "tree_digest": "d" * 64,
+                            "manifest_digest": "e" * 64,
+                            "entry_points": ["SKILL.md"],
+                        }
+                    },
+                },
             ),
             user,
         )

@@ -981,6 +981,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                     allowed_mcp_stdio_commands=(tool_plane_config.allowed_mcp_stdio_commands),
                     allowed_mcp_endpoint_hosts=(tool_plane_config.allowed_mcp_endpoint_hosts),
                     allow_private_mcp_endpoints=(tool_plane_config.allow_private_mcp_endpoints),
+                    allowed_managed_integration_providers=(tool_plane_config.allowed_managed_integration_providers),
+                    forbidden_skill_capabilities=(tool_plane_config.forbidden_skill_capabilities),
                     maximum_mcp_servers=tool_plane_config.maximum_mcp_servers,
                     maximum_skills=tool_plane_config.maximum_skills,
                     require_complete_review=(tool_plane_config.validation_requires_skill_review),

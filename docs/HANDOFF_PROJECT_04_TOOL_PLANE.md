@@ -19,7 +19,9 @@ stored as `decision_evidence.tool_plane_revision` in
 
 - `base_revision_digest`: promoted deployment-base revision identity.
 - `user_overlay_digest`: promoted verified-user overlay identity, or
-  `EMPTY_OVERLAY_MARKER_V1` when that user has no nonempty overlay.
+  `EMPTY_OVERLAY_MARKER_V1` when that user has no nonempty overlay. The service
+  verifies the live absence of custom/legacy packages, nonempty user state,
+  credentials, and unexpected pointers before admitting that marker.
 - `projection_digest`: canonical digest of the observed base and overlay
   projection digests used for this composition.
 - `effective_digest`: canonical digest of the complete effective V1 projection,

@@ -43,17 +43,20 @@ def _archive(
 
 
 def _candidate(artifact) -> dict[str, object]:
+    skill_entry = {
+        "enabled": True,
+        "archive_digest": artifact.archive_digest,
+        "tree_digest": artifact.tree_digest,
+        "manifest_digest": artifact.manifest_digest,
+        "entry_points": list(artifact.entry_points),
+    }
+    if artifact.declared_version is not None:
+        skill_entry["version"] = artifact.declared_version
     return {
         "validation_policy_digest": _POLICY,
         "mcp_servers": {},
         "public_skills": {
-            artifact.skill_name: {
-                "enabled": True,
-                "archive_digest": artifact.archive_digest,
-                "tree_digest": artifact.tree_digest,
-                "manifest_digest": artifact.manifest_digest,
-                "entry_points": list(artifact.entry_points),
-            }
+            artifact.skill_name: skill_entry,
         },
         "managed_integrations": {},
     }
@@ -76,6 +79,7 @@ def test_staged_archive_is_immutable_and_safe_result_contains_no_path_or_bytes(
         "version",
         "artifact_ref",
         "skill_name",
+        "declared_version",
         "archive_digest",
         "tree_digest",
         "manifest_digest",
@@ -84,6 +88,53 @@ def test_staged_archive_is_immutable_and_safe_result_contains_no_path_or_bytes(
     }
     assert str(tmp_path) not in str(payload)
     assert "Instructions" not in str(payload)
+
+
+def test_staged_artifact_binds_declared_version_and_entry_points(tmp_path) -> None:
+    store = GovernedSkillArtifactStore(tmp_path / "candidates")
+    artifact = store.stage_archive(_archive(skill_markdown=("---\nname: helper\ndescription: Helps safely\nversion: 1.2.3-alpha.1+build.7\n---\n\n# Instructions\nDo the work.\n")))
+
+    assert artifact.declared_version == "1.2.3-alpha.1+build.7"
+    assert artifact.entry_points == ("SKILL.md",)
+    assert artifact.to_safe_json()["declared_version"] == "1.2.3-alpha.1+build.7"
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["1.2", "01.2.3", "1.2.3-01", "v1.2.3", "1.2.٣", 123],
+)
+def test_staged_artifact_rejects_non_semver_declared_version(
+    tmp_path,
+    version: object,
+) -> None:
+    store = GovernedSkillArtifactStore(tmp_path / "candidates")
+
+    with pytest.raises(ToolPlaneRevisionError) as caught:
+        store.stage_archive(_archive(skill_markdown=(f"---\nname: helper\ndescription: Helps safely\nversion: {version}\n---\n\n# Instructions\nDo the work.\n")))
+
+    assert caught.value.code == "validation_failed"
+    assert caught.value.safe_details == {
+        "field": "SKILL.md.version",
+        "reason": "invalid_semantic_version",
+    }
+
+
+def test_artifact_verification_recomputes_declared_metadata(tmp_path) -> None:
+    store = GovernedSkillArtifactStore(tmp_path / "candidates")
+    artifact = store.stage_archive(_archive(skill_markdown=("---\nname: helper\ndescription: Helps safely\nversion: 1.2.3\n---\n\n# Instructions\nDo the work.\n")))
+    metadata_path = next((tmp_path / "candidates").rglob("metadata.json"))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["declared_version"] = "9.9.9"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ToolPlaneRevisionError) as caught:
+        store.verify(
+            tree_digest=artifact.tree_digest,
+            archive_digest=artifact.archive_digest,
+            manifest_digest=artifact.manifest_digest,
+        )
+
+    assert caught.value.code == "skill_artifact_not_staged"
 
 
 def test_distinct_archives_for_the_same_tree_remain_independently_verifiable(
@@ -238,7 +289,7 @@ async def test_validator_rejects_unstaged_or_structurally_invalid_skill(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_validator_rejects_public_and_integration_skill_name_collision(
+async def test_validator_preserves_integration_shadow_of_public_skill(
     tmp_path,
 ) -> None:
     store = GovernedSkillArtifactStore(tmp_path / "candidates")
@@ -255,11 +306,14 @@ async def test_validator_rejects_public_and_integration_skill_name_collision(
         durable=True,
     )
     admin = _actor("admin-1", role="admin")
+    user = _actor("user-1")
     candidate = _candidate(artifact)
+    candidate["public_skills"]["helper"]["enabled"] = False
     candidate["managed_integrations"] = {
         "helper": {
             **candidate["public_skills"]["helper"],
             "provider": "example-provider",
+            "enabled": True,
         },
     }
     staged = await service.stage(
@@ -272,8 +326,185 @@ async def test_validator_rejects_public_and_integration_skill_name_collision(
 
     report = await service.validate(staged.revision_id, admin)
 
+    assert report.result == "passed"
+    await service.promote(staged.revision_id, admin)
+    effective = await service.effective_for_actor(user)
+    assert effective.effective_global_skill_states == ({"name": "helper", "enabled": True},)
+
+
+@pytest.mark.asyncio
+async def test_custom_skill_can_shadow_a_base_skill(tmp_path) -> None:
+    store = GovernedSkillArtifactStore(tmp_path / "candidates")
+    artifact = store.stage_archive(_archive())
+    service = ToolPlaneRevisionService(
+        repository=InMemoryToolPlaneRevisionRepository(tenant=_TENANT),
+        projection=InMemoryToolPlaneProjection(),
+        validator=GovernedToolPlaneValidator(
+            policy_digest=_POLICY,
+            artifact_store=store,
+            durable=True,
+        ),
+        artifact_store=store,
+        durable=True,
+    )
+    admin = _actor("admin-1", role="admin")
+    user = _actor("user-1")
+    base = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+            candidate=_candidate(artifact),
+        ),
+        admin,
+    )
+    await service.validate(base.revision_id, admin)
+    await service.promote(base.revision_id, admin)
+    overlay = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(
+                kind="user_overlay",
+                user_ref=user_scope_reference(user),
+            ),
+            candidate={
+                "base_revision_digest": base.revision_digest,
+                "custom_skills": {
+                    "helper": {
+                        "enabled": True,
+                        "archive_digest": artifact.archive_digest,
+                        "tree_digest": artifact.tree_digest,
+                        "manifest_digest": artifact.manifest_digest,
+                        "entry_points": list(artifact.entry_points),
+                    }
+                },
+            },
+        ),
+        user,
+    )
+    await service.validate(overlay.revision_id, user)
+
+    promoted = await service.promote(overlay.revision_id, user)
+
+    assert promoted.state == "promoted"
+    assert (await service.effective_for_actor(user)).user_overlay_digest == (overlay.revision_digest)
+
+
+@pytest.mark.asyncio
+async def test_validator_enforces_provider_and_skill_capability_policy(
+    tmp_path,
+) -> None:
+    store = GovernedSkillArtifactStore(tmp_path / "candidates")
+    artifact = store.stage_archive(_archive(skill_markdown=("---\nname: helper\ndescription: Helps safely\nallowed-tools:\n  - bash\n---\n\n# Instructions\nDo the work.\n")))
+    service = ToolPlaneRevisionService(
+        repository=InMemoryToolPlaneRevisionRepository(tenant=_TENANT),
+        projection=InMemoryToolPlaneProjection(),
+        validator=GovernedToolPlaneValidator(
+            policy_digest=_POLICY,
+            artifact_store=store,
+            durable=True,
+            allowed_managed_integration_providers=("approved-provider",),
+            forbidden_skill_capabilities=("tool:bash",),
+        ),
+        artifact_store=store,
+        durable=True,
+    )
+    entry = _candidate(artifact)["public_skills"]["helper"]
+    staged = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+            candidate={
+                "validation_policy_digest": _POLICY,
+                "mcp_servers": {},
+                "public_skills": {},
+                "managed_integrations": {
+                    "helper": {
+                        **entry,
+                        "provider": "unapproved-provider",
+                    }
+                },
+            },
+        ),
+        _actor("admin-1", role="admin"),
+    )
+
+    report = await service.validate(staged.revision_id, _actor("admin-1", role="admin"))
+
+    codes = {finding.code for finding in report.findings}
     assert report.result == "failed"
-    assert "base_skill_name_conflict" in {finding.code for finding in report.findings}
+    assert "managed_integration_provider_not_allowed" in codes
+    assert "skill_capability_forbidden" in codes
+
+
+@pytest.mark.asyncio
+async def test_validator_derives_default_autonomous_secret_capability(
+    tmp_path,
+) -> None:
+    store = GovernedSkillArtifactStore(tmp_path / "candidates")
+    artifact = store.stage_archive(_archive(skill_markdown=("---\nname: helper\ndescription: Helps safely\nrequired-secrets:\n  - SEARCH_TOKEN\n---\n\n# Instructions\nDo the work.\n")))
+    service = ToolPlaneRevisionService(
+        repository=InMemoryToolPlaneRevisionRepository(tenant=_TENANT),
+        projection=InMemoryToolPlaneProjection(),
+        validator=GovernedToolPlaneValidator(
+            policy_digest=_POLICY,
+            artifact_store=store,
+            durable=True,
+            forbidden_skill_capabilities=("autonomous-secrets",),
+        ),
+        artifact_store=store,
+        durable=True,
+    )
+    admin = _actor("admin-1", role="admin")
+    staged = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+            candidate=_candidate(artifact),
+        ),
+        admin,
+    )
+
+    report = await service.validate(staged.revision_id, admin)
+
+    assert report.result == "failed"
+    assert "skill_capability_forbidden" in {finding.code for finding in report.findings}
+
+
+@pytest.mark.asyncio
+async def test_validator_rejects_caller_asserted_skill_version_and_entry_points(
+    tmp_path,
+) -> None:
+    store = GovernedSkillArtifactStore(tmp_path / "candidates")
+    artifact = store.stage_archive(_archive(skill_markdown=("---\nname: helper\ndescription: Helps safely\nversion: 1.2.3\n---\n\n# Instructions\nDo the work.\n")))
+    service = ToolPlaneRevisionService(
+        repository=InMemoryToolPlaneRevisionRepository(tenant=_TENANT),
+        projection=InMemoryToolPlaneProjection(),
+        validator=GovernedToolPlaneValidator(
+            policy_digest=_POLICY,
+            artifact_store=store,
+            durable=True,
+        ),
+        artifact_store=store,
+        durable=True,
+    )
+    candidate = _candidate(artifact)
+    candidate["public_skills"]["helper"]["version"] = "9.9.9"
+    candidate["public_skills"]["helper"]["entry_points"] = [
+        "SKILL.md",
+        "scripts/run.py",
+    ]
+    admin = _actor("admin-1", role="admin")
+    staged = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+            candidate=candidate,
+        ),
+        admin,
+    )
+
+    report = await service.validate(staged.revision_id, admin)
+
+    assert report.result == "failed"
+    assert {finding.code for finding in report.findings} >= {
+        "skill_version_mismatch",
+        "skill_entry_points_mismatch",
+    }
 
 
 @pytest.mark.asyncio
@@ -551,7 +782,7 @@ async def test_overlay_cannot_override_deployment_public_skill_state(tmp_path) -
             ),
             candidate={
                 "base_revision_digest": base.revision_digest,
-                    "skill_states": {"helper": {"enabled": False}},
+                "skill_states": {"helper": {"enabled": False}},
             },
         ),
         user,
@@ -620,7 +851,7 @@ async def test_overlay_rejects_conflicting_duplicate_custom_skill_state(tmp_path
                         "entry_points": list(artifact.entry_points),
                     }
                 },
-                    "skill_states": {"helper": {"enabled": False}},
+                "skill_states": {"helper": {"enabled": False}},
             },
         ),
         user,

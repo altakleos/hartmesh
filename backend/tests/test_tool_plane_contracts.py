@@ -76,6 +76,34 @@ def test_deployment_candidate_digest_is_stable_across_input_order() -> None:
 
 
 @pytest.mark.parametrize(
+    "version",
+    ["1.2", "01.2.3", "1.2.3-01", "v1.2.3", "1.2.٣", 123],
+)
+def test_skill_declared_version_must_be_semver(version: object) -> None:
+    with pytest.raises(ToolPlaneRevisionError) as caught:
+        canonicalize_deployment_candidate(
+            {
+                "validation_policy_digest": _DIGEST,
+                "public_skills": {
+                    "research": {
+                        "enabled": True,
+                        "version": version,
+                        "tree_digest": "b" * 64,
+                        "manifest_digest": "c" * 64,
+                        "entry_points": ["SKILL.md"],
+                    }
+                },
+            }
+        )
+
+    assert caught.value.code == "validation_failed"
+    assert caught.value.safe_details == {
+        "field": "public_skills.research.version",
+        "reason": "invalid_semantic_version",
+    }
+
+
+@pytest.mark.parametrize(
     "field,value",
     [
         ("headers", {"Authorization": "Bearer super-secret-token"}),

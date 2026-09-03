@@ -89,6 +89,24 @@ class LockedFileToolPlaneProjection:
         self._artifact_store = artifact_store
         self._user_storage_factory = user_storage_factory or get_or_new_user_skill_storage
 
+    def _user_storage_for(self, storage_subject_id: str) -> Any:
+        """Resolve user storage, retaining the config-free harness fallback."""
+
+        try:
+            return self._user_storage_factory(storage_subject_id)
+        except FileNotFoundError:
+            if self._user_storage_factory is not get_or_new_user_skill_storage:
+                raise
+            from deerflow.config.paths import make_safe_user_id
+            from deerflow.skills.storage.user_scoped_skill_storage import (
+                UserScopedSkillStorage,
+            )
+
+            return UserScopedSkillStorage(
+                make_safe_user_id(storage_subject_id),
+                host_path=str(self._skills_root or runtime_home() / "skills"),
+            )
+
     @staticmethod
     def _scope_token(scope: ToolPlaneRevisionScopeV1) -> str:
         return canonical_tool_plane_digest(scope.to_json())
@@ -281,6 +299,8 @@ class LockedFileToolPlaneProjection:
                             "manifest_digest": artifact.manifest_digest,
                             "entry_points": list(artifact.entry_points),
                         }
+                        if artifact.declared_version is not None:
+                            result[artifact.skill_name]["version"] = artifact.declared_version
                         if managed_integration:
                             relative_parts = package_root.relative_to(root).parts
                             if len(relative_parts) != 2:
@@ -311,7 +331,19 @@ class LockedFileToolPlaneProjection:
     ) -> tuple[dict[str, object], str]:
         from deerflow.tool_plane.contracts import canonicalize_user_overlay_candidate
 
-        storage = self._user_storage_factory(storage_subject_id)
+        with extensions_config_write_lock, extensions_config_file_lock(self._config_path):
+            try:
+                raw_config = json.loads(self._config_path.read_text(encoding="utf-8")) if self._config_path.exists() else {}
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ToolPlaneRevisionError("validation_failed") from exc
+            if not isinstance(raw_config, Mapping):
+                raise ToolPlaneRevisionError("validation_failed")
+            raw_global_states = raw_config.get("skills", {})
+            if not isinstance(raw_global_states, Mapping):
+                raise ToolPlaneRevisionError("validation_failed")
+            global_states = copy.deepcopy(dict(raw_global_states))
+
+        storage = self._user_storage_for(storage_subject_id)
         custom_root = Path(storage.get_user_custom_root())
         integrations_root = Path(self._integrations_root or storage.get_integrations_root())
         with skill_projection_mutation(storage, "user"):
@@ -321,6 +353,7 @@ class LockedFileToolPlaneProjection:
                 raise ToolPlaneRevisionError("validation_failed") from exc
 
             custom_package_roots = self._package_roots(custom_root)
+            custom_source = "user"
             if not custom_package_roots:
                 # Before per-user storage existed, global custom skills were
                 # exposed as a read-only LEGACY fallback. Bootstrap must bind
@@ -331,19 +364,44 @@ class LockedFileToolPlaneProjection:
                 custom_package_roots = self._package_roots(
                     Path(storage.get_legacy_custom_root()),
                 )
+                custom_source = "legacy" if custom_package_roots else "empty"
 
             custom_skills: dict[str, dict[str, object]] = {}
+            source_custom_skills: list[dict[str, object]] = []
             for package_root in custom_package_roots:
                 artifact = artifact_store.stage_directory(package_root)
                 if artifact.skill_name in custom_skills:
                     raise ToolPlaneRevisionError("validation_failed")
-                custom_skills[artifact.skill_name] = {
-                    "enabled": states.get(artifact.skill_name, {}).get("enabled", True),
+                per_user_enabled = states.get(artifact.skill_name, {}).get(
+                    "enabled",
+                    True,
+                )
+                global_state = global_states.get(artifact.skill_name, {})
+                global_enabled = global_state.get("enabled", True) if isinstance(global_state, Mapping) else True
+                source_entry: dict[str, object] = {
+                    "name": artifact.skill_name,
+                    "enabled": per_user_enabled,
                     "archive_digest": artifact.archive_digest,
                     "tree_digest": artifact.tree_digest,
                     "manifest_digest": artifact.manifest_digest,
                     "entry_points": list(artifact.entry_points),
                 }
+                if artifact.declared_version is not None:
+                    source_entry["version"] = artifact.declared_version
+                source_custom_skills.append(source_entry)
+                custom_skills[artifact.skill_name] = {
+                    # This is the exact pre-governance runtime rule for custom
+                    # and legacy packages: user state AND the global config
+                    # ceiling. Capturing only the user bit can silently
+                    # re-enable a globally disabled legacy skill on adoption.
+                    "enabled": per_user_enabled and global_enabled,
+                    "archive_digest": artifact.archive_digest,
+                    "tree_digest": artifact.tree_digest,
+                    "manifest_digest": artifact.manifest_digest,
+                    "entry_points": list(artifact.entry_points),
+                }
+                if artifact.declared_version is not None:
+                    custom_skills[artifact.skill_name]["version"] = artifact.declared_version
 
             integration_names = {package_root.name for package_root in self._package_roots(integrations_root)}
             managed_enablement = {name: state["enabled"] for name, state in states.items() if name in integration_names}
@@ -374,8 +432,25 @@ class LockedFileToolPlaneProjection:
                 "parent_revision_digest": None,
                 "change_summary": "Adopt the current user tool-plane projection",
             }
-            material = canonicalize_user_overlay_candidate(candidate)
-            return candidate, material.digest
+            canonicalize_user_overlay_candidate(candidate)
+            source_digest = canonical_tool_plane_digest(
+                {
+                    "version": 1,
+                    "custom_source": custom_source,
+                    "custom_skills": sorted(
+                        source_custom_skills,
+                        key=lambda item: str(item["name"]),
+                    ),
+                    "skill_states": [
+                        {
+                            "name": name,
+                            "enabled": state["enabled"],
+                        }
+                        for name, state in sorted(states.items())
+                    ],
+                }
+            )
+            return candidate, source_digest
 
     def _has_existing_projection_sync(self) -> bool:
         if not self._config_path.exists():
@@ -397,7 +472,7 @@ class LockedFileToolPlaneProjection:
         if self._has_unindexed_user_projection_sync(subject_ids):
             return True
         for subject_id in subject_ids:
-            storage = self._user_storage_factory(subject_id)
+            storage = self._user_storage_for(subject_id)
             custom_root = Path(storage.get_user_custom_root())
             with skill_projection_mutation(storage, "user"):
                 if self._package_roots(custom_root):
@@ -544,7 +619,7 @@ class LockedFileToolPlaneProjection:
                     )
                     reload_extensions_config()
         else:
-            storage = self._user_storage_factory(storage_subject_id)
+            storage = self._user_storage_for(storage_subject_id)
             with skill_projection_mutation(storage, "user"):
                 with extensions_config_file_lock(active_path):
                     if self._artifact_store is not None:
@@ -601,6 +676,51 @@ class LockedFileToolPlaneProjection:
             scope,
             storage_subject_id,
         )
+
+    async def empty_overlay_matches_for_actor(
+        self,
+        scope: ToolPlaneRevisionScopeV1,
+        *,
+        storage_subject_id: str,
+    ) -> bool:
+        """Verify that an actor has no live material outside a revision."""
+
+        if scope.kind != "user_overlay":
+            raise ToolPlaneRevisionError("projection_failed")
+        return await asyncio.to_thread(
+            self._empty_overlay_matches_sync,
+            scope,
+            storage_subject_id,
+        )
+
+    def _empty_overlay_matches_sync(
+        self,
+        scope: ToolPlaneRevisionScopeV1,
+        storage_subject_id: str,
+    ) -> bool:
+        active_path = self._active_path(scope)
+        if active_path.exists() or active_path.is_symlink():
+            return False
+        storage = self._user_storage_for(storage_subject_id)
+        with skill_projection_mutation(storage, "user"):
+            custom_root = Path(storage.get_user_custom_root())
+            try:
+                custom_entries = tuple(path for path in custom_root.iterdir() if not path.name.startswith(".")) if custom_root.exists() else ()
+                if custom_entries:
+                    return False
+                legacy_root = Path(storage.get_legacy_custom_root())
+                if self._package_roots(legacy_root):
+                    return False
+                if storage.has_skill_state_projection():
+                    states = storage.capture_skill_state_projection()
+                    if states:
+                        return False
+                credential_root = Path(storage.get_user_integration_credentials_root())
+                if credential_root.exists() and any(path.is_file() or path.is_symlink() for path in credential_root.rglob("*")):
+                    return False
+            except (OSError, json.JSONDecodeError, ValueError):
+                return False
+        return True
 
     def _observed_digest_sync(
         self,
@@ -667,7 +787,7 @@ class LockedFileToolPlaneProjection:
                     return _DRIFT_DIGEST
                 if expected_storage_subject_id is not None and storage_subject_id != expected_storage_subject_id:
                     return _DRIFT_DIGEST
-                storage = self._user_storage_factory(storage_subject_id)
+                storage = self._user_storage_for(storage_subject_id)
                 if self._artifact_store is not None and not self._skill_packages_match(
                     manifest.get("custom_skills"),
                     storage.get_user_custom_root(),

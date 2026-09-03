@@ -396,7 +396,12 @@ async def test_bootstrap_migrates_visible_legacy_skill_into_user_overlay(
 ) -> None:
     config_path = tmp_path / "extensions_config.json"
     config_path.write_text(
-        json.dumps({"mcpServers": {}, "skills": {}}),
+        json.dumps(
+            {
+                "mcpServers": {},
+                "skills": {"legacy-helper": {"enabled": False}},
+            }
+        ),
         encoding="utf-8",
     )
     skills_root = tmp_path / "skills"
@@ -414,7 +419,7 @@ async def test_bootstrap_migrates_visible_legacy_skill_into_user_overlay(
         return UserScopedSkillStorage(subject_id, host_path=str(skills_root))
 
     alice_storage = storage_for("alice")
-    alice_storage.set_skill_enabled_state("legacy-helper", False)
+    alice_storage.set_skill_enabled_state("legacy-helper", True)
     projection = LockedFileToolPlaneProjection(
         config_path=config_path,
         state_root=tmp_path / "tool-plane",
@@ -453,10 +458,109 @@ async def test_bootstrap_migrates_visible_legacy_skill_into_user_overlay(
     await service.validate(staged.revision_id, admin)
     await service.admin_validate(overlay.revision_id, admin)
     await service.promote(staged.revision_id, admin)
+
+    # The base projection removes the legacy global state entry, but the
+    # bootstrap fence must still distinguish a concurrent user-state edit
+    # even though both variants currently resolve to disabled.
+    alice_storage.set_skill_enabled_state("legacy-helper", False)
+    with pytest.raises(ToolPlaneRevisionError) as caught:
+        await service.admin_promote(overlay.revision_id, admin)
+    assert caught.value.code == "bootstrap_inventory_changed"
+
+    alice_storage.set_skill_enabled_state("legacy-helper", True)
     await service.admin_promote(overlay.revision_id, admin)
 
     assert (alice_storage.get_user_custom_root() / "legacy-helper" / "SKILL.md").is_file()
     assert alice_storage.get_skill_enabled_state("legacy-helper") is False
+
+
+@pytest.mark.asyncio
+async def test_empty_overlay_marker_rejects_live_user_material_as_drift(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps({"mcpServers": {}, "skills": {}}),
+        encoding="utf-8",
+    )
+    skills_root = tmp_path / "skills"
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / ".deer-flow"))
+
+    def storage_for(subject_id: str):
+        return UserScopedSkillStorage(subject_id, host_path=str(skills_root))
+
+    projection = LockedFileToolPlaneProjection(
+        config_path=config_path,
+        state_root=tmp_path / "tool-plane",
+        skills_root=skills_root,
+        integrations_root=tmp_path / "integrations",
+        user_storage_factory=storage_for,
+    )
+    service = ToolPlaneRevisionService(
+        repository=InMemoryToolPlaneRevisionRepository(tenant=_TENANT),
+        projection=projection,
+        validator=DeterministicToolPlaneValidator(policy_digest=_POLICY),
+        user_inventory=StaticToolPlaneUserInventory(("alice",)),
+        durable=True,
+    )
+    admin = _actor("admin-1", "admin")
+    alice = _actor("alice", "member")
+    base = await service.stage(
+        ScopedStageRevisionRequest(
+            scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+            candidate={
+                "validation_policy_digest": _POLICY,
+                "mcp_servers": {},
+                "public_skills": {},
+                "managed_integrations": {},
+            },
+        ),
+        admin,
+    )
+    await service.validate(base.revision_id, admin)
+    await service.promote(base.revision_id, admin)
+    storage_for("alice").write_custom_skill(
+        "unmanaged-helper",
+        "SKILL.md",
+        "---\nname: unmanaged-helper\ndescription: Drift\n---\n\n# Drift\n",
+    )
+
+    with pytest.raises(ToolPlaneRevisionError) as caught:
+        await service.effective_for_actor(alice)
+
+    assert caught.value.code == "unmanaged_drift"
+    assert (await service.status_for_actor(alice)).drift is True
+    overlay_scope = ToolPlaneRevisionScopeV1(
+        kind="user_overlay",
+        user_ref=user_scope_reference(alice),
+    )
+    assert (await service.admin_status(overlay_scope, admin)).drift is True
+    assert await service.readiness_reason() == "unmanaged_drift"
+
+
+@pytest.mark.asyncio
+async def test_empty_overlay_rejects_dangling_active_pointer(tmp_path) -> None:
+    scope = ToolPlaneRevisionScopeV1(
+        kind="user_overlay",
+        user_ref="user-opaque",
+    )
+    projection = LockedFileToolPlaneProjection(
+        config_path=tmp_path / "extensions_config.json",
+        state_root=tmp_path / "tool-plane",
+    )
+    active_path = projection._active_path(scope)
+    active_path.parent.mkdir(parents=True)
+    active_path.symlink_to(active_path.parent / "missing.json")
+
+    assert (
+        await projection.empty_overlay_matches_for_actor(
+            scope,
+            storage_subject_id="alice",
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio

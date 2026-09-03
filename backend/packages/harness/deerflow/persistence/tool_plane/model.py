@@ -97,6 +97,10 @@ class ToolPlaneRevisionRow(Base):
         String(64),
         nullable=True,
     )
+    bootstrap_source_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     # Protected projection routing facts. These values are never returned by
     # ToolPlaneRevisionRecord.to_safe_json() or copied into audit evidence.
     storage_subject_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -115,6 +119,10 @@ class ToolPlaneRevisionRow(Base):
         CheckConstraint(
             "bootstrap_inventory_digest IS NULL OR length(bootstrap_inventory_digest) = 64",
             name="ck_tool_plane_revision_bootstrap_inventory",
+        ),
+        CheckConstraint(
+            "bootstrap_source_digest IS NULL OR length(bootstrap_source_digest) = 64",
+            name="ck_tool_plane_revision_bootstrap_source",
         ),
         CheckConstraint(
             "(scope_kind = 'deployment_base' AND storage_subject_id IS NULL) OR (scope_kind = 'user_overlay' AND length(storage_subject_id) BETWEEN 1 AND 512)",

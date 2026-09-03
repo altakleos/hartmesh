@@ -24,6 +24,12 @@ _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _SELECTOR = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
 _BINDING_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\Z")
+_SEMANTIC_VERSION = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\Z"
+)
 _TRANSPORTS = frozenset({"stdio", "sse", "http", "streamable_http"})
 _MAX_SERVERS = 128
 _MAX_SKILLS = 512
@@ -59,6 +65,12 @@ def canonical_tool_plane_digest(value: object) -> str:
     """Return the lowercase SHA-256 digest of canonical tool-plane JSON."""
 
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def is_semantic_version(value: object) -> bool:
+    """Return whether ``value`` is one bounded SemVer 2.0 identifier."""
+
+    return isinstance(value, str) and len(value.encode("utf-8")) <= 128 and _SEMANTIC_VERSION.fullmatch(value) is not None
 
 
 class ToolPlaneRevisionError(RuntimeError):
@@ -365,12 +377,12 @@ def _canonical_skill_entries(
             )
         version = entry.get("version")
         if version is not None:
-            if not isinstance(version, str) or not version or len(version) > 128:
+            if not is_semantic_version(version):
                 raise ToolPlaneRevisionError(
                     "validation_failed",
                     safe_details={
                         "field": f"{field_name}.{skill_name}.version",
-                        "reason": "invalid_value",
+                        "reason": "invalid_semantic_version",
                     },
                 )
             item["version"] = version
@@ -1376,5 +1388,6 @@ __all__ = [
     "canonicalize_deployment_candidate",
     "canonicalize_effective_mcp_servers",
     "canonicalize_user_overlay_candidate",
+    "is_semantic_version",
     "runtime_mcp_servers_from_canonical",
 ]

@@ -32,7 +32,7 @@ afterEach(() => {
 
 describe("useToolPlaneGovernance fail-closed behavior", () => {
   it("blocks legacy mutation while governance is loading", () => {
-    mockedFetch.mockImplementation(() => new Promise<Response>(() => {}));
+    mockedFetch.mockImplementation(() => new Promise<Response>(() => undefined));
 
     const { result } = renderHook(
       () => useToolPlaneGovernance("deployment_base"),

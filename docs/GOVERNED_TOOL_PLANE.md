@@ -25,6 +25,11 @@ active overlay for each verified user:
   the verified user's active overlay. Users without nonempty state use the
   canonical empty-overlay marker; no synthetic user revision row is created.
 
+Skill lookup keeps the established precedence: a managed integration shadows
+a same-named public skill, and a user's custom skill shadows either base
+variant. Validation permits those intentional seams while still rejecting
+duplicate identifiers within one source.
+
 Revision, content, base, overlay, projection, policy, report, and effective
 digests are lowercase SHA-256 identities over canonical versioned projections.
 The records and transition events are append-only. A rollback creates a new,
@@ -118,9 +123,14 @@ A user overlay names its validated base and only safe per-user choices:
 }
 ```
 
-The archive staging response supplies the archive/tree/manifest digests needed
-by a skill entry. Every managed-integration entry additionally requires its
-provider identifier; projection preserves the canonical
+The archive staging response supplies the archive/tree/manifest digests,
+declared frontmatter version (when present), and the exact `SKILL.md` entry
+point needed by a skill entry. A revision must reproduce those artifact-bound
+values; caller-asserted version or entry-point metadata is rejected. Declared
+versions must conform to SemVer 2.0 in both staged artifacts and revision
+manifests. Every
+managed-integration entry additionally requires its provider identifier;
+projection preserves the canonical
 `<provider>/<skill>/` layout and provider-owned hidden manifests while replacing
 all governed package directories. Archive staging and revision staging are both
 inert; promotion copies only the exact validated artifact bytes.
@@ -154,6 +164,11 @@ Validation covers:
   size rejection;
 - skill manifest/file integrity against staged digests;
 - the built-in read-only SkillScan/review facts for the exact staged tree;
+- the optional managed-integration provider allowlist and exact forbidden
+  skill capabilities derived from `SKILL.md` (`unrestricted-tools`,
+  `autonomous-secrets`, `declared-secrets`, and `tool:<name>`). Startup rejects
+  unknown capability IDs and malformed tool names instead of accepting a
+  no-op denial;
 - MCP schema, transport, executable/argument, endpoint/SSRF, tool, selector,
   provider, count, and deployment-policy checks; and
 - base/overlay composition and non-widening rules.
@@ -163,10 +178,14 @@ Errors reject the candidate. An unavailable or incomplete required validator is
 `unqualified`/failed in durable operation; it is never treated as a successful
 skip. Reports expose bounded safe codes, locations, counts, validator versions,
 policy identity, and digests. Validator versions include SHA-256 identities for
-the canonicalizer, governed validator, shared MCP launch policy, MCP schema,
+the complete conservative source closure used by the canonicalizer, governed
+validator, artifact verifier, endpoint and MCP launch policy, MCP schema,
 SkillScan, and skill-review implementations, plus the review facts schema
-version; a mismatch makes a prior report stale at promotion. Raw unsafe scanner
-payloads and skill source bodies do not enter general audit projections.
+version. The closure includes the MCP schema's imported identifier and bound
+definitions. These identities are frozen at process startup so validation and
+promotion perform no synchronous source-tree I/O on the event loop. A mismatch
+makes a prior report stale at promotion. Raw unsafe scanner payloads and skill
+source bodies do not enter general audit projections.
 
 Validation means the candidate satisfied these deterministic checks. It does
 not prove that a skill is correct, that a remote MCP server is trustworthy, that
@@ -227,9 +246,12 @@ restarted.
 
 For an indexed user still seeing the pre-user-isolation global custom-skill
 fallback, bootstrap stages those exact visible bytes as that user's custom
-package. Promotion moves the immutable package into the user scope and
-preserves its per-user enabled state, so the legacy fallback is not represented
-as state detached from ungoverned bytes.
+package. Its effective enabled state includes the legacy global enablement
+ceiling, so adopting a globally disabled package cannot silently enable it.
+A protected source digest separately fences the raw user state through base
+promotion; a concurrent edit still returns `bootstrap_inventory_changed` even
+when it would produce the same effective disabled value. Overlay promotion then
+moves the immutable package into the user scope.
 
 ## Drift, modes, and readiness
 
@@ -237,6 +259,14 @@ Direct edits are never retroactively converted into revision history. A live
 config, package tree, user state file, subject binding, or active pointer that
 does not match its promoted content produces the constant classification
 `unmanaged_drift`; HartMesh does not digest possibly secret mismatching bytes.
+The canonical empty-overlay marker is also an assertion about live absence:
+custom/legacy packages, nonempty user state, credentials, or an unexpected
+pointer—including a dangling pointer symlink—make an otherwise row-less user
+overlay drifted and block durable admission/readiness. Empty overlay staging is
+rejected: after a base is active, verified absence is itself reported as
+governed without fabricating a per-user row. Administrative status resolves an
+opaque user reference through the bounded authoritative user inventory before
+performing that same live-absence check.
 
 - In ordinary local/non-durable mode, bootstrap-required or drifted material
   remains usable for development. Status and the settings notice say
