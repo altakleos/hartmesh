@@ -12,6 +12,7 @@ from starlette.formparsers import MultiPartException, MultiPartParser
 
 from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
+from app.gateway.tool_plane_guard import reject_direct_tool_plane_mutation
 from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_skills_system_prompt_cache_async, refresh_user_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import (
@@ -288,6 +289,7 @@ async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResp
 )
 async def install_skill(request: Request, body: SkillInstallRequest, config: AppConfig = Depends(get_config)) -> SkillInstallResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    reject_direct_tool_plane_mutation(request, surface="skill_archive_install")
     try:
         skill_file_path = resolve_thread_virtual_path(body.thread_id, body.path)
     except FileNotFoundError as e:
@@ -322,6 +324,7 @@ async def upload_and_install_skill(
     config: AppConfig = Depends(get_config),
 ) -> SkillInstallResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    reject_direct_tool_plane_mutation(request, surface="skill_archive_upload")
 
     form: FormData | None = None
     temporary_path: Path | None = None
@@ -413,6 +416,7 @@ async def _read_custom_skill_response(skill_name: str, config: AppConfig) -> Cus
 @router.put("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Edit Custom Skill")
 async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    reject_direct_tool_plane_mutation(request, surface="custom_skill_edit")
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         storage = _get_user_skill_storage(config)
@@ -453,6 +457,7 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
 @router.delete("/skills/custom/{skill_name}", summary="Delete Custom Skill")
 async def delete_custom_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> dict[str, bool]:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    reject_direct_tool_plane_mutation(request, surface="custom_skill_delete")
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         storage = _get_user_skill_storage(config)
@@ -509,6 +514,7 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
 @router.post("/skills/custom/{skill_name}/rollback", response_model=CustomSkillContentResponse, summary="Rollback Custom Skill")
 async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    reject_direct_tool_plane_mutation(request, surface="custom_skill_legacy_rollback")
     try:
         storage = _get_user_skill_storage(config)
         if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
@@ -634,6 +640,7 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
     # (there is no per-user skill state). Guard it as admin-only like the other
     # global config writes, matching the MCP router.
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    reject_direct_tool_plane_mutation(request, surface="skill_state")
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
 

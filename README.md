@@ -293,6 +293,16 @@ occupancy, and an established binding cannot be removed by migration downgrade.
 
 Admission pins the agent revision, extension generation, trusted context, constraints evidence, effective skill packages, and execution/projection profile.
 
+When governed tool-plane revisions are enabled, admission also binds the active
+deployment-base revision, the verified user's overlay (or canonical empty
+marker), their generations, the observed projection, secret-safe effective MCP
+structure/tool allowlists, and the composed effective digest. Skill bytes and
+MCP tool objects are captured before a second generation check, so promotion or
+rollback cannot create a mixed accepted snapshot. Running and recovered work
+uses that accepted material rather than rereading the newest mutable
+`extensions_config.json`. See the
+[governed tool-plane guide](docs/GOVERNED_TOOL_PLANE.md).
+
 It also resolves the effective subagent catalog once, including each allowed worker's prompt, model/profile settings, tools, skills, limits, source version, and definition digest. Lead discovery, delegation policy, worker construction, retries, and recovery all use that catalog. Managed subagent changes apply to invocations accepted after the edit; an in-flight or recovered invocation uses its accepted snapshot.
 
 One immutable accepted skill tree contains the transitive union needed by the lead and its allowed subagents. Prompt, discovery, activation, and tool policy expose only the accepted per-agent scope; because all accepted packages may share one sandbox tree, that scoping is not a filesystem-confidentiality boundary.
@@ -529,7 +539,7 @@ The host-independent [`deerflow-extension-api`](backend/packages/extension-api/R
 
 It also covers restrictive constraints, capability health, and required MCP preparation.
 
-Python plugins are trusted operator code loaded at startup from top-level `plugins:` in `config.yaml`. That list intentionally stays outside API-writable `extensions_config.json`, which owns MCP and skill configuration.
+Python plugins are trusted operator code loaded at startup from top-level `plugins:` in `config.yaml`. That list intentionally stays outside `extensions_config.json`, which owns MCP and skill configuration. With the default governed tool plane, active MCP and skill changes go through stage, validation, and promotion; direct configuration mutation is a legacy opt-out mode.
 
 Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source.
 
@@ -572,7 +582,7 @@ This repository does not yet document a HartMesh sync cadence, API/configuration
 
 Treat these hashes as provenance, not a maintenance promise.
 
-The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, `0024_tool_receipt_idempotency` fences receipt appends, `0025_tenant_identity` binds the schema tenant, `0026_mcp_task_lineage` seals MCP lineage, `0027_multi_gateway_topology` adds exact-two topology registration plus persisted scheduler generations, `0028_mcp_request_commitment` adds private exact-request MCP replay commitments while cleaning up superseded indexes, `0029_run_recovery_policy` adds immutable run recovery policy, bounded recovery payloads, and database-ordered admission cursors, `0030_run_delivery_owner_backfill` repairs unowned legacy delivery receipts only when their run, thread, and tenant anchors select one authoritative owner, `0031_merge_upstream_0017` joins the personal-access-token branch, `0032_subagent_batch_evidence` binds durable batches to accepted parent evidence and append-only fenced attempts, and `0033_automation_identities` tenant-binds PATs and adds bounded credential audit evidence.
+The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, `0024_tool_receipt_idempotency` fences receipt appends, `0025_tenant_identity` binds the schema tenant, `0026_mcp_task_lineage` seals MCP lineage, `0027_multi_gateway_topology` adds exact-two topology registration plus persisted scheduler generations, `0028_mcp_request_commitment` adds private exact-request MCP replay commitments while cleaning up superseded indexes, `0029_run_recovery_policy` adds immutable run recovery policy, bounded recovery payloads, and database-ordered admission cursors, `0030_run_delivery_owner_backfill` repairs unowned legacy delivery receipts only when their run, thread, and tenant anchors select one authoritative owner, `0031_merge_upstream_0017` joins the personal-access-token branch, `0032_subagent_batch_evidence` binds durable batches to accepted parent evidence and append-only fenced attempts, `0033_automation_identities` tenant-binds PATs and adds bounded credential audit evidence, and `0034_tool_plane_revisions` adds per-scope immutable revisions, transition history, active-generation fences, and base/overlay compatibility attestations without blessing existing mutable files.
 
 PostgreSQL operators should quiesce writers and back up data before rollback; use the migration guidance in [backend/AGENTS.md](backend/AGENTS.md).
 
@@ -588,6 +598,7 @@ Version sources report `2.1.0`, but no tag contains the audited HartMesh impleme
 - [Gateway API](backend/docs/API.md) — authenticated HTTP behavior
 - [Extension API](backend/packages/extension-api/README.md) — policy and trust boundaries
 - [Extension artifact provenance](docs/EXTENSION_ARTIFACT_PROVENANCE.md) — source/artifact/config identities, migration, and rollback
+- [Governed skill and MCP revisions](docs/GOVERNED_TOOL_PLANE.md) — stage/validate/promote, bootstrap, drift, recovery, selectors, and accepted pinning
 - [Tenant identity](backend/docs/TENANT_IDENTITY.md) — server-owned trust boundary, schema/Redis migration, ACLs, and rollback
 - [Honcho memory backend](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md) — tenant/user isolation, durable observation limits, and existing-workspace migration
 - [Helm deployment](deploy/helm/deer-flow/README.md) — production and candidate qualification contracts

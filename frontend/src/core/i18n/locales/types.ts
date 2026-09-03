@@ -807,6 +807,35 @@ export interface Translations {
       languageTitle: string;
       languageDescription: string;
     };
+    toolPlane: {
+      title: string;
+      checking: string;
+      managed: string;
+      immutable: string;
+      bootstrapRequired: string;
+      recoveryRequired: string;
+      drift: string;
+      unmanaged: string;
+      loadFailed: string;
+      mutationsDisabled: string;
+      activeRevision: string;
+      noActiveRevision: string;
+      latestRevision: string;
+      noRevision: string;
+      credentialNotice: string;
+      states: Record<
+        | "bootstrap_required"
+        | "staged"
+        | "validating"
+        | "validated"
+        | "rejected"
+        | "prepared"
+        | "promoted"
+        | "superseded"
+        | "recovery_required",
+        string
+      >;
+    };
     tools: {
       title: string;
       description: string;

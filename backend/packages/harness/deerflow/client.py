@@ -238,6 +238,14 @@ class DeerFlowClient:
         self._agent = None
         self._agent_config_key = None
 
+    def _reject_governed_tool_plane_mutation(self) -> None:
+        from deerflow.config.tool_plane_config import (
+            governed_tool_plane_enabled,
+        )
+
+        if governed_tool_plane_enabled(self._app_config):
+            raise RuntimeError("governed_revision_required: stage, validate, and promote tool-plane material through the Gateway governance API")
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -1250,6 +1258,7 @@ class DeerFlowClient:
         Raises:
             OSError: If the config file cannot be written.
         """
+        self._reject_governed_tool_plane_mutation()
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
             raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
@@ -1307,6 +1316,7 @@ class DeerFlowClient:
             ValueError: If the skill is not found.
             OSError: If the config file cannot be written.
         """
+        self._reject_governed_tool_plane_mutation()
         storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
         skills = storage.load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == name), None)
@@ -1402,6 +1412,7 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
+        self._reject_governed_tool_plane_mutation()
         return get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config).install_skill_from_archive(skill_path)
 
     # ------------------------------------------------------------------

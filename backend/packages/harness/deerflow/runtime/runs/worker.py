@@ -1902,6 +1902,8 @@ async def run_agent(
                 runtime_ctx["accepted_extension_artifact_manifest_digest"] = accepted.extension_artifact_manifest_digest
             if accepted.extension_configuration_digest is not None:
                 runtime_ctx["accepted_extension_configuration_digest"] = accepted.extension_configuration_digest
+            if accepted.tool_plane_revision is not None:
+                runtime_ctx["accepted_tool_plane_revision"] = accepted.tool_plane_revision
             from deerflow_extension_api import SafeContextReferenceV1, SealedOriginV1
 
             from deerflow.runtime.accepted_invocation import (

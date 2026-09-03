@@ -1993,6 +1993,7 @@ def _effective_execution_projection(
                 if accepted.extension_artifact_manifest_digest is not None
                 else {}
             ),
+            **({"tool_plane_revision": accepted.tool_plane_revision} if accepted.tool_plane_revision is not None else {}),
             "input": input_projection,
             "command": canonical_request_value(intent.command),
             "multitask_strategy": intent.multitask_strategy,
@@ -2158,11 +2159,25 @@ class _RevisionResolutionOwnership:
         self._abandoned = False
         self._resolved: Any | None = None
 
-    def resolve(self, config: dict[str, Any], *, app_config: Any, user_id: str | None) -> Any:
+    def resolve(
+        self,
+        config: dict[str, Any],
+        *,
+        app_config: Any,
+        user_id: str | None,
+        governed_tool_plane_digest: str | None = None,
+        governed_mcp_tool_allowlists: Mapping[
+            str,
+            frozenset[str] | None,
+        ]
+        | None = None,
+    ) -> Any:
         revision = resolve_agent_revision(
             config,
             app_config=app_config,
             user_id=user_id,
+            governed_tool_plane_digest=governed_tool_plane_digest,
+            governed_mcp_tool_allowlists=governed_mcp_tool_allowlists,
         )
         release_material: ResolvedAgentMaterialV1 | None = None
         with self._lock:
@@ -2200,6 +2215,12 @@ async def _resolve_agent_revision_cancellation_safe(
     *,
     app_config: Any,
     user_id: str | None,
+    governed_tool_plane_digest: str | None = None,
+    governed_mcp_tool_allowlists: Mapping[
+        str,
+        frozenset[str] | None,
+    ]
+    | None = None,
 ) -> Any:
     ownership = _RevisionResolutionOwnership()
     resolution = asyncio.create_task(
@@ -2208,6 +2229,8 @@ async def _resolve_agent_revision_cancellation_safe(
             config,
             app_config=app_config,
             user_id=user_id,
+            governed_tool_plane_digest=governed_tool_plane_digest,
+            governed_mcp_tool_allowlists=governed_mcp_tool_allowlists,
         )
     )
     try:
@@ -2290,11 +2313,75 @@ async def _seal_accepted_invocation(
         contributor_references=_contribution_json(origin_contributions),
     )
 
-    revision = await _resolve_agent_revision_cancellation_safe(
-        config,
-        app_config=app_config,
-        user_id=principal.user_id,
-    )
+    tool_plane_revision: dict[str, object] | None = None
+    tool_plane_service = getattr(app_state, "tool_plane_revision_service", None)
+    tool_plane_effective = None
+    tool_plane_runtime = None
+    tool_plane_actor = None
+    if tool_plane_service is not None:
+        from deerflow_extension_api import VerifiedActorContextV1
+
+        from deerflow.tool_plane import (
+            ToolPlaneRevisionError,
+            resolve_tool_plane_runtime,
+        )
+
+        if principal.identity is None:  # pragma: no cover - acceptance invariant
+            raise RuntimeError("credential_evidence_unavailable")
+        tool_plane_actor = VerifiedActorContextV1(
+            identity=principal.identity,
+            credential=credential_evidence,
+            tenant=tenant_reference,
+        )
+        try:
+            tool_plane_effective = await tool_plane_service.effective_for_actor(
+                tool_plane_actor,
+            )
+        except ToolPlaneRevisionError as exc:
+            local_unmanaged = exc.code in {"tool_plane_bootstrap_required", "unmanaged_drift"} and tool_plane_service.durable is False
+            if not local_unmanaged:
+                raise
+        if tool_plane_effective is not None:
+            tool_plane_runtime = resolve_tool_plane_runtime(
+                app_config,
+                tool_plane_effective,
+            )
+
+    revision = None
+    for attempt in range(3):
+        resolved_app_config = app_config if tool_plane_runtime is None else tool_plane_runtime.app_config
+        revision = await _resolve_agent_revision_cancellation_safe(
+            config,
+            app_config=resolved_app_config,
+            user_id=principal.user_id,
+            governed_tool_plane_digest=(None if tool_plane_effective is None else tool_plane_effective.effective_digest),
+            governed_mcp_tool_allowlists=(None if tool_plane_runtime is None else tool_plane_runtime.allowed_mcp_tools_by_server),
+        )
+        if tool_plane_effective is None:
+            break
+        assert tool_plane_actor is not None
+        try:
+            confirmed = await tool_plane_service.effective_for_actor(tool_plane_actor)
+        except (Exception, asyncio.CancelledError):
+            if revision.material is not None:
+                try:
+                    await _release_process_material_bounded(revision.material)
+                except asyncio.CancelledError:
+                    pass
+            raise
+        if confirmed.effective_digest == tool_plane_effective.effective_digest:
+            tool_plane_effective = confirmed
+            tool_plane_revision = confirmed.to_json()
+            break
+        if revision.material is not None:
+            await _release_process_material_bounded(revision.material)
+        revision = None
+        tool_plane_effective = confirmed
+        tool_plane_runtime = resolve_tool_plane_runtime(app_config, confirmed)
+    else:
+        raise ToolPlaneRevisionError("revision_conflict")
+    if revision is None:  # pragma: no cover - bounded loop invariant
+        raise RuntimeError("accepted agent revision resolution failed")
     if revision.material is None:  # pragma: no cover - resolver contract
         raise RuntimeError("accepted agent revision is missing captured material")
     # Publish the process-local lease into the already-scrubbed host context as
@@ -2461,6 +2548,7 @@ async def _seal_accepted_invocation(
         extension_manifest_digest=extension_manifest_digest,
         extension_artifact_manifest_digest=extension_artifact_manifest_digest,
         extension_configuration_digest=extension_configuration_digest,
+        tool_plane_revision=tool_plane_revision,
         contributor_execution_digest=contributor_execution_digest,
         tenant=tenant_reference,
         trusted_context=trusted_context,
@@ -2514,6 +2602,8 @@ async def _seal_accepted_invocation(
         runtime_context["accepted_extension_artifact_manifest_digest"] = extension_artifact_manifest_digest
     if extension_configuration_digest is not None:
         runtime_context["accepted_extension_configuration_digest"] = extension_configuration_digest
+    if accepted.tool_plane_revision is not None:
+        runtime_context["accepted_tool_plane_revision"] = accepted.tool_plane_revision
     config["context"] = runtime_context
     return accepted
 

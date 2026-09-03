@@ -103,9 +103,12 @@ Deployment provenance and qualification remain administrator-only; the
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
-servers + skills). Both real files are gitignored and may be edited at runtime via the
-Gateway API. Config schema and resolution order are documented in
-[backend/AGENTS.md](backend/AGENTS.md).
+servers + skills). Both real files are gitignored. The default governed tool plane
+requires stage→validate→promote for writes; direct routes require
+`tool_plane.enabled: false`. It separates deployment material from user overlays,
+binds accepted runs, detects drift, and mounts no exact-two mutation/bootstrap
+routes. See the
+[operator guide](docs/GOVERNED_TOOL_PLANE.md) and [backend guide](backend/AGENTS.md).
 
 Durable qualification requires exact passing external evidence; missing
 infrastructure is an unpassed gate. See `docs/MULTI_GATEWAY_QUALIFICATION.md`.

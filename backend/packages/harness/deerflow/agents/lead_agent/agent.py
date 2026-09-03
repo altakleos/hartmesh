@@ -882,6 +882,18 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     from deerflow.runtime.user_context import resolve_config_user_id
 
     resolved_user_id = resolved_material.user_id if resolved_material is not None else resolve_config_user_id(config)
+    from deerflow.tools.tools import (
+        accepted_mcp_server_ids_from_context,
+        accepted_mcp_tool_allowlists_from_context,
+    )
+
+    allowed_mcp_server_ids = accepted_mcp_server_ids_from_context(cfg)
+    tool_plane_tool_kwargs = {} if allowed_mcp_server_ids is None else {"allowed_mcp_server_ids": allowed_mcp_server_ids}
+    allowed_mcp_tools = accepted_mcp_tool_allowlists_from_context(cfg)
+    if allowed_mcp_tools is not None:
+        tool_plane_tool_kwargs["allowed_mcp_tools_by_server"] = allowed_mcp_tools
+    if resolved_material is not None and resolved_material.mcp_tool_objects is not None:
+        tool_plane_tool_kwargs["mcp_tools_snapshot"] = resolved_material.mcp_tool_objects
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
@@ -1010,7 +1022,12 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             enabled=skill_search_enabled,
             container_base_path=container_base_path,
         )
-        raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
+        raw_tools = get_available_tools(
+            model_name=model_name,
+            subagent_enabled=subagent_enabled,
+            app_config=resolved_app_config,
+            **tool_plane_tool_kwargs,
+        ) + [setup_agent]
         configured_tools = raw_tools
         if non_interactive:
             configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
@@ -1131,7 +1148,13 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Default lead agent (unchanged behavior)
-    raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
+    raw_tools = get_available_tools(
+        model_name=model_name,
+        groups=agent_config.tool_groups if agent_config else None,
+        subagent_enabled=subagent_enabled,
+        app_config=resolved_app_config,
+        **tool_plane_tool_kwargs,
+    )
     configured_tools = raw_tools + extra_tools
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]

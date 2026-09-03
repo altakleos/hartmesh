@@ -910,6 +910,37 @@ export const zhCN: Translations = {
       languageTitle: "语言",
       languageDescription: "在不同语言之间切换。",
     },
+    toolPlane: {
+      title: "受治理的修订",
+      checking: "正在检查修订治理状态",
+      managed:
+        "技能和 MCP 工具通过不可变修订管理。设置中的直接修改已禁用；请通过治理 API 暂存、验证、检查并提升修订。",
+      immutable: "此部署不可变。工具平面材料只能由已批准的部署修订提供。",
+      bootstrapRequired: "必须先完成治理引导，才能修改工具平面或执行持久运行。",
+      recoveryRequired:
+        "已准备的修订需要恢复。工具平面修改和持久运行准入仍被阻止。",
+      drift:
+        "已投影的技能或 MCP 材料与活动修订不一致。运维人员完成偏差协调前，直接修改已禁用。",
+      unmanaged: "此范围没有活动修订。直接修改仍被禁用。",
+      loadFailed: "无法获取修订治理状态",
+      mutationsDisabled: "确认治理状态前，直接修改技能和 MCP 已禁用。",
+      activeRevision: "活动修订",
+      noActiveRevision: "没有活动修订",
+      latestRevision: "最新修订",
+      noRevision: "没有已暂存修订",
+      credentialNotice: "此处仅显示修订标识和无密钥证据，绝不会包含凭证值。",
+      states: {
+        bootstrap_required: "需要引导",
+        staged: "已暂存",
+        validating: "验证中",
+        validated: "已验证",
+        rejected: "无效",
+        prepared: "已准备",
+        promoted: "活动",
+        superseded: "已取代",
+        recovery_required: "需要恢复",
+      },
+    },
     tools: {
       title: "工具",
       description: "管理 MCP 工具的配置和启用状态。",

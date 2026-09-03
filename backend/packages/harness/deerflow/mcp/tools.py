@@ -789,7 +789,9 @@ def _configure_task_tools_for_server(
     return configured
 
 
-async def get_mcp_tools() -> list[BaseTool]:
+async def get_mcp_tools(
+    extensions_config: ExtensionsConfig | None = None,
+) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
@@ -807,11 +809,11 @@ async def get_mcp_tools() -> list[BaseTool]:
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
 
-    # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when initializing MCP tools.
-    extensions_config = ExtensionsConfig.from_file()
+    # Ungoverned callers read the latest mutable file. Governed accepted-run
+    # resolution supplies an immutable, secret-safe structural snapshot and
+    # resolves its selectors only into this process-local object.
+    if extensions_config is None:
+        extensions_config = ExtensionsConfig.from_file()
     validate_mcp_task_config_snapshot(extensions_config)
     servers_config = build_servers_config(extensions_config)
 
@@ -945,9 +947,14 @@ async def get_mcp_tools() -> list[BaseTool]:
                         _VALID_MCP_TOOL_NAME.pattern,
                     )
                     continue
-                tag_mcp_tool(tool, server_name=source_name, transport=transport)
                 prefix = f"{source_name}_"
                 original_name = tool.name[len(prefix) :] if tool_name_prefix and tool.name.startswith(prefix) else tool.name
+                tag_mcp_tool(
+                    tool,
+                    server_name=source_name,
+                    transport=transport,
+                    tool_name=original_name,
+                )
                 routing = resolve_effective_mcp_routing(server_cfg, original_name)
                 if routing.get("mode") != "off":
                     tag_mcp_routing(tool, routing)

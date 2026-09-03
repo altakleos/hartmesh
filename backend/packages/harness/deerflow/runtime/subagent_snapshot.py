@@ -12,7 +12,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from types import MappingProxyType
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from deerflow.runtime.accepted_invocation import canonical_digest
 
@@ -877,6 +877,7 @@ def _available_tool_contracts(
     *,
     agent_config: object | None,
     model_name: str | None,
+    mcp_tools_snapshot: tuple[Any, ...] | None = None,
 ) -> Mapping[str, str]:
     """Resolve the pre-authorization tool ceiling once at admission."""
 
@@ -890,6 +891,7 @@ def _available_tool_contracts(
             model_name=model_name,
             subagent_enabled=False,
             app_config=app_config,
+            mcp_tools_snapshot=mcp_tools_snapshot,
         )
         names = _canonical_names(
             tuple(str(getattr(tool, "name", "")) for tool in tools),
@@ -924,6 +926,7 @@ def snapshot_effective_subagents(
     enabled: bool = True,
     available_skill_names: Sequence[str] | None = None,
     parent_model_name: str | None = None,
+    mcp_tools_snapshot: tuple[Any, ...] | None = None,
 ) -> ResolvedSubagentCatalogV1:
     """Resolve every subagent reachable by this accepted lead exactly once."""
 
@@ -1001,6 +1004,7 @@ def snapshot_effective_subagents(
                 app_config,
                 agent_config=agent_config,
                 model_name=effective_model,
+                mcp_tools_snapshot=mcp_tools_snapshot,
             )
         all_tool_contracts = available_tools_by_model[effective_model]
         all_tool_names = tuple(all_tool_contracts)

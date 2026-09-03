@@ -490,6 +490,13 @@ GET /api/models/{model_name}
 
 ### MCP Configuration
 
+These endpoints are the legacy direct configuration surface. With the default
+`tool_plane.enabled: true`, all MCP write endpoints return `409` with
+`governed_revision_required`; in an immutable exact-two deployment the code is
+`immutable_deployment`. Use the governed revision API below. Read and cache
+reset operations remain available. Direct writes operate only when governance
+is explicitly disabled.
+
 #### Get MCP Config
 
 Get current MCP server configurations.
@@ -681,6 +688,13 @@ Requires an authenticated admin session.
 
 ### Skills
 
+Skill listing, detail, and cache reload remain available with governed
+revisions enabled. Direct archive install/upload, custom-skill edit/delete or
+legacy rollback, and enable/disable writes return `409` with
+`governed_revision_required` (or `immutable_deployment` for the immutable
+profile). Use the governed revision API below. The legacy writes operate only
+when `tool_plane.enabled: false`.
+
 #### List Skills
 
 Get all available skills.
@@ -830,6 +844,91 @@ must be called directly; repeated requests through a load-balanced Service do
 not guarantee that every instance is reached. External MinIO/NFS/CSI writes
 bypass the validation, SkillScan, and history used by the install/edit APIs, so
 the mounted directory must be writable only by trusted operators.
+
+### Governed Tool Plane
+
+The default skill and MCP mutation surface is an authenticated revision
+workflow. Staging is inert, validation binds a report to exact canonical
+material and policy, and promotion activates only the validated revision.
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/tool-plane/status?scope_kind=user_overlay` | Current verified user's status |
+| `GET` | `/api/tool-plane/status?scope_kind=deployment_base` | Deployment-base status (admin) |
+| `GET` | `/api/tool-plane/revisions?scope_kind=...&limit=50` | Bounded current-scope history |
+| `POST` | `/api/tool-plane/revisions` | Stage a canonical base or current-user overlay |
+| `POST` | `/api/tool-plane/skill-artifacts` | Safely stage an inert `.skill` archive |
+| `GET` | `/api/tool-plane/revisions/{revision_id}` | Safe manifest and validation report |
+| `GET` | `/api/tool-plane/revisions/{revision_id}/diff?against={revision_id}` | Bounded changed-field diff |
+| `POST` | `/api/tool-plane/revisions/{revision_id}/validate` | Validate exact staged material |
+| `POST` | `/api/tool-plane/revisions/{revision_id}/promote` | Promote a passing revision |
+| `POST` | `/api/tool-plane/revisions/{revision_id}/rollback` | Re-promote previously validated material |
+| `GET` | `/api/tool-plane/admin/status` | Explicit cross-user/base status (admin) |
+| `GET` | `/api/tool-plane/admin/revisions` | Explicit cross-user/base history (admin) |
+| `GET/POST` | `/api/tool-plane/admin/revisions/{revision_id}[/{action}]` | Inspect/validate/promote/rollback any existing revision (admin) |
+| `POST` | `/api/tool-plane/bootstrap/stage-current` | Stage an upgraded mutable installation (admin) |
+
+Ordinary overlay routes always derive the opaque user scope from the verified
+actor; they do not accept a user identifier. Cross-user admin list/status calls
+require `scope_kind=user_overlay&user_ref=<opaque-ref>`. Personal access tokens
+are denied by the route/scope matrix.
+
+Stage a deployment base:
+
+```http
+POST /api/tool-plane/revisions
+Content-Type: application/json
+```
+
+```json
+{
+  "scope_kind": "deployment_base",
+  "candidate": {
+    "version": 1,
+    "validation_policy_digest": "<digest from status>",
+    "parent_revision_digest": null,
+    "change_summary": "Add reviewed search tooling",
+    "mcp_servers": {
+      "search": {
+        "type": "http",
+        "url": "https://mcp.example.com/api",
+        "headers": {"Authorization": "$SEARCH_TOKEN"},
+        "tools": {"lookup": {}}
+      }
+    },
+    "public_skills": {},
+    "managed_integrations": {}
+  }
+}
+```
+
+For MCP servers, keys in a nonempty `tools` map form the exact raw-tool
+allowlist; an empty map means all valid tools advertised by that server.
+Credential-bearing fields accept environment or request-context selectors,
+never literal values. A user overlay references the active base and may only
+narrow enablement, select a non-secret credential binding reference/version,
+and supply that user's custom skills/state.
+
+Validate and promote by posting the scope discriminator:
+
+```json
+{"scope_kind": "deployment_base"}
+```
+
+The explicit `/admin/revisions/{revision_id}/{validate|promote|rollback}`
+variants take no body. Immutable exact-two deployments mount only the governed
+read routes; revision mutation, archive staging, and bootstrap routes are absent
+from routing and OpenAPI. Direct legacy mutation remains blocked, and the
+service returns `immutable_deployment` if an internal caller attempts a write.
+
+Expected safe failure codes include `validation_failed` (`422`),
+`validation_stale` (`409`), `secret_value_present` (`422`),
+`base_revision_changed` (`409`), `overlay_preflight_failed` (`422`),
+`bootstrap_inventory_changed` (`409`), and `unmanaged_drift`,
+`projection_failed`, `projection_digest_mismatch`, or `recovery_required`
+(`503`). Detailed schemas, bootstrap procedure, locking/recovery contract, and
+accepted-run pinning are documented in
+[Governed Skill and MCP Revisions](../../docs/GOVERNED_TOOL_PLANE.md).
 
 ### File Uploads
 

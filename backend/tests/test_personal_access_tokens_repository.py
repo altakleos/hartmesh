@@ -92,11 +92,17 @@ def test_validate_scopes_deduplicates_and_rejects_unknown():
         validate_scopes([])
 
 
-def test_pat_scopes_stay_aligned_with_route_permissions():
-    """PAT scopes are exactly the authz route permissions — fail on drift."""
-    from app.gateway.authz import _ALL_PERMISSIONS
+def test_pat_scopes_exclude_interactive_tool_plane_permissions():
+    """PATs retain run/thread scopes but cannot manage the tool plane."""
+    from app.gateway.authz import _ALL_PERMISSIONS, Permissions
 
-    assert PAT_ALLOWED_SCOPES == frozenset(_ALL_PERMISSIONS)
+    tool_plane_permissions = {
+        Permissions.TOOL_PLANE_READ,
+        Permissions.TOOL_PLANE_MUTATE,
+        Permissions.TOOL_PLANE_ADMIN,
+    }
+    assert PAT_ALLOWED_SCOPES == frozenset(_ALL_PERMISSIONS) - tool_plane_permissions
+    assert PAT_ALLOWED_SCOPES.isdisjoint(tool_plane_permissions)
 
 
 # ── Repository ────────────────────────────────────────────────────────────

@@ -1252,6 +1252,27 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  // The shared mock models a legacy Gateway by default.  The settings UI only
+  // enables its legacy mutation controls when the Gateway explicitly reports
+  // that the governed tool plane is unavailable; network failures must remain
+  // fail-closed.  Individual governance tests can override this route after
+  // calling mockLangGraphAPI.
+  void page.route("**/api/tool-plane/**", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: {
+            code: "tool_plane_unavailable",
+            message: "Governed tool-plane support is not installed.",
+          },
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
   // Skills list — settings page and slash autocomplete
   void page.route("**/api/skills", (route) => {
     if (route.request().method() === "GET") {

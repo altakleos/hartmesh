@@ -38,6 +38,12 @@ from deerflow.persistence.subagent_batches.model import (
 )
 from deerflow.persistence.tenant_binding import DeploymentIdentityRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.tool_plane.model import (
+    ToolPlaneOverlayCompatibilityRow,
+    ToolPlaneRevisionEventRow,
+    ToolPlaneRevisionRow,
+    ToolPlaneScopeRow,
+)
 from deerflow.persistence.topology.model import TopologyReplicaRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
@@ -64,6 +70,10 @@ __all__ = [
     "SubagentBatchItemRow",
     "ThreadMetaRow",
     "TopologyReplicaRow",
+    "ToolPlaneOverlayCompatibilityRow",
+    "ToolPlaneRevisionEventRow",
+    "ToolPlaneRevisionRow",
+    "ToolPlaneScopeRow",
     "UserRow",
     "WebhookDeliveryRow",
 ]

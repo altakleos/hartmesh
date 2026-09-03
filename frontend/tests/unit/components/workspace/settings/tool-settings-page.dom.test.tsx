@@ -10,6 +10,15 @@ const mcpMockState = rs.hoisted(() => ({
   updateMutate: rs.fn(),
   servers: {} as Record<string, unknown>,
 }));
+const toolPlaneMockState = rs.hoisted(() => ({
+  serviceUnavailable: true,
+  governance: undefined as
+    | {
+        status: Record<string, unknown>;
+        revisions: Record<string, unknown>[];
+      }
+    | undefined,
+}));
 
 // A server carrying config this page never renders: it must survive a write
 // that only meant to add or remove some other entry.
@@ -34,6 +43,34 @@ rs.mock("@/core/i18n/hooks", () => ({
         edit: "Edit",
       },
       settings: {
+        toolPlane: {
+          title: "Governed revisions",
+          checking: "Checking governance",
+          managed: "Managed through immutable revisions.",
+          immutable: "Immutable deployment.",
+          bootstrapRequired: "Bootstrap required.",
+          recoveryRequired: "Recovery required.",
+          drift: "Projection drift.",
+          unmanaged: "No active revision.",
+          loadFailed: "Governance unavailable",
+          mutationsDisabled: "Direct changes are disabled.",
+          activeRevision: "Active",
+          noActiveRevision: "No active revision",
+          latestRevision: "Latest",
+          noRevision: "No staged revisions",
+          credentialNotice: "Credential values are never included.",
+          states: {
+            bootstrap_required: "Bootstrap required",
+            staged: "Staged",
+            validating: "Validating",
+            validated: "Validated",
+            rejected: "Invalid",
+            prepared: "Prepared",
+            promoted: "Active",
+            superseded: "Superseded",
+            recovery_required: "Recovery required",
+          },
+        },
         tools: {
           title: "Tools",
           description: "Manage MCP tools",
@@ -76,6 +113,16 @@ rs.mock("@/core/mcp/hooks", () => ({
   useMCPServerMutation: () => ({
     isPending: mcpMockState.updateIsPending,
     mutate: mcpMockState.updateMutate,
+  }),
+}));
+
+rs.mock("@/core/tool-plane", () => ({
+  useToolPlaneGovernance: () => ({
+    governance: toolPlaneMockState.governance,
+    error: null,
+    isLoading: false,
+    serviceUnavailable: toolPlaneMockState.serviceUnavailable,
+    legacyMutationBlocked: !toolPlaneMockState.serviceUnavailable,
   }),
 }));
 
@@ -122,10 +169,44 @@ afterEach(() => {
   mcpMockState.mutate.mockReset();
   mcpMockState.updateMutate.mockReset();
   mcpMockState.servers = {};
+  toolPlaneMockState.serviceUnavailable = true;
+  toolPlaneMockState.governance = undefined;
   cleanup();
 });
 
 describe("ToolSettingsPage MCP switches", () => {
+  it("shows governed revision evidence and disables every direct mutation", () => {
+    twoServers();
+    toolPlaneMockState.serviceUnavailable = false;
+    toolPlaneMockState.governance = {
+      status: {
+        governance_state: "governed",
+        active_revision_digest: "a".repeat(64),
+        drift: false,
+      },
+      revisions: [
+        {
+          revision_digest: "b".repeat(64),
+          state: "prepared",
+        },
+      ],
+    };
+
+    render(<ToolSettingsPage />);
+
+    expect(screen.getByText("Governed revisions")).toBeDefined();
+    expect(screen.getByText("Prepared")).toBeDefined();
+    expect(
+      screen.getByText("Credential values are never included."),
+    ).toBeDefined();
+    for (const control of [
+      ...screen.getAllByRole("switch"),
+      ...screen.getAllByRole("button"),
+    ]) {
+      expect((control as HTMLButtonElement).disabled).toBe(true);
+    }
+  });
+
   it("disables every switch while a targeted update is pending", () => {
     twoServers();
     mcpMockState.isPending = true;

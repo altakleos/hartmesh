@@ -140,7 +140,8 @@ def safe_extract_skill_archive(
 
     Protections:
     - Reject absolute paths and directory traversal (..).
-    - Skip symlink entries instead of materialising them.
+    - Reject symlink, device, socket, FIFO, and other special entries.
+    - Reject duplicate normalized paths and file/directory conflicts.
     - Enforce a hard limit on total uncompressed size (zip bomb defence).
     - Enforce a hard limit on member count (zip bomb defence by entry count —
       a huge number of tiny/empty members can be cheap to store yet still
@@ -151,8 +152,6 @@ def safe_extract_skill_archive(
         ValueError: If unsafe members, executable binaries, entry count, or size limit exceeded.
     """
     dest_root = dest_path.resolve()
-    total_written = 0
-
     infos = zip_ref.infolist()
     if len(infos) > max_entries:
         # Early-abort before any per-member work below — mirrors the same
@@ -163,21 +162,50 @@ def safe_extract_skill_archive(
         # it lives in the extraction path every install goes through.
         raise ValueError(f"Skill archive contains too many entries ({len(infos)} > {max_entries}).")
 
+    normalized_infos: list[tuple[zipfile.ZipInfo, PurePosixPath, bool]] = []
+    seen: dict[PurePosixPath, bool] = {}
+    advertised_total = 0
     for info in infos:
         if is_unsafe_zip_member(info):
             raise ValueError(f"Archive contains unsafe member path: {info.filename!r}")
-
-        if is_symlink_member(info):
-            logger.warning("Skipping symlink entry in skill archive: %s", info.filename)
-            continue
-
         normalized_name = posixpath.normpath(info.filename.replace("\\", "/"))
-        member_path = dest_root.joinpath(*PurePosixPath(normalized_name).parts)
+        normalized_path = PurePosixPath(normalized_name)
+        if normalized_name in {"", "."}:
+            raise ValueError("Archive contains an empty member path.")
+        is_directory = info.is_dir()
+        unix_mode = info.external_attr >> 16
+        file_type = stat.S_IFMT(unix_mode)
+        if is_symlink_member(info) or file_type not in {
+            0,
+            stat.S_IFREG,
+            stat.S_IFDIR,
+        }:
+            raise ValueError(f"Archive contains link or special-file member: {info.filename!r}")
+        if file_type == stat.S_IFDIR and not is_directory:
+            raise ValueError(f"Archive contains link or special-file member: {info.filename!r}")
+        if normalized_path in seen:
+            raise ValueError(f"Archive contains duplicate or conflicting member path: {info.filename!r}")
+        for parent in normalized_path.parents:
+            if parent == PurePosixPath("."):
+                break
+            if seen.get(parent) is False:
+                raise ValueError(f"Archive contains duplicate or conflicting member path: {info.filename!r}")
+        if not is_directory and any(normalized_path in prior.parents for prior in seen):
+            raise ValueError(f"Archive contains duplicate or conflicting member path: {info.filename!r}")
+        seen[normalized_path] = is_directory
+        advertised_total += max(info.file_size, 0)
+        if advertised_total > max_total_size:
+            raise ValueError("Skill archive is too large or appears highly compressed.")
+        normalized_infos.append((info, normalized_path, is_directory))
+
+    total_written = 0
+    for info, normalized_path, is_directory in normalized_infos:
+        member_path = dest_root.joinpath(*normalized_path.parts)
         if not member_path.resolve().is_relative_to(dest_root):
             raise ValueError(f"Zip entry escapes destination: {info.filename!r}")
         member_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if info.is_dir():
+        if is_directory:
             member_path.mkdir(parents=True, exist_ok=True)
             continue
 

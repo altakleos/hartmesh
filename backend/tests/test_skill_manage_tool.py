@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import anyio
 import pytest
 
+from deerflow.config.tool_plane_config import ToolPlaneConfig
 from deerflow.skills.security_static_scanner import StaticScannerError
 
 skill_manage_module = importlib.import_module("deerflow.tools.skill_manage_tool")
@@ -36,6 +37,38 @@ def _make_runtime(*, thread_id: str = "thread-1", user_id: str = "default"):
         context={"thread_id": thread_id, "user_id": user_id},
         config={"configurable": {"thread_id": thread_id, "user_id": user_id}},
     )
+
+
+def test_skill_manage_rejects_direct_mutation_for_accepted_governed_run():
+    runtime = _make_runtime(user_id="default")
+    runtime.context["accepted_tool_plane_revision"] = {"governance_state": "governed"}
+
+    with pytest.raises(ValueError, match="governed revision"):
+        anyio.run(
+            skill_manage_module.skill_manage_tool.coroutine,
+            runtime,
+            "create",
+            "demo-skill",
+            _skill_content("demo-skill"),
+        )
+
+
+def test_skill_manage_rejects_direct_mutation_when_governance_is_enabled(
+    monkeypatch,
+    tmp_path,
+):
+    config = _make_config(tmp_path / "skills")
+    config.tool_plane = ToolPlaneConfig(enabled=True)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+
+    with pytest.raises(ValueError, match="governed revision"):
+        anyio.run(
+            skill_manage_module.skill_manage_tool.coroutine,
+            _make_runtime(),
+            "create",
+            "demo-skill",
+            _skill_content("demo-skill"),
+        )
 
 
 def test_skill_manage_create_and_patch(monkeypatch, tmp_path):

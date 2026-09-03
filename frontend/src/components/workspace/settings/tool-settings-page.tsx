@@ -34,13 +34,16 @@ import {
   parseMCPServerDefinition,
 } from "@/core/mcp/parse";
 import type { MCPServerConfig } from "@/core/mcp/types";
+import { useToolPlaneGovernance } from "@/core/tool-plane";
 import { env } from "@/env";
 
 import { SettingsSection } from "./settings-section";
+import { ToolPlaneGovernanceNotice } from "./tool-plane-governance-notice";
 
 export function ToolSettingsPage() {
   const { t } = useI18n();
   const { config, isLoading, error } = useMCPConfig();
+  const toolPlane = useToolPlaneGovernance("deployment_base");
   const adminRequired =
     error instanceof MCPConfigRequestError && error.isAdminRequired;
   return (
@@ -48,25 +51,37 @@ export function ToolSettingsPage() {
       title={t.settings.tools.title}
       description={t.settings.tools.description}
     >
-      {isLoading ? (
-        <div className="text-muted-foreground text-sm">{t.common.loading}</div>
-      ) : adminRequired ? (
-        <div className="text-muted-foreground text-sm">
-          {t.settings.tools.adminRequired}
-        </div>
-      ) : error ? (
-        <div>Error: {error.message}</div>
-      ) : (
-        config && <MCPServerList servers={config.mcp_servers} />
-      )}
+      <div className="flex w-full flex-col gap-4">
+        <ToolPlaneGovernanceNotice {...toolPlane} />
+        {isLoading ? (
+          <div className="text-muted-foreground text-sm">
+            {t.common.loading}
+          </div>
+        ) : adminRequired ? (
+          <div className="text-muted-foreground text-sm">
+            {t.settings.tools.adminRequired}
+          </div>
+        ) : error ? (
+          <div>Error: {error.message}</div>
+        ) : (
+          config && (
+            <MCPServerList
+              servers={config.mcp_servers}
+              governanceReadOnly={toolPlane.legacyMutationBlocked}
+            />
+          )
+        )}
+      </div>
     </SettingsSection>
   );
 }
 
 function MCPServerList({
   servers,
+  governanceReadOnly,
 }: {
   servers?: Record<string, MCPServerConfig>;
+  governanceReadOnly: boolean;
 }) {
   const { t } = useI18n();
   const { isPending, mutate: enableMCPServer } = useEnableMCPServer();
@@ -78,7 +93,8 @@ function MCPServerList({
   const [definitionError, setDefinitionError] = useState<string | null>(null);
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
 
-  const readOnly = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
+  const readOnly =
+    governanceReadOnly || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
   const current = servers ?? {};
   const entries = Object.entries(current);
   const isMutating = isPending || isWriting;

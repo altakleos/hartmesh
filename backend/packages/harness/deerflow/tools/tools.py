@@ -1,4 +1,6 @@
 import logging
+from collections.abc import Mapping
+from typing import Any
 
 from langchain.tools import BaseTool
 
@@ -21,7 +23,7 @@ from deerflow.tools.builtins import (
     task_tool,
     view_image_tool,
 )
-from deerflow.tools.mcp_metadata import tag_mcp_tool
+from deerflow.tools.mcp_metadata import get_mcp_source, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,54 @@ SUBAGENT_TOOLS = [
     task_tool,
     # task_status_tool is no longer exposed to LLM (backend handles polling internally)
 ]
+
+
+def accepted_mcp_server_ids_from_context(
+    context: Mapping[str, Any],
+) -> frozenset[str] | None:
+    """Resolve the accepted MCP ceiling; malformed present evidence denies all."""
+
+    evidence = context.get("accepted_tool_plane_revision")
+    if evidence is None:
+        return None
+    if not isinstance(evidence, Mapping):
+        return frozenset()
+    values = evidence.get("effective_mcp_server_ids")
+    if not isinstance(values, (list, tuple)) or any(not isinstance(value, str) or not value for value in values) or list(values) != sorted(set(values)):
+        return frozenset()
+    return frozenset(values)
+
+
+def accepted_mcp_tool_allowlists_from_context(
+    context: Mapping[str, Any],
+) -> Mapping[str, frozenset[str] | None] | None:
+    """Resolve accepted raw-tool ceilings; malformed present evidence denies all."""
+
+    evidence = context.get("accepted_tool_plane_revision")
+    if evidence is None:
+        return None
+    if not isinstance(evidence, Mapping):
+        return {}
+    servers = evidence.get("effective_mcp_servers")
+    if servers is None:
+        # Compatibility for process-local callers carrying the earlier
+        # server-ID-only context shape.
+        return None
+    if not isinstance(servers, (list, tuple)):
+        return {}
+    result: dict[str, frozenset[str] | None] = {}
+    for server in servers:
+        if not isinstance(server, Mapping):
+            return {}
+        server_name = server.get("server_id")
+        names = server.get("tool_allowlist")
+        if not isinstance(server_name, str) or not server_name or server_name in result or not isinstance(names, (list, tuple)) or any(not isinstance(name, str) or not name for name in names) or list(names) != sorted(set(names)):
+            return {}
+        result[server_name] = None if not names else frozenset(str(name) for name in names)
+    accepted_ids = accepted_mcp_server_ids_from_context(context)
+    if accepted_ids is None or frozenset(result) != accepted_ids:
+        return {}
+    return result
 
 
 def _is_host_bash_tool(tool: object) -> bool:
@@ -64,6 +114,13 @@ def get_available_tools(
     *,
     include_upload_tool: bool = True,
     app_config: AppConfig | None = None,
+    allowed_mcp_server_ids: frozenset[str] | None = None,
+    allowed_mcp_tools_by_server: Mapping[
+        str,
+        frozenset[str] | None,
+    ]
+    | None = None,
+    mcp_tools_snapshot: tuple[BaseTool, ...] | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -135,30 +192,45 @@ def get_available_tools(
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
-    # Get cached MCP tools if enabled
-    # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when loading MCP tools.
+    # Governed admissions pass their captured MCP tool snapshot here. Legacy
+    # admissions load through the process cache, whose signature check observes
+    # direct extensions-config updates.
     mcp_tools = []
     if include_mcp:
         try:
-            from deerflow.config.extensions_config import ExtensionsConfig
-            from deerflow.mcp.cache import get_cached_mcp_tools
+            if mcp_tools_snapshot is not None:
+                mcp_tools = list(mcp_tools_snapshot)
+            else:
+                from deerflow.config.extensions_config import ExtensionsConfig
+                from deerflow.mcp.cache import get_cached_mcp_tools
 
-            extensions_config = ExtensionsConfig.from_file()
-            if extensions_config.get_enabled_mcp_servers():
-                mcp_tools = get_cached_mcp_tools()
-                if mcp_tools:
-                    logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
-
-                    # Tag MCP-sourced tools so deferred-tool assembly at each
-                    # agent construction site can identify them. Lead agents
-                    # assemble their full configured MCP catalog and apply active
-                    # skill policy at runtime; subagents may pass an already
-                    # policy-filtered list because their skills load at startup.
-                    for t in mcp_tools:
-                        tag_mcp_tool(t)
+                extensions_config = ExtensionsConfig.from_file()
+                if extensions_config.get_enabled_mcp_servers():
+                    mcp_tools = get_cached_mcp_tools()
+            if mcp_tools:
+                source_label = "accepted" if mcp_tools_snapshot is not None else "cached"
+                logger.info(f"Using {len(mcp_tools)} {source_label} MCP tool(s)")
+                # Tag MCP-sourced tools so deferred-tool assembly at each
+                # agent construction site can identify them. Lead agents
+                # assemble their full configured MCP catalog and apply active
+                # skill policy at runtime; subagents may pass an already
+                # policy-filtered list because their skills load at startup.
+                for t in mcp_tools:
+                    tag_mcp_tool(t)
+                if allowed_mcp_server_ids is not None:
+                    mcp_tools = [tool for tool in mcp_tools if ((source := get_mcp_source(tool)) is not None and source["server_name"] in allowed_mcp_server_ids)]
+                if allowed_mcp_tools_by_server is not None:
+                    filtered: list[BaseTool] = []
+                    for tool in mcp_tools:
+                        source = get_mcp_source(tool)
+                        if source is None:
+                            continue
+                        allowed = allowed_mcp_tools_by_server.get(source["server_name"])
+                        if source["server_name"] not in allowed_mcp_tools_by_server:
+                            continue
+                        if allowed is None or source.get("tool_name") in allowed:
+                            filtered.append(tool)
+                    mcp_tools = filtered
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
         except Exception as e:

@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.gateway.deps import require_admin_user
+from app.gateway.tool_plane_guard import reject_direct_tool_plane_mutation
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
     McpRoutingConfig,
@@ -1519,6 +1520,7 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
     """
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reject_direct_tool_plane_mutation(request, surface="mcp_configuration")
         _validate_mcp_update_request(body)
 
         # Offload the blocking read-modify-write of extensions_config.json
@@ -1549,6 +1551,7 @@ async def create_mcp_servers(request: Request, body: McpConfigUpdateRequest) -> 
     """Add servers atomically and reject names that already exist."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reject_direct_tool_plane_mutation(request, surface="mcp_server_create")
         _validate_mcp_update_request(body)
         reloaded_servers = await asyncio.to_thread(_apply_mcp_servers_create, body)
 
@@ -1572,6 +1575,7 @@ async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest
     """Update one existing server and reload the MCP tool cache."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reject_direct_tool_plane_mutation(request, surface="mcp_server_update")
         _validate_mcp_update_request(
             McpConfigUpdateRequest(mcp_servers={body.server_name: body.server}),
             enforce_execution_policy=body.server.enabled,
@@ -1598,6 +1602,7 @@ async def delete_mcp_server(request: Request, server_name: str) -> McpConfigResp
     """Delete one existing server and reload the MCP tool cache."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reject_direct_tool_plane_mutation(request, surface="mcp_server_delete")
         reloaded_servers = await asyncio.to_thread(_apply_mcp_server_delete, server_name)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
@@ -1620,6 +1625,7 @@ async def update_mcp_server_state(request: Request, body: McpServerStateUpdateRe
     """Enable or disable one MCP server and reload the MCP tool cache."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reject_direct_tool_plane_mutation(request, surface="mcp_server_state")
         reloaded_servers = await asyncio.to_thread(_apply_mcp_server_state_update, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}

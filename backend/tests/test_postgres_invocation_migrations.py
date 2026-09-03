@@ -22,6 +22,14 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
+from deerflow_extension_api import (
+    CredentialEvidenceV1,
+    EffectiveSubjectV1,
+    InvocationIdentityV1,
+    TenantReferenceV1,
+    VerifiedActorContextV1,
+    effective_authority_digest_v1,
+)
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from support.postgres import postgres_async_url
 
@@ -45,6 +53,7 @@ from deerflow.persistence.bootstrap import _get_alembic_config, _get_head_revisi
 from deerflow.persistence.inbound_receipt.model import InboundReceiptRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.run.sql import RunRepository
+from deerflow.persistence.tool_plane import SQLToolPlaneRevisionRepository
 from deerflow.runtime.assembly_evidence import AssemblyEvidenceV1, assembly_evidence_digest
 from deerflow.runtime.runs.lifecycle_query import LifecycleQuery
 from deerflow.runtime.runs.store.base import (
@@ -54,6 +63,14 @@ from deerflow.runtime.runs.store.base import (
     LifecycleTransition,
     LifecycleType,
     lifecycle_owner_scope,
+)
+from deerflow.tool_plane import (
+    DeterministicToolPlaneValidator,
+    InMemoryToolPlaneProjection,
+    ScopedStageRevisionRequest,
+    ToolPlaneRevisionError,
+    ToolPlaneRevisionScopeV1,
+    ToolPlaneRevisionService,
 )
 
 _POSTGRES_URL = os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
@@ -73,7 +90,7 @@ _MULTI_GATEWAY_TOPOLOGY_REVISION = "0027_multi_gateway_topology"
 _MCP_REQUEST_COMMITMENT_REVISION = "0028_mcp_request_commitment"
 _RUN_RECOVERY_REVISION = "0029_run_recovery_policy"
 _DELIVERY_OWNER_BACKFILL_REVISION = "0030_run_delivery_owner_backfill"
-_HEAD_REVISION = "0033_automation_identities"
+_HEAD_REVISION = "0034_tool_plane_revisions"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
     "0012_invocation_idempotency",
@@ -1329,6 +1346,111 @@ async def test_fresh_postgres_migration_chain_reaches_exact_head_schema() -> Non
         await _assert_postgres_head_contract(engine, schema)
         await _assert_postgres_checks_reject_invalid_rows(engine)
         await _assert_lifecycle_constraints_reject_invalid_rows(engine)
+
+
+@pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for PostgreSQL tool-plane qualification",
+)
+async def test_postgres_tool_plane_concurrent_promotions_have_one_winner() -> None:
+    tenant = TenantReferenceV1(
+        version=1,
+        public_ref="tenant-aaaaaaaaaaaaaaaa",
+        digest="a" * 64,
+    )
+    policy_digest = "b" * 64
+    actor = VerifiedActorContextV1(
+        identity=InvocationIdentityV1(
+            effective_subject=EffectiveSubjectV1(
+                kind="human",
+                subject_id="postgres-tool-plane-admin",
+                role="admin",
+            )
+        ),
+        credential=CredentialEvidenceV1(
+            method="session",
+            credential_ref=None,
+            effective_authority_digest=effective_authority_digest_v1(
+                ("tool_plane:admin",),
+            ),
+            authority_categories=("tool_plane",),
+        ),
+        tenant=tenant,
+    )
+    scope = ToolPlaneRevisionScopeV1(kind="deployment_base")
+
+    async with _isolated_postgres_schema() as (schema, engine):
+        await _upgrade(engine, schema, "head")
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        repositories = (
+            SQLToolPlaneRevisionRepository(sessions, tenant=tenant),
+            SQLToolPlaneRevisionRepository(sessions, tenant=tenant),
+        )
+        projection = InMemoryToolPlaneProjection()
+        services = tuple(
+            ToolPlaneRevisionService(
+                repository=repository,
+                projection=projection,
+                validator=DeterministicToolPlaneValidator(
+                    policy_digest=policy_digest,
+                ),
+                durable=True,
+            )
+            for repository in repositories
+        )
+        await services[0].initialize(existing_projection=False)
+
+        def candidate(summary: str, parent: str | None = None) -> dict[str, object]:
+            return {
+                "validation_policy_digest": policy_digest,
+                "mcp_servers": {},
+                "public_skills": {},
+                "managed_integrations": {},
+                "change_summary": summary,
+                "parent_revision_digest": parent,
+            }
+
+        initial = await services[0].stage(
+            ScopedStageRevisionRequest(
+                scope=scope,
+                candidate=candidate("postgres initial"),
+            ),
+            actor,
+        )
+        await services[0].validate(initial.revision_id, actor)
+        await services[0].promote(initial.revision_id, actor)
+
+        contenders = []
+        for index, service in enumerate(services):
+            staged = await service.stage(
+                ScopedStageRevisionRequest(
+                    scope=scope,
+                    candidate=candidate(
+                        f"postgres contender {index}",
+                        initial.revision_digest,
+                    ),
+                ),
+                actor,
+            )
+            await service.validate(staged.revision_id, actor)
+            contenders.append(staged)
+
+        outcomes = await asyncio.gather(
+            *(service.promote(staged.revision_id, actor) for service, staged in zip(services, contenders, strict=True)),
+            return_exceptions=True,
+        )
+
+        winners = [item for item in outcomes if not isinstance(item, BaseException)]
+        failures = [item for item in outcomes if isinstance(item, ToolPlaneRevisionError)]
+        assert len(winners) == 1
+        assert len(failures) == 1
+        assert failures[0].code in {"revision_conflict", "recovery_required"}
+        active = await repositories[0].active(scope)
+        assert active is not None
+        assert active.revision_id == winners[0].revision_id
+        assert await repositories[0].generation(scope) == 2
 
 
 @pytest.mark.anyio

@@ -48,6 +48,7 @@ _EFFECTIVE_EXECUTION_FIELDS_V1 = frozenset(
         "extension_generation",
         "extension_artifact_manifest_digest",
         "extension_configuration_digest",
+        "tool_plane_revision",
         "input",
         "command",
         "multitask_strategy",
@@ -136,6 +137,76 @@ def _require_matching_digest(
     return digest
 
 
+def _validate_tool_plane_revision(value: object) -> dict[str, Any]:
+    """Validate the additive effective tool-plane admission anchor."""
+
+    expected_fields = {
+        "version",
+        "base_revision_digest",
+        "user_overlay_digest",
+        "base_generation",
+        "overlay_generation",
+        "projection_digest",
+        "effective_mcp_server_ids",
+        "effective_mcp_servers",
+        "effective_global_skill_states",
+        "effective_managed_integration_ids",
+        "governance_state",
+        "effective_digest",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_fields or value.get("version") != 1:
+        raise ValueError("tool-plane revision evidence is malformed")
+    for field_name in (
+        "base_revision_digest",
+        "user_overlay_digest",
+        "projection_digest",
+        "effective_digest",
+    ):
+        _require_digest(value.get(field_name), field_name=f"tool-plane {field_name}")
+    for field_name in ("base_generation", "overlay_generation"):
+        item = value.get(field_name)
+        if type(item) is not int or item < 0:
+            raise ValueError(f"tool-plane {field_name} must be a non-negative integer")
+    for field_name in (
+        "effective_mcp_server_ids",
+        "effective_managed_integration_ids",
+    ):
+        items = value.get(field_name)
+        if not isinstance(items, (list, tuple)) or any(not isinstance(item, str) or not item or len(item) > 128 for item in items) or list(items) != sorted(set(items)):
+            raise ValueError(f"tool-plane {field_name} is malformed")
+    try:
+        from deerflow.tool_plane.contracts import EffectiveToolPlaneRevisionV1
+
+        effective = EffectiveToolPlaneRevisionV1(
+            base_revision_digest=value["base_revision_digest"],
+            user_overlay_digest=value["user_overlay_digest"],
+            base_generation=value["base_generation"],
+            overlay_generation=value["overlay_generation"],
+            projection_digest=value["projection_digest"],
+            effective_mcp_server_ids=tuple(value["effective_mcp_server_ids"]),
+            effective_mcp_servers=tuple(value["effective_mcp_servers"]),
+            effective_global_skill_states=tuple(value["effective_global_skill_states"]),
+            effective_managed_integration_ids=tuple(value["effective_managed_integration_ids"]),
+            governance_state=value["governance_state"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("tool-plane MCP or skill material is malformed") from exc
+    except Exception as exc:
+        from deerflow.tool_plane.contracts import ToolPlaneRevisionError
+
+        if isinstance(exc, ToolPlaneRevisionError):
+            raise ValueError("tool-plane MCP or skill material is malformed") from exc
+        raise
+    if value.get("governance_state") not in {"governed", "unmanaged"}:
+        raise ValueError("tool-plane governance state is malformed")
+    _require_matching_digest(
+        value.get("effective_digest"),
+        effective.effective_digest,
+        field_name="tool-plane effective digest",
+    )
+    return {str(key): _deep_thaw(item) for key, item in value.items()}
+
+
 def _frozen_json_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return _deep_freeze(_deep_thaw(value or {}))
 
@@ -154,6 +225,39 @@ def _deep_thaw(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_deep_thaw(item) for item in value]
     return value
+
+
+def mcp_tool_projection(tools: tuple[Any, ...]) -> tuple[dict[str, Any], ...]:
+    """Return the bounded, credential-free contracts for captured MCP tools."""
+
+    from deerflow.runtime.subagent_snapshot import resolved_tool_contract_digest
+    from deerflow.tools.mcp_metadata import get_mcp_source
+
+    projection: list[dict[str, Any]] = []
+    for tool in tools:
+        source = get_mcp_source(tool)
+        name = getattr(tool, "name", None)
+        if source is None or not isinstance(name, str) or not name:
+            raise ValueError("accepted MCP tool is missing source metadata")
+        projection.append(
+            {
+                "name": name,
+                "server_name": source["server_name"],
+                "tool_name": source.get("tool_name", name),
+                "transport": source["transport"],
+                "contract_digest": resolved_tool_contract_digest(tool),
+            }
+        )
+    return tuple(
+        sorted(
+            projection,
+            key=lambda item: (
+                item["server_name"],
+                item["tool_name"],
+                item["name"],
+            ),
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -260,6 +364,12 @@ class ResolvedAgentMaterialV1:
     agent_config_object: Any | None = field(default=None, repr=False, compare=False)
     enabled_skill_objects: tuple[Any, ...] = field(default=(), repr=False, compare=False)
     all_skill_objects: tuple[Any, ...] = field(default=(), repr=False, compare=False)
+    mcp_tools: tuple[Mapping[str, Any], ...] = ()
+    mcp_tool_objects: tuple[Any, ...] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     user_id: str | None = field(default=None, repr=False, compare=False)
     skill_snapshot: AcceptedSkillSnapshot | None = field(
         default=None,
@@ -319,6 +429,22 @@ class ResolvedAgentMaterialV1:
         object.__setattr__(self, "tool_groups", tuple(self.tool_groups))
         object.__setattr__(self, "tools", tuple(self.tools))
         object.__setattr__(self, "skills", tuple(_frozen_json_mapping(item) for item in self.skills))
+        object.__setattr__(
+            self,
+            "mcp_tools",
+            tuple(_frozen_json_mapping(item) for item in self.mcp_tools),
+        )
+        if self.mcp_tool_objects is not None:
+            object.__setattr__(
+                self,
+                "mcp_tool_objects",
+                tuple(self.mcp_tool_objects),
+            )
+            expected_mcp_tools = tuple(_deep_thaw(item) for item in self.mcp_tools)
+            if mcp_tool_projection(self.mcp_tool_objects) != expected_mcp_tools:
+                raise ValueError("accepted MCP tool objects do not match their projection")
+        elif self.mcp_tools:
+            raise ValueError("accepted MCP projection requires process material")
         object.__setattr__(self, "enabled_skill_objects", tuple(self.enabled_skill_objects))
         object.__setattr__(self, "all_skill_objects", tuple(self.all_skill_objects))
         if isinstance(self.soul, bytes):
@@ -337,6 +463,8 @@ class ResolvedAgentMaterialV1:
             from deerflow.runtime.subagent_snapshot import SubagentCatalogError
 
             raise SubagentCatalogError("subagent_skill_material_missing")
+        if self.mcp_tool_objects is not None and mcp_tool_projection(self.mcp_tool_objects) != tuple(_deep_thaw(item) for item in self.mcp_tools):
+            raise ValueError("accepted MCP tool material changed")
 
     def skill_objects_for_scope(self, scope: str) -> tuple[Any, ...]:
         """Return only the accepted packages authorized for one agent scope."""
@@ -362,7 +490,7 @@ class ResolvedAgentMaterialV1:
             self.skill_snapshot.release()
 
     def projector(self) -> dict[str, Any]:
-        return {
+        projection = {
             "version": _AGENT_REVISION_VERSION,
             "agent_id": self.agent_id,
             "storage_source": self.storage_source,
@@ -377,6 +505,11 @@ class ResolvedAgentMaterialV1:
             "subagent_catalog": self.subagent_catalog.to_persisted_json(),
             "skill_scopes": self.skill_scopes.to_persisted_json(),
         }
+        # Additive only for governed runs. Legacy accepted-revision digests do
+        # not change merely because the runtime gained MCP snapshot support.
+        if self.mcp_tool_objects is not None:
+            projection["mcp_tools"] = [_deep_thaw(tool) for tool in self.mcp_tools]
+        return projection
 
 
 @dataclass(frozen=True)
@@ -504,6 +637,18 @@ class AcceptedInvocation:
         return digest
 
     @property
+    def tool_plane_revision(self) -> dict[str, Any] | None:
+        """Effective governed tool-plane revision accepted for this run."""
+
+        evidence = self.decision_evidence.get("tool_plane_revision")
+        if evidence is None:
+            return None
+        try:
+            return _validate_tool_plane_revision(evidence)
+        except ValueError:
+            return None
+
+    @property
     def tool_receipt_evidence_version(self) -> int | None:
         """Receipt capability captured when this invocation was admitted."""
 
@@ -539,6 +684,7 @@ class AcceptedInvocation:
         extension_manifest_digest: str | None = None,
         extension_artifact_manifest_digest: str | None = None,
         extension_configuration_digest: str | None = None,
+        tool_plane_revision: Mapping[str, Any] | None = None,
         contributor_execution_digest: str,
         tenant: TenantReferenceV1,
         trusted_context: TrustedRunContextV1 | None = None,
@@ -561,6 +707,7 @@ class AcceptedInvocation:
             raise ValueError("extension artifact and configuration digests must be supplied together")
         if extension_artifact_manifest_digest is not None and extension_manifest_digest is None:
             raise ValueError("extension artifact evidence requires a capability manifest digest")
+        validated_tool_plane = None if tool_plane_revision is None else _validate_tool_plane_revision(tool_plane_revision)
         if not isinstance(tenant, TenantReferenceV1):
             raise TypeError("new accepted invocations require TenantReferenceV1")
         if trusted_context is not None:
@@ -609,6 +756,7 @@ class AcceptedInvocation:
                     if extension_artifact_manifest_digest is not None
                     else {}
                 ),
+                **({"tool_plane_revision": validated_tool_plane} if validated_tool_plane is not None else {}),
                 "accepted_context_digest": accepted_context_digest,
             }
         )
@@ -626,6 +774,8 @@ class AcceptedInvocation:
                 "artifact_manifest_digest": extension_artifact_manifest_digest,
                 "configuration_digest": extension_configuration_digest,
             }
+        if validated_tool_plane is not None:
+            decision_evidence["tool_plane_revision"] = validated_tool_plane
         return cls(
             principal=principal,
             origin=origin,
@@ -890,6 +1040,8 @@ class AcceptedInvocation:
                 )
             artifact_manifest_digest = artifact_evidence["artifact_manifest_digest"]  # type: ignore[assignment]
             configuration_digest = artifact_evidence["configuration_digest"]  # type: ignore[assignment]
+        tool_plane_evidence = decision_evidence.get("tool_plane_revision")
+        validated_tool_plane = None if tool_plane_evidence is None else _validate_tool_plane_revision(tool_plane_evidence)
         if trusted_context is not None:
             if trusted_context.tenant is not None and trusted_context.tenant != tenant:
                 raise ValueError("trusted context tenant contradicts accepted evidence")
@@ -978,6 +1130,8 @@ class AcceptedInvocation:
             if artifact_evidence is None:
                 expected_projection_fields.discard("extension_artifact_manifest_digest")
                 expected_projection_fields.discard("extension_configuration_digest")
+            if validated_tool_plane is None:
+                expected_projection_fields.discard("tool_plane_revision")
             projection_has_tenant = "tenant_digest" in projection_fields
             if tenant_bound_evidence and not projection_has_tenant:
                 raise ValueError("tenant-bound accepted execution is missing its tenant")
@@ -1013,6 +1167,8 @@ class AcceptedInvocation:
                         "extension_configuration_digest": configuration_digest,
                     }
                 )
+            if validated_tool_plane is not None:
+                expected_identities["tool_plane_revision"] = validated_tool_plane
             if projection_has_tenant:
                 assert tenant is not None
                 expected_identities["tenant_digest"] = tenant.digest
@@ -1091,6 +1247,7 @@ class AcceptedInvocation:
                             if artifact_evidence is not None
                             else {}
                         ),
+                        **({"tool_plane_revision": validated_tool_plane} if validated_tool_plane is not None else {}),
                         "accepted_context_digest": persisted_context_digest,
                     }
                 )
@@ -1129,4 +1286,5 @@ __all__ = [
     "ResolvedAgentRevision",
     "TRUSTED_RUN_CONTEXT_KEY",
     "canonical_digest",
+    "mcp_tool_projection",
 ]

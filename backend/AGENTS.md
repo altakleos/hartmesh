@@ -87,60 +87,13 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 - MCP replay equality is separate from public lineage. `replay_commitment.py` HMACs the canonical request with the startup-frozen dedicated keyring; SQL stores only version/key ID/HMAC, and startup fails if enabled without keys. Exact-two topology binds a non-secret confirmation of all key bytes/IDs and the active ID, so any rotation uses the quiesced restart procedure. Missing historical keys fail replay closed without disabling durable polling/cancellation. Parent evidence requires independent parent-run authorization.
 - MCP notification failures use a consecutive counter separate from the idempotency-key `dispatch_attempt`, capped exponential backoff, latest-event rebuilding before a run launches, and a five-attempt budget before `dead_letter`. A permanently missing/mismatched target thread is dead-lettered immediately instead of being recreated or reclaimed. HTTP and Agent cancellation requests return after the durable cancel fence; the first request separately persists a pseudonymous actor and fixed source reason, while the background loop alone owns the potentially slow remote call and retry schedule. The HTTP cancel endpoint rejects requests with 503 when the loop is not running (`mcp_tasks_available` false, e.g. `mcp_tasks.enabled=false` with SQL persistence), so a cancellation is never acknowledged without a worker to perform it. The bounded notification error/count/status join poll and cancellation diagnostics in the task detail API and expanded card.
 - `uq_scheduled_task_run_active` permits one `queued`/`launching`/`running` occurrence per task. Queued work is durable and consumes no concurrency; only a short lease-fenced `launching` row may invoke the normal Gateway path, using a stable admission key so recovery reuses the run. Thread conflicts requeue; other launch errors fail. Repeated triggers coalesce and same-thread FIFO includes every active state. Definition mutations lock the parent first: pause/delete interrupt queued work but reject launched/running work, while PATCH/resume reject all active states. Recovery locks task/run pairs in deterministic order and reconstructs live fields before releasing a claim. Launch, failure, and timeout update parent plus occurrence atomically; timeout also advances scheduled cadence. Repository boundaries coerce serialized timestamps before SQL binding.
-- `extensions_config.json` is written at runtime by the Gateway (`PUT`/`PATCH /api/mcp/config`, the MCP enable switch, skill updates), so production compose mounts it read-write while `config.yaml` stays `:ro`; ordinary Helm modes copy the ConfigMap seed into a writable home-volume directory. The exact-two qualification candidate instead mounts the qualified extension config read-only and forbids live edits, because every replica must use the same immutable digest. Every writable read-modify-write holds both `extensions_config_write_lock` and the sidecar advisory `extensions_config_file_lock`, because a process-local lock loses updates across workers. Docker's mount-point `EBUSY` case uses a deliberately non-atomic in-place fallback; other errors propagate. Pinned by `tests/test_compose_extensions_config_writable.py`, `tests/test_extensions_config_atomic_write.py`, and `tests/test_helm_extensions_config_writable.py`.
+- `packages/harness/deerflow/tool_plane/` owns canonical secret-safe base/user revisions, validation, SQL generations/attestations, locked projection, bootstrap, drift, and reconciliation. Default-enabled governance makes it the only skill/MCP writer; legacy routes require opt-out, and exact-two mounts only governed reads. Admission pins its coherent effective revision and captured skill/MCP material. Do not bypass the service from routers, clients, tools, or UI; see `docs/GOVERNED_TOOL_PLANE.md` and `test_tool_plane_*`.
 
-**Project Structure**:
-```
-deer-flow/
-├── Makefile                    # Root commands (check, install, dev, stop)
-├── config.yaml                 # Main application configuration
-├── extensions_config.json      # MCP servers and skills configuration
-├── backend/                    # Backend application (this directory)
-│   ├── Makefile               # Backend-only commands (dev, gateway, lint)
-│   ├── langgraph.json         # LangGraph Studio graph configuration
-│   ├── packages/
-│   │   ├── extension-api/     # public, host-independent extension contracts (import: deerflow_extension_api.*)
-│   │   └── harness/           # deerflow-harness package (import: deerflow.*)
-│   │       ├── pyproject.toml
-│   │       └── deerflow/
-│   │           ├── agents/            # LangGraph agent system
-│   │           │   ├── lead_agent/    # Main agent (factory + system prompt)
-│   │           │   ├── middlewares/   # middleware components (see Middleware Chain section)
-│   │           │   ├── memory/        # Memory extraction, queue, prompts
-│   │           │   └── thread_state.py # ThreadState schema
-│   │           ├── sandbox/           # Sandbox execution system
-│   │           │   ├── local/         # Local filesystem provider
-│   │           │   ├── sandbox.py     # Abstract Sandbox interface
-│   │           │   ├── tools.py       # bash, ls, read/write/str_replace
-│   │           │   └── middleware.py  # Sandbox lifecycle management
-│   │           ├── subagents/         # Subagent delegation system
-│   │           │   ├── builtins/      # general-purpose, bash agents
-│   │           │   ├── executor.py    # Background execution engine
-│   │           │   └── registry.py    # Agent registry
-│   │           ├── tools/builtins/    # Built-in tools (present_files, ask_clarification, view_image, review_skill_package)
-│   │           ├── mcp/               # MCP integration (tools, cache, client)
-│   │           ├── integrations/      # Managed first-party integration installers (e.g. Lark CLI skill pack)
-│   │           ├── extensions/        # Python plugin loader, registry, placement, and isolation
-│   │           ├── models/            # Model factory with thinking/vision support
-│   │           ├── skills/            # Skills discovery, loading, parsing
-│   │           ├── config/            # Configuration system (app, model, sandbox, tool, etc.)
-│   │           ├── community/         # Community tools (search/fetch/scrape, image search, AIO sandbox)
-│   │           ├── reflection/        # Dynamic module loading (resolve_variable, resolve_class)
-│   │           ├── utils/             # Utilities (network, readability)
-│   │           └── client.py          # Embedded Python client (DeerFlowClient)
-│   ├── app/                   # Application layer (import: app.*)
-│   │   ├── gateway/           # FastAPI Gateway API
-│   │   │   ├── app.py         # FastAPI application
-│   │   │   └── routers/       # FastAPI route modules (models, mcp, memory, skills, uploads, threads, artifacts, agents, suggestions, channels)
-│   │   └── channels/          # IM platform integrations
-│   ├── scripts/benchmark/       # Standalone reproducible backend benchmarks
-│   ├── tests/                 # Test suite
-│   └── docs/                  # Documentation
-├── frontend/                   # Next.js frontend application
-└── skills/                     # Agent skills directory
-    ├── public/                # Public skills (committed)
-    └── custom/                # Custom skills (gitignored)
-```
+**Backend map**: `app/` owns Gateway and channel application code;
+`packages/harness/deerflow/` owns the agent framework; `packages/extension-api/`
+and `packages/runtime-api/` are public contracts; `tests/` mirrors production
+boundaries. Follow the nearest scoped `AGENTS.md` for subsystem detail. The root
+guide owns the full repository map.
 
 ## Important Development Guidelines
 

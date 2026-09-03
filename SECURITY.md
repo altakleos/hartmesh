@@ -101,6 +101,37 @@ uploaded bytes, and provider response bodies must never enter evidence, labels,
 logs, or support bundles. See the
 [feasibility decision](backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md).
 
+## Governed Skill and MCP Revisions
+
+With governed revisions enabled, skill packages and MCP definitions are
+untrusted candidate material until an authorized actor stages, validates, and
+promotes them. Validation applies bounded archive extraction, exact content
+digests, SkillScan/review, MCP transport and endpoint policy, selector checks,
+and base/overlay compatibility. A passing report establishes compliance with
+that specific validation policy and material; it does not make a skill, remote
+server, package registry, or network endpoint trustworthy.
+
+Revision records, reports, diffs, transition events, accepted invocation
+evidence, logs, and support projections may contain only canonical structure,
+bounded finding codes, actor/tenant pseudonymous references, and non-secret
+credential selector references/versions. They must never contain credential
+values or hashes, tokens, OAuth grants, request secret values, skill bodies,
+scanner raw payloads, unsafe archive bytes, provider responses, or exception
+text. Environment and request-context selectors resolve only into the
+process-local runtime configuration. Per-user operations derive their scope
+from authenticated identity; only explicit audited administrator routes may
+cross user scopes.
+
+Promotion journals SQL intent before atomically switching a content-addressed
+filesystem projection. Because those stores cannot commit atomically together,
+crashes or mismatches remain `recovery_required` and fail durable readiness
+until reconciliation proves the exact intended projection. Direct edits are
+reported only as the constant `unmanaged_drift`; mismatching bytes are not
+hashed into evidence because they may contain secrets. Accepted runs bind the
+exact base, overlay, effective MCP structure and captured tool/skill material,
+so a later promotion cannot silently change recovery. See
+[the governed tool-plane guide](docs/GOVERNED_TOOL_PLANE.md).
+
 ## Durable MCP Task Lineage
 
 Durable MCP task lineage contains only server-owned correlation evidence: the
