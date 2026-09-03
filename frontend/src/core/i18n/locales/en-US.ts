@@ -947,6 +947,44 @@ export const enUS: Translations = {
       languageTitle: "Language",
       languageDescription: "Switch between languages.",
     },
+    toolPlane: {
+      title: "Governed revisions",
+      checking: "Checking revision governance",
+      managed:
+        "Skills and MCP tools are managed through immutable revisions. Direct settings changes are disabled; stage, validate, inspect, and promote a revision through the governed API.",
+      immutable:
+        "This deployment is immutable. Tool-plane material is supplied only by its approved deployment revision.",
+      bootstrapRequired:
+        "Governance bootstrap is required before tool-plane changes or durable runs can proceed.",
+      recoveryRequired:
+        "A prepared revision needs recovery. Tool-plane changes and durable admission remain blocked.",
+      drift:
+        "The projected skill or MCP material differs from the active revision. Direct changes are disabled while operators reconcile the drift.",
+      unmanaged:
+        "No active revision is available for this scope. Direct changes remain disabled.",
+      loadFailed: "Revision governance status is unavailable",
+      mutationsDisabled:
+        "Direct skill and MCP changes are disabled until governance status is verified.",
+      activeRevision: "Active",
+      noActiveRevision: "No active revision",
+      latestRevision: "Latest",
+      noRevision: "No staged revisions",
+      stagedBy: "Staged by",
+      promotedBy: "Promoted by",
+      credentialNotice:
+        "Only revision identifiers and secret-free evidence are shown here. Credential values are never included.",
+      states: {
+        bootstrap_required: "Bootstrap required",
+        staged: "Staged",
+        validating: "Validating",
+        validated: "Validated",
+        rejected: "Invalid",
+        prepared: "Prepared",
+        promoted: "Active",
+        superseded: "Superseded",
+        recovery_required: "Recovery required",
+      },
+    },
     tools: {
       title: "Tools",
       description: "Manage the configuration and enabled status of MCP tools.",

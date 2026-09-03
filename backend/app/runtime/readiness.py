@@ -83,6 +83,7 @@ class RuntimeReadinessCoordinator:
         post_commit_obligations_ready: Callable[[], bool] | None = None,
         topology_status: Callable[[], Awaitable[TopologyStatusV1]] | None = None,
         topology_dependencies_ready: Callable[[], Awaitable[bool]] | None = None,
+        tool_plane_readiness: Callable[[], Awaitable[str | None]] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if overall_timeout_seconds <= 0:
@@ -96,6 +97,7 @@ class RuntimeReadinessCoordinator:
         self._post_commit_obligations_ready = post_commit_obligations_ready
         self._topology_status = topology_status
         self._topology_dependencies_ready = topology_dependencies_ready
+        self._tool_plane_readiness = tool_plane_readiness
         self._clock = clock or (lambda: datetime.now(UTC))
         self._last_snapshot: RuntimeReadinessSnapshot | None = None
         self._last_topology_status: TopologyStatusV1 | None = None
@@ -184,12 +186,18 @@ class RuntimeReadinessCoordinator:
                 return True
             return await self._topology_dependencies_ready()
 
+        async def tool_plane_check() -> str | None:
+            if self._tool_plane_readiness is None:
+                return None
+            return await self._tool_plane_readiness()
+
         (
             health_result,
             lifecycle_result,
             sandbox_projection_result,
             topology_result,
             topology_dependencies_result,
+            tool_plane_result,
         ) = await asyncio.gather(
             self._health_monitor.admission_readiness(
                 expected_generation=expected_generation,
@@ -198,6 +206,7 @@ class RuntimeReadinessCoordinator:
             sandbox_projection_check(),
             topology_check(),
             topology_dependencies_check(),
+            tool_plane_check(),
             return_exceptions=True,
         )
         if isinstance(health_result, BaseException):
@@ -270,6 +279,18 @@ class RuntimeReadinessCoordinator:
             )
         elif topology_dependencies_result is not True:
             reasons.append("topology_dependency_not_shared")
+
+        if isinstance(tool_plane_result, BaseException):
+            if isinstance(tool_plane_result, asyncio.CancelledError):
+                raise tool_plane_result
+            reasons.append("tool_plane_readiness_failed")
+            correlation_id = self._log_dependency_failure(
+                "Tool-plane governance readiness check failed",
+                component="tool_plane",
+                error=tool_plane_result,
+            )
+        elif tool_plane_result is not None:
+            reasons.append(tool_plane_result)
 
         unique_reasons = tuple(dict.fromkeys(reasons))
         return RuntimeReadinessSnapshot(

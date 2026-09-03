@@ -128,6 +128,29 @@ class TestWriteAndRead:
         assert stat.S_IMODE(skill_dir.stat().st_mode) & 0o055 == 0o055
         assert stat.S_IMODE(ref_dir.stat().st_mode) & 0o055 == 0o055
 
+    def test_governed_state_projection_round_trip(self, user_storage: UserScopedSkillStorage):
+        states = {"demo-skill": {"enabled": False}}
+
+        assert user_storage.has_skill_state_projection() is False
+        user_storage.replace_skill_state_projection(states)
+
+        assert user_storage.has_skill_state_projection() is True
+        assert user_storage.capture_skill_state_projection() == states
+        assert user_storage.matches_skill_state_projection(states) is True
+
+    def test_governed_state_projection_rejects_malformed_state(
+        self,
+        user_storage: UserScopedSkillStorage,
+        base_dir: Path,
+    ):
+        state_path = base_dir / "users" / "test-user" / "skills" / "_skill_states.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text('{"demo-skill": {"enabled": "yes"}}', encoding="utf-8")
+
+        with pytest.raises(ValueError, match="invalid entry"):
+            user_storage.capture_skill_state_projection()
+        assert user_storage.matches_skill_state_projection({}) is False
+
 
 class TestSkillLoading:
     """Public skills from global, custom from user dir + fallback."""

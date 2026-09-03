@@ -28,6 +28,8 @@ from app.runtime.invocation import (
     InternalNativeChannelFacts,
     InternalSourceKind,
 )
+from deerflow.config.app_config import AppConfig
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.runtime.accepted_invocation import (
     INVOCATION_IDENTITY_CONTEXT_KEY,
     INVOCATION_ORIGIN_CONTEXT_KEY,
@@ -41,6 +43,7 @@ from deerflow.runtime.accepted_invocation import (
 )
 from deerflow.runtime.agent_revision import (
     RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
+    app_config_execution_digest,
     assert_agent_config_projection_complete,
     assert_app_config_projection_complete,
 )
@@ -50,6 +53,7 @@ from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.runtime.tenant_identity import TenantIdentityV1
+from deerflow.tool_plane import EffectiveToolPlaneRevisionV1
 
 _TEST_TENANT_IDENTITY = TenantIdentityV1.from_canonical_id("local")
 _TEST_TENANT = _TEST_TENANT_IDENTITY.to_persisted_reference()
@@ -116,6 +120,119 @@ def test_material_and_accepted_digests_are_stable_and_mutation_safe() -> None:
         decision_evidence={"version": 1, "decisions": []},
     )
     assert legacy.tool_receipt_evidence_version is None
+
+
+def test_accepted_invocation_binds_governed_tool_plane_revision() -> None:
+    tool_plane = EffectiveToolPlaneRevisionV1(
+        base_revision_digest="c" * 64,
+        user_overlay_digest="d" * 64,
+        base_generation=4,
+        overlay_generation=2,
+        projection_digest="e" * 64,
+    )
+    common = {
+        "principal": PrincipalProjection(user_id="u1", role="member"),
+        "origin": InvocationOrigin(source_kind="http"),
+        "thread_id": "thread-tool-plane",
+        "context_references": {},
+        "agent_revision": ResolvedAgentRevision.from_material(_material()),
+        "normalized_input": {"messages": []},
+        "execution_options": {"multitask_strategy": "reject"},
+        "extension_generation": 7,
+        "contributor_execution_digest": canonical_digest({"version": 1, "execution": []}),
+        "tenant": _TEST_TENANT,
+    }
+
+    accepted = AcceptedInvocation.seal(
+        **common,
+        tool_plane_revision=tool_plane.to_json(),
+    )
+    without_binding = AcceptedInvocation.seal(**common)
+
+    assert accepted.tool_plane_revision == tool_plane.to_json()
+    assert accepted.runtime_identity_digest != without_binding.runtime_identity_digest
+    assert accepted.to_persisted()["decision_evidence_json"]["tool_plane_revision"] == tool_plane.to_json()
+
+    forged = tool_plane.to_json()
+    forged["effective_digest"] = "f" * 64
+    with pytest.raises(ValueError, match="effective digest"):
+        AcceptedInvocation.seal(**common, tool_plane_revision=forged)
+
+
+def test_accepted_tool_plane_rejects_noncanonical_or_secret_mcp_structure() -> None:
+    tool_plane = EffectiveToolPlaneRevisionV1(
+        base_revision_digest="c" * 64,
+        user_overlay_digest="d" * 64,
+        base_generation=4,
+        overlay_generation=2,
+        projection_digest="e" * 64,
+        effective_mcp_server_ids=("search",),
+        effective_mcp_servers=(
+            {
+                "server_id": "search",
+                "enabled": True,
+                "transport": "http",
+                "args": [],
+                "url": "https://mcp.example.test",
+                "tool_allowlist": [],
+                "tool_overrides": {},
+                "description": "",
+                "routing": {"mode": "off", "priority": 0, "keywords": []},
+                "tool_name_prefix": True,
+                "tool_call_timeout": None,
+                "session_init_timeout": None,
+                "task_toolsets": [],
+                "secret_selectors": [],
+            },
+        ),
+    )
+    evidence = tool_plane.to_json()
+    evidence["effective_mcp_servers"][0]["headers"] = {"Authorization": "literal-secret"}
+    evidence["effective_digest"] = canonical_digest({key: value for key, value in evidence.items() if key != "effective_digest"})
+
+    with pytest.raises(ValueError, match="MCP"):
+        AcceptedInvocation.seal(
+            principal=PrincipalProjection(user_id="u1", role="member"),
+            origin=InvocationOrigin(source_kind="http"),
+            thread_id="thread-tool-plane-secret",
+            context_references={},
+            agent_revision=ResolvedAgentRevision.from_material(_material()),
+            normalized_input={"messages": []},
+            execution_options={"multitask_strategy": "reject"},
+            extension_generation=7,
+            contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
+            tenant=_TEST_TENANT,
+            tool_plane_revision=evidence,
+        )
+
+
+def test_governed_app_digest_uses_revision_identity_not_resolved_secret() -> None:
+    base = AppConfig.from_file("../config.example.yaml")
+
+    def configured(secret: str) -> AppConfig:
+        extensions = ExtensionsConfig.model_validate(
+            {
+                "mcpServers": {
+                    "search": {
+                        "type": "http",
+                        "url": "https://mcp.example.test",
+                        "headers": {"Authorization": secret},
+                    }
+                }
+            }
+        )
+        return base.model_copy(update={"extensions": extensions}, deep=True)
+
+    first = app_config_execution_digest(
+        configured("first-runtime-secret"),
+        governed_tool_plane_digest="a" * 64,
+    )
+    second = app_config_execution_digest(
+        configured("rotated-runtime-secret"),
+        governed_tool_plane_digest="a" * 64,
+    )
+
+    assert first == second
 
 
 def test_same_user_thread_and_external_key_are_distinct_across_tenants() -> None:
@@ -419,6 +536,54 @@ async def test_accepted_admission_records_bound_actor_and_fails_closed(
             owner_user_id="u1",
             run_ctx=SimpleNamespace(app_config=object()),
         )
+
+
+@pytest.mark.asyncio
+async def test_gateway_admission_resolves_tool_plane_with_verified_actor(
+    monkeypatch,
+) -> None:
+    from app.gateway import services
+
+    revision = ResolvedAgentRevision.from_material(_material())
+    monkeypatch.setattr(services, "resolve_agent_revision", lambda *_args, **_kwargs: revision)
+    effective = EffectiveToolPlaneRevisionV1(
+        base_revision_digest="c" * 64,
+        user_overlay_digest="d" * 64,
+        base_generation=1,
+        overlay_generation=0,
+        projection_digest="e" * 64,
+    )
+    tool_plane = SimpleNamespace(effective_for_actor=AsyncMock(return_value=effective))
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="u1", system_role="member"),
+            auth_source=AUTH_SOURCE_SESSION,
+        ),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                extensions=SimpleNamespace(generation=1),
+                capability_manifest=SimpleNamespace(digest="f" * 64),
+                contributor_host=None,
+                tenant_identity=_TEST_TENANT_IDENTITY,
+                credential_audit_repo=SimpleNamespace(record=AsyncMock()),
+                tool_plane_revision_service=tool_plane,
+            )
+        ),
+    )
+
+    accepted = await services._seal_accepted_invocation(
+        request=request,
+        intent=InternalLaunchIntent(thread_id="thread-tool-plane-admission"),
+        config={"context": {}},
+        graph_input={"messages": []},
+        owner_user_id="u1",
+        run_ctx=SimpleNamespace(app_config=AppConfig.from_file("../config.example.yaml")),
+    )
+
+    actor = tool_plane.effective_for_actor.await_args.args[0]
+    assert tool_plane.effective_for_actor.await_count == 2
+    assert actor == accepted.trusted_context.verified_actor
+    assert accepted.tool_plane_revision == effective.to_json()
 
 
 @pytest.mark.asyncio

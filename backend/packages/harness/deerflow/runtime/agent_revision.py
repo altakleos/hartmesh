@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import copy
 from collections.abc import Mapping
 from typing import Any
@@ -9,7 +11,12 @@ from typing import Any
 from deerflow.config.agents_config import AgentConfig, load_agent_soul, validate_agent_name
 from deerflow.config.app_config import AppConfig
 from deerflow.persistence.agents import make_agent_store
-from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1, ResolvedAgentRevision, canonical_digest
+from deerflow.runtime.accepted_invocation import (
+    ResolvedAgentMaterialV1,
+    ResolvedAgentRevision,
+    canonical_digest,
+    mcp_tool_projection,
+)
 from deerflow.runtime.skill_snapshot import snapshot_effective_skills
 from deerflow.runtime.subagent_snapshot import (
     ResolvedSkillScopesV1,
@@ -88,6 +95,7 @@ APP_CONFIG_FACTORY_EXCLUDED_FIELDS = frozenset(
         "dedupe_storage",
         "subagent_runtime",
         "subagent_batches",
+        "tool_plane",
     }
 )
 
@@ -168,24 +176,74 @@ def _skills(app_config: AppConfig, *, user_id: str | None) -> tuple[tuple[Any, .
     return enabled, all_skills
 
 
-def app_config_execution_digest(app_config: AppConfig) -> str:
+def app_config_execution_digest(
+    app_config: AppConfig,
+    *,
+    governed_tool_plane_digest: str | None = None,
+) -> str:
     """Digest every app-config field that can affect an assembled agent."""
 
     if not isinstance(app_config, AppConfig):
         raise TypeError("app_config must be AppConfig")
+    if governed_tool_plane_digest is not None and (len(governed_tool_plane_digest) != 64 or any(character not in "0123456789abcdef" for character in governed_tool_plane_digest)):
+        raise ValueError("governed_tool_plane_digest must be a SHA-256 digest")
     assert_app_config_projection_complete()
     return canonical_digest(
         {
             "version": 1,
             "app_config": {
-                field_name: _safe_settings(
-                    getattr(app_config, field_name),
-                    path=f"app_config.{field_name}",
+                field_name: (
+                    {"governed_effective_digest": (governed_tool_plane_digest)}
+                    if field_name == "extensions" and governed_tool_plane_digest is not None
+                    else _safe_settings(
+                        getattr(app_config, field_name),
+                        path=f"app_config.{field_name}",
+                    )
                 )
                 for field_name in sorted(APP_CONFIG_FACTORY_INCLUDED_FIELDS)
             },
         }
     )
+
+
+def _run_mcp_loader(extensions_config: Any) -> tuple[Any, ...]:
+    from deerflow.mcp.tools import get_mcp_tools
+
+    async def load() -> tuple[Any, ...]:
+        return tuple(await get_mcp_tools(extensions_config))
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(load())
+    # Direct unit/library callers can invoke this synchronous resolver from an
+    # active event loop. Keep that loop unblocked from nested-loop errors by
+    # doing the one-time discovery in a dedicated thread.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(asyncio.run, load()).result()
+
+
+def _capture_governed_mcp_tools(
+    app_config: AppConfig,
+    allowlists: Mapping[str, frozenset[str] | None],
+) -> tuple[Any, ...]:
+    if not app_config.extensions.get_enabled_mcp_servers():
+        return ()
+    from deerflow.tools.mcp_metadata import get_mcp_source
+
+    result: list[Any] = []
+    for tool in _run_mcp_loader(app_config.extensions):
+        source = get_mcp_source(tool)
+        if source is None:
+            continue
+        server_name = source["server_name"]
+        if server_name not in allowlists:
+            continue
+        allowed = allowlists[server_name]
+        if allowed is not None and source.get("tool_name") not in allowed:
+            continue
+        result.append(tool)
+    return tuple(result)
 
 
 def resolve_agent_revision(
@@ -195,6 +253,12 @@ def resolve_agent_revision(
     user_id: str | None,
     accepted_subagent_catalog: ResolvedSubagentCatalogV1 | None = None,
     accepted_skill_scopes: ResolvedSkillScopesV1 | None = None,
+    governed_tool_plane_digest: str | None = None,
+    governed_mcp_tool_allowlists: Mapping[
+        str,
+        frozenset[str] | None,
+    ]
+    | None = None,
 ) -> ResolvedAgentRevision:
     """Resolve current material once and return the exact captured object."""
     assert_agent_config_projection_complete()
@@ -232,7 +296,20 @@ def resolve_agent_revision(
         model_config = pinned_app_config.models[0]
     resolved_model_name = model_config.name if model_config is not None else selected_model
     model_profile = _safe_settings(model_config or {}, path="models.selected")
-    model_profile["app_execution_digest"] = app_config_execution_digest(pinned_app_config)
+    model_profile["app_execution_digest"] = app_config_execution_digest(
+        pinned_app_config,
+        governed_tool_plane_digest=governed_tool_plane_digest,
+    )
+
+    governed_mcp_tools: tuple[Any, ...] | None = None
+    if governed_tool_plane_digest is not None:
+        allowlists = governed_mcp_tool_allowlists
+        if allowlists is None:
+            allowlists = {name: (None if not server.tools else frozenset(server.tools)) for name, server in pinned_app_config.extensions.get_enabled_mcp_servers().items()}
+        governed_mcp_tools = _capture_governed_mcp_tools(
+            pinned_app_config,
+            allowlists,
+        )
 
     groups = tuple(pinned_agent_config.tool_groups or ()) if pinned_agent_config else ()
     configured_tools = tuple(sorted(tool.name for tool in pinned_app_config.tools if not groups or tool.group in groups))
@@ -257,6 +334,7 @@ def resolve_agent_revision(
             enabled=bool(cfg.get("subagent_enabled", False)),
             available_skill_names=enabled_skill_names,
             parent_model_name=resolved_model_name,
+            mcp_tools_snapshot=governed_mcp_tools,
         )
     transitive_skill_names = {skill.name for skill in live_lead_skills}
     for entry in subagent_catalog.entries:
@@ -333,6 +411,8 @@ def resolve_agent_revision(
             all_skill_objects=effective_skills,
             user_id=user_id,
             skill_snapshot=skill_snapshot,
+            mcp_tools=(() if governed_mcp_tools is None else mcp_tool_projection(governed_mcp_tools)),
+            mcp_tool_objects=governed_mcp_tools,
         )
         return ResolvedAgentRevision.from_material(material)
     except Exception:

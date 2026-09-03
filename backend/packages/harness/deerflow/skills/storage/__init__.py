@@ -127,6 +127,10 @@ def get_or_new_user_skill_storage(user_id: str, **kwargs) -> SkillStorage:
         app_config = get_app_config()
     kwargs["app_config"] = app_config
 
+    from deerflow.skills.storage.user_inventory import (
+        register_user_skill_subject,
+    )
+
     # Always acquire lock so move_to_end is safe — makes this a true LRU
     # cache instead of FIFO. The overhead is negligible since dict ops are
     # fast and this function is called once per agent-creation cycle.
@@ -137,6 +141,15 @@ def get_or_new_user_skill_storage(user_id: str, **kwargs) -> SkillStorage:
             return cached[1]
 
         storage = UserScopedSkillStorage(safe_id, **kwargs)
+        # The shipped user-scoped adapter exposes the exact Paths instance it
+        # used. Custom/test SkillStorage implementations need not participate
+        # in this filesystem inventory contract.
+        inventory_paths = getattr(storage, "_paths", None)
+        if inventory_paths is not None:
+            register_user_skill_subject(
+                raw_subject_id=user_id,
+                paths=inventory_paths,
+            )
         _user_scoped_storages[safe_id] = (app_config, storage)
         _user_scoped_storages.move_to_end(safe_id)
         # Evict least-recently-used entry if cache exceeds the ceiling.

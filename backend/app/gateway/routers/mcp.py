@@ -1,10 +1,9 @@
 import asyncio
 import json
 import logging
-import os
 import re
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, NoReturn
+from typing import Any, Literal, NoReturn
 
 from deerflow_extension_api import (
     validate_mcp_server_identifier,
@@ -14,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.gateway.deps import require_admin_user
+from app.gateway.tool_plane_guard import reject_direct_tool_plane_mutation
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
     McpRoutingConfig,
@@ -29,327 +29,18 @@ from deerflow.config.extensions_config import (
 from deerflow.config.runtime_paths import project_root
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
 from deerflow.mcp.cache import reset_mcp_tools_cache
+from deerflow.mcp.launch_policy import (
+    MCP_STDIO_COMMAND_ALLOWLIST_ENV,
+    McpStdioLaunchPolicyViolation,
+    allowed_stdio_commands,
+    validate_mcp_stdio_launch,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
 
 _ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage MCP configuration."
-
-
-_MCP_STDIO_COMMAND_ALLOWLIST_ENV = "DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST"
-_DEFAULT_MCP_STDIO_COMMAND_ALLOWLIST = frozenset({"npx", "uvx"})
-_SHELL_METACHARS = frozenset(";|&`$<>\n\r")
-
-# Flags that turn an allowlisted launcher into an arbitrary code evaluator.
-# Validating only the command name leaves the allowlist naming a binary
-# without constraining what that binary runs, so these are screened too.
-# The spellings below mean "evaluate this string" across every launcher an
-# operator would plausibly allowlist (npx/uvx `--call`, python/sh `-c`,
-# node/perl/ruby `-e`/`--eval`, node `--print`), plus npx's pass-through into
-# node's own argv.
-#
-# This is defense in depth, not a trust boundary. `npx`/`uvx` exist to fetch
-# and run remote code, so an admin can still point one at a package they
-# published; the boundary remains admin authentication plus not exposing the
-# Gateway to untrusted networks.
-_ARBITRARY_EXEC_ARGS = frozenset(
-    {
-        "-c",
-        "--call",
-        "-e",
-        "--eval",
-        "--print",
-        "--shell",
-        "--node-arg",
-        "--node-options",
-    }
-)
-
-
-# Package launchers parse their own options only until the package name; every
-# later token is handed to the spawned server's own CLI, where `-c` is commonly
-# "config" and `-e` "env". Screening those rejected ordinary third-party servers
-# without covering anything, so the screen is scoped to the option region.
-#
-# Finding that region needs each launcher's option *arity*, because a value is
-# not a positional: `npx -p <pkg> -c '<command>'` runs the command -- `-p` is
-# exec's `--package`, so `<pkg>` is its value and npm keeps parsing its own
-# flags. Ending the region at the first non-flag token would walk past it.
-# (Verified against npm 10.9.4 / uv 0.11.1.)
-#
-# The two launchers get opposite defaults for an option neither table lists,
-# and the reason is the exec set above, not symmetry:
-#
-#   `npx` really does own exec flags here (`-c`/`--call`), so an unlisted option
-#   must not be able to hide one. Unknown therefore consumes a value, keeping
-#   the region open. npm *errors* on an option it does not define, so this
-#   cannot reject an invocation that would otherwise work; enumerating npm's
-#   booleans (rather than its much larger value-taking set) is what makes the
-#   common `npx -y <pkg> ...` shape land on the package name.
-#
-#   `uvx` owns no exec flag at all -- uv has no "evaluate this string" option --
-#   so its screen is a tripwire, not a control, and an imprecise region cannot
-#   walk past anything real. Unknown therefore consumes nothing, which keeps
-#   uv's large and growing boolean surface from over-blocking.
-#
-# A launcher outside this table is not a package runner and keeps the
-# conservative whole-args screen below.
-class _LauncherGrammar(NamedTuple):
-    """How one package launcher separates its own options from the server's."""
-
-    exec_args: frozenset[str]
-    known_args: frozenset[str]
-    unknown_consumes_value: bool
-
-    def consumes_value(self, flag: str) -> bool:
-        if self.unknown_consumes_value:
-            return flag not in self.known_args
-        return flag in self.known_args
-
-
-# npm's boolean configs, i.e. the options that do *not* consume the next token.
-# Generated from `@npmcli/config`'s definitions (npm 10.9.4): every config whose
-# type is Boolean, plus every nopt shorthand expanding to one of them or to a
-# complete assignment such as `-d` -> `--loglevel info`. Regenerate against a
-# newer npm rather than editing by hand. A boolean missing here over-blocks one
-# invocation and names the flag in the rejection, which is the failure direction
-# this file prefers.
-_NPM_BOOLEAN_ARGS = frozenset(
-    {
-        "--all",
-        "--allow-same-version",
-        "--audit",
-        "--bin-links",
-        "--commit-hooks",
-        "--description",
-        "--dev",
-        "--diff-ignore-all-space",
-        "--diff-name-only",
-        "--diff-no-prefix",
-        "--diff-text",
-        "--dry-run",
-        "--engine-strict",
-        "--expect-results",
-        "--force",
-        "--foreground-scripts",
-        "--format-package-lock",
-        "--fund",
-        "--git-tag-version",
-        "--global",
-        "--global-style",
-        "--if-present",
-        "--ignore-scripts",
-        "--include-staged",
-        "--include-workspace-root",
-        "--install-links",
-        "--json",
-        "--legacy-bundling",
-        "--legacy-peer-deps",
-        "--link",
-        "--long",
-        "--offline",
-        "--omit-lockfile-registry-resolved",
-        "--optional",
-        "--package-lock",
-        "--package-lock-only",
-        "--parseable",
-        "--prefer-dedupe",
-        "--prefer-offline",
-        "--prefer-online",
-        "--production",
-        "--progress",
-        "--provenance",
-        "--read-only",
-        "--rebuild-bundle",
-        "--save",
-        "--save-bundle",
-        "--save-dev",
-        "--save-exact",
-        "--save-optional",
-        "--save-peer",
-        "--save-prod",
-        "--shrinkwrap",
-        "--sign-git-commit",
-        "--sign-git-tag",
-        "--strict-peer-deps",
-        "--strict-ssl",
-        "--timing",
-        "--unicode",
-        "--update-notifier",
-        "--usage",
-        "--version",
-        "--versions",
-        "--workspaces",
-        "--workspaces-update",
-        "--yes",
-        "-?",
-        "-B",
-        "-D",
-        "-E",
-        "-H",
-        "-O",
-        "-P",
-        "-S",
-        "-a",
-        "-d",
-        "-dd",
-        "-ddd",
-        "-desc",
-        "-f",
-        "-g",
-        "-h",
-        "-help",
-        "-iwr",
-        "-l",
-        "-local",
-        "-n",
-        "-no",
-        "-porcelain",
-        "-q",
-        "-quiet",
-        "-readonly",
-        "-s",
-        "-silent",
-        "-v",
-        "-verbose",
-        "-ws",
-        "-y",
-    }
-)
-
-# `npm exec` overrides the global `-p` shorthand: it is `--package <spec>` there,
-# not the boolean `--parseable`. Confirmed by running it -- `npx -p . -c '<cmd>'`
-# executes the command, i.e. `.` was consumed as a value and never ended the
-# option region. Treating it as boolean is exactly the bypass this table exists
-# to prevent, so the override is applied explicitly rather than left implicit.
-_NPX_BOOLEAN_ARGS = _NPM_BOOLEAN_ARGS - {"-p"}
-
-# uv's value-taking options (`uvx --help`, uv 0.11.1). Everything absent is
-# treated as boolean; see the unknown-option note above for why that default is
-# safe here and inverted for npx.
-_UVX_VALUE_ARGS = frozenset(
-    {
-        "--allow-insecure-host",
-        "--build-constraints",
-        "--cache-dir",
-        "--color",
-        "--config-file",
-        "--config-setting",
-        "--config-settings-package",
-        "--constraints",
-        "--default-index",
-        "--directory",
-        "--env-file",
-        "--exclude-newer",
-        "--exclude-newer-package",
-        "--extra-index-url",
-        "--find-links",
-        "--fork-strategy",
-        "--from",
-        "--index",
-        "--index-strategy",
-        "--index-url",
-        "--keyring-provider",
-        "--link-mode",
-        "--no-binary-package",
-        "--no-build-isolation-package",
-        "--no-build-package",
-        "--no-sources-package",
-        "--overrides",
-        "--prerelease",
-        "--project",
-        "--python",
-        "--python-platform",
-        "--refresh-package",
-        "--reinstall-package",
-        "--resolution",
-        "--torch-backend",
-        "--upgrade-package",
-        "--with",
-        "--with-editable",
-        "--with-requirements",
-        "-C",
-        "-P",
-        "-b",
-        "-c",
-        "-f",
-        "-i",
-        "-p",
-        "-w",
-    }
-)
-
-_PACKAGE_LAUNCHERS: dict[str, _LauncherGrammar] = {
-    "npx": _LauncherGrammar(
-        exec_args=_ARBITRARY_EXEC_ARGS,
-        known_args=_NPX_BOOLEAN_ARGS,
-        unknown_consumes_value=True,
-    ),
-    # uv spells `-c` `--constraints` and `-p` `--python`, so the short forms are
-    # dropped from its exec set; the long spellings stay as a tripwire in case a
-    # future uv grows one. Derived so a new entry above cannot forget this.
-    "uvx": _LauncherGrammar(
-        exec_args=frozenset(flag for flag in _ARBITRARY_EXEC_ARGS if flag.startswith("--")),
-        known_args=_UVX_VALUE_ARGS,
-        unknown_consumes_value=False,
-    ),
-}
-
-# `-p` is `--print` (evaluate and print) on node, so exempting it everywhere
-# left the short and long spellings of one flag disagreeing as soon as an
-# operator extended the allowlist. It stays scoped to commands outside
-# `_PACKAGE_LAUNCHERS`, where it is an ordinary selector (`--package` for npx,
-# `--python` for uv), so the default allowlist is unaffected.
-_EXEC_ARGS_OUTSIDE_PACKAGE_LAUNCHERS = frozenset({"-p"})
-
-# Short options combine into one token (`node -pe`, `perl -we`, `python -Ic`),
-# which whole-token matching does not see. Derived rather than restated so a
-# new single-letter entry above cannot forget its clustered spelling.
-_CLUSTERED_EXEC_LETTERS = frozenset(flag[1] for flag in _ARBITRARY_EXEC_ARGS | _EXEC_ARGS_OUTSIDE_PACKAGE_LAUNCHERS if len(flag) == 2 and flag.startswith("-"))
-
-# Environment variables that inject code into a process at startup, which is
-# the same bypass as an exec flag by another name.
-#
-# `PYTHONPATH` matters most: `site` imports `sitecustomize.py` from any
-# `sys.path` entry before the tool's entry point runs, so a caller-controlled
-# directory is code execution under `uvx` -- on the *default* allowlist.
-# `PYTHONSTARTUP` is inert for the non-interactive launchers in scope and is
-# kept only as belt-and-braces for an operator who allowlists a REPL.
-#
-# Known residual, accepted. Every entry below executes code *unconditionally*
-# at process startup. Caller-controlled *search paths* are a different, weaker
-# shape -- they reach code only if the process happens to load a name the
-# caller can shadow -- and they stay out:
-#
-#   `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` run a shadowed library's constructor,
-#   and native-dependency servers legitimately set them.
-#
-#   `NODE_PATH` is narrower still, and not for the reason it first looks like.
-#   Node searches it *after* the local `node_modules` chain -- the resolver
-#   unshifts the requiring module's own paths ahead of it -- so it cannot
-#   shadow an installed dependency, and ESM `import` ignores it entirely. It
-#   can only supply a CJS module that would otherwise fail to resolve, i.e. an
-#   optional `try { require(...) } catch {}` dependency absent from the install.
-#
-# Adding them would make the "unconditional" rule above untrue, and a
-# defense-in-depth list that grows because each entry was cheap is how it ends
-# up mistaken for a boundary. A denylist is not what makes MCP registration
-# safe for an untrusted admin anyway.
-_CODE_INJECTING_ENV_VARS = frozenset(
-    {
-        "BASH_ENV",
-        "DYLD_INSERT_LIBRARIES",
-        "ENV",
-        "LD_AUDIT",
-        "LD_PRELOAD",
-        "NODE_OPTIONS",
-        "PERL5OPT",
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "PYTHONSTARTUP",
-        "RUBYOPT",
-    }
-)
+_MCP_STDIO_COMMAND_ALLOWLIST_ENV = MCP_STDIO_COMMAND_ALLOWLIST_ENV
 
 
 class McpUserScopedAuthConfigResponse(BaseModel):
@@ -691,110 +382,6 @@ def _merge_extra_value_preserving_masked(key: str, incoming_value: Any, existing
     return incoming_value
 
 
-def _allowed_stdio_commands() -> set[str]:
-    """Return executable names allowed for API-managed stdio MCP servers."""
-    raw = os.environ.get(_MCP_STDIO_COMMAND_ALLOWLIST_ENV)
-    base = set(_DEFAULT_MCP_STDIO_COMMAND_ALLOWLIST)
-    if raw is None:
-        return base
-    extra = {item.strip() for item in raw.split(",") if item.strip()}
-    return base | extra
-
-
-def _stdio_command_name(command: str | None, *, server_name: str) -> str:
-    """Normalize and validate a stdio command field from the API boundary."""
-    if command is None or not command.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"MCP server '{server_name}' with stdio transport requires a command.",
-        )
-
-    stripped = command.strip()
-    has_path_separator = "/" in stripped or "\\" in stripped
-    if stripped != command or has_path_separator or any(ch.isspace() for ch in stripped) or any(ch in stripped for ch in _SHELL_METACHARS):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(f"MCP server '{server_name}' command must be a single executable name; put parameters in args instead."),
-        )
-
-    return stripped
-
-
-def _launcher_option_region(args: list[str], *, grammar: _LauncherGrammar) -> list[str]:
-    """Return the leading args a package launcher parses as its own options.
-
-    The region ends at a bare ``--`` or at the package name -- the first token
-    that is neither a flag nor the value of one. A ``--flag=value`` token
-    carries its own value and never consumes the next one.
-
-    Arity is looked up case-sensitively, because a launcher's short options are:
-    npm reads ``-c`` as ``--call`` but ``-C`` as ``--prefix``, which takes a
-    value.
-    """
-    region: list[str] = []
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if not isinstance(arg, str):
-            break
-        token = arg.strip()
-        if token == "--" or token == "-" or not token.startswith("-"):
-            break
-        region.append(token)
-        index += 1
-        if "=" not in token and grammar.consumes_value(token):
-            index += 1
-    return region
-
-
-def _arbitrary_exec_arg(args: list[str], *, command: str) -> str | None:
-    """Return the offending flag when an argument makes the launcher eval a string.
-
-    Handles both ``--call value`` and ``--call=value`` spellings.
-
-    For a package launcher (:data:`_PACKAGE_LAUNCHERS`) only the launcher's own
-    option region is screened, because everything from the package name onward
-    is the spawned server's argv -- ``npx -y <pkg> -c config.json`` hands
-    ``-c config.json`` to the server, where it is "config", not eval. A bare
-    ``--`` ends the region too: only the *first* token after it is the package
-    name, and the rest are that package's arguments.
-
-    Every other command is screened whole, and two extra rules apply because
-    such a command is an interpreter rather than a package runner: ``-p`` is an
-    exec flag (node's ``--print``) instead of a package/python selector, and
-    combined short-option clusters are decomposed so ``-pe`` cannot smuggle
-    past a check that only splits on ``=``.
-
-    Only the normalized flag is returned, never the caller's value, so the
-    rejection message does not echo a payload string back into the response.
-    """
-    grammar = _PACKAGE_LAUNCHERS.get(command.lower())
-    if grammar is not None:
-        for token in _launcher_option_region(args, grammar=grammar):
-            flag = token.split("=", 1)[0]
-            # Long options are matched case-insensitively as before; a short one
-            # is not, because its case selects a different option -- npm's `-C`
-            # is `--prefix`, and folding it onto `-c` rejected an ordinary flag.
-            flag = flag.lower() if flag.startswith("--") else flag
-            if flag in grammar.exec_args:
-                return flag
-        return None
-
-    denied = _ARBITRARY_EXEC_ARGS | _EXEC_ARGS_OUTSIDE_PACKAGE_LAUNCHERS
-    for arg in args:
-        if not isinstance(arg, str):
-            continue
-        flag = arg.split("=", 1)[0].strip().lower()
-        if flag in denied:
-            return flag
-        if not flag.startswith("-") or flag.startswith("--"):
-            continue
-        for letter in flag[1:]:
-            if letter in _CLUSTERED_EXEC_LETTERS:
-                return f"-{letter}"
-    return None
-
-
 def _validate_mcp_update_request(
     request: McpConfigUpdateRequest,
     *,
@@ -811,34 +398,35 @@ def _validate_mcp_update_request(
     companion argument screen are execution policy, so targeted offline edits
     may defer only those checks until the server is enabled.
     """
-    allowed_commands = _allowed_stdio_commands() if enforce_execution_policy else set()
+    allowed_commands = allowed_stdio_commands() if enforce_execution_policy else frozenset()
     for name, server in request.mcp_servers.items():
         transport_type = (server.type or "stdio").lower()
         if transport_type != "stdio":
             continue
-
-        command_name = _stdio_command_name(server.command, server_name=name)
-        if enforce_execution_policy:
-            if command_name not in allowed_commands:
-                allowed = ", ".join(sorted(allowed_commands)) or "<none>"
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(f"MCP server '{name}' uses disallowed stdio command '{command_name}'. Allowed commands: {allowed}. Configure {_MCP_STDIO_COMMAND_ALLOWLIST_ENV} to extend this list."),
-                )
-
-            exec_flag = _arbitrary_exec_arg(server.args, command=command_name)
-            if exec_flag is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(f"MCP server '{name}' passes '{exec_flag}' to '{command_name}', which would run arbitrary code. Point the server at a package or module instead."),
-                )
-
-        for env_name in server.env:
-            if env_name.strip().upper() in _CODE_INJECTING_ENV_VARS:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(f"MCP server '{name}' sets environment variable '{env_name}', which would run arbitrary code at process startup."),
-                )
+        try:
+            validate_mcp_stdio_launch(
+                command=server.command,
+                args=server.args,
+                env_names=server.env,
+                allowed_commands=allowed_commands,
+                enforce_execution_policy=enforce_execution_policy,
+            )
+        except McpStdioLaunchPolicyViolation as exc:
+            if exc.code == "command_required":
+                detail = f"MCP server '{name}' with stdio transport requires a command."
+            elif exc.code == "command_not_bare":
+                detail = f"MCP server '{name}' command must be a single executable name; put parameters in args instead."
+            elif exc.code == "command_not_allowed":
+                allowed = ", ".join(exc.allowed_commands) or "<none>"
+                detail = f"MCP server '{name}' uses disallowed stdio command '{exc.value}'. Allowed commands: {allowed}. Configure {MCP_STDIO_COMMAND_ALLOWLIST_ENV} to extend this list."
+            elif exc.code == "argument_not_allowed":
+                detail = f"MCP server '{name}' passes '{exc.value}' to '{server.command}', which would run arbitrary code. Point the server at a package or module instead."
+            else:
+                detail = f"MCP server '{name}' sets environment variable '{exc.value}', which would run arbitrary code at process startup."
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=detail,
+            ) from exc
 
 
 def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigResponse:
@@ -1519,6 +1107,7 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
     """
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reject_direct_tool_plane_mutation(request, surface="mcp_configuration")
         _validate_mcp_update_request(body)
 
         # Offload the blocking read-modify-write of extensions_config.json
@@ -1549,6 +1138,7 @@ async def create_mcp_servers(request: Request, body: McpConfigUpdateRequest) -> 
     """Add servers atomically and reject names that already exist."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reject_direct_tool_plane_mutation(request, surface="mcp_server_create")
         _validate_mcp_update_request(body)
         reloaded_servers = await asyncio.to_thread(_apply_mcp_servers_create, body)
 
@@ -1572,6 +1162,7 @@ async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest
     """Update one existing server and reload the MCP tool cache."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reject_direct_tool_plane_mutation(request, surface="mcp_server_update")
         _validate_mcp_update_request(
             McpConfigUpdateRequest(mcp_servers={body.server_name: body.server}),
             enforce_execution_policy=body.server.enabled,
@@ -1598,6 +1189,7 @@ async def delete_mcp_server(request: Request, server_name: str) -> McpConfigResp
     """Delete one existing server and reload the MCP tool cache."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reject_direct_tool_plane_mutation(request, surface="mcp_server_delete")
         reloaded_servers = await asyncio.to_thread(_apply_mcp_server_delete, server_name)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
@@ -1620,6 +1212,7 @@ async def update_mcp_server_state(request: Request, body: McpServerStateUpdateRe
     """Enable or disable one MCP server and reload the MCP tool cache."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reject_direct_tool_plane_mutation(request, surface="mcp_server_state")
         reloaded_servers = await asyncio.to_thread(_apply_mcp_server_state_update, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}

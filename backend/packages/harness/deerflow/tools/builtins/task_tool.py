@@ -947,6 +947,19 @@ async def task_tool(
     }
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
+    from deerflow.tools.tools import (
+        accepted_mcp_server_ids_from_context,
+        accepted_mcp_tool_allowlists_from_context,
+    )
+
+    allowed_mcp_server_ids = accepted_mcp_server_ids_from_context(parent_context)
+    if allowed_mcp_server_ids is not None:
+        available_tools_kwargs["allowed_mcp_server_ids"] = allowed_mcp_server_ids
+    allowed_mcp_tools = accepted_mcp_tool_allowlists_from_context(parent_context)
+    if allowed_mcp_tools is not None:
+        available_tools_kwargs["allowed_mcp_tools_by_server"] = allowed_mcp_tools
+    if resolved_agent_material is not None and resolved_agent_material.mcp_tool_objects is not None:
+        available_tools_kwargs["mcp_tools_snapshot"] = resolved_agent_material.mcp_tool_objects
     tools = get_available_tools(**available_tools_kwargs)
 
     dispatch_ledger = subagent_reservation if isinstance(subagent_reservation, InvocationSubagentDispatchLedger) else None

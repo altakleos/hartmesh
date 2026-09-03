@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from deerflow_extension_api import (
     ActingServiceV1,
     CredentialEvidenceV1,
+    EffectiveSubjectV1,
     InvocationIdentityV1,
     VerifiedActorContextV1,
     authority_categories_v1,
@@ -932,6 +933,93 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             # cannot be validated there and are rejected by the middleware.
             app.state.pat_repo = None
 
+        tool_plane_config = getattr(config, "tool_plane", None)
+        if tool_plane_config is not None and tool_plane_config.enabled:
+            from app.gateway.authz import _ALL_PERMISSIONS
+            from deerflow.config.runtime_paths import runtime_home
+            from deerflow.tool_plane import (
+                CompositeToolPlaneUserInventory,
+                GovernedSkillArtifactStore,
+                GovernedToolPlaneValidator,
+                InMemoryToolPlaneRevisionRepository,
+                LockedFileToolPlaneProjection,
+                RegisteredToolPlaneUserInventory,
+                ToolPlaneRevisionService,
+            )
+
+            if sf is not None:
+                from deerflow.persistence.tool_plane import (
+                    SQLToolPlaneRevisionRepository,
+                    SQLToolPlaneUserInventory,
+                )
+
+                tool_plane_repository = SQLToolPlaneRevisionRepository(
+                    sf,
+                    tenant=tenant_reference,
+                )
+                tool_plane_user_inventory = CompositeToolPlaneUserInventory(
+                    SQLToolPlaneUserInventory(sf),
+                    RegisteredToolPlaneUserInventory(),
+                )
+            else:
+                tool_plane_repository = InMemoryToolPlaneRevisionRepository(
+                    tenant=tenant_reference,
+                )
+                tool_plane_user_inventory = RegisteredToolPlaneUserInventory()
+            tool_plane_artifacts = GovernedSkillArtifactStore(runtime_home() / "tool-plane" / "candidates")
+            tool_plane_projection = LockedFileToolPlaneProjection(
+                artifact_store=tool_plane_artifacts,
+            )
+            app.state.tool_plane_revision_service = ToolPlaneRevisionService(
+                repository=tool_plane_repository,
+                projection=tool_plane_projection,
+                validator=GovernedToolPlaneValidator(
+                    policy_digest=tool_plane_config.policy_digest,
+                    artifact_store=tool_plane_artifacts,
+                    durable=deployment_profile.is_durable,
+                    allowed_mcp_transports=tool_plane_config.allowed_mcp_transports,
+                    allowed_mcp_stdio_commands=(tool_plane_config.allowed_mcp_stdio_commands),
+                    allowed_mcp_endpoint_hosts=(tool_plane_config.allowed_mcp_endpoint_hosts),
+                    allow_private_mcp_endpoints=(tool_plane_config.allow_private_mcp_endpoints),
+                    allowed_managed_integration_providers=(tool_plane_config.allowed_managed_integration_providers),
+                    forbidden_skill_capabilities=(tool_plane_config.forbidden_skill_capabilities),
+                    maximum_mcp_servers=tool_plane_config.maximum_mcp_servers,
+                    maximum_skills=tool_plane_config.maximum_skills,
+                    require_complete_review=(tool_plane_config.validation_requires_skill_review),
+                ),
+                artifact_store=tool_plane_artifacts,
+                user_inventory=tool_plane_user_inventory,
+                durable=deployment_profile.is_durable,
+                immutable=is_multi_gateway_profile,
+                authority_universe=tuple(
+                    [*_ALL_PERMISSIONS, "tool_plane:reconcile"],
+                ),
+            )
+            await app.state.tool_plane_revision_service.initialize(
+                existing_projection=(await tool_plane_projection.has_existing_projection()),
+            )
+            reconciliation_authority = canonicalize_authority_v1(("tool_plane:reconcile",))
+            await app.state.tool_plane_revision_service.reconcile(
+                VerifiedActorContextV1(
+                    identity=InvocationIdentityV1(
+                        effective_subject=EffectiveSubjectV1(
+                            kind="service",
+                            subject_id="gateway:tool-plane-reconciler",
+                            role="service",
+                        )
+                    ),
+                    credential=CredentialEvidenceV1(
+                        method="internal_service",
+                        credential_ref=None,
+                        effective_authority_digest=effective_authority_digest_v1(reconciliation_authority),
+                        authority_categories=authority_categories_v1(reconciliation_authority),
+                    ),
+                    tenant=tenant_reference,
+                )
+            )
+        else:
+            app.state.tool_plane_revision_service = None
+
         await app.state.run_store.initialize_lifecycle()
         if is_multi_gateway_profile:
             from deerflow.deployment.topology import (
@@ -1316,6 +1404,10 @@ def build_multi_gateway_topology_service_registry():
         construction_ref="deerflow.runtime.stream_bridge",
     )
     registry.register(
+        "tool_plane_revision_service",
+        construction_ref="deerflow.tool_plane.service:ToolPlaneRevisionService",
+    )
+    registry.register(
         "subagent_batch_repo",
         construction_ref="deerflow.persistence.subagent_batches:SubagentBatchRepository",
     )
@@ -1456,16 +1548,20 @@ def get_app_run_context(app: FastAPI) -> RunContext:
     else:
         authorization_provider = resolver.resolve(authorization_config).provider
 
-    def _resolve_recovered_agent_revision(record, config):
+    async def _resolve_recovered_agent_revision(record, config):
         """Rebuild lead material while retaining accepted subagent facts."""
 
         from deerflow.runtime.agent_revision import resolve_agent_revision
+        from deerflow.tool_plane import resolve_tool_plane_runtime
 
         accepted = getattr(record, "accepted_invocation", None)
         accepted_revision = getattr(accepted, "agent_revision", None)
-        return resolve_agent_revision(
+        tool_plane_evidence = getattr(accepted, "tool_plane_revision", None)
+        governed_runtime = None if tool_plane_evidence is None else resolve_tool_plane_runtime(app_config, tool_plane_evidence)
+        return await asyncio.to_thread(
+            resolve_agent_revision,
             config,
-            app_config=app_config,
+            app_config=(app_config if governed_runtime is None else governed_runtime.app_config),
             user_id=getattr(record, "user_id", None),
             accepted_subagent_catalog=getattr(
                 accepted_revision,
@@ -1477,6 +1573,8 @@ def get_app_run_context(app: FastAPI) -> RunContext:
                 "skill_scopes",
                 None,
             ),
+            governed_tool_plane_digest=(None if tool_plane_evidence is None else tool_plane_evidence["effective_digest"]),
+            governed_mcp_tool_allowlists=(None if governed_runtime is None else governed_runtime.allowed_mcp_tools_by_server),
         )
 
     tenant_identity = getattr(app.state, "tenant_identity", None)

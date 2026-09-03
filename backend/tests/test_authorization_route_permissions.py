@@ -69,6 +69,13 @@ def _user(**overrides):
     return SimpleNamespace(**values)
 
 
+_TOOL_PLANE_PERMISSIONS = [
+    Permissions.TOOL_PLANE_READ,
+    Permissions.TOOL_PLANE_MUTATE,
+    Permissions.TOOL_PLANE_ADMIN,
+]
+
+
 class _FixedResolver:
     def __init__(self, provider) -> None:
         self.provider = provider
@@ -103,6 +110,7 @@ async def test_route_permissions_disabled_preserves_all_permissions(monkeypatch)
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
         Permissions.RUNS_CANCEL,
+        *_TOOL_PLANE_PERMISSIONS,
     ]
     resolver.resolve.assert_not_called()
 
@@ -119,6 +127,7 @@ async def test_route_permissions_use_async_provider_and_trusted_principal(monkey
         Permissions.THREADS_WRITE,
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
+        *_TOOL_PLANE_PERMISSIONS,
     ]
     assert [(request.resource, request.action, request.target) for request in provider.requests] == [
         ("route", "read", Permissions.THREADS_READ),
@@ -127,6 +136,9 @@ async def test_route_permissions_use_async_provider_and_trusted_principal(monkey
         ("route", "create", Permissions.RUNS_CREATE),
         ("route", "read", Permissions.RUNS_READ),
         ("route", "cancel", Permissions.RUNS_CANCEL),
+        ("route", "read", Permissions.TOOL_PLANE_READ),
+        ("route", "mutate", Permissions.TOOL_PLANE_MUTATE),
+        ("route", "admin", Permissions.TOOL_PLANE_ADMIN),
     ]
     principal = provider.requests[0].principal
     assert principal.user_id == "user-123"
@@ -176,6 +188,7 @@ async def test_route_permissions_fail_closed_denies_only_the_failed_permission(m
         Permissions.THREADS_DELETE,
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
+        *_TOOL_PLANE_PERMISSIONS,
     ]
 
 
@@ -219,6 +232,7 @@ async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypa
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
         Permissions.RUNS_CANCEL,
+        *_TOOL_PLANE_PERMISSIONS,
     ]
 
 
@@ -236,6 +250,7 @@ async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypa
                 Permissions.RUNS_CREATE,
                 Permissions.RUNS_READ,
                 Permissions.RUNS_CANCEL,
+                *_TOOL_PLANE_PERMISSIONS,
             ],
         ),
     ],

@@ -386,6 +386,56 @@ class UserScopedSkillStorage(LocalSkillStorage):
     # Public helpers
     # ------------------------------------------------------------------
 
+    def has_skill_state_projection(self) -> bool:
+        """Return whether a persisted per-user state projection exists."""
+
+        return self._skill_states_file.exists()
+
+    def capture_skill_state_projection(self) -> dict[str, dict[str, bool]]:
+        """Read and strictly validate the persisted per-user state projection.
+
+        Unlike the compatibility-oriented ``_read_skill_states`` helper, this
+        method fails on unreadable or malformed material. Governance callers
+        must not silently reinterpret corrupt state as an empty projection.
+        """
+
+        if not self._skill_states_file.exists():
+            return {}
+        if self._skill_states_file.is_symlink() or not self._skill_states_file.is_file():
+            raise ValueError("Skill state projection must be a regular file")
+        with self._skill_states_file.open(encoding="utf-8") as state_file:
+            raw_states = json.load(state_file)
+        if not isinstance(raw_states, dict):
+            raise ValueError("Skill state projection must be a mapping")
+        states: dict[str, dict[str, bool]] = {}
+        for raw_name, raw_state in raw_states.items():
+            if not isinstance(raw_name, str) or not isinstance(raw_state, dict) or set(raw_state) != {"enabled"} or type(raw_state.get("enabled")) is not bool:
+                raise ValueError("Skill state projection contains an invalid entry")
+            states[raw_name] = {"enabled": raw_state["enabled"]}
+        return states
+
+    def replace_skill_state_projection(
+        self,
+        states: dict[str, dict[str, bool]],
+    ) -> None:
+        """Atomically replace the complete per-user state projection."""
+
+        for raw_name, raw_state in states.items():
+            if not isinstance(raw_name, str) or not isinstance(raw_state, dict) or set(raw_state) != {"enabled"} or type(raw_state.get("enabled")) is not bool:
+                raise ValueError("Skill state projection contains an invalid entry")
+        self._write_skill_states(states)
+
+    def matches_skill_state_projection(
+        self,
+        expected: dict[str, dict[str, bool]],
+    ) -> bool:
+        """Return whether persisted state exactly matches a governed projection."""
+
+        try:
+            return self.capture_skill_state_projection() == expected
+        except (OSError, json.JSONDecodeError, ValueError):
+            return False
+
     @property
     def user_id(self) -> str:
         """The user ID this storage is scoped to."""
@@ -395,6 +445,11 @@ class UserScopedSkillStorage(LocalSkillStorage):
         """Host path to this user's custom skills root directory."""
         return self._user_custom_root
 
+    def get_legacy_custom_root(self) -> Path:
+        """Host path to the read-only pre-isolation custom-skill fallback."""
+
+        return self._global_custom_root
+
     def get_integrations_root(self) -> Path:
         """Host path to the global managed integration skills root directory."""
         return self._integrations_root
@@ -402,6 +457,11 @@ class UserScopedSkillStorage(LocalSkillStorage):
     def get_user_integrations_root(self) -> Path:
         """Compatibility alias for :meth:`get_integrations_root`."""
         return self.get_integrations_root()
+
+    def get_user_integration_credentials_root(self) -> Path:
+        """Host path to this user's managed-integration credential trees."""
+
+        return self._user_custom_root.parent.parent / "integrations"
 
     # ------------------------------------------------------------------
     # Path validation — accept public, per-user custom, and integration roots

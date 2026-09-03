@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 49
+config_version: 51
 
 # ============================================================================
 # Logging
@@ -1760,6 +1760,44 @@ skill_scan:
   # (path traversal, symlinks, executable-binary, total-size, and entry-count
   # limits) and the LLM skill scanner still run unconditionally.
   enabled: true
+
+# ============================================================================
+# Governed Tool Plane (startup-frozen)
+# ============================================================================
+# Candidate skill/MCP changes are staged and reviewed before an attributed
+# promotion. Existing mutable installations enter bootstrap_required until an
+# administrator captures, validates, and promotes the current projection.
+# Secret values are rejected; use environment/context or per-user credential
+# binding selectors. The exact-two profile exposes read-only status only.
+tool_plane:
+  enabled: true
+  policy_version: deerflow-default-v1
+  allowed_mcp_transports:
+    - stdio
+    - sse
+    - http
+    - streamable_http
+  # Stdio launchers are executable trust decisions. Extend this exact basename
+  # list only for binaries trusted by the deployment operator.
+  allowed_mcp_stdio_commands:
+    - npx
+    - uvx
+  # Empty permits any structurally valid public hostname. Populate this list
+  # to restrict governed HTTP/SSE MCP endpoints to exact hosts.
+  allowed_mcp_endpoint_hosts: []
+  allow_private_mcp_endpoints: false
+  # Empty accepts every syntactically valid managed-integration provider.
+  # Populate this with exact provider IDs (for example, lark-cli) to restrict
+  # which globally installed integration packages can be promoted.
+  allowed_managed_integration_providers: []
+  # Derived from exact staged SKILL.md frontmatter. Supported capability IDs
+  # are unrestricted-tools, autonomous-secrets, declared-secrets, and
+  # tool:<runtime-tool-name> (for example, tool:bash); tool names use ASCII
+  # letters, digits, dots, underscores, and hyphens.
+  forbidden_skill_capabilities: []
+  maximum_mcp_servers: 128
+  maximum_skills: 512
+  validation_requires_skill_review: true
 
 # Note: To restrict which skills are loaded for a specific custom agent,
 # define a `skills` list in that agent's `config.yaml` (e.g. `agents/my-agent/config.yaml`):

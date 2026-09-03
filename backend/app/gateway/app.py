@@ -50,6 +50,7 @@ from app.gateway.routers import (
     suggestions,
     thread_runs,
     threads,
+    tool_plane,
     uploads,
 )
 from app.gateway.runtime_http import install_runtime_error_handlers
@@ -1214,6 +1215,13 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     topology_status = None
     topology_dependencies_ready = None
+
+    async def tool_plane_readiness() -> str | None:
+        service = getattr(app.state, "tool_plane_revision_service", None)
+        if service is None:
+            return None
+        return await service.readiness_reason()
+
     if construction_deployment.profile is DeploymentProfile.durable_two_gateway_v1:
 
         async def topology_status():
@@ -1291,6 +1299,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         post_commit_obligations_ready=lambda: bool(getattr(app.state, "run_manager", None) is None or app.state.run_manager.post_commit_obligations_ready()),
         topology_status=topology_status,
         topology_dependencies_ready=topology_dependencies_ready,
+        tool_plane_readiness=tool_plane_readiness,
     )
 
     # Include routers
@@ -1305,6 +1314,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)
+
+    # Governed skill and MCP revision lifecycle. Exact-two publishes only the
+    # read surface; mutation and bootstrap routes do not exist in that profile.
+    app.include_router(tool_plane.read_router)
+    if construction_deployment.profile is not DeploymentProfile.durable_two_gateway_v1:
+        app.include_router(tool_plane.mutation_router)
 
     # Durable MCP tasks are scoped to their owning thread.
     app.include_router(mcp_tasks.router)

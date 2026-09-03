@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0033_automation_identities"
+HEAD = "0034_tool_plane_revisions"
 BASELINE = "0001_baseline"
 
 

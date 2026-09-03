@@ -36,9 +36,11 @@ import {
   useUploadSkillArchive,
 } from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
+import { useToolPlaneGovernance } from "@/core/tool-plane";
 import { env } from "@/env";
 
 import { SettingsSection } from "./settings-section";
+import { ToolPlaneGovernanceNotice } from "./tool-plane-governance-notice";
 
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
@@ -77,12 +79,21 @@ function SkillSettingsList({
   const { user } = useAuth();
   const isAdmin = user?.system_role === "admin";
   const [filter, setFilter] = useState<string>("public");
+  const baseToolPlane = useToolPlaneGovernance("deployment_base", isAdmin);
+  const overlayToolPlane = useToolPlaneGovernance("user_overlay");
+  const toolPlane = filter === "public" ? baseToolPlane : overlayToolPlane;
   const { mutate: enableSkill } = useEnableSkill();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { mutateAsync: uploadSkillArchive, isPending: isUploading } =
     useUploadSkillArchive();
+  const staticReadOnly = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
   const isArchiveUploadDisabled =
-    isUploading || !isAdmin || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
+    isUploading ||
+    !isAdmin ||
+    staticReadOnly ||
+    overlayToolPlane.legacyMutationBlocked;
+  const isCreateSkillDisabled =
+    staticReadOnly || overlayToolPlane.legacyMutationBlocked;
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
     [skills, filter],
@@ -143,6 +154,9 @@ function SkillSettingsList({
   };
   return (
     <div className="flex w-full flex-col gap-4">
+      {(filter === "custom" || isAdmin) && (
+        <ToolPlaneGovernanceNotice {...toolPlane} />
+      )}
       <header className="flex justify-between">
         <div className="flex gap-2">
           <Tabs value={filter} onValueChange={setFilter}>
@@ -178,14 +192,21 @@ function SkillSettingsList({
                 : t.settings.skills.installFromFile}
             </Button>
           )}
-          <Button size="sm" onClick={handleCreateSkill}>
+          <Button
+            size="sm"
+            disabled={isCreateSkillDisabled}
+            onClick={handleCreateSkill}
+          >
             <SparklesIcon className="size-4" />
             {t.settings.skills.createSkill}
           </Button>
         </div>
       </header>
       {filteredSkills.length === 0 && (
-        <EmptySkill onCreateSkill={handleCreateSkill} />
+        <EmptySkill
+          createDisabled={isCreateSkillDisabled}
+          onCreateSkill={handleCreateSkill}
+        />
       )}
       {filteredSkills.length > 0 &&
         filteredSkills.map((skill) => (
@@ -202,7 +223,7 @@ function SkillSettingsList({
               <Switch
                 checked={skill.enabled}
                 disabled={
-                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" || !isAdmin
+                  staticReadOnly || !isAdmin || toolPlane.legacyMutationBlocked
                 }
                 onCheckedChange={(checked) =>
                   enableSkill({ skillName: skill.name, enabled: checked })
@@ -215,7 +236,13 @@ function SkillSettingsList({
   );
 }
 
-function EmptySkill({ onCreateSkill }: { onCreateSkill: () => void }) {
+function EmptySkill({
+  createDisabled,
+  onCreateSkill,
+}: {
+  createDisabled: boolean;
+  onCreateSkill: () => void;
+}) {
   const { t } = useI18n();
   return (
     <Empty>
@@ -229,7 +256,9 @@ function EmptySkill({ onCreateSkill }: { onCreateSkill: () => void }) {
         </EmptyDescription>
       </EmptyHeader>
       <EmptyContent>
-        <Button onClick={onCreateSkill}>{t.settings.skills.emptyButton}</Button>
+        <Button disabled={createDisabled} onClick={onCreateSkill}>
+          {t.settings.skills.emptyButton}
+        </Button>
       </EmptyContent>
     </Empty>
   );

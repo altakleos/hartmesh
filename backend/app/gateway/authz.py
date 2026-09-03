@@ -73,6 +73,12 @@ class Permissions:
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
 
+    # Governed skill and MCP revisions. These deliberately remain outside
+    # the PAT v1 scope allowlist.
+    TOOL_PLANE_READ = "tool_plane:read"
+    TOOL_PLANE_MUTATE = "tool_plane:mutate"
+    TOOL_PLANE_ADMIN = "tool_plane:admin"
+
 
 class AuthContext:
     """Authentication context for the current request.
@@ -217,6 +223,9 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.TOOL_PLANE_READ,
+    Permissions.TOOL_PLANE_MUTATE,
+    Permissions.TOOL_PLANE_ADMIN,
 ]
 
 

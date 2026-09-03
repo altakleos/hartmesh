@@ -14,6 +14,7 @@ from langchain_core.tools import BaseTool, StructuredTool, tool
 from pydantic import BaseModel, Field
 
 from deerflow.mcp.tasks.runtime import set_mcp_task_submitter
+from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.tools.tools import get_available_tools
 
 # ---------------------------------------------------------------------------
@@ -231,3 +232,106 @@ def test_background_task_tools_follow_started_runtime_not_hot_config(mock_bash):
     assert {"list_background_tasks", "cancel_background_task"} <= started_names
     assert "list_background_tasks" not in stopped_names
     assert "cancel_background_task" not in stopped_names
+
+
+@patch("deerflow.tools.tools.is_host_bash_allowed", return_value=True)
+def test_accepted_tool_plane_filters_mcp_tools_by_server(mock_bash):
+    config = _make_minimal_config([])
+    alpha = tag_mcp_tool(
+        StructuredTool.from_function(
+            lambda: "alpha",
+            name="alpha_lookup",
+            description="Alpha lookup.",
+        ),
+        server_name="alpha",
+        transport="stdio",
+    )
+    beta = tag_mcp_tool(
+        StructuredTool.from_function(
+            lambda: "beta",
+            name="beta_lookup",
+            description="Beta lookup.",
+        ),
+        server_name="beta",
+        transport="http",
+    )
+    unbound = tag_mcp_tool(
+        StructuredTool.from_function(
+            lambda: "unbound",
+            name="unbound_lookup",
+            description="Missing source metadata.",
+        )
+    )
+    extensions = MagicMock()
+    extensions.get_enabled_mcp_servers.return_value = ["alpha", "beta"]
+
+    with (
+        patch("deerflow.tools.tools.BUILTIN_TOOLS", []),
+        patch(
+            "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+            return_value=extensions,
+        ),
+        patch(
+            "deerflow.mcp.cache.get_cached_mcp_tools",
+            return_value=[alpha, beta, unbound],
+        ),
+    ):
+        tools = get_available_tools(
+            app_config=config,
+            include_upload_tool=False,
+            allowed_mcp_server_ids=frozenset({"alpha"}),
+        )
+
+    assert [tool.name for tool in tools] == ["alpha_lookup"]
+
+
+@patch("deerflow.tools.tools.is_host_bash_allowed", return_value=True)
+def test_accepted_tool_plane_filters_mcp_snapshot_by_original_tool_allowlist(
+    mock_bash,
+):
+    config = _make_minimal_config([])
+    lookup = tag_mcp_tool(
+        StructuredTool.from_function(
+            lambda: "lookup",
+            name="search_lookup",
+            description="Search lookup.",
+        ),
+        server_name="search",
+        transport="http",
+        tool_name="lookup",
+    )
+    delete = tag_mcp_tool(
+        StructuredTool.from_function(
+            lambda: "delete",
+            name="search_delete",
+            description="Delete search record.",
+        ),
+        server_name="search",
+        transport="http",
+        tool_name="delete",
+    )
+
+    with patch("deerflow.tools.tools.BUILTIN_TOOLS", []):
+        tools = get_available_tools(
+            app_config=config,
+            include_upload_tool=False,
+            mcp_tools_snapshot=(lookup, delete),
+            allowed_mcp_server_ids=frozenset({"search"}),
+            allowed_mcp_tools_by_server={"search": frozenset({"lookup"})},
+        )
+
+    assert [tool.name for tool in tools] == ["search_lookup"]
+
+
+def test_accepted_mcp_server_ids_fail_closed_when_evidence_is_malformed():
+    from deerflow.tools.tools import accepted_mcp_server_ids_from_context
+
+    assert accepted_mcp_server_ids_from_context({}) is None
+    assert accepted_mcp_server_ids_from_context(
+        {
+            "accepted_tool_plane_revision": {
+                "effective_mcp_server_ids": ["alpha", "beta"],
+            }
+        }
+    ) == frozenset({"alpha", "beta"})
+    assert accepted_mcp_server_ids_from_context({"accepted_tool_plane_revision": {"effective_mcp_server_ids": "alpha"}}) == frozenset()

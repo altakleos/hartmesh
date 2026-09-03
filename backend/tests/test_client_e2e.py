@@ -81,6 +81,9 @@ def _make_e2e_config() -> AppConfig:
                 "use": "deerflow.sandbox.local:LocalSandboxProvider",
                 "allow_host_bash": True,
             },
+            # These compatibility tests exercise the legacy direct client
+            # mutation API. Governed deployments use the Gateway revision API.
+            "tool_plane": {"enabled": False},
         }
     )
 

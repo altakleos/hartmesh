@@ -40,7 +40,13 @@ def _status(*, ready: bool, live: int, reason: str | None = None):
     )
 
 
-def _coordinator(status, *, dependency_ready=True, run_store=None):
+def _coordinator(
+    status,
+    *,
+    dependency_ready=True,
+    run_store=None,
+    tool_plane_reason=None,
+):
     if run_store is None:
         run_store = SimpleNamespace(
             lease_clock_authority=LeaseClockAuthority.database_v1,
@@ -52,6 +58,9 @@ def _coordinator(status, *, dependency_ready=True, run_store=None):
     async def topology_dependencies():
         return dependency_ready and multi_gateway_run_store_ready(run_store)
 
+    async def tool_plane_readiness():
+        return tool_plane_reason
+
     return RuntimeReadinessCoordinator(
         health_monitor=_Health(),
         lifecycle_store=lambda: _Lifecycle(),
@@ -60,6 +69,7 @@ def _coordinator(status, *, dependency_ready=True, run_store=None):
         overall_timeout_seconds=1,
         topology_status=topology_status,
         topology_dependencies_ready=topology_dependencies,
+        tool_plane_readiness=tool_plane_readiness,
         clock=lambda: datetime(2026, 9, 1, tzinfo=UTC),
     )
 
@@ -112,3 +122,24 @@ async def test_process_clock_run_store_blocks_exact_two_readiness() -> None:
 
     assert snapshot.status == "not_ready"
     assert snapshot.reason_codes == ("topology_dependency_not_shared",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "tool_plane_bootstrap_required",
+        "unmanaged_drift",
+        "recovery_required",
+    ],
+)
+async def test_tool_plane_governance_failure_blocks_readiness(reason) -> None:
+    coordinator = _coordinator(
+        _status(ready=True, live=2),
+        tool_plane_reason=reason,
+    )
+
+    snapshot = await coordinator.readiness()
+
+    assert snapshot.status == "not_ready"
+    assert snapshot.reason_codes == (reason,)

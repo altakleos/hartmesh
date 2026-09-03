@@ -1846,6 +1846,14 @@ class TestMcpConfig:
         finally:
             tmp_path.unlink()
 
+    def test_governed_client_rejects_direct_mcp_update(self, client):
+        from deerflow.config.tool_plane_config import ToolPlaneConfig
+
+        client._app_config.tool_plane = ToolPlaneConfig(enabled=True)
+
+        with pytest.raises(RuntimeError, match="governed_revision_required"):
+            client.update_mcp_config({})
+
 
 # ---------------------------------------------------------------------------
 # Skills management
@@ -3394,8 +3402,8 @@ class TestInstallSkillSecurity:
                 with pytest.raises(ValueError, match="unsafe"):
                     client.install_skill(archive)
 
-    def test_symlinks_skipped_during_extraction(self, client, allow_skill_security_scan):
-        """Symlink entries in the archive are skipped (never written to disk)."""
+    def test_symlinks_rejected_during_extraction(self, client, allow_skill_security_scan):
+        """Symlink entries reject the whole inert candidate archive."""
         import stat as stat_mod
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -3419,11 +3427,11 @@ class TestInstallSkillSecurity:
                 patch("deerflow.skills.storage._default_skill_storage", local_storage),
                 patch("deerflow.client.get_or_new_user_skill_storage", lambda user_id, **kwargs: local_storage),
             ):
-                result = client.install_skill(archive)
+                with pytest.raises(ValueError, match="link or special-file"):
+                    client.install_skill(archive)
 
-            assert result["success"] is True
             installed = skills_root / "custom" / "sym-skill"
-            assert (installed / "SKILL.md").exists()
+            assert not installed.exists()
             assert not (installed / "sneaky_link").exists()
 
     def test_invalid_skill_name_rejected(self, client):

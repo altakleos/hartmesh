@@ -133,6 +133,20 @@ async def _skill_manage_impl(
         replace: Replacement text for patch.
         expected_count: Optional expected number of replacements for patch.
     """
+    context = runtime.context if runtime is not None else None
+    governed = isinstance(context, dict) and context.get("accepted_tool_plane_revision") is not None
+    if not governed:
+        from deerflow.config import get_app_config
+        from deerflow.config.tool_plane_config import (
+            governed_tool_plane_enabled,
+        )
+
+        try:
+            governed = governed_tool_plane_enabled(get_app_config())
+        except (FileNotFoundError, RuntimeError):
+            governed = False
+    if governed:
+        raise ValueError("Direct skill mutation is disabled for this run; stage, validate, and promote a governed revision instead.")
     name = SkillStorage.validate_skill_name(name)
     user_id = resolve_runtime_user_id(runtime)
     lock = _get_lock(user_id, name)

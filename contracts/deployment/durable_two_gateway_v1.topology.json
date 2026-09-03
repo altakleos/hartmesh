@@ -155,6 +155,16 @@
       "requirement": "Unclassified and single-replica-only background contributions fail before service startup."
     },
     {
+      "id": "governed_tool_plane_revisions",
+      "classification": "local_substitutable_store",
+      "authority": "tenant-scoped base and overlay revision rows, immutable compatibility attestations, and deployment-projected active material",
+      "required_adapter": "shared PostgreSQL ToolPlaneRevisionService in immutable mode plus one operator-attributed deployment revision",
+      "config_fields": ["tool_plane"],
+      "service_registrations": ["tool_plane_revision_service"],
+      "runtime_state_fields": ["tool_plane_revision_service"],
+      "requirement": "Gateways expose read-only status, bind one coherent promoted revision to admission, reject live mutations, and fail readiness until shared evidence matches immutable projection."
+    },
+    {
       "id": "memory_backend_and_caches",
       "classification": "process_local_cache_only",
       "authority": "none for run correctness; contextual memory remains explicitly non-durable",

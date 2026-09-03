@@ -1614,6 +1614,27 @@ def test_lark_install_requires_admin(monkeypatch, tmp_path):
     assert response.status_code == 403
 
 
+def test_lark_install_requires_governed_revision_when_service_is_active(monkeypatch, tmp_path):
+    config = _config(tmp_path / "skills")
+    app = _make_app(system_role="admin", config=config)
+    app.state.tool_plane_revision_service = SimpleNamespace(immutable=False)
+
+    def _should_not_install(*args, **kwargs):
+        raise AssertionError("legacy install must not bypass governance")
+
+    monkeypatch.setattr(
+        integrations_router,
+        "install_lark_integration",
+        _should_not_install,
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/integrations/lark/install")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "governed_revision_required"
+
+
 def test_lark_status_is_available_to_authenticated_users(monkeypatch, tmp_path):
     config = _config(tmp_path / "skills")
     app = _make_app(system_role="user", config=config)

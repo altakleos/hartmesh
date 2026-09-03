@@ -82,10 +82,19 @@ def build_boundary_credential_evidence(
 
     from app.gateway.auth.pat import PAT_ALLOWED_SCOPES
 
+    if auth_source == AUTH_SOURCE_PAT:
+        allowed_authorities = PAT_ALLOWED_SCOPES
+    else:
+        # Session/internal authority also covers authenticated management
+        # surfaces that are intentionally unavailable to PAT v1.
+        from app.gateway.authz import _ALL_PERMISSIONS
+
+        allowed_authorities = frozenset(_ALL_PERMISSIONS)
+
     try:
         canonical = canonicalize_authority_v1(
             permissions,
-            allowed=PAT_ALLOWED_SCOPES,
+            allowed=allowed_authorities,
         )
     except (TypeError, ValueError) as exc:
         raise CredentialEvidenceError("credential_evidence_unavailable") from exc

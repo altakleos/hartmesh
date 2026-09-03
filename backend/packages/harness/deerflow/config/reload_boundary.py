@@ -82,6 +82,7 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
         "McpTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "
         "and max_concurrent_polls are captured into the service instance and the background poller task is not rebuilt on config.yaml edits."
     ),
+    "tool_plane": ("ToolPlaneRevisionService binds its repository, validation policy, content store, and projection adapter once during Gateway startup; changes require a restart."),
     "subagent_runtime": ("the shared native-subagent admission controller and isolated execution loop are configured once during Gateway lifespan startup; changing process slots, queue policy, or queue bounds requires a restart."),
     "subagent_batches": ("the durable subagent batch service is constructed and started once during Gateway lifespan startup; scheduler limits, leases, and recovery behavior are captured by that service instance."),
     "run_ownership": (
