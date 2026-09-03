@@ -46,6 +46,7 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
         "Keyed native ingress receipts",
         "Canonical keyed replay",
         "Split identity and sealed Origin",
+        "Auditable credential evidence",
         "Trusted contributor and hydrated evidence",
         "Restrictive authorization and constraints",
         "Pinned agent and extension material",
@@ -89,6 +90,12 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
             "test_poison_receipt_dead_letters_without_exposing_exception_text",
             "test_response_loss_after_admission_replays_known_run_before_binding",
             "test_signed_route_reaches_real_runtime_and_redelivery_replays",
+        },
+        "Auditable credential evidence": {
+            "test_trusted_run_context_v4_binds_credential_and_reads_legacy_contexts",
+            "test_pat_acceptance_is_user_credential_not_acting_service",
+            "test_revoked_pat_cannot_submit_observe_control_or_export",
+            "test_conditional_cancel_paths_also_fail_closed_when_audit_is_unavailable",
         },
         "Trusted contributor and hydrated evidence": {
             "test_hydration_recomputes_bound_effective_and_trusted_evidence",

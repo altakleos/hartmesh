@@ -29,6 +29,7 @@ from deerflow_extension_api import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.runtime.idempotency import (
     REQUEST_DIGEST_VERSION,
     canonical_request_digest,
@@ -37,6 +38,7 @@ from app.runtime.invocation import InternalLaunchIntent
 from deerflow.extensions.contributors import ContributorHost, ContributorIndeterminateError
 from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.persistence.base import Base
+from deerflow.persistence.credential_audit import InMemoryCredentialAuditRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime.accepted_invocation import (
@@ -832,14 +834,21 @@ async def test_gateway_logs_only_redacted_contributor_diagnostic(
         )
     accepted, _material = _worker_accepted()
     monkeypatch.setattr(services, "resolve_agent_revision", lambda *_args, **_kwargs: accepted.agent_revision)
+    tenant_identity = TenantIdentityV1.from_canonical_id("local")
     request = SimpleNamespace(
-        state=SimpleNamespace(user=SimpleNamespace(id="user-1", system_role="member")),
+        state=SimpleNamespace(
+            auth_source=AUTH_SOURCE_SESSION,
+            user=SimpleNamespace(id="user-1", system_role="member"),
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(
                 extensions=SimpleNamespace(generation=7),
                 capability_manifest=SimpleNamespace(digest="d" * 64),
                 contributor_host=ContributorHost(registry.build()),
-                tenant_identity=TenantIdentityV1.from_canonical_id("local"),
+                tenant_identity=tenant_identity,
+                credential_audit_repo=InMemoryCredentialAuditRepository(
+                    tenant=tenant_identity.to_persisted_reference(),
+                ),
             )
         ),
     )

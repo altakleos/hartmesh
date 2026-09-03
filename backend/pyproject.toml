@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     # The Gateway imports public authorization contracts directly. Keep this
     # exact so its Capability Host and the harness implement one API version.
-    "deerflow-extension-api==0.13.0",
+    "deerflow-extension-api==0.13.1",
     "deerflow-harness",
     "deerflow-runtime-api==0.2.0",
     "fastapi>=0.115.0",

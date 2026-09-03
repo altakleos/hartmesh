@@ -37,7 +37,11 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
-from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
+from deerflow_extension_api import (
+    EffectiveSubjectV1,
+    InvocationIdentityV1,
+    VerifiedActorContextV1,
+)
 from fastapi import HTTPException, Request
 
 from deerflow.authz.principal import build_principal_from_context
@@ -140,6 +144,70 @@ def require_cancel_permission_if(request: Request, can_cancel: bool) -> None:
     auth = getattr(getattr(request, "state", None), "auth", None)
     if auth is not None and not auth.has_permission("runs", "cancel"):
         raise HTTPException(status_code=403, detail="Permission denied: runs:cancel")
+
+
+async def require_audited_cancel_permission_if(
+    request: Request,
+    can_cancel: bool,
+) -> None:
+    """Require current cancel authority and its durable control audit."""
+
+    if not can_cancel:
+        return
+    require_cancel_permission_if(request, can_cancel)
+    await require_audited_permission(
+        request,
+        "runs",
+        "cancel",
+        route_category="runs",
+    )
+
+
+async def require_audited_permission(
+    request: Request,
+    resource: str,
+    action: str,
+    *,
+    route_category: str,
+) -> VerifiedActorContextV1 | None:
+    """Recheck current authority, persist audit, and return the exact actor.
+
+    Router unit tests sometimes call an unwrapped handler with a request-like
+    ``SimpleNamespace``. Those calls have no ASGI scope and already bypass the
+    authentication decorators; preserve that explicit harness convention.
+    Shipped HTTP requests always carry a scope and must provide both current
+    authorization and auditable actor evidence.
+    """
+
+    if not isinstance(getattr(request, "scope", None), dict):
+        return None
+    auth = get_auth_context(request)
+    if auth is not None and not auth.has_permission(resource, action):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Permission denied: {resource}:{action}",
+        )
+    if auth is None or not auth.is_authenticated:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    from app.gateway.credential_evidence import (
+        CredentialEvidenceError,
+        record_required_credential_action,
+    )
+    from deerflow.persistence.credential_audit import (
+        CredentialAuditUnavailable,
+    )
+
+    try:
+        return await record_required_credential_action(
+            request,
+            action="control",
+            route_category=route_category,
+        )
+    except (CredentialAuditUnavailable, CredentialEvidenceError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Required audit record unavailable",
+        ) from exc
 
 
 _ALL_PERMISSIONS: list[str] = [

@@ -21,15 +21,17 @@ from starlette.testclient import TestClient
 import deerflow.persistence.models  # noqa: F401  (register every table)
 from app.gateway.auth_disabled import AUTH_SOURCE_PAT, AUTH_SOURCE_SESSION
 from app.gateway.auth_middleware import AuthMiddleware
-from app.gateway.authz import require_cancel_permission_if
+from app.gateway.authz import require_audited_cancel_permission_if
 from app.gateway.csrf_middleware import CSRFMiddleware
 from app.gateway.routers.auth import router as auth_router
 from app.gateway.run_models import RunCreateRequest
 from deerflow.config.authorization_config import AuthorizationConfig
 from deerflow.persistence.base import Base
 from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 TEST_JWT_SECRET = "test-pat-jwt-secret-0123456789abcdef"
+_TEST_TENANT = TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference()
 
 
 class _FakeProvider:
@@ -77,6 +79,10 @@ def _make_pat_app(with_pat_repo: bool = True):
     async def whoami(request: Request):
         return {"user_id": str(request.state.user.id), "auth_source": request.state.auth_source}
 
+    @app.get("/api/threads/credential-evidence")
+    async def credential_evidence(request: Request):
+        return request.state.credential_evidence.to_json()
+
     @app.get("/api/admin-check")
     async def admin_check(request: Request):
         from app.gateway.deps import is_admin_user
@@ -94,6 +100,24 @@ def _make_pat_app(with_pat_repo: bool = True):
     @app.delete("/api/threads/{thread_id}")
     async def thread_delete(request: Request):
         return {"deleted": True}
+
+    @app.post("/api/threads/{thread_id}/runs/{run_id}/cancel")
+    async def cancel_run(request: Request):
+        from app.gateway.authz import require_audited_permission
+
+        request.app.state.cancel_route_entered = True
+        await require_audited_permission(
+            request,
+            "runs",
+            "cancel",
+            route_category="runs",
+        )
+        request.app.state.cancel_mutated = True
+        return {"cancelled": True}
+
+    @app.get("/api/threads/{thread_id}/runs/{run_id}/artifacts/archive")
+    async def export_artifacts(request: Request):
+        return {"exported": True}
 
     # Mirrors the real stateless run entrypoint (routers/runs.py), including
     # the @require_permission decorator, so scope enforcement is exercised
@@ -113,7 +137,7 @@ def _make_pat_app(with_pat_repo: bool = True):
     @app.post("/api/threads/{thread_id}/runs/{run_id}/stream")
     @require_permission("runs", "read")
     async def cancel_then_stream(thread_id: str, run_id: str, request: Request, action: str | None = None):
-        require_cancel_permission_when_action(request, action)
+        await require_cancel_permission_when_action(request, action)
         return {"ok": True}
 
     # Mirrors the real GET-only join surface (thread_runs.py
@@ -138,7 +162,10 @@ def _make_pat_app(with_pat_repo: bool = True):
     @app.post("/api/threads/{thread_id}/runs")
     @require_permission("runs", "create")
     async def create_run(thread_id: str, body: RunCreateRequest, request: Request):
-        require_cancel_permission_if(request, body.multitask_strategy != "reject")
+        await require_audited_cancel_permission_if(
+            request,
+            body.multitask_strategy != "reject",
+        )
         return {"ok": True}
 
     return app
@@ -149,7 +176,10 @@ def pat_env(tmp_path, monkeypatch):
     """Engine + PAT repo + patched user provider; returns (client, repo)."""
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/pats.db", poolclass=NullPool)
     asyncio.run(_create_tables(engine))
-    repo = PersonalAccessTokenRepository(async_sessionmaker(engine, expire_on_commit=False))
+    repo = PersonalAccessTokenRepository(
+        async_sessionmaker(engine, expire_on_commit=False),
+        tenant=_TEST_TENANT,
+    )
 
     fake_provider = _FakeProvider(_fake_user("user-1"), _fake_user("user-2"), _fake_user("admin-1", system_role="admin"))
     monkeypatch.setattr("app.gateway.deps.get_local_provider", lambda: fake_provider)
@@ -220,6 +250,30 @@ def test_invalid_bearer_never_falls_back_to_session_cookie(client):
     assert response.json()["detail"] == "Invalid token"
 
 
+def test_pat_store_failure_is_generic_and_never_renders_bearer_material(
+    monkeypatch,
+):
+    raw_token = "dfp_secret-store-failure-marker"
+
+    async def fail_authentication(*_args, **_kwargs):
+        raise RuntimeError(f"driver included {raw_token}")
+
+    monkeypatch.setattr(
+        "app.gateway.auth.pat.authenticate_pat",
+        fail_authentication,
+    )
+    app = _make_pat_app()
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        response = test_client.get(
+            "/api/threads/whoami",
+            headers={"Authorization": f"Bearer {raw_token}"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Credential authentication unavailable"}
+    assert raw_token not in response.text
+
+
 def test_non_bearer_authorization_scheme_is_rejected(client):
     _session_cookie(client)
     response = client.get("/api/threads/whoami", headers={"Authorization": "Basic dXNlcjpwYXNz"})
@@ -248,6 +302,57 @@ def test_revoked_pat_is_rejected_immediately(client):
     client.cookies.clear()
     response = client.get("/api/threads/whoami", headers={"Authorization": f"Bearer {created['token']}"})
     assert response.status_code == 401
+
+    _session_cookie(client)
+    audit = client.get(f"/api/v1/auth/pats/{created['id']}/audit").json()
+    failures = [item for item in audit if item["action"] == "authentication_failed"]
+    assert failures[0]["reason_code"] == "credential_revoked"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("POST", "/api/threads/t1/runs", {}),
+        ("GET", "/api/threads/whoami", None),
+        ("POST", "/api/threads/t1/runs/r1/cancel", None),
+        (
+            "GET",
+            "/api/threads/t1/runs/r1/artifacts/archive",
+            None,
+        ),
+    ],
+)
+def test_revoked_pat_cannot_submit_observe_control_or_export(
+    client,
+    method,
+    path,
+    body,
+):
+    created = _create_pat(
+        client,
+        scopes=[
+            "threads:read",
+            "runs:create",
+            "runs:read",
+            "runs:cancel",
+        ],
+    )
+    revoked = client.delete(
+        f"/api/v1/auth/pats/{created['id']}",
+        headers={"X-CSRF-Token": client.cookies.get("csrf_token")},
+    )
+    assert revoked.status_code == 200
+
+    client.cookies.clear()
+    response = client.request(
+        method,
+        path,
+        headers={"Authorization": f"Bearer {created['token']}"},
+        json=body,
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid token"
 
 
 def test_pat_with_unresolvable_user_is_rejected(client, pat_env):
@@ -281,21 +386,179 @@ def test_pat_without_durable_store_is_rejected():
 
 
 def test_pat_scopes_intersect_user_permissions(client):
-    created = _create_pat(client, scopes=["runs:read"])
+    created = _create_pat(client, scopes=["runs:create"])
     client.cookies.clear()
     response = client.post("/api/threads/t1/runs/stream", headers={"Authorization": f"Bearer {created['token']}"})
     assert response.status_code == 200
     permissions = response.json()["permissions"]
-    assert "runs:read" in permissions
-    assert "runs:create" not in permissions
+    assert "runs:create" in permissions
+    assert "runs:read" not in permissions
     assert "threads:read" not in permissions
+
+
+def test_boundary_evidence_uses_pat_uuid_and_effective_intersection(client):
+    from deerflow_extension_api import effective_authority_digest_v1
+
+    created = _create_pat(
+        client,
+        scopes=["threads:read", "runs:read"],
+    )
+    client.cookies.clear()
+    response = client.get(
+        "/api/threads/credential-evidence",
+        headers={"Authorization": f"Bearer {created['token']}"},
+    )
+
+    assert response.status_code == 200
+    evidence = response.json()
+    assert evidence["method"] == "personal_access_token"
+    assert evidence["credential_ref"] == created["id"]
+    assert evidence["effective_authority_digest"] == effective_authority_digest_v1(("runs:read", "threads:read"))
+    assert evidence["authority_categories"] == ["runs", "threads"]
+    assert created["token"] not in repr(evidence)
+
+
+def test_boundary_evidence_for_session_has_no_invented_credential_reference(client):
+    from deerflow_extension_api import effective_authority_digest_v1
+
+    from app.gateway.authz import _ALL_PERMISSIONS
+
+    _session_cookie(client)
+    response = client.get("/api/threads/credential-evidence")
+
+    assert response.status_code == 200
+    evidence = response.json()
+    assert evidence["method"] == "session"
+    assert evidence["credential_ref"] is None
+    assert evidence["issued_at"] is not None
+    assert evidence["expires_at"] is not None
+    assert evidence["effective_authority_digest"] == effective_authority_digest_v1(_ALL_PERMISSIONS)
+
+
+def test_pat_route_scope_is_enforced_even_without_route_decorator(client):
+    created = _create_pat(client, scopes=["runs:read"])
+    client.cookies.clear()
+
+    response = client.get(
+        "/api/threads/whoami",
+        headers={"Authorization": f"Bearer {created['token']}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Required PAT scope is unavailable"
+
+
+def test_privileged_cancel_records_required_control_audit(client, pat_env):
+    _app, repo, _engine = pat_env
+    created = _create_pat(client, scopes=["runs:cancel"])
+    client.cookies.clear()
+
+    response = client.post(
+        "/api/threads/t1/runs/r1/cancel",
+        headers={"Authorization": f"Bearer {created['token']}"},
+    )
+
+    assert response.status_code == 200
+    _session_cookie(client)
+    audit = client.get(f"/api/v1/auth/pats/{created['id']}/audit").json()
+    assert "control" in {item["action"] for item in audit}
+
+
+def test_privileged_cancel_fails_inside_route_before_mutation_when_audit_unavailable(
+    client,
+    pat_env,
+    monkeypatch,
+):
+    _app, repo, _engine = pat_env
+    created = _create_pat(client, scopes=["runs:cancel"])
+
+    async def fail_control(**values):
+        if values.get("action") == "control":
+            raise OSError("audit database details")
+        return None
+
+    monkeypatch.setattr(repo.audit_repository, "record", fail_control)
+    client.cookies.clear()
+    response = client.post(
+        "/api/threads/t1/runs/r1/cancel",
+        headers={"Authorization": f"Bearer {created['token']}"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Required audit record unavailable"
+    assert "database" not in response.text
+    assert _app.state.cancel_route_entered is True
+    assert not hasattr(_app.state, "cancel_mutated")
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/threads/t1/runs/r1/stream?action=interrupt", None),
+        ("/api/threads/t1/runs", {"multitask_strategy": "rollback"}),
+    ],
+)
+def test_conditional_cancel_paths_also_fail_closed_when_audit_is_unavailable(
+    client,
+    pat_env,
+    monkeypatch,
+    path,
+    payload,
+):
+    _app, repo, _engine = pat_env
+    created = _create_pat(
+        client,
+        scopes=["runs:create", "runs:read", "runs:cancel"],
+    )
+
+    async def fail_control(**values):
+        if values.get("action") == "control":
+            raise OSError("Bearer dfp_must-not-escape")
+        return None
+
+    monkeypatch.setattr(repo.audit_repository, "record", fail_control)
+    client.cookies.clear()
+    response = client.post(
+        path,
+        headers={"Authorization": f"Bearer {created['token']}"},
+        json=payload,
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Required audit record unavailable"
+    assert "dfp_" not in response.text
+
+
+def test_best_effort_audit_failure_does_not_log_bearer_material(
+    client,
+    pat_env,
+    monkeypatch,
+    caplog,
+):
+    _app, repo, _engine = pat_env
+    created = _create_pat(client, scopes=["threads:read"])
+
+    async def fail_use(**_values):
+        raise RuntimeError(f"Bearer {created['token']}")
+
+    monkeypatch.setattr(repo.audit_repository, "record", fail_use)
+    client.cookies.clear()
+    with caplog.at_level("DEBUG"):
+        response = client.get(
+            "/api/threads/whoami",
+            headers={"Authorization": f"Bearer {created['token']}"},
+        )
+
+    assert response.status_code == 200
+    assert created["token"] not in caplog.text
+    assert "Bearer dfp_" not in caplog.text
 
 
 # ── CSRF posture (#4849 point 4) ──────────────────────────────────────────
 
 
 def test_bearer_request_skips_double_submit(client):
-    created = _create_pat(client)
+    created = _create_pat(client, scopes=["runs:create"])
     client.cookies.clear()  # no csrf_token cookie, no X-CSRF-Token header
     response = client.post("/api/threads/t1/runs/stream", headers={"Authorization": f"Bearer {created['token']}"})
     assert response.status_code == 200
@@ -357,6 +620,65 @@ def test_create_returns_show_once_token_and_list_hides_it(client):
     assert [entry["id"] for entry in entries] == [created["id"]]
     assert "token" not in entries[0]
     assert "token_digest" not in entries[0]
+
+
+def test_owner_can_read_bounded_safe_credential_audit(client):
+    created = _create_pat(client, name="private ci name", scopes=["threads:read"])
+    client.cookies.clear()
+    assert (
+        client.get(
+            "/api/threads/whoami",
+            headers={"Authorization": f"Bearer {created['token']}"},
+        ).status_code
+        == 200
+    )
+
+    _session_cookie(client, user_id="user-1")
+    response = client.get(f"/api/v1/auth/pats/{created['id']}/audit?limit=10")
+
+    assert response.status_code == 200
+    observations = response.json()
+    assert {item["action"] for item in observations} == {
+        "created",
+        "authenticated",
+    }
+    rendered = repr(observations)
+    assert created["token"] not in rendered
+    assert "private ci name" not in rendered
+    assert "token_digest" not in rendered
+
+
+def test_credential_audit_is_owner_scoped(client):
+    created = _create_pat(client, user_id="user-1")
+    _session_cookie(client, user_id="user-2")
+
+    response = client.get(f"/api/v1/auth/pats/{created['id']}/audit")
+
+    assert response.status_code == 404
+
+
+def test_owned_legacy_pat_with_no_audit_rows_returns_empty_history(
+    client,
+    pat_env,
+):
+    _app, _repo, engine = pat_env
+    created = _create_pat(client, user_id="user-1")
+
+    async def clear_audit() -> None:
+        from sqlalchemy import delete
+
+        from deerflow.persistence.credential_audit.model import (
+            CredentialAuditEventRow,
+        )
+
+        async with engine.begin() as connection:
+            await connection.execute(delete(CredentialAuditEventRow))
+
+    asyncio.run(clear_audit())
+    response = client.get(f"/api/v1/auth/pats/{created['id']}/audit")
+
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 def test_create_rejects_unknown_scope(client):
@@ -449,6 +771,58 @@ def test_expired_pat_rejected_at_middleware(client, pat_env):
     client.cookies.clear()
     response = client.get("/api/threads/whoami", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
+    _session_cookie(client)
+    pat_id = asyncio.run(repo.list_for_user("user-1"))[0]["id"]
+    audit = client.get(f"/api/v1/auth/pats/{pat_id}/audit").json()
+    assert {item["action"] for item in audit} >= {
+        "expired",
+        "authentication_failed",
+    }
+    assert {item["reason_code"] for item in audit if item["action"] in {"expired", "authentication_failed"}} == {"credential_expired"}
+
+
+def test_legacy_pat_with_unknown_stored_scope_fails_as_generic_invalid_token(
+    client,
+    pat_env,
+):
+    _app, repo, _engine = pat_env
+    from app.gateway.auth.pat import generate_pat_token, pat_token_digest
+
+    token = generate_pat_token()
+    asyncio.run(
+        repo.create(
+            user_id="user-1",
+            name="legacy-invalid-scope",
+            scopes=["runs:write"],
+            token_digest=pat_token_digest(token),
+        )
+    )
+    client.cookies.clear()
+
+    response = client.get(
+        "/api/threads/whoami",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid token"
+    assert "runs:write" not in response.text
+
+
+def test_stored_digest_is_not_a_bearer_credential(client, pat_env):
+    _app, repo, _engine = pat_env
+    created = _create_pat(client)
+    digest = asyncio.run(repo.list_for_user("user-1"))[0]["token_digest"]
+    client.cookies.clear()
+
+    response = client.get(
+        "/api/threads/whoami",
+        headers={"Authorization": f"Bearer {digest}"},
+    )
+
+    assert response.status_code == 401
+    assert digest not in response.text
+    assert created["token"] not in response.text
 
 
 def test_create_with_expiry_returns_expires_at(client):
@@ -483,6 +857,12 @@ def test_pat_default_denied_on_route_outside_pat_policy(client):
     assert response.status_code == 403
     assert "PAT" in response.json()["detail"]
 
+    _session_cookie(client)
+    audit = client.get(f"/api/v1/auth/pats/{created['id']}/audit").json()
+    denied = [item for item in audit if item["action"] == "authentication_failed"]
+    assert denied
+    assert denied[0]["reason_code"] == "scope_required"
+
 
 def test_session_cookie_reaches_route_that_denies_pat(client):
     """The default-deny is PAT-specific: the same route stays open to the
@@ -515,6 +895,34 @@ def test_pat_policy_does_not_pre_authorize_unimplemented_methods():
 
     assert is_pat_allowed_route("POST", "/api/threads") is True
     assert is_pat_allowed_route("GET", "/api/threads") is False
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "scope"),
+    [
+        ("POST", "/api/threads", "threads:write"),
+        ("POST", "/api/threads/search", "threads:read"),
+        ("GET", "/api/threads/t1", "threads:read"),
+        ("PATCH", "/api/threads/t1", "threads:write"),
+        ("DELETE", "/api/threads/t1", "threads:delete"),
+        ("POST", "/api/threads/t1/runs", "runs:create"),
+        ("GET", "/api/threads/t1/runs", "runs:read"),
+        ("POST", "/api/threads/t1/runs/r1/cancel", "runs:cancel"),
+        ("GET", "/api/threads/t1/runs/r1/events", "runs:read"),
+        ("POST", "/api/runs/wait", "runs:create"),
+    ],
+)
+def test_pat_route_contract_names_required_scope(method, path, scope):
+    from app.gateway.auth.pat import required_pat_scope
+
+    assert required_pat_scope(method, path) == scope
+
+
+def test_pat_route_contract_defaults_to_no_scope_and_denial():
+    from app.gateway.auth.pat import required_pat_scope
+
+    assert required_pat_scope("DELETE", "/api/memory") is None
+    assert required_pat_scope("POST", "/api/v1/auth/pats") is None
 
 
 def test_pat_runs_policy_admits_exactly_the_mounted_routes():
@@ -681,7 +1089,7 @@ def test_start_run_gates_mutating_strategies_at_the_choke_point():
     from app.gateway.services import start_run
 
     source = inspect.getsource(start_run)
-    assert "require_cancel_permission_if" in source
+    assert "require_audited_cancel_permission_if" in source
     assert "multitask_strategy" in source
 
 

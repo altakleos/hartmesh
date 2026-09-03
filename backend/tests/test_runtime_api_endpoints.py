@@ -821,6 +821,34 @@ def test_control_rejects_a_path_body_run_id_mismatch_before_mutation() -> None:
     assert response.json()["code"] == "invalid_request"
 
 
+def test_control_audit_failure_is_indeterminate_and_prevents_mutation() -> None:
+    marker = "audit-driver-secret-marker"
+    control_called = False
+
+    class Adapter:
+        async def control(self, _command):
+            nonlocal control_called
+            control_called = True
+            raise AssertionError("audit failure must prevent control mutation")
+
+    class UnavailableAudit:
+        async def record(self, **_values):
+            raise OSError(marker)
+
+    app = _app_with_adapter(Adapter())
+    app.state.credential_audit_repo = UnavailableAudit()
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/runtime/v1/invocations/run-1/control",
+            json=_cancel_payload(),
+        )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "indeterminate"
+    assert marker not in response.text
+    assert control_called is False
+
+
 def test_http_adapter_binds_the_current_gateway_principal_and_http_source(monkeypatch) -> None:
     from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
     from app.runtime.invocation import (

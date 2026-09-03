@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import require_audited_permission, require_permission
 from app.gateway.deps import get_current_user, get_mcp_task_repo, get_mcp_task_service
 from app.gateway.services import invocation_principal_from_request
 from deerflow.config.extensions_config import ExtensionsConfig
@@ -301,6 +301,12 @@ async def create_mcp_task(
                 }
             )[:48]
         )
+        await require_audited_permission(
+            request,
+            "threads",
+            "write",
+            route_category="mcp_tasks",
+        )
         created = await service.submit(
             driver_name=ORDINARY_MCP_TASK_DRIVER,
             request=TaskSubmitRequest(
@@ -367,6 +373,20 @@ async def cancel_mcp_task(
         # mcp_tasks.enabled=true. Recording cancel_requested_at without a
         # worker would acknowledge a cancellation nobody will ever perform.
         raise HTTPException(status_code=503, detail="MCP task cancellation worker is not running")
+    repository = get_mcp_task_repo(request)
+    existing = await repository.get(
+        task_id,
+        user_id=user_id,
+        tenant_digest=repository.tenant.digest,
+    )
+    if existing is None or existing["thread_id"] != thread_id:
+        raise HTTPException(status_code=404, detail="MCP task not found")
+    await require_audited_permission(
+        request,
+        "threads",
+        "write",
+        route_category="mcp_tasks",
+    )
     record = await service.cancel_task(
         task_id=task_id,
         thread_id=thread_id,

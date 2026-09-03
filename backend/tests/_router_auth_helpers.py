@@ -37,7 +37,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from app.gateway.auth.models import User
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
 from app.gateway.authz import AuthContext, Permissions
+from app.gateway.credential_evidence import build_boundary_credential_evidence
+from deerflow.persistence.credential_audit import InMemoryCredentialAuditRepository
 from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 # Default permission set granted to the stub user. Mirrors `_ALL_PERMISSIONS`
@@ -76,8 +79,14 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         user = self._user_factory()
+        auth_source = AUTH_SOURCE_INTERNAL if getattr(user, "system_role", None) == "internal" else AUTH_SOURCE_SESSION
         request.state.user = user
         request.state.auth = AuthContext(user=user, permissions=list(_STUB_PERMISSIONS))
+        request.state.auth_source = auth_source
+        request.state.credential_evidence = build_boundary_credential_evidence(
+            auth_source=auth_source,
+            permissions=_STUB_PERMISSIONS,
+        )
         return await call_next(request)
 
 
@@ -116,6 +125,9 @@ def make_authed_test_app(
     app.state.thread_store = repo
     app.state.runtime_readiness = _ReadyAdmissionFence()
     app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
+    app.state.credential_audit_repo = InMemoryCredentialAuditRepository(
+        tenant=app.state.tenant_identity.to_persisted_reference(),
+    )
 
     return app
 

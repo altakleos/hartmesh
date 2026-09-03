@@ -69,6 +69,15 @@ a different digest fails startup. A nonempty schema created before this
 feature fails with `tenant_schema_unbound`; the first request never infers its
 owner.
 
+Revision `0033_automation_identities` extends the same defense-in-depth binding
+to `personal_access_tokens`. New PAT rows always carry the frozen public
+reference and digest, and every digest lookup, list, revoke, last-used, and
+audit query compares them. The migration backfills PAT rows only from an
+already-bound singleton. The explicit offline binding command includes PATs in
+the same transaction; an unbound populated schema leaves their nullable legacy
+anchors empty and normal repository access fails closed. Existing PAT UUIDs and
+one-way token digests are not rewritten.
+
 Occupancy inspection is deliberately conservative: every populated table is
 tenant-bearing unless it is one of the narrow Alembic/checkpoint/cursor metadata
 tables. This includes extension-owned and otherwise unknown tables whose

@@ -461,6 +461,49 @@ async def test_cancel_uses_service_with_exact_user_and_thread_scope(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_cancel_audit_failure_prevents_service_mutation(monkeypatch) -> None:
+    repo = FakeRepository([_record()])
+    service = AsyncMock()
+    service.tracking_degraded_after_errors = 3
+    request = _request(repo)
+    request.app.state.mcp_task_service = service
+    request.app.state.mcp_tasks_available = True
+    monkeypatch.setattr(
+        mcp_tasks,
+        "get_current_user",
+        AsyncMock(return_value="user-1"),
+    )
+    audit = AsyncMock(
+        side_effect=HTTPException(
+            status_code=503,
+            detail="Required audit record unavailable",
+        )
+    )
+    monkeypatch.setattr(
+        mcp_tasks,
+        "require_audited_permission",
+        audit,
+        raising=False,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await mcp_tasks.cancel_mcp_task.__wrapped__(
+            thread_id="thread-1",
+            task_id="mcp-task-1",
+            request=request,
+        )
+
+    assert excinfo.value.status_code == 503
+    audit.assert_awaited_once_with(
+        request,
+        "threads",
+        "write",
+        route_category="mcp_tasks",
+    )
+    service.cancel_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cancel_rejected_when_worker_not_running(monkeypatch) -> None:
     repo = FakeRepository([_record()])
     service = AsyncMock()

@@ -11,9 +11,10 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 - **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
 
 **Runtime**:
-- One server-owned tenant is frozen at startup and reused across all durable
-  boundaries; see [docs/TENANT_IDENTITY.md](docs/TENANT_IDENTITY.md).
-- Honcho gets the frozen tenant projection; it is optional context, never durable authority (see the memory guide).
+- Tenant and credential evidence are server-owned at durable boundaries; see
+  [tenant](docs/TENANT_IDENTITY.md) and
+  [actor evidence](../docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
+- Honcho receives tenant context, never durable authority (see the memory guide).
 - HartMesh durable launches from HTTP, Scheduled Tasks, signed native channels,
   and embedded services all enter the application-owned `InvocationRuntime`.
   Admission seals identity, Origin, trusted context, constraints, agent revision,

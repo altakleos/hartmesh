@@ -112,6 +112,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         access_token = request.cookies.get("access_token")
         authorization = request.headers.get("authorization")
         pat_scopes: frozenset[str] = frozenset()
+        pat_record = None
+        session_payload = None
 
         # Non-public path: require session cookie
         if internal_user is not None:
@@ -127,20 +129,31 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # Auth-disabled mode is an operator override of all authentication,
             # so it stays ahead of the Bearer check (a stray Authorization
             # header from a proxy must not 401 an E2E sandbox).
-            from app.gateway.auth.pat import authenticate_pat, is_pat_allowed_route
+            from app.gateway.auth.pat import authenticate_pat
+            from app.gateway.credential_evidence import credential_route_category
 
             try:
-                user, pat_scopes = await authenticate_pat(request.app, authorization)
+                user, pat_scopes, pat_record = await authenticate_pat(
+                    request.app,
+                    authorization,
+                    route_category=credential_route_category(request.url.path),
+                )
             except HTTPException as exc:
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-            # Default-deny route boundary (#5041 review P1-1): scopes only
-            # constrain @require_permission routes, so any route outside the
-            # explicit PAT policy is closed to PAT callers outright — an
-            # all-scopes token must not reach undecorated mutation routes.
-            if not is_pat_allowed_route(request.method, get_request_route_path(request)):
+            except Exception:
+                # Driver and persistence exceptions can embed SQL parameters
+                # in their text. Fail closed without logging or reflecting the
+                # exception, preserving the non-oracular credential surface.
+                if is_runtime_api_path(request.url.path):
+                    return runtime_error_response(
+                        503,
+                        FailureCode.indeterminate,
+                    )
                 return JSONResponse(
-                    status_code=403,
-                    content={"detail": "PAT credentials are not permitted on this route"},
+                    status_code=503,
+                    content={
+                        "detail": "Credential authentication unavailable",
+                    },
                 )
             auth_source = AUTH_SOURCE_PAT
         elif access_token:
@@ -166,6 +179,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
                 user = get_auth_disabled_user()
                 auth_source = AUTH_SOURCE_AUTH_DISABLED
+            if auth_source == AUTH_SOURCE_SESSION:
+                from app.gateway.auth.jwt import TokenPayload, decode_token
+
+                decoded = decode_token(access_token)
+                if isinstance(decoded, TokenPayload):
+                    session_payload = decoded
         elif is_auth_disabled():
             user = get_auth_disabled_user()
             auth_source = AUTH_SOURCE_AUTH_DISABLED
@@ -201,6 +220,52 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # because they were resolved fresh from the owning user above.
             permissions = [permission for permission in permissions if permission in pat_scopes]
         request.state.auth = AuthContext(user=user, permissions=permissions)
+        from app.gateway.credential_evidence import (
+            CredentialEvidenceError,
+            build_boundary_credential_evidence,
+            credential_route_category,
+            record_credential_action_best_effort,
+        )
+
+        try:
+            request.state.credential_evidence = build_boundary_credential_evidence(
+                auth_source=auth_source,
+                permissions=permissions,
+                pat_record=pat_record,
+                session_payload=session_payload,
+            )
+        except CredentialEvidenceError:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Credential evidence unavailable"},
+            )
+
+        from app.gateway.auth.pat import required_pat_scope
+
+        required_scope = required_pat_scope(
+            request.method,
+            get_request_route_path(request),
+        )
+        route_category = credential_route_category(request.url.path)
+        if auth_source == AUTH_SOURCE_PAT and (required_scope is None or required_scope not in permissions):
+            await record_credential_action_best_effort(
+                request,
+                action="authentication_failed",
+                route_category=route_category,
+                reason_code="scope_required",
+            )
+            detail = "PAT credentials are not permitted on this route" if required_scope is None else "Required PAT scope is unavailable"
+            return JSONResponse(
+                status_code=403,
+                content={"detail": detail},
+            )
+
+        await record_credential_action_best_effort(
+            request,
+            action="authenticated",
+            route_category=route_category,
+        )
+
         token = set_current_user(user)
         try:
             return await call_next(request)

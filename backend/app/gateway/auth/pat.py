@@ -19,6 +19,11 @@ import re
 import secrets
 from typing import Any
 
+from deerflow_extension_api import (
+    AUTHORITY_ALIASES_V1,
+    canonicalize_authority_v1,
+)
+
 PAT_TOKEN_PREFIX = "dfp_"
 PAT_RANDOM_BYTES = 32
 # Best-effort ``last_used_at`` writes are throttled per token so high-volume
@@ -46,13 +51,20 @@ PAT_MAX_NAME_LENGTH = 128
 # PAT holding a single read scope. A route is reachable by PAT only when it
 # is explicitly listed here, and only together with the thread/run lifecycle
 # the v1 scopes govern; everything else answers 403 regardless of scopes.
-_PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
-    (frozenset({"POST"}), re.compile(r"^/api/threads$")),
-    (frozenset({"POST"}), re.compile(r"^/api/threads/search$")),
-    (frozenset({"GET", "PATCH", "DELETE"}), re.compile(r"^/api/threads/[^/]+$")),
-    (frozenset({"GET", "PUT", "DELETE"}), re.compile(r"^/api/threads/[^/]+/goal$")),
-    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/state$")),
-    (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/(compact|history|branches)$")),
+PAT_ROUTE_SCOPE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    ("POST", re.compile(r"^/api/threads$"), "threads:write"),
+    ("POST", re.compile(r"^/api/threads/search$"), "threads:read"),
+    ("GET", re.compile(r"^/api/threads/[^/]+$"), "threads:read"),
+    ("PATCH", re.compile(r"^/api/threads/[^/]+$"), "threads:write"),
+    ("DELETE", re.compile(r"^/api/threads/[^/]+$"), "threads:delete"),
+    ("GET", re.compile(r"^/api/threads/[^/]+/goal$"), "threads:read"),
+    ("PUT", re.compile(r"^/api/threads/[^/]+/goal$"), "threads:write"),
+    ("DELETE", re.compile(r"^/api/threads/[^/]+/goal$"), "threads:write"),
+    ("GET", re.compile(r"^/api/threads/[^/]+/state$"), "threads:read"),
+    ("POST", re.compile(r"^/api/threads/[^/]+/state$"), "threads:write"),
+    ("POST", re.compile(r"^/api/threads/[^/]+/compact$"), "threads:write"),
+    ("POST", re.compile(r"^/api/threads/[^/]+/history$"), "threads:read"),
+    ("POST", re.compile(r"^/api/threads/[^/]+/branches$"), "threads:write"),
     # Runs subtree: enumerated per implemented subroute instead of a
     # ``runs(/.*)?`` wildcard, so a route added under /runs is default-denied
     # until explicitly listed — the same no-dead-methods precision the
@@ -60,25 +72,33 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     # matches any single segment; the POST-only collection endpoints sharing
     # that depth (stream, wait, regenerate, edit-regenerate) are excluded
     # from the GET run-id rule so no unimplemented method is pre-authorized.
-    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/runs$")),
+    ("GET", re.compile(r"^/api/threads/[^/]+/runs$"), "runs:read"),
+    ("POST", re.compile(r"^/api/threads/[^/]+/runs$"), "runs:create"),
     (
-        frozenset({"POST"}),
+        "POST",
         re.compile(r"^/api/threads/[^/]+/runs/(stream|wait|regenerate/prepare|edit-regenerate/prepare)$"),
+        "runs:create",
     ),
     (
-        frozenset({"GET"}),
+        "GET",
         re.compile(r"^/api/threads/[^/]+/runs/(?!stream$|wait$|regenerate$|edit-regenerate$)[^/]+$"),
+        "runs:read",
     ),
-    (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/runs/[^/]+/cancel$")),
+    ("POST", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/cancel$"), "runs:cancel"),
     (
-        frozenset({"GET"}),
+        "GET",
         re.compile(r"^/api/threads/[^/]+/runs/[^/]+/(join|messages|events|workspace-changes)$"),
+        "runs:read",
     ),
-    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/runs/[^/]+/artifacts/archive$")),
-    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/runs/[^/]+/stream$")),
-    (frozenset({"POST"}), re.compile(r"^/api/runs/(stream|wait)$")),
-    (frozenset({"GET"}), re.compile(r"^/api/runs/[^/]+/(messages|feedback)$")),
+    ("GET", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/artifacts/archive$"), "runs:read"),
+    ("POST", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/artifacts/archive$"), "runs:read"),
+    ("GET", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/stream$"), "runs:read"),
+    ("POST", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/stream$"), "runs:read"),
+    ("POST", re.compile(r"^/api/runs/(stream|wait)$"), "runs:create"),
+    ("GET", re.compile(r"^/api/runs/[^/]+/(messages|feedback)$"), "runs:read"),
 )
+
+PAT_AUTHORITY_ALIASES_V1 = AUTHORITY_ALIASES_V1
 
 _BASE62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
@@ -89,8 +109,18 @@ def is_pat_allowed_route(method: str, path: str) -> bool:
     Trailing slashes are normalized away so the mounted route and its
     redirect-style twin resolve identically.
     """
+    return required_pat_scope(method, path) is not None
+
+
+def required_pat_scope(method: str, path: str) -> str | None:
+    """Return the one checked-in scope required by a PAT-enabled route."""
+
     normalized = path.rstrip("/") or "/"
-    return any(method in methods and pattern.match(normalized) for methods, pattern in _PAT_ROUTE_RULES)
+    normalized_method = method.upper()
+    for rule_method, pattern, scope in PAT_ROUTE_SCOPE_RULES:
+        if normalized_method == rule_method and pattern.match(normalized):
+            return scope
+    return None
 
 
 @functools.cache
@@ -154,10 +184,17 @@ def extract_bearer_token(authorization: str | None) -> str | None:
     return value.strip()
 
 
-async def authenticate_pat(app: Any, authorization: str | None) -> tuple[Any, frozenset[str]]:
+async def authenticate_pat(
+    app: Any,
+    authorization: str | None,
+    *,
+    route_category: str = "other",
+) -> tuple[Any, frozenset[str], dict[str, Any]]:
     """Validate the Bearer credential and resolve its owning user.
 
-    Returns ``(user, scopes)``. Every token-verdict failure mode — malformed
+    Returns ``(user, scopes, record)``. The bounded record carries the stable
+    PAT UUID and safe timestamps needed for credential evidence; it never
+    contains the bearer value. Every token-verdict failure mode — malformed
     token, unknown/revoked/expired token, PAT store not configured, missing
     owning user — raises the same generic 401 so responses cannot serve as an
     oracle on which check failed. Infrastructure errors (store I/O failures)
@@ -165,15 +202,81 @@ async def authenticate_pat(app: Any, authorization: str | None) -> tuple[Any, fr
     """
     from fastapi import HTTPException
 
+    pat_repo = getattr(app.state, "pat_repo", None)
     token = extract_bearer_token(authorization)
     if not token or not token.startswith(PAT_TOKEN_PREFIX):
+        if pat_repo is not None:
+            await pat_repo.record_audit_best_effort(
+                method="personal_access_token",
+                action="authentication_failed",
+                credential_ref=None,
+                actor_digest=None,
+                authority_digest=None,
+                route_category=route_category,
+                reason_code="credential_invalid",
+            )
         raise HTTPException(status_code=401, detail="Invalid token")
-    pat_repo = getattr(app.state, "pat_repo", None)
     if pat_repo is None:
         raise HTTPException(status_code=401, detail="Invalid token")
-    record = await pat_repo.get_active_by_digest(pat_token_digest(token))
-    if record is None or not digest_matches(record.get("token_digest"), token):
+    lookup = await pat_repo.resolve_for_authentication(pat_token_digest(token))
+    record = lookup.record
+    if lookup.failure_reason is not None or record is None:
+        from deerflow_extension_api import effective_authority_digest_v1
+
+        audit_identity = None if record is None else pat_repo.audit_identity_for_record(record)
+        credential_ref = None if audit_identity is None else audit_identity.credential_ref
+        actor_digest = None if audit_identity is None else audit_identity.actor_digest
+        authority_digest = None
+        if record is not None:
+            try:
+                authority_digest = effective_authority_digest_v1(validate_scopes(record.get("scopes")))
+            except (TypeError, ValueError):
+                pass
+        if lookup.failure_reason == "credential_expired":
+            await pat_repo.record_audit_best_effort(
+                method="personal_access_token",
+                action="expired",
+                credential_ref=credential_ref,
+                actor_digest=actor_digest,
+                authority_digest=authority_digest,
+                route_category=route_category,
+                reason_code="credential_expired",
+            )
+        await pat_repo.record_audit_best_effort(
+            method="personal_access_token",
+            action="authentication_failed",
+            credential_ref=credential_ref,
+            actor_digest=actor_digest,
+            authority_digest=authority_digest,
+            route_category=route_category,
+            reason_code=lookup.failure_reason or "credential_invalid",
+        )
         raise HTTPException(status_code=401, detail="Invalid token")
+    if not digest_matches(record.get("token_digest"), token):
+        await pat_repo.record_audit_best_effort(
+            method="personal_access_token",
+            action="authentication_failed",
+            credential_ref=None,
+            actor_digest=None,
+            authority_digest=None,
+            route_category=route_category,
+            reason_code="credential_invalid",
+        )
+        raise HTTPException(status_code=401, detail="Invalid token")
+    try:
+        canonical_scopes = validate_scopes(record.get("scopes"))
+    except (TypeError, ValueError):
+        audit_identity = pat_repo.audit_identity_for_record(record)
+        await pat_repo.record_audit_best_effort(
+            method="personal_access_token",
+            action="authentication_failed",
+            credential_ref=audit_identity.credential_ref,
+            actor_digest=audit_identity.actor_digest,
+            authority_digest=None,
+            route_category=route_category,
+            reason_code="credential_invalid",
+        )
+        raise HTTPException(status_code=401, detail="Invalid token") from None
     from app.gateway.deps import get_local_provider
 
     user = await get_local_provider().get_user(str(record["user_id"]))
@@ -181,17 +284,41 @@ async def authenticate_pat(app: Any, authorization: str | None) -> tuple[Any, fr
         # The owning user was deleted or became unresolvable; the token is
         # dead even though its row survives (deleting a user revokes their
         # PATs, without needing a FK cascade).
+        from deerflow_extension_api import effective_authority_digest_v1
+
+        audit_identity = pat_repo.audit_identity_for_record(record)
+
+        await pat_repo.record_audit_best_effort(
+            method="personal_access_token",
+            action="authentication_failed",
+            credential_ref=audit_identity.credential_ref,
+            actor_digest=audit_identity.actor_digest,
+            authority_digest=effective_authority_digest_v1(canonical_scopes),
+            route_category=route_category,
+            reason_code="credential_invalid",
+        )
         raise HTTPException(status_code=401, detail="Invalid token")
     await pat_repo.touch_last_used(str(record["id"]))
-    return user, frozenset(record.get("scopes") or ())
+    return user, frozenset(canonical_scopes), record
 
 
 def validate_scopes(scopes: list[str]) -> list[str]:
     """Validate a creation-time scope list; returns the deduplicated order."""
-    unknown = sorted(set(scopes) - PAT_ALLOWED_SCOPES)
-    if unknown:
-        raise ValueError(f"Unknown PAT scopes: {', '.join(unknown)}")
-    deduplicated = sorted(set(scopes))
+    if not isinstance(scopes, list) or any(not isinstance(scope, str) for scope in scopes):
+        raise ValueError("PAT scopes must be a list of identifiers")
+    try:
+        deduplicated = list(
+            canonicalize_authority_v1(
+                scopes,
+                aliases=PAT_AUTHORITY_ALIASES_V1,
+                allowed=PAT_ALLOWED_SCOPES,
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        unknown = sorted(scope for scope in set(scopes) if scope not in PAT_ALLOWED_SCOPES and scope not in PAT_AUTHORITY_ALIASES_V1)
+        if unknown:
+            raise ValueError(f"Unknown PAT scopes: {', '.join(unknown)}") from exc
+        raise
     if not deduplicated:
         raise ValueError("A PAT must request at least one scope")
     return deduplicated

@@ -93,7 +93,22 @@ never returns digests or raw tokens.
 DELETE /api/v1/auth/pats/{pat_id}
 ```
 
-Revocation is immediate.
+Revocation commits a tenant-scoped tombstone. A request whose authentication
+lookup completed before that commit may finish; every later lookup is denied.
+Historical accepted-run evidence is retained but grants no new access.
+
+#### Read Token Audit
+
+```http
+GET /api/v1/auth/pats/{pat_id}/audit?limit=50
+```
+
+Requires an interactive session and ownership of the tenant-bound PAT. `limit`
+is `1`–`100`. The response contains bounded daily aggregates with the public
+credential reference, pseudonymous actor digest, authentication method,
+authority digest, coarse action/route/reason, timestamps, and count. It never
+returns the PAT name, raw token, stored token digest, headers, request body, or
+IP address. SQL audit retention defaults to 90 days.
 
 ### PAT Constraints
 
@@ -114,7 +129,8 @@ Revocation is immediate.
   `regenerate/prepare`, and `edit-regenerate/prepare` collection endpoints,
   `GET /api/threads/{thread_id}/runs/{run_id}` plus its `cancel` (POST),
   `join`/`messages`/`events`/`workspace-changes` (GET), and
-  `GET|POST .../runs/{run_id}/stream`), plus `POST /api/runs/stream|wait` and
+  `GET|POST .../runs/{run_id}/stream`, plus
+  `GET|POST .../runs/{run_id}/artifacts/archive`), plus `POST /api/runs/stream|wait` and
   `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
   denied until explicitly added to the policy.
   Every other authenticated route — memory, agents, models, MCP/skills
@@ -126,7 +142,14 @@ Revocation is immediate.
   an admin. This includes extension-contributed admin routes: the extension
   principal projection suppresses every admin signal for PAT callers.
 - Revoking or deleting the owning user invalidates their PATs on the next
-  request.
+  authentication lookup. Unknown, expired, revoked, cross-tenant, and malformed
+  candidates share the same non-oracular `401` response.
+- Every new durable invocation binds a server-created credential method,
+  optional PAT UUID reference, and canonical effective-authority digest to its
+  existing identity/Origin/tenant evidence. Required audit failure returns 503
+  before durable admission or any cancel-capable control; ordinary use/failure
+  audit refresh is best-effort. See the
+  [full contract](../../docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
 
 ## LangGraph-compatible API
 

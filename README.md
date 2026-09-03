@@ -380,6 +380,24 @@ the additive `run.terminal.v1` and bounded correlated failure records provide a
 safe terminal projection without persisting provider exception messages or
 tracebacks.
 
+### Auditable automation identities
+
+Every newly accepted durable invocation binds a server-created, secret-free
+credential projection to the existing principal, optional acting service,
+Origin, and tenant evidence. Browser sessions, PATs, authenticated internal
+services, and supported channels share the same versioned contract. A PAT
+remains a user credential and uses its existing random UUID as the public
+reference; raw tokens, token digests, cookie values, credential names, and
+service secrets never enter run or credential-audit evidence.
+
+PAT access is explicit and default-deny per method/path/scope. Its scopes are
+intersected with the owner's current permissions on every request. Revocation
+does not rewrite historical evidence, but a revoked or expired PAT cannot
+submit, observe, control, replay-disclose, or export new data. Required audit
+writes close durable admission and privileged run/runtime/MCP/batch/scheduler
+controls; routine use/failure observations are bounded daily aggregates. See the
+[actor, route, replay, and retention contract](docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
+
 ### Policy that follows execution
 
 HartMesh keeps effective subject, acting service, and source evidence distinct.
@@ -554,7 +572,7 @@ This repository does not yet document a HartMesh sync cadence, API/configuration
 
 Treat these hashes as provenance, not a maintenance promise.
 
-The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, `0024_tool_receipt_idempotency` fences receipt appends, `0025_tenant_identity` binds the schema tenant, `0026_mcp_task_lineage` seals MCP lineage, `0027_multi_gateway_topology` adds exact-two topology registration plus persisted scheduler generations, `0028_mcp_request_commitment` adds private exact-request MCP replay commitments while cleaning up superseded indexes, `0029_run_recovery_policy` adds immutable run recovery policy, bounded recovery payloads, and database-ordered admission cursors, `0030_run_delivery_owner_backfill` repairs unowned legacy delivery receipts only when their run, thread, and tenant anchors select one authoritative owner, `0031_merge_upstream_0017` joins the personal-access-token branch, and `0032_subagent_batch_evidence` binds durable batches to accepted parent evidence and append-only fenced attempts.
+The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, `0024_tool_receipt_idempotency` fences receipt appends, `0025_tenant_identity` binds the schema tenant, `0026_mcp_task_lineage` seals MCP lineage, `0027_multi_gateway_topology` adds exact-two topology registration plus persisted scheduler generations, `0028_mcp_request_commitment` adds private exact-request MCP replay commitments while cleaning up superseded indexes, `0029_run_recovery_policy` adds immutable run recovery policy, bounded recovery payloads, and database-ordered admission cursors, `0030_run_delivery_owner_backfill` repairs unowned legacy delivery receipts only when their run, thread, and tenant anchors select one authoritative owner, `0031_merge_upstream_0017` joins the personal-access-token branch, `0032_subagent_batch_evidence` binds durable batches to accepted parent evidence and append-only fenced attempts, and `0033_automation_identities` tenant-binds PATs and adds bounded credential audit evidence.
 
 PostgreSQL operators should quiesce writers and back up data before rollback; use the migration guidance in [backend/AGENTS.md](backend/AGENTS.md).
 

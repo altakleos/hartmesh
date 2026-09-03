@@ -541,6 +541,58 @@ async def test_pause_and_resume_scheduled_task_update_status():
 
 
 @pytest.mark.asyncio
+async def test_pause_audit_failure_prevents_scheduled_task_mutation(monkeypatch):
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-audit",
+        user_id="user-1",
+        thread_id="thread-1",
+        context_mode="reuse_thread",
+        assistant_id="lead_agent",
+        title="Daily summary",
+        prompt="Summarize thread",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    request = SimpleNamespace()
+    user = SimpleNamespace(id="user-1")
+    audit = AsyncMock(
+        side_effect=HTTPException(
+            status_code=503,
+            detail="Required audit record unavailable",
+        )
+    )
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "get_scheduled_task_repo",
+        lambda _request: repo,
+    )
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "get_optional_user_from_request",
+        AsyncMock(return_value=user),
+    )
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "require_audited_permission",
+        audit,
+        raising=False,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await call_unwrapped(
+            scheduled_tasks.pause_scheduled_task,
+            task_id=task["id"],
+            request=request,
+        )
+
+    assert excinfo.value.status_code == 503
+    assert (await repo.get(task["id"], user_id="user-1"))["status"] == "enabled"
+
+
+@pytest.mark.asyncio
 async def test_pause_cancels_waiting_occurrence_before_pausing_task():
     repo = _Repo()
     task = await repo.create(

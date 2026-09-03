@@ -63,7 +63,7 @@ def test_extension_metadata_cannot_opt_a_tool_into_recovery() -> None:
 
 
 def test_extension_api_013_tool_descriptor_wire_shape_is_unchanged() -> None:
-    assert version("deerflow-extension-api") == "0.13.0"
+    assert version("deerflow-extension-api") == "0.13.1"
     assert tuple(field.name for field in fields(ToolDescriptor)) == (
         "name",
         "description_hash",

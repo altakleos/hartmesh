@@ -173,6 +173,60 @@ async def test_cancel_requires_running_worker_and_exact_owner(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "extra"),
+    [
+        ("pause_batch", {}),
+        ("resume_batch", {}),
+        ("cancel_batch", {}),
+        ("retry_batch_item", {"item_id": "item-1"}),
+    ],
+)
+async def test_every_batch_control_fails_before_mutation_when_audit_fails(
+    monkeypatch,
+    handler,
+    extra,
+) -> None:
+    repo = Repository()
+    service = AsyncMock()
+    request = _request(repo, service=service)
+    monkeypatch.setattr(
+        subagent_batches,
+        "get_current_user",
+        AsyncMock(return_value="user-1"),
+    )
+    audit = AsyncMock(
+        side_effect=HTTPException(
+            status_code=503,
+            detail="Required audit record unavailable",
+        )
+    )
+    monkeypatch.setattr(
+        subagent_batches,
+        "require_audited_permission",
+        audit,
+        raising=False,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await getattr(subagent_batches, handler).__wrapped__(
+            thread_id="thread-1",
+            batch_id="batch-1",
+            request=request,
+            **extra,
+        )
+
+    assert excinfo.value.status_code == 503
+    audit.assert_awaited_once_with(
+        request,
+        "threads",
+        "write",
+        route_category="subagent_batches",
+    )
+    service.cancel_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_observations_use_the_same_owner_and_thread_scope(
     monkeypatch,
 ) -> None:

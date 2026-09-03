@@ -107,11 +107,11 @@
     {
       "id": "thread_feedback_and_user_metadata",
       "classification": "local_substitutable_store",
-      "authority": "thread metadata, users, sessions, feedback, personal access tokens, and ownership projections",
+      "authority": "thread metadata, users, sessions, feedback, personal access tokens, credential audits, and ownership projections",
       "required_adapter": "shared PostgreSQL repositories",
       "config_fields": ["auth", "database"],
-      "service_registrations": ["thread_store", "feedback_repo", "personal_access_token_repo", "user_store"],
-      "runtime_state_fields": ["feedback_repo", "pat_repo", "service_observation_visibility_resolver", "thread_store"],
+      "service_registrations": ["thread_store", "feedback_repo", "personal_access_token_repo", "credential_audit_repo", "user_store"],
+      "runtime_state_fields": ["credential_audit_repo", "feedback_repo", "pat_repo", "service_observation_visibility_resolver", "thread_store"],
       "requirement": "Filesystem and process-memory metadata cannot decide visibility or lifecycle."
     },
     {

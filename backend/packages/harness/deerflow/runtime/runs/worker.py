@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
-from deerflow_extension_api import TenantReferenceV1
+from deerflow_extension_api import TenantReferenceV1, VerifiedActorContextV1
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
@@ -901,8 +901,13 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         DEERFLOW_TRACE_METADATA_KEY,
         "__deerflow_accepted_parent_batch_context_v1",
+        "__deerflow_recovery_executor_v1",
     }
 )
+
+# Safe current-executor evidence for an exact-two recovery. This never
+# replaces the accepted admission actor stored in TrustedRunContextV1.
+RECOVERY_EXECUTOR_CONTEXT_KEY: Final[str] = "__deerflow_recovery_executor_v1"
 
 
 def _build_runtime_context(
@@ -977,6 +982,7 @@ def _build_runtime_context(
     runtime_ctx.pop(INVOCATION_IDENTITY_CONTEXT_KEY, None)
     runtime_ctx.pop(INVOCATION_ORIGIN_CONTEXT_KEY, None)
     runtime_ctx.pop(TRUSTED_RUN_CONTEXT_KEY, None)
+    runtime_ctx.pop(RECOVERY_EXECUTOR_CONTEXT_KEY, None)
     runtime_ctx.pop(TENANT_REFERENCE_CONTEXT_KEY, None)
     from deerflow.runtime.assembly_evidence import strip_assembly_evidence_requirement
 
@@ -1040,6 +1046,19 @@ class RunContext:
         ]
         | None
     ) = field(default=None, repr=False)
+    # Exact-two recovery only: the currently authenticated internal executor,
+    # separate from the original accepted actor in trusted_context.
+    recovery_executor: VerifiedActorContextV1 | None = field(
+        default=None,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.recovery_executor is not None and not isinstance(
+            self.recovery_executor,
+            VerifiedActorContextV1,
+        ):
+            raise TypeError("recovery_executor must be VerifiedActorContextV1 or None")
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -1702,6 +1721,10 @@ async def run_agent(
             extensions,
             ctx.authorization_provider,
         )
+        if ctx.recovery_executor is not None:
+            if not record.execution_takeover:
+                raise ValueError("recovery executor evidence requires execution takeover")
+            runtime_ctx[RECOVERY_EXECUTOR_CONTEXT_KEY] = ctx.recovery_executor
         deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording

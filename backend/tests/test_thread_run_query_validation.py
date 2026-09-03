@@ -1,6 +1,6 @@
 """Query validation for thread message and run event read endpoints."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -77,7 +77,13 @@ def test_read_endpoints_accept_positive_limits_and_hit_store():
     assert run_messages.status_code == 200
     assert run_events.status_code == 200
     assert len(thread_messages.json()) == 1
-    app.state.run_event_store.list_messages.assert_awaited_once_with("thread-1", limit=thread_runs.THREAD_MESSAGE_LEGACY_SCAN_BATCH, before_seq=None, user_id=None)
+    app.state.run_event_store.list_messages.assert_awaited_once_with(
+        "thread-1",
+        limit=thread_runs.THREAD_MESSAGE_LEGACY_SCAN_BATCH,
+        before_seq=None,
+        user_id=ANY,
+    )
+    assert app.state.run_event_store.list_messages.await_args.kwargs["user_id"]
     app.state.run_event_store.list_messages_by_run.assert_awaited_once_with(
         "thread-1",
         "run-1",

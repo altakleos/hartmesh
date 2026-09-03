@@ -1,16 +1,17 @@
 ### Durable Invocation Boundary
 
 Gateway-owned `InvocationRuntime` is the only durable admission module. Its
-accepted record binds the effective subject/acting service, sealed Origin,
-trusted context, restrictive constraints, pinned agent/extension revision, and
-immutable effective skills. Start authorization happens before admission; a
-known external key first passes current visibility/observe authorization and
+accepted record binds the effective subject/acting service, sealed Origin, v4
+trusted context with credential evidence, restrictive constraints, pinned
+agent/extension revision, and immutable effective skills. Start authorization
+happens before admission; a known external key first passes current
+visibility/observe authorization and
 must match the stored request evidence. State changes and lifecycle events are
 transactional, cancellation is fenced, and the server-selected recovery policy
-is persisted at first admission. `terminalize_v1` remains the default. The
-candidate-only `exact_two_takeover_v1` schema/coordinator is dormant: Gateway's
-eligibility gate rejects every execution-takeover claim before owner CAS, regardless
-of its process-local environment flag. Expired exact-two rows stay fail-closed.
+persists at admission; recovery uses a distinct audited executor. `terminalize_v1`
+remains the default. Candidate `exact_two_takeover_v1` stays dormant: Gateway
+rejects every execution-takeover claim before owner CAS. Expired exact-two rows
+stay fail-closed.
 Future activation requires the linearizable authority and reconstructible
 checkpoint/event/delivery state defined in the multi-Gateway qualification
 guide; existing markers and fault barriers do not constitute support.

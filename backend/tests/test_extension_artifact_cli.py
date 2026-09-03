@@ -22,7 +22,7 @@ def _project_with_empty_manifest(tmp_path: Path, monkeypatch) -> tuple[Path, Pat
     )
     (backend / "uv.lock").write_text("version = 1\n", encoding="utf-8")
     lock = ExtensionSourceLockV1.create(
-        extension_api_version="0.13.0",
+        extension_api_version="0.13.1",
         entries=(),
     )
     source_lock_path = backend / "extensions.lock.json"

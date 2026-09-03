@@ -25,7 +25,7 @@ from deerflow_runtime_api import (
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.gateway.authz import get_auth_context
+from app.gateway.authz import get_auth_context, require_audited_permission
 from app.gateway.deps import get_current_user, require_admin_user
 from app.gateway.runtime_http import runtime_error_response
 from app.gateway.services import (
@@ -405,6 +405,18 @@ async def control_invocation(
         return parsed
     if parsed.run_id != run_id:
         return runtime_error_response(422, FailureCode.invalid_request)
+    try:
+        await require_audited_permission(
+            request,
+            "runs",
+            "cancel",
+            route_category="runtime",
+        )
+    except HTTPException as exc:
+        return runtime_error_response(
+            exc.status_code,
+            (FailureCode.indeterminate if exc.status_code >= 500 else FailureCode.denied),
+        )
     result = await _invoke_runtime_operation("control", lambda: runtime.control(parsed))
     if isinstance(result, RuntimeFailure):
         return _runtime_failure_response(result)
