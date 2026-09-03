@@ -11,7 +11,7 @@ from deerflow_extension_api import (
     VerifiedActorContextV1,
     effective_authority_digest_v1,
 )
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import deerflow.persistence.models  # noqa: F401
@@ -41,6 +41,14 @@ _TENANT = TenantReferenceV1(
     digest="a" * 64,
 )
 _POLICY = "b" * 64
+
+
+def _enable_sqlite_foreign_keys(engine) -> None:
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 def _admin() -> VerifiedActorContextV1:
@@ -120,6 +128,43 @@ async def test_sql_repository_persists_active_revision_and_append_only_events(
         async with sessions() as session:
             event_count = len((await session.scalars(select(ToolPlaneRevisionEventRow))).all())
         assert event_count == 5
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_repository_stages_revision_before_fk_bound_event(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tool-plane-fk.db'}")
+    _enable_sqlite_foreign_keys(engine)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        repository = SQLToolPlaneRevisionRepository(
+            async_sessionmaker(engine, expire_on_commit=False),
+            tenant=_TENANT,
+        )
+        service = ToolPlaneRevisionService(
+            repository=repository,
+            projection=InMemoryToolPlaneProjection(),
+            validator=DeterministicToolPlaneValidator(policy_digest=_POLICY),
+            durable=True,
+        )
+
+        await service.initialize(existing_projection=False)
+        staged = await service.stage(
+            ScopedStageRevisionRequest(
+                scope=ToolPlaneRevisionScopeV1(kind="deployment_base"),
+                candidate={
+                    "validation_policy_digest": _POLICY,
+                    "mcp_servers": {},
+                    "public_skills": {},
+                    "managed_integrations": {},
+                },
+            ),
+            _admin(),
+        )
+
+        assert [event.state for event in await repository.events(staged.revision_id)] == ["staged"]
     finally:
         await engine.dispose()
 

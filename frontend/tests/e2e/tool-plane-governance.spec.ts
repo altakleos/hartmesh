@@ -121,7 +121,9 @@ test.describe("governed tool-plane settings", () => {
     await page.goto("/workspace/chats/new?settings=tools");
 
     const dialog = page.getByRole("dialog", { name: "Settings" });
-    await expect(dialog.getByText("Revision governance status is unavailable")).toBeVisible();
+    await expect(
+      dialog.getByText("Revision governance status is unavailable"),
+    ).toBeVisible();
     await expect(dialog.getByRole("switch")).toBeDisabled();
   });
 

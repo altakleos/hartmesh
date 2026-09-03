@@ -279,6 +279,7 @@ class SQLToolPlaneRevisionRepository:
             await self._scope_row(session, record.scope, create=True)
             row = self._row_for_record(record)
             session.add(row)
+            await session.flush((row,))
             session.add(self._staged_event(record))
 
     def _row_for_record(self, record: ToolPlaneRevisionRecord) -> ToolPlaneRevisionRow:
@@ -333,7 +334,9 @@ class SQLToolPlaneRevisionRepository:
         async with self._sf() as session, session.begin():
             for record in records:
                 await self._scope_row(session, record.scope, create=True)
-                session.add(self._row_for_record(record))
+                row = self._row_for_record(record)
+                session.add(row)
+                await session.flush((row,))
                 session.add(self._staged_event(record))
 
     @classmethod

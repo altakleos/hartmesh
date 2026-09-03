@@ -73,6 +73,7 @@ does not render raw candidate archives, scanner payloads, secrets, or another
 user's overlay. Only the explicit `tool_plane_unavailable` response identifies
 the configured legacy opt-out and restores legacy controls; other status errors
 stay fail-closed. See [the governed tool-plane contract](../docs/GOVERNED_TOOL_PLANE.md).
+
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
 - **`content/`** — MDX content (blog posts, docs) rendered by the app

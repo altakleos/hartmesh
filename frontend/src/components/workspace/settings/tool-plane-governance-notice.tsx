@@ -100,8 +100,11 @@ export function ToolPlaneGovernanceNotice({
         </div>
         {latest ? (
           <p>
-            {copy.stagedBy}: <code>{shortDigest(latest.staging_actor_digest)}</code>{" "}
-            <time dateTime={latest.staged_at}>{formatTimestamp(latest.staged_at)}</time>
+            {copy.stagedBy}:{" "}
+            <code>{shortDigest(latest.staging_actor_digest)}</code>{" "}
+            <time dateTime={latest.staged_at}>
+              {formatTimestamp(latest.staged_at)}
+            </time>
             {latest.promotion_actor_digest && latest.promoted_at ? (
               <>
                 {" · "}
