@@ -174,6 +174,8 @@ def _point_matches(point: str, scenario: str) -> bool:
             "during_tool_execution",
             "terminal_before_lifecycle_commit",
         }
+    if scenario == "terminal_before_lifecycle_commit":
+        return point == "accepted_sandbox_after_validation"
     return point == "during_model_execution" and scenario in {
         "active_execution",
         "graceful_rollout_termination",
@@ -321,6 +323,31 @@ def _runtime_configuration(
     if not 0 < timeout_seconds <= 300:
         raise RuntimeError("kubernetes_qualification_runtime_misconfigured")
     return qualification_id, redis_url, timeout_seconds
+
+
+def accepted_sandbox_qualification_candidate_enabled() -> bool:
+    """Recognize only the disposable, fault-enabled live qualification mode.
+
+    The candidate gate is not passing evidence.  It exists solely to let the
+    external Kubernetes harness exercise the code that will produce such
+    evidence without creating a circular admission dependency.
+    """
+
+    candidate_id = os.getenv("DEER_FLOW_QUALIFICATION_CANDIDATE_ID", "")
+    qualification_id = os.getenv(
+        "DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID",
+        "",
+    )
+    namespace = os.getenv("DEER_FLOW_QUALIFICATION_NAMESPACE", "")
+    return (
+        os.getenv("DEER_FLOW_QUALIFICATION_CANDIDATE") == "1"
+        and os.getenv("DEERFLOW_TEST_KUBERNETES_RUNTIME") == "1"
+        and os.getenv("DEERFLOW_TEST_KUBERNETES_FAULT_INJECTION") == "1"
+        and _SAFE_ID.fullmatch(candidate_id) is not None
+        and candidate_id == qualification_id
+        and namespace.startswith("hartmesh-qualification-")
+        and _SAFE_ID.fullmatch(namespace) is not None
+    )
 
 
 async def _with_async_hooks(
@@ -626,6 +653,32 @@ async def qualification_sandbox_operation(
             )
         result = await operation
         await qualification_counter("tool_completions", record)
+        if _scenario_for_record(record) == "terminal_before_lifecycle_commit":
+            from deerflow.sandbox.accepted_material import (
+                AcceptedSandboxAuthorityLostError,
+            )
+
+            await qualification_counter(
+                "accepted_sandbox_raced_provider_calls",
+                record,
+            )
+            try:
+                await _bash_tool_async(
+                    runtime,
+                    "verify post-loss refusal",
+                    qualification_reconciled_operation_command(
+                        receipt.receipt_id,
+                    ),
+                )
+            except AcceptedSandboxAuthorityLostError:
+                await qualification_counter(
+                    "accepted_sandbox_post_loss_rejections",
+                    record,
+                )
+            else:
+                raise RuntimeError(
+                    "accepted_sandbox_post_loss_operation_was_accepted",
+                )
         return result
     finally:
         if not operation.done():
@@ -642,6 +695,7 @@ __all__ = [
     "QUALIFICATION_SCENARIOS",
     "KubernetesQualificationChatModel",
     "KubernetesQualificationHooks",
+    "accepted_sandbox_qualification_candidate_enabled",
     "qualification_barrier",
     "qualification_counter",
     "qualification_reconciled_operation_command",

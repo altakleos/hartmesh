@@ -158,7 +158,11 @@ class _SkillSnapshot:
         return None
 
 
-def _skill_bound_request(snapshot: _SkillSnapshot):
+def _skill_bound_request(
+    snapshot: _SkillSnapshot,
+    *,
+    tool_plane_revision=None,
+):
     definition = resolved_subagent_definition(
         name="general-purpose",
         source_kind="builtin",
@@ -177,6 +181,7 @@ def _skill_bound_request(snapshot: _SkillSnapshot):
         definition=definition,
         skill_snapshot=snapshot,
         skill_scope_digests=("d" * 64,),
+        tool_plane_revision=tool_plane_revision,
     )
 
 
@@ -973,6 +978,305 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
     restored_material = executor_kwargs["resolved_agent_material"]
     accepted = make_claimed_item(repository.request)["batch"]["acceptance"]
     assert restored_material.subagent_catalog.digest == (accepted.subagent_catalog_digest)
+
+
+@pytest.mark.asyncio
+async def test_batch_item_uses_its_own_attempt_fence_for_accepted_sandbox(
+    monkeypatch,
+) -> None:
+    from datetime import timedelta
+
+    from deerflow.sandbox.accepted_material import (
+        AcceptedExecutionEvidenceV2,
+        AcceptedMaterialCapability,
+        AcceptedMaterializerSelection,
+        AcceptedMaterialLeaseV1,
+        AcceptedSandboxCapabilityProfileV1,
+        AcceptedSandboxIsolationFactsV1,
+        AcceptedSandboxQualificationV1,
+        AcceptedSandboxSessionBridge,
+    )
+    from deerflow.sandbox.sandbox import Sandbox
+    from deerflow.tool_plane.contracts import EffectiveToolPlaneRevisionV1
+
+    tool_plane = EffectiveToolPlaneRevisionV1(
+        base_revision_digest="1" * 64,
+        user_overlay_digest="2" * 64,
+        base_generation=1,
+        overlay_generation=2,
+        projection_digest="3" * 64,
+    )
+    snapshot = _SkillSnapshot()
+    snapshot.root = object()
+    request = _skill_bound_request(
+        snapshot,
+        tool_plane_revision=tool_plane.to_json(),
+    )
+    token = SkillProjectionConsumerToken(
+        user_id=request.user_id,
+        thread_id=request.thread_id,
+        sandbox_id="parent-sandbox",
+        run_id=request.run_id,
+        generation=7,
+        consumer_id="subagent-batch:batch-1",
+        snapshot_id=snapshot.snapshot_id,
+    )
+    item = make_claimed_item(request)
+    result = SimpleNamespace(
+        status=FakeStatus.PENDING,
+        result=None,
+        error=None,
+        stop_reason=None,
+        token_usage_records=None,
+    )
+    authority_calls: list[dict[str, object]] = []
+
+    class Repository:
+        finalized = None
+
+        async def item_attempt_authorized(self, item_id, **kwargs):
+            authority_calls.append({"item_id": item_id, **kwargs})
+            return True
+
+        async def mark_item_running(self, *_args, **_kwargs):
+            return True
+
+        async def finalize_item(self, *_args, **kwargs):
+            self.finalized = kwargs
+            return True
+
+    class RecordingSandbox(Sandbox):
+        persistent_shell_sessions = False
+
+        def __init__(self) -> None:
+            super().__init__("raw-provider-resource")
+            self.calls: list[str] = []
+
+        def execute_command(self, command, env=None, timeout=None):
+            del env, timeout
+            self.calls.append(command)
+            return "sandbox-ok"
+
+        def read_file(self, path, start_line=None, end_line=None):
+            raise AssertionError((path, start_line, end_line))
+
+        def download_file(self, path):
+            raise AssertionError(path)
+
+        def list_dir(self, path, max_depth=2):
+            raise AssertionError((path, max_depth))
+
+        def write_file(self, path, content, append=False):
+            raise AssertionError((path, content, append))
+
+        def glob(self, path, pattern, *, include_dirs=False, max_results=200):
+            raise AssertionError((path, pattern, include_dirs, max_results))
+
+        def grep(
+            self,
+            path,
+            pattern,
+            *,
+            glob=None,
+            literal=False,
+            case_sensitive=False,
+            max_results=100,
+        ):
+            raise AssertionError(
+                (path, pattern, glob, literal, case_sensitive, max_results),
+            )
+
+        def update_file(self, path, content):
+            raise AssertionError((path, content))
+
+    now = datetime.now(UTC)
+    profile = AcceptedSandboxCapabilityProfileV1.build(
+        material_capability=AcceptedMaterialCapability.IMMUTABLE_READ_ONLY,
+        atomic_provider_ownership_fencing=True,
+        atomic_provider_operation_fencing=False,
+        authoritative_shared_expiry=True,
+        resolved_immutable_image=True,
+        restricted_non_root_isolation=True,
+        recoverable_resource_lookup=True,
+        durable_one_replica=True,
+        exact_two=False,
+    )
+    qualification = AcceptedSandboxQualificationV1.build(
+        capability_profile_digest=profile.digest,
+        qualification_scope="contract_test_only",
+        artifact_digest="4" * 64,
+        topology_digest="5" * 64,
+        verified_at=now,
+        expires_at=now + timedelta(hours=1),
+    )
+    isolation = AcceptedSandboxIsolationFactsV1.build(
+        restricted_non_root=True,
+        read_only_accepted_material=True,
+        privilege_escalation_disabled=True,
+        runtime_class_digest="6" * 64,
+        network_policy_digest="7" * 64,
+    )
+    raw_sandbox = RecordingSandbox()
+
+    class Materializer:
+        acquired_request = None
+        released = 0
+        validate_calls = 0
+
+        def capability(self):
+            return AcceptedMaterialCapability.IMMUTABLE_READ_ONLY
+
+        async def acquire_and_materialize(
+            self,
+            accepted_request,
+            *,
+            execution_claim=None,
+        ):
+            assert execution_claim is None
+            self.acquired_request = accepted_request
+            lease = AcceptedMaterialLeaseV1(
+                version=1,
+                provider_kind="qualified-test",
+                provider_instance_ref=raw_sandbox.id,
+                ownership_epoch=9,
+                lease_expires_at=now + timedelta(minutes=5),
+                opaque_renewal_handle=object(),
+            )
+            evidence = AcceptedExecutionEvidenceV2.build(
+                request=accepted_request,
+                lease=lease,
+                materialization_digest="8" * 64,
+                verifier_image_digest="9" * 64,
+                verifier_contract_version="contract-test-v1",
+                read_only_proof_digest="a" * 64,
+                qualification=qualification,
+                isolation=isolation,
+            )
+            return raw_sandbox, lease, evidence
+
+        async def validate(self, lease, evidence):
+            del lease, evidence
+            self.validate_calls += 1
+            return True
+
+        async def renew(self, lease):
+            return lease
+
+        async def release(self, lease):
+            del lease
+            self.released += 1
+
+    materializer = Materializer()
+    selection = AcceptedMaterializerSelection(
+        materializer=materializer,
+        runtime_image_digest="b" * 64,
+        lease_duration=timedelta(minutes=5),
+        capability_profile=profile,
+        qualification=qualification,
+    )
+    selection_calls: list[dict[str, object]] = []
+
+    async def select(_provider, **kwargs):
+        selection_calls.append(kwargs)
+        return selection
+
+    executor_kwargs: dict[str, object] = {}
+
+    class Executor:
+        def __init__(self, **kwargs) -> None:
+            executor_kwargs.update(kwargs)
+
+        def execute_async(self, _prompt, task_id=None):
+            assert task_id == item["id"]
+
+            async def complete() -> None:
+                bridge = executor_kwargs["accepted_sandbox_session_bridge"]
+                assert isinstance(bridge, AcceptedSandboxSessionBridge)
+                assert (
+                    await asyncio.to_thread(
+                        bridge.sandbox.execute_command,
+                        "echo child",
+                    )
+                    == "sandbox-ok"
+                )
+                callback = executor_kwargs["execution_admitted_callback"]
+                await callback()
+                result.status = FakeStatus.COMPLETED
+                result.result = "done"
+
+            asyncio.create_task(complete())
+            return "execution-1"
+
+    repository = Repository()
+    monkeypatch.setattr(
+        service_module,
+        "resolve_accepted_materializer",
+        select,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "capture_accepted_file_manifest",
+        lambda _root: (),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "get_sandbox_provider",
+        lambda: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "resolve_subagent_model_name",
+        lambda *_args, **_kwargs: "model-a",
+    )
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(
+        service_module,
+        "get_background_task_result",
+        lambda _execution_id: result,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "cleanup_background_task",
+        lambda _execution_id: None,
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+        app_config=_app_config(),
+    )
+    service._accepted_material["batch-1"] = request.resolved_parent_material
+    service._runtime_adapters["batch-1"] = {
+        "app_config": request.app_config,
+        "accepted_parent": request.accepted_parent,
+        "skill_projection_token": token,
+    }
+    service._batch_owners["batch-1"] = request.user_id
+
+    await service._execute_item(item)
+
+    accepted_request = materializer.acquired_request
+    assert accepted_request.batch_child_attempt_ref is not None
+    assert accepted_request.accepted_invocation_digest == (request.accepted_parent.runtime_identity_digest)
+    assert accepted_request.tool_plane_effective_digest == tool_plane.effective_digest
+    assert selection_calls[0]["require_durable_one_replica"] is True
+    assert selection_calls[0]["require_exact_two"] is False
+    assert authority_calls
+    assert authority_calls[0] == {
+        "item_id": item["id"],
+        "attempt_id": item["attempt_id"],
+        "lease_epoch": item["lease_epoch"],
+        "lease_owner": service._lease_owner,
+    }
+    assert raw_sandbox.calls == ["echo child"]
+    assert materializer.validate_calls == 2
+    assert materializer.released == 1
+    assert repository.finalized["succeeded"] is True
 
 
 @pytest.mark.asyncio

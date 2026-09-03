@@ -986,6 +986,27 @@ written to the authoritative `RunRow` in the same transaction that changes it to
 `started` lifecycle payload contains only its digest. A process restart cannot recover the
 ephemeral capability and therefore follows the documented orphan-terminalization behavior.
 
+After that transition, the worker wraps the private provider object in one
+`AcceptedSandboxSession`. The session composes the existing
+`AcceptedMaterialExecutionClaimV1`, `AcceptedMaterialLeaseV1`, and V1/V2
+accepted evidence; it creates no lease or heartbeat. Every shell/file operation,
+including middleware output externalization and inherited subagent work, samples
+the current SQL owner/state fence and then calls the materializer's provider
+validation before delegation. Durable batch items use the same facade with their
+own existing item-attempt fence. Renewal is installed into the worker's normal
+lease supervisor. Observed run/provider loss, cancellation, or close blocks all
+later calls, and terminal publication revalidates independently.
+
+Remote AIO declares `atomic_provider_operation_fencing=false`: its operation
+request does not carry the expected ownership epoch into the provider's atomic
+acceptance step. Work accepted before loss, or one call in the
+validation-to-delegation gap, may finish; no exactly-once or recall guarantee is
+made. The live one-replica qualification lane deliberately opens that gap,
+removes the provider Lease, expects exactly one raced call, then proves the next
+call and stale terminal success are rejected. Capability declarations never
+replace current, byte-pinned live qualification. See
+[tenant-bound accepted sandbox execution](ACCEPTED_SANDBOX_EXECUTION.md).
+
 Provisioner management is separate from the per-attempt data-plane capability. The Helm profile
 projects a rotating ServiceAccount token into the Gateway, scopes it to the provisioner audience,
 and has the provisioner verify its exact namespace and ServiceAccount through TokenReview. Gateway
@@ -1010,6 +1031,11 @@ duration plus a strictly advancing bounded RFC3339 `renewTime`; a `resourceVersi
 change alone is not renewal evidence. The verifier and materialization gate are shipped
 by the provisioner artifact, so v2 evidence and expectations require their exact pinned
 image reference and digest to equal the provisioner subject while still reporting both roles.
+The lane also executes through the session facade, opens the exact
+post-validation/provider-call race, records AIO's one permitted raced call, and
+requires both post-loss refusal and stale-terminal refusal. On publication it
+turns candidate mode off, places the canonical passing bytes in a read-only
+Gateway ConfigMap mount, and pins their SHA-256 in `sandbox` configuration.
 The v1 pod recovery artifact remains readable and is not upgraded into this stronger claim.
 Both scopes remain skipped and unpassed by default; neither offline/fake coverage
 nor a declared reference qualifies live cross-node execution.

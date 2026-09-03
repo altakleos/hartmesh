@@ -111,6 +111,50 @@
       }
     },
     {
+      "event_type": "sandbox.lifecycle.v1",
+      "category": "trace",
+      "producer": "AcceptedSandboxSession through the fenced durable worker, or the administrative reconciler after winning orphan takeover",
+      "content_description": "Bounded, non-authoritative lifecycle observation. It links accepted evidence without exposing provider resource handles, renewal material, commands, or file data.",
+      "content_schema": {
+        "type": "object",
+        "required": [
+          "version",
+          "kind",
+          "run_id",
+          "attempt_ref",
+          "batch_child_attempt_ref",
+          "tool_receipt_ref",
+          "provider_kind",
+          "qualification_scope",
+          "observed_at",
+          "reason_code",
+          "execution_evidence_digest",
+          "digest"
+        ],
+        "properties": {
+          "version": {"const": 1},
+          "kind": {"enum": ["acquired", "authority_lost", "released", "cleanup_pending", "orphaned"]},
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 512},
+          "attempt_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+          "batch_child_attempt_ref": {"type": ["string", "null"], "maxLength": 512},
+          "tool_receipt_ref": {"type": ["string", "null"], "maxLength": 512},
+          "provider_kind": {"type": "string", "minLength": 1, "maxLength": 512},
+          "qualification_scope": {"type": "string", "minLength": 1, "maxLength": 512},
+          "observed_at": {"type": "string", "format": "date-time"},
+          "reason_code": {"type": ["string", "null"], "maxLength": 512},
+          "execution_evidence_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": false
+      },
+      "metadata_schema": {"type": "object", "additionalProperties": false},
+      "storage_semantics": {
+        "authority": "Observations describe lifecycle state and never grant execution or cleanup authority.",
+        "renewal": "Routine successful renewals are coalesced and do not produce events.",
+        "redaction": "Raw provider handles and opaque renewal data are forbidden."
+      }
+    },
+    {
       "event_type": "run.end",
       "category": "outputs",
       "producer": "RunJournal.on_chain_end(parent_run_id=None)",

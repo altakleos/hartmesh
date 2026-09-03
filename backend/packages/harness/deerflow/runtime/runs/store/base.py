@@ -305,11 +305,11 @@ def build_lifecycle_payload(transition: LifecycleTransition) -> dict[str, Any]:
         neutral_evidence_digest: str | None = None
         if isinstance(evidence, dict):
             from deerflow.sandbox.accepted_material import (
-                AcceptedExecutionEvidenceV1,
+                decode_accepted_execution_evidence,
             )
 
             try:
-                neutral_evidence_digest = AcceptedExecutionEvidenceV1.from_persisted(
+                neutral_evidence_digest = decode_accepted_execution_evidence(
                     evidence,
                 ).digest
             except (TypeError, ValueError):

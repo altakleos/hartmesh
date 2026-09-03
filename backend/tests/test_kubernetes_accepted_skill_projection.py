@@ -645,9 +645,15 @@ def test_remote_preflight_uses_and_rereads_projected_service_account_token(
 
     assert backend.accepted_skill_projection_ready() is True
     assert backend.accepted_material_runtime_image_digest() == "a" * 64
+    assert backend.accepted_material_runtime_subjects() == (
+        "a" * 64,
+        "b" * 64,
+    )
     (tmp_path / "token").write_text("token-two", encoding="utf-8")
     assert backend.accepted_skill_projection_ready() is True
     assert observed_headers == [
+        {"Authorization": "Bearer token-one"},
+        {"Authorization": "Bearer token-one"},
         {"Authorization": "Bearer token-one"},
         {"Authorization": "Bearer token-one"},
         {"Authorization": "Bearer token-one"},

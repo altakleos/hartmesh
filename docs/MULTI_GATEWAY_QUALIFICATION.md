@@ -53,8 +53,17 @@ definitions and occurrences, the shared scheduler capacity budget, MCP task
 lineage, metadata, dedupe, and topology registration. Redis owns only the
 required shared transport/cache/ownership surfaces under the frozen tenant
 prefix; durable run history remains reconstructible from PostgreSQL after a
-Redis interruption. Accepted skill bytes remain immutable and are recovered
-through the already-qualified AIO/RWX materialization contract.
+Redis interruption. Accepted skill bytes remain immutable under the AIO/RWX
+materialization contract, but exact-two resource recovery is not qualified.
+
+That material guarantee is not an atomic sandbox-operation guarantee. The AIO
+capability profile declares `atomic_provider_operation_fencing=false` and
+`recoverable_resource_lookup=false`; its one-replica live lane therefore proves
+the narrower check-then-call behavior (one validation-gap call may start, later
+calls and stale terminal success are refused). Consequently AIO declares
+`exact_two=false`, and no one-replica artifact can unlock the exact-two profile.
+See
+[tenant-bound accepted sandbox execution](../backend/docs/ACCEPTED_SANDBOX_EXECUTION.md).
 
 The exact-two startup inventory and readiness probe inspect the constructed
 run store, not only its configured backend. They require the versioned

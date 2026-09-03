@@ -11,6 +11,7 @@ import shutil
 import stat
 import sys
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -43,7 +44,11 @@ from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
-from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.runtime.runs.worker import (
+    RunContext,
+    _AcceptedMaterializationResult,
+    run_agent,
+)
 from deerflow.runtime.skill_snapshot import (
     SkillSnapshotError,
     SkillSnapshotLimits,
@@ -57,10 +62,18 @@ from deerflow.runtime.tenant_identity import (
 from deerflow.sandbox import tools as sandbox_tools
 from deerflow.sandbox.accepted_material import (
     AcceptedExecutionEvidenceV1,
+    AcceptedExecutionEvidenceV2,
     AcceptedMaterialCapability,
+    AcceptedMaterialLeaseV1,
+    AcceptedMaterialRequestV1,
+    AcceptedMaterialRequestV2,
+    AcceptedSandboxCapabilityProfileV1,
+    AcceptedSandboxQualificationV1,
     AcceptedSkillExecutionEvidenceV2,
+    accepted_sandbox_from_runtime_context,
 )
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import AcceptedSkillExecutionEvidenceV1
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import Skill, SkillCategory
@@ -150,7 +163,11 @@ class _ModelRequest:
         )
 
 
-def _accepted(revision) -> AcceptedInvocation:
+def _accepted(
+    revision,
+    *,
+    tool_plane_revision=None,
+) -> AcceptedInvocation:
     return AcceptedInvocation.seal(
         principal=PrincipalProjection(user_id="user-1"),
         origin=InvocationOrigin(source_kind="http"),
@@ -162,6 +179,7 @@ def _accepted(revision) -> AcceptedInvocation:
         extension_generation=1,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
         tenant=_TEST_TENANT,
+        tool_plane_revision=tool_plane_revision,
     )
 
 
@@ -1717,17 +1735,30 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
         SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
         get_skill_projection_coordinator,
     )
+    from deerflow.subagents.batch_acceptance import (
+        PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
+    )
+    from deerflow.tool_plane.contracts import EffectiveToolPlaneRevisionV1
 
     skill_file = _write_skill(tmp_path, body="Neutral adapter worker path")
     revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
     material = revision.material
     assert material is not None and material.skill_snapshot is not None
+    tool_plane = EffectiveToolPlaneRevisionV1(
+        base_revision_digest="1" * 64,
+        user_overlay_digest="2" * 64,
+        base_generation=1,
+        overlay_generation=2,
+        projection_digest="3" * 64,
+    )
+    accepted = _accepted(revision, tool_plane_revision=tool_plane.to_json())
 
     class QualifiedAioProvider(AioSandboxProvider):
         def __init__(self) -> None:
             self.sandbox = SimpleNamespace(id="sandbox-neutral")
             self.evidence = None
             self.acquired_scope = None
+            self.execution_claim = None
             self.destroyed = []
             self._config = {
                 "accepted_material_lease_duration_seconds": 300,
@@ -1739,14 +1770,33 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
         async def accepted_material_runtime_image_digest_async(self) -> str:
             return "5" * 64
 
+        async def _accepted_sandbox_qualification(
+            self,
+            *,
+            profile: AcceptedSandboxCapabilityProfileV1,
+            runtime_image_digest: str,
+        ) -> AcceptedSandboxQualificationV1:
+            assert runtime_image_digest == "5" * 64
+            now = datetime.now(UTC)
+            return AcceptedSandboxQualificationV1.build(
+                capability_profile_digest=profile.digest,
+                qualification_scope="contract_test_only",
+                artifact_digest="d" * 64,
+                topology_digest="e" * 64,
+                verified_at=now - timedelta(minutes=1),
+                expires_at=now + timedelta(days=1),
+            )
+
         async def acquire_bound_accepted_skills_async(
             self,
             thread_id,
             *,
             user_id,
             binding,
+            execution_claim=None,
         ) -> str:
             self.acquired_scope = (thread_id, user_id)
+            self.execution_claim = execution_claim
             wire = {
                 "profile": "rwx_verified_copy_v2",
                 "attempt_id": "provider-attempt",
@@ -1819,10 +1869,11 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
     monkeypatch.setattr("deerflow.sandbox.get_sandbox_provider", lambda: provider)
     runtime = SimpleNamespace(
         context={
-            "thread_id": "thread-neutral",
+            "thread_id": "thread-1",
             "run_id": "run-neutral",
             RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
             TENANT_REFERENCE_CONTEXT_KEY: _TEST_TENANT,
+            PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY: accepted,
             "accepted_agent_revision_digest": revision.digest,
         },
     )
@@ -1830,10 +1881,27 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
     result = await _materialize_accepted_skill_projection(
         runtime,
         user_id="user-1",
+        record=SimpleNamespace(
+            owner_worker_id="worker-pending",
+            state_version=3,
+            execution_takeover=False,
+            execution_evidence_json=None,
+            recovery_policy=None,
+        ),
     )
     try:
-        assert provider.acquired_scope == ("thread-neutral", "user-1")
-        assert isinstance(result.evidence, AcceptedExecutionEvidenceV1)
+        assert provider.acquired_scope == ("thread-1", "user-1")
+        assert provider.execution_claim is not None
+        assert provider.execution_claim.owner_worker_id == "worker-pending"
+        assert provider.execution_claim.state_version == 3
+        assert isinstance(result.request, AcceptedMaterialRequestV2)
+        assert isinstance(result.evidence, AcceptedExecutionEvidenceV2)
+        assert result.evidence.accepted_invocation_digest == (accepted.runtime_identity_digest)
+        assert result.evidence.tool_plane_effective_digest == (tool_plane.effective_digest)
+        assert "sandbox-neutral" not in json.dumps(
+            result.evidence.to_persisted(),
+            sort_keys=True,
+        )
         assert result.evidence.attempt_id != provider.evidence.attempt_id
         assert await result.validate()
     finally:
@@ -1847,6 +1915,214 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
         material.release_process_material()
 
     assert provider.destroyed == ["sandbox-neutral"]
+
+
+@pytest.mark.asyncio
+async def test_durable_worker_installs_running_claim_sandbox_session(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    skill_file = _write_skill(tmp_path, body="Session-gated material")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    material = revision.material
+    assert material is not None and material.skill_snapshot is not None
+    revision = ResolvedAgentRevision.from_material(
+        replace(
+            material,
+            model_profile={**material.model_profile, "name": "default"},
+        )
+    )
+    accepted = _accepted(revision)
+    store = MemoryRunStore()
+    manager = RunManager(
+        store=store,
+        tenant=_TEST_TENANT,
+        run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True),
+    )
+    record = await manager.create_or_reject(
+        "thread-worker",
+        accepted_invocation=accepted,
+    )
+    expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    request = AcceptedMaterialRequestV1.build(
+        run_id=record.run_id,
+        attempt_id="attempt-session",
+        tenant=_TEST_TENANT,
+        user_ref="user-ref",
+        thread_ref="thread-ref",
+        agent_revision_digest=revision.digest,
+        skill_snapshot_digest=material.skill_snapshot.snapshot_id,
+        skill_scope_digest=material.skill_scopes.digest,
+        file_manifest=(),
+        runtime_image_digest="5" * 64,
+        lease_expires_at=expires_at,
+    )
+    lease = AcceptedMaterialLeaseV1(
+        version=1,
+        provider_kind="test",
+        provider_instance_ref="private-provider-resource",
+        ownership_epoch=4,
+        lease_expires_at=expires_at,
+        opaque_renewal_handle=object(),
+    )
+    evidence = AcceptedExecutionEvidenceV1.build(
+        run_id=record.run_id,
+        attempt_id=request.attempt_id,
+        tenant=_TEST_TENANT,
+        provider_kind=lease.provider_kind,
+        provider_instance_ref=lease.provider_instance_ref,
+        ownership_epoch=lease.ownership_epoch,
+        runtime_image_digest=request.runtime_image_digest,
+        skill_snapshot_digest=request.skill_snapshot_digest,
+        skill_scope_digest=request.skill_scope_digest,
+        materialization_digest=request.digest,
+        verifier_image_digest="6" * 64,
+        verifier_contract_version="test_v1",
+        read_only_proof_digest="7" * 64,
+        qualification_scope="contract_test_only",
+    )
+
+    class RawSandbox(Sandbox):
+        persistent_shell_sessions = False
+
+        def __init__(self) -> None:
+            super().__init__(lease.provider_instance_ref)
+            self.commands: list[str] = []
+
+        def execute_command(self, command, env=None, timeout=None):
+            del env, timeout
+            self.commands.append(command)
+            return "gated"
+
+        def read_file(self, path, start_line=None, end_line=None):
+            raise AssertionError("unexpected read")
+
+        def download_file(self, path):
+            raise AssertionError("unexpected download")
+
+        def list_dir(self, path, max_depth=2):
+            raise AssertionError("unexpected list")
+
+        def write_file(self, path, content, append=False):
+            raise AssertionError("unexpected write")
+
+        def glob(self, path, pattern, *, include_dirs=False, max_results=200):
+            raise AssertionError("unexpected glob")
+
+        def grep(
+            self,
+            path,
+            pattern,
+            *,
+            glob=None,
+            literal=False,
+            case_sensitive=False,
+            max_results=100,
+        ):
+            raise AssertionError("unexpected grep")
+
+        def update_file(self, path, content):
+            raise AssertionError("unexpected update")
+
+    class Materializer:
+        def __init__(self) -> None:
+            self.validated = 0
+            self.released = 0
+            self.validated_tuples = []
+
+        def capability(self):
+            return AcceptedMaterialCapability.IMMUTABLE_READ_ONLY
+
+        async def validate(self, checked_lease, checked_evidence):
+            self.validated += 1
+            self.validated_tuples.append((checked_lease, checked_evidence))
+            return True
+
+        async def renew(self, checked_lease):
+            return checked_lease
+
+        async def release(self, checked_lease):
+            del checked_lease
+            self.released += 1
+
+    raw_sandbox = RawSandbox()
+    materializer = Materializer()
+    result = _AcceptedMaterializationResult(
+        sandbox_id=raw_sandbox.id,
+        evidence=evidence,
+        provider=None,
+        materializer=materializer,
+        lease=lease,
+        sandbox=raw_sandbox,
+        request=request,
+    )
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._materialize_accepted_skill_projection",
+        AsyncMock(return_value=result),
+    )
+
+    observed_facades = []
+    observed_results = []
+
+    class Agent:
+        async def astream(self, *_args, **kwargs):
+            facade = accepted_sandbox_from_runtime_context(
+                kwargs["config"]["context"],
+            )
+            observed_facades.append(facade)
+            if facade is not None:
+                observed_results.append(
+                    await asyncio.to_thread(
+                        facade.execute_command,
+                        "echo gated",
+                    )
+                )
+            yield {"messages": []}
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    event_store = MemoryRunEventStore(
+        run_store=store,
+        tenant=_TEST_TENANT,
+    )
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=event_store,
+            tenant=_TEST_TENANT,
+        ),
+        agent_factory=lambda **_kwargs: _assembled_agent_for_revision(
+            revision,
+            Agent(),
+        ),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status is RunStatus.success, record.error
+    assert len(observed_facades) == 1
+    assert observed_facades[0] is not raw_sandbox
+    assert raw_sandbox.id not in observed_facades[0].id
+    assert observed_results == ["gated"]
+    assert raw_sandbox.commands == ["echo gated"]
+    assert materializer.validated >= 2
+    assert all(pair == (lease, evidence) for pair in materializer.validated_tuples)
+    assert materializer.released == 1
+    lifecycle_events = await event_store.list_events(
+        record.thread_id,
+        record.run_id,
+        event_types=["sandbox.lifecycle.v1"],
+    )
+    assert lifecycle_events
+    assert lifecycle_events[0]["content"]["kind"] == "acquired"
+    assert raw_sandbox.id not in json.dumps(lifecycle_events, sort_keys=True)
 
 
 @pytest.mark.asyncio

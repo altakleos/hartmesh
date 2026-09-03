@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import gc
-import hashlib
 import inspect
 import logging
 import os
@@ -65,7 +64,10 @@ from deerflow.runtime.events.appender import (
     RuntimeEventAuthority,
     RuntimeEventOwnershipLost,
 )
-from deerflow.runtime.events.catalog import RUN_EXECUTION_STARTED_EVENT
+from deerflow.runtime.events.catalog import (
+    RUN_EXECUTION_STARTED_EVENT,
+    SANDBOX_LIFECYCLE_EVENT,
+)
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.failure_evidence import RuntimeFailureV1, map_runtime_failure
 from deerflow.runtime.goal import (
@@ -118,11 +120,14 @@ from .store.base import BindAssemblyEvidenceOutcome, LifecycleType, RecoveryPoli
 
 if TYPE_CHECKING:
     from deerflow.sandbox.accepted_material import (
-        AcceptedExecutionEvidenceV1,
+        AcceptedExecutionEvidence,
         AcceptedMaterializer,
         AcceptedMaterialLeaseV1,
+        AcceptedMaterialRequest,
+        AcceptedSandboxSessionBridge,
         AcceptedSkillExecutionEvidence,
     )
+    from deerflow.sandbox.sandbox import Sandbox
     from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 logger = logging.getLogger(__name__)
@@ -304,10 +309,12 @@ class _AcceptedMaterializationResult:
     """Process-local adapter state paired with persisted execution evidence."""
 
     sandbox_id: str
-    evidence: AcceptedExecutionEvidenceV1 | AcceptedSkillExecutionEvidence | None
+    evidence: AcceptedExecutionEvidence | AcceptedSkillExecutionEvidence | None
     provider: SandboxProvider | None
     materializer: AcceptedMaterializer | None = None
     lease: AcceptedMaterialLeaseV1 | None = None
+    sandbox: Sandbox | None = None
+    request: AcceptedMaterialRequest | None = None
 
     async def validate(self) -> bool:
         if self.evidence is None:
@@ -315,10 +322,14 @@ class _AcceptedMaterializationResult:
         if self.materializer is not None:
             from deerflow.sandbox.accepted_material import (
                 AcceptedExecutionEvidenceV1,
+                AcceptedExecutionEvidenceV2,
                 AcceptedMaterialLeaseV1,
             )
 
-            if not isinstance(self.evidence, AcceptedExecutionEvidenceV1) or not isinstance(self.lease, AcceptedMaterialLeaseV1):
+            if not isinstance(
+                self.evidence,
+                (AcceptedExecutionEvidenceV1, AcceptedExecutionEvidenceV2),
+            ) or not isinstance(self.lease, AcceptedMaterialLeaseV1):
                 return False
             return await self.materializer.validate(self.lease, self.evidence)
         if self.provider is None:
@@ -348,20 +359,6 @@ class _AcceptedMaterializationResult:
     async def release(self) -> None:
         if self.materializer is not None and self.lease is not None:
             await self.materializer.release(self.lease)
-
-
-def _accepted_scope_reference(
-    tenant: TenantReferenceV1,
-    *,
-    kind: Literal["user", "thread", "attempt"],
-    value: str,
-) -> str:
-    """Derive a bounded provider-safe pseudonym under the accepted tenant."""
-
-    digest = hashlib.sha256(
-        b"hartmesh.accepted-material.v1\0" + tenant.digest.encode("ascii") + b"\0" + kind.encode("ascii") + b"\0" + value.encode("utf-8"),
-    ).hexdigest()
-    return f"{kind}-{digest[:32]}"
 
 
 async def _await_accepted_skill_projection_claim(
@@ -439,15 +436,24 @@ async def _materialize_accepted_skill_projection(
         raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
     provider = get_sandbox_provider()
     sandbox_id: str | None = None
+    sandbox = None
+    request = None
     token = None
     materializer = None
     materialization_lease = None
     try:
+        from deerflow.runtime.kubernetes_qualification import (
+            accepted_sandbox_qualification_candidate_enabled,
+        )
         from deerflow.sandbox.accepted_material import (
+            AcceptedMaterialError,
             AcceptedMaterialExecutionClaimV1,
             AcceptedMaterialRequestV1,
+            AcceptedMaterialRequestV2,
+            accepted_scope_reference,
             capture_accepted_file_manifest,
             resolve_accepted_materializer,
+            validate_accepted_materialization,
         )
 
         selection = await resolve_accepted_materializer(
@@ -455,11 +461,20 @@ async def _materialize_accepted_skill_projection(
             binding=binding,
             thread_id=thread_id,
             user_id=user_id,
+            require_durable_one_replica=record is not None,
+            require_exact_two=(record is not None and record.recovery_policy is RecoveryPolicy.exact_two_takeover_v1),
+            allow_qualification_candidate=(record is not None and accepted_sandbox_qualification_candidate_enabled()),
         )
         if selection is not None:
-            from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+            from deerflow.runtime.accepted_invocation import (
+                AcceptedInvocation,
+                ResolvedAgentMaterialV1,
+            )
             from deerflow.runtime.agent_revision import (
                 RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
+            )
+            from deerflow.subagents.batch_acceptance import (
+                PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
             )
 
             material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
@@ -475,20 +490,20 @@ async def _materialize_accepted_skill_projection(
                 snapshot.root,
             )
             await asyncio.to_thread(material.verify_process_material)
-            request = AcceptedMaterialRequestV1.build(
+            request_arguments = dict(
                 run_id=binding.run_id,
-                attempt_id=_accepted_scope_reference(
+                attempt_id=accepted_scope_reference(
                     tenant,
                     kind="attempt",
                     value=f"{binding.run_id}:{binding.generation}",
                 ),
                 tenant=tenant,
-                user_ref=_accepted_scope_reference(
+                user_ref=accepted_scope_reference(
                     tenant,
                     kind="user",
                     value=user_id,
                 ),
-                thread_ref=_accepted_scope_reference(
+                thread_ref=accepted_scope_reference(
                     tenant,
                     kind="thread",
                     value=thread_id,
@@ -500,11 +515,33 @@ async def _materialize_accepted_skill_projection(
                 runtime_image_digest=selection.runtime_image_digest,
                 lease_expires_at=datetime.now(UTC) + selection.lease_duration,
             )
+            accepted_invocation = context.get(
+                PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
+            )
+            tool_plane = accepted_invocation.tool_plane_revision if isinstance(accepted_invocation, AcceptedInvocation) else None
+            if isinstance(accepted_invocation, AcceptedInvocation) and accepted_invocation.tenant == tenant and accepted_invocation.thread_id == thread_id and tool_plane is not None:
+                request = AcceptedMaterialRequestV2.build(
+                    **request_arguments,
+                    accepted_invocation_ref=accepted_scope_reference(
+                        tenant,
+                        kind="invocation",
+                        value=(f"{binding.run_id}:{accepted_invocation.runtime_identity_digest}"),
+                    ),
+                    accepted_invocation_digest=(accepted_invocation.runtime_identity_digest),
+                    tool_plane_base_revision_digest=tool_plane["base_revision_digest"],
+                    tool_plane_user_overlay_digest=tool_plane["user_overlay_digest"],
+                    tool_plane_projection_digest=tool_plane["projection_digest"],
+                    tool_plane_effective_digest=tool_plane["effective_digest"],
+                    batch_child_attempt_ref=None,
+                    capability_profile_digest=selection.capability_profile.digest,
+                )
+            else:
+                request = AcceptedMaterialRequestV1.build(**request_arguments)
             materializer = selection.materializer
             execution_claim = None
-            if record is not None and record.recovery_policy is RecoveryPolicy.exact_two_takeover_v1:
+            if record is not None:
                 owner_worker_id = record.owner_worker_id
-                if not isinstance(owner_worker_id, str) or not owner_worker_id:
+                if not isinstance(owner_worker_id, str) or not owner_worker_id or type(record.state_version) is not int:
                     raise RuntimeError(
                         "accepted_material_execution_owner_unavailable",
                     )
@@ -543,14 +580,22 @@ async def _materialize_accepted_skill_projection(
                     request,
                     execution_claim=execution_claim,
                 )
+            validate_accepted_materialization(
+                selection=selection,
+                request=request,
+                lease=materialization_lease,
+                evidence=evidence,
+            )
             sandbox_id = sandbox.id
-        else:
+        elif record is None:
             sandbox_id = await provider.acquire_bound_accepted_skills_async(
                 thread_id,
                 user_id=user_id,
                 binding=binding,
             )
             evidence = provider.accepted_skill_execution_evidence(sandbox_id)
+        else:
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
         require_runtime_accepted_skill_isolation(
             provider,
             runtime,
@@ -576,6 +621,8 @@ async def _materialize_accepted_skill_projection(
             provider=provider,
             materializer=materializer,
             lease=materialization_lease,
+            sandbox=sandbox,
+            request=request,
         )
     except Exception:
         invalidate_runtime_skill_projection_token(runtime, token)
@@ -606,6 +653,45 @@ async def _materialize_accepted_skill_projection(
         raise AcceptedSkillSandboxBindingError(
             "accepted_skill_snapshot_materialization_failed",
         ) from None
+
+
+async def _publish_accepted_sandbox_lifecycle(
+    event_appender: Any | None,
+    session: AcceptedSandboxSessionBridge,
+    *,
+    start_index: int,
+) -> int:
+    """Publish newly observed safe diagnostics without making them authority."""
+
+    observations = session.lifecycle_observations
+    for observation in observations[start_index:]:
+        logger.info(
+            "Accepted sandbox lifecycle run_id=%s kind=%s provider_kind=%s qualification_scope=%s reason_code=%s evidence_digest=%s",
+            observation.run_id,
+            observation.kind.value,
+            observation.provider_kind,
+            observation.qualification_scope,
+            observation.reason_code,
+            observation.execution_evidence_digest,
+        )
+        if event_appender is None:
+            continue
+        try:
+            await event_appender.put(
+                thread_id=event_appender.authority.thread_id,
+                run_id=observation.run_id,
+                event_type=SANDBOX_LIFECYCLE_EVENT.event_type,
+                category=SANDBOX_LIFECYCLE_EVENT.category,
+                content=observation.to_persisted(),
+                metadata={},
+            )
+        except Exception:
+            logger.warning(
+                "Accepted sandbox lifecycle observation could not be persisted run_id=%s kind=%s",
+                observation.run_id,
+                observation.kind.value,
+            )
+    return len(observations)
 
 
 def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -901,6 +987,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         DEERFLOW_TRACE_METADATA_KEY,
         "__deerflow_accepted_parent_batch_context_v1",
+        "__deerflow_accepted_sandbox_session_v1",
         "__deerflow_recovery_executor_v1",
     }
 )
@@ -1080,6 +1167,12 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         strip_parent_batch_acceptance_context(configurable)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
+        from deerflow.sandbox.accepted_material import (
+            ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY,
+            strip_accepted_sandbox_session,
+        )
+
+        strip_accepted_sandbox_session(existing_context)
         strip_assembly_evidence_requirement(existing_context)
         from deerflow.runtime.tool_evidence import (
             TOOL_EVIDENCE_CONTEXT_KEY,
@@ -1118,6 +1211,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         for internal_key in (
             RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
             PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
+            ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY,
             "accepted_agent_revision_digest",
             "accepted_extension_generation",
             "accepted_extension_manifest_digest",
@@ -1437,6 +1531,8 @@ async def run_agent(
     skill_binding_user_id: str | None = None
     materialization: _AcceptedMaterializationResult | None = None
     materialization_evidence = None
+    accepted_sandbox_session: AcceptedSandboxSessionBridge | None = None
+    accepted_sandbox_lifecycle_count = 0
     dispatch_ledger = None
     thread_projection_owner_id: str | None = None
     thread_projection_active_state_version: int | None = None
@@ -2039,15 +2135,6 @@ async def run_agent(
                         "accepted_skill_execution_lease_unavailable",
                     )
 
-                async def _renew_materialization() -> bool:
-                    assert materialization is not None
-                    return await materialization.renew()
-
-                await run_manager.set_execution_lease_renewal(
-                    run_id,
-                    _renew_materialization,
-                )
-
         if materialization_evidence is None:
             start_outcome = await run_manager.try_start(run_id)
         else:
@@ -2066,6 +2153,124 @@ async def run_agent(
         if isinstance(record.owner_worker_id, str) and record.owner_worker_id and type(record.state_version) is int:
             thread_projection_owner_id = record.owner_worker_id
             thread_projection_active_state_version = record.state_version
+
+        if materialization_evidence is not None:
+            assert materialization is not None
+            from deerflow.sandbox.accepted_material import (
+                AcceptedExecutionEvidenceV1,
+                AcceptedExecutionEvidenceV2,
+                AcceptedMaterialExecutionClaimV1,
+                AcceptedMaterialLeaseV1,
+                AcceptedMaterialRequestV1,
+                AcceptedMaterialRequestV2,
+                AcceptedSandboxSession,
+                install_accepted_sandbox_session,
+            )
+
+            neutral_tuple = (
+                materialization.sandbox,
+                materialization.materializer,
+                materialization.lease,
+                materialization.request,
+            )
+            if all(value is not None for value in neutral_tuple) and isinstance(
+                materialization.evidence,
+                (AcceptedExecutionEvidenceV1, AcceptedExecutionEvidenceV2),
+            ):
+                if not isinstance(
+                    materialization.lease,
+                    AcceptedMaterialLeaseV1,
+                ) or not isinstance(
+                    materialization.request,
+                    (AcceptedMaterialRequestV1, AcceptedMaterialRequestV2),
+                ):
+                    raise AcceptedSkillExecutionFenceError(
+                        "accepted_skill_execution_fence_failed",
+                    )
+                owner_worker_id = record.owner_worker_id
+                state_version = record.state_version
+                if not isinstance(owner_worker_id, str) or not owner_worker_id or type(state_version) is not int:
+                    raise AcceptedSkillExecutionFenceError(
+                        "accepted_skill_execution_fence_failed",
+                    )
+                running_claim = AcceptedMaterialExecutionClaimV1(
+                    version=1,
+                    tenant_digest=materialization.request.tenant.digest,
+                    run_id=run_id,
+                    owner_worker_id=owner_worker_id,
+                    state_version=state_version,
+                    execution_takeover=record.execution_takeover,
+                    expected_materialization_digest=(materialization.evidence.materialization_digest if record.execution_takeover else None),
+                )
+
+                async def _validate_running_claim(
+                    claim: AcceptedMaterialExecutionClaimV1,
+                ) -> bool:
+                    if claim is not running_claim or record.ownership_lost or record.abort_event.is_set():
+                        return False
+                    async with run_manager.hold_execution_fence(
+                        run_id,
+                        owner_worker_id=claim.owner_worker_id,
+                        state_version=claim.state_version,
+                    ) as active:
+                        sampled = active
+                    return bool(sampled and not record.ownership_lost and not record.abort_event.is_set())
+
+                from deerflow.runtime.kubernetes_qualification import (
+                    accepted_sandbox_qualification_candidate_enabled,
+                    qualification_barrier,
+                    qualification_counter,
+                )
+
+                before_delegate = None
+                if accepted_sandbox_qualification_candidate_enabled():
+
+                    async def _qualification_before_delegate() -> None:
+                        await qualification_counter(
+                            "accepted_sandbox_validations",
+                            record,
+                        )
+                        await qualification_barrier(
+                            "accepted_sandbox_after_validation",
+                            record,
+                        )
+
+                    before_delegate = _qualification_before_delegate
+
+                accepted_sandbox_session = install_accepted_sandbox_session(
+                    runtime_ctx,
+                    AcceptedSandboxSession(
+                        sandbox=materialization.sandbox,
+                        materializer=materialization.materializer,
+                        lease=materialization.lease,
+                        evidence=materialization.evidence,
+                        execution_claim=running_claim,
+                        run_fence_validator=_validate_running_claim,
+                        before_delegate=before_delegate,
+                    ),
+                )
+                _install_runtime_context(config, runtime_ctx)
+                accepted_sandbox_lifecycle_count = await _publish_accepted_sandbox_lifecycle(
+                    event_appender,
+                    accepted_sandbox_session,
+                    start_index=accepted_sandbox_lifecycle_count,
+                )
+
+                async def _renew_materialization() -> bool:
+                    assert accepted_sandbox_session is not None
+                    await accepted_sandbox_session.renew()
+                    return True
+
+            else:
+
+                async def _renew_materialization() -> bool:
+                    assert materialization is not None
+                    return await materialization.renew()
+
+            await run_manager.set_execution_lease_renewal(
+                run_id,
+                _renew_materialization,
+            )
 
         if checkpointer is not None and getattr(
             run_manager,
@@ -2686,6 +2891,11 @@ async def run_agent(
                     code="artifact_delivery_incomplete",
                     error_class="ArtifactDeliveryFailure",
                 )
+            if accepted_sandbox_session is not None:
+                # Success is not staged from a provider lease that was lost
+                # after the final graph operation. The subsequent run-store
+                # transition independently rechecks the SQL execution fence.
+                await accepted_sandbox_session.validate()
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error if delivery_error else RunStatus.success,
@@ -2845,6 +3055,12 @@ async def run_agent(
             )
 
     finally:
+        if accepted_sandbox_session is not None:
+            accepted_sandbox_lifecycle_count = await _publish_accepted_sandbox_lifecycle(
+                event_appender,
+                accepted_sandbox_session,
+                start_index=accepted_sandbox_lifecycle_count,
+            )
         if started and getattr(run_manager, "heartbeat_enabled", False) and not record.ownership_lost:
             try:
                 refreshed_cancel = await run_manager.refresh_owned_cancellation(run_id)
@@ -3233,7 +3449,27 @@ async def run_agent(
                 run_id=run_id,
             )
 
-        if materialization is not None:
+        if accepted_sandbox_session is not None:
+            try:
+                await accepted_sandbox_session.close()
+            except Exception:
+                logger.warning(
+                    "Failed to release accepted materialization for run %s",
+                    run_id,
+                    exc_info=True,
+                )
+            accepted_sandbox_lifecycle_count = await _publish_accepted_sandbox_lifecycle(
+                event_appender,
+                accepted_sandbox_session,
+                start_index=accepted_sandbox_lifecycle_count,
+            )
+            if runtime_ctx is not None:
+                from deerflow.sandbox.accepted_material import (
+                    strip_accepted_sandbox_session,
+                )
+
+                strip_accepted_sandbox_session(runtime_ctx)
+        elif materialization is not None:
             try:
                 await materialization.release()
             except Exception:

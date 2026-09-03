@@ -295,7 +295,7 @@ class RemoteSandboxBackend(SandboxBackend):
         """Authenticate and require exact provisioner profile advertisement."""
 
         try:
-            self._runtime_image_digest_from_capabilities(
+            self._runtime_image_subjects_from_capabilities(
                 self._accepted_skill_projection_capabilities(),
             )
         except RuntimeError:
@@ -303,9 +303,9 @@ class RemoteSandboxBackend(SandboxBackend):
         return True
 
     @staticmethod
-    def _runtime_image_digest_from_capabilities(
+    def _runtime_image_subjects_from_capabilities(
         payload: dict[str, object],
-    ) -> str:
+    ) -> tuple[str, str]:
         accepted = payload.get("accepted_skill_projection")
         if not isinstance(accepted, dict) or set(accepted) != {
             "profile",
@@ -323,12 +323,26 @@ class RemoteSandboxBackend(SandboxBackend):
             or _SHA256_PATTERN.fullmatch(verifier_digest) is None
         ):
             raise RuntimeError("accepted_skill_projection_preflight_unavailable")
-        return sandbox_digest
+        return sandbox_digest, verifier_digest
+
+    @classmethod
+    def _runtime_image_digest_from_capabilities(
+        cls,
+        payload: dict[str, object],
+    ) -> str:
+        return cls._runtime_image_subjects_from_capabilities(payload)[0]
 
     def accepted_material_runtime_image_digest(self) -> str:
         """Return the exact sandbox image digest advertised by qualified preflight."""
 
         return self._runtime_image_digest_from_capabilities(
+            self._accepted_skill_projection_capabilities(),
+        )
+
+    def accepted_material_runtime_subjects(self) -> tuple[str, str]:
+        """Return exact sandbox and verifier image digests from preflight."""
+
+        return self._runtime_image_subjects_from_capabilities(
             self._accepted_skill_projection_capabilities(),
         )
 

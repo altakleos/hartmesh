@@ -12,6 +12,7 @@ import deerflow.runtime.kubernetes_qualification as qualification_module
 from deerflow.runtime.kubernetes_qualification import (
     KubernetesQualificationChatModel,
     KubernetesQualificationHooks,
+    accepted_sandbox_qualification_candidate_enabled,
     qualification_barrier,
     qualification_service_barrier,
     scenario_from_external_key,
@@ -53,6 +54,36 @@ def test_fault_scenario_is_derived_only_from_the_normalized_external_key() -> No
     assert scenario_from_external_key("k8s-qual-v1:active_execution:delivery-1") is None
     assert scenario_from_external_key("raw:k8s-qual-v1:unknown:delivery-1") is None
     assert scenario_from_external_key("raw:k8s-qual-v1:owner_sigkill:delivery-1") == "owner_sigkill"
+
+
+def test_accepted_sandbox_candidate_requires_every_disposable_test_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = (
+        "DEER_FLOW_QUALIFICATION_CANDIDATE",
+        "DEER_FLOW_QUALIFICATION_CANDIDATE_ID",
+        "DEER_FLOW_QUALIFICATION_NAMESPACE",
+        "DEERFLOW_TEST_KUBERNETES_RUNTIME",
+        "DEERFLOW_TEST_KUBERNETES_FAULT_INJECTION",
+        "DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID",
+    )
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    assert accepted_sandbox_qualification_candidate_enabled() is False
+
+    monkeypatch.setenv("DEER_FLOW_QUALIFICATION_CANDIDATE", "1")
+    monkeypatch.setenv("DEER_FLOW_QUALIFICATION_CANDIDATE_ID", "qual-1")
+    monkeypatch.setenv(
+        "DEER_FLOW_QUALIFICATION_NAMESPACE",
+        "hartmesh-qualification-qual-1",
+    )
+    monkeypatch.setenv("DEERFLOW_TEST_KUBERNETES_RUNTIME", "1")
+    monkeypatch.setenv("DEERFLOW_TEST_KUBERNETES_FAULT_INJECTION", "1")
+    monkeypatch.setenv("DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID", "qual-1")
+    assert accepted_sandbox_qualification_candidate_enabled() is True
+
+    monkeypatch.setenv("DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID", "other")
+    assert accepted_sandbox_qualification_candidate_enabled() is False
 
 
 @pytest.mark.anyio
@@ -165,6 +196,85 @@ async def test_fault_hook_requires_and_atomically_consumes_one_expiring_arm() ->
     assert await hooks.barrier("during_model_execution", record) is False
     assert redis.increments == [
         f"{_QUALIFICATION_PREFIX}:qual-1:active_execution:barrier_hits",
+    ]
+
+
+@pytest.mark.anyio
+async def test_accepted_sandbox_race_has_a_post_validation_barrier() -> None:
+    redis = _RedisDouble()
+    _arm(redis, "terminal_before_lifecycle_commit")
+    hooks = KubernetesQualificationHooks(
+        qualification_id="qual-1",
+        redis_client=redis,
+        timeout_seconds=1,
+        tenant_namespace=_TENANT_NAMESPACE,
+    )
+    record = SimpleNamespace(
+        run_id="run-1",
+        external_key=("raw:k8s-qual-v1:terminal_before_lifecycle_commit:during-tool"),
+    )
+
+    assert await hooks.barrier("accepted_sandbox_after_validation", record) is True
+    assert redis.values[f"{_QUALIFICATION_PREFIX}:qual-1:terminal_before_lifecycle_commit:reached"] == b"run-1"
+
+
+@pytest.mark.anyio
+async def test_live_qualification_tool_proves_raced_call_then_post_loss_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.sandbox.accepted_material import (
+        AcceptedSandboxAuthorityLostError,
+    )
+
+    record = SimpleNamespace(
+        external_key=("raw:k8s-qual-v1:terminal_before_lifecycle_commit:during-tool"),
+        execution_lease_renewal=None,
+    )
+    record_token = qualification_module._ACTIVE_RECORD.set(record)
+    calls = 0
+    counters: list[str] = []
+
+    async def bash(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise AcceptedSandboxAuthorityLostError(
+                "accepted_sandbox_material_lease_lost",
+            )
+        return "raced-call-completed"
+
+    async def counter(name, _record):
+        counters.append(name)
+        return True
+
+    async def barrier(_point, _record):
+        return True
+
+    monkeypatch.setattr("deerflow.sandbox.tools._bash_tool_async", bash)
+    monkeypatch.setattr(
+        "deerflow.runtime.tool_evidence.get_active_tool_receipt",
+        lambda: SimpleNamespace(
+            tool_name="qualification_sandbox_operation",
+            receipt_id="receipt-1",
+        ),
+    )
+    monkeypatch.setattr(qualification_module, "qualification_counter", counter)
+    monkeypatch.setattr(qualification_module, "qualification_barrier", barrier)
+    try:
+        result = await qualification_module.qualification_sandbox_operation.coroutine(
+            runtime=object(),
+            description="bounded",
+        )
+    finally:
+        qualification_module._ACTIVE_RECORD.reset(record_token)
+
+    assert result == "raced-call-completed"
+    assert calls == 2
+    assert counters == [
+        "tool_starts",
+        "tool_completions",
+        "accepted_sandbox_raced_provider_calls",
+        "accepted_sandbox_post_loss_rejections",
     ]
 
 

@@ -331,6 +331,63 @@ async def test_manual_retry_cannot_reset_an_accepted_attempt_limit(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_item_attempt_authority_is_checked_without_renewing_the_lease(
+    tmp_path,
+) -> None:
+    request = make_parent_batch_request()
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+    repo = SubagentBatchRepository(sf, tenant=request.tenant)
+    accepted = AcceptedBatchV1.from_parent_request(
+        request,
+        batch_id="accepted-batch-authority",
+    )
+    execution = ParentBoundBatchExecutionV1.from_parent_request(
+        request,
+        accepted=accepted,
+    )
+    await repo.accept_batch(
+        accepted=accepted,
+        execution=execution,
+        item_requests=request.items,
+        user_id=request.user_id,
+        submission_key=request.submission_key,
+        title=request.title,
+        subagent_type=request.subagent_name,
+    )
+    item = (
+        await repo.claim_items(
+            now=datetime.now(UTC),
+            lease_owner="worker-1",
+            lease_seconds=60,
+            limit=1,
+        )
+    )[0]
+    authority = {
+        "item_id": item["id"],
+        "attempt_id": item["attempt_id"],
+        "lease_epoch": item["lease_epoch"],
+        "lease_owner": "worker-1",
+    }
+
+    assert await repo.item_attempt_authorized(**authority)
+    assert await repo.mark_item_running(
+        item["id"],
+        attempt_id=item["attempt_id"],
+        lease_epoch=item["lease_epoch"],
+        lease_owner="worker-1",
+        now=None,
+    )
+    assert await repo.item_attempt_authorized(**authority)
+    assert not await repo.item_attempt_authorized(**{**authority, "lease_epoch": item["lease_epoch"] + 1})
+
+    await repo.cancel_batch(accepted.batch_id, user_id=request.user_id)
+
+    assert not await repo.item_attempt_authorized(**authority)
+
+
+@pytest.mark.asyncio
 async def test_public_projections_omit_execution_context_and_full_results(tmp_path) -> None:
     repo = await _repo(tmp_path)
     created = await _create(repo, count=1, max_live=1, max_running=1)

@@ -6,10 +6,12 @@ import hashlib
 import importlib
 import stat
 import threading
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from deerflow.config.paths import Paths, join_host_path
 from deerflow.config.sandbox_config import SandboxConfig
@@ -19,6 +21,227 @@ from deerflow.sandbox.sandbox_provider import (
     AcceptedSkillSandboxBindingError,
     AcceptedSkillSandboxBindingV1,
 )
+
+
+def test_accepted_material_qualification_config_requires_a_pinned_pair() -> None:
+    provider = "deerflow.community.aio_sandbox:AioSandboxProvider"
+
+    with pytest.raises(ValidationError, match="qualification evidence and digest"):
+        SandboxConfig(
+            use=provider,
+            accepted_material_qualification_evidence="/qualification/evidence.json",
+        )
+    with pytest.raises(ValidationError, match="qualification evidence and digest"):
+        SandboxConfig(
+            use=provider,
+            accepted_material_qualification_digest="sha256:" + ("a" * 64),
+        )
+
+    config = SandboxConfig(
+        use=provider,
+        accepted_material_qualification_evidence="/qualification/evidence.json",
+        accepted_material_qualification_digest="sha256:" + ("a" * 64),
+        accepted_material_qualification_max_age_seconds=86400,
+    )
+    assert config.accepted_material_qualification_max_age_seconds == 86400
+
+
+def test_aio_provider_loads_the_qualification_tuple(monkeypatch) -> None:
+    aio_mod = importlib.import_module(
+        "deerflow.community.aio_sandbox.aio_sandbox_provider",
+    )
+    sandbox_config = SandboxConfig(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        accepted_material_qualification_evidence="/qualification/evidence.json",
+        accepted_material_qualification_digest="sha256:" + ("a" * 64),
+        accepted_material_qualification_max_age_seconds=86400,
+    )
+    monkeypatch.setattr(
+        aio_mod,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            sandbox=sandbox_config,
+            stream_bridge=None,
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+        ),
+    )
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+
+    loaded = provider._load_config()
+
+    assert loaded["accepted_material_qualification_evidence"] == ("/qualification/evidence.json")
+    assert loaded["accepted_material_qualification_digest"] == ("sha256:" + ("a" * 64))
+    assert loaded["accepted_material_qualification_max_age_seconds"] == 86400
+
+
+@pytest.mark.asyncio
+async def test_aio_qualification_rejects_an_unpinned_or_replaced_artifact(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from deerflow.qualification_evidence import (
+        ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2,
+        AcceptedSkillMaterialEvidenceV2,
+        AcceptedSkillQualificationEnvironmentV2,
+        AcceptedSkillScenarioEvidenceV2,
+        KubernetesAcceptedSkillQualificationEvidenceV2,
+        qualification_evidence_digest,
+    )
+    from deerflow.sandbox.accepted_material import AcceptedMaterialError
+
+    aio_mod = importlib.import_module(
+        "deerflow.community.aio_sandbox.aio_sandbox_provider",
+    )
+    now = datetime.now(UTC)
+    evidence = KubernetesAcceptedSkillQualificationEvidenceV2(
+        qualification_id="accepted-sandbox-current",
+        gateway_image_reference="registry.example/gateway@sha256:" + ("a" * 64),
+        gateway_image_digest="sha256:" + ("a" * 64),
+        provisioner_image_reference="registry.example/provisioner@sha256:" + ("b" * 64),
+        provisioner_image_digest="sha256:" + ("b" * 64),
+        verifier_image_reference="registry.example/provisioner@sha256:" + ("b" * 64),
+        verifier_image_digest="sha256:" + ("b" * 64),
+        sandbox_image_reference="registry.example/sandbox@sha256:" + ("c" * 64),
+        sandbox_image_digest="sha256:" + ("c" * 64),
+        chart_version="2.1.0",
+        chart_digest="sha256:" + ("d" * 64),
+        configuration_digest="sha256:" + ("e" * 64),
+        migration_head="0032_test",
+        environment=AcceptedSkillQualificationEnvironmentV2(
+            kubernetes_server_version="v1.33.1",
+            cluster_context="qualification-context",
+            cluster_driver="kind",
+            namespace="hartmesh-qualification-a1b2c3",
+            schedulable_nodes=("worker-a", "worker-b"),
+            gateway_node="worker-a",
+            sandbox_node="worker-b",
+            rwx_storage_class="rwx-storage",
+            rwx_volume_uid="pvc-uid",
+            token_review_authenticated=True,
+            gateway_service_account="hartmesh-gateway",
+            lease_uid="lease-uid",
+            lease_renewals=2,
+        ),
+        material=AcceptedSkillMaterialEvidenceV2(
+            skill_name="qualification-skill",
+            snapshot_digest="sha256:" + ("1" * 64),
+            skill_tree_digest="sha256:" + ("2" * 64),
+            allowed_tool_policy_digest="sha256:" + ("3" * 64),
+            file_count=2,
+            total_bytes=192,
+            materialization_digest="sha256:" + ("4" * 64),
+            receipt_digest="sha256:" + ("5" * 64),
+        ),
+        scenarios=tuple(
+            AcceptedSkillScenarioEvidenceV2(
+                name=name,
+                run_id=f"run-{index}",
+                result_digest="sha256:" + (f"{index + 6:x}" * 64),
+                replacement_observed=name in {"gateway_replacement_cleanup", "process_loss_cleanup"},
+                cleanup_outcome="deleted",
+            )
+            for index, name in enumerate(
+                ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2,
+            )
+        ),
+        completed_at=now - timedelta(minutes=1),
+    )
+    artifact = tmp_path / "qualification.json"
+    payload = evidence.canonical_bytes()
+    artifact.write_bytes(payload)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {
+        "accepted_material_qualification_evidence": str(artifact),
+        "accepted_material_qualification_digest": qualification_evidence_digest(
+            payload,
+        ),
+        "accepted_material_qualification_max_age_seconds": 86400,
+    }
+    provider._backend = SimpleNamespace(
+        accepted_material_runtime_subjects=lambda: ("c" * 64, "b" * 64),
+    )
+    monkeypatch.setenv("DEER_FLOW_IMAGE_DIGEST", "sha256:" + ("a" * 64))
+    profile = provider.accepted_sandbox_capability_profile()
+
+    qualification = await provider._accepted_sandbox_qualification(
+        profile=profile,
+        runtime_image_digest="c" * 64,
+    )
+    assert qualification.is_current(now)
+    assert profile.recoverable_resource_lookup is False
+
+    monkeypatch.setenv("DEER_FLOW_IMAGE_DIGEST", "sha256:" + ("9" * 64))
+    with pytest.raises(AcceptedMaterialError, match="sandbox_provider_unqualified"):
+        await provider._accepted_sandbox_qualification(
+            profile=profile,
+            runtime_image_digest="c" * 64,
+        )
+    monkeypatch.setenv("DEER_FLOW_IMAGE_DIGEST", "sha256:" + ("a" * 64))
+    provider._backend = SimpleNamespace(
+        accepted_material_runtime_subjects=lambda: ("c" * 64, "8" * 64),
+    )
+    with pytest.raises(AcceptedMaterialError, match="sandbox_provider_unqualified"):
+        await provider._accepted_sandbox_qualification(
+            profile=profile,
+            runtime_image_digest="c" * 64,
+        )
+
+    provider._backend = SimpleNamespace(
+        accepted_material_runtime_subjects=lambda: ("c" * 64, "b" * 64),
+    )
+    provider._config["accepted_material_qualification_digest"] = "sha256:" + ("f" * 64)
+    with pytest.raises(AcceptedMaterialError, match="sandbox_provider_unqualified"):
+        await provider._accepted_sandbox_qualification(
+            profile=profile,
+            runtime_image_digest="c" * 64,
+        )
+
+
+@pytest.mark.asyncio
+async def test_aio_candidate_is_explicit_short_lived_and_never_passing(
+    monkeypatch,
+) -> None:
+    from deerflow.sandbox.accepted_material import AcceptedMaterialError
+
+    aio_mod = importlib.import_module(
+        "deerflow.community.aio_sandbox.aio_sandbox_provider",
+    )
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {}
+    provider._backend = SimpleNamespace(
+        accepted_material_runtime_subjects=lambda: ("c" * 64, "b" * 64),
+    )
+    profile = provider.accepted_sandbox_capability_profile()
+    monkeypatch.setenv("DEER_FLOW_IMAGE_DIGEST", "sha256:" + ("a" * 64))
+
+    with pytest.raises(AcceptedMaterialError, match="sandbox_provider_unqualified"):
+        await provider._accepted_sandbox_qualification(
+            profile=profile,
+            runtime_image_digest="c" * 64,
+        )
+
+    monkeypatch.setenv("DEER_FLOW_QUALIFICATION_CANDIDATE", "1")
+    monkeypatch.setenv("DEER_FLOW_QUALIFICATION_CANDIDATE_ID", "qual-1")
+    monkeypatch.setenv(
+        "DEER_FLOW_QUALIFICATION_NAMESPACE",
+        "hartmesh-qualification-qual-1",
+    )
+    monkeypatch.setenv("DEERFLOW_TEST_KUBERNETES_RUNTIME", "1")
+    monkeypatch.setenv("DEERFLOW_TEST_KUBERNETES_FAULT_INJECTION", "1")
+    monkeypatch.setenv("DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID", "qual-1")
+
+    qualification = await provider._accepted_sandbox_qualification(
+        profile=profile,
+        runtime_image_digest="c" * 64,
+    )
+    now = datetime.now(UTC)
+    assert qualification.status == "candidate"
+    assert qualification.is_current(now) is False
+    assert qualification.is_candidate_current(now) is True
+    assert qualification.expires_at - qualification.verified_at <= timedelta(
+        minutes=15,
+    )
+
 
 _LEGACY_COLLIDING_IDENTITIES = (
     ("user-9721", "thread-9721"),

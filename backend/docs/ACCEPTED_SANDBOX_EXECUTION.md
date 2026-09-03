@@ -1,0 +1,166 @@
+# Tenant-bound accepted sandbox execution
+
+## Status and guarantee
+
+Durable accepted sandbox work is authorized by the existing accepted-material
+tuple. HartMesh does not add another execution lease, epoch, table, or heartbeat:
+
+| Component | Responsibility | Not authority for |
+| --- | --- | --- |
+| `AcceptedMaterialExecutionClaimV1` | Current tenant/run/worker/state fence from the durable run store | Provider cleanup or immutable evidence |
+| `AcceptedMaterialLeaseV1` | Provider resource, provider ownership epoch, expiry, and private renewal handle | Durable run ownership |
+| `AcceptedExecutionEvidenceV1` / `V2` | Immutable material, image, provider, epoch, qualification, and isolation proof | Current execution or cleanup permission |
+| `AcceptedMaterializer` | Provider acquisition, validation, renewal, and release | Durable run-state transitions |
+| `AcceptedSandboxSession` | Composes the run fence and materializer tuple before each operation | New authority of its own |
+| Cleanup ownership | Reaps provider resources and reconciles orphans | Sandbox execution |
+
+The session exposes operations, never its backing provider sandbox. All eight
+`Sandbox` operations—command execution, full/ranged read, download, directory
+list, text write, glob, grep, and binary update—cross the same facade. Normal
+sandbox tools, sandbox middleware, output externalization, lead agents, inherited
+subagents, and durable batch children resolve that facade from host-owned runtime
+context. A batch child builds a separate session over its existing SQL
+item-attempt fence; it does not borrow the parent run's mutable authority.
+
+Before every provider call the session:
+
+1. samples the current durable run or batch-item attempt fence;
+2. calls `AcceptedMaterializer.validate(lease, evidence)`;
+3. performs a final process-local open/lease identity check; and
+4. delegates the closed operation envelope to the private sandbox object.
+
+Renewal reuses the worker's supervised run heartbeat. Run-fence loss, provider
+validation or renewal loss, cancellation, and close invalidate the session for
+later calls. Close refuses new calls immediately, waits for an already-delegated
+call, then releases through the materializer. Terminal publication independently
+revalidates the tuple and remains fenced by the durable run/item store.
+
+This is a check-then-call guarantee, not distributed atomicity. A call accepted
+before loss may finish. For a provider without atomic operation fencing, one call
+may also enter the provider when takeover/loss occurs after both checks but before
+provider acceptance. Once loss is observed, every later call is refused, and the
+stale worker cannot publish accepted terminal success. A provider may set
+`atomic_provider_operation_fencing=true` only when the expected epoch travels in
+the operation request and is checked atomically with starting that operation.
+
+## V1 and V2 persistence boundary
+
+V1 remains strictly decodable under its original guarantees. It is never silently
+upgraded. V2 retains every V1 semantic field and adds the missing accepted
+anchors:
+
+| V1 meaning | V2 representation |
+| --- | --- |
+| Run, attempt, tenant, provider, ownership epoch | Retained |
+| Runtime image, skill snapshot/scope, materialization, verifier, read-only proof, qualification scope | Retained |
+| Raw `provider_instance_ref` | Replaced in portable evidence by a tenant-bound SHA-256 resource commitment |
+| Accepted invocation | Pseudonymous reference plus immutable invocation digest |
+| Governed tool plane | Deployment-base, user-overlay, projection, and effective digests |
+| Batch child | Optional tenant-derived child-attempt reference |
+| Provider guarantees | Capability-profile digest plus qualification-evidence digest |
+| Isolation | Bounded restricted-non-root, read-only-material, no-privilege-escalation facts and optional runtime-class/network-policy digests |
+
+Request and evidence decoders require exact field sets and canonical digests.
+The lease's provider handle and renewal object stay process-local. Portable V2
+evidence and lifecycle events contain no namespace, Pod/container/sandbox ID,
+endpoint, credential, command, file content, or output. The safe handoff forms
+are `accepted-execution-<evidence-digest>` and the per-call opaque
+`accepted-operation-<uuid>` reference.
+
+A persisted V1 row can be read and terminalized under V1. A durable V2 provider
+selection must produce V2 evidence; a missing V2 invocation/tool-plane binding,
+capability mismatch, or absent current qualification fails before model work.
+AIO process takeover remains unavailable because the per-attempt capability is
+not recoverable across processes.
+
+## Provider capability and qualification matrix
+
+Capability is an adapter declaration. Qualification is current, exact external
+evidence for a configured deployment. Both are required for durable admission.
+
+| Provider/profile | Ordinary use | Immutable accepted material | Ownership / shared expiry | Atomic operation fence | Resolved image and restricted isolation | Protected lookup after process loss | Durable one replica | Exact two |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Remote AIO/Kubernetes `rwx_verified_copy_v2` | Yes | Declared and verified per attempt | Declared atomic ownership and authoritative shared expiry | **No**; baseline check-then-call only | Declared; each attempt binds observed digests | **No** | Eligible only with a current pinned passing artifact | **No** |
+| Local/container AIO | Yes | Existing local accepted-only behavior only; no durable V2 selection | No qualified durable profile | No | No live durable qualification | No | No | No |
+| Local host, E2B, BoxLite, Tenki | Yes under their ordinary contracts | No durable accepted profile | Not claimed for this contract | No | Not qualified for this contract | Not claimed | No | No |
+| OpenSandbox 0.1.14 / SDK 0.1.15 | Yes | `empty_only`; nonempty durable paths rejected | Required ownership CAS is absent | No | Resolved-image readback is absent | No | No | No |
+| In-memory accepted adapter | Tests only | Contract fixture | Test state only | No production claim | No production claim | No | No production claim | No |
+
+Remote AIO's capability profile deliberately records
+`atomic_provider_operation_fencing=false`, `recoverable_resource_lookup=false`,
+and `exact_two=false`. The repository does not ship a passing artifact. Missing
+cluster infrastructure or an unrun lane is an unpassed gate, never a skip that
+enables production.
+
+## Qualification and configuration
+
+For production durable admission, mount one canonical
+`deerflow.kubernetes-accepted-skill-qualification/v2` artifact read-only into the
+Gateway and configure all three fields:
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  provisioner_url: http://deer-flow-provisioner:8002
+  accepted_skill_projection_profile: rwx_verified_copy_v2
+  accepted_material_qualification_evidence: /var/run/hartmesh/qualification/evidence.json
+  accepted_material_qualification_digest: sha256:<artifact-sha256>
+  accepted_material_qualification_max_age_seconds: 2592000
+```
+
+The path and digest are an inseparable pair. Selection reads at most 64 KiB,
+requires canonical strict V2 JSON with `status: passed`, verifies the pinned byte
+digest and freshness, and compares the live Gateway, provisioner/verifier, and
+sandbox image digests with the artifact. Any mismatch returns a safe
+`sandbox_provider_unqualified` or `sandbox_image_unresolved` failure before
+model/tool work. Qualification artifacts are administrator-controlled deployment
+material, not API-writable configuration.
+
+The live Kubernetes harness has a circular-bootstrap exception: a Helm
+`deployment.qualificationCandidate` can create a short-lived `candidate`
+qualification only when every internal test/fault flag is set, its ID matches the
+harness qualification ID, and the namespace begins `hartmesh-qualification-`.
+Candidate status is never current production evidence and must be explicitly
+allowed by the worker. The harness runs a restricted non-root Pod, bounded work
+through `AcceptedSandboxSession`, deletes the authoritative provider Lease after
+both checks at a deterministic barrier, observes exactly one raced call for AIO's
+non-atomic profile, proves the next call is refused, and proves stale terminal
+success is rejected. Publishing values disable candidate mode and instead mount
+the independently retained passing artifact.
+
+Exact-two remains rejected. Its enablement additionally needs recoverable
+protected resource lookup and live cross-worker atomic operation-fencing evidence;
+projected Secret rotation is not linearizable revocation.
+
+## Lifecycle and recovery
+
+`sandbox.lifecycle.v1` is a bounded, non-authoritative trace event linked to the
+accepted run/attempt and execution-evidence digest. Routine renewal success is
+coalesced. Its states are:
+
+- `acquired`: a session was constructed from a validated tuple;
+- `authority_lost`: run or provider authority failed validation/renewal;
+- `released`: materializer release completed;
+- `cleanup_pending`: release failed or was interrupted and cleanup ownership must reconcile;
+- `orphaned`: durable run reconciliation won the expired-owner CAS for persisted accepted evidence.
+
+The orphan event is written only after authoritative run takeover/terminalization.
+It diagnoses the abandoned resource; it does not authorize a replacement worker
+or cleanup. Event-store failure does not undo the terminal run CAS. Logs and the
+event carry safe provider kind, qualification scope, time, reason code, and
+evidence digest—not the raw resource reference.
+
+Recovery outcomes follow the existing authorities:
+
+| Failure point | Deterministic outcome |
+| --- | --- |
+| Resource created before materializer return | Adapter compensates with provider destroy; a failed compensation is `cleanup_pending` for existing reconciliation |
+| Material placed before evidence joins `RunRow` | Pending run cannot execute; release/cleanup paths own the resource |
+| Worker dies after evidence persistence, before first operation | Expired run owner is terminalized, an `orphaned` observation is emitted, and provider cleanup reconciliation proceeds |
+| Run/provider loss during an operation | Already-issued work may finish; later operations and stale terminal publication fail closed |
+| Release succeeds but final observation fails | Resource remains released; diagnostics may be incomplete and never become authority |
+| Release fails after local close | Session stays closed, records `cleanup_pending`, and existing cleanup ownership/reconciliation retries or reaps |
+
+See [invocation runtime](INVOCATION_RUNTIME.md),
+[OpenSandbox feasibility](OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md), and the
+[Kubernetes/Helm guide](../../deploy/helm/deer-flow/README.md).

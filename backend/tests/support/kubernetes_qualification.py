@@ -24,6 +24,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from deerflow.community.aio_sandbox.aio_sandbox_provider import (
+    AioSandboxProvider,
+)
 from deerflow.deployment.topology import MULTI_GATEWAY_QUALIFICATION_SCOPE
 from deerflow.qualification_evidence import (
     ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2,
@@ -47,7 +50,11 @@ from deerflow.runtime.tenant_identity import (
     TenantSubsystem,
     redis_component_key_prefix,
 )
-from deerflow.sandbox.accepted_material import AcceptedExecutionEvidenceV1
+from deerflow.sandbox.accepted_material import (
+    AcceptedExecutionEvidenceV2,
+    accepted_sandbox_resource_commitment,
+    decode_accepted_execution_evidence,
+)
 
 _SAFE_CONTEXT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,252}\Z")
 _SAFE_NAMESPACE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?\Z")
@@ -1648,6 +1655,10 @@ class _AcceptedSkillAttemptObservation:
     verifier_receipt_digest: str
     token_review_authenticated: bool
     lease_renewals: int
+    session_validation_passes: int = 0
+    raced_provider_calls: int = 0
+    post_loss_rejections: int = 0
+    stale_terminal_rejected: bool = False
 
     def result_digest(
         self,
@@ -1670,6 +1681,10 @@ class _AcceptedSkillAttemptObservation:
                     "receipt": dict(self.receipt),
                     "materialization_digest": self.materialization_digest,
                     "verifier_receipt_digest": self.verifier_receipt_digest,
+                    "session_validation_passes": (self.session_validation_passes),
+                    "raced_provider_calls": self.raced_provider_calls,
+                    "post_loss_rejections": self.post_loss_rejections,
+                    "stale_terminal_rejected": self.stale_terminal_rejected,
                     "cleanup_outcome": cleanup_outcome,
                     "gateway_replacement_uid": gateway_replacement_uid,
                 }
@@ -1683,6 +1698,7 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
     skill_source_claim = "hartmesh-qualification-skill-source"
     skill_fixture_config_map = "hartmesh-qualification-skill-fixture"
     skill_fixture_job = "hartmesh-qualification-skill-fixture"
+    accepted_qualification_mount = "/var/run/hartmesh/qualification"
 
     def __init__(
         self,
@@ -1718,6 +1734,26 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
             remote_sandbox,
             1,
         )
+        empty_tools = "tool_groups: []\ntools: []"
+        qualification_tools = "\n".join(
+            (
+                "tool_groups:",
+                "  - name: qualification",
+                "tools:",
+                "  - name: qualification_sandbox_operation",
+                "    group: qualification",
+                "    use: deerflow.runtime.kubernetes_qualification:qualification_sandbox_operation",
+            )
+        )
+        if empty_tools not in values["config"]:
+            raise QualificationCommandError(
+                "qualification base tool configuration changed",
+            )
+        values["config"] = str(values["config"]).replace(
+            empty_tools,
+            qualification_tools,
+            1,
+        )
         values["provisioner"] = {
             "enabled": True,
             "image": {
@@ -1746,7 +1782,18 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
             "existingClaim": self.skill_source_claim,
             "configMap": "",
         }
+        values["deployment"]["qualificationCandidate"] = {
+            "enabled": True,
+            "id": self.config.qualification_id,
+        }
         return values
+
+    @staticmethod
+    def _ensure_payload(scenario: str) -> dict[str, object]:
+        payload = KubernetesQualificationRunner._ensure_payload(scenario)
+        if scenario == "terminal_before_lifecycle_commit":
+            payload["external_key"] = f"{payload['external_key']}:during-tool"
+        return payload
 
     def _create_namespace_and_configuration(self) -> None:
         super()._create_namespace_and_configuration()
@@ -2011,7 +2058,7 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
                 "accepted-skill materialization digests are invalid",
             )
         try:
-            execution_evidence = AcceptedExecutionEvidenceV1.from_persisted(
+            execution_evidence = decode_accepted_execution_evidence(
                 self._run_execution_evidence(run_id),
             )
             ownership_epoch = int(
@@ -2021,17 +2068,28 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
             raise QualificationCommandError(
                 "accepted-skill ledger evidence is malformed",
             ) from exc
+        expected_profile = AioSandboxProvider.accepted_sandbox_capability_profile()
         if (
             execution_evidence.run_id != run_id
             or execution_evidence.provider_kind != "aio_kubernetes"
-            or execution_evidence.provider_instance_ref != sandbox_id
+            or not isinstance(execution_evidence, AcceptedExecutionEvidenceV2)
+            or execution_evidence.provider_resource_commitment
+            != accepted_sandbox_resource_commitment(
+                tenant_digest=execution_evidence.tenant.digest,
+                provider_kind="aio_kubernetes",
+                provider_instance_ref=sandbox_id,
+            )
             or execution_evidence.ownership_epoch != ownership_epoch
             or execution_evidence.runtime_image_digest != self.config.sandbox_image_digest.removeprefix("sha256:")
             or execution_evidence.skill_snapshot_digest != snapshot_id
             or execution_evidence.materialization_digest != materialization_digest
             or execution_evidence.verifier_image_digest != self.config.verifier_image_digest.removeprefix("sha256:")
-            or execution_evidence.verifier_contract_version != "rwx_verified_copy_v2"
+            or execution_evidence.verifier_contract_version != "rwx_verified_copy_v2:accepted_execution_claim_v2"
             or execution_evidence.qualification_scope != ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2
+            or execution_evidence.capability_profile_digest != expected_profile.digest
+            or not execution_evidence.isolation.restricted_non_root
+            or not execution_evidence.isolation.read_only_accepted_material
+            or not execution_evidence.isolation.privilege_escalation_disabled
         ):
             raise QualificationCommandError(
                 "accepted-skill ledger evidence does not match the live attempt",
@@ -2251,6 +2309,60 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
             "--wait=false",
         )
 
+    def _prove_accepted_session_race(
+        self,
+        attempt: _AcceptedSkillAttemptObservation,
+    ) -> _AcceptedSkillAttemptObservation:
+        """Release the exact post-validation race and require narrow guarantees."""
+
+        self._delete_attempt_lease(attempt)
+        if (
+            self._redis(
+                "SET",
+                self._barrier_key(attempt.scenario, "release"),
+                "1",
+                "EX",
+                "300",
+            )
+            != "OK"
+        ):
+            raise QualificationCommandError(
+                "accepted-sandbox race barrier release failed",
+            )
+
+        observed: dict[str, int] = {}
+
+        def completed() -> bool:
+            observed.update(
+                {
+                    "session_validation_passes": self._counter(
+                        attempt.scenario,
+                        "accepted_sandbox_validations",
+                    ),
+                    "raced_provider_calls": self._counter(
+                        attempt.scenario,
+                        "accepted_sandbox_raced_provider_calls",
+                    ),
+                    "post_loss_rejections": self._counter(
+                        attempt.scenario,
+                        "accepted_sandbox_post_loss_rejections",
+                    ),
+                }
+            )
+            return all(value == 1 for value in observed.values())
+
+        wait_until(
+            completed,
+            description="accepted-sandbox validation/takeover/delegation race",
+            timeout_seconds=60,
+            interval_seconds=1,
+        )
+        if any(value != 1 for value in observed.values()):
+            raise QualificationCommandError(
+                "accepted-sandbox race evidence is incomplete",
+            )
+        return replace(attempt, **observed)
+
     def _wait_for_attempt_cleanup(
         self,
         attempt: _AcceptedSkillAttemptObservation,
@@ -2389,6 +2501,78 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
                 "running provisioner imageID does not match the qualified digest",
             )
 
+    def _accepted_qualification_config_map(self) -> str:
+        candidate = f"{self.fullname}-accepted-sandbox-qualification"
+        if len(candidate) <= 63:
+            return candidate
+        suffix = _sha256_bytes(candidate.encode("utf-8"))[:8]
+        return f"{candidate[:54].rstrip('-')}-{suffix}"
+
+    def _published_accepted_skill_values(
+        self,
+        values: dict[str, object],
+        *,
+        evidence_digest: str,
+    ) -> dict[str, object]:
+        """Mount the exact passing bytes used by runtime qualification."""
+
+        if _IMAGE_DIGEST.fullmatch(evidence_digest) is None:
+            raise QualificationCommandError(
+                "accepted-skill evidence digest is invalid",
+            )
+        published = json.loads(json.dumps(values))
+        published["deployment"]["qualificationCandidate"] = {
+            "enabled": False,
+            "id": "",
+        }
+        profile_line = "  accepted_skill_projection_profile: rwx_verified_copy_v2"
+        rendered_config = published.get("config")
+        if not isinstance(rendered_config, str) or rendered_config.count(profile_line) != 1:
+            raise QualificationCommandError(
+                "accepted-skill runtime config cannot be pinned",
+            )
+        evidence_path = f"{self.accepted_qualification_mount}/evidence.json"
+        published["config"] = rendered_config.replace(
+            profile_line,
+            "\n".join(
+                (
+                    profile_line,
+                    "  accepted_material_qualification_evidence: " + evidence_path,
+                    "  accepted_material_qualification_digest: " + evidence_digest,
+                    "  accepted_material_qualification_max_age_seconds: 2592000",
+                )
+            ),
+            1,
+        )
+        gateway = published.get("gateway")
+        if not isinstance(gateway, dict):
+            raise QualificationCommandError(
+                "accepted-skill Gateway values are invalid",
+            )
+        volume_name = "accepted-sandbox-qualification"
+        config_map_name = self._accepted_qualification_config_map()
+        gateway["extraVolumes"] = [
+            *gateway.get("extraVolumes", []),
+            {
+                "name": volume_name,
+                "configMap": {
+                    "name": config_map_name,
+                    "items": [
+                        {"key": "evidence.json", "path": "evidence.json"},
+                    ],
+                },
+            },
+        ]
+        gateway["extraVolumeMounts"] = [
+            *gateway.get("extraVolumeMounts", []),
+            {
+                "name": volume_name,
+                "mountPath": self.accepted_qualification_mount,
+                "readOnly": True,
+            },
+        ]
+        return published
+
     def _publish_accepted_skill_qualification(
         self,
         values: dict[str, object],
@@ -2430,7 +2614,10 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
                 "Z",
             )
         )
-        published = json.loads(json.dumps(values))
+        published = self._published_accepted_skill_values(
+            values,
+            evidence_digest=evidence_digest,
+        )
         published["deployment"]["qualificationEvidence"] = [
             {
                 "qualificationId": evidence.qualification_id,
@@ -2440,6 +2627,18 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
                 "status": "passed",
             }
         ]
+        self._apply_json(
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": self._accepted_qualification_config_map(),
+                },
+                "data": {
+                    "evidence.json": passing_path.read_text(encoding="utf-8"),
+                },
+            }
+        )
         values_path = self._write_values(published, "qualified-skill-v2")
         self._helm(
             "upgrade",
@@ -2526,7 +2725,7 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
                     attempt = self._verify_gateway_token_review(attempt)
                     attempt = self._wait_for_lease_renewal(attempt)
                 if scenario == "terminal_before_lifecycle_commit":
-                    self._delete_attempt_lease(attempt)
+                    attempt = self._prove_accepted_session_race(attempt)
                 attempts[scenario] = attempt
 
             for scenario in KubernetesQualificationEvidence.REQUIRED_SCENARIOS:
@@ -2535,7 +2734,7 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
                     client.set_base_url(base_url)
                     owner_observer.set_base_url(base_url)
                     nonowner.set_base_url(base_url)
-                    _scenario_evidence, gateway_pod = self._run_scenario(
+                    scenario_evidence, gateway_pod = self._run_scenario(
                         scenario,
                         client,
                         owner_observer,
@@ -2543,6 +2742,16 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
                         gateway_pod,
                         forwarded,
                         barrier_probe=probe,
+                    )
+                if scenario == "terminal_before_lifecycle_commit":
+                    attempt = attempts.get(scenario)
+                    if attempt is None or scenario_evidence.terminal_status != "error":
+                        raise QualificationCommandError(
+                            "stale accepted-sandbox success was not refused",
+                        )
+                    attempts[scenario] = replace(
+                        attempt,
+                        stale_terminal_rejected=True,
                     )
                 if scenario in {
                     "graceful_rollout_termination",
@@ -2562,6 +2771,11 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
                     "accepted-skill fault coverage is incomplete",
                 )
             active = attempts["active_execution"]
+            accepted_session_race = attempts["terminal_before_lifecycle_commit"]
+            if accepted_session_race.session_validation_passes != 1 or accepted_session_race.raced_provider_calls != 1 or accepted_session_race.post_loss_rejections != 1 or not accepted_session_race.stale_terminal_rejected:
+                raise QualificationCommandError(
+                    "accepted-sandbox session race evidence is incomplete",
+                )
             facts = self._environment_facts(gateway_pod[0])
             evidence_scenarios = (
                 ("nonempty_material_execution", active),

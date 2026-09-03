@@ -239,6 +239,7 @@ def test_qualification_candidate_is_isolated_unqualified_and_explicit(
 
     assert environment["DEER_FLOW_QUALIFICATION_CANDIDATE"] == "1"
     assert environment["DEER_FLOW_QUALIFICATION_CANDIDATE_ID"] == ("qualification-09")
+    assert environment["DEER_FLOW_QUALIFICATION_NAMESPACE"] == ("hartmesh-qualification-two-gateway")
     assert "DEER_FLOW_QUALIFICATION_EVIDENCE" not in environment
 
 

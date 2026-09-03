@@ -631,6 +631,19 @@ imagePullSecrets:
   {{- end -}}
 {{- end -}}
 
+{{- $candidate := .Values.deployment.qualificationCandidate | default dict -}}
+{{- $candidateEnabled := (index $candidate "enabled") | default false -}}
+{{- $candidateId := (index $candidate "id") | default "" -}}
+{{- if and $candidateEnabled (not (hasPrefix "hartmesh-qualification-" (include "deer-flow.namespace" .))) -}}
+{{- fail "qualification candidate requires a disposable namespace beginning hartmesh-qualification-" -}}
+{{- end -}}
+{{- if and $candidateEnabled (not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$" $candidateId)) -}}
+{{- fail "qualification candidate requires a bounded safe id" -}}
+{{- end -}}
+{{- if and $candidateEnabled (gt (len .Values.deployment.qualificationEvidence) 0) -}}
+{{- fail "qualification candidate cannot declare passing evidence" -}}
+{{- end -}}
+
 {{- if eq $mode "durable_two_gateway_v1" -}}
   {{- $profile := ((index $deploymentConfig "profile") | default "local_development") -}}
   {{- $checkpointCache := (index $databaseConfig "checkpoint_cache") | default dict -}}
@@ -674,18 +687,6 @@ imagePullSecrets:
     {{- if and (eq (.scope | default "") "durable_two_gateway_v1_postgres_redis_aio_rwx") (eq (.status | default "") "passed") -}}
       {{- $matchingEvidence = add1 $matchingEvidence -}}
     {{- end -}}
-  {{- end -}}
-  {{- $candidate := .Values.deployment.qualificationCandidate | default dict -}}
-  {{- $candidateEnabled := (index $candidate "enabled") | default false -}}
-  {{- $candidateId := (index $candidate "id") | default "" -}}
-  {{- if and $candidateEnabled (not (hasPrefix "hartmesh-qualification-" (include "deer-flow.namespace" .))) -}}
-  {{- fail "durable_two_gateway_v1 qualification candidate requires a disposable namespace beginning hartmesh-qualification-" -}}
-  {{- end -}}
-  {{- if and $candidateEnabled (not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$" $candidateId)) -}}
-  {{- fail "durable_two_gateway_v1 qualification candidate requires a bounded safe id" -}}
-  {{- end -}}
-  {{- if and $candidateEnabled (ne $matchingEvidence 0) -}}
-  {{- fail "durable_two_gateway_v1 qualification candidate cannot declare passing evidence" -}}
   {{- end -}}
   {{- if and (not $candidateEnabled) (ne $matchingEvidence 1) -}}
   {{- fail "durable_two_gateway_v1 requires passed qualification evidence for durable_two_gateway_v1_postgres_redis_aio_rwx" -}}

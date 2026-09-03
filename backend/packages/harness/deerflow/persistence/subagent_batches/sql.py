@@ -1136,6 +1136,60 @@ class SubagentBatchRepository:
                 await session.commit()
             return {"valid": not cancel_requested, "cancel_requested": cancel_requested}
 
+    async def item_attempt_authorized(
+        self,
+        item_id: str,
+        *,
+        lease_owner: str,
+        attempt_id: str,
+        lease_epoch: int,
+    ) -> bool:
+        """Sample whether one accepted item attempt still owns execution.
+
+        The database locks exist only for this authority sample. Callers must
+        release this method before invoking a sandbox provider; this is the
+        baseline check-then-call fence, not an atomic provider-operation fence.
+        """
+
+        async with self._sf() as session:
+            loaded = await self._locked_fenced_item(
+                session,
+                item_id=item_id,
+                lease_owner=lease_owner,
+                attempt_id=attempt_id,
+                lease_epoch=lease_epoch,
+                statuses=("leased", "running"),
+            )
+            if loaded is None:
+                return False
+            item, batch = loaded
+            authority_now = await self._now(session, None)
+            if not await self._execution_window_open(
+                session,
+                batch=batch,
+                now=authority_now,
+            ):
+                await session.commit()
+                return False
+            expected_attempt_status = ("claimed",) if item.status == "leased" else ("started",)
+            attempt = await session.get(
+                SubagentBatchAttemptRow,
+                attempt_id,
+                with_for_update=True,
+            )
+            return bool(
+                batch.status in BATCH_ACTIVE_STATUSES
+                and item.cancel_requested_at is None
+                and item.lease_expires_at is not None
+                and _as_utc(item.lease_expires_at) > authority_now
+                and self._attempt_matches_current(
+                    batch=batch,
+                    item=item,
+                    attempt=attempt,
+                    statuses=expected_attempt_status,
+                )
+            )
+
     async def _locked_fenced_item(
         self,
         session: AsyncSession,

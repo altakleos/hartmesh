@@ -14,14 +14,17 @@ import asyncio
 import atexit
 import contextlib
 import hashlib
+import json
 import logging
 import os
+import re
 import signal
 import threading
 import time
 import uuid
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 try:
@@ -45,8 +48,12 @@ from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATIO
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_LOCKS_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.accepted_material import (
+    AcceptedMaterialCapability,
+    AcceptedMaterialError,
     AcceptedMaterialExecutionClaimV1,
     AcceptedMaterializerSelection,
+    AcceptedSandboxCapabilityProfileV1,
+    AcceptedSandboxQualificationV1,
 )
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.identity import derive_sandbox_scope_token
@@ -334,6 +341,21 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 sandbox_config,
                 "accepted_material_lease_duration_seconds",
                 300,
+            ),
+            "accepted_material_qualification_evidence": getattr(
+                sandbox_config,
+                "accepted_material_qualification_evidence",
+                None,
+            ),
+            "accepted_material_qualification_digest": getattr(
+                sandbox_config,
+                "accepted_material_qualification_digest",
+                None,
+            ),
+            "accepted_material_qualification_max_age_seconds": getattr(
+                sandbox_config,
+                "accepted_material_qualification_max_age_seconds",
+                30 * 24 * 60 * 60,
             ),
             "skills_container_path": _normalize_skills_container_path(
                 configured_skills_path,
@@ -2216,6 +2238,154 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         return self._config.get("accepted_skill_projection_profile") == "rwx_verified_copy_v2" and isinstance(self._backend, RemoteSandboxBackend)
 
+    @staticmethod
+    def accepted_sandbox_capability_profile() -> AcceptedSandboxCapabilityProfileV1:
+        """Declare AIO guarantees separately from live qualification.
+
+        AIO's Redis/Kubernetes ownership seam is authoritative for lease
+        acquisition, but its ordinary sandbox operations do not carry the
+        expected ownership epoch into the provider acceptance step.  The
+        stronger atomic-operation flag and exact-two support therefore remain
+        false.
+        """
+
+        return AcceptedSandboxCapabilityProfileV1.build(
+            material_capability=AcceptedMaterialCapability.IMMUTABLE_READ_ONLY,
+            atomic_provider_ownership_fencing=True,
+            atomic_provider_operation_fencing=False,
+            authoritative_shared_expiry=True,
+            resolved_immutable_image=True,
+            restricted_non_root_isolation=True,
+            # The running process can revalidate the protected resource, but
+            # a replacement process cannot recover the ephemeral attempt
+            # capability. Process loss therefore terminalizes and reconciles.
+            recoverable_resource_lookup=False,
+            durable_one_replica=True,
+            exact_two=False,
+        )
+
+    async def _accepted_sandbox_qualification(
+        self,
+        *,
+        profile: AcceptedSandboxCapabilityProfileV1,
+        runtime_image_digest: str,
+    ) -> AcceptedSandboxQualificationV1:
+        """Load one bounded, canonical, current live qualification artifact."""
+
+        from deerflow.qualification_evidence import (
+            MAX_QUALIFICATION_EVIDENCE_BYTES,
+            KubernetesAcceptedSkillQualificationEvidenceV2,
+            qualification_evidence_digest,
+        )
+
+        try:
+            runtime_subjects = await asyncio.to_thread(
+                self._backend.accepted_material_runtime_subjects,
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            raise AcceptedMaterialError("sandbox_provider_unqualified") from None
+        if not isinstance(runtime_subjects, tuple) or len(runtime_subjects) != 2 or any(not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None for digest in runtime_subjects):
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
+        sandbox_image_digest, verifier_image_digest = runtime_subjects
+        if sandbox_image_digest != runtime_image_digest:
+            raise AcceptedMaterialError("sandbox_image_unresolved")
+
+        gateway_image_digest = os.getenv("DEER_FLOW_IMAGE_DIGEST", "")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", gateway_image_digest) is None:
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
+
+        reference = self._config.get("accepted_material_qualification_evidence")
+        expected_digest = self._config.get(
+            "accepted_material_qualification_digest",
+        )
+        if not isinstance(reference, str) or not reference or not isinstance(expected_digest, str) or not expected_digest:
+            from deerflow.runtime.kubernetes_qualification import (
+                accepted_sandbox_qualification_candidate_enabled,
+            )
+
+            if not accepted_sandbox_qualification_candidate_enabled():
+                raise AcceptedMaterialError("sandbox_provider_unqualified")
+            now = datetime.now(UTC)
+            candidate_id = os.environ["DEER_FLOW_QUALIFICATION_CANDIDATE_ID"]
+            candidate_payload = {
+                "version": 1,
+                "candidate_id": candidate_id,
+                "gateway_image_digest": gateway_image_digest,
+                "sandbox_image_digest": sandbox_image_digest,
+                "verifier_image_digest": verifier_image_digest,
+            }
+            candidate_digest = hashlib.sha256(
+                json.dumps(
+                    candidate_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+            ).hexdigest()
+            return AcceptedSandboxQualificationV1.build(
+                capability_profile_digest=profile.digest,
+                qualification_scope=(KubernetesAcceptedSkillQualificationEvidenceV2.SCOPE),
+                artifact_digest=candidate_digest,
+                topology_digest=candidate_digest,
+                verified_at=now,
+                expires_at=now + timedelta(minutes=15),
+                status="candidate",
+            )
+
+        def _read_bounded_artifact() -> bytes:
+            with Path(reference).open("rb") as artifact:
+                payload = artifact.read(MAX_QUALIFICATION_EVIDENCE_BYTES + 1)
+            if len(payload) > MAX_QUALIFICATION_EVIDENCE_BYTES:
+                raise ValueError("qualification evidence exceeds bounded size")
+            return payload
+
+        try:
+            payload = await asyncio.to_thread(_read_bounded_artifact)
+            actual_digest = qualification_evidence_digest(payload)
+            if actual_digest.removeprefix("sha256:") != expected_digest.removeprefix(
+                "sha256:",
+            ):
+                raise ValueError("qualification artifact digest mismatch")
+            evidence = KubernetesAcceptedSkillQualificationEvidenceV2.from_bytes(
+                payload,
+            )
+        except (OSError, TypeError, ValueError):
+            raise AcceptedMaterialError("sandbox_provider_unqualified") from None
+        if evidence.sandbox_image_digest.removeprefix("sha256:") != runtime_image_digest:
+            raise AcceptedMaterialError("sandbox_image_unresolved")
+        if evidence.gateway_image_digest != gateway_image_digest or evidence.provisioner_image_digest.removeprefix("sha256:") != verifier_image_digest or evidence.verifier_image_digest.removeprefix("sha256:") != verifier_image_digest:
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
+        max_age_seconds = self._config.get(
+            "accepted_material_qualification_max_age_seconds",
+            30 * 24 * 60 * 60,
+        )
+        if type(max_age_seconds) is not int or max_age_seconds < 60 or max_age_seconds > 365 * 24 * 60 * 60:
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
+        topology_payload = {
+            "version": 1,
+            "environment": evidence.environment.to_dict(),
+            "chart_digest": evidence.chart_digest,
+            "configuration_digest": evidence.configuration_digest,
+            "migration_head": evidence.migration_head,
+        }
+        topology_digest = hashlib.sha256(
+            json.dumps(
+                topology_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+        qualification = AcceptedSandboxQualificationV1.build(
+            capability_profile_digest=profile.digest,
+            qualification_scope=evidence.SCOPE,
+            artifact_digest=actual_digest.removeprefix("sha256:"),
+            topology_digest=topology_digest,
+            verified_at=evidence.completed_at,
+            expires_at=evidence.completed_at + timedelta(seconds=max_age_seconds),
+        )
+        if not qualification.is_current(datetime.now(UTC)):
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
+        return qualification
+
     async def accepted_materializer_selection(
         self,
         *,
@@ -2230,6 +2400,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         from .accepted_materializer import AioAcceptedMaterializer
 
         runtime_image_digest = await self.accepted_material_runtime_image_digest_async()
+        profile = self.accepted_sandbox_capability_profile()
+        qualification = await self._accepted_sandbox_qualification(
+            profile=profile,
+            runtime_image_digest=runtime_image_digest,
+        )
         lease_duration = timedelta(
             seconds=self._config["accepted_material_lease_duration_seconds"],
         )
@@ -2239,9 +2414,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 binding_resolver=lambda _request: binding,
                 scope_resolver=lambda _request: (thread_id, user_id),
                 lease_duration=lease_duration,
+                qualification=qualification,
             ),
             runtime_image_digest=runtime_image_digest,
             lease_duration=lease_duration,
+            capability_profile=profile,
+            qualification=qualification,
         )
 
     def accepted_skill_execution_evidence(

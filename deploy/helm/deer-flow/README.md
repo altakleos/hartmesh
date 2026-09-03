@@ -634,8 +634,11 @@ The opt-in GitHub Actions Kubernetes qualification workflow selects this v2
 scope. Its dispatch therefore requires pinned Gateway, provisioner, and AIO
 sandbox images plus an RWX storage class. The runner creates the accepted
 sandbox through the provisioner-backed AIO provider and executes a bounded
-file read inside the real sandbox container, so the lane also serves as the
-hardened-sandbox smoke for the chart's restricted security baseline.
+operation through `AcceptedSandboxSession` inside the real sandbox container.
+At a deterministic post-validation barrier it deletes the provider Lease;
+AIO's declared non-atomic operation profile must record exactly one raced call,
+then refuse the next call and stale terminal success. The lane therefore also
+serves as the hardened-sandbox smoke for the chart's restricted security baseline.
 Lease owner loss deliberately fails closed; this scope does not claim same-run
 sandbox rehydration or replacement.
 A renewal is proven only when the Lease keeps the exact UID, accepted-attempt
@@ -644,6 +647,42 @@ strictly advances. A `metadata.resourceVersion` change by itself is not renewal
 evidence. Offline fakes pin this predicate and the v2 orchestration, but only an
 artifact from the opt-in live run qualifies cross-node Kubernetes behavior.
 An absent v2 artifact leaves nonempty remote skill execution unqualified.
+
+The live runner publishes its passing artifact into a read-only ConfigMap mount,
+pins the exact byte digest in the application config, and turns candidate mode
+off before the final Helm upgrade. For an independently managed deployment, use
+the equivalent shape (the artifact is bounded evidence, not a credential):
+
+```yaml
+gateway:
+  extraVolumes:
+    - name: accepted-sandbox-qualification
+      configMap:
+        name: accepted-sandbox-qualification
+        items:
+          - key: evidence.json
+            path: evidence.json
+  extraVolumeMounts:
+    - name: accepted-sandbox-qualification
+      mountPath: /var/run/hartmesh/qualification
+      readOnly: true
+
+config: |
+  sandbox:
+    use: deerflow.community.aio_sandbox:AioSandboxProvider
+    provisioner_url: http://deer-flow-provisioner:8002
+    accepted_skill_projection_profile: rwx_verified_copy_v2
+    accepted_material_qualification_evidence: /var/run/hartmesh/qualification/evidence.json
+    accepted_material_qualification_digest: sha256:<artifact-sha256>
+    accepted_material_qualification_max_age_seconds: 2592000
+```
+
+The Gateway parses canonical V2 bytes, enforces freshness, and compares the
+current Gateway, sandbox, and provisioner/verifier image digests. A
+`deployment.qualificationEvidence` report entry alone does not satisfy this
+runtime gate. `deployment.qualificationCandidate` is accepted only in a
+`hartmesh-qualification-*` namespace with matching internal live-test and fault
+flags; candidate status is never production qualification.
 
 After the run, obtain the declared digest/reference from the administrator report and the
 artifact from the independently configured evidence path or artifact store. Supply expected
