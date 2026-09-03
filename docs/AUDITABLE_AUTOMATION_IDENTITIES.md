@@ -112,17 +112,20 @@ and tool-plane promotion are not reachable with ordinary run scopes.
 ## Persistence and migration
 
 Migration `0033_automation_identities` adds nullable legacy anchors
-`personal_access_tokens.tenant_ref` and `.tenant_digest`, their both-or-neither
-check, and tenant-first digest/user indexes. Every new row has both anchors.
+`personal_access_tokens.tenant_ref` and `.tenant_digest`, backfills them, then
+makes both columns `NOT NULL`; it also adds a pair check and tenant-first
+digest/user indexes. Every current row has both anchors.
 Create, digest lookup, list, revoke, last-used, and audit operations compare the
 repository's frozen tenant reference as well as user ownership where relevant.
 
 The migration backfills only when the schema already has the bound
-`hartmesh_deployment_identity` singleton. A populated unbound schema remains
-unbound and therefore unreadable by the tenant-scoped repository. The explicit
-offline `deerflow deployment bind-tenant --expected-nonempty-schema` flow also
-backfills PAT rows in its singleton transaction. It never derives tenancy from
-a request, user, host, release, or namespace. Existing PAT UUIDs are preserved.
+`hartmesh_deployment_identity` singleton. A populated unbound PAT table stops
+before DDL with `credential_tenant_binding_required`. The explicit offline
+`deerflow deployment bind-tenant --expected-nonempty-schema` command catches
+that precondition, binds the authoritative singleton, and reruns bootstrap; the
+migration then performs the PAT backfill and required-column transition. It
+never derives tenancy from a request, user, host, release, or namespace.
+Existing PAT UUIDs are preserved.
 
 The same migration creates `credential_audit_events`. Rows are tenant-bound,
 validated, and aggregated by a daily canonical key over safe dimensions. The
@@ -143,12 +146,14 @@ timestamps, and count. PAT name and token material are excluded. PAT scopes
 cannot call PAT management APIs.
 
 Creation and revocation audits share the PAT mutation transaction. Durable
-admission and all cancel-capable controls require an audit write and fail 503
-before the action when it is unavailable. Routine successful use, rejected
-use, expiry observations, and last-used timestamps are best-effort so audit
-refresh cannot become a general authentication availability dependency. Scope
-mutation is not currently supported; if added, it must write the existing
-`scope_changed` action in the same transaction as the mutation.
+admission and privileged run, runtime, MCP-task, subagent-batch, and scheduled-
+task mutations require an audit write after current authorization/resource
+checks and before mutation; they fail 503 when that write is unavailable.
+Routine successful use, rejected use, expiry observations, and last-used
+timestamps are best-effort so audit refresh cannot become a general
+authentication availability dependency. Scope mutation is not currently
+supported; if added, it must write the existing `scope_changed` action in the
+same transaction as the mutation.
 
 ## Revocation, replay, and recovery
 
@@ -165,22 +170,26 @@ scope, user, and tenant authorization, so historical equality cannot submit,
 observe, cancel, or export with a revoked credential.
 
 An authorized recovery worker resumes the already accepted record under the
-existing owner/lease/epoch recovery fences. Its service execution authority is
-separate runtime evidence; it does not replace the original
-`TrustedRunContextV1.identity` or `.credential`. Historical admission actor and
-current recovery executor must be displayed as different facts.
+existing owner/lease/epoch recovery fences. Before materialization or graph
+work, the Gateway creates and durably audits a separate
+`VerifiedActorContextV1`: it retains the accepted effective subject, replaces
+the original acting-service slot with `gateway:execution-recovery`, uses the
+`internal_service` method, and commits to `runs:recover`. The worker publishes
+that safe context under the server-owned `RECOVERY_EXECUTOR_CONTEXT_KEY`. It
+does not replace the original `TrustedRunContextV1.identity` or `.credential`;
+historical admission actor and current recovery executor are distinct facts.
 
 ## Handoff to governed tool-plane revisions
 
 Project 03 should import `VerifiedActorContextV1`, `CredentialEvidenceV1`, and
 the existing identity/tenant types from `deerflow_extension_api`; its deep
 revision service must not import Gateway authentication modules. At an HTTP
-boundary, `app.gateway.credential_evidence.verified_actor_context_for_request`
-composes the current server-resolved actor. The Gateway's
-`require_audited_cancel_permission_if` demonstrates the privileged-action
-sequence: recheck a dedicated current permission, then call
-`record_required_credential_action` before mutation, and pass the verified
-actor into the deep service.
+boundary, `app.gateway.authz.require_audited_permission` is the authorization
+hook: it rechecks a dedicated current permission, persists the required audit,
+and returns the exact `VerifiedActorContextV1` to pass into the deep service.
+Conditional cancel paths use `require_audited_cancel_permission_if`, which
+delegates to the same hook. `record_required_credential_action` is the lower
+level audit-plus-actor seam when authorization has already been established.
 
 The authority digest is evidence, not an authorization evaluator. Tool-plane
 staging/promotion needs a new explicit administrator permission and route

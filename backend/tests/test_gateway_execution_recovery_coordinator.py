@@ -3,8 +3,15 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from deerflow_extension_api import (
+    ActingServiceV1,
+    EffectiveSubjectV1,
+    InvocationIdentityV1,
+    VerifiedActorContextV1,
+)
 from fastapi import FastAPI
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
@@ -25,6 +32,7 @@ from deerflow.runtime import (
 from deerflow.runtime.events.catalog import RUN_EXECUTION_STARTED_EVENT
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.store.base import RecoveryPolicy
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 from deerflow.runtime.tool_evidence import (
     TOOL_RECEIPT_CATEGORY,
     TOOL_RECEIPT_OUTCOME_EVENT,
@@ -326,8 +334,23 @@ async def test_production_launcher_reconstructs_only_after_manager_release(
     input_kind: str,
 ) -> None:
     record = _record()
+    original_identity = InvocationIdentityV1(
+        effective_subject=EffectiveSubjectV1(
+            kind="human",
+            subject_id="user-1",
+            role="user",
+        ),
+        acting_service=ActingServiceV1(
+            service_id="channel:slack",
+        ),
+    )
+    tenant = TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference()
     record.accepted_invocation = SimpleNamespace(
-        principal=SimpleNamespace(is_internal=False),
+        principal=SimpleNamespace(
+            is_internal=False,
+            identity=original_identity,
+        ),
+        tenant=tenant,
     )
     input_value: object = {"messages": [{"role": "user", "content": "recover once"}]} if input_kind == "graph" else {"approved": True}
     record.recovery_payload_json = ExecutionRecoveryPayloadV1(
@@ -348,6 +371,14 @@ async def test_production_launcher_reconstructs_only_after_manager_release(
     manager = _AttachmentManager()
     app = FastAPI()
     app.state.stream_bridge = object()
+    events: list[str] = []
+
+    async def record_audit(**_values):
+        events.append("audit")
+
+    audit = AsyncMock()
+    audit.record.side_effect = record_audit
+    app.state.credential_audit_repo = audit
     context_calls = 0
     factory_calls = 0
     worker_calls: list[dict[str, object]] = []
@@ -363,7 +394,19 @@ async def test_production_launcher_reconstructs_only_after_manager_release(
         return object()
 
     async def fake_run_agent(*_args, **kwargs):
+        events.append("run")
         worker_calls.append(kwargs)
+        executor = kwargs["ctx"].recovery_executor
+        assert isinstance(executor, VerifiedActorContextV1)
+        assert executor.identity.effective_subject == original_identity.effective_subject
+        assert executor.identity.acting_service is not None
+        assert executor.identity.acting_service.service_id == "gateway:execution-recovery"
+        assert executor.identity != original_identity
+        assert executor.credential.method == "internal_service"
+        assert executor.credential.credential_ref is None
+        assert executor.credential.authority_categories == ("runs",)
+        assert executor.tenant == tenant
+        assert record.accepted_invocation.principal.identity is original_identity
         decision = await kwargs["ctx"].execution_recovery_gate(
             record,
             SimpleNamespace(effective_policies={}),
@@ -402,6 +445,13 @@ async def test_production_launcher_reconstructs_only_after_manager_release(
     assert context_calls == 1
     assert factory_calls == 1
     assert len(worker_calls) == 1
+    assert events == ["audit", "run"]
+    audit.record.assert_awaited_once()
+    audit_values = audit.record.await_args.kwargs
+    assert audit_values["method"] == "internal_service"
+    assert audit_values["action"] == "control"
+    assert audit_values["route_category"] == "runtime_recovery"
+    assert audit_values["actor_digest"] == worker_calls[0]["ctx"].recovery_executor.digest
     kwargs = worker_calls[0]
     if input_kind == "graph":
         messages = kwargs["graph_input"]["messages"]  # type: ignore[index]

@@ -316,7 +316,6 @@ class TrustedRunContextV1:
     profile_revision: ResolvedProfileRevisionReferenceV1
     extension_generation: int
     extension_manifest_digest: str | None
-    credential: CredentialEvidenceV1 | None = None
     extension_artifact_manifest_digest: str | None = None
     extension_configuration_digest: str | None = None
     tenant: TenantReferenceV1 | None = None
@@ -327,6 +326,9 @@ class TrustedRunContextV1:
     runtime_reference_digest: str = ""
     runtime_reference_count: int = 0
     runtime_state_complete: bool = True
+    # Appended after every v1-v3 constructor slot so adding v4 evidence is
+    # backward compatible for callers using optional positional arguments.
+    credential: CredentialEvidenceV1 | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, InvocationIdentityV1):

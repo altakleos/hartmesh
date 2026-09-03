@@ -26,6 +26,15 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
+from deerflow_extension_api import (
+    ActingServiceV1,
+    CredentialEvidenceV1,
+    InvocationIdentityV1,
+    VerifiedActorContextV1,
+    authority_categories_v1,
+    canonicalize_authority_v1,
+    effective_authority_digest_v1,
+)
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
@@ -43,7 +52,11 @@ from deerflow.runtime import (
 )
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RecoveryPolicy, RunStore
-from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
+from deerflow.runtime.tenant_identity import (
+    TenantIdentityV1,
+    TenantReferenceV1,
+    TenantSubsystem,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +70,8 @@ logger = logging.getLogger(__name__)
 # timeout.
 _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
 _EXECUTION_RECOVERY_CLAIMS_ENV = "HARTMESH_EXECUTION_RECOVERY_CLAIMS_ENABLED"
+_EXECUTION_RECOVERY_AUTHORITY = ("runs:recover",)
+_EXECUTION_RECOVERY_SERVICE_ID = "gateway:execution-recovery"
 
 
 def _execution_recovery_claims_enabled() -> bool:
@@ -102,6 +117,68 @@ def _execution_recovery_manager_options(
         "execution_recovery_claims_enabled": (_execution_recovery_claims_enabled()),
         "execution_takeover_eligibility": (_exact_two_execution_takeover_eligible),
     }
+
+
+def _execution_recovery_actor(
+    record: RunRecord,
+) -> VerifiedActorContextV1:
+    """Build host-authenticated recovery evidence without rewriting history."""
+
+    accepted = record.accepted_invocation
+    identity = getattr(getattr(accepted, "principal", None), "identity", None)
+    tenant = getattr(accepted, "tenant", None)
+    if not isinstance(identity, InvocationIdentityV1) or not isinstance(
+        tenant,
+        TenantReferenceV1,
+    ):
+        raise RuntimeError("execution_recovery_actor_unavailable")
+    authority = canonicalize_authority_v1(
+        _EXECUTION_RECOVERY_AUTHORITY,
+    )
+    return VerifiedActorContextV1(
+        identity=InvocationIdentityV1(
+            effective_subject=identity.effective_subject,
+            acting_service=ActingServiceV1(
+                service_id=_EXECUTION_RECOVERY_SERVICE_ID,
+                role="recovery_executor",
+            ),
+        ),
+        credential=CredentialEvidenceV1(
+            method="internal_service",
+            credential_ref=None,
+            effective_authority_digest=effective_authority_digest_v1(authority),
+            authority_categories=authority_categories_v1(authority),
+        ),
+        tenant=tenant,
+    )
+
+
+async def _record_execution_recovery_actor(
+    app: FastAPI,
+    actor: VerifiedActorContextV1,
+) -> None:
+    """Require bounded current-executor audit before recovered execution."""
+
+    from deerflow.persistence.credential_audit import (
+        CredentialAuditUnavailable,
+    )
+
+    repository = getattr(app.state, "credential_audit_repo", None)
+    if repository is None:
+        raise CredentialAuditUnavailable()
+    try:
+        await repository.record(
+            method=actor.credential.method,
+            action="control",
+            credential_ref=actor.credential.credential_ref,
+            actor_digest=actor.digest,
+            authority_digest=(actor.credential.effective_authority_digest),
+            route_category="runtime_recovery",
+        )
+    except CredentialAuditUnavailable:
+        raise
+    except Exception as exc:
+        raise CredentialAuditUnavailable() from exc
 
 
 async def _launch_execution_recovery_worker(
@@ -178,6 +255,8 @@ async def _launch_execution_recovery_worker(
 
     async def released_worker() -> None:
         await record.execution_recovery_release_event.wait()
+        recovery_executor = _execution_recovery_actor(record)
+        await _record_execution_recovery_actor(app, recovery_executor)
         config = copy.deepcopy(dict(payload.config))
         if payload.input_kind == "command_resume":
             graph_input = Command(
@@ -191,6 +270,7 @@ async def _launch_execution_recovery_worker(
         run_context = replace(
             get_app_run_context(app),
             execution_recovery_gate=verified_gate,
+            recovery_executor=recovery_executor,
         )
         agent_factory = resolve_agent_factory(record.assistant_id)
         before = payload.interrupt_before

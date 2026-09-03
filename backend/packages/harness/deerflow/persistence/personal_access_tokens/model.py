@@ -33,10 +33,11 @@ class PersonalAccessTokenRow(Base):
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    # Nullable only for rows predating the auditable-identity migration. New
-    # repository writes always bind both values and every read compares both.
-    tenant_ref: Mapped[str | None] = mapped_column(String(23), nullable=True)
-    tenant_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Migration 0033 backfills legacy rows only from the deployment singleton,
+    # then makes both anchors required. Every repository operation also
+    # compares them for defense in depth.
+    tenant_ref: Mapped[str] = mapped_column(String(23), nullable=False)
+    tenant_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     # SHA-256 hex digest of the ``dfp_…`` token. The raw token exists only in

@@ -103,6 +103,16 @@ def _make_pat_app(with_pat_repo: bool = True):
 
     @app.post("/api/threads/{thread_id}/runs/{run_id}/cancel")
     async def cancel_run(request: Request):
+        from app.gateway.authz import require_audited_permission
+
+        request.app.state.cancel_route_entered = True
+        await require_audited_permission(
+            request,
+            "runs",
+            "cancel",
+            route_category="runs",
+        )
+        request.app.state.cancel_mutated = True
         return {"cancelled": True}
 
     @app.get("/api/threads/{thread_id}/runs/{run_id}/artifacts/archive")
@@ -238,6 +248,30 @@ def test_invalid_bearer_never_falls_back_to_session_cookie(client):
     response = client.get("/api/threads/whoami", headers={"Authorization": "Bearer dfp_not-a-real-token"})
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid token"
+
+
+def test_pat_store_failure_is_generic_and_never_renders_bearer_material(
+    monkeypatch,
+):
+    raw_token = "dfp_secret-store-failure-marker"
+
+    async def fail_authentication(*_args, **_kwargs):
+        raise RuntimeError(f"driver included {raw_token}")
+
+    monkeypatch.setattr(
+        "app.gateway.auth.pat.authenticate_pat",
+        fail_authentication,
+    )
+    app = _make_pat_app()
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        response = test_client.get(
+            "/api/threads/whoami",
+            headers={"Authorization": f"Bearer {raw_token}"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Credential authentication unavailable"}
+    assert raw_token not in response.text
 
 
 def test_non_bearer_authorization_scheme_is_rejected(client):
@@ -430,7 +464,7 @@ def test_privileged_cancel_records_required_control_audit(client, pat_env):
     assert "control" in {item["action"] for item in audit}
 
 
-def test_privileged_cancel_fails_before_route_when_audit_unavailable(
+def test_privileged_cancel_fails_inside_route_before_mutation_when_audit_unavailable(
     client,
     pat_env,
     monkeypatch,
@@ -453,6 +487,8 @@ def test_privileged_cancel_fails_before_route_when_audit_unavailable(
     assert response.status_code == 503
     assert response.json()["detail"] == "Required audit record unavailable"
     assert "database" not in response.text
+    assert _app.state.cancel_route_entered is True
+    assert not hasattr(_app.state, "cancel_mutated")
 
 
 @pytest.mark.parametrize(

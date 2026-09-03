@@ -220,3 +220,32 @@ def test_trusted_run_context_v4_binds_credential_and_reads_legacy_contexts() -> 
     assert legacy_payload["version"] == 2
     assert "credential" not in legacy_payload
     assert TrustedRunContextV1.from_persisted_json(legacy_payload).credential is None
+
+
+def test_trusted_run_context_keeps_legacy_optional_positional_arguments() -> None:
+    """Adding v4 evidence must not shift the public v3 constructor slots."""
+
+    trusted = TrustedRunContextV1(
+        _identity(),
+        SealedOriginV1(source_kind="native_channel", digest="b" * 64),
+        "thread-1",
+        None,
+        ResolvedAgentRevisionReferenceV1(
+            agent_id="lead-agent",
+            digest="c" * 64,
+        ),
+        ResolvedProfileRevisionReferenceV1(
+            profile_id="default",
+            digest="d" * 64,
+        ),
+        1,
+        "e" * 64,
+        "sha256:" + ("f" * 64),
+        "sha256:" + ("1" * 64),
+        _tenant(),
+    )
+
+    assert trusted.credential is None
+    assert trusted.extension_artifact_manifest_digest == "sha256:" + ("f" * 64)
+    assert trusted.extension_configuration_digest == "sha256:" + ("1" * 64)
+    assert trusted.tenant == _tenant()

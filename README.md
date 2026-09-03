@@ -394,8 +394,8 @@ PAT access is explicit and default-deny per method/path/scope. Its scopes are
 intersected with the owner's current permissions on every request. Revocation
 does not rewrite historical evidence, but a revoked or expired PAT cannot
 submit, observe, control, replay-disclose, or export new data. Required audit
-writes close durable admission and cancel-capable controls; routine use/failure
-observations are bounded daily aggregates. See the
+writes close durable admission and privileged run/runtime/MCP/batch/scheduler
+controls; routine use/failure observations are bounded daily aggregates. See the
 [actor, route, replay, and retention contract](docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
 
 ### Policy that follows execution

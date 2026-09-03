@@ -43,6 +43,10 @@ def _postgres_engine_kwargs(
         merged_connect_args["command_timeout"] = command_timeout
     return {
         "echo": echo,
+        # SQLAlchemy otherwise renders bound parameter values in echoed SQL
+        # and StatementError text. Credential digests are query parameters on
+        # the PAT authentication path, so parameter hiding is unconditional.
+        "hide_parameters": True,
         "pool_size": pool_size,
         "max_overflow": pool_max_overflow,
         "pool_pre_ping": True,
@@ -76,7 +80,11 @@ async def _auto_create_postgres_db(url: str) -> None:
 
     # Connect to the default 'postgres' database to issue CREATE DATABASE
     maint_url = parsed.set(database="postgres")
-    maint_engine = create_async_engine(maint_url, isolation_level="AUTOCOMMIT")
+    maint_engine = create_async_engine(
+        maint_url,
+        isolation_level="AUTOCOMMIT",
+        hide_parameters=True,
+    )
     try:
         async with maint_engine.connect() as conn:
             await conn.execute(text(f'CREATE DATABASE "{db_name}"'))
@@ -150,7 +158,12 @@ async def init_engine(
         # syscall) blocks it during startup. Mirrors the #1912 fix for the
         # checkpointer's ``ensure_sqlite_parent_dir``.
         await asyncio.to_thread(os.makedirs, sqlite_dir or ".", exist_ok=True)
-        _engine = create_async_engine(url, echo=echo, json_serializer=_json_serializer)
+        _engine = create_async_engine(
+            url,
+            echo=echo,
+            hide_parameters=True,
+            json_serializer=_json_serializer,
+        )
 
         # Enable WAL on every new connection. SQLite PRAGMA settings are
         # per-connection, so we wire the listener instead of running PRAGMA

@@ -223,19 +223,9 @@ async def authenticate_pat(
     if lookup.failure_reason is not None or record is None:
         from deerflow_extension_api import effective_authority_digest_v1
 
-        from deerflow.persistence.credential_audit.sql import (
-            principal_reference_digest,
-        )
-
-        credential_ref = None if record is None else str(record["id"])
-        actor_digest = (
-            None
-            if record is None
-            else principal_reference_digest(
-                pat_repo.tenant,
-                str(record["user_id"]),
-            )
-        )
+        audit_identity = None if record is None else pat_repo.audit_identity_for_record(record)
+        credential_ref = None if audit_identity is None else audit_identity.credential_ref
+        actor_digest = None if audit_identity is None else audit_identity.actor_digest
         authority_digest = None
         if record is not None:
             try:
@@ -276,11 +266,12 @@ async def authenticate_pat(
     try:
         canonical_scopes = validate_scopes(record.get("scopes"))
     except (TypeError, ValueError):
+        audit_identity = pat_repo.audit_identity_for_record(record)
         await pat_repo.record_audit_best_effort(
             method="personal_access_token",
             action="authentication_failed",
-            credential_ref=str(record["id"]),
-            actor_digest=None,
+            credential_ref=audit_identity.credential_ref,
+            actor_digest=audit_identity.actor_digest,
             authority_digest=None,
             route_category=route_category,
             reason_code="credential_invalid",
@@ -295,18 +286,13 @@ async def authenticate_pat(
         # PATs, without needing a FK cascade).
         from deerflow_extension_api import effective_authority_digest_v1
 
-        from deerflow.persistence.credential_audit.sql import (
-            principal_reference_digest,
-        )
+        audit_identity = pat_repo.audit_identity_for_record(record)
 
         await pat_repo.record_audit_best_effort(
             method="personal_access_token",
             action="authentication_failed",
-            credential_ref=str(record["id"]),
-            actor_digest=principal_reference_digest(
-                pat_repo.tenant,
-                str(record["user_id"]),
-            ),
+            credential_ref=audit_identity.credential_ref,
+            actor_digest=audit_identity.actor_digest,
             authority_digest=effective_authority_digest_v1(canonical_scopes),
             route_category=route_category,
             reason_code="credential_invalid",

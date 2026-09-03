@@ -9,7 +9,7 @@ from .recovery import (
     project_execution_recovery_config,
 )
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
-from .worker import RunContext, run_agent
+from .worker import RECOVERY_EXECUTOR_CONTEXT_KEY, RunContext, run_agent
 
 __all__ = [
     "CancelOutcome",
@@ -20,6 +20,7 @@ __all__ = [
     "ExecutionRecoveryPayloadV1",
     "ORPHAN_RECOVERY_STOP_REASON",
     "PostCommitObligationStatus",
+    "RECOVERY_EXECUTOR_CONTEXT_KEY",
     "RunContext",
     "RunManager",
     "RunRecord",

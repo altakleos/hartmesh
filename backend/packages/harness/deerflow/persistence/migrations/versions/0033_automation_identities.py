@@ -71,6 +71,22 @@ def _add_pat_tenant_anchors() -> None:
             )
 
 
+def _require_binding_for_populated_legacy_pats() -> None:
+    """Fail before SQLite batch DDL can leave retry artifacts behind."""
+
+    bind = op.get_bind()
+    tables = set(sa.inspect(bind).get_table_names())
+    if "personal_access_tokens" not in tables:
+        return
+    if bind.execute(sa.text("SELECT 1 FROM personal_access_tokens LIMIT 1")).first() is None:
+        return
+    binding = None
+    if "hartmesh_deployment_identity" in tables:
+        binding = bind.execute(sa.text("SELECT 1 FROM hartmesh_deployment_identity WHERE singleton_key = 1")).first()
+    if binding is None:
+        raise RuntimeError("credential_tenant_binding_required")
+
+
 def _backfill_from_bound_singleton() -> None:
     bind = op.get_bind()
     tables = set(sa.inspect(bind).get_table_names())
@@ -84,6 +100,9 @@ def _backfill_from_bound_singleton() -> None:
         return
     binding = bind.execute(sa.text("SELECT tenant_ref, tenant_digest FROM hartmesh_deployment_identity WHERE singleton_key = 1")).first()
     if binding is None:
+        populated = bind.execute(sa.text("SELECT 1 FROM personal_access_tokens LIMIT 1")).first()
+        if populated is not None:
+            raise RuntimeError("credential_tenant_binding_required")
         return
     tenant_ref, tenant_digest = binding
     conflict = bind.execute(
@@ -96,6 +115,31 @@ def _backfill_from_bound_singleton() -> None:
         sa.text("UPDATE personal_access_tokens SET tenant_ref = :tenant_ref, tenant_digest = :tenant_digest WHERE tenant_ref IS NULL AND tenant_digest IS NULL"),
         {"tenant_ref": tenant_ref, "tenant_digest": tenant_digest},
     )
+
+
+def _require_pat_tenant_anchors() -> None:
+    """Finish the nullable/backfill/constraint sequence for PAT anchors."""
+
+    bind = op.get_bind()
+    if "personal_access_tokens" not in sa.inspect(bind).get_table_names():
+        return
+    missing = bind.execute(sa.text("SELECT 1 FROM personal_access_tokens WHERE tenant_ref IS NULL OR tenant_digest IS NULL LIMIT 1")).first()
+    if missing is not None:
+        raise RuntimeError("credential_tenant_binding_required")
+    columns = {str(column["name"]): column for column in sa.inspect(bind).get_columns("personal_access_tokens")}
+    if not columns["tenant_ref"].get("nullable") and not columns["tenant_digest"].get("nullable"):
+        return
+    with op.batch_alter_table("personal_access_tokens") as batch:
+        batch.alter_column(
+            "tenant_ref",
+            existing_type=sa.String(length=23),
+            nullable=False,
+        )
+        batch.alter_column(
+            "tenant_digest",
+            existing_type=sa.String(length=64),
+            nullable=False,
+        )
 
 
 def _create_audit_table() -> None:
@@ -180,8 +224,10 @@ def _create_audit_table() -> None:
 
 
 def upgrade() -> None:
+    _require_binding_for_populated_legacy_pats()
     _add_pat_tenant_anchors()
     _backfill_from_bound_singleton()
+    _require_pat_tenant_anchors()
     _create_audit_table()
 
 

@@ -136,6 +136,34 @@ def test_admission_rejects_authority_changed_after_evidence_projection() -> None
         )
 
 
+def test_admission_rejects_coarse_authority_categories_changed_after_projection() -> None:
+    evidence = build_boundary_credential_evidence(
+        auth_source=AUTH_SOURCE_SESSION,
+        permissions=["runs:create"],
+    )
+    forged = CredentialEvidenceV1(
+        method=evidence.method,
+        credential_ref=evidence.credential_ref,
+        effective_authority_digest=evidence.effective_authority_digest,
+        authority_categories=("threads",),
+        issued_at=evidence.issued_at,
+        expires_at=evidence.expires_at,
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            auth_source=AUTH_SOURCE_SESSION,
+            auth=SimpleNamespace(permissions=["runs:create"]),
+            credential_evidence=forged,
+        )
+    )
+
+    with pytest.raises(CredentialEvidenceError, match="authority_digest_mismatch"):
+        credential_evidence_for_admission(
+            request,
+            InternalLaunchIntent(thread_id="thread-1"),
+        )
+
+
 def test_boundary_adapter_rejects_unknown_authority_with_typed_error() -> None:
     with pytest.raises(
         CredentialEvidenceError,

@@ -21,6 +21,7 @@ def test_postgres_engine_kwargs_include_connection_hardening() -> None:
     assert kwargs["pool_size"] == 5
     assert kwargs["pool_pre_ping"] is True
     assert kwargs["pool_recycle"] == engine_mod.POSTGRES_POOL_RECYCLE_SECONDS
+    assert kwargs["hide_parameters"] is True
     assert kwargs["connect_args"]["command_timeout"] == engine_mod.POSTGRES_COMMAND_TIMEOUT_SECONDS
     assert kwargs["json_serializer"] is engine_mod._json_serializer
 
@@ -259,7 +260,12 @@ async def test_init_engine_sqlite_omits_postgres_kwargs_and_keeps_wal_listener(t
         try:
             await engine_mod.init_engine(backend="sqlite", url=url, echo=True, sqlite_dir=str(tmp_path))
 
-            create_engine.assert_called_once_with(url, echo=True, json_serializer=engine_mod._json_serializer)
+            create_engine.assert_called_once_with(
+                url,
+                echo=True,
+                hide_parameters=True,
+                json_serializer=engine_mod._json_serializer,
+            )
             kwargs = create_engine.call_args.kwargs
             assert "pool_size" not in kwargs
             assert "max_overflow" not in kwargs

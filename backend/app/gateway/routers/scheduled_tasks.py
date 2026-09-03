@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import require_audited_permission, require_permission
 from app.gateway.deps import (
     get_config,
     get_optional_user_from_request,
@@ -124,6 +124,12 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
             detail=(f"once schedule must be at least {config.scheduler.min_once_delay_seconds} seconds in the future"),
         )
 
+    await require_audited_permission(
+        request,
+        "runs",
+        "create",
+        route_category="scheduled_tasks",
+    )
     return await repo.create(
         task_id=f"task-{uuid.uuid4().hex}",
         user_id=str(user.id),
@@ -224,6 +230,12 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
         if next_run_at is not None and existing["status"] in {"completed", "failed", "cancelled"}:
             updates["status"] = "enabled"
 
+    await require_audited_permission(
+        request,
+        "threads",
+        "write",
+        route_category="scheduled_tasks",
+    )
     try:
         updated = await repo.update(
             task_id,
@@ -256,6 +268,12 @@ async def pause_scheduled_task(task_id: str, request: Request):
             status_code=409,
             detail="Scheduled task is currently running; retry after the active execution finishes",
         )
+    await require_audited_permission(
+        request,
+        "threads",
+        "write",
+        route_category="scheduled_tasks",
+    )
     result = await repo.pause_with_queue_cancellation(
         task_id,
         user_id=str(user.id),
@@ -284,6 +302,12 @@ async def resume_scheduled_task(task_id: str, request: Request):
     if existing is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
     await _ensure_task_mutable(existing, repo)
+    await require_audited_permission(
+        request,
+        "threads",
+        "write",
+        route_category="scheduled_tasks",
+    )
     try:
         updated = await repo.update(
             task_id,
@@ -313,6 +337,12 @@ async def trigger_scheduled_task(task_id: str, request: Request):
     task = await repo.get(task_id, user_id=str(user.id))
     if task is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
+    await require_audited_permission(
+        request,
+        "runs",
+        "create",
+        route_category="scheduled_tasks",
+    )
     result = await service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
     if result["outcome"] == "not_found":
         raise HTTPException(status_code=404, detail=result["error"] or "Scheduled task not found")
@@ -330,6 +360,15 @@ async def delete_scheduled_task(task_id: str, request: Request):
     user = await get_optional_user_from_request(request)
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication required")
+    existing = await repo.get(task_id, user_id=str(user.id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Scheduled task not found")
+    await require_audited_permission(
+        request,
+        "threads",
+        "write",
+        route_category="scheduled_tasks",
+    )
     result = await repo.delete_with_queue_cancellation(
         task_id,
         user_id=str(user.id),

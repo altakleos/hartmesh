@@ -123,6 +123,13 @@ async def test_create_and_resolve_by_digest_roundtrip(tmp_path):
     assert record["id"] not in token
     assert record["id"] not in record["token_digest"]
 
+    audit_identity = repo.audit_identity_for_record(record)
+    assert audit_identity.credential_ref == record["id"]
+    assert len(audit_identity.actor_digest) == 64
+    assert record["user_id"] not in repr(audit_identity)
+    assert record["name"] not in repr(audit_identity)
+    assert record["token_digest"] not in repr(audit_identity)
+
     resolved = await repo.get_active_by_digest(pat_token_digest(token))
     assert resolved is not None
     assert resolved["id"] == record["id"]
@@ -136,6 +143,18 @@ async def test_create_and_resolve_by_digest_roundtrip(tmp_path):
     assert audit[0]["credential_ref"] == record["id"]
     assert record["name"] not in repr(audit)
     assert record["token_digest"] not in repr(audit)
+
+
+@pytest.mark.asyncio
+async def test_audit_identity_rejects_incomplete_pat_record(tmp_path):
+    repo = await _make_repo(tmp_path)
+
+    with pytest.raises(ValueError, match="credential reference"):
+        repo.audit_identity_for_record({"user_id": "user-1"})
+    with pytest.raises(ValueError, match="owner"):
+        repo.audit_identity_for_record(
+            {"id": "00000000-0000-4000-8000-000000000001"},
+        )
 
 
 @pytest.mark.asyncio

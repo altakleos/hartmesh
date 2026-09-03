@@ -143,6 +143,7 @@ async def _backfill_legacy_tenant_rows(
 
     connection = await session.connection()
     present_tables = await connection.run_sync(lambda sync_connection: set(sa_inspect(sync_connection).get_table_names()))
+    tenant_columns = await connection.run_sync(lambda sync_connection: {table_name: {str(column["name"]) for column in sa_inspect(sync_connection).get_columns(table_name)} for table_name in present_tables})
 
     legacy_scopes = (await session.execute(text("SELECT run_id, external_scope FROM runs WHERE tenant_digest IS NULL AND external_scope IS NOT NULL"))).all()
     for run_id, base_scope in legacy_scopes:
@@ -164,6 +165,11 @@ async def _backfill_legacy_tenant_rows(
         "personal_access_tokens",
     ):
         if table_name not in present_tables:
+            continue
+        # An explicit operator bind can precede a migration that first adds
+        # tenant anchors to this table. The singleton is authoritative; the
+        # later migration backfills the new columns from it.
+        if not {"tenant_ref", "tenant_digest"} <= tenant_columns[table_name]:
             continue
         conflict = (
             await session.execute(

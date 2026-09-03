@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -21,6 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.credential_audit import (
     CredentialAuditRepository,
     CredentialAuditUnavailable,
+)
+from deerflow.persistence.credential_audit.contract import (
+    validate_credential_reference,
 )
 from deerflow.persistence.credential_audit.sql import principal_reference_digest
 from deerflow.persistence.personal_access_tokens.model import PersonalAccessTokenRow
@@ -34,6 +38,14 @@ logger = logging.getLogger(__name__)
 class PersonalAccessTokenAuthenticationResult:
     record: dict[str, Any] | None
     failure_reason: str | None
+
+
+@dataclass(frozen=True)
+class PersonalAccessTokenAuditIdentity:
+    """Safe PAT-owned projection for audit adapters."""
+
+    credential_ref: str
+    actor_digest: str
 
 
 class PersonalAccessTokenRepository:
@@ -69,6 +81,32 @@ class PersonalAccessTokenRepository:
     @property
     def tenant(self) -> TenantReferenceV1:
         return self._tenant
+
+    def audit_identity_for_record(
+        self,
+        record: Mapping[str, Any],
+    ) -> PersonalAccessTokenAuditIdentity:
+        """Project a row without exposing tenant internals or private fields."""
+
+        if not isinstance(record, Mapping):
+            raise TypeError("PAT audit record must be a mapping")
+        credential_ref = record.get("id")
+        user_id = record.get("user_id")
+        if not isinstance(credential_ref, str) or not credential_ref:
+            raise ValueError("PAT audit record requires a credential reference")
+        validate_credential_reference(
+            credential_ref,
+            method="personal_access_token",
+        )
+        if not isinstance(user_id, str) or not user_id:
+            raise ValueError("PAT audit record requires an owner")
+        return PersonalAccessTokenAuditIdentity(
+            credential_ref=credential_ref,
+            actor_digest=principal_reference_digest(
+                self._tenant,
+                user_id,
+            ),
+        )
 
     @staticmethod
     def _row_to_dict(row: PersonalAccessTokenRow) -> dict[str, Any]:
@@ -245,11 +283,6 @@ class PersonalAccessTokenRepository:
         if owned is None:
             return None
         return await self._audit.list_for_credential(pat_id, limit=limit)
-
-    async def record_audit(self, **values: Any) -> None:
-        """Record a required credential observation; failures propagate."""
-
-        await self._audit.record(**values)
 
     async def record_audit_best_effort(self, **values: Any) -> None:
         """Record a low-value observation without failing authentication."""

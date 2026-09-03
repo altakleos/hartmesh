@@ -28,6 +28,7 @@ from starlette.background import BackgroundTask
 from app.gateway.artifact_archive import ArtifactArchiveError, ArtifactArchiveResult, build_artifact_archive
 from app.gateway.authz import (
     require_audited_cancel_permission_if,
+    require_audited_permission,
     require_permission,
 )
 from app.gateway.checkpoint_lineage import (
@@ -1051,6 +1052,12 @@ async def cancel_run(
     terminalized; an exact-two store-only row returns a safe conflict without
     mutation while execution takeover is unavailable.
     """
+    await require_audited_permission(
+        request,
+        "runs",
+        "cancel",
+        route_category="runs",
+    )
     result = await build_invocation_runtime(request).cancel_run(
         InternalCancelRequest(
             run_id=run_id,

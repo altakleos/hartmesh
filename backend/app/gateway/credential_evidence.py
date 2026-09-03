@@ -147,6 +147,8 @@ def credential_evidence_for_admission(
                 raise CredentialEvidenceError("credential_evidence_unavailable") from exc
             if expected != evidence.effective_authority_digest:
                 raise CredentialEvidenceError("authority_digest_mismatch")
+            if authority_categories_v1(canonicalize_authority_v1(permissions)) != evidence.authority_categories:
+                raise CredentialEvidenceError("authority_digest_mismatch")
         expected_method = {
             AUTH_SOURCE_PAT: "personal_access_token",
             AUTH_SOURCE_SESSION: "session",
@@ -241,27 +243,50 @@ async def verified_actor_context_for_request(
         raise CredentialEvidenceError("credential_evidence_unavailable") from exc
 
 
+async def _record_credential_action(
+    request: Any,
+    *,
+    action: str,
+    route_category: str,
+    reason_code: str | None = None,
+) -> VerifiedActorContextV1:
+    """Persist one current actor observation and return its exact evidence."""
+
+    audit_repo = _audit_repository_for_request(request)
+    actor = await verified_actor_context_for_request(request)
+    await audit_repo.record(
+        method=actor.credential.method,
+        action=action,
+        credential_ref=actor.credential.credential_ref,
+        actor_digest=actor.digest,
+        authority_digest=(actor.credential.effective_authority_digest),
+        route_category=route_category,
+        reason_code=reason_code,
+    )
+    return actor
+
+
 async def record_required_credential_action(
     request: Any,
     *,
     action: str,
     route_category: str,
-) -> None:
-    """Persist current actor evidence before a required audited action."""
+) -> VerifiedActorContextV1:
+    """Persist current actor evidence before a required audited action.
+
+    The returned neutral actor contract is the handoff seam for deep services:
+    the authorization check and durable audit refer to the same immutable
+    projection, without those services importing Gateway authentication code.
+    """
 
     from deerflow.persistence.credential_audit import (
         CredentialAuditUnavailable,
     )
 
     try:
-        audit_repo = _audit_repository_for_request(request)
-        actor = await verified_actor_context_for_request(request)
-        await audit_repo.record(
-            method=actor.credential.method,
+        return await _record_credential_action(
+            request,
             action=action,
-            credential_ref=actor.credential.credential_ref,
-            actor_digest=actor.digest,
-            authority_digest=(actor.credential.effective_authority_digest),
             route_category=route_category,
         )
     except CredentialAuditUnavailable:
@@ -280,14 +305,9 @@ async def record_credential_action_best_effort(
     """Record a low-value aggregate without exposing failure details."""
 
     try:
-        audit_repo = _audit_repository_for_request(request)
-        actor = await verified_actor_context_for_request(request)
-        await audit_repo.record(
-            method=actor.credential.method,
+        await _record_credential_action(
+            request,
             action=action,
-            credential_ref=actor.credential.credential_ref,
-            actor_digest=actor.digest,
-            authority_digest=(actor.credential.effective_authority_digest),
             route_category=route_category,
             reason_code=reason_code,
         )

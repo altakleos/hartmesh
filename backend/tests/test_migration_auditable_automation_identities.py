@@ -9,12 +9,14 @@ from pathlib import Path
 import pytest
 from alembic import command
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateTable
 
 from deerflow.persistence.bootstrap import _get_alembic_config
 from deerflow.persistence.credential_audit.model import CredentialAuditEventRow
 from deerflow.persistence.personal_access_tokens.model import PersonalAccessTokenRow
+from deerflow.persistence.tenant_binding import ensure_schema_tenant_binding
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 _REVISION = "0033_automation_identities"
 _PREVIOUS_REVISION = "0032_subagent_batch_evidence"
@@ -33,6 +35,8 @@ def test_models_render_tenant_and_audit_indexes_for_postgres() -> None:
     ).lower()
     assert "tenant_ref varchar(23)" in pat_ddl
     assert "tenant_digest varchar(64)" in pat_ddl
+    assert "tenant_ref varchar(23) not null" in pat_ddl
+    assert "tenant_digest varchar(64) not null" in pat_ddl
     assert "credential_ref varchar(128)" in audit_ddl
     assert "event_count bigint not null" in audit_ddl
     assert "ck_credential_audit_safe_references" in audit_ddl
@@ -65,8 +69,11 @@ async def test_bound_singleton_backfills_pat_without_replacing_uuid(tmp_path: Pa
 
         await asyncio.to_thread(command.upgrade, config, _REVISION)
         with sqlite3.connect(path) as connection:
-            columns = {row[1] for row in connection.execute("PRAGMA table_info(personal_access_tokens)")}
+            column_rows = {row[1]: row for row in connection.execute("PRAGMA table_info(personal_access_tokens)")}
+            columns = set(column_rows)
             assert {"tenant_ref", "tenant_digest"} <= columns
+            assert column_rows["tenant_ref"][3] == 1
+            assert column_rows["tenant_digest"][3] == 1
             assert connection.execute("SELECT id, tenant_ref, tenant_digest FROM personal_access_tokens").fetchone() == (pat_id, tenant_ref, tenant_digest)
             assert connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='credential_audit_events'").fetchone() == ("credential_audit_events",)
     finally:
@@ -74,7 +81,7 @@ async def test_bound_singleton_backfills_pat_without_replacing_uuid(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_unbound_legacy_pat_is_not_inferred_and_unused_schema_downgrades(
+async def test_populated_unbound_legacy_pat_fails_closed(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "credential-unbound.db"
@@ -92,9 +99,44 @@ async def test_unbound_legacy_pat_is_not_inferred_and_unused_schema_downgrades(
             )
             connection.commit()
 
+        with pytest.raises(
+            RuntimeError,
+            match="credential_tenant_binding_required",
+        ):
+            await asyncio.to_thread(command.upgrade, config, _REVISION)
+
+        identity = TenantIdentityV1.from_canonical_id("tenant-a")
+        await ensure_schema_tenant_binding(
+            async_sessionmaker(engine, expire_on_commit=False),
+            identity,
+            allow_nonempty_legacy=True,
+            require_nonempty_legacy=True,
+        )
         await asyncio.to_thread(command.upgrade, config, _REVISION)
         with sqlite3.connect(path) as connection:
-            assert connection.execute("SELECT tenant_ref, tenant_digest FROM personal_access_tokens").fetchone() == (None, None)
+            row = connection.execute("SELECT tenant_ref, tenant_digest FROM personal_access_tokens").fetchone()
+            assert row == (identity.public_ref, identity.digest)
+            columns = {item[1]: item for item in connection.execute("PRAGMA table_info(personal_access_tokens)")}
+            assert columns["tenant_ref"][3] == 1
+            assert columns["tenant_digest"][3] == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_empty_unbound_schema_gets_required_anchors_and_downgrades(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "credential-empty-unbound.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    config = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(command.upgrade, config, _PREVIOUS_REVISION)
+        await asyncio.to_thread(command.upgrade, config, _REVISION)
+        with sqlite3.connect(path) as connection:
+            columns = {row[1]: row for row in connection.execute("PRAGMA table_info(personal_access_tokens)")}
+            assert columns["tenant_ref"][3] == 1
+            assert columns["tenant_digest"][3] == 1
 
         await asyncio.to_thread(command.downgrade, config, _PREVIOUS_REVISION)
         with sqlite3.connect(path) as connection:

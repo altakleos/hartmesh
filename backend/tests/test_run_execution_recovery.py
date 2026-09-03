@@ -7,6 +7,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from deerflow_extension_api import (
+    ActingServiceV1,
+    CredentialEvidenceV1,
+    EffectiveSubjectV1,
+    InvocationIdentityV1,
+    VerifiedActorContextV1,
+    effective_authority_digest_v1,
+)
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -37,6 +45,8 @@ from deerflow.runtime.runs.store.base import (
     RecoveryPolicy,
 )
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.runs.worker import RECOVERY_EXECUTOR_CONTEXT_KEY
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 def _recovery_payload(thread_id: str) -> dict[str, object]:
@@ -1178,6 +1188,25 @@ async def test_checkpoint_resume_reuses_existing_dispatch_marker() -> None:
     )
     observed_inputs: list[object] = []
     observed_configs: list[dict[str, object]] = []
+    tenant = TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference()
+    recovery_executor = VerifiedActorContextV1(
+        identity=InvocationIdentityV1(
+            effective_subject=EffectiveSubjectV1(
+                kind="human",
+                subject_id="user-1",
+            ),
+            acting_service=ActingServiceV1(
+                service_id="gateway:execution-recovery",
+            ),
+        ),
+        credential=CredentialEvidenceV1(
+            method="internal_service",
+            credential_ref=None,
+            effective_authority_digest=effective_authority_digest_v1(("runs:recover",)),
+            authority_categories=("runs",),
+        ),
+        tenant=tenant,
+    )
 
     class _Agent:
         async def astream(
@@ -1205,6 +1234,7 @@ async def test_checkpoint_resume_reuses_existing_dispatch_marker() -> None:
         ctx=RunContext(
             checkpointer=None,
             execution_recovery_gate=recovery_gate,
+            recovery_executor=recovery_executor,
         ),
         agent_factory=lambda *, config: _Agent(),
         graph_input={"messages": [{"role": "user", "content": "once"}]},
@@ -1219,6 +1249,7 @@ async def test_checkpoint_resume_reuses_existing_dispatch_marker() -> None:
     )
 
     assert observed_inputs == [None]
+    assert observed_configs[0]["context"][RECOVERY_EXECUTOR_CONTEXT_KEY] is recovery_executor
     configurable = observed_configs[0]["configurable"]
     assert configurable["checkpoint_ns"] == ""
     assert "checkpoint_id" not in configurable

@@ -79,7 +79,18 @@ async def _bind_tenant(
         raise ValueError("deployment bind-tenant requires database.backend sqlite or postgres")
 
     try:
-        await init_engine_from_config(config.database)
+        migration_needs_binding = False
+        try:
+            await init_engine_from_config(config.database)
+        except RuntimeError as exc:
+            if str(exc) != "credential_tenant_binding_required":
+                raise
+            # Migration 0033 deliberately refuses to infer tenant anchors for
+            # populated PAT rows. Its engine/session remain usable at the
+            # prior revision (Postgres rolls the DDL transaction back; SQLite
+            # may retain the idempotent nullable columns), allowing this
+            # explicit operator flow to install the authoritative singleton.
+            migration_needs_binding = True
         session_factory = get_session_factory()
         if session_factory is None:
             raise RuntimeError("persistence session factory was not initialized")
@@ -91,6 +102,13 @@ async def _bind_tenant(
             dry_run=dry_run,
             legacy_redis_prefixes=legacy_prefixes,
         )
+        if migration_needs_binding and not dry_run:
+            # Re-open through the ordinary bootstrap after the binding commit;
+            # 0033 can now backfill PAT rows from the singleton and enforce its
+            # required tenant columns. Closing first avoids leaking the engine
+            # retained by the failed bootstrap attempt.
+            await close_engine()
+            await init_engine_from_config(config.database)
         recorded_components = [
             name
             for name, value in (

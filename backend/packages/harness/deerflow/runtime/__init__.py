@@ -9,6 +9,7 @@ from .checkpoint_state import CheckpointStateAccessor, build_state_mutation_grap
 from .checkpointer import checkpointer_context, get_checkpointer, make_checkpointer, reset_checkpointer
 from .runs import (
     ORPHAN_RECOVERY_STOP_REASON,
+    RECOVERY_EXECUTOR_CONTEXT_KEY,
     STARTUP_ORPHAN_RECOVERY_ERROR,
     CancelOutcome,
     ConflictError,
@@ -53,6 +54,7 @@ __all__ = [
     "ExecutionRecoveryPayloadV1",
     "ORPHAN_RECOVERY_STOP_REASON",
     "PostCommitObligationStatus",
+    "RECOVERY_EXECUTOR_CONTEXT_KEY",
     "RunContext",
     "RunManager",
     "RunRecord",

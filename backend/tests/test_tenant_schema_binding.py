@@ -114,6 +114,11 @@ async def test_nonempty_legacy_schema_requires_explicit_operator_binding(tmp_pat
             session.add(
                 PersonalAccessTokenRow(
                     id="018f2d70-0fca-4f88-b0c3-a0f83ebf2c89",
+                    # Current schemas require PAT anchors. Migration-specific
+                    # coverage constructs the pre-0033 nullable shape and
+                    # proves the explicit singleton backfill separately.
+                    tenant_ref=identity.public_ref,
+                    tenant_digest=identity.digest,
                     user_id="user-1",
                     name="legacy private name",
                     token_digest="c" * 64,

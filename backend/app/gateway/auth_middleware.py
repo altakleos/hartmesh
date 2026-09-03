@@ -140,6 +140,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
             except HTTPException as exc:
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+            except Exception:
+                # Driver and persistence exceptions can embed SQL parameters
+                # in their text. Fail closed without logging or reflecting the
+                # exception, preserving the non-oracular credential surface.
+                if is_runtime_api_path(request.url.path):
+                    return runtime_error_response(
+                        503,
+                        FailureCode.indeterminate,
+                    )
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "Credential authentication unavailable",
+                    },
+                )
             auth_source = AUTH_SOURCE_PAT
         elif access_token:
             # Strict JWT validation: reject junk/expired tokens with 401
@@ -251,26 +266,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
             route_category=route_category,
         )
 
-        if required_scope == "runs:cancel":
-            from app.gateway.authz import (
-                require_audited_cancel_permission_if,
-            )
-            from deerflow.persistence.credential_audit import (
-                CredentialAuditUnavailable,
-            )
-
-            try:
-                await require_audited_cancel_permission_if(request, True)
-            except HTTPException as exc:
-                return JSONResponse(
-                    status_code=exc.status_code,
-                    content={"detail": exc.detail},
-                )
-            except (CredentialAuditUnavailable, CredentialEvidenceError):
-                return JSONResponse(
-                    status_code=503,
-                    content={"detail": "Required audit record unavailable"},
-                )
         token = set_current_user(user)
         try:
             return await call_next(request)

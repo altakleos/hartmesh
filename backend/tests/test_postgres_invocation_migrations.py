@@ -765,12 +765,12 @@ async def _assert_postgres_head_contract(engine: AsyncEngine, schema: str) -> No
     assert pat_columns["tenant_ref"][:3] == (
         "character varying",
         23,
-        True,
+        False,
     )
     assert pat_columns["tenant_digest"][:3] == (
         "character varying",
         64,
-        True,
+        False,
     )
     assert "ck_personal_access_tokens_tenant_pair" in constraints["personal_access_tokens"]
     _assert_index_definition(
