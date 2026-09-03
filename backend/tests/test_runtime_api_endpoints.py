@@ -346,6 +346,79 @@ def test_invocation_observation_opts_into_independent_mcp_task_paging() -> None:
     assert response.json()["mcp_tasks"] == page
 
 
+def test_invocation_observation_opts_into_subagent_batch_lifecycle_paging() -> None:
+    batch_id = "sb_" + "1" * 48
+    page = {
+        "items": [
+            {
+                "batch_id": batch_id,
+                "acceptance_digest": "a" * 64,
+                "parent_tool_receipt_id": "tr_" + "b" * 64,
+                "status": "running",
+                "terminal_code": None,
+                "total_items": 1,
+                "accepted_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": None,
+                "observations": [
+                    {
+                        "version": 1,
+                        "event": "batch.accepted",
+                        "batch_id": batch_id,
+                        "acceptance_digest": "a" * 64,
+                        "parent_run_id": "run-1",
+                        "parent_tool_receipt_id": "tr_" + "b" * 64,
+                        "item_count": 1,
+                        "occurred_at": "2026-01-01T00:00:00+00:00",
+                    }
+                ],
+            }
+        ],
+        "next_cursor": "sbc1.next",
+        "pruning_status": "not_pruned",
+    }
+
+    class Adapter:
+        async def observe(self, query):
+            assert query == InvocationQuery(
+                run_id="run-1",
+                limit=20,
+                include_subagent_batches=True,
+                subagent_batch_cursor="sbc1.opaque",
+                subagent_batch_limit=7,
+            )
+            return InvocationObservation(
+                run_id="run-1",
+                thread_id="thread-1",
+                status="running",
+                state_version=2,
+                snapshots=(),
+                events=(),
+                next_cursor="lc1.Mg",
+                minimum_available_cursor="lc1.MA",
+                read_fence_cursor="lc1.Mg",
+                subagent_batches=page,
+            )
+
+    app = make_authed_test_app()
+    app.include_router(runtime_api.router)
+    app.dependency_overrides[runtime_api.get_runtime_api] = lambda: Adapter()
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/runtime/v1/invocations/run-1",
+            params={
+                "limit": 20,
+                "include_subagent_batches": "true",
+                "subagent_batch_cursor": "sbc1.opaque",
+                "subagent_batch_limit": 7,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["subagent_batches"] == page
+
+
 @pytest.mark.parametrize(
     "query",
     [
@@ -356,6 +429,13 @@ def test_invocation_observation_opts_into_independent_mcp_task_paging() -> None:
         "include_tool_receipts=true&tool_receipt_limit=101",
         "include_tool_receipts=true&tool_receipt_limit=01",
         "include_tool_receipts=true&include_tool_receipts=true",
+        "include_subagent_batches=yes",
+        "subagent_batch_cursor=sbc1.opaque",
+        "include_subagent_batches=true&subagent_batch_cursor=",
+        "include_subagent_batches=true&subagent_batch_limit=0",
+        "include_subagent_batches=true&subagent_batch_limit=101",
+        "include_subagent_batches=true&subagent_batch_limit=01",
+        "include_subagent_batches=true&include_subagent_batches=true",
     ],
 )
 def test_invocation_receipt_paging_rejects_values_outside_the_exact_http_contract(query: str) -> None:

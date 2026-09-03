@@ -66,6 +66,50 @@ async def list_batch_items(
     return await repo.list_items(batch_id, user_id=user_id, offset=offset, limit=limit, status=status) or []
 
 
+@router.get("/{batch_id}/attempts")
+@require_permission("threads", "read", owner_check=True)
+async def list_batch_attempts(
+    thread_id: ThreadId,
+    batch_id: str,
+    request: Request,
+    item_id: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=100),
+) -> list[dict]:
+    """Return payload-free, tenant-scoped attempt observations."""
+
+    repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
+    return (
+        await repo.list_attempts(
+            batch_id,
+            user_id=user_id,
+            item_id=item_id,
+            limit=limit,
+        )
+        or []
+    )
+
+
+@router.get("/{batch_id}/observations")
+@require_permission("threads", "read", owner_check=True)
+async def list_batch_observations(
+    thread_id: ThreadId,
+    batch_id: str,
+    request: Request,
+    limit: int = Query(100, ge=1, le=100),
+) -> list[dict]:
+    """Return the bounded additive batch lifecycle projection."""
+
+    repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
+    return (
+        await repo.list_observations(
+            batch_id,
+            user_id=user_id,
+            limit=limit,
+        )
+        or []
+    )
+
+
 @router.post("/{batch_id}/pause")
 @require_permission("threads", "write", owner_check=True)
 async def pause_batch(thread_id: ThreadId, batch_id: str, request: Request) -> dict:
@@ -98,7 +142,10 @@ async def retry_batch_item(thread_id: ThreadId, batch_id: str, item_id: str, req
     repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
     item = await repo.retry_item(batch_id, item_id, user_id=user_id)
     if item is None:
-        raise HTTPException(status_code=409, detail="Only failed items can be retried")
+        raise HTTPException(
+            status_code=409,
+            detail="Item is not eligible for retry within its accepted attempt limit",
+        )
     return item
 
 

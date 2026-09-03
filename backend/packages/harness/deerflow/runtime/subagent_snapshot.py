@@ -36,6 +36,7 @@ _OPTIONAL_DEFINITION_FIELDS = frozenset(
         "inherits_tools",
         "disallowed_tool_names",
         "policy_settings",
+        "tool_contract_digests",
     }
 )
 
@@ -136,6 +137,28 @@ def _canonical_names(values: Sequence[object], *, canonical_agent_names: bool = 
     return tuple(sorted(names))
 
 
+def resolved_tool_contract_digest(tool: object) -> str:
+    """Hash one tool's stable name/schema/source contract without its payload."""
+
+    from deerflow.agents.assembly_descriptor import describe_tool
+
+    descriptor = describe_tool(tool)
+    return canonical_digest(
+        {
+            "version": 1,
+            "domain": "resolved_subagent_tool_contract",
+            "tool": {
+                "name": descriptor.name,
+                "description_hash": descriptor.description_hash,
+                "schema_hash": descriptor.schema_hash,
+                "source": descriptor.source,
+                "mcp_server": descriptor.mcp_server,
+                "mcp_transport": descriptor.mcp_transport,
+            },
+        }
+    )
+
+
 @dataclass(frozen=True)
 class ResolvedSubagentDefinitionV1:
     """One fully resolved, execution-relevant subagent definition."""
@@ -160,6 +183,9 @@ class ResolvedSubagentDefinitionV1:
     # Middleware/policy settings that affect construction (currently the
     # effective token-budget policy) live here rather than as mutable config.
     policy_settings: Mapping[str, object] = field(default_factory=dict)
+    # Older accepted catalogs did not bind schemas. ``None`` preserves that
+    # observable legacy state; durable batches require a complete tuple.
+    tool_contract_digests: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if type(self.version) is not int or self.version != SUBAGENT_CATALOG_VERSION:
@@ -180,6 +206,11 @@ class ResolvedSubagentDefinitionV1:
         if type(self.inherits_tools) is not bool:
             _invalid()
         object.__setattr__(self, "tool_names", _canonical_names(self.tool_names))
+        contracts = self.tool_contract_digests
+        if contracts is not None:
+            if not isinstance(contracts, Sequence) or isinstance(contracts, str | bytes | bytearray) or len(contracts) != len(self.tool_names) or any(not _is_digest(value) for value in contracts):
+                _invalid()
+            object.__setattr__(self, "tool_contract_digests", tuple(contracts))
         object.__setattr__(self, "skill_names", _canonical_names(self.skill_names))
         object.__setattr__(self, "disallowed_tool_names", _canonical_names(self.disallowed_tool_names))
         model_settings = _plain_json(self.model_settings)
@@ -192,7 +223,7 @@ class ResolvedSubagentDefinitionV1:
             _invalid()
 
     def _digest_projection(self) -> dict[str, object]:
-        return {
+        projection: dict[str, object] = {
             "version": self.version,
             "name": self.name,
             "source_kind": self.source_kind,
@@ -209,6 +240,9 @@ class ResolvedSubagentDefinitionV1:
             "disallowed_tool_names": list(self.disallowed_tool_names),
             "policy_settings": _thaw_json(self.policy_settings),
         }
+        if self.tool_contract_digests is not None:
+            projection["tool_contract_digests"] = list(self.tool_contract_digests)
+        return projection
 
     def to_persisted_json(self) -> dict[str, object]:
         return {**self._digest_projection(), "definition_digest": self.definition_digest}
@@ -232,6 +266,9 @@ class ResolvedSubagentDefinitionV1:
                 str | bytes | bytearray,
             ):
                 _invalid()
+        raw_contracts = value.get("tool_contract_digests")
+        if raw_contracts is not None and (not isinstance(raw_contracts, Sequence) or isinstance(raw_contracts, str | bytes | bytearray)):
+            _invalid()
         if not isinstance(value.get("model_settings"), Mapping) or not isinstance(
             value.get("policy_settings", {}),
             Mapping,
@@ -244,6 +281,7 @@ class ResolvedSubagentDefinitionV1:
                     "inherits_tools": value.get("inherits_tools", False),
                     "disallowed_tool_names": tuple(value.get("disallowed_tool_names", ())),
                     "policy_settings": value.get("policy_settings", {}),
+                    "tool_contract_digests": (None if raw_contracts is None else tuple(raw_contracts)),
                     "tool_names": tuple(value.get("tool_names", ())),
                     "skill_names": tuple(value.get("skill_names", ())),
                 }
@@ -314,9 +352,19 @@ def resolved_subagent_definition(
     inherits_tools: bool = False,
     disallowed_tool_names: Sequence[str] = (),
     policy_settings: Mapping[str, object] | None = None,
+    tool_contract_digests: Sequence[str] | None = None,
 ) -> ResolvedSubagentDefinitionV1:
     """Build one definition and derive its digest from canonical fields."""
 
+    raw_tool_names = tuple(tool_names)
+    canonical_tool_names = _canonical_names(raw_tool_names)
+    normalized_tool_contracts: tuple[str, ...] | None = None
+    if tool_contract_digests is not None:
+        raw_contracts = tuple(tool_contract_digests)
+        if len(raw_contracts) != len(raw_tool_names) or any(not _is_digest(value) for value in raw_contracts):
+            _invalid()
+        contracts_by_name = dict(zip(raw_tool_names, raw_contracts, strict=True))
+        normalized_tool_contracts = tuple(contracts_by_name[name] for name in canonical_tool_names)
     values: dict[str, object] = {
         "version": SUBAGENT_CATALOG_VERSION,
         "name": _canonical_name(name),
@@ -326,13 +374,14 @@ def resolved_subagent_definition(
         "system_prompt": system_prompt,
         "model": model,
         "model_settings": model_settings,
-        "tool_names": tuple(tool_names),
+        "tool_names": canonical_tool_names,
         "skill_names": tuple(skill_names),
         "max_turns": max_turns,
         "timeout_seconds": float(timeout_seconds),
         "inherits_tools": inherits_tools,
         "disallowed_tool_names": tuple(disallowed_tool_names),
         "policy_settings": policy_settings or {},
+        "tool_contract_digests": normalized_tool_contracts,
     }
     # Normalize once through a temporary projection without trusting callers to
     # supply their own digest.  The final dataclass verifies it again.
@@ -342,12 +391,16 @@ def resolved_subagent_definition(
         "description": _bounded_text(description, max_bytes=MAX_SUBAGENT_DESCRIPTION_BYTES),
         "system_prompt": _bounded_text(system_prompt, max_bytes=MAX_SUBAGENT_PROMPT_BYTES, allow_empty=True),
         "model_settings": _plain_json(model_settings),
-        "tool_names": list(_canonical_names(tuple(tool_names))),
+        "tool_names": list(canonical_tool_names),
         "skill_names": list(_canonical_names(tuple(skill_names))),
         "timeout_seconds": float(timeout_seconds),
         "disallowed_tool_names": list(_canonical_names(tuple(disallowed_tool_names))),
         "policy_settings": _plain_json(policy_settings or {}),
     }
+    if normalized_tool_contracts is not None:
+        normalized["tool_contract_digests"] = list(normalized_tool_contracts)
+    else:
+        normalized.pop("tool_contract_digests", None)
     return ResolvedSubagentDefinitionV1(
         **values,
         definition_digest=canonical_digest(normalized),
@@ -819,12 +872,12 @@ def _policy_settings_for(
     return {"token_budget": token_budget.model_dump(mode="json")}
 
 
-def _available_tool_names(
+def _available_tool_contracts(
     app_config: object,
     *,
     agent_config: object | None,
     model_name: str | None,
-) -> tuple[str, ...]:
+) -> Mapping[str, str]:
     """Resolve the pre-authorization tool ceiling once at admission."""
 
     from deerflow.tools import get_available_tools
@@ -838,9 +891,13 @@ def _available_tool_names(
             subagent_enabled=False,
             app_config=app_config,
         )
-        return _canonical_names(
+        names = _canonical_names(
             tuple(str(getattr(tool, "name", "")) for tool in tools),
         )
+        tools_by_name = {str(getattr(tool, "name", "")): tool for tool in tools}
+        if len(tools_by_name) != len(tools):
+            _invalid()
+        return MappingProxyType({name: resolved_tool_contract_digest(tools_by_name[name]) for name in names})
     except SubagentCatalogError:
         raise
     except Exception as exc:
@@ -914,7 +971,7 @@ def snapshot_effective_subagents(
     loaded_skill_names: tuple[str, ...] | None = None
     if available_skill_names is not None:
         loaded_skill_names = _canonical_names(tuple(available_skill_names))
-    available_tools_by_model: dict[str | None, tuple[str, ...]] = {}
+    available_tools_by_model: dict[str | None, Mapping[str, str]] = {}
     entries: list[ResolvedSubagentDefinitionV1] = []
     for resolved in resolved_definitions:
         name = resolved.name
@@ -940,12 +997,13 @@ def snapshot_effective_subagents(
         effective_model = configured_model or parent_model_name
         model_settings = _model_settings_for(app_config, effective_model)
         if effective_model not in available_tools_by_model:
-            available_tools_by_model[effective_model] = _available_tool_names(
+            available_tools_by_model[effective_model] = _available_tool_contracts(
                 app_config,
                 agent_config=agent_config,
                 model_name=effective_model,
             )
-        all_tool_names = available_tools_by_model[effective_model]
+        all_tool_contracts = available_tools_by_model[effective_model]
+        all_tool_names = tuple(all_tool_contracts)
         denied_tool_names = set(_canonical_names(tuple(config.disallowed_tools or ())))
         if config.tools is None:
             effective_tool_names = tuple(tool_name for tool_name in all_tool_names if tool_name not in denied_tool_names)
@@ -954,6 +1012,7 @@ def snapshot_effective_subagents(
             # Preserve them even when a provider-backed tool is temporarily
             # unavailable; remote/provider health is deliberately not frozen.
             effective_tool_names = tuple(tool_name for tool_name in _canonical_names(tuple(config.tools)) if tool_name not in denied_tool_names)
+        tool_contract_digests = tuple(all_tool_contracts[name] for name in effective_tool_names) if set(effective_tool_names) <= set(all_tool_contracts) else None
         source_version = canonical_digest(
             {
                 "version": 1,
@@ -971,6 +1030,7 @@ def snapshot_effective_subagents(
                 model=configured_model,
                 model_settings=model_settings,
                 tool_names=effective_tool_names,
+                tool_contract_digests=tool_contract_digests,
                 skill_names=skill_names,
                 max_turns=config.max_turns,
                 timeout_seconds=config.timeout_seconds,
@@ -999,5 +1059,6 @@ __all__ = [
     "SubagentCatalogError",
     "assert_subagent_projection_complete",
     "resolved_subagent_definition",
+    "resolved_tool_contract_digest",
     "snapshot_effective_subagents",
 ]

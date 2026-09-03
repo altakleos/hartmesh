@@ -1,11 +1,17 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from _subagent_batch_helpers import make_parent_batch_request
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.subagent_batches import SubagentBatchRepository
+from deerflow.subagents.batch_acceptance import (
+    AcceptedBatchV1,
+    ParentBoundBatchExecutionV1,
+)
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -239,6 +245,92 @@ async def test_all_failed_items_mark_batch_failed(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_retry_cannot_reset_an_accepted_attempt_limit(tmp_path) -> None:
+    request = make_parent_batch_request()
+    request = replace(
+        request,
+        limits=replace(request.limits, max_attempts=1),
+    )
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+    repo = SubagentBatchRepository(sf, tenant=request.tenant)
+    accepted = AcceptedBatchV1.from_parent_request(
+        request,
+        batch_id="accepted-batch",
+    )
+    execution = ParentBoundBatchExecutionV1.from_parent_request(
+        request,
+        accepted=accepted,
+    )
+    await repo.accept_batch(
+        accepted=accepted,
+        execution=execution,
+        item_requests=request.items,
+        user_id=request.user_id,
+        submission_key=request.submission_key,
+        title=request.title,
+        subagent_type=request.subagent_name,
+    )
+
+    claimed = (
+        await repo.claim_items(
+            now=datetime.now(UTC),
+            lease_owner="worker-1",
+            lease_seconds=60,
+            limit=1,
+        )
+    )[0]
+    assert await repo.mark_item_running(
+        claimed["id"],
+        lease_owner="worker-1",
+        attempt_id=claimed["attempt_id"],
+        lease_epoch=claimed["lease_epoch"],
+        now=datetime.now(UTC),
+    )
+    assert await repo.finalize_item(
+        claimed["id"],
+        lease_owner="worker-1",
+        attempt_id=claimed["attempt_id"],
+        lease_epoch=claimed["lease_epoch"],
+        succeeded=False,
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        error="permanent",
+        stop_reason=None,
+        token_usage=None,
+        model_name="model-a",
+        completed_at=datetime.now(UTC),
+    )
+
+    assert (
+        await repo.retry_item(
+            accepted.batch_id,
+            claimed["id"],
+            user_id=request.user_id,
+        )
+        is None
+    )
+    items = await repo.list_items(accepted.batch_id, user_id=request.user_id)
+    attempts = await repo.list_attempts(accepted.batch_id, user_id=request.user_id)
+    assert items is not None
+    assert items[0]["status"] == "failed"
+    assert items[0]["attempt"] == 1
+    assert attempts is not None
+    assert [(attempt["attempt_number"], attempt["consumed"]) for attempt in attempts] == [(1, True)]
+    assert (
+        await repo.claim_items(
+            now=datetime.now(UTC),
+            lease_owner="worker-2",
+            lease_seconds=60,
+            limit=1,
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
 async def test_public_projections_omit_execution_context_and_full_results(tmp_path) -> None:
     repo = await _repo(tmp_path)
     created = await _create(repo, count=1, max_live=1, max_running=1)
@@ -268,10 +360,11 @@ async def test_public_projections_omit_execution_context_and_full_results(tmp_pa
     assert public_batch is not None
     assert "execution_spec" not in public_batch
     public_item = (await repo.list_items("batch-1", user_id="user-1"))[0]
-    assert public_item["result_preview"] == "preview"
+    assert "result_preview" not in public_item
     assert "result" not in public_item
     assert "lease_owner" not in public_item
     export_item = (await repo.list_items("batch-1", user_id="user-1", include_result=True))[0]
+    assert export_item["result_preview"] == "preview"
     assert export_item["result"] == "full private result"
 
 

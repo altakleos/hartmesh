@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0031_merge_upstream_0017"
+HEAD = "0032_subagent_batch_evidence"
 
 
 def _url(tmp_path: Path) -> str:

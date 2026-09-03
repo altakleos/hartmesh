@@ -1187,11 +1187,18 @@ class TestAsyncExecutionPath:
             def slot(self):
                 return RejectingSlot()
 
+        callback_called = False
+
+        async def execution_admitted() -> None:
+            nonlocal callback_called
+            callback_called = True
+
         executor = SubagentExecutor(
             config=base_config,
             tools=[],
             thread_id="test-thread",
             execution_capacity=RejectingCapacity(),
+            execution_admitted_callback=execution_admitted,
         )
 
         result = await executor._aexecute("Do something")
@@ -1199,6 +1206,71 @@ class TestAsyncExecutionPath:
         assert result.status == SubagentStatus.FAILED
         assert result.admission_failure is True
         assert "capacity is full" in result.error
+        assert callback_called is False
+
+    @pytest.mark.anyio
+    async def test_aexecute_persists_admission_after_capacity_before_model_work(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        msg,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        events: list[str] = []
+
+        class ImmediateSlot:
+            async def __aenter__(self):
+                events.append("capacity")
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class ImmediateCapacity:
+            def slot(self):
+                return ImmediateSlot()
+
+        async def execution_admitted() -> None:
+            events.append("durable-start")
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=ImmediateCapacity(),
+            execution_admitted_callback=execution_admitted,
+        )
+
+        final_state = {
+            "messages": [
+                msg.human("Do something"),
+                msg.ai("done", "msg-1"),
+            ]
+        }
+
+        async def stream_model(*_args, **_kwargs):
+            events.append("model")
+            yield final_state
+
+        mock_agent.astream = stream_model
+
+        def finish_preflight(*_args, **_kwargs):
+            events.append("preflight")
+            return mock_agent
+
+        with patch.object(
+            executor,
+            "_create_agent",
+            side_effect=finish_preflight,
+        ):
+            await executor._aexecute("Do something")
+
+        assert events == [
+            "capacity",
+            "preflight",
+            "durable-start",
+            "model",
+        ]
 
     @pytest.mark.anyio
     async def test_aexecute_marks_structured_llm_error_fallback_as_failed(self, classes, base_config, mock_agent, msg):

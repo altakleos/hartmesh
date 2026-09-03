@@ -18,6 +18,8 @@ object.
 - an opt-in strict durable tool-receipt page on one-invocation observations;
 - an independently paged, opt-in MCP child-task lineage projection on
   one-invocation observations;
+- an independently paged, opt-in, payload-free subagent-batch lifecycle
+  projection on one-invocation observations;
 - `InvocationSummaryV1` and `InvocationCorrelationReferenceV1` for bounded,
   source-aware accepted evidence joined to those pages;
 - `CancelInvocationRequest` / `InvocationControlReceipt` for version-fenced
@@ -90,6 +92,14 @@ for an exact visible parent invocation; the host scopes its indexed query and
 cursor to the authenticated owner and process tenant. Context observations do
 not enumerate MCP tasks. Legacy wires omit these additive fields and default to
 no MCP task request/page.
+
+`InvocationQuery` may likewise set `include_subagent_batches=True`, an opaque
+owner/tenant/parent-scoped `subagent_batch_cursor`, and
+`subagent_batch_limit` (1–100). Each batch item carries only acceptance and
+parent-receipt anchors, status/terminal code, counts, timestamps, and up to 100
+typed `batch.accepted`, item-attempt, and `batch.terminal` observations. The
+strict page excludes prompts, results, arguments, credentials, worker names,
+and provider handles. Legacy wires default to no batch request/page.
 
 The host stores only bounded safe request/result projection digests, never raw
 arguments, results, provider messages, headers, stack traces, or credentials.

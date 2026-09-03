@@ -23,6 +23,7 @@ from deerflow.runtime.subagent_snapshot import (
     SubagentCatalogError,
     assert_subagent_projection_complete,
     resolved_subagent_definition,
+    resolved_tool_contract_digest,
     snapshot_effective_subagents,
 )
 from deerflow.runtime.tenant_identity import TenantIdentityV1
@@ -140,12 +141,54 @@ def test_inherited_tools_are_expanded_to_an_immutable_allowlist(
     assert accepted is not None
     assert accepted.inherits_tools is True
     assert accepted.tool_names == ("read_file",)
+    assert accepted.tool_contract_digests == (resolved_tool_contract_digest(live_tools[0]),)
     assert accepted.to_subagent_config().tools == ["read_file"]
 
     # A provider/config edit can make another tool live, but reconstructing the
     # accepted executor config keeps the original authorization ceiling.
     live_tools.append(SimpleNamespace(name="write_file"))
     assert accepted.to_subagent_config().tools == ["read_file"]
+
+
+def test_snapshot_tool_contract_changes_when_same_named_tool_schema_changes(
+    monkeypatch,
+) -> None:
+    managed = ManagedSubagentDefinition(
+        name="planner",
+        description="Plan bounded work",
+        system_prompt="Accepted planner prompt",
+        tools=None,
+        skills=[],
+    )
+    monkeypatch.setattr(registry, "_managed_definitions", lambda **_: (managed,))
+    live_tools = [SimpleNamespace(name="read_file", description="Read one shape")]
+    monkeypatch.setattr(
+        "deerflow.tools.get_available_tools",
+        lambda **_kwargs: list(live_tools),
+    )
+    before = snapshot_effective_subagents(
+        app_config=_app_config(),
+        agent_config=AgentConfig(name="lead", allowed_subagents=["planner"]),
+        user_id="user-1",
+        is_bootstrap=False,
+        available_skill_names=(),
+    )
+
+    live_tools[0] = SimpleNamespace(
+        name="read_file",
+        description="Read a changed shape",
+    )
+    after = snapshot_effective_subagents(
+        app_config=_app_config(),
+        agent_config=AgentConfig(name="lead", allowed_subagents=["planner"]),
+        user_id="user-1",
+        is_bootstrap=False,
+        available_skill_names=(),
+    )
+
+    assert before.get("planner").tool_names == after.get("planner").tool_names
+    assert before.get("planner").tool_contract_digests != after.get("planner").tool_contract_digests
+    assert before.digest != after.digest
 
 
 def test_admission_bypasses_registry_ttl_and_reads_managed_store_once(

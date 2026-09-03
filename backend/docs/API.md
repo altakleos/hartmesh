@@ -950,6 +950,39 @@ remove it. There is no list, bulk-requeue, bulk-discard, or raw-payload route.
 
 ---
 
+### Durable subagent batch operations
+
+Base URL: `/api/threads/{thread_id}/subagent-batches`
+
+These routes are available when `subagent_batches.enabled` starts a SQL-backed
+worker. All lookups require the authenticated owner and server-owned tenant; an
+invisible batch returns `404`. Batch creation is model-initiated through
+`batch_task` inside an accepted durable parent tool attempt, not through an HTTP
+create route.
+
+| Route | Contract |
+|---|---|
+| `GET /api/threads/{thread_id}/subagent-batches` | List up to 100 owner-scoped batch projections. |
+| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}` | Return safe aggregate status, counts, immutable evidence anchors, and terminal code. |
+| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/items` | Page item projections; optional finite `status` filter. Raw results are omitted. |
+| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/attempts` | Return at most 100 payload-free attempt evidence records, optionally for one item. |
+| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/observations` | Return at most 100 `batch.accepted`, item-attempt transition, and `batch.terminal` observations. |
+| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/pause` | Stop new claims without revoking an active lease. |
+| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/resume` | Make paused work claimable again. |
+| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/cancel` | Persist cancellation, increment its fence, and reject stale completions; returns `503` if no worker is running. |
+| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/items/{item_id}/retry` | Requeue an owner-scoped failed item without resetting its accepted attempt budget; returns `409` when the item is ineligible or the budget is exhausted. |
+| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl` | Stream results through the protected owner-authorized channel. |
+
+Attempt and lifecycle routes never return prompts, results, tool arguments,
+exception text, credentials, worker names, or provider handles. Result export is
+separate because model output is operational data, not lifecycle evidence.
+Parent-run cancellation does not cascade into a batch in this release.
+
+See [Evidence-bound durable subagent batches](../../docs/DURABLE_SUBAGENT_BATCHES.md)
+for admission, retry, cancellation, limits, and qualification semantics.
+
+---
+
 ## Durable Invocation Runtime API
 
 Base URL: `/api/runtime/v1`
@@ -970,7 +1003,7 @@ container, while each `to_dict()` call returns a new mutable JSON wire copy.
 | `GET /capabilities` | Administrator-only strict `runtime.capabilities`; reports only portable ensure, invocation/context observation, cancel control, and unsupported context export/retirement. |
 | `GET /deployment` | Administrator-only `deerflow.deployment/v1` report with extension manifest/health, latest safe admission-readiness reason codes/correlation, bounded image/source provenance when supplied, persistence facts, and an operator-asserted qualification reference or explicit `unqualified` state. This is not part of `DurableInvocationPort` and is not remote attestation. |
 | `POST /invocations/ensure` | Exact `invocation.ensure` body. `external_key` is required; the server derives its scope from the authenticated principal or service. |
-| `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. Optional `include_tool_receipts=true` adds an independently paged receipt projection; `tool_receipt_limit` is 1–100 and `tool_receipt_cursor` is scoped to this run. Optional `include_mcp_tasks=true` adds an independently paged bounded child-task projection; `mcp_task_limit` is 1–100 and `mcp_task_cursor` is scoped to this tenant, owner, and parent run. |
+| `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. Optional `include_tool_receipts=true`, `include_mcp_tasks=true`, and `include_subagent_batches=true` add independently paged bounded receipt, MCP-child, and payload-free batch-lifecycle projections. Each auxiliary limit is 1–100 and each cursor is scoped to the visible run plus its owner/tenant where applicable. |
 | `GET /contexts/{thread_id}/invocations` | Access-filtered normal-run lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500; optional `source_kind` is `http|scheduled_task|native_channel|service`. |
 | `POST /invocations/{run_id}/control` | Exact `invocation.cancel` body with required `expected_state_version`; body and path run IDs must match. |
 
@@ -1016,12 +1049,14 @@ null. Observation is represented by `invocation.query` (`run_id`) or
 `include_snapshot`, and strict nullable `source_kind`. HTTP supplies the path
 identity and fixes `include_snapshot=true`; invocation paging accepts `cursor`
 and `limit`, plus additive `include_tool_receipts`, `tool_receipt_cursor`, and
-`tool_receipt_limit` fields and additive `include_mcp_tasks`, `mcp_task_cursor`,
-and `mcp_task_limit` fields. HTTP accepts exact lowercase `true|false`; a receipt
-or MCP-task cursor without its matching inclusion flag, duplicate parameters,
-an empty cursor, or an auxiliary limit outside 1–100 is `422 invalid_request`.
-Context paging additionally
-accepts `source_kind` but cannot request receipts. Control accepts exactly:
+`tool_receipt_limit` fields, additive `include_mcp_tasks`, `mcp_task_cursor`,
+and `mcp_task_limit` fields, and additive `include_subagent_batches`,
+`subagent_batch_cursor`, and `subagent_batch_limit` fields. HTTP accepts exact
+lowercase `true|false`; an auxiliary cursor without its matching inclusion
+flag, duplicate parameters, an empty cursor, or an auxiliary limit outside
+1–100 is `422 invalid_request`.
+Context paging additionally accepts `source_kind` but cannot request receipt,
+MCP-child, or batch-child pages. Control accepts exactly:
 
 ```json
 {
@@ -1073,6 +1108,13 @@ timestamps, `next_cursor`, and `pruning_status`. The join is one bounded indexed
 query after parent visibility and current observation authorization succeed; it
 does not fetch one row per task. Cursors cannot be moved between tenants, owners,
 or parent runs. Parent cancellation does not cancel these remote tasks.
+
+When explicitly requested for one visible invocation, `subagent_batches` is a
+separate parent-linked page. It carries immutable acceptance and tool-receipt
+references, safe current status, timestamps, and bounded typed lifecycle
+observations. It never carries prompts, model output, tool arguments,
+credentials, worker identities, or provider handles. Its cursor is scoped to
+the server tenant, owner, and accepted parent run.
 
 The thread-scoped durable-task API is outside the `/api/runtime/v1` base:
 

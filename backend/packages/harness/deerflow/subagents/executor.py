@@ -8,7 +8,7 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
@@ -821,6 +821,7 @@ class SubagentExecutor:
         tool_evidence_sink: DurableToolReceiptSink | None = None,
         tool_evidence_execution_task_id: str | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
+        execution_admitted_callback: Callable[[], Awaitable[None]] | None = None,
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
     ):
@@ -878,6 +879,10 @@ class SubagentExecutor:
                 Direct ``create_deerflow_agent`` callers pass one through their
                 ``SubagentRuntime``; application factories fall back to the
                 startup-configured process singleton.
+            execution_admitted_callback: Optional async fence invoked after a
+                process slot is acquired and immediately before model work.
+                Durable batch workers use it to persist ``started`` without
+                treating a queue-capacity rejection as an execution attempt.
             acceptance_criteria: Optional lead-supplied completion requirements
                 (RFC #4651 PR3). Criterion values are model-supplied untrusted
                 data, so ``_build_initial_state`` appends them to the task
@@ -1029,6 +1034,9 @@ class SubagentExecutor:
         self.skill_projection_token = skill_projection_token
         self._owns_skill_projection_token = False
         self.execution_capacity = execution_capacity
+        if execution_admitted_callback is not None and not callable(execution_admitted_callback):
+            raise TypeError("execution_admitted_callback must be callable or None")
+        self.execution_admitted_callback = execution_admitted_callback
         # Raw lead-supplied criteria; stripping/capping happens at render time
         # in report_contract.render_acceptance_criteria_block.
         self.acceptance_criteria = acceptance_criteria
@@ -1747,6 +1755,12 @@ class SubagentExecutor:
                     tool_receipts=terminal_receipts(),
                 )
                 return result
+
+            # All child material, tools, middleware, and policy context are now
+            # assembled, while no model call has begun. Durable batch workers
+            # use this exact boundary to transition claimed -> started.
+            if self.execution_admitted_callback is not None:
+                await self.execution_admitted_callback()
 
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
                 # A yielded values chunk is already executed state.  Retain it

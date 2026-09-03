@@ -47,19 +47,18 @@ internal; the published nginx port is the entire external surface, and the Gatew
 address; `backend/tests/test_compose_default_bind_host.py` pins this for every service
 in both compose files.
 
-`durable_two_gateway_v1` is qualified only for the exact two-replica PostgreSQL + Redis + AIO/RWX profile and artifact. It does not claim arbitrary scaling, IM connector HA, cross-region operation, or zero-downtime upgrades.
-This checkout bundles no passing artifact, so the profile is candidate-only and
-operator-declared evidence cannot unlock production rendering or startup.
+`durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
+AIO/RWX artifact, not arbitrary scaling, IM HA, cross-region operation, or
+zero-downtime upgrades. This checkout has no passing artifact; operator claims
+cannot unlock production rendering or startup.
 
-The chart can place provisioner-created sandboxes in a separate, pre-created
-`sandboxNamespace`. The provisioner stays in the release namespace, receives
-namespaced sandbox lifecycle RBAC only in the sandbox namespace, and retains
-only name-pinned namespace get and TokenReview create at cluster scope.
-`K8S_NAMESPACE` selects sandbox
-resources; `PROVISIONER_GATEWAY_NAMESPACE` remains the release namespace used
-to validate the Gateway ServiceAccount identity. Empty `sandboxNamespace`
-preserves single-namespace behavior, while empty `namespace` follows Helm's
-release namespace.
+The chart may put sandboxes in a pre-created `sandboxNamespace`. The provisioner
+stays in the release namespace, gets sandbox lifecycle RBAC only in the sandbox
+namespace, and retains name-pinned namespace get plus TokenReview create at
+cluster scope. `K8S_NAMESPACE` selects sandbox resources;
+`PROVISIONER_GATEWAY_NAMESPACE` selects the release namespace for Gateway
+ServiceAccount validation. Empty `sandboxNamespace` keeps single-namespace
+behavior; empty `namespace` follows the Helm release.
 
 ## Repository Map
 
@@ -87,13 +86,13 @@ deer-flow/
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
 
-Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
-(operator-controlled on purpose — that list causes code to be imported, so it is deliberately
-kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
-middleware, task lifecycle, system-model observers, Gateway services, and FastAPI HTTP
-routers; the [reference extension](examples/deerflow-extension-example/) demonstrates all
-five. Manage them with `deerflow extensions install/list/enable/disable/remove` or the root
-`make extension-*` wrappers. Changes require Gateway restart. Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source. See
+Third-party extensions come from the operator-controlled top-level `plugins:`
+list in `config.yaml`, not API-writable `extensions_config.json`, because they
+import code. They may contribute middleware, lifecycle, model observers,
+Gateway services, and HTTP routers; the [reference extension](examples/deerflow-extension-example/)
+shows all five. Manage them with `deerflow extensions` or root `make
+extension-*`; changes require restart. Provenance records admitted bytes/config,
+but extensions run with Gateway privileges and must be trusted. See the
 [extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md) and
 [provenance guide](docs/EXTENSION_ARTIFACT_PROVENANCE.md).
 
@@ -135,6 +134,9 @@ Durable MCP task note:
   output, and can never waive blocker findings. Adding a waiver and relying on
   it therefore requires two steps: merge the reviewed waiver first, then update
   the affected public skill in a later pull request.
+
+Durable batches bind active parent receipts to immutable tenant material under
+database-time fences. Effects may repeat; production stays disabled.
 
 Scheduled-task note:
 - `/workspace/scheduled-tasks` and its service are gated by `scheduler.enabled`.

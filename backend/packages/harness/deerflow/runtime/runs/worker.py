@@ -900,6 +900,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
     {
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         DEERFLOW_TRACE_METADATA_KEY,
+        "__deerflow_accepted_parent_batch_context_v1",
     }
 )
 
@@ -985,6 +986,11 @@ def _build_runtime_context(
     # Tool evidence objects are executable host capabilities. A request may
     # use a lookalike key but can never inject a sink, fence, or anchor.
     strip_tool_evidence_context(runtime_ctx)
+    from deerflow.subagents.batch_acceptance import (
+        strip_parent_batch_acceptance_context,
+    )
+
+    strip_parent_batch_acceptance_context(runtime_ctx)
     runtime_ctx.pop("authz_attributes", None)
     return runtime_ctx
 
@@ -1048,6 +1054,11 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         from deerflow.runtime.tool_evidence import strip_tool_evidence_context
 
         strip_tool_evidence_context(configurable)
+        from deerflow.subagents.batch_acceptance import (
+            strip_parent_batch_acceptance_context,
+        )
+
+        strip_parent_batch_acceptance_context(configurable)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         strip_assembly_evidence_requirement(existing_context)
@@ -1058,6 +1069,12 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         )
 
         strip_tool_evidence_context(existing_context)
+        from deerflow.subagents.batch_acceptance import (
+            PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
+            strip_parent_batch_acceptance_context,
+        )
+
+        strip_parent_batch_acceptance_context(existing_context)
         if REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY in runtime_context:
             existing_context[REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY] = runtime_context[REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY]
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -1081,6 +1098,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
 
         for internal_key in (
             RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
+            PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
             "accepted_agent_revision_digest",
             "accepted_extension_generation",
             "accepted_extension_manifest_digest",
@@ -1846,6 +1864,11 @@ async def run_agent(
             # Bind the exact object that passed the digest check. The factory
             # consumes it directly and never performs a second mutable read.
             runtime_ctx[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = pinned_material
+            from deerflow.subagents.batch_acceptance import (
+                PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
+            )
+
+            runtime_ctx[PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY] = accepted
             if accepted.tenant is not None:
                 runtime_ctx[TENANT_REFERENCE_CONTEXT_KEY] = accepted.tenant
             runtime_ctx["accepted_agent_revision_digest"] = actual_revision.digest

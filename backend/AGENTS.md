@@ -41,6 +41,8 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   durable receipt records HartMesh's observation of a tool attempt. It
   does not guarantee an external side effect occurred exactly once or that the
   tool result was correct. Production requires `run_events.backend: db`.
+- Batch acceptance is parent/tenant-bound and database-time fenced. Production
+  stays disabled; see `docs/DURABLE_SUBAGENT_BATCHES.md`.
 - Live journal, subagent, workspace, and delivery event writes are authority-
   bound to tenant/run/owner/epoch. Recovery uses a separate explicit
   administrative appender. Arbitrary runtime failures are converted once to

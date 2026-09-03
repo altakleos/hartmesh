@@ -1,5 +1,24 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+**Evidence-bound durable batches**: `batch_task` builds a
+`ParentBoundBatchRequest` only from the server-installed accepted invocation
+context and active started tool receipt. `batch_acceptance.py` owns the safe
+`AcceptedBatchV1`, `AcceptedBatchItemV1`, `BatchAttemptEvidenceV1`, and protected
+`ParentBoundBatchExecutionV1` contracts; prompts, output, credentials, provider
+handles, and live objects stay out of evidence. Acceptance and all item rows are
+one transaction. `subagent_snapshot.py` remains the only live-to-immutable
+catalog seam. Recovery never rediscovers subagents or skills; it resolves only
+accepted tool names and requires their captured schema/description/source
+contract digests to match, otherwise it fails closed. Accepted skill projection
+leases remain retained until terminal batch cleanup. Claims create append-only
+attempt rows; start occurs only after process-capacity admission,
+and renewal/cancellation/completion compare attempt ID, owner, lease epoch, and
+database time. Queue rejection is non-consuming, while execution and expired
+claims consume the retry budget. Delivery is at-least-once and external
+side effects may repeat even though only one terminal database publication can
+win. The initial cancellation policy rejects `parent_cancellable=true`; parent
+cancellation does not cascade and users must cancel the batch explicitly.
+
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
 **Registry and managed definitions**: Runtime resolution is built-in → `config.yaml custom_agents` → enabled administrator-managed definitions, followed by explicit `subagents.agents.<name>` overrides. Managed definitions are deployment-wide, persist through the same `agent_storage.backend` selection as Custom Agent definitions, and remain stored but are excluded from runtime when a built-in or later-added config definition owns the same name. The default Lead Agent sees the whole enabled catalog. A Custom Agent's `allowed_subagents` is `None` = all, `[]` = hard deny, or an explicit allowlist. Durable admission resolves that policy exactly once through `runtime/subagent_snapshot.py`; prompt discovery, `task` membership, effective config, limits, and descriptor digests then use the accepted catalog. Ordinary/non-durable calls and administration continue using the live registry. Managed subagent changes apply to invocations accepted after the edit; an in-flight or recovered invocation uses its accepted snapshot. Never reload caller policy or a managed definition inside an accepted tool dispatch, and never fall back live when an accepted name is missing.
 **Accepted skill scope**: admission snapshots the union of packages required by the lead and every allowed subagent once, then maps immutable content digests to `lead` and `subagent:<name>`. `SubagentExecutor` loads only its scope. The shared sandbox may contain the full accepted union, so this is an instruction/tool-authorization boundary rather than filesystem confidentiality.

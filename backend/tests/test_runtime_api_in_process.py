@@ -84,6 +84,39 @@ def _record(*, status: RunStatus = RunStatus.pending, state_version: int = 1) ->
     )
 
 
+def _subagent_batch_page() -> dict:
+    batch_id = "sb_" + "1" * 48
+    return {
+        "items": [
+            {
+                "batch_id": batch_id,
+                "acceptance_digest": "a" * 64,
+                "parent_tool_receipt_id": "tr_" + "b" * 64,
+                "status": "running",
+                "terminal_code": None,
+                "total_items": 1,
+                "accepted_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": None,
+                "observations": [
+                    {
+                        "version": 1,
+                        "event": "batch.accepted",
+                        "batch_id": batch_id,
+                        "acceptance_digest": "a" * 64,
+                        "parent_run_id": "run-1",
+                        "parent_tool_receipt_id": "tr_" + "b" * 64,
+                        "item_count": 1,
+                        "occurred_at": "2026-01-01T00:00:00+00:00",
+                    }
+                ],
+            }
+        ],
+        "next_cursor": None,
+        "pruning_status": "not_pruned",
+    }
+
+
 class _Runtime:
     def __init__(self) -> None:
         self.intent = None
@@ -265,6 +298,55 @@ async def test_observe_propagates_bounded_mcp_task_lineage_page() -> None:
     assert runtime.query.mcp_task_cursor == "mtc1.opaque"
     assert runtime.query.mcp_task_limit == 7
     assert observation.to_dict()["mcp_tasks"] == page
+
+
+@pytest.mark.anyio
+async def test_observe_propagates_bounded_subagent_batch_lifecycle_page() -> None:
+    from app.runtime.api import InProcessInvocationRuntime
+    from app.runtime.invocation import InternalLifecycleObservation
+    from deerflow.runtime.runs.lifecycle_query import LifecyclePage, encode_lifecycle_cursor
+
+    page = _subagent_batch_page()
+
+    class Runtime(_Runtime):
+        async def observe_invocation_lifecycle(self, query):
+            self.query = query
+            return InternalLifecycleObservation(
+                record=_record(),
+                page=LifecyclePage(
+                    snapshots=(
+                        {
+                            "run_id": "run-1",
+                            "thread_id": "thread-1",
+                            "status": "pending",
+                            "state_version": 1,
+                        },
+                    ),
+                    events=(),
+                    next_cursor=encode_lifecycle_cursor(1),
+                    minimum_available_cursor=encode_lifecycle_cursor(0),
+                    read_fence_cursor=encode_lifecycle_cursor(1),
+                ),
+                subagent_batches=page,
+            )
+
+    runtime = Runtime()
+    observation = await InProcessInvocationRuntime(
+        runtime,
+        authenticated_service_id="service-1",
+    ).observe(
+        InvocationQuery(
+            run_id="run-1",
+            include_subagent_batches=True,
+            subagent_batch_cursor="sbc1.opaque",
+            subagent_batch_limit=7,
+        )
+    )
+
+    assert runtime.query.include_subagent_batches is True
+    assert runtime.query.subagent_batch_cursor == "sbc1.opaque"
+    assert runtime.query.subagent_batch_limit == 7
+    assert observation.to_dict()["subagent_batches"] == page
 
 
 @pytest.mark.anyio
@@ -680,11 +762,19 @@ async def test_authorized_parent_lineage_uses_one_bounded_owner_scoped_query() -
                 "pruning_status": "not_pruned",
             }
 
+    class Batches:
+        tenant = SimpleNamespace(digest="a" * 64)
+
+        async def list_lifecycle_by_parent_run(self, parent_run_id, **kwargs):
+            calls.append(("batches", parent_run_id, kwargs))
+            return _subagent_batch_page()
+
     runtime = InvocationRuntime(
         normalizer=object(),
         runs=Runs(),
         authorization=Authorization(),
         mcp_tasks=Tasks(),
+        subagent_batches=Batches(),
     )
     observation = await runtime.observe_invocation_lifecycle(
         InternalInvocationLifecycleQuery(
@@ -693,6 +783,9 @@ async def test_authorized_parent_lineage_uses_one_bounded_owner_scoped_query() -
             include_mcp_tasks=True,
             mcp_task_cursor="mtc1.opaque",
             mcp_task_limit=7,
+            include_subagent_batches=True,
+            subagent_batch_cursor="sbc1.opaque",
+            subagent_batch_limit=5,
         )
     )
 
@@ -701,6 +794,8 @@ async def test_authorized_parent_lineage_uses_one_bounded_owner_scoped_query() -
         "next_cursor": None,
         "pruning_status": "not_pruned",
     }
+    assert observation.subagent_batches is not None
+    assert observation.subagent_batches["items"][0]["batch_id"] == ("sb_" + "1" * 48)
     assert calls == [
         "visibility",
         "policy",
@@ -711,6 +806,16 @@ async def test_authorized_parent_lineage_uses_one_bounded_owner_scoped_query() -
                 "user_id": "service-1",
                 "limit": 7,
                 "cursor": "mtc1.opaque",
+                "tenant_digest": "a" * 64,
+            },
+        ),
+        (
+            "batches",
+            "run-1",
+            {
+                "user_id": "service-1",
+                "limit": 5,
+                "cursor": "sbc1.opaque",
                 "tenant_digest": "a" * 64,
             },
         ),

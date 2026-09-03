@@ -93,6 +93,82 @@ def test_invocation_query_and_observation_bound_optional_mcp_task_lineage_page()
         )
 
 
+def test_invocation_query_and_observation_bound_optional_subagent_batch_lifecycle_page() -> None:
+    from deerflow_runtime_api import InvocationObservation, InvocationQuery
+
+    query = InvocationQuery(
+        run_id="run-1",
+        include_subagent_batches=True,
+        subagent_batch_cursor="sbc1.opaque",
+        subagent_batch_limit=7,
+    )
+    assert InvocationQuery.from_dict(query.to_dict()) == query
+    with pytest.raises(ValueError, match="requires include_subagent_batches"):
+        InvocationQuery(
+            run_id="run-1",
+            subagent_batch_cursor="sbc1.opaque",
+        )
+
+    page = {
+        "items": [
+            {
+                "batch_id": "sb_" + "1" * 48,
+                "acceptance_digest": "a" * 64,
+                "parent_tool_receipt_id": "tr_" + "b" * 64,
+                "status": "completed",
+                "terminal_code": "succeeded",
+                "total_items": 1,
+                "accepted_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:01:00+00:00",
+                "completed_at": "2026-01-01T00:01:00+00:00",
+                "observations": [
+                    {
+                        "version": 1,
+                        "event": "batch.accepted",
+                        "batch_id": "sb_" + "1" * 48,
+                        "acceptance_digest": "a" * 64,
+                        "parent_run_id": "run-1",
+                        "parent_tool_receipt_id": "tr_" + "b" * 64,
+                        "item_count": 1,
+                        "occurred_at": "2026-01-01T00:00:00+00:00",
+                    }
+                ],
+            }
+        ],
+        "next_cursor": None,
+        "pruning_status": "not_pruned",
+    }
+    observation = InvocationObservation(
+        run_id="run-1",
+        thread_id="thread-1",
+        status="success",
+        state_version=2,
+        snapshots=(),
+        events=(),
+        next_cursor="lc1.Mg",
+        minimum_available_cursor="lc1.MA",
+        read_fence_cursor="lc1.Mg",
+        subagent_batches=page,
+    )
+
+    assert observation.to_dict()["subagent_batches"] == page
+    assert InvocationObservation.from_dict(observation.to_dict()) == observation
+
+    with pytest.raises(ValueError, match="singular invocation"):
+        InvocationObservation(
+            run_id=None,
+            thread_id="thread-1",
+            status=None,
+            state_version=None,
+            snapshots=(),
+            events=(),
+            next_cursor="lc1.Mg",
+            minimum_available_cursor="lc1.MA",
+            read_fence_cursor="lc1.Mg",
+            subagent_batches=page,
+        )
+
+
 def test_runtime_api_nested_values_are_immutable_defensive_snapshots() -> None:
     from deerflow_runtime_api import (
         GraphInputV1,

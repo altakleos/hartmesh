@@ -590,6 +590,7 @@ imagePullSecrets:
 {{- end -}}
 
 {{- $sourceRevision := .Values.deployment.provenance.sourceRevision -}}
+{{- $subagentBatchesConfig := (index $appConfig "subagent_batches") | default dict -}}
 {{- if and $sourceRevision (not (regexMatch "^[0-9a-f]{7,64}$" $sourceRevision)) -}}
 {{- fail "deployment provenance sourceRevision must be 7-64 lowercase hexadecimal characters" -}}
 {{- end -}}
@@ -724,6 +725,9 @@ imagePullSecrets:
   {{- if or (not ((index $schedulerConfig "enabled") | default false)) (not ((index $schedulerConfig "multi_instance") | default false)) -}}
   {{- fail "durable_two_gateway_v1 requires scheduler.enabled and scheduler.multi_instance" -}}
   {{- end -}}
+  {{- if ((index $subagentBatchesConfig "enabled") | default false) -}}
+  {{- fail "subagent_batches_exact_two_unqualified: durable subagent batches are not qualified for durable_two_gateway_v1" -}}
+  {{- end -}}
   {{- if not ((index $mcpTasksConfig "enabled") | default false) -}}
   {{- fail "durable_two_gateway_v1 requires mcp_tasks.enabled" -}}
   {{- end -}}
@@ -810,6 +814,9 @@ imagePullSecrets:
 {{- end -}}
 
 {{- if eq $mode "durable_one_replica" -}}
+  {{- if ((index $subagentBatchesConfig "enabled") | default false) -}}
+  {{- fail "subagent_batches_durable_one_unqualified: durable subagent batches require a passing artifact-bound PostgreSQL process-restart suite" -}}
+  {{- end -}}
   {{- if or (not $tenantId) (eq $tenantId "local") -}}{{- fail "durable_one_replica requires tenant.id to be an explicit non-local identity" -}}{{- end -}}
   {{- if not .Values.gateway.image.digest -}}{{- fail "production validation requires a gateway image digest" -}}{{- end -}}
   {{- if and $hasEnabledExtensions (not $artifactManifestDigest) -}}{{- fail "durable_one_replica with enabled extensions requires expected artifact and configuration digests" -}}{{- end -}}

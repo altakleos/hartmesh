@@ -8,6 +8,9 @@ from deerflow.runtime.tool_evidence import (
     ToolEvidenceRuntimeBinding,
     install_tool_evidence_context,
 )
+from deerflow.subagents.batch_acceptance import (
+    PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
+)
 
 
 def _binding() -> ToolEvidenceRuntimeBinding:
@@ -38,15 +41,27 @@ def test_caller_cannot_inject_tool_evidence_capabilities() -> None:
     assert TOOL_EVIDENCE_SINK_KEY not in runtime_context
 
 
+def test_caller_cannot_inject_accepted_parent_batch_capability() -> None:
+    runtime_context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY: "forged"},
+    )
+
+    assert PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY not in runtime_context
+
+
 def test_install_replaces_forged_values_only_with_typed_host_objects() -> None:
     config = {
         "context": {
             TOOL_EVIDENCE_CONTEXT_KEY: "forged",
             TOOL_EVIDENCE_SINK_KEY: "forged",
+            PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY: "forged",
         },
         "configurable": {
             TOOL_EVIDENCE_CONTEXT_KEY: "forged",
             TOOL_EVIDENCE_SINK_KEY: "forged",
+            PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY: "forged",
         },
     }
     runtime_context: dict[str, object] = {
@@ -56,6 +71,8 @@ def test_install_replaces_forged_values_only_with_typed_host_objects() -> None:
     binding = _binding()
     sink = NullDurableToolReceiptSink()
     install_tool_evidence_context(runtime_context, binding=binding, sink=sink)
+    accepted_parent = object()
+    runtime_context[PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY] = accepted_parent
 
     _install_runtime_context(config, runtime_context)
 
@@ -63,3 +80,5 @@ def test_install_replaces_forged_values_only_with_typed_host_objects() -> None:
     assert config["context"][TOOL_EVIDENCE_SINK_KEY] is sink
     assert TOOL_EVIDENCE_CONTEXT_KEY not in config["configurable"]
     assert TOOL_EVIDENCE_SINK_KEY not in config["configurable"]
+    assert config["context"][PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY] is accepted_parent
+    assert PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY not in config["configurable"]

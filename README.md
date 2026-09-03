@@ -352,6 +352,28 @@ was correct.
 
 Evidence: [`tool_evidence.py`](backend/packages/harness/deerflow/runtime/tool_evidence.py), [event-store contracts](backend/tests/test_tool_receipt_event_store.py), and [HTTP reference](backend/docs/API.md#durable-invocation-runtime-api).
 
+### Evidence-bound durable subagent batches
+
+When `subagent_batches.enabled` is true, an accepted lead run may use the
+explicit `batch_task` tool to persist many independent subagent items. The tool
+schema carries only operational items and requested limits: tenant, parent
+invocation and assembly, selected subagent snapshot, and the active tool
+receipt come from server-owned runtime context. Acceptance and item commitments
+are written before work is claimable, and recovery cannot broaden them from
+live configuration.
+
+Attempt delivery is at least once. Lease expiry or process loss can repeat an
+item and its external side effects; HartMesh guarantees one fenced accepted
+terminal publication, not exactly-once behavior outside the database. The
+initial cancellation policy is non-cascading, so cancelling a parent run does
+not cancel its batch. Use the explicit batch cancellation tool or API.
+
+Owner-scoped APIs expose batch/item progress, payload-free attempt and lifecycle
+evidence, and a separate protected JSONL result export. Durable production
+profiles reject enabled batches until their artifact-bound PostgreSQL process-
+restart/failover gates have passed. See the [durable subagent batch guide](docs/DURABLE_SUBAGENT_BATCHES.md)
+for limits, recovery, legacy cleanup, qualification status, and guarantees.
+
 Live rich-event writes are likewise bound to the admitted tenant, run, worker,
 and lifecycle epoch. Authorized graph output remains opaque in `run.end`, while
 the additive `run.terminal.v1` and bounded correlated failure records provide a
@@ -532,7 +554,7 @@ This repository does not yet document a HartMesh sync cadence, API/configuration
 
 Treat these hashes as provenance, not a maintenance promise.
 
-The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, `0024_tool_receipt_idempotency` fences receipt appends, `0025_tenant_identity` binds the schema tenant, `0026_mcp_task_lineage` seals MCP lineage, `0027_multi_gateway_topology` adds exact-two topology registration plus persisted scheduler generations, `0028_mcp_request_commitment` adds private exact-request MCP replay commitments while cleaning up superseded indexes, `0029_run_recovery_policy` adds immutable run recovery policy, bounded recovery payloads, and database-ordered admission cursors, and `0030_run_delivery_owner_backfill` repairs unowned legacy delivery receipts only when their run, thread, and tenant anchors select one authoritative owner.
+The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invocation migrations through `0019_inbound_event_identity` and upstream's result, managed-subagent, and scheduled-enqueue work; merge revisions `0020`–`0022` join those branches, `0023_agent_assembly_evidence` binds actual assembly, `0024_tool_receipt_idempotency` fences receipt appends, `0025_tenant_identity` binds the schema tenant, `0026_mcp_task_lineage` seals MCP lineage, `0027_multi_gateway_topology` adds exact-two topology registration plus persisted scheduler generations, `0028_mcp_request_commitment` adds private exact-request MCP replay commitments while cleaning up superseded indexes, `0029_run_recovery_policy` adds immutable run recovery policy, bounded recovery payloads, and database-ordered admission cursors, `0030_run_delivery_owner_backfill` repairs unowned legacy delivery receipts only when their run, thread, and tenant anchors select one authoritative owner, `0031_merge_upstream_0017` joins the personal-access-token branch, and `0032_subagent_batch_evidence` binds durable batches to accepted parent evidence and append-only fenced attempts.
 
 PostgreSQL operators should quiesce writers and back up data before rollback; use the migration guidance in [backend/AGENTS.md](backend/AGENTS.md).
 
@@ -543,6 +565,7 @@ Version sources report `2.1.0`, but no tag contains the audited HartMesh impleme
 ## Documentation
 
 - [Durable invocation runtime](backend/docs/INVOCATION_RUNTIME.md) — guarantees, evidence, recovery, and deferred scope
+- [Durable subagent batches](docs/DURABLE_SUBAGENT_BATCHES.md) — accepted evidence, retries, cancellation, legacy cleanup, and qualification
 - [Runtime API](backend/packages/runtime-api/README.md) — DTOs and `DurableInvocationPort`
 - [Gateway API](backend/docs/API.md) — authenticated HTTP behavior
 - [Extension API](backend/packages/extension-api/README.md) — policy and trust boundaries

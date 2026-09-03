@@ -56,6 +56,7 @@ _SUBAGENT_CATALOG_FIELDS = (
 MAX_OBSERVATION_PAGE_SIZE = 500
 MAX_TOOL_RECEIPT_PAGE_SIZE = 100
 MAX_MCP_TASK_PAGE_SIZE = 100
+MAX_SUBAGENT_BATCH_PAGE_SIZE = 100
 MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES = 4 * 1024
 MAX_OBSERVATION_PAYLOAD_BYTES = 12 * 1024 * 1024
 _SAFE_TOOL_RECEIPT_ERROR_CODES = frozenset(
@@ -445,7 +446,8 @@ class InvocationQuery(_Record):
 
     ``cursor`` is opaque and ``include_snapshot`` controls snapshot inclusion;
     events remain ordered after the cursor through the adapter's read fence.
-    Tool receipts and MCP child tasks use independent opt-in bounded pages.
+    Tool receipts, MCP child tasks, and subagent batches use independent opt-in
+    bounded pages.
     """
 
     KIND: ClassVar[str] = "invocation.query"
@@ -459,6 +461,9 @@ class InvocationQuery(_Record):
     include_mcp_tasks: bool = False
     mcp_task_cursor: str | None = None
     mcp_task_limit: int = 100
+    include_subagent_batches: bool = False
+    subagent_batch_cursor: str | None = None
+    subagent_batch_limit: int = 20
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["invocation.query"] = field(default=KIND, init=False)
 
@@ -483,6 +488,13 @@ class InvocationQuery(_Record):
             raise ValueError("mcp_task_cursor requires include_mcp_tasks")
         if type(self.mcp_task_limit) is not int or not 1 <= self.mcp_task_limit <= MAX_MCP_TASK_PAGE_SIZE:
             raise ValueError("mcp_task_limit must be between 1 and 100")
+        if type(self.include_subagent_batches) is not bool:
+            raise TypeError("include_subagent_batches must be a boolean")
+        _optional_nonempty(self.subagent_batch_cursor, "subagent_batch_cursor")
+        if self.subagent_batch_cursor is not None and not self.include_subagent_batches:
+            raise ValueError("subagent_batch_cursor requires include_subagent_batches")
+        if type(self.subagent_batch_limit) is not int or not 1 <= self.subagent_batch_limit <= MAX_SUBAGENT_BATCH_PAGE_SIZE:
+            raise ValueError("subagent_batch_limit must be between 1 and 100")
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> Self:
@@ -502,6 +514,9 @@ class InvocationQuery(_Record):
             "include_mcp_tasks",
             "mcp_task_cursor",
             "mcp_task_limit",
+            "include_subagent_batches",
+            "subagent_batch_cursor",
+            "subagent_batch_limit",
         }
         if missing - optional:
             raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(missing - optional))}")
@@ -516,6 +531,9 @@ class InvocationQuery(_Record):
         values.setdefault("include_mcp_tasks", False)
         values.setdefault("mcp_task_cursor", None)
         values.setdefault("mcp_task_limit", 100)
+        values.setdefault("include_subagent_batches", False)
+        values.setdefault("subagent_batch_cursor", None)
+        values.setdefault("subagent_batch_limit", 20)
         return cls(**values)
 
 
@@ -1043,6 +1061,148 @@ def _mcp_task_page(value: Any) -> Mapping[str, ImmutableJsonValue]:
     return frozen
 
 
+_SUBAGENT_BATCH_PAGE_FIELDS = {"items", "next_cursor", "pruning_status"}
+_SUBAGENT_BATCH_ITEM_FIELDS = {
+    "batch_id",
+    "acceptance_digest",
+    "parent_tool_receipt_id",
+    "status",
+    "terminal_code",
+    "total_items",
+    "accepted_at",
+    "updated_at",
+    "completed_at",
+    "observations",
+}
+_SUBAGENT_BATCH_STATUSES = frozenset({"queued", "running", "paused", "completed", "failed", "cancelled"})
+_SUBAGENT_BATCH_EVENTS = frozenset({"batch.accepted", "batch.item_attempt", "batch.terminal"})
+
+
+def _bounded_batch_identifier(value: Any, name: str, *, maximum: int = 80) -> str:
+    identifier = _nonempty(value, name)
+    if len(identifier.encode("utf-8")) > maximum or _PUBLIC_IDENTIFIER_RE.fullmatch(identifier) is None:
+        raise ValueError(f"subagent batch {name} is invalid")
+    return identifier
+
+
+def _batch_timestamp(value: Any, name: str, *, optional: bool = False) -> None:
+    if value is None and optional:
+        return
+    if not isinstance(value, str) or len(value.encode("utf-8")) > 64:
+        raise ValueError(f"subagent batch {name} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"subagent batch {name} is invalid") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"subagent batch {name} is invalid")
+
+
+def _batch_terminal_code(value: Any) -> None:
+    if value is not None:
+        _bounded_batch_identifier(value, "terminal_code", maximum=64)
+
+
+def _validate_batch_observation(value: Any, *, batch_id: str) -> None:
+    if not isinstance(value, Mapping) or value.get("event") not in _SUBAGENT_BATCH_EVENTS:
+        raise ValueError("subagent batch observation is invalid")
+    event = value["event"]
+    common = {"version", "event", "batch_id", "occurred_at"}
+    if event == "batch.accepted":
+        expected = common | {
+            "acceptance_digest",
+            "parent_run_id",
+            "parent_tool_receipt_id",
+            "item_count",
+        }
+    elif event == "batch.terminal":
+        expected = common | {"acceptance_digest", "terminal_code"}
+    else:
+        expected = common | {
+            "item_id",
+            "attempt_id",
+            "attempt_number",
+            "lease_epoch",
+            "transition",
+        }
+        if value.get("transition") == "terminal":
+            expected |= {"terminal_code", "consumed", "evidence_digest"}
+    if set(value) != expected or value.get("version") != 1 or value.get("batch_id") != batch_id:
+        raise ValueError("subagent batch observation fields are invalid")
+    _batch_timestamp(value.get("occurred_at"), "observation timestamp")
+    if event in {"batch.accepted", "batch.terminal"}:
+        digest = value.get("acceptance_digest")
+        if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+            raise ValueError("subagent batch acceptance digest is invalid")
+    if event == "batch.accepted":
+        parent_run_id = _nonempty(value.get("parent_run_id"), "parent_run_id")
+        if len(parent_run_id.encode("utf-8")) > 64:
+            raise ValueError("subagent batch parent_run_id is invalid")
+        receipt_id = value.get("parent_tool_receipt_id")
+        if not isinstance(receipt_id, str) or _RECEIPT_ID_RE.fullmatch(receipt_id) is None:
+            raise ValueError("subagent batch parent receipt is invalid")
+        if type(value.get("item_count")) is not int or value["item_count"] < 1:
+            raise ValueError("subagent batch item count is invalid")
+    elif event == "batch.terminal":
+        _batch_terminal_code(value.get("terminal_code"))
+    else:
+        _bounded_batch_identifier(value.get("item_id"), "item_id")
+        _bounded_batch_identifier(value.get("attempt_id"), "attempt_id")
+        for name in ("attempt_number", "lease_epoch"):
+            if type(value.get(name)) is not int or value[name] < 1:
+                raise ValueError(f"subagent batch {name} is invalid")
+        if value.get("transition") not in {"claimed", "started", "terminal"}:
+            raise ValueError("subagent batch attempt transition is invalid")
+        if value.get("transition") == "terminal":
+            _batch_terminal_code(value.get("terminal_code"))
+            if type(value.get("consumed")) is not bool:
+                raise ValueError("subagent batch attempt consumed flag is invalid")
+            digest = value.get("evidence_digest")
+            if digest is not None and (not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None):
+                raise ValueError("subagent batch attempt evidence digest is invalid")
+
+
+def _subagent_batch_page(value: Any) -> Mapping[str, ImmutableJsonValue]:
+    """Validate the bounded portable projection of child batch lifecycle."""
+
+    if not isinstance(value, Mapping) or set(value) != _SUBAGENT_BATCH_PAGE_FIELDS:
+        raise ValueError("subagent batch page fields are invalid")
+    items = value.get("items")
+    if not isinstance(items, (list, tuple)) or len(items) > MAX_SUBAGENT_BATCH_PAGE_SIZE:
+        raise ValueError("subagent batch items must be a list of at most 100")
+    for item in items:
+        if not isinstance(item, Mapping) or set(item) != _SUBAGENT_BATCH_ITEM_FIELDS:
+            raise ValueError("subagent batch item fields are invalid")
+        batch_id = _bounded_batch_identifier(item.get("batch_id"), "batch_id")
+        acceptance_digest = item.get("acceptance_digest")
+        if not isinstance(acceptance_digest, str) or _SHA256_RE.fullmatch(acceptance_digest) is None:
+            raise ValueError("subagent batch acceptance digest is invalid")
+        receipt_id = item.get("parent_tool_receipt_id")
+        if not isinstance(receipt_id, str) or _RECEIPT_ID_RE.fullmatch(receipt_id) is None:
+            raise ValueError("subagent batch parent receipt is invalid")
+        if item.get("status") not in _SUBAGENT_BATCH_STATUSES:
+            raise ValueError("subagent batch status is invalid")
+        _batch_terminal_code(item.get("terminal_code"))
+        if type(item.get("total_items")) is not int or item["total_items"] < 1:
+            raise ValueError("subagent batch total_items is invalid")
+        _batch_timestamp(item.get("accepted_at"), "accepted_at")
+        _batch_timestamp(item.get("updated_at"), "updated_at")
+        _batch_timestamp(item.get("completed_at"), "completed_at", optional=True)
+        observations = item.get("observations")
+        if not isinstance(observations, (list, tuple)) or len(observations) > 100:
+            raise ValueError("subagent batch observations must be a list of at most 100")
+        for observation in observations:
+            _validate_batch_observation(observation, batch_id=batch_id)
+    next_cursor = value.get("next_cursor")
+    if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor or len(next_cursor.encode("utf-8")) > 4096):
+        raise ValueError("subagent batch next cursor is invalid")
+    if value.get("pruning_status") != "not_pruned":
+        raise ValueError("subagent batch pruning status is invalid")
+    frozen = _json_value(value, object_only=True)
+    assert isinstance(frozen, Mapping)
+    return frozen
+
+
 def _fixed_public_rows(
     rows: Any,
     *,
@@ -1129,6 +1289,7 @@ class InvocationObservation(_Record):
     summaries: tuple[InvocationSummaryV1, ...] = ()
     tool_receipts: Mapping[str, ImmutableJsonValue] | None = None
     mcp_tasks: Mapping[str, ImmutableJsonValue] | None = None
+    subagent_batches: Mapping[str, ImmutableJsonValue] | None = None
     api_version: str = field(default=API_VERSION, init=False)
     kind: Literal["invocation.observation"] = field(default=KIND, init=False)
 
@@ -1190,6 +1351,17 @@ class InvocationObservation(_Record):
             if self.run_id is None:
                 raise ValueError("MCP tasks require a singular invocation observation")
             object.__setattr__(self, "mcp_tasks", _mcp_task_page(self.mcp_tasks))
+        if self.subagent_batches is not None:
+            if self.run_id is None:
+                raise ValueError("subagent batches require a singular invocation observation")
+            page = _subagent_batch_page(self.subagent_batches)
+            for item in page["items"]:
+                assert isinstance(item, Mapping)
+                for observation in item["observations"]:
+                    assert isinstance(observation, Mapping)
+                    if observation.get("event") == "batch.accepted" and observation.get("parent_run_id") != self.run_id:
+                        raise ValueError("subagent batch lifecycle belongs to another invocation")
+            object.__setattr__(self, "subagent_batches", page)
         encoded = json.dumps(
             self.to_dict(),
             ensure_ascii=False,
@@ -1211,7 +1383,12 @@ class InvocationObservation(_Record):
         missing = expected - set(payload)
         if unknown:
             raise ValueError(f"unknown fields for {cls.KIND}: {', '.join(sorted(unknown))}")
-        optional = {"summaries", "tool_receipts", "mcp_tasks"}
+        optional = {
+            "summaries",
+            "tool_receipts",
+            "mcp_tasks",
+            "subagent_batches",
+        }
         if missing - optional:
             raise ValueError(f"missing fields for {cls.KIND}: {', '.join(sorted(missing - optional))}")
         if payload["api_version"] != API_VERSION:
@@ -1224,6 +1401,7 @@ class InvocationObservation(_Record):
         values.setdefault("summaries", ())
         values.setdefault("tool_receipts", None)
         values.setdefault("mcp_tasks", None)
+        values.setdefault("subagent_batches", None)
         return cls._from_wire(values)
 
     @classmethod
@@ -1462,6 +1640,7 @@ __all__ = [
     "JsonValue",
     "MAX_OBSERVATION_PAGE_SIZE",
     "MAX_MCP_TASK_PAGE_SIZE",
+    "MAX_SUBAGENT_BATCH_PAGE_SIZE",
     "MAX_TOOL_RECEIPT_PAGE_SIZE",
     "MAX_LIFECYCLE_EVENT_PAYLOAD_BYTES",
     "MAX_OBSERVATION_PAYLOAD_BYTES",

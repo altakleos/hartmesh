@@ -27,6 +27,12 @@ execution stops with `subagent_catalog_unavailable`. Do not install an older
 runtime that cannot validate the additive fields until all such nonterminal rows
 are drained or terminalized.
 
+Durable batches are subordinate to `InvocationRuntime`. The worker strips
+caller batch context; `batch_task` requires the accepted parent and active
+receipt. `AcceptedBatchV1` binds the assembly and execution snapshot without
+sealing another revision. Recovery does not rediscover subagents or skills;
+stable named tool adapters must match their accepted contract digests.
+
 Accepted durable lead execution also binds `AssemblyEvidenceV1` to the running
 owner/state-version fence. After accepted material is verified and the run starts,
 the worker assembles under the frozen extension generation, validates the actual
@@ -126,10 +132,10 @@ The portable `deerflow-runtime-api` DTOs contain runtime operations only;
 deployment provenance and qualification are administrator-only. Memory-backed
 local development is explicitly unqualified. Real Postgres and opt-in
 Kubernetes suites are release gates, and neither establishes multi-replica HA.
-Invocation observation includes MCP children only when `include_mcp_tasks=true`;
-the adapter performs one owner/tenant-scoped indexed query and returns one
-bounded cursor page. Parent-run visibility is checked before that query, and
-parent cancellation never cascades into remote MCP-task cancellation.
+Invocation observation includes MCP children only when `include_mcp_tasks=true`
+and payload-free batch lifecycle only when `include_subagent_batches=true`;
+both use independent owner/tenant/parent-scoped cursor pages after parent
+visibility. Parent cancellation cascades to neither MCP tasks nor batches.
 
 ### Stream Bridge Heartbeats
 

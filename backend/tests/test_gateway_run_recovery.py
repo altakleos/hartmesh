@@ -462,6 +462,10 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
         noop,
     )
     monkeypatch.setattr(
+        "deerflow.persistence.subagent_batches.SubagentBatchRepository.verify_schema_writer_compatibility",
+        noop,
+    )
+    monkeypatch.setattr(
         "deerflow.persistence.tenant_binding.ensure_schema_tenant_binding",
         fake_tenant_binding,
     )
