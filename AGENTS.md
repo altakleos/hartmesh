@@ -32,10 +32,6 @@ to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` ro
 other `/api/*` go straight to the Gateway REST routers. See
 [backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail.
 One tenant is frozen per Gateway; see [its contract](backend/docs/TENANT_IDENTITY.md).
-Durable invocations bind secret-free credential evidence to existing
-identity/Origin/tenant context. PAT UUIDs are public references; PATs and
-audits are tenant-bound, and current authorization is rechecked; see
-[the auditable identity contract](docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
 It compresses HTML and configured textual assets, while deliberately leaving SSE,
 fonts, images, audio, and video uncompressed at the proxy layer.
 
