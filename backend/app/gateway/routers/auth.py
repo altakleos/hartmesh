@@ -9,7 +9,7 @@ import time
 import urllib.parse
 from ipaddress import ip_address, ip_network
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from starlette.responses import RedirectResponse
@@ -511,6 +511,19 @@ class PATSummaryResponse(BaseModel):
     revoked_at: str | None
 
 
+class CredentialAuditResponse(BaseModel):
+    credential_ref: str | None
+    actor_digest: str | None
+    method: str
+    authority_digest: str | None
+    action: str
+    route_category: str
+    reason_code: str | None
+    first_occurred_at: str
+    last_occurred_at: str
+    event_count: int
+
+
 def _pat_summary(record: dict) -> PATSummaryResponse:
     return PATSummaryResponse(
         id=str(record["id"]),
@@ -543,13 +556,23 @@ async def create_pat(request: Request, body: PATCreateRequest):
 
     token = generate_pat_token()
     expires_at = datetime.now(UTC) + timedelta(days=body.expires_in_days) if body.expires_in_days is not None else None
-    record = await get_pat_repo(request).create(
-        user_id=str(user.id),
-        name=body.name.strip(),
-        scopes=scopes,
-        token_digest=pat_token_digest(token),
-        expires_at=expires_at,
+    from deerflow.persistence.credential_audit import (
+        CredentialAuditUnavailable,
     )
+
+    try:
+        record = await get_pat_repo(request).create(
+            user_id=str(user.id),
+            name=body.name.strip(),
+            scopes=scopes,
+            token_digest=pat_token_digest(token),
+            expires_at=expires_at,
+        )
+    except CredentialAuditUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Required audit record unavailable",
+        ) from exc
     return PATCreatedResponse(
         id=str(record["id"]),
         name=str(record["name"]),
@@ -570,13 +593,60 @@ async def list_pats(request: Request):
     return [_pat_summary(record) for record in records]
 
 
+@router.get(
+    "/pats/{pat_id}/audit",
+    response_model=list[CredentialAuditResponse],
+    dependencies=[Depends(require_session_source)],
+)
+async def list_pat_audit(
+    request: Request,
+    pat_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    """Return bounded, secret-free audit aggregates for one owned PAT."""
+
+    from app.gateway.deps import get_pat_repo
+
+    user = await get_current_user_from_request(request)
+    observations = await get_pat_repo(request).list_audit_for_user(
+        pat_id,
+        str(user.id),
+        limit=limit,
+    )
+    if observations is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Token not found",
+        )
+    return [
+        CredentialAuditResponse(
+            **{
+                **observation,
+                "first_occurred_at": str(observation["first_occurred_at"]),
+                "last_occurred_at": str(observation["last_occurred_at"]),
+            }
+        )
+        for observation in observations
+    ]
+
+
 @router.delete("/pats/{pat_id}", response_model=MessageResponse, dependencies=[Depends(require_session_source)])
 async def revoke_pat(request: Request, pat_id: str):
     """Revoke one of the session user's tokens. Revocation is immediate."""
     from app.gateway.deps import get_pat_repo
 
     user = await get_current_user_from_request(request)
-    revoked = await get_pat_repo(request).revoke(pat_id, str(user.id))
+    from deerflow.persistence.credential_audit import (
+        CredentialAuditUnavailable,
+    )
+
+    try:
+        revoked = await get_pat_repo(request).revoke(pat_id, str(user.id))
+    except CredentialAuditUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Required audit record unavailable",
+        ) from exc
     if not revoked:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Token not found")
     return MessageResponse(message="Token revoked")

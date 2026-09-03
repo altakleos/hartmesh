@@ -88,6 +88,16 @@ from deerflow_extension_api.contributors import (
     SealedOriginV1,
     TrustedRunContextV1,
 )
+from deerflow_extension_api.credentials import (
+    AUTHORITY_ALIASES_V1,
+    AUTHORITY_CANONICALIZATION_VERSION,
+    AuthenticationMethod,
+    CredentialEvidenceV1,
+    VerifiedActorContextV1,
+    authority_categories_v1,
+    canonicalize_authority_v1,
+    effective_authority_digest_v1,
+)
 from deerflow_extension_api.health import (
     CapabilityHealthProbe,
     CapabilityHealthResult,
@@ -155,7 +165,7 @@ from deerflow_extension_api.tenant import TenantReferenceV1
 #: Contract version. Pre-1.0 minors may break and only patches promise to be
 #: additive. From 1.0 on, bump the major on any breaking change; see the spec's
 #: evolution rules for what counts as additive.
-API_VERSION = "0.13.0"
+API_VERSION = "0.13.1"
 
 __all__ = [
     "API_VERSION",
@@ -167,6 +177,8 @@ __all__ = [
     "THREAD_IDENTIFIER_PATTERN",
     "AUTHORIZATION_PROVIDER_CAPABILITY_API_VERSION",
     "AUTHORIZATION_PROVIDER_KIND",
+    "AUTHORITY_ALIASES_V1",
+    "AUTHORITY_CANONICALIZATION_VERSION",
     "INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION",
     "INVOCATION_CONSTRAINTS_CAPABILITY_API_VERSION_V2",
     "INVOCATION_CONSTRAINTS_KIND",
@@ -186,6 +198,7 @@ __all__ = [
     "AgentBuildContext",
     "AgentScope",
     "ActingServiceV1",
+    "AuthenticationMethod",
     "AuthorizationProvider",
     "AuthorizationProviderFactory",
     "AuthzDecision",
@@ -200,6 +213,7 @@ __all__ = [
     "ConstraintProjectionV1",
     "ConstraintProjectionV2",
     "ConstraintRejected",
+    "CredentialEvidenceV1",
     "CompactionEvent",
     "ContentKind",
     "ContextCompactionObserver",
@@ -248,6 +262,7 @@ __all__ = [
     "SafeContextReferenceV1",
     "SealedOriginV1",
     "TrustedRunContextV1",
+    "VerifiedActorContextV1",
     "ReleasePolicyProvider",
     "SystemModelCallObserver",
     "SystemModelRequest",
@@ -260,6 +275,8 @@ __all__ = [
     "ToolDescriptor",
     "canonical_hash",
     "canonical_json",
+    "authority_categories_v1",
+    "canonicalize_authority_v1",
     "collect_release_policies",
     "extension",
     "provenance_kwargs",
@@ -273,4 +290,5 @@ __all__ = [
     "validate_mcp_tool_identifier",
     "validate_model_profile_identifier",
     "validate_thread_identifier",
+    "effective_authority_digest_v1",
 ]

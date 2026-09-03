@@ -73,7 +73,7 @@ _MULTI_GATEWAY_TOPOLOGY_REVISION = "0027_multi_gateway_topology"
 _MCP_REQUEST_COMMITMENT_REVISION = "0028_mcp_request_commitment"
 _RUN_RECOVERY_REVISION = "0029_run_recovery_policy"
 _DELIVERY_OWNER_BACKFILL_REVISION = "0030_run_delivery_owner_backfill"
-_HEAD_REVISION = "0032_subagent_batch_evidence"
+_HEAD_REVISION = "0033_automation_identities"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
     "0012_invocation_idempotency",
@@ -757,6 +757,72 @@ async def _assert_postgres_head_contract(engine: AsyncEngine, schema: str) -> No
         None,
         True,
     )
+    pat_columns = await _column_contract(
+        engine,
+        schema,
+        "personal_access_tokens",
+    )
+    assert pat_columns["tenant_ref"][:3] == (
+        "character varying",
+        23,
+        True,
+    )
+    assert pat_columns["tenant_digest"][:3] == (
+        "character varying",
+        64,
+        True,
+    )
+    assert "ck_personal_access_tokens_tenant_pair" in constraints["personal_access_tokens"]
+    _assert_index_definition(
+        indexes,
+        "ix_personal_access_tokens_tenant_digest_token_digest",
+        ("tenant_digest", "token_digest"),
+    )
+    _assert_index_definition(
+        indexes,
+        "ix_personal_access_tokens_tenant_digest_user_created",
+        ("tenant_digest", "user_id", "created_at"),
+    )
+
+    audit_columns = await _column_contract(
+        engine,
+        schema,
+        "credential_audit_events",
+    )
+    for name, expected in {
+        "aggregation_key": ("character varying", 64, False),
+        "tenant_ref": ("character varying", 23, False),
+        "tenant_digest": ("character varying", 64, False),
+        "credential_ref": ("character varying", 128, True),
+        "actor_digest": ("character varying", 64, True),
+        "authority_digest": ("character varying", 64, True),
+        "event_count": ("bigint", None, False),
+    }.items():
+        assert audit_columns[name][:3] == expected
+    assert {
+        "ck_credential_audit_identity_shape",
+        "ck_credential_audit_safe_references",
+        "ck_credential_audit_method",
+        "ck_credential_audit_action",
+        "ck_credential_audit_reason",
+        "ck_credential_audit_bounds",
+    } <= constraints["credential_audit_events"]
+    _assert_index_definition(
+        indexes,
+        "ix_credential_audit_aggregation_key",
+        ("aggregation_key",),
+        unique=True,
+    )
+    _assert_index_definition(
+        indexes,
+        "ix_credential_audit_tenant_credential_last",
+        ("tenant_digest", "credential_ref", "last_occurred_at"),
+    )
+    _assert_index_definition(
+        indexes,
+        "ix_credential_audit_tenant_last",
+        ("tenant_digest", "last_occurred_at"),
+    )
     _assert_index_definition(
         indexes,
         "uq_runs_thread_active",
@@ -1263,6 +1329,39 @@ async def test_fresh_postgres_migration_chain_reaches_exact_head_schema() -> Non
         await _assert_postgres_head_contract(engine, schema)
         await _assert_postgres_checks_reject_invalid_rows(engine)
         await _assert_lifecycle_constraints_reject_invalid_rows(engine)
+
+
+@pytest.mark.anyio
+@pytest.mark.postgres_contract
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="requires DEERFLOW_TEST_POSTGRES_URL for PostgreSQL migration qualification",
+)
+async def test_postgres_bound_singleton_backfills_pat_without_replacing_uuid() -> None:
+    pat_id = "018f2d70-0fca-4f88-b0c3-a0f83ebf2c89"
+    tenant_ref = "tenant-aaaaaaaaaaaaaaaa"
+    tenant_digest = "a" * 64
+    async with _isolated_postgres_schema() as (schema, engine):
+        await _upgrade(engine, schema, "0032_subagent_batch_evidence")
+        async with engine.begin() as connection:
+            await connection.execute(
+                sa.text("INSERT INTO hartmesh_deployment_identity (singleton_key, identity_version, tenant_ref, tenant_digest, legacy_redis_prefixes_json, bound_at) VALUES (1, 1, :tenant_ref, :tenant_digest, NULL, CURRENT_TIMESTAMP)"),
+                {
+                    "tenant_ref": tenant_ref,
+                    "tenant_digest": tenant_digest,
+                },
+            )
+            await connection.execute(
+                sa.text("INSERT INTO personal_access_tokens (id, user_id, name, token_digest, scopes, created_at) VALUES (:id, 'user-1', 'private name', :digest, CAST('[\"runs:read\"]' AS json), CURRENT_TIMESTAMP)"),
+                {"id": pat_id, "digest": "b" * 64},
+            )
+
+        await _upgrade(engine, schema, "head")
+
+        async with engine.connect() as connection:
+            row = (await connection.execute(sa.text("SELECT id, tenant_ref, tenant_digest FROM personal_access_tokens"))).one()
+        assert tuple(row) == (pat_id, tenant_ref, tenant_digest)
+        await _assert_postgres_head_contract(engine, schema)
 
 
 @pytest.mark.anyio

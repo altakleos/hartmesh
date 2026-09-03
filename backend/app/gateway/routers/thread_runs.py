@@ -26,7 +26,10 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from app.gateway.artifact_archive import ArtifactArchiveError, ArtifactArchiveResult, build_artifact_archive
-from app.gateway.authz import require_cancel_permission_if, require_permission
+from app.gateway.authz import (
+    require_audited_cancel_permission_if,
+    require_permission,
+)
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
     CheckpointParentMissingError,
@@ -229,7 +232,10 @@ class ThreadTokenUsageResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def require_cancel_permission_when_action(request: Request, action: str | None) -> None:
+async def require_cancel_permission_when_action(
+    request: Request,
+    action: str | None,
+) -> None:
     """Conditionally require ``runs:cancel`` for cancel-then-stream requests.
 
     ``stream_existing_run`` is gated at ``runs:read`` so action-less stream
@@ -237,10 +243,10 @@ def require_cancel_permission_when_action(request: Request, action: str | None) 
     cancels the run — a separate permission. A read-only PAT (or any read-only
     credential) must not reach the cancel path, and decorators cannot express
     query-parameter-conditional permissions, so the check lives here. See
-    ``authz.require_cancel_permission_if`` — the shared primitive for every
-    request dimension that carries cancel capability.
+    ``authz.require_audited_cancel_permission_if`` — the shared primitive for
+    every request dimension that carries cancel capability.
     """
-    require_cancel_permission_if(request, action is not None)
+    await require_audited_cancel_permission_if(request, action is not None)
 
 
 def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
@@ -1153,7 +1159,7 @@ async def _stream_existing_run(
     cancelled first; the response then streams any remaining buffered events
     so the client observes a clean shutdown.
     """
-    require_cancel_permission_when_action(request, action)
+    await require_cancel_permission_when_action(request, action)
 
     runtime = build_invocation_runtime(request)
     record = await _observe_run_or_404(

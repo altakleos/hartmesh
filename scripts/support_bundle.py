@@ -57,6 +57,7 @@ VAR_REFERENCE_RE = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
 ENV_SECRET_RE = re.compile(r"(?im)^([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION|COOKIE|CREDENTIAL)[A-Z0-9_]*\s*=\s*)(.+)$")
 YAML_SECRET_RE = re.compile(r"(?im)^(\s*[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential|private[_-]?key)[\w.-]*\s*:\s*)(.+)$")
 BEARER_RE = re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]+")
+PAT_TOKEN_RE = re.compile(r"\bdfp_[A-Za-z0-9]+\b")
 OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 URL_USERINFO_RE = re.compile(r"([a-zA-Z][\w+.-]*://)([^/?#\s@]+)@")
 URL_QUERY_SECRET_RE = re.compile(r"(?i)([?&][\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?token|credential)[\w.-]*=)([^&\s#]+)")
@@ -110,6 +111,7 @@ def redact_text(text: str) -> str:
     text = ENV_SECRET_RE.sub(r"\1<redacted>", text)
     text = YAML_SECRET_RE.sub(_redact_yaml_secret_match, text)
     text = BEARER_RE.sub(r"\1<redacted>", text)
+    text = PAT_TOKEN_RE.sub("<redacted-pat>", text)
     return OPENAI_KEY_RE.sub("sk-<redacted>", text)
 
 

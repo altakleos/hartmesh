@@ -69,6 +69,21 @@ graph TB
 
 `ContextVar` 是这里的核心边界。上层 Gateway 负责写入身份，下层 persistence / file path 只读取结构化的当前用户，不反向依赖 `app.gateway.auth` 具体类型。
 
+### 自动化凭据证据
+
+浏览器 session、PAT、内部服务与受支持的 IM channel 最终都由 Gateway
+生成 `CredentialEvidenceV1`。它只记录认证方法、可选的安全凭据引用、规范化
+权限摘要/粗粒度类别以及有界时间；不会记录 Bearer、PAT digest、cookie、
+凭据名称或服务 secret。该证据与现有 `InvocationIdentityV1`（principal 与
+可选 acting service）、`SealedOriginV1`（source）和 `TenantReferenceV1`
+组合，不创建第二套身份模型。PAT 始终是用户凭据，不是 acting service。
+
+新 durable invocation 将它绑定到 `TrustedRunContextV1` v4。历史证据在
+撤销后保持不变，但每次新的提交、观察、控制或导出仍会重新认证并检查当前
+权限；旧记录不是 capability token。完整 schema、PAT 路由/权限矩阵、审计
+策略和恢复语义见
+[`docs/AUDITABLE_AUTOMATION_IDENTITIES.md`](../../docs/AUDITABLE_AUTOMATION_IDENTITIES.md)。
+
 可以把 repository 调用的用户参数理解成一个三态 ADT：
 
 ```scala

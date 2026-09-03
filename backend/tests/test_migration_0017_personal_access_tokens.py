@@ -25,6 +25,8 @@ _PREVIOUS = "0016_subagent_batches"
 
 _EXPECTED_COLUMNS = {
     "id",
+    "tenant_ref",
+    "tenant_digest",
     "user_id",
     "name",
     "token_digest",

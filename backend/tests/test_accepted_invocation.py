@@ -11,12 +11,18 @@ from unittest.mock import AsyncMock
 import pytest
 from deerflow_extension_api import (
     ActingServiceV1,
+    CredentialEvidenceV1,
     EffectiveSubjectV1,
     InvocationIdentityV1,
     SafeContextReferenceV1,
     SealedOriginV1,
+    effective_authority_digest_v1,
 )
 
+from app.gateway.auth_disabled import (
+    AUTH_SOURCE_INTERNAL,
+    AUTH_SOURCE_SESSION,
+)
 from app.runtime.invocation import (
     InternalLaunchIntent,
     InternalNativeChannelFacts,
@@ -324,7 +330,10 @@ async def test_full_agent_identifier_domain_seals_into_trusted_context(
     revision = ResolvedAgentRevision.from_material(material)
     monkeypatch.setattr(services, "resolve_agent_revision", lambda *_args, **_kwargs: revision)
     request = SimpleNamespace(
-        state=SimpleNamespace(user=SimpleNamespace(id="u1", system_role="member")),
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="u1", system_role="member"),
+            auth_source=AUTH_SOURCE_SESSION,
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(
                 extensions=SimpleNamespace(generation=1),
@@ -352,6 +361,118 @@ async def test_full_agent_identifier_domain_seals_into_trusted_context(
     assert accepted.agent_revision.agent_id == agent_id
     assert accepted.trusted_context is not None
     assert accepted.trusted_context.agent_revision.agent_id == agent_id
+    assert accepted.trusted_context.credential is not None
+    assert accepted.trusted_context.credential.method == "session"
+
+
+@pytest.mark.asyncio
+async def test_accepted_admission_records_bound_actor_and_fails_closed(
+    monkeypatch,
+) -> None:
+    from app.gateway import services
+
+    revision = ResolvedAgentRevision.from_material(_material())
+    monkeypatch.setattr(
+        services,
+        "resolve_agent_revision",
+        lambda *_args, **_kwargs: revision,
+    )
+    audit = SimpleNamespace(record=AsyncMock())
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="u1", system_role="member"),
+            auth_source=AUTH_SOURCE_SESSION,
+        ),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                extensions=SimpleNamespace(generation=1),
+                capability_manifest=SimpleNamespace(digest="f" * 64),
+                contributor_host=None,
+                tenant_identity=_TEST_TENANT_IDENTITY,
+                credential_audit_repo=audit,
+            )
+        ),
+    )
+
+    accepted = await services._seal_accepted_invocation(
+        request=request,
+        intent=InternalLaunchIntent(thread_id="thread-1"),
+        config={"context": {}},
+        graph_input={"messages": []},
+        owner_user_id="u1",
+        run_ctx=SimpleNamespace(app_config=object()),
+    )
+
+    assert accepted.trusted_context is not None
+    actor = accepted.trusted_context.verified_actor
+    assert actor is not None
+    assert audit.record.await_args.kwargs["actor_digest"] == actor.digest
+    assert audit.record.await_args.kwargs["action"] == "admission"
+
+    audit.record.side_effect = OSError("database details must not escape")
+    with pytest.raises(RuntimeError, match="^audit_record_unavailable$"):
+        await services._seal_accepted_invocation(
+            request=request,
+            intent=InternalLaunchIntent(thread_id="thread-2"),
+            config={"context": {}},
+            graph_input={"messages": []},
+            owner_user_id="u1",
+            run_ctx=SimpleNamespace(app_config=object()),
+        )
+
+
+@pytest.mark.asyncio
+async def test_pat_acceptance_is_user_credential_not_acting_service(
+    monkeypatch,
+) -> None:
+    from app.gateway import services
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+    revision = ResolvedAgentRevision.from_material(_material())
+    monkeypatch.setattr(
+        services,
+        "resolve_agent_revision",
+        lambda *_args, **_kwargs: revision,
+    )
+    credential = CredentialEvidenceV1(
+        method="personal_access_token",
+        credential_ref="018f2d70-0fca-4f88-b0c3-a0f83ebf2c89",
+        effective_authority_digest=effective_authority_digest_v1(("runs:create",)),
+        authority_categories=("runs",),
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="u1", system_role="member"),
+            auth_source=AUTH_SOURCE_PAT,
+            auth=SimpleNamespace(permissions=["runs:create"]),
+            credential_evidence=credential,
+        ),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                extensions=SimpleNamespace(generation=1),
+                capability_manifest=SimpleNamespace(digest="f" * 64),
+                contributor_host=None,
+                tenant_identity=_TEST_TENANT_IDENTITY,
+                credential_audit_repo=SimpleNamespace(record=AsyncMock()),
+            )
+        ),
+    )
+
+    accepted = await services._seal_accepted_invocation(
+        request=request,
+        intent=InternalLaunchIntent(thread_id="thread-pat"),
+        config={"context": {}},
+        graph_input={"messages": []},
+        owner_user_id="u1",
+        run_ctx=SimpleNamespace(app_config=object()),
+    )
+
+    assert accepted.principal.identity is not None
+    assert accepted.principal.identity.effective_subject.subject_id == "u1"
+    assert accepted.principal.identity.acting_service is None
+    assert accepted.trusted_context is not None
+    assert accepted.trusted_context.credential == credential
+    assert accepted.trusted_context.origin.source_kind == "http"
 
 
 @pytest.mark.asyncio
@@ -379,7 +500,10 @@ async def test_cancelled_revision_resolution_releases_late_process_material(
     monkeypatch.setattr(services, "resolve_agent_revision", blocking_resolver)
     monkeypatch.setattr(ResolvedAgentMaterialV1, "release_process_material", release_process_material)
     request = SimpleNamespace(
-        state=SimpleNamespace(user=SimpleNamespace(id="u1", system_role="member")),
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="u1", system_role="member"),
+            auth_source=AUTH_SOURCE_SESSION,
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(
                 extensions=SimpleNamespace(generation=1),
@@ -446,7 +570,10 @@ async def test_cancelled_run_context_contribution_releases_published_material(
     monkeypatch.setattr(services, "resolve_agent_revision", lambda *_args, **_kwargs: revision)
     monkeypatch.setattr(ResolvedAgentMaterialV1, "release_process_material", release_process_material)
     request = SimpleNamespace(
-        state=SimpleNamespace(user=SimpleNamespace(id="u1", system_role="member")),
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="u1", system_role="member"),
+            auth_source=AUTH_SOURCE_SESSION,
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(
                 extensions=SimpleNamespace(generation=1),
@@ -1724,6 +1851,7 @@ async def test_every_launch_source_is_sealed_with_host_selected_origin(
     request = SimpleNamespace(
         state=SimpleNamespace(
             user=SimpleNamespace(id="u1", system_role="member"),
+            auth_source=(AUTH_SOURCE_SESSION if intent.source_kind is InternalSourceKind.http else AUTH_SOURCE_INTERNAL),
         ),
         app=SimpleNamespace(
             state=SimpleNamespace(

@@ -45,7 +45,7 @@ from app.gateway.auth_disabled import (
     AUTH_SOURCE_INTERNAL,
 )
 from app.gateway.authorization import AuthorizationResolutionSnapshot
-from app.gateway.authz import require_cancel_permission_if
+from app.gateway.authz import require_audited_cancel_permission_if
 from app.gateway.deps import (
     get_checkpointer,
     get_local_provider,
@@ -786,6 +786,11 @@ _SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
         "channel_user_id",
         "langgraph_auth_user",
         "langgraph_auth_user_id",
+        "__deerflow_credential_evidence",
+        "credential_evidence",
+        "credential_ref",
+        "effective_authority_digest",
+        "auth_method",
         INVOCATION_IDENTITY_CONTEXT_KEY,
         INVOCATION_ORIGIN_CONTEXT_KEY,
         TRUSTED_RUN_CONTEXT_KEY,
@@ -2234,6 +2239,11 @@ async def _seal_accepted_invocation(
         intent,
         owner_user_id=owner_user_id,
     )
+    from app.gateway.credential_evidence import (
+        credential_evidence_for_admission,
+    )
+
+    credential_evidence = credential_evidence_for_admission(request, intent)
     base_references = _base_origin_references(intent)
     app_state = getattr(getattr(request, "app", None), "state", None)
     app_config = run_ctx.app_config or get_app_config()
@@ -2412,6 +2422,7 @@ async def _seal_accepted_invocation(
     external_key_reference = normalize_external_key(intent.external_key) if intent.external_key is not None else None
     trusted_context = TrustedRunContextV1(
         identity=principal.identity,
+        credential=credential_evidence,
         tenant=tenant_reference,
         origin=public_origin,
         thread_id=intent.thread_id,
@@ -2454,6 +2465,42 @@ async def _seal_accepted_invocation(
         tenant=tenant_reference,
         trusted_context=trusted_context,
     )
+    # Required admission audit is written before the accepted plan can reach
+    # the durable run manager. Production construction always installs this
+    # repository; the attribute-absent case preserves private direct-call
+    # harnesses that do not construct a full Gateway application.
+    if app_state is not None and hasattr(app_state, "credential_audit_repo"):
+        from deerflow.persistence.credential_audit import (
+            CredentialAuditUnavailable,
+        )
+
+        credential_audit_repo = getattr(
+            app_state,
+            "credential_audit_repo",
+            None,
+        )
+        if credential_audit_repo is None:
+            raise CredentialAuditUnavailable()
+        verified_actor = trusted_context.verified_actor
+        if verified_actor is None:  # pragma: no cover - constructor invariant
+            raise RuntimeError("credential_evidence_unavailable")
+        try:
+            await credential_audit_repo.record(
+                method=credential_evidence.method,
+                action="admission",
+                credential_ref=credential_evidence.credential_ref,
+                actor_digest=verified_actor.digest,
+                authority_digest=(credential_evidence.effective_authority_digest),
+                route_category="runs",
+            )
+        except Exception as exc:
+            raise CredentialAuditUnavailable() from exc
+    elif isinstance(request, Request):
+        from deerflow.persistence.credential_audit import (
+            CredentialAuditUnavailable,
+        )
+
+        raise CredentialAuditUnavailable()
     # These objects are server-owned and installed after all caller context is
     # scrubbed. The worker and delegated subagents inherit the same accepted
     # revision/generation for construction and audit.
@@ -3677,7 +3724,10 @@ async def start_run(
     # Interrupt and rollback terminate an active run, so they require the
     # cancel capability in addition to run creation. Internal/test requests
     # without a stamped auth context retain their existing behavior.
-    require_cancel_permission_if(request, body.multitask_strategy != "reject")
+    await require_audited_cancel_permission_if(
+        request,
+        body.multitask_strategy != "reject",
+    )
     try:
         validate_thread_id(thread_id)
     except ValueError as exc:
@@ -3689,6 +3739,11 @@ async def start_run(
         validate_run_metadata_secrets(config_metadata)
     except LegacyRunMetadataSecretError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    from app.gateway.credential_evidence import CredentialEvidenceError
+    from deerflow.persistence.credential_audit import (
+        CredentialAuditUnavailable,
+    )
+
     runtime = build_invocation_runtime(request)
     try:
         receipt = await runtime.launch(
@@ -3706,6 +3761,11 @@ async def start_run(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except UnsupportedStrategyError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except (CredentialAuditUnavailable, CredentialEvidenceError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Required credential evidence unavailable",
+        ) from exc
     raise_for_invocation_authorization(receipt, operation="start")
     if receipt is NotFoundOrInvisible.not_found_or_invisible:
         raise HTTPException(status_code=404, detail="Invocation not found")

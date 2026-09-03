@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.persistence.base import Base
+from deerflow.persistence.personal_access_tokens.model import PersonalAccessTokenRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.tenant_binding import (
     DeploymentIdentityRow,
@@ -110,6 +111,15 @@ async def test_nonempty_legacy_schema_requires_explicit_operator_binding(tmp_pat
                     request_digest_version="sha256-canonical-json-v1",
                 )
             )
+            session.add(
+                PersonalAccessTokenRow(
+                    id="018f2d70-0fca-4f88-b0c3-a0f83ebf2c89",
+                    user_id="user-1",
+                    name="legacy private name",
+                    token_digest="c" * 64,
+                    scopes=["runs:read"],
+                )
+            )
             await session.commit()
 
         with pytest.raises(TenantIdentityError) as error:
@@ -141,12 +151,19 @@ async def test_nonempty_legacy_schema_requires_explicit_operator_binding(tmp_pat
         assert bound.legacy_redis_prefixes == legacy_prefixes
         async with sessions() as session:
             legacy = await session.get(RunRow, "legacy-run")
+            legacy_pat = await session.get(
+                PersonalAccessTokenRow,
+                "018f2d70-0fca-4f88-b0c3-a0f83ebf2c89",
+            )
             binding = await session.get(DeploymentIdentityRow, 1)
             assert legacy is not None
+            assert legacy_pat is not None
             assert binding is not None
             assert binding.legacy_redis_prefixes_json == legacy_prefixes.to_json()
             assert legacy.tenant_ref == identity.public_ref
             assert legacy.tenant_digest == identity.digest
+            assert legacy_pat.tenant_ref == identity.public_ref
+            assert legacy_pat.tenant_digest == identity.digest
             assert legacy.external_scope == tenant_admission_scope(
                 identity.to_persisted_reference(),
                 legacy_scope,

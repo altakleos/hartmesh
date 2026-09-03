@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0032_subagent_batch_evidence"
+HEAD = "0033_automation_identities"
 
 
 def _url(tmp_path: Path) -> str:

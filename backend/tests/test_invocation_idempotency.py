@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.postgres import postgres_async_url
 
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
+from app.gateway.authz import _ALL_PERMISSIONS
+from app.gateway.credential_evidence import build_boundary_credential_evidence
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import _GatewayLaunchNormalizer, build_channel_invocation_runtime, start_run
 from app.runtime.idempotency import (
@@ -42,6 +44,7 @@ from app.runtime.native_binding import (
 )
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.persistence.base import Base
+from deerflow.persistence.credential_audit import InMemoryCredentialAuditRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
@@ -944,6 +947,10 @@ async def test_http_replay_returns_one_run_and_attaches_exactly_one_worker() -> 
         headers={"Idempotency-Key": "request-1"},
         state=SimpleNamespace(
             auth_source=AUTH_SOURCE_SESSION,
+            credential_evidence=build_boundary_credential_evidence(
+                auth_source=AUTH_SOURCE_SESSION,
+                permissions=_ALL_PERMISSIONS,
+            ),
             user=SimpleNamespace(id="owner-1", system_role="user", oauth_provider=None, oauth_id=None),
         ),
         app=SimpleNamespace(
@@ -957,6 +964,9 @@ async def test_http_replay_returns_one_run_and_attaches_exactly_one_worker() -> 
                 run_events_config=None,
                 thread_store=MemoryThreadMetaStore(store),
                 tenant_identity=_TEST_TENANT_IDENTITY,
+                credential_audit_repo=InMemoryCredentialAuditRepository(
+                    tenant=_TEST_TENANT,
+                ),
             )
         ),
     )

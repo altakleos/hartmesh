@@ -121,6 +121,20 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 | `/api/v1/auth/change-password` | POST | 修改密码 |
 | `/api/v1/auth/setup-status` | GET | 检查 admin 是否存在 |
 | `/api/v1/auth/initialize` | POST | 首次初始化第一个 admin（仅无 admin 时可调用） |
+| `/api/v1/auth/pats` | POST / GET | 使用 session 创建（原始 token 仅返回一次）或列出当前用户 PAT |
+| `/api/v1/auth/pats/{pat_id}` | DELETE | 使用 session 撤销当前用户 PAT |
+| `/api/v1/auth/pats/{pat_id}/audit` | GET | 使用 session 读取最多 100 条安全聚合审计记录 |
+
+## PAT 租户迁移
+
+Revision `0033_automation_identities` 为 PAT 添加 nullable legacy
+`tenant_ref`/`tenant_digest`。已有 schema 只有在
+`hartmesh_deployment_identity` 已绑定时才自动回填；非空但未绑定的 schema
+不会从请求、用户、hostname 或 namespace 推断租户，必须停写后运行文档化的
+`deerflow deployment bind-tenant --expected-nonempty-schema` 操作流程。原有 PAT
+UUID 保持不变。迁移同时创建 90 天保留、按日聚合的安全凭据审计表。详见
+[`docs/AUDITABLE_AUTOMATION_IDENTITIES.md`](../../docs/AUDITABLE_AUTOMATION_IDENTITIES.md)
+与 [TENANT_IDENTITY.md](TENANT_IDENTITY.md)。
 
 ## 兼容性
 

@@ -7,7 +7,18 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, Integer, String, select, text
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    Integer,
+    String,
+    select,
+    text,
+)
+from sqlalchemy import (
+    inspect as sa_inspect,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -130,6 +141,9 @@ async def _backfill_legacy_tenant_rows(
 ) -> None:
     """Bind nullable pre-migration rows inside the singleton transaction."""
 
+    connection = await session.connection()
+    present_tables = await connection.run_sync(lambda sync_connection: set(sa_inspect(sync_connection).get_table_names()))
+
     legacy_scopes = (await session.execute(text("SELECT run_id, external_scope FROM runs WHERE tenant_digest IS NULL AND external_scope IS NOT NULL"))).all()
     for run_id, base_scope in legacy_scopes:
         await session.execute(
@@ -143,7 +157,14 @@ async def _backfill_legacy_tenant_rows(
             },
         )
 
-    for table_name in ("runs", "run_lifecycle_events", "run_events"):
+    for table_name in (
+        "runs",
+        "run_lifecycle_events",
+        "run_events",
+        "personal_access_tokens",
+    ):
+        if table_name not in present_tables:
+            continue
         conflict = (
             await session.execute(
                 text(f"SELECT 1 FROM {table_name} WHERE tenant_digest IS NOT NULL AND (tenant_digest <> :tenant_digest OR tenant_ref <> :tenant_ref) LIMIT 1"),

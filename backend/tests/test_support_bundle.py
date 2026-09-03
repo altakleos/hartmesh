@@ -145,10 +145,12 @@ def test_redact_keeps_non_secret_flags_visible():
 
 
 def test_redact_text_masks_env_assignments_and_bearer_tokens():
+    raw_pat = "dfp_" + ("A" * 43)
     text = "\n".join(
         [
             "OPENAI_API_KEY=sk-live-secret",
             "Authorization: Bearer abc.def.ghi",
+            f"driver exception leaked {raw_pat}",
             "client_secret: very-secret",
             "normal=value",
         ]
@@ -158,6 +160,8 @@ def test_redact_text_masks_env_assignments_and_bearer_tokens():
 
     assert "sk-live-secret" not in redacted
     assert "abc.def.ghi" not in redacted
+    assert raw_pat not in redacted
+    assert "dfp_" not in redacted
     assert "very-secret" not in redacted
     assert "OPENAI_API_KEY=<redacted>" in redacted
     assert "Authorization: Bearer <redacted>" in redacted

@@ -142,6 +142,36 @@ def require_cancel_permission_if(request: Request, can_cancel: bool) -> None:
         raise HTTPException(status_code=403, detail="Permission denied: runs:cancel")
 
 
+async def require_audited_cancel_permission_if(
+    request: Request,
+    can_cancel: bool,
+) -> None:
+    """Require current cancel authority and its durable control audit."""
+
+    require_cancel_permission_if(request, can_cancel)
+    if not can_cancel:
+        return
+    from app.gateway.credential_evidence import (
+        CredentialEvidenceError,
+        record_required_credential_action,
+    )
+    from deerflow.persistence.credential_audit import (
+        CredentialAuditUnavailable,
+    )
+
+    try:
+        await record_required_credential_action(
+            request,
+            action="control",
+            route_category="runs",
+        )
+    except (CredentialAuditUnavailable, CredentialEvidenceError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Required audit record unavailable",
+        ) from exc
+
+
 _ALL_PERMISSIONS: list[str] = [
     Permissions.THREADS_READ,
     Permissions.THREADS_WRITE,

@@ -16,6 +16,10 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
+from deerflow_extension_api.credentials import (
+    CredentialEvidenceV1,
+    VerifiedActorContextV1,
+)
 from deerflow_extension_api.health import CapabilityHealthProbe
 from deerflow_extension_api.identifiers import (
     canonicalize_agent_identifier,
@@ -312,6 +316,7 @@ class TrustedRunContextV1:
     profile_revision: ResolvedProfileRevisionReferenceV1
     extension_generation: int
     extension_manifest_digest: str | None
+    credential: CredentialEvidenceV1 | None = None
     extension_artifact_manifest_digest: str | None = None
     extension_configuration_digest: str | None = None
     tenant: TenantReferenceV1 | None = None
@@ -326,8 +331,18 @@ class TrustedRunContextV1:
     def __post_init__(self) -> None:
         if not isinstance(self.identity, InvocationIdentityV1):
             raise TypeError("trusted run context identity must be InvocationIdentityV1")
+        if self.credential is not None and not isinstance(self.credential, CredentialEvidenceV1):
+            raise TypeError("trusted run context credential must be CredentialEvidenceV1 or None")
         if self.tenant is not None and not isinstance(self.tenant, TenantReferenceV1):
             raise TypeError("trusted run context tenant must be TenantReferenceV1 or None")
+        if self.credential is not None and self.tenant is None:
+            raise ValueError("credential-bound trusted run context requires a tenant reference")
+        if self.credential is not None and self.tenant is not None:
+            VerifiedActorContextV1(
+                identity=self.identity,
+                credential=self.credential,
+                tenant=self.tenant,
+            )
         if not isinstance(self.origin, SealedOriginV1):
             raise TypeError("trusted run context origin must be SealedOriginV1")
         validate_thread_identifier(self.thread_id, field_name="thread_id")
@@ -437,8 +452,9 @@ class TrustedRunContextV1:
             raise ValueError("canonical trusted run context is limited to 32 KiB")
 
     def _full_projection(self) -> dict[str, object]:
+        version = 4 if self.credential is not None else (3 if self.extension_artifact_manifest_digest is not None else (2 if self.tenant is not None else 1))
         projection = {
-            "version": (3 if self.extension_artifact_manifest_digest is not None else (2 if self.tenant is not None else 1)),
+            "version": version,
             "identity": self.identity.to_json(),
             "origin": {
                 "source_kind": self.origin.source_kind,
@@ -467,7 +483,11 @@ class TrustedRunContextV1:
         }
         if self.tenant is not None:
             projection["tenant"] = self.tenant.to_json()
-        if self.extension_artifact_manifest_digest is not None:
+        if version == 4:
+            projection["credential"] = self.credential.to_json()  # type: ignore[union-attr]
+            projection["extension_artifact_manifest_digest"] = self.extension_artifact_manifest_digest
+            projection["extension_configuration_digest"] = self.extension_configuration_digest
+        elif self.extension_artifact_manifest_digest is not None:
             projection["extension_artifact_manifest_digest"] = self.extension_artifact_manifest_digest
             projection["extension_configuration_digest"] = self.extension_configuration_digest
         return projection
@@ -493,6 +513,18 @@ class TrustedRunContextV1:
         )
 
     @property
+    def verified_actor(self) -> VerifiedActorContextV1 | None:
+        """Return the composed actor evidence for credential-bound contexts."""
+
+        if self.credential is None or self.tenant is None:
+            return None
+        return VerifiedActorContextV1(
+            identity=self.identity,
+            credential=self.credential,
+            tenant=self.tenant,
+        )
+
+    @property
     def digest(self) -> str:
         """Stable audit-evidence digest, including persistable correlation."""
 
@@ -512,8 +544,9 @@ class TrustedRunContextV1:
 
         persistable_execution = tuple(item for item in self.persistable_references if item.reference.purpose == "execution")
         persistable_handles = tuple(item for item in self.secret_handles if item.reference.storage_class == "persistable")
+        version = 4 if self.credential is not None else (3 if self.extension_artifact_manifest_digest is not None else (2 if self.tenant is not None else 1))
         projection = {
-            "version": (3 if self.extension_artifact_manifest_digest is not None else (2 if self.tenant is not None else 1)),
+            "version": version,
             "identity": self.identity.to_json(),
             "base_origin": {
                 "source_kind": self.origin.source_kind,
@@ -538,7 +571,11 @@ class TrustedRunContextV1:
         }
         if self.tenant is not None:
             projection["tenant"] = self.tenant.to_json()
-        if self.extension_artifact_manifest_digest is not None:
+        if version == 4:
+            projection["credential"] = self.credential.to_json()  # type: ignore[union-attr]
+            projection["extension_artifact_manifest_digest"] = self.extension_artifact_manifest_digest
+            projection["extension_configuration_digest"] = self.extension_configuration_digest
+        elif self.extension_artifact_manifest_digest is not None:
             projection["extension_artifact_manifest_digest"] = self.extension_artifact_manifest_digest
             projection["extension_configuration_digest"] = self.extension_configuration_digest
         return hashlib.sha256(
@@ -588,17 +625,19 @@ class TrustedRunContextV1:
             "runtime_reference_count",
             "evidence_digest",
         }
-        if not isinstance(value, dict) or value.get("version") not in {1, 2, 3}:
+        if not isinstance(value, dict) or value.get("version") not in {1, 2, 3, 4}:
             raise ValueError("trusted run context has unknown fields or an unsupported version")
-        if value.get("version") in {2, 3}:
+        if value.get("version") in {2, 3, 4}:
             expected.add("tenant")
-        if value.get("version") == 3:
+        if value.get("version") in {3, 4}:
             expected.update(
                 {
                     "extension_artifact_manifest_digest",
                     "extension_configuration_digest",
                 }
             )
+        if value.get("version") == 4:
+            expected.add("credential")
         if set(value) != expected:
             raise ValueError("trusted run context has unknown fields or an unsupported version")
         origin = value["origin"]
@@ -618,7 +657,8 @@ class TrustedRunContextV1:
         runtime_count = value["runtime_reference_count"]
         trusted = cls(
             identity=InvocationIdentityV1.from_json(value["identity"]),  # type: ignore[arg-type]
-            tenant=(TenantReferenceV1.from_json(value["tenant"]) if value.get("version") in {2, 3} else None),
+            tenant=(TenantReferenceV1.from_json(value["tenant"]) if value.get("version") in {2, 3, 4} else None),
+            credential=(CredentialEvidenceV1.from_json(value["credential"]) if value.get("version") == 4 else None),
             origin=SealedOriginV1(
                 source_kind=origin["source_kind"],  # type: ignore[arg-type]
                 references=tuple(_reference_from_json(item) for item in origin["references"]),  # type: ignore[union-attr]

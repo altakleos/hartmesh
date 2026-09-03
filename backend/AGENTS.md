@@ -13,6 +13,11 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 **Runtime**:
 - One server-owned tenant is frozen at startup and reused across all durable
   boundaries; see [docs/TENANT_IDENTITY.md](docs/TENANT_IDENTITY.md).
+- New durable work uses `TrustedRunContextV1` v4 to bind secret-free,
+  canonical `CredentialEvidenceV1` to identity, Origin, and tenant facts.
+  Historical evidence grants no current authority. PAT rows/audits are
+  tenant-bound, and audited cancel controls fail closed. See
+  [the cross-component contract](../docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
 - Honcho gets the frozen tenant projection; it is optional context, never durable authority (see the memory guide).
 - HartMesh durable launches from HTTP, Scheduled Tasks, signed native channels,
   and embedded services all enter the application-owned `InvocationRuntime`.

@@ -14,6 +14,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+from app.gateway.authz import _ALL_PERMISSIONS
+from app.gateway.credential_evidence import build_boundary_credential_evidence
 from app.gateway.routers import runtime_api as runtime_api_router
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import build_service_invocation_runtime, start_run
@@ -21,6 +23,7 @@ from app.runtime.api import InvocationRuntimeAPI
 from app.runtime.idempotency import CanonicalCallerIntent, canonical_request_digest, normalize_external_key, scope_for_http
 from app.runtime.invocation import InternalSourceKind, InvocationPrincipal
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+from deerflow.persistence.credential_audit import InMemoryCredentialAuditRepository
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime import RunManager, RunStatus
 from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1, ResolvedAgentRevision
@@ -48,6 +51,10 @@ def gateway_launch_harness():
         headers={},
         state=SimpleNamespace(
             auth_source=AUTH_SOURCE_SESSION,
+            credential_evidence=build_boundary_credential_evidence(
+                auth_source=AUTH_SOURCE_SESSION,
+                permissions=_ALL_PERMISSIONS,
+            ),
             user=SimpleNamespace(id="owner-1", system_role="user", oauth_provider=None, oauth_id=None),
         ),
         app=SimpleNamespace(
@@ -61,6 +68,9 @@ def gateway_launch_harness():
                 run_events_config=None,
                 thread_store=MemoryThreadMetaStore(graph_store),
                 tenant_identity=_TEST_TENANT_IDENTITY,
+                credential_audit_repo=InMemoryCredentialAuditRepository(
+                    tenant=_TEST_TENANT,
+                ),
             )
         ),
     )

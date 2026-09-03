@@ -44,12 +44,25 @@ def _make_start_run_request(
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
+    from app.gateway.authz import _ALL_PERMISSIONS
+    from app.gateway.credential_evidence import (
+        build_boundary_credential_evidence,
+    )
+    from deerflow.persistence.credential_audit import (
+        InMemoryCredentialAuditRepository,
+    )
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 
     store = InMemoryStore()
     return SimpleNamespace(
         headers={},
-        state=SimpleNamespace(auth_source=auth_source),
+        state=SimpleNamespace(
+            auth_source=auth_source,
+            credential_evidence=build_boundary_credential_evidence(
+                auth_source=auth_source,
+                permissions=_ALL_PERMISSIONS,
+            ),
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(
                 runtime_readiness=_ReadyAdmissionFence(),
@@ -61,6 +74,9 @@ def _make_start_run_request(
                 run_events_config=None,
                 thread_store=thread_store or MemoryThreadMetaStore(store),
                 tenant_identity=_TEST_TENANT_IDENTITY,
+                credential_audit_repo=InMemoryCredentialAuditRepository(
+                    tenant=_TEST_TENANT,
+                ),
             )
         ),
     )

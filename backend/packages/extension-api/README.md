@@ -4,6 +4,14 @@
 no dependency on `deerflow`, `app`, FastAPI, or the Gateway runtime. Extensions should
 depend on this distribution and import contracts from `deerflow_extension_api`.
 
+Version 0.13.1 adds the immutable, secret-free `CredentialEvidenceV1` and
+`VerifiedActorContextV1` contracts. A credential projection composes with the
+existing identity and tenant types; `TrustedRunContextV1` serialization v4
+binds it without turning historical evidence into current authority. PAT
+references are canonical UUID4 values, while sessions and current internal or
+channel adapters may have no credential record reference. Canonical authority
+uses a versioned sorted/deduplicated digest and bounded coarse categories.
+
 Version 0.13.0 adds host-owned extension artifact and configuration digests to
 `TrustedRunContextV1` and the v2 invocation-constraint request. They are paired,
 immutable accepted facts: extensions may observe them but cannot construct or

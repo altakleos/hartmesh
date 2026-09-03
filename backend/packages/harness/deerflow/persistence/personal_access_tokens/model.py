@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Index, String
+from sqlalchemy import JSON, CheckConstraint, DateTime, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -13,9 +13,30 @@ from deerflow.persistence.base import Base
 class PersonalAccessTokenRow(Base):
     __tablename__ = "personal_access_tokens"
 
-    __table_args__ = (Index("ix_personal_access_tokens_token_digest", "token_digest", unique=True),)
+    __table_args__ = (
+        Index("ix_personal_access_tokens_token_digest", "token_digest", unique=True),
+        Index(
+            "ix_personal_access_tokens_tenant_digest_token_digest",
+            "tenant_digest",
+            "token_digest",
+        ),
+        Index(
+            "ix_personal_access_tokens_tenant_digest_user_created",
+            "tenant_digest",
+            "user_id",
+            "created_at",
+        ),
+        CheckConstraint(
+            "(tenant_ref IS NULL AND tenant_digest IS NULL) OR (tenant_ref IS NOT NULL AND tenant_digest IS NOT NULL)",
+            name="ck_personal_access_tokens_tenant_pair",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Nullable only for rows predating the auditable-identity migration. New
+    # repository writes always bind both values and every read compares both.
+    tenant_ref: Mapped[str | None] = mapped_column(String(23), nullable=True)
+    tenant_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     # SHA-256 hex digest of the ``dfp_…`` token. The raw token exists only in

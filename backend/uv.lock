@@ -924,7 +924,7 @@ extensions = [{ name = "hartmesh-governance-extension", directory = "extensions/
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.13.0"
+version = "0.13.1"
 source = { editable = "packages/extension-api" }
 
 [[package]]

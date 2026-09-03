@@ -680,6 +680,12 @@ async def test_start_run_is_a_thin_gateway_compatibility_adapter(monkeypatch) ->
     launch = AsyncMock(return_value=InternalLaunchReceipt(record=record))
     runtime = SimpleNamespace(launch=launch)
     request = SimpleNamespace()
+    audited_cancel = AsyncMock()
+    monkeypatch.setattr(
+        services,
+        "require_audited_cancel_permission_if",
+        audited_cancel,
+    )
     monkeypatch.setattr(
         services,
         "build_invocation_runtime",
@@ -702,6 +708,7 @@ async def test_start_run_is_a_thin_gateway_compatibility_adapter(monkeypatch) ->
     result = await services.start_run(body, "thread-1", request)
 
     assert result is record
+    audited_cancel.assert_awaited_once_with(request, True)
     intent = launch.await_args.args[0]
     assert intent == InternalLaunchIntent(
         thread_id="thread-1",

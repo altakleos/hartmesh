@@ -42,6 +42,22 @@ guessable for a small identifier space. Redis principals should be restricted
 with both key/stream and pub/sub channel ACL patterns derived from the same
 identity. See [the deployment and migration guide](backend/docs/TENANT_IDENTITY.md).
 
+## Automation Credential Evidence
+
+Durable automation records only a server-verified credential method, a stable
+non-secret credential reference where one exists, a digest and bounded
+categories for the effective authority, and safe issue/expiry timestamps.
+Session cookies, bearer tokens, token digests, credential names, raw user
+identities, and exception text must never enter durable invocation evidence,
+credential audit rows, logs, or support bundles. A PAT's UUID and the authority
+and actor digests are correlation evidence, not reusable credentials, but they
+should still be disclosed only where operationally necessary.
+
+Current authorization is always re-evaluated before a request is admitted or a
+control action is performed; historical evidence never grants authority. PATs
+are tenant-bound and default-denied outside the checked-in route/scope matrix.
+See [the automation identity contract](docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
+
 ## External Honcho Memory
 
 Honcho supplies mutable contextual memory. It is tenant- and user-scoped, but it is not HartMesh's source of truth for admission, checkpoints, invocation status, authorization, or audit evidence.

@@ -687,6 +687,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         legacy_redis_prefixes = LegacyRedisPrefixRecordV1()
         if sf is not None:
+            from deerflow.persistence.credential_audit import (
+                CredentialAuditRepository,
+            )
             from deerflow.persistence.tenant_binding import (
                 ensure_schema_tenant_binding,
             )
@@ -826,12 +829,25 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.feedback_repo = FeedbackRepository(sf)
             from app.gateway.auth.pat import PAT_LAST_USED_WRITE_INTERVAL_SECONDS
 
-            app.state.pat_repo = PersonalAccessTokenRepository(sf, last_used_write_interval_seconds=PAT_LAST_USED_WRITE_INTERVAL_SECONDS)
+            app.state.credential_audit_repo = CredentialAuditRepository(
+                sf,
+                tenant=tenant_reference,
+            )
+            app.state.pat_repo = PersonalAccessTokenRepository(
+                sf,
+                tenant=tenant_reference,
+                audit_repository=app.state.credential_audit_repo,
+                last_used_write_interval_seconds=PAT_LAST_USED_WRITE_INTERVAL_SECONDS,
+            )
         else:
+            from deerflow.persistence.credential_audit import (
+                InMemoryCredentialAuditRepository,
+            )
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore(tenant=tenant_reference)
             app.state.feedback_repo = None
+            app.state.credential_audit_repo = InMemoryCredentialAuditRepository(tenant=tenant_reference)
             # Memory backend has no durable PAT store, so Bearer credentials
             # cannot be validated there and are rejected by the middleware.
             app.state.pat_repo = None
@@ -1118,6 +1134,10 @@ def build_multi_gateway_topology_service_registry():
     registry.register(
         "configuration_snapshot",
         construction_ref="app.gateway.app:lifespan",
+    )
+    registry.register(
+        "credential_audit_repo",
+        construction_ref=("deerflow.persistence.credential_audit:CredentialAuditRepository"),
     )
     registry.register(
         "extension_services",

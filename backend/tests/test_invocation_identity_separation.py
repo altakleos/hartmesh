@@ -288,11 +288,17 @@ def test_gateway_scrubs_caller_supplied_identity_actor_and_origin() -> None:
             INVOCATION_IDENTITY_CONTEXT_KEY: forged_identity,
             INVOCATION_ORIGIN_CONTEXT_KEY: forged_origin,
             "is_internal": True,
+            "credential_ref": "caller-selected",
+            "effective_authority_digest": "f" * 64,
+            "credential_evidence": {"method": "internal_service"},
         },
         "configurable": {
             INVOCATION_IDENTITY_CONTEXT_KEY: forged_identity,
             INVOCATION_ORIGIN_CONTEXT_KEY: forged_origin,
             "is_internal": True,
+            "credential_ref": "caller-selected",
+            "effective_authority_digest": "f" * 64,
+            "credential_evidence": {"method": "internal_service"},
         },
     }
     request = SimpleNamespace(
@@ -313,6 +319,13 @@ def test_gateway_scrubs_caller_supplied_identity_actor_and_origin() -> None:
     assert INVOCATION_ORIGIN_CONTEXT_KEY not in config["context"]
     assert INVOCATION_IDENTITY_CONTEXT_KEY not in config["configurable"]
     assert INVOCATION_ORIGIN_CONTEXT_KEY not in config["configurable"]
+    for key in (
+        "credential_ref",
+        "effective_authority_digest",
+        "credential_evidence",
+    ):
+        assert key not in config["context"]
+        assert key not in config["configurable"]
     assert config["context"]["is_internal"] is False
     assert config["context"]["user_id"] == "human-1"
 
@@ -487,7 +500,16 @@ async def test_accepted_channel_identity_is_shared_with_contributors(monkeypatch
     assert contributor.context_request.principal.identity is accepted.principal.identity
     assert contributor.origin_request.tenant is accepted.tenant
     assert contributor.context_request.tenant is accepted.tenant
+    assert accepted.trusted_context is not None
+    assert accepted.trusted_context.credential is not None
+    assert accepted.trusted_context.credential.method == "channel"
+    assert accepted.trusted_context.verified_actor is not None
+    assert accepted.trusted_context.verified_actor.identity is accepted.principal.identity
+    assert accepted.trusted_context.origin.source_kind == "native_channel"
     persisted = accepted.to_persisted()
+    trusted_json = persisted["decision_evidence_json"]["trusted_run_context"]
+    assert trusted_json["version"] == 4
+    assert trusted_json["credential"]["method"] == "channel"
     assert persisted["principal_projection_json"]["version"] == 2
     assert persisted["principal_projection_json"]["identity"] == accepted.principal.identity.to_json()
     assert persisted["principal_projection_digest"] == accepted.principal_digest
