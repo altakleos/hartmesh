@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0035_batch_sandbox_evidence"
+HEAD = "0036_execution_policy_state"
 
 
 def _url(tmp_path: Path) -> str:

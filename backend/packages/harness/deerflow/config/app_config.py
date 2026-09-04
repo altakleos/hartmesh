@@ -19,6 +19,7 @@ from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpo
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.dedupe_storage_config import DedupeStorageConfig
 from deerflow.config.deployment_config import DeploymentConfig
+from deerflow.config.execution_policy_config import ExecutionPolicyConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
@@ -277,6 +278,10 @@ class AppConfig(BaseModel):
         ),
     )
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
+    execution_policy: ExecutionPolicyConfig = Field(
+        default_factory=ExecutionPolicyConfig,
+        description="Accepted, replay-stable execution budgets and circuit breakers.",
+    )
     tool_progress: ToolProgressConfig = Field(default_factory=ToolProgressConfig, description="Tool progress state machine middleware configuration")
     verification: VerificationConfig = Field(default_factory=VerificationConfig, description="Subagent result verification (receipts, checklist, judge)")
     read_before_write: ReadBeforeWriteConfig = Field(default_factory=ReadBeforeWriteConfig, description="Read-before-write file gate middleware configuration")

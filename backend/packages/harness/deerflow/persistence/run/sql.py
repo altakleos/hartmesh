@@ -40,6 +40,7 @@ from deerflow.runtime.assembly_evidence import (
     assembly_evidence_binding_matches,
     assembly_evidence_digest,
 )
+from deerflow.runtime.execution_policy import ExecutionPolicyStateV1
 from deerflow.runtime.runs.lifecycle_query import (
     CursorAhead,
     LifecycleOrderingCorruption,
@@ -53,6 +54,7 @@ from deerflow.runtime.runs.lifecycle_query import (
 )
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
+    ApplyExecutionPolicyStateOutcome,
     BindAssemblyEvidenceOutcome,
     CancellationRequestOutcome,
     CancellationRequestResult,
@@ -1021,6 +1023,53 @@ class RunRepository(RunStore):
                 return BindAssemblyEvidenceOutcome.already_matching
             await session.commit()
             return BindAssemblyEvidenceOutcome.mismatch
+
+    async def apply_execution_policy_state(
+        self,
+        run_id: str,
+        *,
+        owner_id: str,
+        lease_epoch: int,
+        expected_digest: str | None,
+        state_json: Mapping[str, object],
+        state_digest: str,
+    ) -> ApplyExecutionPolicyStateOutcome:
+        state = ExecutionPolicyStateV1.from_json(state_json)
+        if state.digest != state_digest:
+            raise ValueError("execution policy state digest mismatch")
+
+        async with self._sf() as session:
+            await self._begin_lifecycle_write(session)
+            statement = self._scope_run(select(RunRow)).where(
+                RunRow.run_id == run_id,
+                RunRow.operation_kind == "run",
+            )
+            if session.get_bind().dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            row = (await session.execute(statement)).scalar_one_or_none()
+            if row is None:
+                await session.commit()
+                return ApplyExecutionPolicyStateOutcome.not_found
+            if (
+                row.status not in {"pending", "running"}
+                or row.state_version != lease_epoch
+                or not await self._owned_run_fence_matches(
+                    session,
+                    row,
+                    expected_owner_worker_id=owner_id,
+                    require_unexpired_lease=row.lease_expires_at is not None,
+                )
+            ):
+                await session.commit()
+                return ApplyExecutionPolicyStateOutcome.ownership_lost
+            if row.execution_policy_state_digest != expected_digest:
+                await session.commit()
+                return ApplyExecutionPolicyStateOutcome.conflict
+            row.execution_policy_state_json = state.to_json()
+            row.execution_policy_state_digest = state_digest
+            row.updated_at = datetime.now(UTC)
+            await session.commit()
+            return ApplyExecutionPolicyStateOutcome.applied
 
     @staticmethod
     def _normalize_model_name(model_name: str | None) -> str | None:
