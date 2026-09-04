@@ -83,7 +83,10 @@ def project_honcho_backend_config(
             "allow_local_shared_workspaces must be an explicit boolean",
         )
     if "workspace_prefix" in config:
-        logger.warning("Honcho workspace_prefix is deprecated; the Gateway validates it against the server-owned tenant namespace")
+        config.pop("workspace_prefix", None)
+        logger.warning(
+            "Ignoring deprecated Honcho workspace_prefix; the Gateway-derived tenant namespace is authoritative. Memory written under the previous prefix is not migrated and is not read.",
+        )
 
     tenant_user = _projection(tenant_identity, isolation_mode="tenant_user")
     baseline = {

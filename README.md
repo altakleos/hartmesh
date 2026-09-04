@@ -9,7 +9,7 @@ HartMesh is an operations-focused DeerFlow distribution for replay-safe invocati
 Built on DeerFlow's workspace, sandboxes, memory, skills, tools, subagents, schedules, and channels.
 
 > [!IMPORTANT]
-> **Status: pre-release.** This source tree contains the implemented runtime and offline contract evidence, but no HartMesh release tag contains it.
+> **Status: pre-release.** The published `v2.1.0+hartmesh.*` tags contain the durable invocation runtime and its HTTP API. The evidence layer in this source tree — bound assembly, durable tool receipts, server-owned tenant identity, the governed tool plane, accepted sandbox evidence, portable run evidence bundles, and execution policy — is in no release tag.
 >
 > Exact live-deployment qualification remains a separate, artifact-bound gate.
 
@@ -632,9 +632,9 @@ The Alembic graph has one head: `0011_mcp_tasks` branches into HartMesh's invoca
 
 PostgreSQL operators should quiesce writers and back up data before rollback; use the migration guidance in [backend/AGENTS.md](backend/AGENTS.md).
 
-Version sources report `2.1.0`, but no tag contains the audited HartMesh implementation; version strings do not establish a HartMesh release.
+Version sources report `2.1.0+hartmesh.4`, the newest tag. It predates the evidence layer above, so a version string alone does not tell you which HartMesh work a checkout contains.
 
-[RELEASING.md](RELEASING.md) documents inherited DeerFlow tag mechanics, not a HartMesh-owned release channel.
+[RELEASING.md](RELEASING.md) documents the `X.Y.Z+hartmesh.N` fork release process used for the published tags.
 
 ## Documentation
 

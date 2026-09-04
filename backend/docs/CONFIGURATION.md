@@ -134,8 +134,9 @@ Select the optional external backend with `memory.manager_class: honcho`.
 The Gateway derives its workspace namespace from `deployment.tenant_id`; the
 reserved `_hartmesh_tenant` projection is server-owned and must not appear in
 operator or API-written `backend_config`. Durable production fails startup if
-the projection is unavailable, malformed, or conflicts with the deprecated
-`workspace_prefix`.
+the projection is unavailable or malformed. The deprecated `workspace_prefix`
+is dropped with a warning rather than failing startup; memory written under it
+is not migrated.
 
 ```yaml
 memory:

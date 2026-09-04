@@ -9,7 +9,7 @@ HartMesh は、リプレイセーフな呼び出し、強制可能なポリシ�
 DeerFlow のワークスペース、サンドボックス、メモリ、スキル、ツール、サブエージェント、スケジュール、チャネルを基盤にしています。
 
 > [!IMPORTANT]
-> **ステータス：プレリリース。** このソースツリーには実装済みランタイムとオフライン契約証拠がありますが、それを含む HartMesh リリースタグはまだありません。
+> **ステータス：プレリリース。** 公開済みの `v2.1.0+hartmesh.*` タグには、永続的な呼び出しランタイムとその HTTP API が含まれます。このソースツリーの証拠レイヤー（束縛されたアセンブリ、永続ツールレシート、サーバー所有のテナント識別、統制されたツールプレーン、受理済みサンドボックス証拠、可搬な実行証拠バンドル、実行ポリシー）は、どのリリースタグにも含まれていません。
 >
 > 実デプロイの厳密な適格性確認は、成果物に紐づく別のゲートです。
 
@@ -403,9 +403,9 @@ Alembic graph の head は一つです。`0011_mcp_tasks` から HartMesh の `0
 
 PostgreSQL operator は rollback 前に writer を停止し data を backup してください。migration guidance は [backend/AGENTS.md](backend/AGENTS.md) にあります。
 
-version source は `2.1.0` を示しますが、監査した HartMesh 実装を含む tag はありません。version string は HartMesh release を確立しません。
+version source は最新 tag である `2.1.0+hartmesh.4` を示します。これは上記の証拠レイヤーより前のものであり、version string だけでは checkout にどの HartMesh 作業が含まれるかは判断できません。
 
-[RELEASING.md](RELEASING.md) は継承した DeerFlow tag mechanics であり、HartMesh 独自の release channel ではありません。
+[RELEASING.md](RELEASING.md) は、公開済み tag に使用している `X.Y.Z+hartmesh.N` の fork release 手順を記載しています。
 
 ## ドキュメント
 

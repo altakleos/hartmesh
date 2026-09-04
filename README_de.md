@@ -9,7 +9,7 @@ HartMesh ist eine auf den Betrieb ausgerichtete DeerFlow-Distribution für wiede
 Sie baut auf DeerFlows Workspace, Sandboxes, Speicher, Skills, Werkzeugen, Subagenten, Zeitplänen und Kanälen auf.
 
 > [!IMPORTANT]
-> **Status: Vorabversion.** Dieser Quellbaum enthält die implementierte Runtime und Offline-Vertragsnachweise, aber noch kein HartMesh-Release-Tag umfasst sie.
+> **Status: Vorabversion.** Die veröffentlichten `v2.1.0+hartmesh.*`-Tags enthalten die dauerhafte Invocation-Runtime und ihre HTTP-API. Die Nachweisschicht in diesem Quellbaum – gebundene Assemblierung, dauerhafte Tool-Quittungen, servereigene Mandantenidentität, geregelte Tool-Ebene, akzeptierte Sandbox-Nachweise, portable Ausführungsnachweis-Bundles und Ausführungsrichtlinie – ist in keinem Release-Tag enthalten.
 >
 > Die exakte Qualifikation einer echten Bereitstellung bleibt eine separate, artefaktgebundene Freigabe.
 
@@ -405,9 +405,9 @@ Der Alembic-Graph hat einen Head: Von `0011_mcp_tasks` zweigen HartMesh-Migratio
 
 PostgreSQL-Betreiber sollten vor einem Rollback Schreibzugriffe stoppen und Daten sichern; nutze die Migrationshinweise in [backend/AGENTS.md](backend/AGENTS.md).
 
-Versionsquellen melden `2.1.0`, aber kein Tag enthält die geprüfte HartMesh-Implementierung; Versionszeichenketten begründen kein HartMesh-Release.
+Versionsquellen melden `2.1.0+hartmesh.4`, das neueste Tag. Es liegt vor der oben genannten Nachweisschicht; eine Versionszeichenkette allein sagt daher nicht, welche HartMesh-Arbeit ein Checkout enthält.
 
-[RELEASING.md](RELEASING.md) dokumentiert geerbte DeerFlow-Tagmechanik, keinen HartMesh-eigenen Releasekanal.
+[RELEASING.md](RELEASING.md) dokumentiert den `X.Y.Z+hartmesh.N`-Fork-Releaseprozess, der für die veröffentlichten Tags verwendet wird.
 
 ## Dokumentation
 

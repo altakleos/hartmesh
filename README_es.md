@@ -9,7 +9,7 @@ HartMesh es una distribución de DeerFlow orientada a operaciones que ofrece inv
 Se apoya en el espacio de trabajo, los sandboxes, la memoria, las skills, las herramientas, los subagentes, las tareas programadas y los canales de DeerFlow.
 
 > [!IMPORTANT]
-> **Estado: prelanzamiento.** Este árbol de código contiene el runtime implementado y evidencia contractual sin conexión, pero todavía no existe una etiqueta de versión de HartMesh que lo incluya.
+> **Estado: prelanzamiento.** Las etiquetas publicadas `v2.1.0+hartmesh.*` contienen el runtime de invocación duradera y su API HTTP. La capa de evidencia de este árbol de código —ensamblaje vinculado, recibos de herramientas duraderos, identidad de inquilino propiedad del servidor, plano de herramientas gobernado, evidencia de sandbox aceptada, paquetes portátiles de evidencia de ejecución y política de ejecución— no está en ninguna etiqueta de versión.
 >
 > La calificación exacta de un despliegue real sigue siendo una puerta independiente vinculada al artefacto.
 
@@ -405,9 +405,9 @@ El grafo Alembic tiene un solo head: desde `0011_mcp_tasks` se bifurcan las migr
 
 Los operadores PostgreSQL deben detener escritores y respaldar los datos antes de revertir; usa la guía de migración de [backend/AGENTS.md](backend/AGENTS.md).
 
-Las fuentes de versión informan `2.1.0`, pero ninguna etiqueta contiene la implementación HartMesh auditada; las cadenas de versión no establecen una versión de HartMesh.
+Las fuentes de versión informan `2.1.0+hartmesh.4`, la etiqueta más reciente. Es anterior a la capa de evidencia descrita arriba, así que una cadena de versión por sí sola no indica qué trabajo de HartMesh contiene una copia.
 
-[RELEASING.md](RELEASING.md) documenta la mecánica heredada de etiquetas DeerFlow, no un canal de versiones propio de HartMesh.
+[RELEASING.md](RELEASING.md) documenta el proceso de publicación del fork `X.Y.Z+hartmesh.N` usado para las etiquetas publicadas.
 
 ## Documentación
 

@@ -9,7 +9,7 @@ HartMesh 是面向运维的 DeerFlow 下游发行版，提供重放安全的调�
 它建立在 DeerFlow 的工作区、沙箱、记忆、技能、工具、子智能体、定时任务和渠道能力之上。
 
 > [!IMPORTANT]
-> **状态：预发布。** 此源码树包含已实现的运行时与离线契约证据，但尚无包含这些实现的 HartMesh 发布标签。
+> **状态：预发布。** 已发布的 `v2.1.0+hartmesh.*` 标签包含持久调用运行时及其 HTTP API。本源码树中的证据层——绑定装配、持久工具回执、服务端拥有的租户标识、受治理工具面、已接受沙箱证据、可移植运行证据包与执行策略——尚未包含在任何发布标签中。
 >
 > 精确的真实部署资格认定仍是独立、与制品绑定的门槛。
 
@@ -403,9 +403,9 @@ Alembic 图只有一个 head：`0011_mcp_tasks` 分支为 HartMesh 迁移（直�
 
 PostgreSQL 运维人员应在回滚前停止写入并备份数据；迁移说明见 [backend/AGENTS.md](backend/AGENTS.md)。
 
-版本源报告 `2.1.0`，但没有任何标签包含审计的 HartMesh 实现；版本字符串不能证明 HartMesh 发布。
+版本源报告 `2.1.0+hartmesh.4`，即最新标签。它早于上述证据层，因此仅凭版本字符串无法判断某个检出包含哪些 HartMesh 工作。
 
-[RELEASING.md](RELEASING.md) 记录的是继承的 DeerFlow 标签机制，不是 HartMesh 自有发布渠道。
+[RELEASING.md](RELEASING.md) 记录了已发布标签所用的 `X.Y.Z+hartmesh.N` 分支发布流程。
 
 ## 文档
 
