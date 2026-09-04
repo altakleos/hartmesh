@@ -5246,6 +5246,37 @@ class TestBashExecutionHarvest:
 
         assert executions[0]["shell_persistent"] is True
 
+    def test_accepted_session_supplies_shell_persistence_without_raw_provider_lookup(
+        self,
+        classes,
+        monkeypatch,
+    ):
+        """Accepted state carries only a safe session reference; its trusted
+        bridge owns the producing sandbox capability declaration."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_result_meta",
+            _module(
+                "deerflow.agents.middlewares.tool_result_meta",
+                TOOL_META_KEY="deerflow_tool_meta",
+            ),
+        )
+        monkeypatch.setattr(
+            "deerflow.sandbox.sandbox_provider.get_sandbox_provider",
+            lambda: pytest.fail("accepted evidence must not resolve a raw sandbox"),
+        )
+        state = self._final_state(classes)
+        state["sandbox"] = {"sandbox_id": "accepted-session-safe-ref"}
+        bridge = SimpleNamespace(persistent_shell_sessions=True)
+
+        executions = executor_module._harvest_bash_executions(
+            state,
+            accepted_sandbox_session_bridge=bridge,
+        )
+
+        assert executions[0]["shell_persistent"] is True
+
     def test_fresh_process_sandbox_stamps_false(self, classes, monkeypatch):
         executor_module = importlib.import_module("deerflow.subagents.executor")
         monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))

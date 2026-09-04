@@ -4,6 +4,7 @@ import base64
 import json
 import uuid
 from collections import Counter
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -19,6 +20,13 @@ from deerflow.persistence.subagent_batches.model import (
     SubagentBatchRow,
 )
 from deerflow.runtime.accepted_invocation import canonical_digest
+from deerflow.sandbox.accepted_material import (
+    AcceptedExecutionEvidenceV2,
+    AcceptedMaterialRequestV2,
+    AcceptedSandboxLifecycleKind,
+    AcceptedSandboxLifecycleObservationV1,
+    accepted_scope_reference,
+)
 from deerflow.subagents.batch_acceptance import (
     AcceptedBatchItemV1,
     AcceptedBatchV1,
@@ -83,6 +91,144 @@ _ITEM_PUBLIC_FIELDS = (
 _ITEM_TIMESTAMP_FIELDS = ("started_at", "completed_at", "created_at", "updated_at")
 _BATCH_PARENT_CURSOR_VERSION = "deerflow.subagent-batch-parent-cursor/v1"
 _MAX_BATCH_PARENT_PAGE_SIZE = 100
+_MAX_ACCEPTED_MATERIAL_REQUEST_BYTES = 4 * 1024 * 1024
+_MAX_ACCEPTED_EXECUTION_EVIDENCE_BYTES = 64 * 1024
+_MAX_ACCEPTED_SANDBOX_LIFECYCLE_OBSERVATIONS = 8
+
+
+def _canonical_json_size(value: object) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8"),
+    )
+
+
+def _decode_sandbox_lifecycle(
+    value: object,
+    *,
+    evidence_digest: str | None,
+) -> tuple[AcceptedSandboxLifecycleObservationV1, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list | tuple) or len(value) > _MAX_ACCEPTED_SANDBOX_LIFECYCLE_OBSERVATIONS:
+        raise BatchAdmissionError("execution_material_unavailable")
+    try:
+        observations = tuple(AcceptedSandboxLifecycleObservationV1.from_persisted(row) for row in value)
+    except (TypeError, ValueError) as exc:
+        raise BatchAdmissionError("execution_material_unavailable") from exc
+    if evidence_digest is None or any(observation.execution_evidence_digest != evidence_digest for observation in observations):
+        raise BatchAdmissionError("execution_material_unavailable")
+    if len({observation.digest for observation in observations}) != len(
+        observations,
+    ):
+        raise BatchAdmissionError("execution_material_unavailable")
+    return observations
+
+
+def _validated_sandbox_attachment_payloads(
+    *,
+    request: AcceptedMaterialRequestV2,
+    evidence: AcceptedExecutionEvidenceV2,
+    observations: Sequence[AcceptedSandboxLifecycleObservationV1],
+    require_initial_acquisition: bool,
+) -> tuple[
+    dict[str, object],
+    dict[str, object],
+    tuple[AcceptedSandboxLifecycleObservationV1, ...],
+]:
+    try:
+        if not isinstance(request, AcceptedMaterialRequestV2):
+            raise TypeError("request must be AcceptedMaterialRequestV2")
+        if not isinstance(evidence, AcceptedExecutionEvidenceV2):
+            raise TypeError("evidence must be AcceptedExecutionEvidenceV2")
+        if isinstance(observations, str | bytes | bytearray):
+            raise TypeError("observations must be a sequence")
+        request_json = request.to_persisted()
+        evidence_json = evidence.to_persisted()
+        AcceptedMaterialRequestV2.from_persisted(request_json)
+        AcceptedExecutionEvidenceV2.from_persisted(evidence_json)
+        if _canonical_json_size(request_json) > _MAX_ACCEPTED_MATERIAL_REQUEST_BYTES or _canonical_json_size(evidence_json) > _MAX_ACCEPTED_EXECUTION_EVIDENCE_BYTES:
+            raise ValueError("accepted sandbox attachment is too large")
+        shared_fields = (
+            "run_id",
+            "attempt_id",
+            "tenant",
+            "runtime_image_digest",
+            "skill_snapshot_digest",
+            "skill_scope_digest",
+            "accepted_invocation_ref",
+            "accepted_invocation_digest",
+            "tool_plane_base_revision_digest",
+            "tool_plane_user_overlay_digest",
+            "tool_plane_projection_digest",
+            "tool_plane_effective_digest",
+            "batch_child_attempt_ref",
+            "capability_profile_digest",
+        )
+        if any(getattr(request, field_name) != getattr(evidence, field_name) for field_name in shared_fields):
+            raise ValueError("accepted sandbox request/evidence mismatch")
+        lifecycle = tuple(observations)
+        persisted_lifecycle = [row.to_persisted() for row in lifecycle]
+        decoded_lifecycle = _decode_sandbox_lifecycle(
+            persisted_lifecycle,
+            evidence_digest=evidence.digest,
+        )
+        if any(
+            observation.run_id != evidence.run_id
+            or observation.attempt_ref != evidence.attempt_id
+            or observation.batch_child_attempt_ref != evidence.batch_child_attempt_ref
+            or observation.provider_kind != evidence.provider_kind
+            or observation.qualification_scope != evidence.qualification_scope
+            for observation in decoded_lifecycle
+        ):
+            raise ValueError("accepted sandbox lifecycle binding mismatch")
+        if require_initial_acquisition and (len(decoded_lifecycle) != 1 or decoded_lifecycle[0].kind is not AcceptedSandboxLifecycleKind.ACQUIRED):
+            raise ValueError("accepted sandbox acquisition observation missing")
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise BatchAdmissionError("execution_material_unavailable") from exc
+    return request_json, evidence_json, decoded_lifecycle
+
+
+def _decode_attempt_sandbox_attachment(
+    row: SubagentBatchAttemptRow,
+) -> tuple[AcceptedSandboxLifecycleObservationV1, ...]:
+    attachment = (
+        row.accepted_material_request_json,
+        row.accepted_material_request_digest,
+        row.accepted_execution_evidence_json,
+        row.accepted_execution_evidence_digest,
+        row.accepted_sandbox_lifecycle_json,
+    )
+    if all(value is None for value in attachment):
+        return ()
+    if any(value is None for value in attachment):
+        raise BatchAdmissionError("execution_material_unavailable")
+    try:
+        request = AcceptedMaterialRequestV2.from_persisted(
+            row.accepted_material_request_json,
+        )
+        evidence = AcceptedExecutionEvidenceV2.from_persisted(
+            row.accepted_execution_evidence_json,
+        )
+    except (TypeError, ValueError) as exc:
+        raise BatchAdmissionError("execution_material_unavailable") from exc
+    _, _, lifecycle = _validated_sandbox_attachment_payloads(
+        request=request,
+        evidence=evidence,
+        observations=_decode_sandbox_lifecycle(
+            row.accepted_sandbox_lifecycle_json,
+            evidence_digest=row.accepted_execution_evidence_digest,
+        ),
+        require_initial_acquisition=False,
+    )
+    if request.digest != row.accepted_material_request_digest or evidence.digest != row.accepted_execution_evidence_digest or not lifecycle or lifecycle[0].kind is not AcceptedSandboxLifecycleKind.ACQUIRED:
+        raise BatchAdmissionError("execution_material_unavailable")
+    return lifecycle
 
 
 class SubagentBatchRepository:
@@ -149,6 +295,7 @@ class SubagentBatchRepository:
 
     @staticmethod
     def _attempt_dict(row: SubagentBatchAttemptRow) -> dict[str, Any]:
+        lifecycle = _decode_attempt_sandbox_attachment(row)
         value = {
             "attempt_id": row.id,
             "batch_id": row.batch_id,
@@ -160,6 +307,9 @@ class SubagentBatchRepository:
             "consumed": row.consumed,
             "terminal_code": row.terminal_code,
             "evidence_digest": row.evidence_digest,
+            "accepted_material_request_digest": (row.accepted_material_request_digest),
+            "accepted_execution_evidence_digest": (row.accepted_execution_evidence_digest),
+            "accepted_sandbox_lifecycle_count": len(lifecycle),
             "claimed_at": coerce_iso(row.claimed_at),
             "started_at": (None if row.started_at is None else coerce_iso(row.started_at)),
             "terminal_at": (None if row.terminal_at is None else coerce_iso(row.terminal_at)),
@@ -1022,6 +1172,49 @@ class SubagentBatchRepository:
         attempt.evidence_digest = evidence.evidence_digest
         attempt.terminal_at = terminal_at
         item.terminal_evidence_digest = evidence.evidence_digest
+        if (
+            terminal_code == "lease_expired"
+            and attempt.accepted_material_request_json is not None
+            and attempt.accepted_material_request_digest is not None
+            and attempt.accepted_execution_evidence_json is not None
+            and attempt.accepted_execution_evidence_digest is not None
+        ):
+            try:
+                sandbox_request = AcceptedMaterialRequestV2.from_persisted(
+                    attempt.accepted_material_request_json,
+                )
+                sandbox_evidence = AcceptedExecutionEvidenceV2.from_persisted(
+                    attempt.accepted_execution_evidence_json,
+                )
+                existing_lifecycle = _decode_sandbox_lifecycle(
+                    attempt.accepted_sandbox_lifecycle_json,
+                    evidence_digest=(attempt.accepted_execution_evidence_digest),
+                )
+                if sandbox_request.digest != attempt.accepted_material_request_digest or sandbox_evidence.digest != attempt.accepted_execution_evidence_digest:
+                    raise ValueError("accepted sandbox attachment digest mismatch")
+                _validated_sandbox_attachment_payloads(
+                    request=sandbox_request,
+                    evidence=sandbox_evidence,
+                    observations=existing_lifecycle,
+                    require_initial_acquisition=False,
+                )
+                if not existing_lifecycle or existing_lifecycle[0].kind is not AcceptedSandboxLifecycleKind.ACQUIRED:
+                    raise ValueError("accepted sandbox acquisition missing")
+                orphaned = AcceptedSandboxLifecycleObservationV1.build(
+                    evidence=sandbox_evidence,
+                    kind=AcceptedSandboxLifecycleKind.ORPHANED,
+                    observed_at=terminal_at,
+                    reason_code="batch_item_lease_expired",
+                )
+                if orphaned.digest not in {row.digest for row in existing_lifecycle} and len(existing_lifecycle) < _MAX_ACCEPTED_SANDBOX_LIFECYCLE_OBSERVATIONS:
+                    attempt.accepted_sandbox_lifecycle_json = [
+                        *(row.to_persisted() for row in existing_lifecycle),
+                        orphaned.to_persisted(),
+                    ]
+            except (BatchAdmissionError, TypeError, ValueError):
+                # Lifecycle evidence is diagnostic only. Corruption cannot
+                # prevent the authoritative lease-expiry transition.
+                pass
         return True
 
     @staticmethod
@@ -1135,6 +1328,306 @@ class SubagentBatchRepository:
                 item.updated_at = authority_now
                 await session.commit()
             return {"valid": not cancel_requested, "cancel_requested": cancel_requested}
+
+    async def item_attempt_authorized(
+        self,
+        item_id: str,
+        *,
+        lease_owner: str,
+        attempt_id: str,
+        lease_epoch: int,
+    ) -> bool:
+        """Sample whether one accepted item attempt still owns execution.
+
+        The database locks exist only for this authority sample. Callers must
+        release this method before invoking a sandbox provider; this is the
+        baseline check-then-call fence, not an atomic provider-operation fence.
+        """
+
+        async with self._sf() as session:
+            loaded = await self._locked_fenced_item(
+                session,
+                item_id=item_id,
+                lease_owner=lease_owner,
+                attempt_id=attempt_id,
+                lease_epoch=lease_epoch,
+                statuses=("leased", "running"),
+            )
+            if loaded is None:
+                return False
+            item, batch = loaded
+            authority_now = await self._now(session, None)
+            if not await self._execution_window_open(
+                session,
+                batch=batch,
+                now=authority_now,
+            ):
+                await session.commit()
+                return False
+            expected_attempt_status = ("claimed",) if item.status == "leased" else ("started",)
+            attempt = await session.get(
+                SubagentBatchAttemptRow,
+                attempt_id,
+                with_for_update=True,
+            )
+            return bool(
+                batch.status in BATCH_ACTIVE_STATUSES
+                and item.cancel_requested_at is None
+                and item.lease_expires_at is not None
+                and _as_utc(item.lease_expires_at) > authority_now
+                and self._attempt_matches_current(
+                    batch=batch,
+                    item=item,
+                    attempt=attempt,
+                    statuses=expected_attempt_status,
+                )
+            )
+
+    def _sandbox_attachment_matches_attempt(
+        self,
+        *,
+        batch: SubagentBatchRow,
+        item: SubagentBatchItemRow,
+        attempt: SubagentBatchAttemptRow,
+        request: AcceptedMaterialRequestV2,
+    ) -> bool:
+        tenant = self._tenant
+        if tenant is None or item.request_digest is None:
+            return False
+        try:
+            execution_batch = self._execution_batch_dict(batch)
+            acceptance = execution_batch["acceptance"]
+        except (BatchAdmissionError, KeyError, TypeError):
+            return False
+        if not isinstance(acceptance, AcceptedBatchV1):
+            return False
+        child_identity = f"{batch.id}:{item.id}:{attempt.id}:{attempt.lease_epoch}:{item.request_digest}"
+        expected_attempt_ref = accepted_scope_reference(
+            tenant,
+            kind="attempt",
+            value=child_identity,
+        )
+        expected_child_ref = accepted_scope_reference(
+            tenant,
+            kind="batch-child",
+            value=child_identity,
+        )
+        expected_invocation_ref = accepted_scope_reference(
+            tenant,
+            kind="invocation",
+            value=(f"{acceptance.parent_run_id}:{acceptance.parent_invocation_digest}"),
+        )
+        return bool(
+            request.tenant == tenant
+            and request.run_id == acceptance.parent_run_id == batch.run_id
+            and request.attempt_id == expected_attempt_ref
+            and request.batch_child_attempt_ref == expected_child_ref
+            and request.user_ref
+            == accepted_scope_reference(
+                tenant,
+                kind="user",
+                value=batch.user_id,
+            )
+            and request.thread_ref
+            == accepted_scope_reference(
+                tenant,
+                kind="thread",
+                value=batch.thread_id,
+            )
+            and request.accepted_invocation_ref == expected_invocation_ref
+            and request.accepted_invocation_digest == acceptance.parent_invocation_digest == batch.parent_invocation_digest
+            and request.agent_revision_digest == acceptance.parent_agent_revision_digest
+            and request.skill_scope_digest == acceptance.skill_scope_digest
+        )
+
+    async def attach_item_sandbox_evidence(
+        self,
+        item_id: str,
+        *,
+        lease_owner: str,
+        attempt_id: str,
+        lease_epoch: int,
+        request: AcceptedMaterialRequestV2,
+        evidence: AcceptedExecutionEvidenceV2,
+        observations: Sequence[AcceptedSandboxLifecycleObservationV1],
+    ) -> bool:
+        """Atomically join one accepted sandbox tuple to the active attempt.
+
+        Provider I/O has already completed before this short transaction. The
+        same item/attempt fence is sampled again here, so evidence from a
+        worker that lost authority can never become executable batch state.
+        """
+
+        request_json, evidence_json, lifecycle = _validated_sandbox_attachment_payloads(
+            request=request,
+            evidence=evidence,
+            observations=observations,
+            require_initial_acquisition=True,
+        )
+        lifecycle_json = [row.to_persisted() for row in lifecycle]
+        async with self._sf() as session:
+            loaded = await self._locked_fenced_item(
+                session,
+                item_id=item_id,
+                lease_owner=lease_owner,
+                attempt_id=attempt_id,
+                lease_epoch=lease_epoch,
+                statuses=("leased", "running"),
+            )
+            if loaded is None:
+                return False
+            item, batch = loaded
+            authority_now = await self._now(session, None)
+            if not await self._execution_window_open(
+                session,
+                batch=batch,
+                now=authority_now,
+            ):
+                await session.commit()
+                return False
+            if batch.status not in BATCH_ACTIVE_STATUSES or item.cancel_requested_at is not None or item.lease_expires_at is None or _as_utc(item.lease_expires_at) <= authority_now:
+                return False
+            expected_attempt_status = ("claimed",) if item.status == "leased" else ("started",)
+            attempt = await session.get(
+                SubagentBatchAttemptRow,
+                attempt_id,
+                with_for_update=True,
+            )
+            if (
+                not self._attempt_matches_current(
+                    batch=batch,
+                    item=item,
+                    attempt=attempt,
+                    statuses=expected_attempt_status,
+                )
+                or attempt is None
+                or not self._sandbox_attachment_matches_attempt(
+                    batch=batch,
+                    item=item,
+                    attempt=attempt,
+                    request=request,
+                )
+            ):
+                return False
+            existing = (
+                attempt.accepted_material_request_json,
+                attempt.accepted_material_request_digest,
+                attempt.accepted_execution_evidence_json,
+                attempt.accepted_execution_evidence_digest,
+                attempt.accepted_sandbox_lifecycle_json,
+            )
+            if any(value is not None for value in existing):
+                if any(value is None for value in existing):
+                    return False
+                if existing != (
+                    request_json,
+                    request.digest,
+                    evidence_json,
+                    evidence.digest,
+                    lifecycle_json,
+                ):
+                    return False
+                return True
+            attempt.accepted_material_request_json = request_json
+            attempt.accepted_material_request_digest = request.digest
+            attempt.accepted_execution_evidence_json = evidence_json
+            attempt.accepted_execution_evidence_digest = evidence.digest
+            attempt.accepted_sandbox_lifecycle_json = lifecycle_json
+            await session.commit()
+            return True
+
+    async def append_item_sandbox_lifecycle(
+        self,
+        item_id: str,
+        *,
+        lease_owner: str,
+        attempt_id: str,
+        lease_epoch: int,
+        execution_evidence_digest: str,
+        observations: Sequence[AcceptedSandboxLifecycleObservationV1],
+    ) -> bool:
+        """Append bounded diagnostics to their exact evidence-bound attempt.
+
+        This retained attempt fence deliberately remains usable after terminal
+        publication. It cannot authorize work or mutate item/batch state.
+        """
+
+        if self._tenant is None:
+            return False
+        try:
+            new_lifecycle = tuple(observations)
+            if isinstance(observations, str | bytes | bytearray):
+                raise TypeError("observations must be a sequence")
+            if len(new_lifecycle) > _MAX_ACCEPTED_SANDBOX_LIFECYCLE_OBSERVATIONS:
+                raise ValueError("too many sandbox lifecycle observations")
+            for observation in new_lifecycle:
+                if not isinstance(
+                    observation,
+                    AcceptedSandboxLifecycleObservationV1,
+                ):
+                    raise TypeError("invalid sandbox lifecycle observation")
+                if observation.execution_evidence_digest != execution_evidence_digest:
+                    raise ValueError("sandbox lifecycle evidence mismatch")
+        except (TypeError, ValueError) as exc:
+            raise BatchAdmissionError("execution_material_unavailable") from exc
+        async with self._sf() as session:
+            attempt = await session.get(
+                SubagentBatchAttemptRow,
+                attempt_id,
+                with_for_update=True,
+            )
+            expected_worker_ref = canonical_digest(
+                {
+                    "version": 1,
+                    "domain": "subagent_batch_worker_ref",
+                    "tenant_digest": self._tenant.digest,
+                    "lease_owner": lease_owner,
+                }
+            )
+            if (
+                attempt is None
+                or attempt.item_id != item_id
+                or attempt.tenant_digest != self._tenant.digest
+                or attempt.lease_epoch != lease_epoch
+                or attempt.worker_ref != expected_worker_ref
+                or attempt.accepted_material_request_json is None
+                or attempt.accepted_material_request_digest is None
+                or attempt.accepted_execution_evidence_json is None
+                or attempt.accepted_execution_evidence_digest != execution_evidence_digest
+            ):
+                return False
+            try:
+                sandbox_request = AcceptedMaterialRequestV2.from_persisted(
+                    attempt.accepted_material_request_json,
+                )
+                evidence = AcceptedExecutionEvidenceV2.from_persisted(
+                    attempt.accepted_execution_evidence_json,
+                )
+                _, _, validated_new = _validated_sandbox_attachment_payloads(
+                    request=sandbox_request,
+                    evidence=evidence,
+                    observations=new_lifecycle,
+                    require_initial_acquisition=False,
+                )
+                existing = _decode_sandbox_lifecycle(
+                    attempt.accepted_sandbox_lifecycle_json,
+                    evidence_digest=execution_evidence_digest,
+                )
+            except (BatchAdmissionError, TypeError, ValueError):
+                return False
+            if sandbox_request.digest != attempt.accepted_material_request_digest or evidence.digest != execution_evidence_digest or not existing or existing[0].kind is not AcceptedSandboxLifecycleKind.ACQUIRED:
+                return False
+            merged = list(existing)
+            known = {observation.digest for observation in existing}
+            for observation in validated_new:
+                if observation.digest not in known:
+                    merged.append(observation)
+                    known.add(observation.digest)
+            if len(merged) > _MAX_ACCEPTED_SANDBOX_LIFECYCLE_OBSERVATIONS:
+                return False
+            attempt.accepted_sandbox_lifecycle_json = [observation.to_persisted() for observation in merged]
+            await session.commit()
+            return True
 
     async def _locked_fenced_item(
         self,
@@ -1683,6 +2176,35 @@ class SubagentBatchRepository:
                             "occurred_at": coerce_iso(attempt.terminal_at),
                         }
                     )
+                for observation in _decode_attempt_sandbox_attachment(attempt):
+                    attempt_observations.append(
+                        {
+                            "version": 1,
+                            "event": "sandbox.lifecycle",
+                            "batch_id": batch.id,
+                            "item_id": attempt.item_id,
+                            "attempt_id": attempt.id,
+                            "parent_run_id": observation.run_id,
+                            "attempt_ref": observation.attempt_ref,
+                            "batch_child_attempt_ref": (observation.batch_child_attempt_ref),
+                            "tool_receipt_ref": observation.tool_receipt_ref,
+                            "state": observation.kind.value,
+                            "provider_kind": observation.provider_kind,
+                            "qualification_scope": (observation.qualification_scope),
+                            "reason_code": observation.reason_code,
+                            "evidence_digest": (observation.execution_evidence_digest),
+                            "occurred_at": coerce_iso(
+                                observation.observed_at,
+                            ),
+                        }
+                    )
+            attempt_observations.sort(
+                key=lambda row: (
+                    row["occurred_at"],
+                    row["event"],
+                    str(row.get("transition") or row.get("state") or ""),
+                ),
+            )
             reserved_edges = 1 + int(terminal_observation is not None)
             transition_budget = max(0, bounded_limit - reserved_edges)
             observations = [accepted_observation]

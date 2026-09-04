@@ -26,6 +26,10 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.sandbox.accepted_material import (
+    AcceptedSandboxAuthorityLostError,
+    accepted_sandbox_from_runtime_context,
+)
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -1433,6 +1437,9 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Tool runtime not available")
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
+    accepted_sandbox = accepted_sandbox_from_runtime_context(runtime.context)
+    if accepted_sandbox is not None:
+        return accepted_sandbox
     # Read-only lookup: this only resolves the provider entry, and ownership
     # (release) stays with after_agent's short-circuit on the wrapped state.
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
@@ -1518,6 +1525,10 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             context=runtime.context or {},
             app_config=safe_app_config(),
         )
+
+    accepted_sandbox = accepted_sandbox_from_runtime_context(runtime.context)
+    if accepted_sandbox is not None:
+        return accepted_sandbox
 
     # Check if sandbox already exists in state
     # Discarding fork_restored is safe: after_agent short-circuits on the
@@ -1617,6 +1628,10 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             app_config=await safe_app_config_async(),
         )
 
+    accepted_sandbox = accepted_sandbox_from_runtime_context(runtime.context)
+    if accepted_sandbox is not None:
+        return accepted_sandbox
+
     # Same discard as the sync path above: the reuse path never releases,
     # because after_agent short-circuits on the still-wrapped state first.
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
@@ -1702,6 +1717,8 @@ async def _run_sync_tool_after_async_sandbox_init(
                 return "Error: Tool implementation not available"
 
             return await asyncio.to_thread(func, runtime, *args)
+    except AcceptedSandboxAuthorityLostError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -2078,6 +2095,8 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         except Exception:
             max_chars = 20000
         return _truncate_bash_output(mask_secret_values(sandbox.execute_command(command, env=injected_env), injected_env), max_chars)
+    except AcceptedSandboxAuthorityLostError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:
@@ -2145,6 +2164,8 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         except Exception:
             max_chars = 20000
         return _truncate_ls_output(output, max_chars)
+    except AcceptedSandboxAuthorityLostError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -2209,6 +2230,8 @@ def glob_tool(
         # so a root above a disabled skill still surfaces its files.
         matches = _drop_disabled_skill_paths(matches, user_id=user_id)
         return _format_glob_results(requested_path, matches, truncated)
+    except AcceptedSandboxAuthorityLostError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -2309,6 +2332,8 @@ def grep_tool(
         allowed = set(_drop_disabled_skill_paths([match.path for match in matches], user_id=user_id))
         matches = [match for match in matches if match.path in allowed]
         return _format_grep_results(requested_path, matches, truncated)
+    except AcceptedSandboxAuthorityLostError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -2426,6 +2451,8 @@ def read_file_tool(
         except Exception:
             max_chars = 50000
         return _truncate_read_file_output(content, max_chars)
+    except AcceptedSandboxAuthorityLostError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -2542,6 +2569,8 @@ def write_file_tool(
         with get_file_operation_lock(sandbox, path):
             sandbox.write_file(path, content, append)
         return "OK"
+    except AcceptedSandboxAuthorityLostError:
+        raise
     except SandboxError as e:
         return _format_write_file_error(requested_path, e, runtime)
     except PermissionError:
@@ -2619,6 +2648,8 @@ def str_replace_tool(
                 content = content.replace(old_str, new_str, 1)
             sandbox.write_file(path, content)
         return "OK"
+    except AcceptedSandboxAuthorityLostError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:

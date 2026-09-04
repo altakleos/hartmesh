@@ -31,6 +31,10 @@ receipt. `AcceptedBatchV1` binds the assembly and execution snapshot without
 sealing another revision. Recovery does not rediscover subagents or skills;
 stable named tool adapters must match their accepted contract digests.
 
+Durable sandbox operations use `AcceptedSandboxSession`; see
+`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`. It composes run/material
+authority and exposes no raw provider handle.
+
 Accepted durable lead execution also binds `AssemblyEvidenceV1` to the running
 owner/state-version fence. After accepted material is verified and the run starts,
 the worker assembles under the frozen extension generation, validates the actual

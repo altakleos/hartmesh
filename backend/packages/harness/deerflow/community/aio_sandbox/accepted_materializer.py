@@ -12,12 +12,18 @@ from typing import TYPE_CHECKING, cast
 
 from deerflow.qualification_evidence import ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2
 from deerflow.sandbox.accepted_material import (
+    AcceptedExecutionEvidence,
     AcceptedExecutionEvidenceV1,
+    AcceptedExecutionEvidenceV2,
     AcceptedMaterialCapability,
     AcceptedMaterialError,
     AcceptedMaterialExecutionClaimV1,
     AcceptedMaterialLeaseV1,
+    AcceptedMaterialRequest,
     AcceptedMaterialRequestV1,
+    AcceptedMaterialRequestV2,
+    AcceptedSandboxIsolationFactsV1,
+    AcceptedSandboxQualificationV1,
     AcceptedSkillExecutionEvidenceV2,
     AcceptedSkillSandboxBindingV1,
 )
@@ -41,19 +47,19 @@ def _canonical_digest(value: object) -> str:
 
 @dataclass(slots=True)
 class _AioRenewalHandle:
-    request: AcceptedMaterialRequestV1
+    request: AcceptedMaterialRequest
     legacy_evidence: AcceptedSkillExecutionEvidenceV2
-    neutral_evidence: AcceptedExecutionEvidenceV1
+    neutral_evidence: AcceptedExecutionEvidence | None = None
     current_lease: AcceptedMaterialLeaseV1 | None = None
     active: bool = True
 
 
 @dataclass(slots=True)
 class _AioMaterialization:
-    request: AcceptedMaterialRequestV1
+    request: AcceptedMaterialRequest
     sandbox: Sandbox
     lease: AcceptedMaterialLeaseV1
-    evidence: AcceptedExecutionEvidenceV1
+    evidence: AcceptedExecutionEvidence
 
 
 class AioAcceptedMaterializer:
@@ -64,16 +70,18 @@ class AioAcceptedMaterializer:
         *,
         provider: AioSandboxProvider,
         binding_resolver: Callable[
-            [AcceptedMaterialRequestV1],
+            [AcceptedMaterialRequest],
             AcceptedSkillSandboxBindingV1,
         ],
         scope_resolver: Callable[
-            [AcceptedMaterialRequestV1],
+            [AcceptedMaterialRequest],
             tuple[str, str],
         ]
         | None = None,
         clock: Callable[[], datetime] | None = None,
         lease_duration: timedelta = timedelta(minutes=5),
+        qualification: AcceptedSandboxQualificationV1 | None = None,
+        isolation: AcceptedSandboxIsolationFactsV1 | None = None,
     ) -> None:
         if not callable(binding_resolver):
             raise TypeError("binding_resolver must be callable")
@@ -84,6 +92,8 @@ class AioAcceptedMaterializer:
         self._scope_resolver = scope_resolver or (lambda request: (request.thread_ref, request.user_ref))
         self._clock = clock or (lambda: datetime.now(UTC))
         self._lease_duration = lease_duration
+        self._qualification = qualification
+        self._isolation = isolation
         self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._active: dict[tuple[str, str, str], _AioMaterialization] = {}
 
@@ -92,7 +102,7 @@ class AioAcceptedMaterializer:
 
     @staticmethod
     def _key(
-        request: AcceptedMaterialRequestV1,
+        request: AcceptedMaterialRequest,
     ) -> tuple[str, str, str]:
         return request.tenant.digest, request.run_id, request.attempt_id
 
@@ -105,12 +115,14 @@ class AioAcceptedMaterializer:
 
     @staticmethod
     def _neutral_evidence(
-        request: AcceptedMaterialRequestV1,
+        request: AcceptedMaterialRequest,
         *,
-        sandbox_id: str,
+        lease: AcceptedMaterialLeaseV1,
         legacy: AcceptedSkillExecutionEvidenceV2,
+        qualification: AcceptedSandboxQualificationV1 | None,
+        isolation: AcceptedSandboxIsolationFactsV1 | None,
         stable_execution_claim: bool = False,
-    ) -> AcceptedExecutionEvidenceV1:
+    ) -> AcceptedExecutionEvidence:
         if legacy.profile != "rwx_verified_copy_v2" or legacy.snapshot_id != request.skill_snapshot_digest or legacy.run_id != request.run_id:
             raise AcceptedMaterialError("accepted_material_evidence_mismatch")
         if legacy.sandbox_image_digest != request.runtime_image_digest:
@@ -141,12 +153,33 @@ class AioAcceptedMaterializer:
                 "materialization_evidence_digest": (legacy.materialization_evidence_digest),
             },
         )
+        if isinstance(request, AcceptedMaterialRequestV2):
+            if qualification is None:
+                raise AcceptedMaterialError("sandbox_provider_unqualified")
+            if isolation is None:
+                isolation = AcceptedSandboxIsolationFactsV1.build(
+                    restricted_non_root=True,
+                    read_only_accepted_material=True,
+                    privilege_escalation_disabled=True,
+                    runtime_class_digest=legacy.pod_isolation_digest,
+                    network_policy_digest=legacy.network_policy_spec_digest,
+                )
+            return AcceptedExecutionEvidenceV2.build(
+                request=request,
+                lease=lease,
+                materialization_digest=legacy.materialization_evidence_digest,
+                verifier_image_digest=legacy.accepted_skill_runtime_image_digest,
+                verifier_contract_version=(f"{legacy.profile}:accepted_execution_claim_v2"),
+                read_only_proof_digest=read_only_proof_digest,
+                qualification=qualification,
+                isolation=isolation,
+            )
         return AcceptedExecutionEvidenceV1.build(
             run_id=request.run_id,
             attempt_id=request.attempt_id,
             tenant=request.tenant,
             provider_kind="aio_kubernetes",
-            provider_instance_ref=sandbox_id,
+            provider_instance_ref=lease.provider_instance_ref,
             ownership_epoch=legacy.generation,
             runtime_image_digest=legacy.sandbox_image_digest,
             skill_snapshot_digest=legacy.snapshot_id,
@@ -160,12 +193,15 @@ class AioAcceptedMaterializer:
 
     async def acquire_and_materialize(
         self,
-        request: AcceptedMaterialRequestV1,
+        request: AcceptedMaterialRequest,
         *,
         execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
-    ) -> tuple[Sandbox, AcceptedMaterialLeaseV1, AcceptedExecutionEvidenceV1]:
-        if not isinstance(request, AcceptedMaterialRequestV1):
-            raise TypeError("request must be AcceptedMaterialRequestV1")
+    ) -> tuple[Sandbox, AcceptedMaterialLeaseV1, AcceptedExecutionEvidence]:
+        if not isinstance(
+            request,
+            (AcceptedMaterialRequestV1, AcceptedMaterialRequestV2),
+        ):
+            raise TypeError("request must be accepted material request")
         if request.lease_expires_at <= self._clock():
             raise AcceptedMaterialError("accepted_material_lease_expired")
         if execution_claim is not None and (not isinstance(execution_claim, AcceptedMaterialExecutionClaimV1) or not execution_claim.binds(request)):
@@ -217,10 +253,15 @@ class AioAcceptedMaterializer:
                     execution_claim=execution_claim,
                 )
             elif execution_claim is None:
+                acquire_kwargs = {
+                    "user_id": user_id,
+                    "binding": binding,
+                }
+                if isinstance(request, AcceptedMaterialRequestV2) and request.batch_child_attempt_ref is not None:
+                    acquire_kwargs["resource_scope_ref"] = request.batch_child_attempt_ref
                 sandbox_id = await self._provider.acquire_bound_accepted_skills_async(
                     thread_id,
-                    user_id=user_id,
-                    binding=binding,
+                    **acquire_kwargs,
                 )
             else:
                 sandbox_id = await self._provider.acquire_bound_accepted_skills_async(
@@ -239,10 +280,24 @@ class AioAcceptedMaterializer:
                     raise AcceptedMaterialError(
                         "accepted_material_evidence_unavailable",
                     )
+                handle = _AioRenewalHandle(
+                    request=request,
+                    legacy_evidence=legacy,
+                )
+                lease = AcceptedMaterialLeaseV1(
+                    version=1,
+                    provider_kind="aio_kubernetes",
+                    provider_instance_ref=sandbox_id,
+                    ownership_epoch=legacy.generation,
+                    lease_expires_at=request.lease_expires_at,
+                    opaque_renewal_handle=handle,
+                )
                 evidence = self._neutral_evidence(
                     request,
-                    sandbox_id=sandbox_id,
+                    lease=lease,
                     legacy=legacy,
+                    qualification=self._qualification,
+                    isolation=self._isolation,
                     stable_execution_claim=execution_claim is not None,
                 )
             except Exception:
@@ -253,19 +308,7 @@ class AioAcceptedMaterializer:
                         "accepted_material_cleanup_failed",
                     ) from None
                 raise
-            handle = _AioRenewalHandle(
-                request=request,
-                legacy_evidence=legacy,
-                neutral_evidence=evidence,
-            )
-            lease = AcceptedMaterialLeaseV1(
-                version=1,
-                provider_kind=evidence.provider_kind,
-                provider_instance_ref=sandbox_id,
-                ownership_epoch=evidence.ownership_epoch,
-                lease_expires_at=request.lease_expires_at,
-                opaque_renewal_handle=handle,
-            )
+            handle.neutral_evidence = evidence
             handle.current_lease = lease
             materialization = _AioMaterialization(
                 request=request,
@@ -290,11 +333,11 @@ class AioAcceptedMaterializer:
     async def validate(
         self,
         lease: AcceptedMaterialLeaseV1,
-        evidence: AcceptedExecutionEvidenceV1,
+        evidence: AcceptedExecutionEvidence,
     ) -> bool:
         if not isinstance(lease, AcceptedMaterialLeaseV1) or not isinstance(
             evidence,
-            AcceptedExecutionEvidenceV1,
+            (AcceptedExecutionEvidenceV1, AcceptedExecutionEvidenceV2),
         ):
             return False
         handle = self._handle(lease)
@@ -310,10 +353,7 @@ class AioAcceptedMaterializer:
         lease: AcceptedMaterialLeaseV1,
     ) -> AcceptedMaterialLeaseV1:
         handle = self._handle(lease)
-        if handle is None or not await self.validate(
-            lease,
-            handle.neutral_evidence,
-        ):
+        if handle is None or handle.neutral_evidence is None or not await self.validate(lease, handle.neutral_evidence):
             raise AcceptedMaterialError("accepted_material_lease_lost")
         if not await self._provider.renew_accepted_skill_execution_async(
             lease.provider_instance_ref,

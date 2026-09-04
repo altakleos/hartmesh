@@ -196,6 +196,23 @@ class SubagentBatchAttemptRow(Base):
     terminal_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     evidence_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     evidence_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    accepted_material_request_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    accepted_material_request_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    accepted_execution_evidence_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    accepted_execution_evidence_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    accepted_sandbox_lifecycle_json: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

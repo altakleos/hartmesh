@@ -82,7 +82,7 @@ def test_fingerprint_builder_binds_runtime_manifests_and_expected_head() -> None
         mcp_task_replay_keyring_confirmation_version=1,
         mcp_task_replay_keyring_confirmation_digest=f"sha256:{'4' * 64}",
     )
-    assert fingerprint.migration_head == "0034_tool_plane_revisions"
+    assert fingerprint.migration_head == "0035_batch_sandbox_evidence"
     assert fingerprint.extension_artifact_digest == f"sha256:{'f' * 64}"
     assert fingerprint.redis_namespace_digest == f"sha256:{'3' * 64}"
     assert fingerprint.capability_manifest_digest == "1" * 64

@@ -293,6 +293,17 @@ class SandboxConfig(BaseModel):
         max_length=2048,
         description="Reference to the exact scoped live qualification artifact.",
     )
+    accepted_material_qualification_digest: str | None = Field(
+        default=None,
+        pattern=r"^(?:sha256:)?[0-9a-f]{64}$",
+        description=("Operator-pinned SHA-256 digest of the accepted-material qualification artifact."),
+    )
+    accepted_material_qualification_max_age_seconds: int = Field(
+        default=30 * 24 * 60 * 60,
+        ge=60,
+        le=365 * 24 * 60 * 60,
+        description="Maximum accepted age of a pinned live qualification artifact.",
+    )
 
     @model_validator(mode="after")
     def _validate_provisioner_auth(self) -> "SandboxConfig":
@@ -342,6 +353,12 @@ class SandboxConfig(BaseModel):
         if self.accepted_skill_projection_profile in {"rwx_verified_copy_v1", "rwx_verified_copy_v2"} and not self.provisioner_url:
             raise ValueError(
                 f"{self.accepted_skill_projection_profile} requires sandbox.provisioner_url",
+            )
+        if bool(self.accepted_material_qualification_evidence) != bool(
+            self.accepted_material_qualification_digest,
+        ):
+            raise ValueError(
+                "accepted material qualification evidence and digest must be configured together",
             )
         return self
 

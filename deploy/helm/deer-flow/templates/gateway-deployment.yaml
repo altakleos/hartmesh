@@ -185,6 +185,8 @@ spec:
               value: "1"
             - name: DEER_FLOW_QUALIFICATION_CANDIDATE_ID
               value: {{ .Values.deployment.qualificationCandidate.id | quote }}
+            - name: DEER_FLOW_QUALIFICATION_NAMESPACE
+              value: {{ include "deer-flow.namespace" . | quote }}
             {{- end }}
             - name: DEER_FLOW_PROJECT_ROOT
               value: /app

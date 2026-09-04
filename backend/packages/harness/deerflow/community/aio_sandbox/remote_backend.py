@@ -29,6 +29,7 @@ from pathlib import Path, PurePosixPath
 import requests
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.qualification_evidence import AcceptedSandboxRuntimeTopologyV1
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.accepted_material import AcceptedMaterialExecutionClaimV1
 from deerflow.skills.storage import user_should_see_legacy_skills
@@ -295,7 +296,7 @@ class RemoteSandboxBackend(SandboxBackend):
         """Authenticate and require exact provisioner profile advertisement."""
 
         try:
-            self._runtime_image_digest_from_capabilities(
+            self._runtime_image_subjects_from_capabilities(
                 self._accepted_skill_projection_capabilities(),
             )
         except RuntimeError:
@@ -303,14 +304,24 @@ class RemoteSandboxBackend(SandboxBackend):
         return True
 
     @staticmethod
-    def _runtime_image_digest_from_capabilities(
+    def _runtime_image_subjects_from_capabilities(
         payload: dict[str, object],
-    ) -> str:
+    ) -> tuple[str, str]:
+        sandbox_digest, verifier_digest, _topology = RemoteSandboxBackend._runtime_qualification_subjects_from_capabilities(
+            payload,
+        )
+        return sandbox_digest, verifier_digest
+
+    @staticmethod
+    def _runtime_qualification_subjects_from_capabilities(
+        payload: dict[str, object],
+    ) -> tuple[str, str, AcceptedSandboxRuntimeTopologyV1]:
         accepted = payload.get("accepted_skill_projection")
         if not isinstance(accepted, dict) or set(accepted) != {
             "profile",
             "sandbox_image_digest",
             "accepted_skill_runtime_image_digest",
+            "runtime_topology",
         }:
             raise RuntimeError("accepted_skill_projection_preflight_unavailable")
         sandbox_digest = accepted.get("sandbox_image_digest")
@@ -323,12 +334,45 @@ class RemoteSandboxBackend(SandboxBackend):
             or _SHA256_PATTERN.fullmatch(verifier_digest) is None
         ):
             raise RuntimeError("accepted_skill_projection_preflight_unavailable")
-        return sandbox_digest
+        try:
+            topology = AcceptedSandboxRuntimeTopologyV1.from_dict(
+                accepted.get("runtime_topology"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "accepted_skill_projection_preflight_unavailable",
+            ) from exc
+        if topology.profile != accepted.get("profile") or topology.sandbox_image_digest != sandbox_digest or topology.verifier_image_digest != verifier_digest:
+            raise RuntimeError("accepted_skill_projection_preflight_unavailable")
+        return sandbox_digest, verifier_digest, topology
+
+    @classmethod
+    def _runtime_image_digest_from_capabilities(
+        cls,
+        payload: dict[str, object],
+    ) -> str:
+        return cls._runtime_image_subjects_from_capabilities(payload)[0]
 
     def accepted_material_runtime_image_digest(self) -> str:
         """Return the exact sandbox image digest advertised by qualified preflight."""
 
         return self._runtime_image_digest_from_capabilities(
+            self._accepted_skill_projection_capabilities(),
+        )
+
+    def accepted_material_runtime_subjects(self) -> tuple[str, str]:
+        """Return exact sandbox and verifier image digests from preflight."""
+
+        return self._runtime_image_subjects_from_capabilities(
+            self._accepted_skill_projection_capabilities(),
+        )
+
+    def accepted_material_runtime_qualification_subjects(
+        self,
+    ) -> tuple[str, str, AcceptedSandboxRuntimeTopologyV1]:
+        """Return image subjects and a fresh live Kubernetes topology sample."""
+
+        return self._runtime_qualification_subjects_from_capabilities(
             self._accepted_skill_projection_capabilities(),
         )
 
@@ -600,11 +644,19 @@ class RemoteSandboxBackend(SandboxBackend):
                 with self._attempt_capabilities_lock:
                     self._attempt_capabilities.pop(sandbox_id, None)
                     self._attempt_execution_claims.pop(sandbox_id, None)
-                logger.info(f"Provisioner destroyed sandbox {sandbox_id}")
+                logger.info("Provisioner destroyed sandbox")
             else:
-                logger.warning(f"Provisioner destroy returned {resp.status_code}: {resp.text}")
+                logger.warning(
+                    "Provisioner destroy returned HTTP %s",
+                    resp.status_code,
+                )
+                raise RuntimeError("Provisioner destroy failed")
         except requests.RequestException as exc:
-            logger.warning(f"Provisioner destroy failed for {sandbox_id}: {exc}")
+            logger.warning(
+                "Provisioner destroy request failed: %s",
+                type(exc).__name__,
+            )
+            raise RuntimeError("Provisioner destroy failed") from None
 
     def _provisioner_is_alive(
         self,

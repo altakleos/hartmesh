@@ -307,7 +307,20 @@ It also resolves the effective subagent catalog once, including each allowed wor
 
 One immutable accepted skill tree contains the transitive union needed by the lead and its allowed subagents. Prompt, discovery, activation, and tool policy expose only the accepted per-agent scope; because all accepted packages may share one sandbox tree, that scoping is not a filesystem-confidentiality boundary.
 
-Nonempty accepted skills use a supported accepted-only profile: local container-backed AIO or Kubernetes with the fenced `rwx_verified_copy_v2` projection.
+Non-durable accepted-only isolation can use local container-backed AIO. Durable
+accepted sandbox operations require the remote AIO/Kubernetes
+`rwx_verified_copy_v2` profile plus a current, byte-digest-pinned live
+qualification artifact. This checkout ships no passing artifact.
+
+For a qualified durable run, every command and file operation crosses one
+`AcceptedSandboxSession`. It checks the current SQL run (or batch-child attempt)
+fence and the existing provider lease/evidence immediately before delegation.
+This is explicitly check-then-call: AIO does not atomically carry its ownership
+epoch into an operation, so one call racing loss may start, but observed loss
+blocks every later call and stale terminal success. Portable V2 evidence binds
+the accepted invocation and governed tool-plane digests while replacing the raw
+provider resource with a tenant-bound commitment. See the
+[accepted sandbox execution contract](backend/docs/ACCEPTED_SANDBOX_EXECUTION.md).
 
 OpenSandbox support for ordinary execution is distinct from HartMesh-qualified immutable accepted material. Nonempty durable skills are supported only for the exact live-qualified profile and artifact.
 
@@ -523,6 +536,12 @@ HartMesh agents can execute commands and read or write files allowed by configur
 
 Command classification and path rewriting are defense in depth. Use a supported isolated provider for untrusted work.
 
+Provider capability declarations are not qualification. Remote AIO is the only
+durable candidate in this release; its declared operation fencing and protected
+process-loss lookup are both false, exact-two remains rejected, and missing live
+qualification fails before model/tool work. Lifecycle events expose only safe
+acquired/lost/released/cleanup-pending/orphan diagnostics.
+
 Complete first-admin setup before making the service reachable beyond loopback.
 
 Administrators can configure stdio MCP processes and trusted Python plugins, so administrator access is equivalent to code execution.
@@ -594,6 +613,7 @@ Version sources report `2.1.0`, but no tag contains the audited HartMesh impleme
 
 - [Durable invocation runtime](backend/docs/INVOCATION_RUNTIME.md) — guarantees, evidence, recovery, and deferred scope
 - [Durable subagent batches](docs/DURABLE_SUBAGENT_BATCHES.md) — accepted evidence, retries, cancellation, legacy cleanup, and qualification
+- [Accepted sandbox execution](backend/docs/ACCEPTED_SANDBOX_EXECUTION.md) — composed run/provider authority, operation gating, capability matrix, lifecycle evidence, and qualification
 - [Runtime API](backend/packages/runtime-api/README.md) — DTOs and `DurableInvocationPort`
 - [Gateway API](backend/docs/API.md) — authenticated HTTP behavior
 - [Extension API](backend/packages/extension-api/README.md) — policy and trust boundaries

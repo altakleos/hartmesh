@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
+from deerflow_extension_api import TenantReferenceV1
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -25,6 +26,7 @@ from deerflow.runtime.runs.manager import (
 )
 from deerflow.runtime.runs.store.base import CancellationRequestOutcome, LeaseRenewal
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.sandbox.accepted_material import AcceptedExecutionEvidenceV1
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -1091,6 +1093,63 @@ async def test_reconcile_orphaned_run_backfills_delivery_after_atomic_takeover()
     assert len(delivery) == 1
     assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
     assert (await store.get("running-run"))["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_reconcile_orphaned_run_emits_safe_accepted_sandbox_observation():
+    store = MemoryRunStore()
+    events = MemoryRunEventStore()
+    evidence = AcceptedExecutionEvidenceV1.build(
+        run_id="running-run",
+        attempt_id="attempt-ref",
+        tenant=TenantReferenceV1(
+            version=1,
+            public_ref="tenant-" + ("a" * 16),
+            digest="a" * 64,
+        ),
+        provider_kind="aio_kubernetes",
+        provider_instance_ref="raw-pod-name",
+        ownership_epoch=4,
+        runtime_image_digest="b" * 64,
+        skill_snapshot_digest="c" * 64,
+        skill_scope_digest="d" * 64,
+        materialization_digest="e" * 64,
+        verifier_image_digest="f" * 64,
+        verifier_contract_version="rwx_verified_copy_v2",
+        read_only_proof_digest="1" * 64,
+        qualification_scope="accepted-skill-v2",
+    )
+    await store.put(
+        "running-run",
+        thread_id="thread-1",
+        status="pending",
+        owner_worker_id="dead-worker",
+        lease_expires_at="2025-12-31T23:59:00+00:00",
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    assert await store.start_run(
+        "running-run",
+        execution_evidence_json=evidence.to_persisted(),
+        execution_evidence_digest=evidence.digest,
+    )
+    manager = RunManager(store=store, event_store=events)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="worker crashed",
+        before="2026-01-01T00:00:01+00:00",
+    )
+
+    assert [record.run_id for record in recovered] == ["running-run"]
+    lifecycle = await events.list_events(
+        "thread-1",
+        "running-run",
+        event_types=["sandbox.lifecycle.v1"],
+    )
+    assert len(lifecycle) == 1
+    assert lifecycle[0]["content"]["kind"] == "orphaned"
+    assert lifecycle[0]["content"]["reason_code"] == "durable_run_owner_expired"
+    assert lifecycle[0]["content"]["execution_evidence_digest"] == evidence.digest
+    assert "raw-pod-name" not in str(lifecycle[0])
 
 
 @pytest.mark.anyio

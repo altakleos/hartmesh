@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import gc
-import hashlib
 import inspect
 import logging
 import os
@@ -65,7 +64,10 @@ from deerflow.runtime.events.appender import (
     RuntimeEventAuthority,
     RuntimeEventOwnershipLost,
 )
-from deerflow.runtime.events.catalog import RUN_EXECUTION_STARTED_EVENT
+from deerflow.runtime.events.catalog import (
+    RUN_EXECUTION_STARTED_EVENT,
+    SANDBOX_LIFECYCLE_EVENT,
+)
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.failure_evidence import RuntimeFailureV1, map_runtime_failure
 from deerflow.runtime.goal import (
@@ -118,11 +120,14 @@ from .store.base import BindAssemblyEvidenceOutcome, LifecycleType, RecoveryPoli
 
 if TYPE_CHECKING:
     from deerflow.sandbox.accepted_material import (
-        AcceptedExecutionEvidenceV1,
+        AcceptedExecutionEvidence,
         AcceptedMaterializer,
         AcceptedMaterialLeaseV1,
+        AcceptedMaterialRequest,
+        AcceptedSandboxSessionBridge,
         AcceptedSkillExecutionEvidence,
     )
+    from deerflow.sandbox.sandbox import Sandbox
     from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 logger = logging.getLogger(__name__)
@@ -304,10 +309,12 @@ class _AcceptedMaterializationResult:
     """Process-local adapter state paired with persisted execution evidence."""
 
     sandbox_id: str
-    evidence: AcceptedExecutionEvidenceV1 | AcceptedSkillExecutionEvidence | None
+    evidence: AcceptedExecutionEvidence | AcceptedSkillExecutionEvidence | None
     provider: SandboxProvider | None
     materializer: AcceptedMaterializer | None = None
     lease: AcceptedMaterialLeaseV1 | None = None
+    sandbox: Sandbox | None = None
+    request: AcceptedMaterialRequest | None = None
 
     async def validate(self) -> bool:
         if self.evidence is None:
@@ -315,10 +322,14 @@ class _AcceptedMaterializationResult:
         if self.materializer is not None:
             from deerflow.sandbox.accepted_material import (
                 AcceptedExecutionEvidenceV1,
+                AcceptedExecutionEvidenceV2,
                 AcceptedMaterialLeaseV1,
             )
 
-            if not isinstance(self.evidence, AcceptedExecutionEvidenceV1) or not isinstance(self.lease, AcceptedMaterialLeaseV1):
+            if not isinstance(
+                self.evidence,
+                (AcceptedExecutionEvidenceV1, AcceptedExecutionEvidenceV2),
+            ) or not isinstance(self.lease, AcceptedMaterialLeaseV1):
                 return False
             return await self.materializer.validate(self.lease, self.evidence)
         if self.provider is None:
@@ -348,20 +359,6 @@ class _AcceptedMaterializationResult:
     async def release(self) -> None:
         if self.materializer is not None and self.lease is not None:
             await self.materializer.release(self.lease)
-
-
-def _accepted_scope_reference(
-    tenant: TenantReferenceV1,
-    *,
-    kind: Literal["user", "thread", "attempt"],
-    value: str,
-) -> str:
-    """Derive a bounded provider-safe pseudonym under the accepted tenant."""
-
-    digest = hashlib.sha256(
-        b"hartmesh.accepted-material.v1\0" + tenant.digest.encode("ascii") + b"\0" + kind.encode("ascii") + b"\0" + value.encode("utf-8"),
-    ).hexdigest()
-    return f"{kind}-{digest[:32]}"
 
 
 async def _await_accepted_skill_projection_claim(
@@ -412,6 +409,7 @@ async def _materialize_accepted_skill_projection(
     *,
     user_id: str,
     record: RunRecord | None = None,
+    claim_validator: Callable[[object], Awaitable[bool]] | None = None,
 ) -> _AcceptedMaterializationResult:
     """Prove accepted material before the authoritative running transition."""
 
@@ -437,17 +435,37 @@ async def _materialize_accepted_skill_projection(
     )
     if binding is None:
         raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
-    provider = get_sandbox_provider()
+    provider = None
     sandbox_id: str | None = None
+    sandbox = None
+    request = None
     token = None
     materializer = None
     materialization_lease = None
     try:
+        from deerflow.authz.sandbox_authz import (
+            authorize_sandbox_execution_async,
+            safe_app_config_async,
+        )
+
+        configured_app = context.get("app_config")
+        await authorize_sandbox_execution_async(
+            context=context,
+            app_config=(configured_app if isinstance(configured_app, AppConfig) else await safe_app_config_async()),
+        )
+        provider = get_sandbox_provider()
+        from deerflow.runtime.kubernetes_qualification import (
+            accepted_sandbox_qualification_candidate_enabled,
+        )
         from deerflow.sandbox.accepted_material import (
+            AcceptedMaterialError,
             AcceptedMaterialExecutionClaimV1,
             AcceptedMaterialRequestV1,
+            AcceptedMaterialRequestV2,
+            accepted_scope_reference,
             capture_accepted_file_manifest,
             resolve_accepted_materializer,
+            validate_accepted_materialization,
         )
 
         selection = await resolve_accepted_materializer(
@@ -455,11 +473,20 @@ async def _materialize_accepted_skill_projection(
             binding=binding,
             thread_id=thread_id,
             user_id=user_id,
+            require_durable_one_replica=record is not None,
+            require_exact_two=(record is not None and record.recovery_policy is RecoveryPolicy.exact_two_takeover_v1),
+            allow_qualification_candidate=(record is not None and accepted_sandbox_qualification_candidate_enabled()),
         )
         if selection is not None:
-            from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
+            from deerflow.runtime.accepted_invocation import (
+                AcceptedInvocation,
+                ResolvedAgentMaterialV1,
+            )
             from deerflow.runtime.agent_revision import (
                 RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
+            )
+            from deerflow.subagents.batch_acceptance import (
+                PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
             )
 
             material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
@@ -475,20 +502,20 @@ async def _materialize_accepted_skill_projection(
                 snapshot.root,
             )
             await asyncio.to_thread(material.verify_process_material)
-            request = AcceptedMaterialRequestV1.build(
+            request_arguments = dict(
                 run_id=binding.run_id,
-                attempt_id=_accepted_scope_reference(
+                attempt_id=accepted_scope_reference(
                     tenant,
                     kind="attempt",
                     value=f"{binding.run_id}:{binding.generation}",
                 ),
                 tenant=tenant,
-                user_ref=_accepted_scope_reference(
+                user_ref=accepted_scope_reference(
                     tenant,
                     kind="user",
                     value=user_id,
                 ),
-                thread_ref=_accepted_scope_reference(
+                thread_ref=accepted_scope_reference(
                     tenant,
                     kind="thread",
                     value=thread_id,
@@ -500,11 +527,33 @@ async def _materialize_accepted_skill_projection(
                 runtime_image_digest=selection.runtime_image_digest,
                 lease_expires_at=datetime.now(UTC) + selection.lease_duration,
             )
+            accepted_invocation = context.get(
+                PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
+            )
+            tool_plane = accepted_invocation.tool_plane_revision if isinstance(accepted_invocation, AcceptedInvocation) else None
+            if isinstance(accepted_invocation, AcceptedInvocation) and accepted_invocation.tenant == tenant and accepted_invocation.thread_id == thread_id and tool_plane is not None:
+                request = AcceptedMaterialRequestV2.build(
+                    **request_arguments,
+                    accepted_invocation_ref=accepted_scope_reference(
+                        tenant,
+                        kind="invocation",
+                        value=(f"{binding.run_id}:{accepted_invocation.runtime_identity_digest}"),
+                    ),
+                    accepted_invocation_digest=(accepted_invocation.runtime_identity_digest),
+                    tool_plane_base_revision_digest=tool_plane["base_revision_digest"],
+                    tool_plane_user_overlay_digest=tool_plane["user_overlay_digest"],
+                    tool_plane_projection_digest=tool_plane["projection_digest"],
+                    tool_plane_effective_digest=tool_plane["effective_digest"],
+                    batch_child_attempt_ref=None,
+                    capability_profile_digest=selection.capability_profile.digest,
+                )
+            else:
+                request = AcceptedMaterialRequestV1.build(**request_arguments)
             materializer = selection.materializer
             execution_claim = None
-            if record is not None and record.recovery_policy is RecoveryPolicy.exact_two_takeover_v1:
+            if record is not None:
                 owner_worker_id = record.owner_worker_id
-                if not isinstance(owner_worker_id, str) or not owner_worker_id:
+                if not isinstance(owner_worker_id, str) or not owner_worker_id or type(record.state_version) is not int:
                     raise RuntimeError(
                         "accepted_material_execution_owner_unavailable",
                     )
@@ -535,6 +584,22 @@ async def _materialize_accepted_skill_projection(
                     evidence,
                 ) = await materializer.acquire_and_materialize(request)
             else:
+                if claim_validator is None:
+                    raise AcceptedMaterialError(
+                        "accepted_material_claim_lost",
+                    )
+                try:
+                    claim_current = await claim_validator(execution_claim)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    raise AcceptedMaterialError(
+                        "accepted_material_claim_lost",
+                    ) from None
+                if claim_current is not True:
+                    raise AcceptedMaterialError(
+                        "accepted_material_claim_lost",
+                    )
                 (
                     sandbox,
                     materialization_lease,
@@ -543,14 +608,34 @@ async def _materialize_accepted_skill_projection(
                     request,
                     execution_claim=execution_claim,
                 )
+                try:
+                    claim_current = await claim_validator(execution_claim)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    raise AcceptedMaterialError(
+                        "accepted_material_claim_lost",
+                    ) from None
+                if claim_current is not True:
+                    raise AcceptedMaterialError(
+                        "accepted_material_claim_lost",
+                    )
+            validate_accepted_materialization(
+                selection=selection,
+                request=request,
+                lease=materialization_lease,
+                evidence=evidence,
+            )
             sandbox_id = sandbox.id
-        else:
+        elif record is None:
             sandbox_id = await provider.acquire_bound_accepted_skills_async(
                 thread_id,
                 user_id=user_id,
                 binding=binding,
             )
             evidence = provider.accepted_skill_execution_evidence(sandbox_id)
+        else:
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
         require_runtime_accepted_skill_isolation(
             provider,
             runtime,
@@ -576,8 +661,11 @@ async def _materialize_accepted_skill_projection(
             provider=provider,
             materializer=materializer,
             lease=materialization_lease,
+            sandbox=sandbox,
+            request=request,
         )
-    except Exception:
+    except BaseException as exc:
+        deferred_interrupt = exc if not isinstance(exc, Exception) else None
         invalidate_runtime_skill_projection_token(runtime, token)
         if token is not None:
             try:
@@ -587,13 +675,25 @@ async def _materialize_accepted_skill_projection(
                     "Failed to release rejected accepted skill consumer",
                     exc_info=True,
                 )
-        elif materializer is None and sandbox_id is not None:
+            except BaseException as cleanup_exc:
+                if deferred_interrupt is None:
+                    deferred_interrupt = cleanup_exc
+                logger.warning(
+                    "Rejected accepted skill consumer cleanup interrupted",
+                )
+        elif materializer is None and sandbox_id is not None and provider is not None:
             try:
                 await asyncio.to_thread(provider.release, sandbox_id)
             except Exception:
                 logger.warning(
                     "Failed to release rejected accepted sandbox",
                     exc_info=True,
+                )
+            except BaseException as cleanup_exc:
+                if deferred_interrupt is None:
+                    deferred_interrupt = cleanup_exc
+                logger.warning(
+                    "Rejected accepted sandbox cleanup interrupted",
                 )
         if materializer is not None and materialization_lease is not None:
             try:
@@ -603,9 +703,56 @@ async def _materialize_accepted_skill_projection(
                     "Failed to release rejected accepted materialization",
                     exc_info=True,
                 )
+            except BaseException as cleanup_exc:
+                if deferred_interrupt is None:
+                    deferred_interrupt = cleanup_exc
+                logger.warning(
+                    "Rejected accepted materialization cleanup interrupted",
+                )
+        if deferred_interrupt is not None:
+            raise deferred_interrupt
         raise AcceptedSkillSandboxBindingError(
             "accepted_skill_snapshot_materialization_failed",
         ) from None
+
+
+async def _publish_accepted_sandbox_lifecycle(
+    event_appender: Any | None,
+    session: AcceptedSandboxSessionBridge,
+    *,
+    start_index: int,
+) -> int:
+    """Publish newly observed safe diagnostics without making them authority."""
+
+    observations = session.lifecycle_observations
+    for observation in observations[start_index:]:
+        logger.info(
+            "Accepted sandbox lifecycle run_id=%s kind=%s provider_kind=%s qualification_scope=%s reason_code=%s evidence_digest=%s",
+            observation.run_id,
+            observation.kind.value,
+            observation.provider_kind,
+            observation.qualification_scope,
+            observation.reason_code,
+            observation.execution_evidence_digest,
+        )
+        if event_appender is None:
+            continue
+        try:
+            await event_appender.put(
+                thread_id=event_appender.authority.thread_id,
+                run_id=observation.run_id,
+                event_type=SANDBOX_LIFECYCLE_EVENT.event_type,
+                category=SANDBOX_LIFECYCLE_EVENT.category,
+                content=observation.to_persisted(),
+                metadata={},
+            )
+        except Exception:
+            logger.warning(
+                "Accepted sandbox lifecycle observation could not be persisted run_id=%s kind=%s",
+                observation.run_id,
+                observation.kind.value,
+            )
+    return len(observations)
 
 
 def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -901,6 +1048,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         DEERFLOW_TRACE_METADATA_KEY,
         "__deerflow_accepted_parent_batch_context_v1",
+        "__deerflow_accepted_sandbox_session_v1",
         "__deerflow_recovery_executor_v1",
     }
 )
@@ -1080,6 +1228,12 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         strip_parent_batch_acceptance_context(configurable)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
+        from deerflow.sandbox.accepted_material import (
+            ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY,
+            strip_accepted_sandbox_session,
+        )
+
+        strip_accepted_sandbox_session(existing_context)
         strip_assembly_evidence_requirement(existing_context)
         from deerflow.runtime.tool_evidence import (
             TOOL_EVIDENCE_CONTEXT_KEY,
@@ -1118,6 +1272,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         for internal_key in (
             RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
             PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
+            ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY,
             "accepted_agent_revision_digest",
             "accepted_extension_generation",
             "accepted_extension_manifest_digest",
@@ -1388,6 +1543,56 @@ async def run_agent(
     task_store: ExtensionData | None = None
     task_info: TaskInfo | None = None
     deferred_stop_interrupt: BaseException | None = None
+
+    def _defer_stop_interrupt(exc: BaseException) -> None:
+        """Retain the first control-flow interruption until cleanup is done."""
+
+        nonlocal deferred_stop_interrupt
+        if deferred_stop_interrupt is None:
+            deferred_stop_interrupt = exc
+
+    async def _await_terminal_cleanup(
+        awaitable: Awaitable[Any],
+        *,
+        interrupted_result: Any = None,
+        interrupt_current: bool = False,
+        propagate_inner_interrupt: bool = False,
+    ) -> Any:
+        """Finish one cleanup await despite repeated caller cancellation.
+
+        Observer hooks remain interruptible so shutdown cannot wait forever on
+        third-party code. All ownership and resource cleanup is shielded and
+        drained before the first interruption is re-raised.
+        """
+
+        cleanup_task = asyncio.ensure_future(awaitable)
+        if interrupt_current and deferred_stop_interrupt is not None:
+            cleanup_task.cancel()
+        while True:
+            try:
+                return await asyncio.shield(cleanup_task)
+            except Exception:
+                raise
+            except BaseException as exc:
+                _defer_stop_interrupt(exc)
+                if interrupt_current and not cleanup_task.done():
+                    cleanup_task.cancel()
+                if not cleanup_task.done():
+                    continue
+                if cleanup_task.cancelled():
+                    if propagate_inner_interrupt:
+                        cleanup_task.result()
+                    return interrupted_result
+                try:
+                    return cleanup_task.result()
+                except Exception:
+                    raise
+                except BaseException as cleanup_exc:
+                    _defer_stop_interrupt(cleanup_exc)
+                    if propagate_inner_interrupt:
+                        raise cleanup_exc
+                    return interrupted_result
+
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
@@ -1437,9 +1642,36 @@ async def run_agent(
     skill_binding_user_id: str | None = None
     materialization: _AcceptedMaterializationResult | None = None
     materialization_evidence = None
+    accepted_sandbox_session: AcceptedSandboxSessionBridge | None = None
+    accepted_sandbox_lifecycle_count = 0
     dispatch_ledger = None
     thread_projection_owner_id: str | None = None
     thread_projection_active_state_version: int | None = None
+
+    async def _publish_accepted_sandbox_lifecycle_during_cleanup() -> None:
+        nonlocal accepted_sandbox_lifecycle_count, deferred_stop_interrupt
+
+        if accepted_sandbox_session is None:
+            return
+        try:
+            accepted_sandbox_lifecycle_count = await _publish_accepted_sandbox_lifecycle(
+                event_appender,
+                accepted_sandbox_session,
+                start_index=accepted_sandbox_lifecycle_count,
+            )
+        except BaseException as exc:
+            if deferred_stop_interrupt is None:
+                deferred_stop_interrupt = exc
+                logger.warning(
+                    "Accepted sandbox lifecycle publication interrupted for run %s; completing terminal cleanup first",
+                    run_id,
+                )
+            else:
+                logger.warning(
+                    "Accepted sandbox lifecycle publication failed while another terminal interruption was pending for run %s",
+                    run_id,
+                    exc_info=True,
+                )
 
     async def _finish_cancellation(
         action: str,
@@ -2014,10 +2246,35 @@ async def run_agent(
                 "accepted_before_materialization",
                 record,
             )
+
+            async def _validate_pending_material_claim(claim: object) -> bool:
+                from deerflow.sandbox.accepted_material import (
+                    AcceptedMaterialExecutionClaimV1,
+                )
+
+                if (
+                    not isinstance(claim, AcceptedMaterialExecutionClaimV1)
+                    or claim.run_id != run_id
+                    or claim.owner_worker_id != record.owner_worker_id
+                    or claim.state_version != record.state_version
+                    or record.ownership_lost
+                    or record.abort_event.is_set()
+                ):
+                    return False
+                async with run_manager.hold_execution_fence(
+                    run_id,
+                    owner_worker_id=claim.owner_worker_id,
+                    state_version=claim.state_version,
+                    allowed_active_statuses=("pending", "running"),
+                ) as active:
+                    sampled = active
+                return bool(sampled and not record.ownership_lost and not record.abort_event.is_set())
+
             raw_materialization = await _materialize_accepted_skill_projection(
                 runtime,
                 user_id=skill_binding_user_id,
                 record=record,
+                claim_validator=_validate_pending_material_claim,
             )
             if isinstance(raw_materialization, _AcceptedMaterializationResult):
                 materialization = raw_materialization
@@ -2039,15 +2296,6 @@ async def run_agent(
                         "accepted_skill_execution_lease_unavailable",
                     )
 
-                async def _renew_materialization() -> bool:
-                    assert materialization is not None
-                    return await materialization.renew()
-
-                await run_manager.set_execution_lease_renewal(
-                    run_id,
-                    _renew_materialization,
-                )
-
         if materialization_evidence is None:
             start_outcome = await run_manager.try_start(run_id)
         else:
@@ -2066,6 +2314,132 @@ async def run_agent(
         if isinstance(record.owner_worker_id, str) and record.owner_worker_id and type(record.state_version) is int:
             thread_projection_owner_id = record.owner_worker_id
             thread_projection_active_state_version = record.state_version
+
+        if materialization_evidence is not None:
+            assert materialization is not None
+            from deerflow.sandbox.accepted_material import (
+                AcceptedExecutionEvidenceV1,
+                AcceptedExecutionEvidenceV2,
+                AcceptedMaterialExecutionClaimV1,
+                AcceptedMaterialLeaseV1,
+                AcceptedMaterialRequestV1,
+                AcceptedMaterialRequestV2,
+                AcceptedSandboxSession,
+                install_accepted_sandbox_session,
+            )
+
+            neutral_tuple = (
+                materialization.sandbox,
+                materialization.materializer,
+                materialization.lease,
+                materialization.request,
+            )
+            if all(value is not None for value in neutral_tuple) and isinstance(
+                materialization.evidence,
+                (AcceptedExecutionEvidenceV1, AcceptedExecutionEvidenceV2),
+            ):
+                if not isinstance(
+                    materialization.lease,
+                    AcceptedMaterialLeaseV1,
+                ) or not isinstance(
+                    materialization.request,
+                    (AcceptedMaterialRequestV1, AcceptedMaterialRequestV2),
+                ):
+                    raise AcceptedSkillExecutionFenceError(
+                        "accepted_skill_execution_fence_failed",
+                    )
+                owner_worker_id = record.owner_worker_id
+                state_version = record.state_version
+                if not isinstance(owner_worker_id, str) or not owner_worker_id or type(state_version) is not int:
+                    raise AcceptedSkillExecutionFenceError(
+                        "accepted_skill_execution_fence_failed",
+                    )
+                running_claim = AcceptedMaterialExecutionClaimV1(
+                    version=1,
+                    tenant_digest=materialization.request.tenant.digest,
+                    run_id=run_id,
+                    owner_worker_id=owner_worker_id,
+                    state_version=state_version,
+                    execution_takeover=record.execution_takeover,
+                    expected_materialization_digest=(materialization.evidence.materialization_digest if record.execution_takeover else None),
+                )
+
+                async def _validate_running_claim(
+                    claim: AcceptedMaterialExecutionClaimV1,
+                ) -> bool:
+                    if claim is not running_claim or record.ownership_lost or record.abort_event.is_set():
+                        return False
+                    async with run_manager.hold_execution_fence(
+                        run_id,
+                        owner_worker_id=claim.owner_worker_id,
+                        state_version=claim.state_version,
+                    ) as active:
+                        sampled = active
+                    return bool(sampled and not record.ownership_lost and not record.abort_event.is_set())
+
+                from deerflow.runtime.kubernetes_qualification import (
+                    accepted_sandbox_qualification_candidate_enabled,
+                    qualification_barrier,
+                    qualification_counter,
+                )
+                from deerflow.runtime.tool_evidence import (
+                    get_active_tool_receipt,
+                )
+
+                before_delegate = None
+                if accepted_sandbox_qualification_candidate_enabled():
+
+                    async def _qualification_before_delegate() -> None:
+                        await qualification_counter(
+                            "accepted_sandbox_validations",
+                            record,
+                        )
+                        await qualification_barrier(
+                            "accepted_sandbox_after_validation",
+                            record,
+                        )
+
+                    before_delegate = _qualification_before_delegate
+
+                def _active_tool_receipt_ref() -> str | None:
+                    receipt = get_active_tool_receipt()
+                    return None if receipt is None else receipt.receipt_id
+
+                accepted_sandbox_session = install_accepted_sandbox_session(
+                    runtime_ctx,
+                    AcceptedSandboxSession(
+                        sandbox=materialization.sandbox,
+                        materializer=materialization.materializer,
+                        lease=materialization.lease,
+                        evidence=materialization.evidence,
+                        execution_claim=running_claim,
+                        run_fence_validator=_validate_running_claim,
+                        before_delegate=before_delegate,
+                        tool_receipt_ref_resolver=_active_tool_receipt_ref,
+                    ),
+                )
+                _install_runtime_context(config, runtime_ctx)
+                accepted_sandbox_lifecycle_count = await _publish_accepted_sandbox_lifecycle(
+                    event_appender,
+                    accepted_sandbox_session,
+                    start_index=accepted_sandbox_lifecycle_count,
+                )
+
+                async def _renew_materialization() -> bool:
+                    assert accepted_sandbox_session is not None
+                    await accepted_sandbox_session.renew()
+                    return True
+
+            else:
+
+                async def _renew_materialization() -> bool:
+                    assert materialization is not None
+                    return await materialization.renew()
+
+            await run_manager.set_execution_lease_renewal(
+                run_id,
+                _renew_materialization,
+            )
 
         if checkpointer is not None and getattr(
             run_manager,
@@ -2686,6 +3060,11 @@ async def run_agent(
                     code="artifact_delivery_incomplete",
                     error_class="ArtifactDeliveryFailure",
                 )
+            if accepted_sandbox_session is not None:
+                # Success is not staged from a provider lease that was lost
+                # after the final graph operation. The subsequent run-store
+                # transition independently rechecks the SQL execution fence.
+                await accepted_sandbox_session.validate()
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error if delivery_error else RunStatus.success,
@@ -2845,9 +3224,22 @@ async def run_agent(
             )
 
     finally:
+        active_terminal_exception = sys.exception()
+        if active_terminal_exception is not None and not isinstance(
+            active_terminal_exception,
+            Exception,
+        ):
+            _defer_stop_interrupt(active_terminal_exception)
+        if accepted_sandbox_session is not None:
+            await _await_terminal_cleanup(
+                _publish_accepted_sandbox_lifecycle_during_cleanup(),
+                interrupt_current=True,
+            )
         if started and getattr(run_manager, "heartbeat_enabled", False) and not record.ownership_lost:
             try:
-                refreshed_cancel = await run_manager.refresh_owned_cancellation(run_id)
+                refreshed_cancel = await _await_terminal_cleanup(
+                    run_manager.refresh_owned_cancellation(run_id),
+                )
             except Exception as exc:
                 failure = map_runtime_failure(
                     code="runtime_event_authority_refresh_failed",
@@ -2862,13 +3254,17 @@ async def run_agent(
                 )
                 refreshed_cancel = None
             if refreshed_cancel is not None:
-                await _finish_cancellation(refreshed_cancel)
+                await _await_terminal_cleanup(
+                    _finish_cancellation(refreshed_cancel),
+                )
             elif runtime_event_authority_rejected:
                 record.ownership_lost = True
 
         if materialization_evidence is not None:
             try:
-                await run_manager.set_execution_lease_renewal(run_id, None)
+                await _await_terminal_cleanup(
+                    run_manager.set_execution_lease_renewal(run_id, None),
+                )
             except Exception:
                 logger.warning(
                     "Failed to clear accepted sandbox renewal for run %s",
@@ -2885,23 +3281,30 @@ async def run_agent(
 
         if not record.ownership_lost and checkpoint_access_authorized and _is_edit_replay_run(record) and record.status != RunStatus.success:
             if not record.finalizing:
-                await run_manager.set_finalizing(run_id, True)
+                await _await_terminal_cleanup(
+                    run_manager.set_finalizing(run_id, True),
+                )
             try:
                 if not checkpoint_rollback_completed:
-                    checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
-                        accessor=accessor,
-                        checkpointer=checkpointer,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        rollback_point=rollback_point,
-                        snapshot_capture_failed=snapshot_capture_failed,
+                    checkpoint_rollback_completed = await _await_terminal_cleanup(
+                        _rollback_to_pre_run_checkpoint(
+                            accessor=accessor,
+                            checkpointer=checkpointer,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            rollback_point=rollback_point,
+                            snapshot_capture_failed=snapshot_capture_failed,
+                        ),
+                        interrupted_result=False,
                     )
                 if checkpoint_rollback_completed:
-                    await _publish_restored_checkpoint_values(
-                        bridge=bridge,
-                        run_id=run_id,
-                        accessor=accessor,
-                        thread_id=thread_id,
+                    await _await_terminal_cleanup(
+                        _publish_restored_checkpoint_values(
+                            bridge=bridge,
+                            run_id=run_id,
+                            accessor=accessor,
+                            thread_id=thread_id,
+                        ),
                     )
                     logger.info(
                         "Run %s edit replay restored pre-run checkpoint %s",
@@ -2915,19 +3318,21 @@ async def run_agent(
         # abort/exception paths, where the stream loop broke before its own flush.
         if not record.ownership_lost and subagent_events is not None:
             try:
-                await subagent_events.flush()
+                await _await_terminal_cleanup(subagent_events.flush())
             except RuntimeEventOwnershipLost:
                 record.ownership_lost = True
 
         if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
             try:
-                await record_workspace_changes(
-                    event_appender,
-                    thread_id,
-                    run_id,
-                    pre_run_workspace_snapshot,
-                    user_id=workspace_changes_user_id,
-                    extra_excluded_dir_names=workspace_excluded_dir_names,
+                await _await_terminal_cleanup(
+                    record_workspace_changes(
+                        event_appender,
+                        thread_id,
+                        run_id,
+                        pre_run_workspace_snapshot,
+                        user_id=workspace_changes_user_id,
+                        extra_excluded_dir_names=workspace_excluded_dir_names,
+                    ),
                 )
             except RuntimeEventOwnershipLost:
                 record.ownership_lost = True
@@ -2951,7 +3356,7 @@ async def run_agent(
         # A fenced worker leaves receipt recovery to the peer that claimed it.
         if not record.ownership_lost and journal is not None:
             try:
-                await journal.flush()
+                await _await_terminal_cleanup(journal.flush())
             except RuntimeEventOwnershipLost:
                 record.ownership_lost = True
             except Exception as exc:
@@ -2969,20 +3374,26 @@ async def run_agent(
 
             if not record.ownership_lost and delivery_content is None:
                 if produced_output_paths is None:
-                    produced_output_paths = await _produced_output_paths(
-                        pre_run_workspace_snapshot,
-                        thread_id=thread_id,
-                        user_id=workspace_changes_user_id,
-                        extra_excluded_dir_names=workspace_excluded_dir_names,
+                    produced_output_paths = await _await_terminal_cleanup(
+                        _produced_output_paths(
+                            pre_run_workspace_snapshot,
+                            thread_id=thread_id,
+                            user_id=workspace_changes_user_id,
+                            extra_excluded_dir_names=workspace_excluded_dir_names,
+                        ),
+                        interrupted_result=[],
                     )
                 delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
             if not record.ownership_lost:
                 try:
-                    receipt_persisted = await _persist_delivery_receipt(
-                        event_appender,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        content=delivery_content,
+                    receipt_persisted = await _await_terminal_cleanup(
+                        _persist_delivery_receipt(
+                            event_appender,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            content=delivery_content,
+                        ),
+                        interrupted_result=False,
                     )
                 except RuntimeEventOwnershipLost:
                     record.ownership_lost = True
@@ -2992,11 +3403,13 @@ async def run_agent(
                     code="delivery_receipt_failed",
                     error_class="DeliveryReceiptFailure",
                 )
-                await run_manager.set_status(
-                    run_id,
-                    RunStatus.error,
-                    error=_DELIVERY_RECEIPT_FAILED_ERROR,
-                    persist=False,
+                await _await_terminal_cleanup(
+                    run_manager.set_status(
+                        run_id,
+                        RunStatus.error,
+                        error=_DELIVERY_RECEIPT_FAILED_ERROR,
+                        persist=False,
+                    ),
                 )
 
             if not record.ownership_lost:
@@ -3006,7 +3419,7 @@ async def run_agent(
                     failure=terminal_failure,
                 )
                 try:
-                    await journal.flush()
+                    await _await_terminal_cleanup(journal.flush())
                 except RuntimeEventOwnershipLost:
                     record.ownership_lost = True
                 except Exception as exc:
@@ -3033,16 +3446,42 @@ async def run_agent(
                 # RunRecord lifetime in integer seconds, including admission
                 # delay. Persist zero for sub-second successful turns.
                 duration = max(0, int((updated - created).total_seconds()))
-                await _persist_run_duration(
-                    checkpointer=checkpointer,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    duration_seconds=duration,
+                await _await_terminal_cleanup(
+                    _persist_run_duration(
+                        checkpointer=checkpointer,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        duration_seconds=duration,
+                    ),
                 )
             except Exception:
                 logger.debug(
                     "Failed to persist run duration for thread %s run %s (non-fatal)",
                     thread_id,
+                    run_id,
+                )
+
+        if not record.ownership_lost and event_store is not None and accepted_sandbox_session is not None:
+            try:
+                # Re-sample both authorities immediately before the durable
+                # terminal CAS. Earlier validation cannot cover delivery,
+                # lifecycle, or checkpoint awaits in this cleanup path.
+                await _await_terminal_cleanup(
+                    accepted_sandbox_session.validate(),
+                    propagate_inner_interrupt=True,
+                )
+            except Exception:
+                record.ownership_lost = True
+                logger.warning(
+                    "Skipping terminal persistence after accepted sandbox authority loss for run %s",
+                    run_id,
+                )
+            except BaseException as exc:
+                record.ownership_lost = True
+                if deferred_stop_interrupt is None:
+                    deferred_stop_interrupt = exc
+                logger.warning(
+                    "Accepted sandbox terminal validation interrupted for run %s; completing cleanup first",
                     run_id,
                 )
 
@@ -3053,27 +3492,39 @@ async def run_agent(
                     qualification_counter,
                 )
 
-                await qualification_counter("terminal_commit_attempts", record)
-                await qualification_barrier(
-                    "terminal_before_lifecycle_commit",
-                    record,
+                await _await_terminal_cleanup(
+                    qualification_counter("terminal_commit_attempts", record),
+                )
+                await _await_terminal_cleanup(
+                    qualification_barrier(
+                        "terminal_before_lifecycle_commit",
+                        record,
+                    ),
                 )
                 # Even after bounded receipt retries are exhausted, persist the
                 # real worker outcome. Leaving a successful row inflight would
                 # let lease recovery rewrite it as an error with a synthetic
                 # zero receipt.
                 if record.abort_event.is_set():
-                    await run_manager.persist_current_status(run_id)
+                    await _await_terminal_cleanup(
+                        run_manager.persist_current_status(run_id),
+                    )
                 else:
-                    cancel_action = await run_manager.set_status_if_not_cancelled(
-                        run_id,
-                        record.status,
-                        error=record.error,
-                        stop_reason=record.stop_reason,
+                    cancel_action = await _await_terminal_cleanup(
+                        run_manager.set_status_if_not_cancelled(
+                            run_id,
+                            record.status,
+                            error=record.error,
+                            stop_reason=record.stop_reason,
+                        ),
                     )
                     if cancel_action is not None:
-                        await _finish_cancellation(cancel_action)
-                        await run_manager.persist_current_status(run_id)
+                        await _await_terminal_cleanup(
+                            _finish_cancellation(cancel_action),
+                        )
+                        await _await_terminal_cleanup(
+                            run_manager.persist_current_status(run_id),
+                        )
             except Exception:
                 logger.warning(
                     "Failed to persist terminal status for run %s after delivery receipt attempts",
@@ -3085,7 +3536,13 @@ async def run_agent(
             try:
                 # Persist token usage + convenience fields to RunStore
                 completion = journal.get_completion_data()
-                await run_manager.update_run_completion(run_id, status=record.status.value, **completion)
+                await _await_terminal_cleanup(
+                    run_manager.update_run_completion(
+                        run_id,
+                        status=record.status.value,
+                        **completion,
+                    ),
+                )
             except Exception:
                 logger.warning(
                     "Failed to persist run completion for %s (non-fatal)",
@@ -3095,13 +3552,21 @@ async def run_agent(
 
         if started and not record.ownership_lost and checkpoint_access_authorized and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
             try:
-                await run_manager.wait_for_prior_finalizing(thread_id, run_id)
-                if not await run_manager.has_later_started_run(thread_id, run_id):
-                    await _ensure_interrupted_title(
-                        checkpointer=checkpointer,
-                        thread_id=thread_id,
-                        app_config=ctx.app_config,
-                        graph_input=graph_input,
+                await _await_terminal_cleanup(
+                    run_manager.wait_for_prior_finalizing(thread_id, run_id),
+                )
+                has_later_started_run = await _await_terminal_cleanup(
+                    run_manager.has_later_started_run(thread_id, run_id),
+                    interrupted_result=True,
+                )
+                if not has_later_started_run:
+                    await _await_terminal_cleanup(
+                        _ensure_interrupted_title(
+                            checkpointer=checkpointer,
+                            thread_id=thread_id,
+                            app_config=ctx.app_config,
+                            graph_input=graph_input,
+                        ),
                     )
             except Exception:
                 logger.debug(
@@ -3113,7 +3578,9 @@ async def run_agent(
         if started and not record.ownership_lost and checkpoint_access_authorized and checkpointer is not None:
             try:
                 ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-                ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
+                ckpt_tuple = await _await_terminal_cleanup(
+                    checkpointer.aget_tuple(ckpt_config),
+                )
                 if ckpt_tuple is not None:
                     ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
                     title = ckpt.get("channel_values", {}).get("title")
@@ -3132,17 +3599,19 @@ async def run_agent(
         if started and not record.ownership_lost and thread_store is not None and terminal_projection_owner_id is not None and terminal_projection_active_version is not None and type(record.checkpoint_terminal_state_version) is int:
             try:
                 final_status = "idle" if record.status == RunStatus.success else record.status.value
-                await thread_store.project_run(
-                    ThreadMetaRunProjection(
-                        run_id=run_id,
-                        thread_id=thread_id,
-                        owner_worker_id=terminal_projection_owner_id,
-                        active_state_version=(terminal_projection_active_version),
-                        terminal_state_version=(record.checkpoint_terminal_state_version),
-                        status=final_status,
-                        display_name=projected_title,
+                await _await_terminal_cleanup(
+                    thread_store.project_run(
+                        ThreadMetaRunProjection(
+                            run_id=run_id,
+                            thread_id=thread_id,
+                            owner_worker_id=terminal_projection_owner_id,
+                            active_state_version=(terminal_projection_active_version),
+                            terminal_state_version=(record.checkpoint_terminal_state_version),
+                            status=final_status,
+                            display_name=projected_title,
+                        ),
+                        user_id=record.user_id,
                     ),
-                    user_id=record.user_id,
                 )
             except Exception:
                 logger.debug(
@@ -3152,7 +3621,10 @@ async def run_agent(
 
         if not record.ownership_lost and ctx.on_run_completed is not None:
             try:
-                await ctx.on_run_completed(record)
+                await _await_terminal_cleanup(
+                    ctx.on_run_completed(record),
+                    interrupt_current=True,
+                )
             except Exception:
                 logger.warning(
                     "Run completion hook failed for %s (non-fatal)",
@@ -3162,7 +3634,7 @@ async def run_agent(
             except BaseException as exc:
                 # A cancellation or other control-flow interruption must not
                 # bypass stream closure and local reference cleanup.
-                deferred_stop_interrupt = exc
+                _defer_stop_interrupt(exc)
                 logger.warning(
                     "Run completion hook interrupted for run %s; completing cleanup first",
                     run_id,
@@ -3172,15 +3644,18 @@ async def run_agent(
             # Keep the finalizing barrier held until stop observers finish, so
             # a same-thread replacement cannot overlap this task's lifecycle.
             try:
-                await notify_task_stop(
-                    extensions,
-                    task_store,
-                    task_info,
-                    lead_task_outcome(
-                        aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),
-                        succeeded=record.status == RunStatus.success,
+                await _await_terminal_cleanup(
+                    notify_task_stop(
+                        extensions,
+                        task_store,
+                        task_info,
+                        lead_task_outcome(
+                            aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),
+                            succeeded=record.status == RunStatus.success,
+                        ),
+                        timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
                     ),
-                    timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                    interrupt_current=True,
                 )
             except Exception:
                 logger.warning(
@@ -3191,13 +3666,15 @@ async def run_agent(
             except BaseException as exc:
                 # Cancellation here must not strand the finalizing barrier or
                 # leave stream consumers waiting for the end frame.
-                deferred_stop_interrupt = exc
+                _defer_stop_interrupt(exc)
                 logger.warning(
                     "Extension task-stop notification interrupted for run %s; completing cleanup first",
                     run_id,
                 )
         if record.finalizing:
-            await run_manager.set_finalizing(run_id, False)
+            await _await_terminal_cleanup(
+                run_manager.set_finalizing(run_id, False),
+            )
 
         from deerflow.runtime.skill_projection import get_skill_projection_coordinator
 
@@ -3216,9 +3693,11 @@ async def run_agent(
             )
 
             try:
-                await asyncio.to_thread(
-                    release_accepted_skill_consumer,
-                    projection_token,
+                await _await_terminal_cleanup(
+                    asyncio.to_thread(
+                        release_accepted_skill_consumer,
+                        projection_token,
+                    ),
                 )
             except Exception:
                 logger.warning(
@@ -3233,9 +3712,39 @@ async def run_agent(
                 run_id=run_id,
             )
 
-        if materialization is not None:
+        if accepted_sandbox_session is not None:
             try:
-                await materialization.release()
+                await _await_terminal_cleanup(
+                    accepted_sandbox_session.close(),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to release accepted materialization for run %s",
+                    run_id,
+                    exc_info=True,
+                )
+            except BaseException as exc:
+                # Preserve cancellation/interrupt semantics, but do not let an
+                # interrupted provider release bypass lifecycle publication or
+                # the rest of the worker's terminal cleanup.
+                _defer_stop_interrupt(exc)
+                logger.warning(
+                    "Accepted materialization cleanup interrupted for run %s; completing terminal cleanup first",
+                    run_id,
+                )
+            await _await_terminal_cleanup(
+                _publish_accepted_sandbox_lifecycle_during_cleanup(),
+                interrupt_current=True,
+            )
+            if runtime_ctx is not None:
+                from deerflow.sandbox.accepted_material import (
+                    strip_accepted_sandbox_session,
+                )
+
+                strip_accepted_sandbox_session(runtime_ctx)
+        elif materialization is not None:
+            try:
+                await _await_terminal_cleanup(materialization.release())
             except Exception:
                 logger.warning(
                     "Failed to release accepted materialization for run %s",
@@ -3245,7 +3754,11 @@ async def run_agent(
 
         if pinned_material_for_cleanup is not None:
             try:
-                await asyncio.to_thread(pinned_material_for_cleanup.release_process_material)
+                await _await_terminal_cleanup(
+                    asyncio.to_thread(
+                        pinned_material_for_cleanup.release_process_material,
+                    ),
+                )
             except Exception:
                 logger.warning(
                     "Failed to release accepted skill snapshot for run %s",
@@ -3256,7 +3769,7 @@ async def run_agent(
             dispatch_ledger.close()
         if not record.ownership_lost:
             try:
-                await bridge.publish_end(run_id)
+                await _await_terminal_cleanup(bridge.publish_end(run_id))
             except BaseException as exc:
                 if deferred_stop_interrupt is None:
                     deferred_stop_interrupt = exc
@@ -3269,7 +3782,9 @@ async def run_agent(
 
         if journal is not None:
             try:
-                await journal.close(flush=not record.ownership_lost)
+                await _await_terminal_cleanup(
+                    journal.close(flush=not record.ownership_lost),
+                )
             except Exception:
                 logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
 

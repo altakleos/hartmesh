@@ -415,7 +415,10 @@ def _is_path_under_base(path: str, base: str) -> bool:
 def _normalize_skills_container_path(container_path: str) -> str:
     """Return a canonical skills root that cannot overlap platform mounts."""
     if not container_path or not container_path.startswith("/") or container_path.startswith("//"):
-        raise HTTPException(status_code=400, detail="The skills container path must be an absolute non-root path")
+        raise HTTPException(
+            status_code=400,
+            detail="The skills container path must be an absolute non-root path",
+        )
 
     normalized = posixpath.normpath(container_path)
     if normalized == "/" or normalized != container_path:
@@ -449,10 +452,11 @@ def _normalize_extra_mount_container_path(
 ) -> str:
     normalized = posixpath.normpath(container_path)
     if not normalized.startswith("/"):
-        raise HTTPException(status_code=400, detail=f"Extra mount path must be absolute: {container_path}")
-    allowed_paths = ALLOWED_EXTRA_MOUNT_PATHS | _managed_skill_category_mount_paths(
-        skills_container_path
-    )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Extra mount path must be absolute: {container_path}",
+        )
+    allowed_paths = ALLOWED_EXTRA_MOUNT_PATHS | _managed_skill_category_mount_paths(skills_container_path)
     if normalized not in allowed_paths:
         raise HTTPException(status_code=400, detail=f"Unsupported extra mount path: {container_path}")
     return normalized
@@ -475,9 +479,15 @@ def _validated_extra_mounts(
     for mount in extra_mounts:
         host_path = os.path.normpath(mount.host_path)
         if not os.path.isabs(host_path):
-            raise HTTPException(status_code=400, detail=f"Extra mount host path must be absolute: {mount.host_path}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Extra mount host path must be absolute: {mount.host_path}",
+            )
         if not _is_path_under_base(host_path, host_base_dir):
-            raise HTTPException(status_code=400, detail=f"Extra mount host path is outside DeerFlow state: {mount.host_path}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Extra mount host path is outside DeerFlow state: {mount.host_path}",
+            )
 
         container_path = _normalize_extra_mount_container_path(
             mount.container_path,
@@ -572,7 +582,10 @@ def _lark_broker_credential_mounts(
 def _extra_mount_pvc_sub_path(host_path: str) -> str:
     host_base_dir = _host_base_dir_for_extra_mounts()
     if not _is_path_under_base(host_path, host_base_dir):
-        raise HTTPException(status_code=400, detail=f"Extra mount host path is outside DeerFlow state: {host_path}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Extra mount host path is outside DeerFlow state: {host_path}",
+        )
 
     rel_path = os.path.relpath(os.path.normpath(host_path), host_base_dir)
     rel_parts = [part for part in rel_path.replace(os.sep, "/").split("/") if part and part != "."]
@@ -1359,6 +1372,7 @@ def _takeover_accepted_attempt(
         detail="accepted_execution_takeover_unavailable",
     )
 
+
 def _delete_lease_by_exact_uid(name: str, uid: str) -> None:
     if coordination_v1 is None:
         return
@@ -1803,12 +1817,7 @@ def _build_volumes(
         extra_mounts,
         skills_container_path=skills_root,
     )
-    skill_overrides = {
-        posixpath.normpath(mount.container_path)
-        for mount in validated_extra_mounts
-        if posixpath.normpath(mount.container_path)
-        in managed_skill_paths
-    }
+    skill_overrides = {posixpath.normpath(mount.container_path) for mount in validated_extra_mounts if posixpath.normpath(mount.container_path) in managed_skill_paths}
     all_skill_categories_overridden = managed_skill_paths <= skill_overrides
 
     # ── Skills volumes ────────────────────────────────────────────────
@@ -1817,8 +1826,7 @@ def _build_volumes(
         # PVC mode: three-way subPath not yet supported; fall back to
         # single-volume mount for backward compatibility.
         logger.warning(
-            "SKILLS_PVC_NAME is set — three-way skills layout is not supported in PVC mode yet; "
-            "falling back to single %s mount",
+            "SKILLS_PVC_NAME is set — three-way skills layout is not supported in PVC mode yet; falling back to single %s mount",
             skills_root,
         )
         volumes.append(
@@ -1862,9 +1870,7 @@ def _build_volumes(
                 )
             )
 
-        legacy_path = join_host_path(
-            DEER_FLOW_HOST_BASE_DIR, "users", user_id, "skills_view", "legacy"
-        )
+        legacy_path = join_host_path(DEER_FLOW_HOST_BASE_DIR, "users", user_id, "skills_view", "legacy")
         if posixpath.join(skills_root, "legacy") not in skill_overrides:
             volumes.append(
                 k8s_client.V1Volume(
@@ -1975,12 +1981,7 @@ def _build_volume_mounts(
         extra_mounts,
         skills_container_path=skills_root,
     )
-    skill_overrides = {
-        posixpath.normpath(mount.container_path)
-        for mount in validated_extra_mounts
-        if posixpath.normpath(mount.container_path)
-        in managed_skill_paths
-    }
+    skill_overrides = {posixpath.normpath(mount.container_path) for mount in validated_extra_mounts if posixpath.normpath(mount.container_path) in managed_skill_paths}
     all_skill_categories_overridden = managed_skill_paths <= skill_overrides
 
     if SANDBOX_VOLUME_CONFIG.mode == "pvc" and not all_skill_categories_overridden:
@@ -2069,7 +2070,12 @@ def _build_lark_cli_init_containers(
                 image=LARK_CLI_BROKER_IMAGE,
                 image_pull_policy="IfNotPresent",
                 args=["install-shim", LARK_CLI_RUNTIME_CONTAINER_PATH],
-                env=[k8s_client.V1EnvVar(name="LARK_CLI_RUNTIME_DEST", value=LARK_CLI_RUNTIME_CONTAINER_PATH)],
+                env=[
+                    k8s_client.V1EnvVar(
+                        name="LARK_CLI_RUNTIME_DEST",
+                        value=LARK_CLI_RUNTIME_CONTAINER_PATH,
+                    )
+                ],
                 volume_mounts=[runtime_mount],
                 security_context=secure,
             )
@@ -2114,9 +2120,21 @@ def _build_lark_cli_broker_sidecars(
     )
     volume_mounts: list[k8s_client.V1VolumeMount] = []
     for container_path, volume_name, sidecar_path in (
-        (LARK_CLI_CONFIG_CONTAINER_PATH, LARK_BROKER_CONFIG_VOLUME_NAME, LARK_BROKER_SIDECAR_CONFIG_PATH),
-        (LARK_CLI_LOCKS_CONTAINER_PATH, LARK_BROKER_LOCKS_VOLUME_NAME, LARK_BROKER_SIDECAR_LOCKS_PATH),
-        (LARK_CLI_DATA_CONTAINER_PATH, LARK_BROKER_DATA_VOLUME_NAME, LARK_BROKER_SIDECAR_DATA_PATH),
+        (
+            LARK_CLI_CONFIG_CONTAINER_PATH,
+            LARK_BROKER_CONFIG_VOLUME_NAME,
+            LARK_BROKER_SIDECAR_CONFIG_PATH,
+        ),
+        (
+            LARK_CLI_LOCKS_CONTAINER_PATH,
+            LARK_BROKER_LOCKS_VOLUME_NAME,
+            LARK_BROKER_SIDECAR_LOCKS_PATH,
+        ),
+        (
+            LARK_CLI_DATA_CONTAINER_PATH,
+            LARK_BROKER_DATA_VOLUME_NAME,
+            LARK_BROKER_SIDECAR_DATA_PATH,
+        ),
     ):
         mount = credential_mounts.get(container_path)
         if mount is None:
@@ -3639,8 +3657,81 @@ def readiness():
     return {"status": "ready"}
 
 
+def _accepted_sandbox_pvc_topology(
+    role: Literal["skills", "userdata"],
+    claim_name: str,
+) -> dict[str, object]:
+    claim = core_v1.read_namespaced_persistent_volume_claim(
+        claim_name,
+        K8S_NAMESPACE,
+    )
+    metadata = getattr(claim, "metadata", None)
+    spec = getattr(claim, "spec", None)
+    status = getattr(claim, "status", None)
+    uid = getattr(metadata, "uid", None)
+    volume_name = getattr(spec, "volume_name", None)
+    storage_class = getattr(spec, "storage_class_name", None)
+    access_modes = getattr(spec, "access_modes", None)
+    if (
+        not isinstance(uid, str)
+        or not uid
+        or not isinstance(volume_name, str)
+        or not volume_name
+        or not isinstance(storage_class, str)
+        or not storage_class
+        or not isinstance(access_modes, list)
+        or "ReadWriteMany" not in access_modes
+        or any(not isinstance(mode, str) or not mode for mode in access_modes)
+        or getattr(status, "phase", None) != "Bound"
+    ):
+        raise RuntimeError("accepted_sandbox_topology_invalid")
+    return {
+        "role": role,
+        "uid": uid,
+        "volume_name": volume_name,
+        "storage_class": storage_class,
+        "access_modes": sorted(set(access_modes)),
+    }
+
+
+def _accepted_sandbox_runtime_topology() -> dict[str, object]:
+    namespace = core_v1.read_namespace(K8S_NAMESPACE)
+    metadata = getattr(namespace, "metadata", None)
+    namespace_uid = getattr(metadata, "uid", None)
+    labels = getattr(metadata, "labels", None) or {}
+    if not isinstance(namespace_uid, str) or not namespace_uid or not isinstance(labels, dict):
+        raise RuntimeError("accepted_sandbox_topology_invalid")
+    return {
+        "version": 1,
+        "provider_kind": "aio_kubernetes",
+        "profile": ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2,
+        "sandbox_image_digest": SANDBOX_IMAGE.rsplit("@sha256:", 1)[-1],
+        "verifier_image_digest": ACCEPTED_SKILL_RUNTIME_IMAGE.rsplit(
+            "@sha256:",
+            1,
+        )[-1],
+        "namespace_uid": namespace_uid,
+        "pod_security_enforce": labels.get(
+            "pod-security.kubernetes.io/enforce",
+        ),
+        "pod_security_warn": labels.get("pod-security.kubernetes.io/warn"),
+        "pod_security_audit": labels.get("pod-security.kubernetes.io/audit"),
+        "runtime_class": SANDBOX_RUNTIME_CLASS or None,
+        "gateway_namespace": PROVISIONER_GATEWAY_NAMESPACE,
+        "gateway_service_account": PROVISIONER_GATEWAY_SERVICE_ACCOUNT,
+        "token_review_audience": PROVISIONER_AUTH_AUDIENCE,
+        "accepted_attempt_lease_seconds": ACCEPTED_ATTEMPT_LEASE_SECONDS,
+        "accepted_attempt_reconcile_interval_seconds": (ACCEPTED_ATTEMPT_RECONCILE_INTERVAL_SECONDS),
+        "accepted_attempt_reconcile_limit": ACCEPTED_ATTEMPT_RECONCILE_LIMIT,
+        "volumes": [
+            _accepted_sandbox_pvc_topology("skills", SKILLS_PVC_NAME),
+            _accepted_sandbox_pvc_topology("userdata", USERDATA_PVC_NAME),
+        ],
+    }
+
+
 @app.get("/api/capabilities")
-async def capabilities():
+def capabilities():
     """Report provisioner-side capabilities the Gateway cannot infer statically.
 
     ``lark_cli_init_image`` / ``lark_cli_broker_image`` reflect whether a lark-cli
@@ -3650,7 +3741,12 @@ async def capabilities():
     """
     accepted_projection_ready = (
         ACCEPTED_SKILL_PROJECTION_PROFILE == ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2
+        and SANDBOX_VOLUME_CONFIG.mode == "pvc"
+        and bool(SKILLS_PVC_NAME)
         and bool(USERDATA_PVC_NAME)
+        and bool(PROVISIONER_AUTH_AUDIENCE)
+        and bool(PROVISIONER_GATEWAY_NAMESPACE)
+        and bool(PROVISIONER_GATEWAY_SERVICE_ACCOUNT)
         and re.fullmatch(
             r"[^\s@]+@sha256:[0-9a-f]{64}",
             ACCEPTED_SKILL_RUNTIME_IMAGE,
@@ -3662,6 +3758,22 @@ async def capabilities():
         )
         is not None
     )
+    accepted_sandbox_topology = None
+    if accepted_projection_ready:
+        try:
+            accepted_sandbox_topology = _accepted_sandbox_runtime_topology()
+        except (
+            ApiException,
+            AttributeError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            logger.warning(
+                "accepted sandbox topology unavailable: %s",
+                getattr(exc, "status", type(exc).__name__),
+            )
+            accepted_projection_ready = False
     return {
         "lark_cli_init_image": bool(LARK_CLI_INIT_IMAGE),
         "lark_cli_broker_image": bool(LARK_CLI_BROKER_IMAGE),
@@ -3671,6 +3783,7 @@ async def capabilities():
                 "profile": ACCEPTED_SKILL_PROFILE_RWX_VERIFIED_COPY_V2,
                 "sandbox_image_digest": SANDBOX_IMAGE.rsplit("@sha256:", 1)[-1],
                 "accepted_skill_runtime_image_digest": (ACCEPTED_SKILL_RUNTIME_IMAGE.rsplit("@sha256:", 1)[-1]),
+                "runtime_topology": accepted_sandbox_topology,
             }
             if accepted_projection_ready
             else None
@@ -3689,9 +3802,7 @@ def create_sandbox(req: CreateSandboxRequest):
     thread_id = req.thread_id or sandbox_id
     user_id = req.user_id
     include_legacy_skills = req.include_legacy_skills
-    skills_container_path = _normalize_skills_container_path(
-        req.skills_container_path
-    )
+    skills_container_path = _normalize_skills_container_path(req.skills_container_path)
     provision_lark_cli_runtime = req.provision_lark_cli_runtime
     provision_lark_cli_broker = req.provision_lark_cli_broker
     accepted_projection = req.accepted_skill_projection

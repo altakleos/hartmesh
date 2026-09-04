@@ -397,6 +397,12 @@ async def test_auth_middleware_accepts_only_bound_gateway_service_account_token(
         "ACCEPTED_SKILL_PROJECTION_PROFILE",
         "rwx_verified_copy_v2",
     )
+    monkeypatch.setattr(
+        provisioner_module,
+        "SANDBOX_VOLUME_CONFIG",
+        SimpleNamespace(mode="pvc"),
+    )
+    monkeypatch.setattr(provisioner_module, "SKILLS_PVC_NAME", "skills")
     monkeypatch.setattr(provisioner_module, "USERDATA_PVC_NAME", "userdata")
     monkeypatch.setattr(
         provisioner_module,
@@ -408,6 +414,32 @@ async def test_auth_middleware_accepts_only_bound_gateway_service_account_token(
         "ACCEPTED_SKILL_RUNTIME_IMAGE",
         "registry.example/verifier@sha256:" + "b" * 64,
     )
+    monkeypatch.setattr(provisioner_module, "SANDBOX_RUNTIME_CLASS", "")
+
+    class Core:
+        def read_namespace(self, name: str):
+            assert name == provisioner_module.K8S_NAMESPACE
+            return SimpleNamespace(
+                metadata=SimpleNamespace(uid="namespace-uid", labels={}),
+            )
+
+        def read_namespaced_persistent_volume_claim(
+            self,
+            name: str,
+            namespace: str,
+        ):
+            assert namespace == provisioner_module.K8S_NAMESPACE
+            return SimpleNamespace(
+                metadata=SimpleNamespace(uid=f"{name}-uid"),
+                spec=SimpleNamespace(
+                    volume_name=f"{name}-volume",
+                    storage_class_name="rwx-storage",
+                    access_modes=["ReadWriteMany"],
+                ),
+                status=SimpleNamespace(phase="Bound"),
+            )
+
+    monkeypatch.setattr(provisioner_module, "core_v1", Core())
     reviewed: list[object] = []
 
     class Authentication:
@@ -444,6 +476,40 @@ async def test_auth_middleware_accepts_only_bound_gateway_service_account_token(
             "profile": "rwx_verified_copy_v2",
             "sandbox_image_digest": "a" * 64,
             "accepted_skill_runtime_image_digest": "b" * 64,
+            "runtime_topology": {
+                "version": 1,
+                "provider_kind": "aio_kubernetes",
+                "profile": "rwx_verified_copy_v2",
+                "sandbox_image_digest": "a" * 64,
+                "verifier_image_digest": "b" * 64,
+                "namespace_uid": "namespace-uid",
+                "pod_security_enforce": None,
+                "pod_security_warn": None,
+                "pod_security_audit": None,
+                "runtime_class": None,
+                "gateway_namespace": "runtime",
+                "gateway_service_account": "gateway",
+                "token_review_audience": "hartmesh-provisioner",
+                "accepted_attempt_lease_seconds": 120,
+                "accepted_attempt_reconcile_interval_seconds": 30,
+                "accepted_attempt_reconcile_limit": 100,
+                "volumes": [
+                    {
+                        "role": "skills",
+                        "uid": "skills-uid",
+                        "volume_name": "skills-volume",
+                        "storage_class": "rwx-storage",
+                        "access_modes": ["ReadWriteMany"],
+                    },
+                    {
+                        "role": "userdata",
+                        "uid": "userdata-uid",
+                        "volume_name": "userdata-volume",
+                        "storage_class": "rwx-storage",
+                        "access_modes": ["ReadWriteMany"],
+                    },
+                ],
+            },
         }
         response = await client.get(
             "/api/capabilities",
@@ -452,3 +518,32 @@ async def test_auth_middleware_accepts_only_bound_gateway_service_account_token(
         assert response.status_code == 401
 
     assert len(reviewed) == 1
+
+
+def test_accepted_sandbox_topology_rejects_an_unbound_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    class Core:
+        def read_namespaced_persistent_volume_claim(
+            self,
+            _name: str,
+            _namespace: str,
+        ):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(uid="claim-uid"),
+                spec=SimpleNamespace(
+                    volume_name="bound-volume-name",
+                    storage_class_name="rwx-storage",
+                    access_modes=["ReadWriteMany"],
+                ),
+                status=SimpleNamespace(phase="Pending"),
+            )
+
+    monkeypatch.setattr(provisioner_module, "core_v1", Core())
+
+    with pytest.raises(RuntimeError, match="accepted_sandbox_topology_invalid"):
+        provisioner_module._accepted_sandbox_pvc_topology(
+            "skills",
+            "skills-claim",
+        )

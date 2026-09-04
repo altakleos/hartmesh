@@ -671,6 +671,35 @@ drift rejection; they do not qualify live cross-node CNI/RWX behavior, which rem
 artifact-bound opt-in release gate. The same management authentication remains enabled when the projection profile is
 disabled so legacy remote AIO calls do not become anonymous.
 
+Selecting `rwx_verified_copy_v2` is necessary but is not itself production
+qualification. Durable accepted sandbox execution also requires a current,
+canonical `deerflow.accepted-sandbox-qualification/v1` companion mounted
+read-only into the Gateway:
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  provisioner_url: http://provisioner:8002
+  accepted_skill_projection_profile: rwx_verified_copy_v2
+  accepted_material_qualification_evidence: /var/run/hartmesh/qualification/evidence.json
+  accepted_material_qualification_digest: sha256:<artifact-sha256>
+  accepted_material_qualification_max_age_seconds: 2592000
+```
+
+The evidence path and digest must be configured together. Before admitting a
+nonempty accepted session, the Gateway checks the companion's status, freshness,
+AIO capability profile, explicit race facts, and portable topology-policy digest
+against a fresh provisioner sample, then verifies its embedded v2 image subjects.
+The provisioner also validates the current namespace UID and each PVC UID plus
+its bound PV name on that sample; those deployment-specific values are not
+copied from the qualification namespace. A
+standalone v2 proof, candidate run, or deployment-report reference cannot satisfy
+this runtime gate. This checkout
+ships no passing artifact, so production accepted sandbox execution remains
+disabled until the live qualification lane publishes one. See
+[Accepted Sandbox Execution](ACCEPTED_SANDBOX_EXECUTION.md) for the authority,
+operation-fencing, evidence, recovery, and provider contracts.
+
 **E2B Cloud Sandbox** (runs sandbox code in [E2B](https://e2b.dev) cloud micro-VMs):
 
 ```yaml

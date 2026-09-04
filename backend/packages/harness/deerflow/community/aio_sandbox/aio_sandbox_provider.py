@@ -14,14 +14,17 @@ import asyncio
 import atexit
 import contextlib
 import hashlib
+import json
 import logging
 import os
+import re
 import signal
 import threading
 import time
 import uuid
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 try:
@@ -45,8 +48,12 @@ from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATIO
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_LOCKS_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.accepted_material import (
+    AcceptedMaterialCapability,
+    AcceptedMaterialError,
     AcceptedMaterialExecutionClaimV1,
     AcceptedMaterializerSelection,
+    AcceptedSandboxCapabilityProfileV1,
+    AcceptedSandboxQualificationV1,
 )
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.identity import derive_sandbox_scope_token
@@ -334,6 +341,21 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 sandbox_config,
                 "accepted_material_lease_duration_seconds",
                 300,
+            ),
+            "accepted_material_qualification_evidence": getattr(
+                sandbox_config,
+                "accepted_material_qualification_evidence",
+                None,
+            ),
+            "accepted_material_qualification_digest": getattr(
+                sandbox_config,
+                "accepted_material_qualification_digest",
+                None,
+            ),
+            "accepted_material_qualification_max_age_seconds": getattr(
+                sandbox_config,
+                "accepted_material_qualification_max_age_seconds",
+                30 * 24 * 60 * 60,
             ),
             "skills_container_path": _normalize_skills_container_path(
                 configured_skills_path,
@@ -2081,14 +2103,55 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         user_id: str,
         binding: AcceptedSkillSandboxBindingV1,
         execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
+        resource_scope_ref: str | None = None,
     ) -> str:
-        return await asyncio.to_thread(
-            self._acquire_bound_accepted_skills_with_claim,
-            thread_id,
-            user_id,
-            binding,
-            execution_claim,
+        acquire_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._acquire_bound_accepted_skills_with_claim,
+                thread_id,
+                user_id,
+                binding,
+                execution_claim,
+                resource_scope_ref,
+            ),
+            name=f"aio-accepted-acquire:{binding.run_id}",
         )
+        try:
+            return await asyncio.shield(acquire_task)
+        except asyncio.CancelledError as cancellation:
+            # Executor work cannot be cancelled once it starts. Recover the
+            # exact resource identity before propagating cancellation so a
+            # lead or batch caller cannot orphan a newly created sandbox.
+            while not acquire_task.done():
+                try:
+                    await asyncio.shield(acquire_task)
+                except asyncio.CancelledError:
+                    continue
+            try:
+                sandbox_id = acquire_task.result()
+            except Exception:
+                logger.warning(
+                    "Accepted sandbox acquisition failed after caller cancellation",
+                    exc_info=True,
+                )
+            else:
+                destroy_task = asyncio.create_task(
+                    asyncio.to_thread(self.destroy, sandbox_id),
+                    name=f"aio-accepted-cancel-cleanup:{binding.run_id}",
+                )
+                while not destroy_task.done():
+                    try:
+                        await asyncio.shield(destroy_task)
+                    except asyncio.CancelledError:
+                        continue
+                try:
+                    destroy_task.result()
+                except Exception:
+                    logger.error(
+                        "Accepted sandbox cleanup failed after caller cancellation",
+                        exc_info=True,
+                    )
+            raise cancellation
 
     def _acquire_bound_accepted_skills_with_claim(
         self,
@@ -2096,20 +2159,54 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         user_id: str,
         binding: AcceptedSkillSandboxBindingV1,
         execution_claim: AcceptedMaterialExecutionClaimV1 | None,
+        resource_scope_ref: str | None,
     ) -> str:
         sandbox_id = self._acquire_accepted_skills_internal(
             thread_id,
             user_id=user_id,
             binding=binding,
             execution_claim=execution_claim,
+            resource_scope_ref=resource_scope_ref,
         )
-        self.bind_accepted_skill_snapshot(
-            sandbox_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            binding=binding,
-        )
+        try:
+            identity_thread_id = self._accepted_resource_thread_id(
+                thread_id,
+                resource_scope_ref,
+            )
+            self.bind_accepted_skill_snapshot(
+                sandbox_id,
+                thread_id=identity_thread_id,
+                user_id=user_id,
+                binding=binding,
+            )
+        except BaseException as exc:
+            try:
+                self.destroy(sandbox_id)
+            except BaseException:
+                logger.error(
+                    "Accepted sandbox cleanup failed after binding failure",
+                    exc_info=True,
+                )
+            raise exc
         return sandbox_id
+
+    @staticmethod
+    def _accepted_resource_thread_id(
+        thread_id: str,
+        resource_scope_ref: str | None,
+    ) -> str:
+        """Separate attempt ownership identity from the mounted parent thread."""
+
+        if resource_scope_ref is None:
+            return thread_id
+        if not isinstance(resource_scope_ref, str) or not resource_scope_ref or len(resource_scope_ref.encode("utf-8")) > 512:
+            raise AcceptedSkillSandboxBindingError(
+                "accepted_material_scope_unavailable",
+            )
+        digest = hashlib.sha256(
+            b"hartmesh.accepted-sandbox-attempt.v1\0" + thread_id.encode("utf-8") + b"\0" + resource_scope_ref.encode("utf-8"),
+        ).hexdigest()
+        return f"accepted-attempt-{digest[:32]}"
 
     async def recover_bound_accepted_skills_async(
         self,
@@ -2137,6 +2234,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         user_id: str,
         binding: AcceptedSkillSandboxBindingV1 | None,
         execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
+        resource_scope_ref: str | None = None,
     ) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)
         try:
@@ -2166,7 +2264,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             ),
             configured_host_mounts,
         )
-        key = self._thread_key(thread_id, effective_user_id)
+        identity_thread_id = self._accepted_resource_thread_id(
+            thread_id,
+            resource_scope_ref,
+        )
+        key = self._thread_key(identity_thread_id, effective_user_id)
         with self._acquire_serializer.hold(key):
             with self._lock:
                 existing = self._thread_sandboxes.get(key)
@@ -2175,7 +2277,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 if existing in accepted_ids:
                     return existing
                 raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_isolation_conflict")
-            sandbox_id = f"{self._sandbox_id_for_thread(thread_id, effective_user_id)}-accepted"
+            sandbox_id = f"{self._sandbox_id_for_thread(identity_thread_id, effective_user_id)}-accepted"
             created = self._create_sandbox(
                 thread_id,
                 sandbox_id,
@@ -2183,6 +2285,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 accepted_skills_only=True,
                 accepted_skill_binding=binding,
                 accepted_execution_claim=execution_claim,
+                identity_thread_id=identity_thread_id,
             )
             with self._lock:
                 accepted_ids = getattr(self, "_accepted_only_sandbox_ids", None)
@@ -2216,6 +2319,153 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         return self._config.get("accepted_skill_projection_profile") == "rwx_verified_copy_v2" and isinstance(self._backend, RemoteSandboxBackend)
 
+    @staticmethod
+    def accepted_sandbox_capability_profile() -> AcceptedSandboxCapabilityProfileV1:
+        """Declare AIO guarantees separately from live qualification.
+
+        AIO's Redis/Kubernetes ownership seam is authoritative for lease
+        acquisition, but its ordinary sandbox operations do not carry the
+        expected ownership epoch into the provider acceptance step.  The
+        stronger atomic-operation flag and exact-two support therefore remain
+        false.
+        """
+
+        return AcceptedSandboxCapabilityProfileV1.build(
+            material_capability=AcceptedMaterialCapability.IMMUTABLE_READ_ONLY,
+            atomic_provider_ownership_fencing=True,
+            atomic_provider_operation_fencing=False,
+            authoritative_shared_expiry=True,
+            resolved_immutable_image=True,
+            restricted_non_root_isolation=True,
+            # The running process can revalidate the protected resource, but
+            # a replacement process cannot recover the ephemeral attempt
+            # capability. Process loss therefore terminalizes and reconciles.
+            recoverable_resource_lookup=False,
+            durable_one_replica=True,
+            exact_two=False,
+        )
+
+    async def _accepted_sandbox_qualification(
+        self,
+        *,
+        profile: AcceptedSandboxCapabilityProfileV1,
+        runtime_image_digest: str,
+    ) -> AcceptedSandboxQualificationV1:
+        """Load one bounded, canonical, current live qualification artifact."""
+
+        from deerflow.qualification_evidence import (
+            ACCEPTED_SANDBOX_OPERATION_FENCING_MODE_V1,
+            MAX_QUALIFICATION_EVIDENCE_BYTES,
+            AcceptedSandboxQualificationArtifactV1,
+            AcceptedSandboxRuntimeTopologyV1,
+            qualification_evidence_digest,
+        )
+
+        try:
+            runtime_subjects = await asyncio.to_thread(
+                self._backend.accepted_material_runtime_qualification_subjects,
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            raise AcceptedMaterialError("sandbox_provider_unqualified") from None
+        if not isinstance(runtime_subjects, tuple) or len(runtime_subjects) != 3:
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
+        sandbox_image_digest, verifier_image_digest, runtime_topology = runtime_subjects
+        if any(not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None for digest in (sandbox_image_digest, verifier_image_digest)) or not isinstance(runtime_topology, AcceptedSandboxRuntimeTopologyV1):
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
+        if sandbox_image_digest != runtime_image_digest:
+            raise AcceptedMaterialError("sandbox_image_unresolved")
+
+        gateway_image_digest = os.getenv("DEER_FLOW_IMAGE_DIGEST", "")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", gateway_image_digest) is None:
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
+
+        reference = self._config.get("accepted_material_qualification_evidence")
+        expected_digest = self._config.get(
+            "accepted_material_qualification_digest",
+        )
+        if not isinstance(reference, str) or not reference or not isinstance(expected_digest, str) or not expected_digest:
+            from deerflow.runtime.kubernetes_qualification import (
+                accepted_sandbox_qualification_candidate_enabled,
+            )
+
+            if not accepted_sandbox_qualification_candidate_enabled():
+                raise AcceptedMaterialError("sandbox_provider_unqualified")
+            now = datetime.now(UTC)
+            candidate_id = os.environ["DEER_FLOW_QUALIFICATION_CANDIDATE_ID"]
+            candidate_payload = {
+                "version": 1,
+                "candidate_id": candidate_id,
+                "gateway_image_digest": gateway_image_digest,
+                "sandbox_image_digest": sandbox_image_digest,
+                "verifier_image_digest": verifier_image_digest,
+            }
+            candidate_digest = hashlib.sha256(
+                json.dumps(
+                    candidate_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+            ).hexdigest()
+            return AcceptedSandboxQualificationV1.build(
+                capability_profile_digest=profile.digest,
+                qualification_scope=(AcceptedSandboxQualificationArtifactV1.SCOPE),
+                artifact_digest=candidate_digest,
+                topology_digest=runtime_topology.digest,
+                verified_at=now,
+                expires_at=now + timedelta(minutes=15),
+                status="candidate",
+            )
+
+        def _read_bounded_artifact() -> bytes:
+            with Path(reference).open("rb") as artifact:
+                payload = artifact.read(MAX_QUALIFICATION_EVIDENCE_BYTES + 1)
+            if len(payload) > MAX_QUALIFICATION_EVIDENCE_BYTES:
+                raise ValueError("qualification evidence exceeds bounded size")
+            return payload
+
+        try:
+            payload = await asyncio.to_thread(_read_bounded_artifact)
+            actual_digest = qualification_evidence_digest(payload)
+            if actual_digest.removeprefix("sha256:") != expected_digest.removeprefix(
+                "sha256:",
+            ):
+                raise ValueError("qualification artifact digest mismatch")
+            evidence = AcceptedSandboxQualificationArtifactV1.from_bytes(payload)
+        except (OSError, TypeError, ValueError):
+            raise AcceptedMaterialError("sandbox_provider_unqualified") from None
+        subordinate = evidence.accepted_skill_evidence
+        if subordinate.sandbox_image_digest.removeprefix("sha256:") != runtime_image_digest:
+            raise AcceptedMaterialError("sandbox_image_unresolved")
+        if (
+            subordinate.gateway_image_digest != gateway_image_digest
+            or subordinate.provisioner_image_digest.removeprefix("sha256:") != verifier_image_digest
+            or subordinate.verifier_image_digest.removeprefix("sha256:") != verifier_image_digest
+            or evidence.provider_kind != "aio_kubernetes"
+            or evidence.capability_profile_version != profile.version
+            or evidence.capability_profile_digest != profile.digest
+            or evidence.operation_fencing_mode != ACCEPTED_SANDBOX_OPERATION_FENCING_MODE_V1
+            or profile.atomic_provider_operation_fencing
+            or evidence.topology_policy_digest != runtime_topology.qualification_policy_digest
+        ):
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
+        max_age_seconds = self._config.get(
+            "accepted_material_qualification_max_age_seconds",
+            30 * 24 * 60 * 60,
+        )
+        if type(max_age_seconds) is not int or max_age_seconds < 60 or max_age_seconds > 365 * 24 * 60 * 60:
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
+        qualification = AcceptedSandboxQualificationV1.build(
+            capability_profile_digest=profile.digest,
+            qualification_scope=evidence.SCOPE,
+            artifact_digest=actual_digest.removeprefix("sha256:"),
+            topology_digest=runtime_topology.digest,
+            verified_at=evidence.completed_at,
+            expires_at=evidence.completed_at + timedelta(seconds=max_age_seconds),
+        )
+        if not qualification.is_current(datetime.now(UTC)):
+            raise AcceptedMaterialError("sandbox_provider_unqualified")
+        return qualification
+
     async def accepted_materializer_selection(
         self,
         *,
@@ -2230,6 +2480,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         from .accepted_materializer import AioAcceptedMaterializer
 
         runtime_image_digest = await self.accepted_material_runtime_image_digest_async()
+        profile = self.accepted_sandbox_capability_profile()
+        qualification = await self._accepted_sandbox_qualification(
+            profile=profile,
+            runtime_image_digest=runtime_image_digest,
+        )
         lease_duration = timedelta(
             seconds=self._config["accepted_material_lease_duration_seconds"],
         )
@@ -2239,9 +2494,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 binding_resolver=lambda _request: binding,
                 scope_resolver=lambda _request: (thread_id, user_id),
                 lease_duration=lease_duration,
+                qualification=qualification,
             ),
             runtime_image_digest=runtime_image_digest,
             lease_duration=lease_duration,
+            capability_profile=profile,
+            qualification=qualification,
         )
 
     def accepted_skill_execution_evidence(
@@ -2532,6 +2790,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         accepted_skills_only: bool = False,
         accepted_skill_binding: AcceptedSkillSandboxBindingV1 | None = None,
         accepted_execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
+        identity_thread_id: str | None = None,
     ) -> str:
         """Create a new sandbox via the backend.
 
@@ -2607,7 +2866,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._destroy_unready_sandbox(sandbox_id, info)
             raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
 
-        return self._register_created_sandbox(thread_id, sandbox_id, info, user_id=effective_user_id)
+        return self._register_created_sandbox(
+            identity_thread_id or thread_id,
+            sandbox_id,
+            info,
+            user_id=effective_user_id,
+        )
 
     async def _create_sandbox_async(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Async counterpart to ``_create_sandbox``."""

@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
     # `from deerflow.subagents import SubagentExecutor`, which re-enters this
     # still-initializing package. Type-only here keeps the annotation precise.
+    from deerflow.sandbox.accepted_material import AcceptedSandboxSessionBridge
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
@@ -454,7 +455,11 @@ def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | No
     return ("success" if int(match.group(1)) == 0 else "error"), " ".join(match.group(0).split())
 
 
-def _harvest_shell_persistence(final_state: Any) -> bool | None:
+def _harvest_shell_persistence(
+    final_state: Any,
+    *,
+    accepted_sandbox_session_bridge: "AcceptedSandboxSessionBridge | None" = None,
+) -> bool | None:
     """Whether the sandbox that produced this state's bash evidence reuses one
     persistent shell session (``Sandbox.persistent_shell_sessions`` — AIO's
     legacy exec path).
@@ -471,6 +476,9 @@ def _harvest_shell_persistence(final_state: Any) -> bool | None:
     fresh-shell proof. Consumers must fail closed (UNVERIFIED) on ``None``.
     """
     try:
+        if accepted_sandbox_session_bridge is not None:
+            declared = accepted_sandbox_session_bridge.persistent_shell_sessions
+            return None if declared is None else bool(declared)
         from deerflow.sandbox.overwrite import unwrap_sandbox
         from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
@@ -492,6 +500,8 @@ def _harvest_shell_persistence(final_state: Any) -> bool | None:
 
 def _harvest_bash_executions(
     final_state: Any,
+    *,
+    accepted_sandbox_session_bridge: "AcceptedSandboxSessionBridge | None" = None,
 ) -> list[dict[str, Any]] | None:
     """Harvest bounded bash command/output evidence from one streamed state.
 
@@ -567,7 +577,10 @@ def _harvest_bash_executions(
         # cannot derive it (its runtime has no ``sandbox`` key when the
         # parent delegated before touching one). ``None`` (unknown) fails
         # closed in the acceptance matcher.
-        shell_persistent = _harvest_shell_persistence(final_state)
+        shell_persistent = _harvest_shell_persistence(
+            final_state,
+            accepted_sandbox_session_bridge=accepted_sandbox_session_bridge,
+        )
         for execution in executions:
             execution["shell_persistent"] = shell_persistent
         return executions[-_BASH_EVIDENCE_MAX_ENTRIES:]
@@ -822,6 +835,7 @@ class SubagentExecutor:
         tool_evidence_execution_task_id: str | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
         execution_admitted_callback: Callable[[], Awaitable[None]] | None = None,
+        accepted_sandbox_session_bridge: "AcceptedSandboxSessionBridge | None" = None,
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
     ):
@@ -883,6 +897,9 @@ class SubagentExecutor:
                 process slot is acquired and immediately before model work.
                 Durable batch workers use it to persist ``started`` without
                 treating a queue-capacity rejection as an execution attempt.
+            accepted_sandbox_session_bridge: Parent-owned operation gate for
+                accepted durable sandbox access. The child borrows it and
+                never renews or closes the underlying lease.
             acceptance_criteria: Optional lead-supplied completion requirements
                 (RFC #4651 PR3). Criterion values are model-supplied untrusted
                 data, so ``_build_initial_state`` appends them to the task
@@ -1037,6 +1054,19 @@ class SubagentExecutor:
         if execution_admitted_callback is not None and not callable(execution_admitted_callback):
             raise TypeError("execution_admitted_callback must be callable or None")
         self.execution_admitted_callback = execution_admitted_callback
+        if accepted_sandbox_session_bridge is not None:
+            from deerflow.sandbox.accepted_material import (
+                AcceptedSandboxSessionBridge,
+            )
+
+            if not isinstance(
+                accepted_sandbox_session_bridge,
+                AcceptedSandboxSessionBridge,
+            ):
+                raise TypeError(
+                    "accepted_sandbox_session_bridge must be AcceptedSandboxSessionBridge or None",
+                )
+        self.accepted_sandbox_session_bridge = accepted_sandbox_session_bridge
         # Raw lead-supplied criteria; stripping/capping happens at render time
         # in report_contract.render_acceptance_criteria_block.
         self.acceptance_criteria = acceptance_criteria
@@ -1585,7 +1615,10 @@ class SubagentExecutor:
             # execution. Criteria-free runs pay nothing.
             if not self.acceptance_criteria:
                 return None
-            return _harvest_bash_executions(final_state)
+            return _harvest_bash_executions(
+                final_state,
+                accepted_sandbox_session_bridge=(self.accepted_sandbox_session_bridge),
+            )
 
         try:
             if self.resolved_agent_material is not None:
@@ -1730,6 +1763,12 @@ class SubagentExecutor:
                 context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = self.resolved_agent_material
             if self.skill_projection_token is not None:
                 context[SKILL_PROJECTION_TOKEN_CONTEXT_KEY] = self.skill_projection_token
+            if self.accepted_sandbox_session_bridge is not None:
+                from deerflow.sandbox.accepted_material import (
+                    ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY,
+                )
+
+                context[ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY] = self.accepted_sandbox_session_bridge
             if self.tool_evidence_binding is not None and self.tool_evidence_sink is not None:
                 install_tool_evidence_context(
                     context,

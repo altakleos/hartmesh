@@ -4,10 +4,26 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from _subagent_batch_helpers import make_parent_batch_request
+from sqlalchemy import select, update
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
-from deerflow.persistence.subagent_batches import SubagentBatchRepository
+from deerflow.persistence.subagent_batches import (
+    SubagentBatchAttemptRow,
+    SubagentBatchItemRow,
+    SubagentBatchRepository,
+)
+from deerflow.sandbox.accepted_material import (
+    AcceptedExecutionEvidenceV2,
+    AcceptedMaterialLeaseV1,
+    AcceptedMaterialRequestV2,
+    AcceptedSandboxCapabilityProfileV1,
+    AcceptedSandboxIsolationFactsV1,
+    AcceptedSandboxLifecycleKind,
+    AcceptedSandboxLifecycleObservationV1,
+    AcceptedSandboxQualificationV1,
+    accepted_scope_reference,
+)
 from deerflow.subagents.batch_acceptance import (
     AcceptedBatchV1,
     ParentBoundBatchExecutionV1,
@@ -328,6 +344,320 @@ async def test_manual_retry_cannot_reset_an_accepted_attempt_limit(tmp_path) -> 
         )
         == []
     )
+
+
+@pytest.mark.asyncio
+async def test_item_attempt_authority_is_checked_without_renewing_the_lease(
+    tmp_path,
+) -> None:
+    request = make_parent_batch_request()
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+    repo = SubagentBatchRepository(sf, tenant=request.tenant)
+    accepted = AcceptedBatchV1.from_parent_request(
+        request,
+        batch_id="accepted-batch-authority",
+    )
+    execution = ParentBoundBatchExecutionV1.from_parent_request(
+        request,
+        accepted=accepted,
+    )
+    await repo.accept_batch(
+        accepted=accepted,
+        execution=execution,
+        item_requests=request.items,
+        user_id=request.user_id,
+        submission_key=request.submission_key,
+        title=request.title,
+        subagent_type=request.subagent_name,
+    )
+    item = (
+        await repo.claim_items(
+            now=datetime.now(UTC),
+            lease_owner="worker-1",
+            lease_seconds=60,
+            limit=1,
+        )
+    )[0]
+    authority = {
+        "item_id": item["id"],
+        "attempt_id": item["attempt_id"],
+        "lease_epoch": item["lease_epoch"],
+        "lease_owner": "worker-1",
+    }
+
+    assert await repo.item_attempt_authorized(**authority)
+    assert await repo.mark_item_running(
+        item["id"],
+        attempt_id=item["attempt_id"],
+        lease_epoch=item["lease_epoch"],
+        lease_owner="worker-1",
+        now=None,
+    )
+    assert await repo.item_attempt_authorized(**authority)
+    assert not await repo.item_attempt_authorized(**{**authority, "lease_epoch": item["lease_epoch"] + 1})
+
+    await repo.cancel_batch(accepted.batch_id, user_id=request.user_id)
+
+    assert not await repo.item_attempt_authorized(**authority)
+
+
+@pytest.mark.asyncio
+async def test_attempt_persists_accepted_sandbox_evidence_and_lifecycle_after_terminal(
+    tmp_path,
+) -> None:
+    request = make_parent_batch_request()
+    await init_engine_from_config(
+        DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)),
+    )
+    sf = get_session_factory()
+    assert sf is not None
+    repo = SubagentBatchRepository(sf, tenant=request.tenant)
+    accepted = AcceptedBatchV1.from_parent_request(
+        request,
+        batch_id="accepted-batch-sandbox-evidence",
+    )
+    execution = ParentBoundBatchExecutionV1.from_parent_request(
+        request,
+        accepted=accepted,
+    )
+    await repo.accept_batch(
+        accepted=accepted,
+        execution=execution,
+        item_requests=request.items,
+        user_id=request.user_id,
+        submission_key=request.submission_key,
+        title=request.title,
+        subagent_type=request.subagent_name,
+    )
+    claimed = (
+        await repo.claim_items(
+            now=None,
+            lease_owner="worker-1",
+            lease_seconds=60,
+            limit=1,
+        )
+    )[0]
+    now = datetime.now(UTC)
+    child_identity = f"{accepted.batch_id}:{claimed['id']}:{claimed['attempt_id']}:{claimed['lease_epoch']}:{claimed['request_digest']}"
+    attempt_ref = accepted_scope_reference(
+        request.tenant,
+        kind="attempt",
+        value=child_identity,
+    )
+    batch_child_ref = accepted_scope_reference(
+        request.tenant,
+        kind="batch-child",
+        value=child_identity,
+    )
+    profile = AcceptedSandboxCapabilityProfileV1.build(
+        material_capability="immutable_read_only",
+        atomic_provider_ownership_fencing=True,
+        atomic_provider_operation_fencing=False,
+        authoritative_shared_expiry=True,
+        resolved_immutable_image=True,
+        restricted_non_root_isolation=True,
+        recoverable_resource_lookup=True,
+        durable_one_replica=True,
+        exact_two=False,
+    )
+    material_request = AcceptedMaterialRequestV2.build(
+        run_id=accepted.parent_run_id,
+        attempt_id=attempt_ref,
+        tenant=request.tenant,
+        user_ref=accepted_scope_reference(
+            request.tenant,
+            kind="user",
+            value=request.user_id,
+        ),
+        thread_ref=accepted_scope_reference(
+            request.tenant,
+            kind="thread",
+            value=request.thread_id,
+        ),
+        agent_revision_digest=accepted.parent_agent_revision_digest,
+        skill_snapshot_digest="1" * 64,
+        skill_scope_digest=accepted.skill_scope_digest,
+        file_manifest=(),
+        runtime_image_digest="2" * 64,
+        lease_expires_at=now + timedelta(minutes=5),
+        accepted_invocation_ref=accepted_scope_reference(
+            request.tenant,
+            kind="invocation",
+            value=(f"{accepted.parent_run_id}:{accepted.parent_invocation_digest}"),
+        ),
+        accepted_invocation_digest=accepted.parent_invocation_digest,
+        tool_plane_base_revision_digest="3" * 64,
+        tool_plane_user_overlay_digest="4" * 64,
+        tool_plane_projection_digest="5" * 64,
+        tool_plane_effective_digest="6" * 64,
+        batch_child_attempt_ref=batch_child_ref,
+        capability_profile_digest=profile.digest,
+    )
+    lease = AcceptedMaterialLeaseV1(
+        version=1,
+        provider_kind="qualified-test",
+        provider_instance_ref="raw-provider-resource",
+        ownership_epoch=9,
+        lease_expires_at=now + timedelta(minutes=5),
+        opaque_renewal_handle=object(),
+    )
+    qualification = AcceptedSandboxQualificationV1.build(
+        capability_profile_digest=profile.digest,
+        qualification_scope="contract_test_only",
+        artifact_digest="8" * 64,
+        topology_digest="9" * 64,
+        verified_at=now,
+        expires_at=now + timedelta(hours=1),
+    )
+    evidence = AcceptedExecutionEvidenceV2.build(
+        request=material_request,
+        lease=lease,
+        materialization_digest="a" * 64,
+        verifier_image_digest="b" * 64,
+        verifier_contract_version="contract-test-v1",
+        read_only_proof_digest="c" * 64,
+        qualification=qualification,
+        isolation=AcceptedSandboxIsolationFactsV1.build(
+            restricted_non_root=True,
+            read_only_accepted_material=True,
+            privilege_escalation_disabled=True,
+            runtime_class_digest="d" * 64,
+            network_policy_digest="e" * 64,
+        ),
+    )
+    acquired = AcceptedSandboxLifecycleObservationV1.build(
+        evidence=evidence,
+        kind=AcceptedSandboxLifecycleKind.ACQUIRED,
+        observed_at=now,
+    )
+    authority = {
+        "item_id": claimed["id"],
+        "attempt_id": claimed["attempt_id"],
+        "lease_epoch": claimed["lease_epoch"],
+        "lease_owner": "worker-1",
+    }
+
+    assert not await repo.attach_item_sandbox_evidence(
+        **{**authority, "lease_epoch": claimed["lease_epoch"] + 1},
+        request=material_request,
+        evidence=evidence,
+        observations=(acquired,),
+    )
+    assert await repo.attach_item_sandbox_evidence(
+        **authority,
+        request=material_request,
+        evidence=evidence,
+        observations=(acquired,),
+    )
+    conflicting_evidence = AcceptedExecutionEvidenceV2.build(
+        request=material_request,
+        lease=lease,
+        materialization_digest="f" * 64,
+        verifier_image_digest="b" * 64,
+        verifier_contract_version="contract-test-v1",
+        read_only_proof_digest="c" * 64,
+        qualification=qualification,
+        isolation=evidence.isolation,
+    )
+    conflicting_acquired = AcceptedSandboxLifecycleObservationV1.build(
+        evidence=conflicting_evidence,
+        kind=AcceptedSandboxLifecycleKind.ACQUIRED,
+        observed_at=now,
+    )
+    assert not await repo.attach_item_sandbox_evidence(
+        **authority,
+        request=material_request,
+        evidence=conflicting_evidence,
+        observations=(conflicting_acquired,),
+    )
+    async with sf() as session:
+        await session.execute(
+            update(SubagentBatchItemRow).where(SubagentBatchItemRow.id == claimed["id"]).values(lease_expires_at=now - timedelta(seconds=1)),
+        )
+        await session.commit()
+    replacement = await repo.claim_items(
+        now=None,
+        lease_owner="worker-2",
+        lease_seconds=60,
+        limit=1,
+    )
+    assert len(replacement) == 1
+    assert replacement[0]["attempt_id"] != claimed["attempt_id"]
+    released = AcceptedSandboxLifecycleObservationV1.build(
+        evidence=evidence,
+        kind=AcceptedSandboxLifecycleKind.RELEASED,
+        observed_at=now + timedelta(seconds=1),
+    )
+    assert not await repo.append_item_sandbox_lifecycle(
+        **{**authority, "lease_owner": "other-worker"},
+        execution_evidence_digest=evidence.digest,
+        observations=(acquired, released),
+    )
+    assert await repo.append_item_sandbox_lifecycle(
+        **authority,
+        execution_evidence_digest=evidence.digest,
+        observations=(acquired, released),
+    )
+    overflow = tuple(
+        AcceptedSandboxLifecycleObservationV1.build(
+            evidence=evidence,
+            kind=AcceptedSandboxLifecycleKind.RELEASED,
+            observed_at=now + timedelta(seconds=offset),
+        )
+        for offset in range(2, 10)
+    )
+    assert not await repo.append_item_sandbox_lifecycle(
+        **authority,
+        execution_evidence_digest=evidence.digest,
+        observations=overflow,
+    )
+
+    attempts = await repo.list_attempts(
+        accepted.batch_id,
+        user_id=request.user_id,
+    )
+    assert attempts is not None
+    assert attempts[0]["accepted_material_request_digest"] == (material_request.digest)
+    assert attempts[0]["accepted_execution_evidence_digest"] == evidence.digest
+    assert attempts[0]["accepted_sandbox_lifecycle_count"] == 3
+    serialized = str(attempts)
+    assert "raw-provider-resource" not in serialized
+
+    observations = await repo.list_observations(
+        accepted.batch_id,
+        user_id=request.user_id,
+    )
+    assert observations is not None
+    sandbox_events = [row for row in observations if row["event"] == "sandbox.lifecycle"]
+    assert {row["state"] for row in sandbox_events} == {
+        "acquired",
+        "orphaned",
+        "released",
+    }
+    assert len(sandbox_events) == 3
+    assert all(row["evidence_digest"] == evidence.digest for row in sandbox_events)
+
+    async with sf() as session:
+        attempt_row = (
+            await session.execute(
+                select(SubagentBatchAttemptRow).where(
+                    SubagentBatchAttemptRow.id == claimed["attempt_id"],
+                ),
+            )
+        ).scalar_one()
+        assert attempt_row.accepted_material_request_json == (material_request.to_persisted())
+        assert attempt_row.accepted_execution_evidence_json == (evidence.to_persisted())
+        assert [row["kind"] for row in attempt_row.accepted_sandbox_lifecycle_json] == ["acquired", "orphaned", "released"]
+        persisted = str(
+            (
+                attempt_row.accepted_material_request_json,
+                attempt_row.accepted_execution_evidence_json,
+                attempt_row.accepted_sandbox_lifecycle_json,
+            ),
+        )
+        assert "raw-provider-resource" not in persisted
 
 
 @pytest.mark.asyncio

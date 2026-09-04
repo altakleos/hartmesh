@@ -7,8 +7,8 @@ fenced and verified before the run enters `started`; unsupported nonempty
 accepted material fails before graph/model work.
 
 **Accepted-material deep module**: `accepted_material.py` owns the canonical
-provider-neutral V1 file manifest, request, lease, execution evidence,
-capability, and `AcceptedMaterializer` protocol. Provider SDK objects,
+provider-neutral V1/V2 contracts, capability profiles,
+`AcceptedSandboxSession`, and `AcceptedMaterializer` protocol. Provider SDK objects,
 credentials, and opaque renewal handles never enter persisted evidence. A lease
 is valid only for its exact provider instance and monotonically fenced ownership
 epoch; stale workers must not validate, renew, execute, or destroy a newer

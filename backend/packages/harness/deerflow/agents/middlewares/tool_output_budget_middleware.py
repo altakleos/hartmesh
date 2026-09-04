@@ -27,6 +27,11 @@ from langgraph.types import Command
 from deerflow.agents.middlewares.tool_output_synopsis import render_tool_output_preview
 from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform
 from deerflow.config.tool_output_config import ToolOutputConfig
+from deerflow.sandbox.accepted_material import (
+    AcceptedSandboxAuthorityLostError,
+    accepted_sandbox_from_runtime_context,
+    is_accepted_sandbox_facade,
+)
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 if TYPE_CHECKING:
@@ -210,6 +215,8 @@ def _externalize_to_sandbox(
                 check,
             )
             return None
+    except AcceptedSandboxAuthorityLostError:
+        raise
     except Exception:
         logger.exception(
             "Failed to externalize %s output to sandbox (call_id=%s)",
@@ -324,6 +331,14 @@ def _resolve_sandbox(request: ToolCallRequest) -> Sandbox | None:
     sandbox_id = sandbox_state.get("sandbox_id")
     if not sandbox_id:
         return None
+    # Eager authorization denial deliberately leaves state unset. Requiring
+    # the initialized marker prevents an unrelated large tool result from
+    # using a pre-installed facade without the sandbox:execute decision.
+    accepted_sandbox = accepted_sandbox_from_runtime_context(
+        getattr(runtime, "context", None),
+    )
+    if accepted_sandbox is not None:
+        return accepted_sandbox
     try:
         return get_sandbox_provider().get(sandbox_id)
     except Exception:
@@ -359,25 +374,11 @@ def _budget_content(
         # without a configured sandbox (and CI environments without a
         # config.yaml) continue to externalize to the host as before.
         if sandbox is not None:
-            provider = None
-            try:
-                provider = get_sandbox_provider()
-            except Exception:
-                logger.exception("Failed to get sandbox provider for tool-output externalization; falling back to inline truncation")
-            if provider is not None and getattr(provider, "uses_thread_data_mounts", False):
-                # Host-mounted sandbox: host outputs path is bind-mounted into
-                # the sandbox at the same virtual path, so writing host-side is
-                # equivalent. Preserve the original behavior to avoid extra
-                # sandbox round-trips.
-                if outputs_path:
-                    virtual_path = _externalize(
-                        content,
-                        tool_name=tool_name,
-                        tool_call_id=tool_call_id,
-                        outputs_path=outputs_path,
-                        storage_subdir=config.storage_subdir,
-                    )
-            else:
+            if is_accepted_sandbox_facade(sandbox):
+                # The session facade is the only operation boundary available
+                # to durable code. Avoid reopening its raw provider merely to
+                # inspect mount metadata; a gated write is safe for either
+                # mounted or provider-owned output storage.
                 virtual_path = _externalize_to_sandbox(
                     content,
                     tool_name=tool_name,
@@ -385,6 +386,37 @@ def _budget_content(
                     storage_subdir=config.storage_subdir,
                     sandbox=sandbox,
                 )
+            else:
+                provider = None
+                try:
+                    provider = get_sandbox_provider()
+                except Exception:
+                    logger.exception("Failed to get sandbox provider for tool-output externalization; falling back to inline truncation")
+                if provider is not None and getattr(
+                    provider,
+                    "uses_thread_data_mounts",
+                    False,
+                ):
+                    # Host-mounted sandbox: host outputs path is bind-mounted into
+                    # the sandbox at the same virtual path, so writing host-side is
+                    # equivalent. Preserve the original behavior to avoid extra
+                    # sandbox round-trips.
+                    if outputs_path:
+                        virtual_path = _externalize(
+                            content,
+                            tool_name=tool_name,
+                            tool_call_id=tool_call_id,
+                            outputs_path=outputs_path,
+                            storage_subdir=config.storage_subdir,
+                        )
+                else:
+                    virtual_path = _externalize_to_sandbox(
+                        content,
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_id,
+                        storage_subdir=config.storage_subdir,
+                        sandbox=sandbox,
+                    )
         elif outputs_path:
             # No sandbox in this call (legacy / non-sandbox tools): write to
             # host outputs path directly, no provider needed.

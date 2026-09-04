@@ -13,7 +13,10 @@ contract digests to match, otherwise it fails closed. Accepted skill projection
 leases remain retained until terminal batch cleanup. Claims create append-only
 attempt rows; start occurs only after process-capacity admission,
 and renewal/cancellation/completion compare attempt ID, owner, lease epoch, and
-database time. Queue rejection is non-consuming, while execution and expired
+database time. Accepted sandbox request/evidence is joined atomically to that
+same fenced attempt before child execution, and its bounded handle-free
+lifecycle observations remain attached after terminal publication. Queue
+rejection is non-consuming, while execution and expired
 claims consume the retry budget. Delivery is at-least-once and external
 side effects may repeat even though only one terminal database publication can
 win. The initial cancellation policy rejects `parent_cancellable=true`; parent

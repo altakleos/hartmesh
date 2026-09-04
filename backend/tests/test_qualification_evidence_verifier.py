@@ -13,8 +13,13 @@ from pathlib import Path
 import pytest
 
 from deerflow.qualification_evidence import (
+    ACCEPTED_SANDBOX_OPERATION_FENCING_MODE_V1,
     ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2,
     MAX_QUALIFICATION_EVIDENCE_BYTES,
+    AcceptedSandboxPersistentVolumeTopologyV1,
+    AcceptedSandboxQualificationArtifactV1,
+    AcceptedSandboxRaceEvidenceV1,
+    AcceptedSandboxRuntimeTopologyV1,
     AcceptedSkillMaterialEvidenceV2,
     AcceptedSkillQualificationEnvironmentV2,
     AcceptedSkillQualificationExpectationV2,
@@ -182,6 +187,116 @@ def _accepted_skill_expectation_v2() -> AcceptedSkillQualificationExpectationV2:
         namespace=evidence.environment.namespace,
         required_scenarios=evidence.REQUIRED_SCENARIOS,
     )
+
+
+def _accepted_sandbox_topology_v1() -> AcceptedSandboxRuntimeTopologyV1:
+    return AcceptedSandboxRuntimeTopologyV1(
+        provider_kind="aio_kubernetes",
+        profile="rwx_verified_copy_v2",
+        sandbox_image_digest="d" * 64,
+        verifier_image_digest="b" * 64,
+        namespace_uid="namespace-uid",
+        pod_security_enforce="restricted",
+        pod_security_warn=None,
+        pod_security_audit=None,
+        runtime_class="gvisor",
+        gateway_namespace="hartmesh-qualification-a1b2c3",
+        gateway_service_account="hartmesh-gateway",
+        token_review_audience="hartmesh-provisioner",
+        accepted_attempt_lease_seconds=120,
+        accepted_attempt_reconcile_interval_seconds=30,
+        accepted_attempt_reconcile_limit=100,
+        volumes=(
+            AcceptedSandboxPersistentVolumeTopologyV1(
+                role="skills",
+                uid="skills-uid",
+                volume_name="skills-volume",
+                storage_class="rwx-storage",
+                access_modes=("ReadWriteMany",),
+            ),
+            AcceptedSandboxPersistentVolumeTopologyV1(
+                role="userdata",
+                uid="userdata-uid",
+                volume_name="userdata-volume",
+                storage_class="rwx-storage",
+                access_modes=("ReadWriteMany",),
+            ),
+        ),
+    )
+
+
+def _accepted_sandbox_artifact_v1() -> AcceptedSandboxQualificationArtifactV1:
+    subordinate = _accepted_skill_evidence_v2()
+    return AcceptedSandboxQualificationArtifactV1(
+        qualification_id=subordinate.qualification_id,
+        accepted_skill_evidence=subordinate,
+        accepted_skill_evidence_digest=qualification_evidence_digest(
+            subordinate.canonical_bytes(),
+        ),
+        provider_kind="aio_kubernetes",
+        capability_profile_version=1,
+        capability_profile_digest="9" * 64,
+        operation_fencing_mode=ACCEPTED_SANDBOX_OPERATION_FENCING_MODE_V1,
+        topology_policy_digest=(_accepted_sandbox_topology_v1().qualification_policy_digest),
+        race=AcceptedSandboxRaceEvidenceV1(
+            session_validation_passes=1,
+            raced_provider_calls=1,
+            post_loss_rejections=1,
+            stale_terminal_rejected=True,
+            cleanup_outcome="deleted",
+        ),
+        completed_at=subordinate.completed_at,
+    )
+
+
+def test_accepted_sandbox_companion_is_strict_and_binds_subordinate_evidence() -> None:
+    evidence = _accepted_sandbox_artifact_v1()
+
+    assert (
+        AcceptedSandboxQualificationArtifactV1.from_bytes(
+            evidence.canonical_bytes(),
+        )
+        == evidence
+    )
+    with pytest.raises(ValueError, match="accepted-sandbox qualification"):
+        AcceptedSandboxQualificationArtifactV1.from_bytes(
+            evidence.accepted_skill_evidence.canonical_bytes(),
+        )
+
+    wire = evidence.to_dict()
+    wire["accepted_skill_evidence_digest"] = "sha256:" + ("0" * 64)
+    with pytest.raises(ValueError, match="accepted-sandbox qualification values"):
+        AcceptedSandboxQualificationArtifactV1.from_dict(wire)
+
+
+def test_accepted_sandbox_topology_separates_live_identity_from_portable_policy() -> None:
+    topology = _accepted_sandbox_topology_v1()
+    replacement = replace(
+        topology,
+        namespace_uid="replacement-uid",
+        gateway_namespace="production",
+        gateway_service_account="production-gateway",
+        volumes=tuple(
+            replace(
+                volume,
+                uid=f"replacement-{volume.role}-uid",
+                volume_name=f"replacement-{volume.role}-volume",
+            )
+            for volume in topology.volumes
+        ),
+    )
+
+    assert replacement.digest != topology.digest
+    assert replacement.qualification_policy_digest == topology.qualification_policy_digest
+    assert replace(topology, runtime_class="kata").qualification_policy_digest != topology.qualification_policy_digest
+    with pytest.raises(ValueError, match="race evidence is incomplete"):
+        AcceptedSandboxRaceEvidenceV1(
+            session_validation_passes=1,
+            raced_provider_calls=0,
+            post_loss_rejections=1,
+            stale_terminal_rejected=True,
+            cleanup_outcome="deleted",
+        )
 
 
 def test_v2_nonempty_cross_node_skill_evidence_verifies_exact_subjects() -> None:

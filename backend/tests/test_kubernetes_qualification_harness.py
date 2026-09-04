@@ -6,7 +6,7 @@ import base64
 import json
 import subprocess
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -34,14 +34,26 @@ from support.kubernetes_qualification import (
     wait_until,
 )
 
+from deerflow.community.aio_sandbox.aio_sandbox_provider import (
+    AioSandboxProvider,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.qualification_evidence import (
     ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+    AcceptedSandboxPersistentVolumeTopologyV1,
+    AcceptedSandboxQualificationArtifactV1,
+    AcceptedSandboxRuntimeTopologyV1,
     AcceptedSkillMaterialEvidenceV2,
     QualificationEvidenceExpectation,
     verify_qualification_evidence,
 )
-from deerflow.sandbox.accepted_material import AcceptedExecutionEvidenceV1
+from deerflow.sandbox.accepted_material import (
+    AcceptedExecutionEvidenceV2,
+    AcceptedMaterialLeaseV1,
+    AcceptedMaterialRequestV2,
+    AcceptedSandboxIsolationFactsV1,
+    AcceptedSandboxQualificationV1,
+)
 
 
 def _accepted_skill_environment(tmp_path: Path) -> dict[str, str]:
@@ -184,12 +196,18 @@ def test_accepted_skill_live_values_select_pinned_cross_node_profile(
         _accepted_skill_environment(tmp_path),
     )
 
-    values = KubernetesAcceptedSkillQualificationRunnerV2(config).values()
-    sandbox = yaml.safe_load(values["config"])["sandbox"]
+    runner = KubernetesAcceptedSkillQualificationRunnerV2(config)
+    values = runner.values()
+    rendered_config = yaml.safe_load(values["config"])
+    sandbox = rendered_config["sandbox"]
 
     assert values["deployment"] == {
         "mode": "durable_one_replica",
         "persistenceTier": "shared_durable",
+        "qualificationCandidate": {
+            "enabled": True,
+            "id": "skill-projection-20260810",
+        },
     }
     assert values["gateway"]["image"] == {
         "repository": "registry.example/hartmesh/gateway",
@@ -221,6 +239,163 @@ def test_accepted_skill_live_values_select_pinned_cross_node_profile(
     assert sandbox["use"] == ("deerflow.community.aio_sandbox:AioSandboxProvider")
     assert sandbox["provisioner_url"] == ("http://hartmesh-qualification-deer-flow-provisioner:8002")
     assert sandbox["accepted_skill_projection_profile"] == ("rwx_verified_copy_v2")
+    assert rendered_config["tool_groups"] == [{"name": "qualification"}]
+    assert rendered_config["tools"] == [
+        {
+            "name": "qualification_sandbox_operation",
+            "group": "qualification",
+            "use": ("deerflow.runtime.kubernetes_qualification:qualification_sandbox_operation"),
+        }
+    ]
+    assert runner._ensure_payload("terminal_before_lifecycle_commit")["external_key"].endswith(":during-tool")
+
+
+def test_accepted_sandbox_topology_records_pvc_uid_and_bound_volume_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = KubernetesAcceptedSkillQualificationRunnerV2(
+        KubernetesAcceptedSkillQualificationConfigV2.from_environment(
+            _accepted_skill_environment(tmp_path),
+        )
+    )
+    calls: list[tuple[tuple[str, ...], bool]] = []
+    claim_phase = "Bound"
+
+    def kubectl(*arguments: str, namespaced: bool = True, **_kwargs) -> str:
+        calls.append((arguments, namespaced))
+        if arguments[:2] == ("get", "persistentvolumeclaim"):
+            return json.dumps(
+                {
+                    "metadata": {"uid": "skills-pvc-uid"},
+                    "spec": {
+                        "volumeName": "skills-pv",
+                        "storageClassName": "rwx-storage",
+                        "accessModes": ["ReadWriteMany"],
+                    },
+                    "status": {"phase": claim_phase},
+                }
+            )
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(runner, "_kubectl", kubectl)
+
+    topology = runner._accepted_pvc_topology("skills", "skills-claim")
+
+    assert topology.uid == "skills-pvc-uid"
+    assert topology.volume_name == "skills-pv"
+    assert calls == [
+        (
+            (
+                "get",
+                "persistentvolumeclaim",
+                "skills-claim",
+                "-o",
+                "json",
+            ),
+            True,
+        ),
+    ]
+
+    claim_phase = "Pending"
+    with pytest.raises(
+        QualificationCommandError,
+        match="PVC topology is unavailable",
+    ):
+        runner._accepted_pvc_topology("skills", "skills-claim")
+
+
+def test_passing_artifact_must_admit_one_fresh_post_upgrade_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = KubernetesAcceptedSkillQualificationRunnerV2(
+        KubernetesAcceptedSkillQualificationConfigV2.from_environment(
+            _accepted_skill_environment(tmp_path),
+        )
+    )
+    calls: list[object] = []
+    attempt = object()
+    monkeypatch.setattr(
+        runner,
+        "_arm_barrier",
+        lambda scenario: calls.append(("armed", scenario)),
+    )
+    monkeypatch.setattr(runner, "_wait_for_barrier", lambda _scenario: "run-post")
+    monkeypatch.setattr(runner, "_gateway_node", lambda: "worker-a")
+    monkeypatch.setattr(
+        runner,
+        "_accepted_attempt",
+        lambda scenario, run_id, *, gateway_node: calls.append(("attempt", scenario, run_id, gateway_node)) or attempt,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_redis",
+        lambda *arguments: calls.append(("redis", arguments)) or "OK",
+    )
+    monkeypatch.setattr(
+        runner,
+        "_observe_until_terminal",
+        lambda _client, run_id: {"run_id": run_id, "status": "success"},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_for_attempt_cleanup",
+        lambda observed: calls.append(("cleanup", observed)),
+    )
+
+    class Client:
+        def request(self, method, path, *, payload, timeout_seconds):
+            calls.append(
+                (method, path, payload["external_key"], timeout_seconds),
+            )
+            return 202, {"run_id": "run-post"}
+
+    runner._prove_post_upgrade_accepted_invocation(Client())
+
+    assert ("armed", "active_execution") in calls
+    assert ("attempt", "active_execution", "run-post", "worker-a") in calls
+    assert ("cleanup", attempt) in calls
+
+
+def test_published_accepted_skill_values_mount_and_pin_passing_artifact(
+    tmp_path: Path,
+) -> None:
+    runner = KubernetesAcceptedSkillQualificationRunnerV2(
+        KubernetesAcceptedSkillQualificationConfigV2.from_environment(
+            _accepted_skill_environment(tmp_path),
+        )
+    )
+
+    published = runner._published_accepted_skill_values(
+        runner.values(),
+        evidence_digest="sha256:" + ("e" * 64),
+    )
+
+    sandbox = yaml.safe_load(published["config"])["sandbox"]
+    assert published["deployment"]["qualificationCandidate"] == {
+        "enabled": False,
+        "id": "",
+    }
+    assert sandbox["accepted_material_qualification_evidence"] == ("/var/run/hartmesh/qualification/evidence.json")
+    assert sandbox["accepted_material_qualification_digest"] == ("sha256:" + ("e" * 64))
+    assert sandbox["accepted_material_qualification_max_age_seconds"] == 2592000
+    assert published["gateway"]["extraVolumes"] == [
+        {
+            "name": "accepted-sandbox-qualification",
+            "configMap": {
+                "name": ("hartmesh-qualification-deer-flow-accepted-sandbox-qualification"),
+                "items": [{"key": "evidence.json", "path": "evidence.json"}],
+            },
+        }
+    ]
+    assert published["gateway"]["extraVolumeMounts"] == [
+        {
+            "name": "accepted-sandbox-qualification",
+            "mountPath": "/var/run/hartmesh/qualification",
+            "readOnly": True,
+        }
+    ]
 
 
 def test_accepted_skill_attempt_binds_live_receipt_images_ledger_and_bytes(
@@ -316,25 +491,66 @@ def test_accepted_skill_attempt_binds_live_receipt_images_ledger_and_bytes(
         raise AssertionError(arguments)
 
     monkeypatch.setattr(runner, "_kubectl", kubectl)
-    neutral_evidence = AcceptedExecutionEvidenceV1.build(
+    tenant = TenantReferenceV1(
+        version=1,
+        public_ref="tenant-" + ("d" * 16),
+        digest="d" * 64,
+    )
+    profile = AioSandboxProvider.accepted_sandbox_capability_profile()
+    now = datetime.now(UTC)
+    request = AcceptedMaterialRequestV2.build(
         run_id="run-1",
         attempt_id="attempt-ref",
-        tenant=TenantReferenceV1(
-            version=1,
-            public_ref="tenant-" + ("d" * 16),
-            digest="d" * 64,
-        ),
+        tenant=tenant,
+        user_ref="user-ref",
+        thread_ref="thread-ref",
+        agent_revision_digest="6" * 64,
+        skill_snapshot_digest=snapshot,
+        skill_scope_digest="4" * 64,
+        file_manifest=(),
+        runtime_image_digest="c" * 64,
+        lease_expires_at=now + timedelta(minutes=5),
+        accepted_invocation_ref="invocation-ref",
+        accepted_invocation_digest="7" * 64,
+        tool_plane_base_revision_digest="8" * 64,
+        tool_plane_user_overlay_digest="9" * 64,
+        tool_plane_projection_digest="a" * 64,
+        tool_plane_effective_digest="b" * 64,
+        batch_child_attempt_ref=None,
+        capability_profile_digest=profile.digest,
+    )
+    material_lease = AcceptedMaterialLeaseV1(
+        version=1,
         provider_kind="aio_kubernetes",
         provider_instance_ref="attempt",
         ownership_epoch=4,
-        runtime_image_digest="c" * 64,
-        skill_snapshot_digest=snapshot,
-        skill_scope_digest="4" * 64,
+        lease_expires_at=request.lease_expires_at,
+        opaque_renewal_handle=object(),
+    )
+    qualification = AcceptedSandboxQualificationV1.build(
+        capability_profile_digest=profile.digest,
+        qualification_scope=AcceptedSandboxQualificationArtifactV1.SCOPE,
+        artifact_digest="e" * 64,
+        topology_digest="f" * 64,
+        verified_at=now,
+        expires_at=now + timedelta(minutes=15),
+        status="candidate",
+    )
+    neutral_evidence = AcceptedExecutionEvidenceV2.build(
+        request=request,
+        lease=material_lease,
         materialization_digest=materialization,
         verifier_image_digest="b" * 64,
-        verifier_contract_version="rwx_verified_copy_v2",
+        verifier_contract_version=("rwx_verified_copy_v2:accepted_execution_claim_v2"),
         read_only_proof_digest="5" * 64,
-        qualification_scope=ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+        qualification=qualification,
+        isolation=AcceptedSandboxIsolationFactsV1.build(
+            restricted_non_root=True,
+            read_only_accepted_material=True,
+            privilege_escalation_disabled=True,
+            runtime_class_digest=None,
+            network_policy_digest=None,
+        ),
     )
     monkeypatch.setattr(
         runner,
@@ -491,6 +707,80 @@ def test_accepted_skill_lease_resource_version_change_is_not_renewal(
 
     with pytest.raises(QualificationTimeout, match="renewTime did not advance"):
         runner._wait_for_lease_renewal(attempt)
+
+
+def test_accepted_session_race_requires_one_raced_call_and_one_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = KubernetesAcceptedSkillQualificationRunnerV2(
+        KubernetesAcceptedSkillQualificationConfigV2.from_environment(
+            _accepted_skill_environment(tmp_path),
+        )
+    )
+    attempt = _AcceptedSkillAttemptObservation(
+        scenario="terminal_before_lifecycle_commit",
+        run_id="run-1",
+        sandbox_id="sandbox-1",
+        pod_name="pod-1",
+        pod_uid="pod-uid-1",
+        gateway_node="worker-a",
+        pod_node="worker-b",
+        lease_name="lease-1",
+        lease_uid="lease-uid-1",
+        receipt={"version": 2},
+        materialization_digest="1" * 64,
+        verifier_receipt_digest="2" * 64,
+        token_review_authenticated=False,
+        lease_renewals=0,
+    )
+    deleted: list[str] = []
+    redis_calls: list[tuple[str, ...]] = []
+    counters = {
+        "accepted_sandbox_validations": 1,
+        "accepted_sandbox_raced_provider_calls": 1,
+        "accepted_sandbox_post_loss_rejections": 1,
+    }
+    monkeypatch.setattr(
+        runner,
+        "_delete_attempt_lease",
+        lambda item: deleted.append(item.lease_uid),
+    )
+
+    def redis(*arguments: str) -> str:
+        redis_calls.append(arguments)
+        return "OK"
+
+    monkeypatch.setattr(runner, "_redis", redis)
+    monkeypatch.setattr(
+        runner,
+        "_counter",
+        lambda _scenario, name: counters[name],
+    )
+
+    def wait_once(predicate, **_kwargs) -> None:
+        assert predicate()
+
+    monkeypatch.setattr(
+        "support.kubernetes_qualification.wait_until",
+        wait_once,
+    )
+
+    observed = runner._prove_accepted_session_race(attempt)
+
+    assert deleted == ["lease-uid-1"]
+    assert redis_calls == [
+        (
+            "SET",
+            runner._barrier_key(attempt.scenario, "release"),
+            "1",
+            "EX",
+            "300",
+        )
+    ]
+    assert observed.session_validation_passes == 1
+    assert observed.raced_provider_calls == 1
+    assert observed.post_loss_rejections == 1
 
 
 @pytest.mark.parametrize(
@@ -712,6 +1002,43 @@ def _wire_accepted_skill_qualify_fake(
     monkeypatch.setattr(runner, "_rwx_volume_identity", lambda: "rwx-pvc-uid")
     monkeypatch.setattr(
         runner,
+        "_accepted_runtime_topology",
+        lambda _values: AcceptedSandboxRuntimeTopologyV1(
+            provider_kind="aio_kubernetes",
+            profile="rwx_verified_copy_v2",
+            sandbox_image_digest="c" * 64,
+            verifier_image_digest="b" * 64,
+            namespace_uid="namespace-uid",
+            pod_security_enforce=None,
+            pod_security_warn=None,
+            pod_security_audit=None,
+            runtime_class=None,
+            gateway_namespace="hartmesh-qualification-a1b2c3",
+            gateway_service_account=("hartmesh-qualification-deer-flow-gateway"),
+            token_review_audience="hartmesh-provisioner",
+            accepted_attempt_lease_seconds=120,
+            accepted_attempt_reconcile_interval_seconds=30,
+            accepted_attempt_reconcile_limit=100,
+            volumes=(
+                AcceptedSandboxPersistentVolumeTopologyV1(
+                    role="skills",
+                    uid="skills-pvc-uid",
+                    volume_name="skills-pv",
+                    storage_class="rwx-storage",
+                    access_modes=("ReadWriteMany",),
+                ),
+                AcceptedSandboxPersistentVolumeTopologyV1(
+                    role="userdata",
+                    uid="userdata-pvc-uid",
+                    volume_name="userdata-pv",
+                    storage_class="rwx-storage",
+                    access_modes=("ReadWriteMany",),
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
         "_initialize_admin",
         lambda _client: events.append("admin-initialized"),
     )
@@ -765,6 +1092,20 @@ def _wire_accepted_skill_qualify_fake(
         runner,
         "_delete_attempt_lease",
         lambda attempt: events.append(f"lease-deleted:{attempt.scenario}"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_prove_accepted_session_race",
+        lambda attempt: (
+            events.append(f"lease-deleted:{attempt.scenario}")
+            or events.append("accepted-session-race-proved")
+            or replace(
+                attempt,
+                session_validation_passes=1,
+                raced_provider_calls=1,
+                post_loss_rejections=1,
+            )
+        ),
     )
 
     def cleanup(attempt: _AcceptedSkillAttemptObservation) -> None:
@@ -881,18 +1222,21 @@ def test_v2_qualify_maps_faults_cleans_attempts_and_publishes_atomically(
 
     evidence = runner.qualify()
 
-    assert tuple(item.name for item in evidence.scenarios) == (
+    assert isinstance(evidence, AcceptedSandboxQualificationArtifactV1)
+    subordinate = evidence.accepted_skill_evidence
+    assert tuple(item.name for item in subordinate.scenarios) == (
         "nonempty_material_execution",
         "token_review_and_lease_renewal",
         "gateway_replacement_cleanup",
         "sandbox_owner_loss_cleanup",
         "process_loss_cleanup",
     )
-    assert evidence.environment.token_review_authenticated is True
-    assert evidence.environment.lease_renewals == 1
+    assert subordinate.environment.token_review_authenticated is True
+    assert subordinate.environment.lease_renewals == 1
     assert events.count("token-review") == 1
     assert events.count("lease-renewed") == 1
     assert events.count("lease-deleted:terminal_before_lifecycle_commit") == 1
+    assert events.count("accepted-session-race-proved") == 1
     assert events.index("published") < events.index("namespace-deleted")
     assert runner.config.evidence_path.read_bytes() == evidence.canonical_bytes()
     assert not runner.config.evidence_path.with_suffix(
@@ -922,7 +1266,7 @@ def test_v2_qualify_never_publishes_when_cleanup_is_incomplete(
 
     failure = json.loads(runner.config.evidence_path.read_bytes())
     assert failure["status"] == "failed"
-    assert failure["scope"] == ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2
+    assert failure["scope"] == AcceptedSandboxQualificationArtifactV1.SCOPE
     assert "published" not in events
     assert "namespace-deleted" not in events
     assert events.count("failure-artifacts") == 1

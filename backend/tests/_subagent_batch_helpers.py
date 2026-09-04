@@ -55,6 +55,7 @@ def make_parent_batch_request(
     artifact_manifest_digest: str | None = None,
     extension_configuration_digest: str | None = None,
     extensions=None,
+    tool_plane_revision=None,
 ) -> ParentBoundBatchRequest:
     tenant = TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference()
     if definition is None:
@@ -108,6 +109,7 @@ def make_parent_batch_request(
         extension_manifest_digest=capability_manifest_digest,
         extension_artifact_manifest_digest=artifact_manifest_digest,
         extension_configuration_digest=extension_configuration_digest,
+        tool_plane_revision=tool_plane_revision,
         contributor_execution_digest=canonical_digest({"version": 1, "execution": []}),
         tenant=tenant,
     )

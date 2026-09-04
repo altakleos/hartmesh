@@ -12,10 +12,15 @@ from deerflow.community.aio_sandbox.accepted_materializer import (
     AioAcceptedMaterializer,
 )
 from deerflow.sandbox.accepted_material import (
+    AcceptedExecutionEvidenceV2,
     AcceptedMaterialCapability,
     AcceptedMaterialError,
     AcceptedMaterialExecutionClaimV1,
     AcceptedMaterialRequestV1,
+    AcceptedMaterialRequestV2,
+    AcceptedSandboxCapabilityProfileV1,
+    AcceptedSandboxIsolationFactsV1,
+    AcceptedSandboxQualificationV1,
     AcceptedSkillExecutionEvidenceV2,
     AcceptedSkillSandboxBindingV1,
 )
@@ -73,12 +78,51 @@ def _legacy_evidence() -> AcceptedSkillExecutionEvidenceV2:
     return AcceptedSkillExecutionEvidenceV2(**wire)  # type: ignore[arg-type]
 
 
+def _profile() -> AcceptedSandboxCapabilityProfileV1:
+    return AcceptedSandboxCapabilityProfileV1.build(
+        material_capability=AcceptedMaterialCapability.IMMUTABLE_READ_ONLY,
+        atomic_provider_ownership_fencing=True,
+        atomic_provider_operation_fencing=False,
+        authoritative_shared_expiry=True,
+        resolved_immutable_image=True,
+        restricted_non_root_isolation=True,
+        recoverable_resource_lookup=True,
+        durable_one_replica=True,
+        exact_two=False,
+    )
+
+
+def _qualification(
+    profile: AcceptedSandboxCapabilityProfileV1,
+    now: datetime,
+) -> AcceptedSandboxQualificationV1:
+    return AcceptedSandboxQualificationV1.build(
+        capability_profile_digest=profile.digest,
+        qualification_scope="durable_one_replica_rwx_verified_copy_v2_nonempty_skill",
+        artifact_digest="d" * 64,
+        topology_digest="e" * 64,
+        verified_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(days=1),
+    )
+
+
+def _isolation() -> AcceptedSandboxIsolationFactsV1:
+    return AcceptedSandboxIsolationFactsV1.build(
+        restricted_non_root=True,
+        read_only_accepted_material=True,
+        privilege_escalation_disabled=True,
+        runtime_class_digest="6" * 64,
+        network_policy_digest="7" * 64,
+    )
+
+
 class _AioProviderPort:
     def __init__(self, evidence: AcceptedSkillExecutionEvidenceV2) -> None:
         self.evidence = evidence
         self.sandbox = SimpleNamespace(id="sandbox-1")
         self.destroyed: list[str] = []
         self.acquire_calls = 0
+        self.resource_scope_refs: list[str | None] = []
 
     async def acquire_bound_accepted_skills_async(
         self,
@@ -87,8 +131,10 @@ class _AioProviderPort:
         user_id: str,
         binding: AcceptedSkillSandboxBindingV1,
         execution_claim: object | None = None,
+        resource_scope_ref: str | None = None,
     ) -> str:
         self.acquire_calls += 1
+        self.resource_scope_refs.append(resource_scope_ref)
         assert (thread_id, user_id) == ("thread-ref", "user-ref")
         assert binding.snapshot_id == "3" * 64
         return self.sandbox.id
@@ -167,6 +213,103 @@ async def test_aio_adapter_preserves_v2_evidence_and_fences_release() -> None:
     assert provider.destroyed == []
     await adapter.release(renewed)
     assert provider.destroyed == ["sandbox-1"]
+
+
+@pytest.mark.asyncio
+async def test_aio_adapter_emits_handle_free_v2_evidence_for_v2_request() -> None:
+    now = datetime(2026, 8, 31, 12, tzinfo=UTC)
+    legacy = _legacy_evidence()
+    provider = _AioProviderPort(legacy)
+    profile = _profile()
+    qualification = _qualification(profile, now)
+    v1 = _request(now)
+    request = AcceptedMaterialRequestV2.build(
+        run_id=v1.run_id,
+        attempt_id=v1.attempt_id,
+        tenant=v1.tenant,
+        user_ref=v1.user_ref,
+        thread_ref=v1.thread_ref,
+        agent_revision_digest=v1.agent_revision_digest,
+        skill_snapshot_digest=v1.skill_snapshot_digest,
+        skill_scope_digest=v1.skill_scope_digest,
+        file_manifest=v1.file_manifest,
+        runtime_image_digest=v1.runtime_image_digest,
+        lease_expires_at=v1.lease_expires_at,
+        accepted_invocation_ref="invocation-safe-ref",
+        accepted_invocation_digest="8" * 64,
+        tool_plane_base_revision_digest="9" * 64,
+        tool_plane_user_overlay_digest="a" * 64,
+        tool_plane_projection_digest="b" * 64,
+        tool_plane_effective_digest="c" * 64,
+        batch_child_attempt_ref=None,
+        capability_profile_digest=profile.digest,
+    )
+    adapter = AioAcceptedMaterializer(
+        provider=provider,
+        binding_resolver=lambda _request: AcceptedSkillSandboxBindingV1(
+            snapshot_id=legacy.snapshot_id,
+            run_id=legacy.run_id,
+            generation=legacy.generation,
+        ),
+        clock=lambda: now,
+        qualification=qualification,
+        isolation=_isolation(),
+    )
+
+    _sandbox, lease, evidence = await adapter.acquire_and_materialize(request)
+
+    assert isinstance(evidence, AcceptedExecutionEvidenceV2)
+    assert evidence.binds(request, lease)
+    assert evidence.qualification_evidence_digest == qualification.digest
+    assert evidence.verifier_contract_version == "rwx_verified_copy_v2:accepted_execution_claim_v2"
+    assert "sandbox-1" not in json.dumps(evidence.to_persisted(), sort_keys=True)
+    assert await adapter.validate(lease, evidence)
+    await adapter.release(lease)
+
+
+@pytest.mark.asyncio
+async def test_batch_child_attempt_gets_a_distinct_provider_resource_scope() -> None:
+    now = datetime(2026, 8, 31, 12, tzinfo=UTC)
+    legacy = _legacy_evidence()
+    provider = _AioProviderPort(legacy)
+    profile = _profile()
+    v1 = _request(now)
+    request = AcceptedMaterialRequestV2.build(
+        run_id=v1.run_id,
+        attempt_id=v1.attempt_id,
+        tenant=v1.tenant,
+        user_ref=v1.user_ref,
+        thread_ref=v1.thread_ref,
+        agent_revision_digest=v1.agent_revision_digest,
+        skill_snapshot_digest=v1.skill_snapshot_digest,
+        skill_scope_digest=v1.skill_scope_digest,
+        file_manifest=v1.file_manifest,
+        runtime_image_digest=v1.runtime_image_digest,
+        lease_expires_at=v1.lease_expires_at,
+        accepted_invocation_ref="invocation-safe-ref",
+        accepted_invocation_digest="8" * 64,
+        tool_plane_base_revision_digest="9" * 64,
+        tool_plane_user_overlay_digest="a" * 64,
+        tool_plane_projection_digest="b" * 64,
+        tool_plane_effective_digest="c" * 64,
+        batch_child_attempt_ref="batch-child-" + ("d" * 32),
+        capability_profile_digest=profile.digest,
+    )
+    adapter = AioAcceptedMaterializer(
+        provider=provider,
+        binding_resolver=lambda _request: AcceptedSkillSandboxBindingV1(
+            snapshot_id=legacy.snapshot_id,
+            run_id=legacy.run_id,
+            generation=legacy.generation,
+        ),
+        clock=lambda: now,
+        qualification=_qualification(profile, now),
+        isolation=_isolation(),
+    )
+
+    await adapter.acquire_and_materialize(request)
+
+    assert provider.resource_scope_refs == [request.batch_child_attempt_ref]
 
 
 @pytest.mark.asyncio

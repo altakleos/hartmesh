@@ -25,10 +25,12 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   `AssemblyEvidenceV1` before checkpoint/graph/model/tool work. Missing evidence
   fails `assembly_evidence_unavailable`, drift fails `agent_assembly_drift`, and
   stale owners cannot finalize.
-- `sandbox/accepted_material.py` owns accepted material's bounded request,
-  manifest, fenced lease, evidence, and `AcceptedMaterializer` port. Workers
-  consume only its optional provider selection; adapter construction stays
-  provider-local. AIO preserves the qualified `rwx_verified_copy_v2` tuple. OpenSandbox
+- `sandbox/accepted_material.py` owns accepted material's bounded V1/V2 request,
+  lease/evidence, capability profiles, and `AcceptedSandboxSession`. The session
+  composes the existing run or batch-item fence, exposes no raw provider handle,
+  and blocks calls/publication after observed loss. AIO keeps
+  `rwx_verified_copy_v2` but declares atomic fencing, process-loss lookup, and
+  exact-two false; see `docs/ACCEPTED_SANDBOX_EXECUTION.md`. OpenSandbox
   ordinary execution remains separate and accepted nonempty material fails
   closed: its pinned server/SDK surface has no ownership CAS or resolved-image
   digest readback; candidate trusted-setup surfaces remain live-unqualified. The committed Phase 0

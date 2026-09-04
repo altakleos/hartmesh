@@ -20,6 +20,7 @@ from deerflow.authz.sandbox_authz import (
 )
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
+from deerflow.sandbox.accepted_material import accepted_sandbox_from_runtime_context
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.sandbox_provider import (
@@ -159,6 +160,27 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if thread_id is None:
             return super().before_agent(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
+        accepted_sandbox = accepted_sandbox_from_runtime_context(runtime.context)
+        if accepted_sandbox is not None:
+            try:
+                authorize_sandbox_execution(
+                    context=runtime.context or {},
+                    app_config=safe_app_config(),
+                )
+            except SandboxAuthorizationError:
+                logger.info(
+                    "Accepted sandbox execution denied for this role (thread_id=%s)",
+                    thread_id,
+                )
+                return None
+            existing_sandbox_id = self._read_sandbox_id_from_state(state)
+            if existing_sandbox_id == accepted_sandbox.id:
+                return super().before_agent(state, runtime)
+            if existing_sandbox_id is not None:
+                return {
+                    "sandbox": Overwrite({"sandbox_id": accepted_sandbox.id}),
+                }
+            return {"sandbox": {"sandbox_id": accepted_sandbox.id}}
         projection = None if has_accepted_binding else self._prepare_agent_skill_projection(thread_id, user_id=user_id)
 
         # Durable accepted material and policy-scoped legacy views must be
@@ -257,6 +279,27 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if thread_id is None:
             return await super().abefore_agent(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
+        accepted_sandbox = accepted_sandbox_from_runtime_context(runtime.context)
+        if accepted_sandbox is not None:
+            try:
+                await authorize_sandbox_execution_async(
+                    context=runtime.context or {},
+                    app_config=await safe_app_config_async(),
+                )
+            except SandboxAuthorizationError:
+                logger.info(
+                    "Accepted sandbox execution denied for this role (thread_id=%s)",
+                    thread_id,
+                )
+                return None
+            existing_sandbox_id = self._read_sandbox_id_from_state(state)
+            if existing_sandbox_id == accepted_sandbox.id:
+                return await super().abefore_agent(state, runtime)
+            if existing_sandbox_id is not None:
+                return {
+                    "sandbox": Overwrite({"sandbox_id": accepted_sandbox.id}),
+                }
+            return {"sandbox": {"sandbox_id": accepted_sandbox.id}}
         projection = (
             None
             if has_accepted_binding
@@ -356,6 +399,8 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        if accepted_sandbox_from_runtime_context(runtime.context) is not None:
+            return None
         from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY, SkillProjectionConsumerToken
 
         token = (runtime.context or {}).get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
@@ -385,6 +430,8 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        if accepted_sandbox_from_runtime_context(runtime.context) is not None:
+            return None
         from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY, SkillProjectionConsumerToken
 
         token = (runtime.context or {}).get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)

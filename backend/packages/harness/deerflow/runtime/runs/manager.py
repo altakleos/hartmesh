@@ -2692,6 +2692,7 @@ class RunManager:
                 if execution_evidence is not None:
                     from deerflow.sandbox.accepted_material import (
                         AcceptedExecutionEvidenceV1,
+                        AcceptedExecutionEvidenceV2,
                         AcceptedSkillExecutionEvidenceV1,
                         AcceptedSkillExecutionEvidenceV2,
                     )
@@ -2700,6 +2701,7 @@ class RunManager:
                         execution_evidence,
                         (
                             AcceptedExecutionEvidenceV1,
+                            AcceptedExecutionEvidenceV2,
                             AcceptedSkillExecutionEvidenceV1,
                             AcceptedSkillExecutionEvidenceV2,
                         ),
@@ -2835,6 +2837,7 @@ class RunManager:
         state_version: int,
         terminal_state_version: int | None = None,
         revoked: bool = False,
+        allowed_active_statuses: tuple[str, ...] = ("running",),
     ) -> AsyncIterator[bool]:
         """Serialize one external mutation with durable owner changes."""
 
@@ -2846,6 +2849,7 @@ class RunManager:
             owner_worker_id=owner_worker_id,
             state_version=state_version,
             terminal_state_version=terminal_state_version,
+            allowed_active_statuses=allowed_active_statuses,
         ) as active:
             yield active
 
@@ -3606,6 +3610,63 @@ class RunManager:
                 failure.correlation_id,
             )
             return False
+
+    async def _record_accepted_sandbox_orphan(
+        self,
+        record: RunRecord,
+    ) -> None:
+        """Append one safe diagnostic after authoritative orphan takeover.
+
+        The terminal run CAS remains the authority. This observation is
+        deliberately best-effort and contains neither the provider resource
+        handle nor cleanup authority.
+        """
+
+        if self._event_store is None or record.execution_evidence_json is None:
+            return
+        try:
+            from deerflow.runtime.events.appender import (
+                AdministrativeRunEventAppender,
+            )
+            from deerflow.runtime.events.catalog import SANDBOX_LIFECYCLE_EVENT
+            from deerflow.sandbox.accepted_material import (
+                AcceptedSandboxLifecycleKind,
+                AcceptedSandboxLifecycleObservationV1,
+                decode_accepted_execution_evidence,
+            )
+
+            evidence = decode_accepted_execution_evidence(
+                record.execution_evidence_json,
+            )
+            if record.execution_evidence_digest != evidence.digest:
+                return
+            observation = AcceptedSandboxLifecycleObservationV1.build(
+                evidence=evidence,
+                kind=AcceptedSandboxLifecycleKind.ORPHANED,
+                observed_at=datetime.now(UTC),
+                reason_code="durable_run_owner_expired",
+            )
+            await AdministrativeRunEventAppender(
+                self._event_store,
+            ).put_batch(
+                [
+                    {
+                        "thread_id": record.thread_id,
+                        "run_id": record.run_id,
+                        "event_type": SANDBOX_LIFECYCLE_EVENT.event_type,
+                        "category": SANDBOX_LIFECYCLE_EVENT.category,
+                        "content": observation.to_persisted(),
+                        "metadata": {},
+                        "user_id": record.user_id,
+                    }
+                ],
+            )
+        except Exception:
+            logger.warning(
+                "Accepted sandbox orphan observation failed for run %s",
+                record.run_id,
+                exc_info=True,
+            )
 
     async def _ensure_owned_delivery_receipt(
         self,
@@ -5837,6 +5898,7 @@ class RunManager:
                 )
                 claimed_any = claimed_any or claimed
                 if terminal_record is not None:
+                    await self._record_accepted_sandbox_orphan(terminal_record)
                     recovered.append(terminal_record)
                 # Immutable admission policy owns dispatch. A disabled,
                 # unavailable, or lost exact-two claim must never fall through
@@ -5893,6 +5955,7 @@ class RunManager:
                 # permanently overwrite a live run's later detailed receipt. The
                 # receipt remains best-effort, matching normal terminal delivery
                 # when its event store is unavailable.
+                await self._record_accepted_sandbox_orphan(record)
                 await self._ensure_delivery_receipt(record)
                 recovered.append(record)
 

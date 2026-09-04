@@ -94,6 +94,13 @@ renewal/deletion, and trusted setup instead of emulating them in Gateway memory.
 The stateful control-plane fake exists for contract testing only and is not
 qualification evidence.
 
+OpenSandbox consequently supplies no `AcceptedMaterializerSelection`, capability
+profile, qualification, or `AcceptedSandboxSession` for durable nonempty work.
+Ordinary OpenSandbox tools retain their existing lifecycle, but durable admission
+does not fall back to that weaker route. The cross-provider capability matrix and
+check-then-call semantics are documented in
+[tenant-bound accepted sandbox execution](ACCEPTED_SANDBOX_EXECUTION.md).
+
 Enabling the future scope
 `durable_one_replica_opensandbox_immutable_skills_v1` requires a new Phase 0
 artifact for exact supported versions, implementation of all live scenarios,
