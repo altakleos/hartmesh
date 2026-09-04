@@ -2,6 +2,7 @@
 Web Search Tool - Search the web using DuckDuckGo (no API key required).
 """
 
+import asyncio
 import json
 import logging
 
@@ -9,6 +10,25 @@ from langchain.tools import tool
 
 from deerflow.community.search_time_range import DDGS_TIMELIMIT_BY_TIME_RANGE, SearchTimeRange
 from deerflow.config import get_app_config
+from deerflow.retrieval import (
+    RETRIEVAL_TOOL_METADATA_KEY,
+    EvidenceBearingRetrievalService,
+    ProviderRetrievalItem,
+    ProviderRetrievalResponse,
+    ResolvedRetrievalCredentialV1,
+    RetrievalPolicyV1,
+    RetrievalProviderError,
+    RetrievalRequestConstraintsV1,
+    RetrievalToolDeclarationV1,
+    accepted_retrieval_app_config_from_active,
+    accepted_retrieval_request_from_active,
+    get_active_retrieval_handoff,
+)
+from deerflow.retrieval.provider_config import (
+    configured_domains,
+    configured_int,
+    configured_timeout_ms,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +130,8 @@ def _search_text(
     safesearch: str | None = DEFAULT_SAFESEARCH,
     backend: str | list[str] | tuple[str, ...] | None = DEFAULT_BACKEND,
     time_range: SearchTimeRange | None = None,
+    timeout_seconds: float = 30,
+    raise_errors: bool = False,
 ) -> list[dict]:
     """
     Execute text search using DuckDuckGo.
@@ -129,9 +151,11 @@ def _search_text(
         from ddgs import DDGS
     except ImportError:
         logger.error("ddgs library not installed. Run: pip install ddgs")
+        if raise_errors:
+            raise RetrievalProviderError("configuration_error") from None
         return []
 
-    ddgs = DDGS(timeout=30)
+    ddgs = DDGS(timeout=timeout_seconds)
 
     try:
         backend = _resolve_time_range_backend(backend) if time_range is not None else _normalize_backend(backend)
@@ -149,7 +173,9 @@ def _search_text(
         return list(results) if results else []
 
     except Exception as e:
-        logger.error(f"Failed to search web: {e}")
+        logger.error("DDGS web search failed (%s)", type(e).__name__)
+        if raise_errors:
+            raise RetrievalProviderError("provider_unavailable") from None
         return []
 
 
@@ -206,3 +232,171 @@ def web_search_tool(
     }
 
     return json.dumps(output, indent=2, ensure_ascii=False)
+
+
+_RECENCY_DAYS = {
+    "day": 1,
+    "week": 7,
+    "month": 31,
+    "year": 366,
+}
+
+
+class _DuckDuckGoRetrievalProvider:
+    def __init__(
+        self,
+        *,
+        region: str,
+        safesearch: str,
+        backend: str | list[str] | tuple[str, ...],
+        time_range: SearchTimeRange | None,
+    ) -> None:
+        self._region = region
+        self._safesearch = safesearch
+        self._backend = backend
+        self._time_range = time_range
+
+    async def search(self, request) -> ProviderRetrievalResponse:
+        results = await asyncio.to_thread(
+            _search_text,
+            query=request.query,
+            max_results=request.constraints.max_results,
+            region=self._region,
+            safesearch=self._safesearch,
+            backend=self._backend,
+            time_range=self._time_range,
+            timeout_seconds=request.constraints.timeout_ms / 1_000,
+            raise_errors=True,
+        )
+        normalized_results = [
+            {
+                "title": result.get("title", ""),
+                "url": result.get("href", result.get("link", "")),
+                "content": result.get("body", result.get("snippet", "")),
+            }
+            for result in results[: request.constraints.max_results]
+            if isinstance(result, dict)
+        ]
+        if normalized_results:
+            candidate = json.dumps(
+                {
+                    "query": request.query,
+                    "total_results": len(normalized_results),
+                    "results": normalized_results,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        else:
+            candidate = json.dumps(
+                {"error": "No results found", "query": request.query},
+                ensure_ascii=False,
+            )
+        items = tuple(
+            ProviderRetrievalItem(
+                source_locator=result["url"],
+                content=result.get("content", ""),
+            )
+            for result in normalized_results
+            if isinstance(result.get("url"), str) and result["url"]
+        )
+        return ProviderRetrievalResponse(
+            candidate_result=candidate,
+            items=items,
+            result_count=len(normalized_results),
+            truncated=len(results) > request.constraints.max_results,
+        )
+
+
+async def _web_search_with_evidence(
+    query: str,
+    max_results: int = 5,
+    time_range: SearchTimeRange | None = None,
+) -> str:
+    if get_active_retrieval_handoff() is None:
+        return await asyncio.to_thread(
+            web_search_tool.func,
+            query,
+            max_results,
+            time_range,
+        )
+    app_config = accepted_retrieval_app_config_from_active()
+    config = app_config.get_tool_config("web_search")
+    extra = dict((config.model_extra or {}) if config is not None else {})
+    server_max_results = configured_int(
+        extra,
+        "max_results",
+        default=5,
+        maximum=50,
+    )
+    if not isinstance(max_results, int) or isinstance(max_results, bool) or not 1 <= max_results <= 50:
+        raise RetrievalProviderError("configuration_error")
+    region = str(extra.get("region", DEFAULT_REGION))
+    safesearch = str(extra.get("safesearch", DEFAULT_SAFESEARCH))
+    # Evidence-bearing DDGS calls use one known network provider. The direct
+    # compatibility path may still use its configured multi-backend mode.
+    backend = "duckduckgo"
+    recency_days = _RECENCY_DAYS.get(str(time_range)) if time_range else None
+    timeout_ms = configured_timeout_ms(extra, default_seconds=30)
+    policy = RetrievalPolicyV1(
+        allowed_providers=("duckduckgo",),
+        allowed_endpoint_origins=("https://duckduckgo.com",),
+        web_domain_allowlist=configured_domains(extra, "allowed_domains"),
+        web_domain_denylist=configured_domains(extra, "denied_domains"),
+        max_recency_days=366,
+        max_results=server_max_results,
+        max_item_bytes=configured_int(
+            extra,
+            "max_item_bytes",
+            default=16 * 1024,
+            maximum=1024 * 1024,
+        ),
+        max_aggregate_bytes=configured_int(
+            extra,
+            "max_total_bytes",
+            default=64 * 1024,
+            maximum=8 * 1024 * 1024,
+        ),
+        timeout_ms=timeout_ms,
+        allow_redirects=False,
+        source_schemes=("http", "https"),
+    )
+    accepted = accepted_retrieval_request_from_active(
+        query=query.strip(),
+        credential=ResolvedRetrievalCredentialV1(
+            provider_id="duckduckgo",
+            selector_ref="duckduckgo-anonymous",
+            secret=True,
+        ),
+        policy=policy,
+        requested_constraints=RetrievalRequestConstraintsV1(
+            provider_id="duckduckgo",
+            endpoint="https://duckduckgo.com",
+            recency_days=recency_days,
+            max_results=max_results,
+            timeout_ms=timeout_ms,
+        ),
+    )
+    candidate = await EvidenceBearingRetrievalService().retrieve(
+        accepted,
+        _DuckDuckGoRetrievalProvider(
+            region=region,
+            safesearch=safesearch,
+            backend=backend,
+            time_range=time_range,
+        ),
+    )
+    if not isinstance(candidate.result, str):
+        raise RetrievalProviderError("unsafe_response")
+    return candidate.result
+
+
+web_search_tool.coroutine = _web_search_with_evidence
+web_search_tool.metadata = {
+    **(web_search_tool.metadata or {}),
+    RETRIEVAL_TOOL_METADATA_KEY: RetrievalToolDeclarationV1(
+        provider_id="duckduckgo",
+        tool_kind="web_search",
+        adapter_capability_version="ddgs-v1",
+    ).to_metadata(),
+}

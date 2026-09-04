@@ -367,6 +367,8 @@ SKILL.md Format:
       - TodoListMiddleware: Load todos (if plan mode)
       - ViewImageMiddleware: Process images
       - ClarificationMiddleware: Check for clarifications
+      - ToolReceiptMiddleware: Reserve durable attempt before inner tool work;
+        commit the final post-sanitization/post-budget result digest
 
    c. Execute agent:
       - Model processes messages
@@ -378,6 +380,13 @@ SKILL.md Format:
 
 4. Client receives streaming response
 ```
+
+Supported RAGFlow, DuckDuckGo, Serply, and Tencent WSA calls pass through the
+provider-neutral `deerflow.retrieval` service inside that tool boundary. It
+fixes tenant credential and policy, invokes an injected provider port, and
+publishes a query-free safe draft. The outer receipt middleware atomically
+stores that draft as `retrieval.observation.v1` beside the terminal receipt.
+See [EVIDENCE_BEARING_RETRIEVAL.md](EVIDENCE_BEARING_RETRIEVAL.md).
 
 ## Data Flow
 

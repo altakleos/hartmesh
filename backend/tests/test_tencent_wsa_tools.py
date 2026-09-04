@@ -31,6 +31,13 @@ def _response(pages: list[object] | None = None, **extra: object) -> dict:
 
 
 def _mock_http_client(response: MagicMock):
+    if not isinstance(response.content, (bytes, bytearray)):
+        try:
+            response.content = json.dumps(response.json.return_value).encode("utf-8")
+        except TypeError:
+            response.content = b""
+    if not isinstance(response.headers, dict):
+        response.headers = {"content-type": "application/json"}
     client = MagicMock()
     client.post.return_value = response
     context_manager = MagicMock()
@@ -57,6 +64,16 @@ class TestTencentWsaApiKey:
             from deerflow.community.tencent_wsa.tools import _get_api_key
 
             assert _get_api_key() == "environment-key"
+
+    def test_environment_fallback_can_be_disabled_for_accepted_runs(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("TENCENTCLOUD_WSA_APIKEY", "late-environment-key")
+
+        from deerflow.community.tencent_wsa.tools import _get_api_key
+
+        assert _get_api_key(extras={}, allow_env_fallback=False) is None
 
     def test_missing_key_returns_a_structured_error(self, monkeypatch):
         monkeypatch.delenv("TENCENTCLOUD_WSA_APIKEY", raising=False)
@@ -262,6 +279,78 @@ class TestTencentWsaSearch:
             "query": "腾讯云",
             "request_id": "request-123",
         }
+
+    def test_non_json_content_type_is_rejected(self):
+        http_response = MagicMock()
+        http_response.json.return_value = _response([])
+        http_response.headers = {"content-type": "text/html"}
+        _, context_manager = _mock_http_client(http_response)
+
+        with (
+            patch("deerflow.community.tencent_wsa.tools.get_app_config") as get_config,
+            patch(
+                "deerflow.community.tencent_wsa.tools.httpx.Client",
+                return_value=context_manager,
+            ),
+        ):
+            get_config.return_value.get_tool_config.return_value = _tool_config({"api_key": "test-key"})
+
+            from deerflow.community.tencent_wsa.tools import web_search_tool
+
+            result = json.loads(web_search_tool.run({"query": "腾讯云"}))
+
+        assert result == {
+            "error": "Tencent Cloud WSA returned an unexpected response format",
+            "query": "腾讯云",
+        }
+
+    def test_strict_adapter_rejects_oversized_raw_response(self):
+        from deerflow.community.tencent_wsa.tools import _search
+        from deerflow.retrieval import RetrievalProviderError
+
+        http_response = MagicMock()
+        http_response.json.return_value = _response([])
+        http_response.content = b"x" * 65
+        _, context_manager = _mock_http_client(http_response)
+
+        with patch(
+            "deerflow.community.tencent_wsa.tools.httpx.Client",
+            return_value=context_manager,
+        ):
+            with pytest.raises(RetrievalProviderError) as caught:
+                _search(
+                    "secret",
+                    {"Query": "query"},
+                    "query",
+                    max_response_bytes=64,
+                    strict_response=True,
+                )
+
+        assert caught.value.status == "oversized_response"
+
+    def test_strict_adapter_classifies_invalid_json_as_unsafe(self):
+        from deerflow.community.tencent_wsa.tools import _search
+        from deerflow.retrieval import RetrievalProviderError
+
+        http_response = MagicMock()
+        http_response.content = b"not-json"
+        http_response.headers = {"content-type": "application/json"}
+        http_response.json.side_effect = ValueError("private provider body")
+        _, context_manager = _mock_http_client(http_response)
+
+        with patch(
+            "deerflow.community.tencent_wsa.tools.httpx.Client",
+            return_value=context_manager,
+        ):
+            with pytest.raises(RetrievalProviderError) as caught:
+                _search(
+                    "secret",
+                    {"Query": "query"},
+                    "query",
+                    strict_response=True,
+                )
+
+        assert caught.value.status == "unsafe_response"
 
 
 class TestTencentWsaConfiguration:

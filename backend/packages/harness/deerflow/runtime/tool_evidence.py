@@ -872,6 +872,7 @@ class ToolAttemptReservation:
 
     started: DurableToolReceiptV1
     replayed_outcome: DurableToolReceiptV1 | None = None
+    replayed_retrieval_observation: object | None = None
 
     def __post_init__(self) -> None:
         if self.started.phase != "started":
@@ -885,6 +886,8 @@ class ToolAttemptReservation:
             or outcome.request_projection_digest != self.started.request_projection_digest
         ):
             raise ToolEvidenceError("reservation_outcome_invalid")
+        if self.replayed_retrieval_observation is not None and outcome is None:
+            raise ToolEvidenceError("reservation_observation_without_outcome")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1245,6 +1248,20 @@ class RunEventToolReceiptSink:
             raise
         receipt = parse_tool_receipt_event(outcome.event).receipt
         replayed_outcome = parse_tool_receipt_event(outcome.terminal_event).receipt if outcome.terminal_event is not None else None
+        replayed_retrieval_observation = None
+        if outcome.retrieval_observation_event is not None:
+            from deerflow.retrieval import (
+                RetrievalObservationV1,
+                validate_retrieval_pair,
+            )
+
+            if replayed_outcome is None:
+                raise ToolReceiptIntegrityError("retrieval_observation_without_receipt")
+            replayed_retrieval_observation = RetrievalObservationV1.from_event_body(outcome.retrieval_observation_event.get("content"))
+            validate_retrieval_pair(
+                replayed_outcome.to_event_body(),
+                replayed_retrieval_observation.to_event_body(),
+            )
         binding.bind_dispatch_attempt(
             tool_call_id,
             dispatch,
@@ -1258,6 +1275,7 @@ class RunEventToolReceiptSink:
         return ToolAttemptReservation(
             started=receipt,
             replayed_outcome=replayed_outcome,
+            replayed_retrieval_observation=replayed_retrieval_observation,
         )
 
     async def _record(
@@ -1303,6 +1321,51 @@ class RunEventToolReceiptSink:
             raise ToolEvidenceError("outcome_receipt_phase_invalid")
         await self._record(receipt, event_type=TOOL_RECEIPT_OUTCOME_EVENT)
         self._active_fences.pop(receipt.receipt_id, None)
+
+    async def record_with_receipt_outcome(
+        self,
+        receipt: DurableToolReceiptV1,
+        draft: object,
+    ) -> object:
+        """Atomically publish a terminal receipt and retrieval observation."""
+
+        from deerflow.retrieval import (
+            RetrievalObservationDraftV1,
+            RetrievalObservationV1,
+        )
+
+        if receipt.phase == "started":
+            raise ToolEvidenceError("outcome_receipt_phase_invalid")
+        if not isinstance(draft, RetrievalObservationDraftV1):
+            raise ToolEvidenceError("retrieval_draft_invalid")
+        observation = RetrievalObservationV1.finalize(receipt, draft)
+        active = self._active_fences.get(
+            receipt.receipt_id,
+            (receipt.context.owner_id, receipt.context.lease_epoch),
+        )
+        owner_id, lease_epoch = active
+        try:
+            outcome = await self._event_store.append_retrieval_pair(
+                receipt.context.run_id,
+                receipt_body=receipt.to_event_body(),
+                observation_body=observation.to_event_body(),
+                owner_id=owner_id,
+                lease_epoch=lease_epoch,
+            )
+        except ToolReceiptOwnershipLost:
+            await self._report_ownership_lost("append_retrieval_pair")
+            raise
+        stored = RetrievalObservationV1.from_event_body(outcome.observation_event["content"])
+        if stored != observation:
+            raise ToolReceiptIntegrityError("retrieval_observation_conflict")
+        if outcome.observation_created:
+            from deerflow.retrieval.metrics import (
+                record_retrieval_observation_metric,
+            )
+
+            record_retrieval_observation_metric(stored)
+        self._active_fences.pop(receipt.receipt_id, None)
+        return stored
 
 
 class ToolEvidenceRuntimeBinding:
@@ -1547,6 +1610,17 @@ class CrossLoopDurableToolReceiptSink:
 
     async def record_outcome(self, receipt: DurableToolReceiptV1) -> None:
         await self._run(receipt, outcome=True)
+
+    async def record_with_receipt_outcome(
+        self,
+        receipt: DurableToolReceiptV1,
+        draft: object,
+    ) -> object:
+        operation = self._sink.record_with_receipt_outcome(receipt, draft)
+        if asyncio.get_running_loop() is self._owner_loop:
+            return await operation
+        future = asyncio.run_coroutine_threadsafe(operation, self._owner_loop)
+        return await asyncio.wrap_future(future)
 
 
 def cross_loop_receipt_sink(sink: DurableToolReceiptSink) -> DurableToolReceiptSink:

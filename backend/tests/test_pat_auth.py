@@ -909,6 +909,11 @@ def test_pat_policy_does_not_pre_authorize_unimplemented_methods():
         ("GET", "/api/threads/t1/runs", "runs:read"),
         ("POST", "/api/threads/t1/runs/r1/cancel", "runs:cancel"),
         ("GET", "/api/threads/t1/runs/r1/events", "runs:read"),
+        (
+            "GET",
+            "/api/threads/t1/runs/r1/retrieval-observations",
+            "runs:read",
+        ),
         ("POST", "/api/runs/wait", "runs:create"),
     ],
 )

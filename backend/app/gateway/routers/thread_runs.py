@@ -63,6 +63,8 @@ from app.runtime import InternalCancelRequest, InvocationPrincipal, NotFoundOrIn
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import get_paths, make_safe_user_id
+from deerflow.constants import RETRIEVAL_OBSERVATION_EVENT_TYPE
+from deerflow.retrieval import RetrievalEvidenceError, RetrievalObservationV1
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
@@ -1784,6 +1786,60 @@ async def list_run_events(
         else event
         for event in events
     ]
+
+
+@router.get("/{thread_id}/runs/{run_id}/retrieval-observations")
+@require_permission("runs", "read", owner_check=True)
+async def list_retrieval_observations(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=100),
+    after_seq: int | None = Query(default=None, ge=1),
+) -> dict[str, object]:
+    """Return a bounded authorized page of safe retrieval observations."""
+
+    await _authorize_run_feed(request, thread_id=thread_id, run_id=run_id)
+    events = await get_run_event_store(request).list_events(
+        thread_id,
+        run_id,
+        event_types=[RETRIEVAL_OBSERVATION_EVENT_TYPE],
+        task_id=None,
+        limit=limit + 1,
+        after_seq=after_seq,
+    )
+    has_more = len(events) > limit
+    selected = events[:limit]
+    items: list[dict[str, object]] = []
+    invalid_event_count = 0
+    for event in selected:
+        try:
+            if not isinstance(event, dict) or event.get("thread_id") != thread_id or event.get("run_id") != run_id or event.get("event_type") != RETRIEVAL_OBSERVATION_EVENT_TYPE or type(event.get("seq")) is not int:
+                raise RetrievalEvidenceError("retrieval_event_scope_invalid")
+            observation = RetrievalObservationV1.from_event_body(event.get("content"))
+            if observation.draft.run_id != run_id:
+                raise RetrievalEvidenceError("retrieval_event_scope_invalid")
+            envelope_tenant = event.get("tenant_digest")
+            if envelope_tenant is not None and envelope_tenant != observation.draft.tenant_digest:
+                raise RetrievalEvidenceError("retrieval_event_tenant_invalid")
+            items.append(
+                {
+                    "event_seq": event["seq"],
+                    **observation.to_public_projection(),
+                }
+            )
+        except (RetrievalEvidenceError, TypeError, ValueError):
+            invalid_event_count += 1
+    next_after_seq = None
+    if has_more and selected:
+        candidate = selected[-1].get("seq")
+        if type(candidate) is int:
+            next_after_seq = candidate
+    return {
+        "items": items,
+        "next_after_seq": next_after_seq,
+        "invalid_event_count": invalid_event_count,
+    }
 
 
 @router.get("/{thread_id}/runs/{run_id}/workspace-changes")

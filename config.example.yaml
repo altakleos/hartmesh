@@ -717,9 +717,10 @@ tool_groups:
 
 tools:
   # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
-  # `datasets` is optional. Omit it to list every tenant-visible dataset at
-  # search time; an explicit `datasets: []` is invalid. Empty datasets are
-  # skipped; searchable datasets are grouped by
+  # Durable evidence-bearing runs require an explicit non-empty `datasets`
+  # allowlist. Omitting it retains tenant-wide catalog lookup only for legacy
+  # direct/local calls; an explicit `datasets: []` is invalid. Empty datasets
+  # are skipped; searchable datasets are grouped by
   # embedding model and retrieved with at most four groups in parallel. Group
   # ranks are interleaved under the global `page_size` limit; scores are omitted
   # when multiple groups are searched because they are not comparable.
@@ -745,6 +746,11 @@ tools:
     group: web
     use: deerflow.community.ddg_search.tools:web_search_tool
     max_results: 5
+    # allowed_domains: [example.com]        # Optional source-domain ceiling
+    # denied_domains: [private.example.com] # Deny wins over allow
+    # max_item_bytes: 16384
+    # max_total_bytes: 65536
+    # timeout: 30
     # backend: auto          # DDGS backend(s): auto, duckduckgo, brave, wikipedia, etc.
     # region: wt-wt          # wt-wt is normalized for Wikipedia when backend includes auto/all/wikipedia.
     # safesearch: moderate   # on, moderate, off
@@ -776,10 +782,15 @@ tools:
   #   group: web
   #   use: deerflow.community.serply.tools:web_search_tool
   #   max_results: 5                 # Serply accepts 1-100 per request
+  #   allowed_domains: [example.com] # Optional source-domain ceiling
+  #   denied_domains: [private.example.com]
+  #   max_item_bytes: 16384
+  #   max_total_bytes: 65536
+  #   timeout: 30
   #   # vertical: search             # search (default), news, or scholar
   #   # gl: us                       # Optional country code for the results
   #   # hl: en                       # Optional interface language
-  #   # api_key: $SERPLY_API_KEY     # Optional if the env var is set
+  #   api_key: $SERPLY_API_KEY       # Required for durable evidence-bearing runs
 
   # Web search tool (uses Brave Search API, requires BRAVE_SEARCH_API_KEY)
   # Brave Search returns results from an independent index. Sign up at
@@ -814,8 +825,13 @@ tools:
   #   use: deerflow.community.tencent_wsa.tools:web_search_tool
   #   max_results: 5                 # 1-50; values above 10 request Tencent's Cnt option
   #                                    # (requires a Tencent plan that supports Cnt)
+  #   allowed_domains: [example.com] # Optional source-domain ceiling
+  #   denied_domains: [private.example.com]
+  #   max_item_bytes: 16384
+  #   max_total_bytes: 65536
+  #   timeout: 30
   #   # mode: 0                      # Optional: 0=web, 1=VR, 2=mixed
-  #   # api_key: $TENCENTCLOUD_WSA_APIKEY  # Optional explicit env-var reference
+  #   api_key: $TENCENTCLOUD_WSA_APIKEY  # Required for durable evidence-bearing runs
 
   # Web search tool (uses Exa, requires EXA_API_KEY)
   # - name: web_search

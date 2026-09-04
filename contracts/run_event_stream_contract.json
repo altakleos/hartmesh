@@ -610,6 +610,87 @@
       }
     },
     {
+      "event_type": "retrieval.observation.v1",
+      "category": "tool",
+      "producer": "ToolReceiptMiddleware through RunEventToolReceiptSink.append_retrieval_pair() beside the terminal receipt outcome",
+      "content_schema": {
+        "type": "object",
+        "required": ["version", "observation_id", "idempotency_key", "observation_digest", "domain", "draft", "draft_digest", "receipt_phase", "result_projection_digest", "result_kind", "final_result_status", "safe_terminal_reason", "terminal_at"],
+        "properties": {
+          "version": {"const": 1},
+          "observation_id": {"type": "string", "pattern": "^ro_[0-9a-f]{64}$"},
+          "idempotency_key": {"type": "string", "pattern": "^tr_[0-9a-f]{64}:retrieval$"},
+          "observation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "domain": {"const": "hartmesh/retrieval-observation/v1"},
+          "draft": {
+            "type": "object",
+            "required": ["version", "canonicalization", "tenant_ref", "tenant_digest", "run_id", "receipt_id", "attempt", "provider_id", "tool_kind", "adapter_capability_version", "policy_digest", "safe_constraints", "started_at", "provider_finished_at", "duration_ms", "provider_status", "safe_reason", "result_count", "source_count", "source_references", "truncated", "partial", "safe_provider_request_ref", "tool_plane", "accepted_execution_evidence_ref", "accepted_sandbox_operation_ref", "mcp_evidence_ref"],
+            "properties": {
+              "version": {"const": 1},
+              "canonicalization": {"const": "hartmesh-retrieval-v1"},
+              "tenant_ref": {"type": "string", "pattern": "^tenant-[0-9a-f]{16}$"},
+              "tenant_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "run_id": {"type": "string", "minLength": 1, "maxLength": 64},
+              "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
+              "attempt": {"type": "integer", "minimum": 1},
+              "provider_id": {"type": "string", "minLength": 1, "maxLength": 64},
+              "tool_kind": {"type": "string", "minLength": 1, "maxLength": 64},
+              "adapter_capability_version": {"type": "string", "minLength": 1, "maxLength": 64},
+              "policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "safe_constraints": {"type": "object", "maxProperties": 24},
+              "started_at": {"type": "string", "maxLength": 64},
+              "provider_finished_at": {"type": "string", "maxLength": 64},
+              "duration_ms": {"type": "integer", "minimum": 0, "maximum": 86400000},
+              "provider_status": {"enum": ["success", "empty", "partial", "policy_denied", "provider_unavailable", "timeout", "rate_limited", "authentication_failed", "configuration_error", "unsafe_response", "oversized_response", "internal_error", "cancelled"]},
+              "safe_reason": {"type": ["string", "null"], "maxLength": 64},
+              "result_count": {"type": "integer", "minimum": 0},
+              "source_count": {"type": "integer", "minimum": 0, "maximum": 64},
+              "source_references": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 512}},
+              "truncated": {"type": "boolean"},
+              "partial": {"type": "boolean"},
+              "safe_provider_request_ref": {"type": ["string", "null"], "maxLength": 128},
+              "tool_plane": {
+                "type": "object",
+                "required": ["base_revision_digest", "user_overlay_digest", "projection_digest", "effective_digest"],
+                "properties": {
+                  "base_revision_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "user_overlay_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "projection_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "effective_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "additionalProperties": false
+              },
+              "accepted_execution_evidence_ref": {"type": ["string", "null"], "maxLength": 256},
+              "accepted_sandbox_operation_ref": {"type": ["string", "null"], "maxLength": 256},
+              "mcp_evidence_ref": {"type": ["string", "null"], "maxLength": 256}
+            },
+            "additionalProperties": false
+          },
+          "draft_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "receipt_phase": {"enum": ["succeeded", "failed", "denied", "cancelled"]},
+          "result_projection_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+          "result_kind": {"type": ["string", "null"], "maxLength": 32},
+          "final_result_status": {"enum": ["success", "error"]},
+          "safe_terminal_reason": {"type": ["string", "null"], "maxLength": 64},
+          "terminal_at": {"type": "string", "maxLength": 64}
+        },
+        "additionalProperties": false
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["receipt_id", "task_id", "attempt", "provider_id", "observation_id", "writer_fence_digest"],
+        "properties": {
+          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
+          "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "attempt": {"type": "integer", "minimum": 1},
+          "provider_id": {"type": "string", "minLength": 1, "maxLength": 64},
+          "observation_id": {"type": "string", "pattern": "^ro_[0-9a-f]{64}$"},
+          "writer_fence_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": true
+      }
+    },
+    {
       "event_type": "workspace_changes",
       "category": "workspace",
       "producer": "workspace_changes.record_workspace_changes()",

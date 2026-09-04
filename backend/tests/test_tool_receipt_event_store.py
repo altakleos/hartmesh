@@ -4,11 +4,19 @@ import asyncio
 import threading
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from deerflow_extension_api import TenantReferenceV1
 
+from deerflow.retrieval import (
+    RetrievalEvidenceError,
+    RetrievalObservationDraftV1,
+    RetrievalObservationV1,
+)
+from deerflow.retrieval.metrics import RetrievalMetricPoint, RetrievalMetricsRegistry
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.tool_evidence import (
@@ -84,6 +92,70 @@ def _binding(runs: _OwnedRunStore) -> ToolEvidenceRuntimeBinding:
     )
 
 
+def _tenant_binding(runs: _OwnedRunStore) -> ToolEvidenceRuntimeBinding:
+    return ToolEvidenceRuntimeBinding(
+        run_id="run-1",
+        execution_task_id="run-1",
+        execution_kind="lead",
+        subagent_name=None,
+        owner_id=str(runs.row["owner_worker_id"]),
+        lease_epoch=int(runs.row["state_version"]),
+        agent_revision_digest="a" * 64,
+        assembly_fingerprint="b" * 64,
+        extension_generation=3,
+        subagent_catalog_digest="c" * 64,
+        subagent_definition_digest=None,
+        tenant=TenantReferenceV1(
+            version=1,
+            public_ref="tenant-" + "d" * 16,
+            digest="d" * 64,
+        ),
+    )
+
+
+def _retrieval_draft(started: DurableToolReceiptV1) -> RetrievalObservationDraftV1:
+    return RetrievalObservationDraftV1(
+        tenant_ref="tenant-" + "d" * 16,
+        tenant_digest="d" * 64,
+        run_id="run-1",
+        receipt_id=started.receipt_id,
+        attempt=started.context.attempt,
+        provider_id="serply",
+        tool_kind="web_search",
+        adapter_capability_version="serply-http-v1",
+        policy_digest="e" * 64,
+        safe_constraints={
+            "version": 1,
+            "provider_id": "serply",
+            "collection_public_refs": [],
+            "domains": [],
+            "recency_days": None,
+            "max_results": 2,
+            "max_item_bytes": 1_024,
+            "max_aggregate_bytes": 4_096,
+            "timeout_ms": 2_000,
+            "allow_redirects": False,
+            "accept_partial": False,
+            "source_schemes": ["https"],
+            "policy_digest": "e" * 64,
+        },
+        started_at=started.occurred_at,
+        provider_finished_at=started.occurred_at,
+        provider_status="success",
+        safe_reason=None,
+        result_count=1,
+        source_count=1,
+        source_references=("https://example.com/source",),
+        truncated=False,
+        partial=False,
+        safe_provider_request_ref="request-opaque-1",
+        tool_plane_base_revision_digest="1" * 64,
+        tool_plane_user_overlay_digest="2" * 64,
+        tool_plane_projection_digest="3" * 64,
+        tool_plane_effective_digest="4" * 64,
+    )
+
+
 def _body(
     phase: str = "started",
     *,
@@ -156,6 +228,274 @@ async def test_identical_append_is_idempotent_and_keeps_store_timestamp(local_st
     assert duplicate.event == first.event
     assert first.event["created_at"]
     assert len(await store.list_events("thread-1", "run-1")) == 1
+
+
+@pytest.mark.anyio
+async def test_receipt_outcome_and_retrieval_observation_are_one_idempotent_pair(
+    local_store,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = RetrievalMetricsRegistry()
+    monkeypatch.setattr("deerflow.retrieval.metrics.RETRIEVAL_METRICS", metrics)
+    store, runs = local_store
+    sink = RunEventToolReceiptSink(store)
+    reservation = await sink.reserve_started(
+        binding=_tenant_binding(runs),
+        tool_call_id="call-retrieval",
+        tool_name="web_search",
+        request_projection_digest="f" * 64,
+        dispatch=_DISPATCH_1,
+    )
+    terminal = reservation.started.outcome(
+        phase="succeeded",
+        result_projection_digest="9" * 64,
+        result_kind="tool_message",
+        safe_error_code=None,
+    )
+    draft = _retrieval_draft(reservation.started)
+
+    first = await sink.record_with_receipt_outcome(terminal, draft)
+    duplicate = await sink.record_with_receipt_outcome(terminal, draft)
+
+    assert duplicate == first
+    assert first.result_projection_digest == terminal.result_projection_digest
+    events = await store.list_events("thread-1", "run-1")
+    assert [event["event_type"] for event in events] == [
+        "tool_receipt.started.v1",
+        "tool_receipt.outcome.v1",
+        "retrieval.observation.v1",
+    ]
+    assert events[1]["content"]["result_projection_digest"] == events[2]["content"]["result_projection_digest"]
+
+    runs.row["owner_worker_id"] = "worker-2"
+    runs.row["state_version"] = 6
+    replay = await RunEventToolReceiptSink(store).reserve_started(
+        binding=_tenant_binding(runs),
+        tool_call_id="call-retrieval",
+        tool_name="web_search",
+        request_projection_digest="f" * 64,
+        dispatch=_DISPATCH_1,
+    )
+    assert replay.replayed_outcome is not None
+    assert replay.replayed_outcome.to_event_body() == terminal.to_event_body()
+    assert replay.replayed_retrieval_observation == first
+    assert metrics.snapshot() == (
+        RetrievalMetricPoint(
+            provider_category="serply",
+            status="success",
+            count=1,
+            total_duration_ms=0,
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_retrieval_retry_appends_new_immutable_observation(local_store) -> None:
+    store, runs = local_store
+    sink = RunEventToolReceiptSink(store)
+    binding = _tenant_binding(runs)
+    first = await sink.reserve_started(
+        binding=binding,
+        tool_call_id="call-retrieval-retry",
+        tool_name="web_search",
+        request_projection_digest="f" * 64,
+        dispatch=_DISPATCH_1,
+    )
+    await sink.record_with_receipt_outcome(
+        first.started.outcome(
+            phase="succeeded",
+            result_projection_digest="8" * 64,
+            result_kind="tool_message",
+            safe_error_code=None,
+        ),
+        _retrieval_draft(first.started),
+    )
+    second = await sink.reserve_started(
+        binding=binding,
+        tool_call_id="call-retrieval-retry",
+        tool_name="web_search",
+        request_projection_digest="f" * 64,
+        dispatch=_DISPATCH_2,
+    )
+    await sink.record_with_receipt_outcome(
+        second.started.outcome(
+            phase="succeeded",
+            result_projection_digest="9" * 64,
+            result_kind="tool_message",
+            safe_error_code=None,
+        ),
+        replace(
+            _retrieval_draft(second.started),
+            source_references=("https://example.com/changed",),
+        ),
+    )
+
+    events = await store.list_events(
+        "thread-1",
+        "run-1",
+        event_types=["retrieval.observation.v1"],
+    )
+    observations = [RetrievalObservationV1.from_event_body(event["content"]) for event in events]
+    assert [item.attempt for item in observations] == [1, 2]
+    assert observations[0].observation_id != observations[1].observation_id
+    assert observations[0].draft.source_references == ("https://example.com/source",)
+    assert observations[1].draft.source_references == ("https://example.com/changed",)
+
+
+@pytest.mark.anyio
+async def test_wrong_attempt_or_digest_disagreement_cannot_publish_pair(
+    local_store,
+) -> None:
+    store, runs = local_store
+    sink = RunEventToolReceiptSink(store)
+    reservation = await sink.reserve_started(
+        binding=_tenant_binding(runs),
+        tool_call_id="call-retrieval-conflict",
+        tool_name="web_search",
+        request_projection_digest="f" * 64,
+        dispatch=_DISPATCH_1,
+    )
+    terminal = reservation.started.outcome(
+        phase="succeeded",
+        result_projection_digest="9" * 64,
+        result_kind="tool_message",
+        safe_error_code=None,
+    )
+    draft = _retrieval_draft(reservation.started)
+
+    with pytest.raises(RetrievalEvidenceError, match="retrieval_receipt_mismatch"):
+        await sink.record_with_receipt_outcome(
+            terminal,
+            replace(draft, attempt=2),
+        )
+
+    observation = RetrievalObservationV1.finalize(terminal, draft)
+    forged = {
+        **observation.to_event_body(),
+        "result_projection_digest": "8" * 64,
+    }
+    with pytest.raises(
+        RetrievalEvidenceError,
+        match="retrieval_observation_digest_mismatch",
+    ):
+        await store.append_retrieval_pair(
+            "run-1",
+            receipt_body=terminal.to_event_body(),
+            observation_body=forged,
+            owner_id="worker-1",
+            lease_epoch=5,
+        )
+
+    assert [event["event_type"] for event in await store.list_events("thread-1", "run-1")] == ["tool_receipt.started.v1"]
+
+
+@pytest.mark.anyio
+async def test_receipt_only_recovery_completes_observation_without_rewriting_receipt(
+    local_store,
+) -> None:
+    store, runs = local_store
+    sink = RunEventToolReceiptSink(store)
+    reservation = await sink.reserve_started(
+        binding=_tenant_binding(runs),
+        tool_call_id="call-retrieval-reconcile",
+        tool_name="web_search",
+        request_projection_digest="f" * 64,
+        dispatch=_DISPATCH_1,
+    )
+    terminal = reservation.started.outcome(
+        phase="succeeded",
+        result_projection_digest="9" * 64,
+        result_kind="tool_message",
+        safe_error_code=None,
+    )
+    receipt_append = await store.append_idempotent(
+        "run-1",
+        event_type="tool_receipt.outcome.v1",
+        idempotency_key=terminal.idempotency_key,
+        body=terminal.to_event_body(),
+        owner_id="worker-1",
+        lease_epoch=5,
+    )
+
+    await sink.record_with_receipt_outcome(
+        terminal,
+        _retrieval_draft(reservation.started),
+    )
+
+    events = await store.list_events("thread-1", "run-1")
+    assert [event["event_type"] for event in events] == [
+        "tool_receipt.started.v1",
+        "tool_receipt.outcome.v1",
+        "retrieval.observation.v1",
+    ]
+    assert events[1]["created_at"] == receipt_append.event["created_at"]
+
+
+@pytest.mark.anyio
+async def test_memory_pair_rolls_back_if_observation_publication_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = _OwnedRunStore()
+    store = MemoryRunEventStore(run_store=runs)
+    sink = RunEventToolReceiptSink(store)
+    reservation = await sink.reserve_started(
+        binding=_tenant_binding(runs),
+        tool_call_id="call-retrieval-fault",
+        tool_name="web_search",
+        request_projection_digest="f" * 64,
+        dispatch=_DISPATCH_1,
+    )
+    terminal = reservation.started.outcome(
+        phase="succeeded",
+        result_projection_digest="9" * 64,
+        result_kind="tool_message",
+        safe_error_code=None,
+    )
+    original_put = store._put_one
+
+    def fail_observation(**kwargs):
+        if kwargs["event_type"] == "retrieval.observation.v1":
+            raise RuntimeError("injected observation failure")
+        return original_put(**kwargs)
+
+    monkeypatch.setattr(store, "_put_one", fail_observation)
+
+    with pytest.raises(RuntimeError, match="injected observation failure"):
+        await sink.record_with_receipt_outcome(
+            terminal,
+            _retrieval_draft(reservation.started),
+        )
+
+    assert [event["event_type"] for event in await store.list_events("thread-1", "run-1")] == ["tool_receipt.started.v1"]
+
+
+@pytest.mark.anyio
+async def test_stale_worker_cannot_publish_retrieval_pair(local_store) -> None:
+    store, runs = local_store
+    sink = RunEventToolReceiptSink(store)
+    reservation = await sink.reserve_started(
+        binding=_tenant_binding(runs),
+        tool_call_id="call-retrieval-stale",
+        tool_name="web_search",
+        request_projection_digest="f" * 64,
+        dispatch=_DISPATCH_1,
+    )
+    terminal = reservation.started.outcome(
+        phase="succeeded",
+        result_projection_digest="9" * 64,
+        result_kind="tool_message",
+        safe_error_code=None,
+    )
+    runs.row["owner_worker_id"] = "worker-2"
+    runs.row["state_version"] = 6
+
+    with pytest.raises(ToolReceiptOwnershipLost):
+        await sink.record_with_receipt_outcome(
+            terminal,
+            _retrieval_draft(reservation.started),
+        )
+
+    assert [event["event_type"] for event in await store.list_events("thread-1", "run-1")] == ["tool_receipt.started.v1"]
 
 
 @pytest.mark.anyio
@@ -879,6 +1219,89 @@ async def test_database_append_is_fenced_idempotent_and_recoverable(tmp_path) ->
             await _append(reopened, event_type="tool_receipt.outcome.v1", body=_body("succeeded"))
     finally:
         await close_engine()
+
+
+@pytest.mark.anyio
+async def test_database_retrieval_pair_is_atomic_and_idempotent(tmp_path) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.runtime.events.store.db import DbRunEventStore
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'retrieval-pair.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        async with session_factory.begin() as session:
+            session.add(
+                RunRow(
+                    run_id="run-1",
+                    thread_id="thread-1",
+                    user_id="user-1",
+                    operation_kind="run",
+                    status="running",
+                    owner_worker_id="worker-1",
+                    state_version=5,
+                    lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                )
+            )
+        runs = _OwnedRunStore()
+        store = DbRunEventStore(session_factory)
+        sink = RunEventToolReceiptSink(store)
+        reservation = await sink.reserve_started(
+            binding=_tenant_binding(runs),
+            tool_call_id="call-database-retrieval",
+            tool_name="web_search",
+            request_projection_digest="f" * 64,
+            dispatch=_DISPATCH_1,
+        )
+        terminal = reservation.started.outcome(
+            phase="succeeded",
+            result_projection_digest="9" * 64,
+            result_kind="tool_message",
+            safe_error_code=None,
+        )
+        draft = _retrieval_draft(reservation.started)
+
+        await sink.record_with_receipt_outcome(terminal, draft)
+        await RunEventToolReceiptSink(store).record_with_receipt_outcome(
+            terminal,
+            draft,
+        )
+
+        events = await store.list_events(
+            "thread-1",
+            "run-1",
+            user_id=None,
+        )
+        assert [event["event_type"] for event in events] == [
+            "tool_receipt.started.v1",
+            "tool_receipt.outcome.v1",
+            "retrieval.observation.v1",
+        ]
+        assert events[1]["content"]["result_projection_digest"] == events[2]["content"]["result_projection_digest"]
+
+        async with session_factory.begin() as session:
+            row = await session.get(RunRow, "run-1")
+            assert row is not None
+            row.owner_worker_id = "worker-2"
+            row.state_version = 6
+        runs.row["owner_worker_id"] = "worker-2"
+        runs.row["state_version"] = 6
+        replay = await RunEventToolReceiptSink(store).reserve_started(
+            binding=_tenant_binding(runs),
+            tool_call_id="call-database-retrieval",
+            tool_name="web_search",
+            request_projection_digest="f" * 64,
+            dispatch=_DISPATCH_1,
+        )
+        assert replay.replayed_outcome is not None
+        assert replay.replayed_retrieval_observation is not None
+        assert replay.replayed_retrieval_observation.to_event_body() == events[2]["content"]
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.anyio

@@ -163,6 +163,18 @@ A durable receipt records HartMesh's observation of a tool attempt. It does not
 guarantee an external side effect occurred exactly once or that the tool result
 was correct.
 
+Supported external retrieval adds `retrieval.observation.v1` beside the
+terminal receipt. `append_retrieval_pair()` validates their receipt ID, attempt,
+tenant, run, phase, and exact `result_projection_digest`, then writes both in
+one fenced store operation. Recovery may complete a retained receipt-only pair
+only while the original safe draft remains available; reservation replay never
+accepts that receipt as a complete supported retrieval. An observation-only
+state, conflicting duplicate, or stale fence is an integrity failure. The
+observation is capped at 12 KiB and contains only safe constraints, normalized
+source references, counts/status, accepted material references, and digests—no
+query/query-derived identifier or result text. See
+[EVIDENCE_BEARING_RETRIEVAL.md](EVIDENCE_BEARING_RETRIEVAL.md).
+
 ### Live rich-event write authority
 
 After run admission, worker-owned journal, subagent, workspace, and delivery
@@ -224,6 +236,7 @@ through run-event or specialized APIs:
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
 | `tool_receipt.started.v1` | `tool` | `RunEventToolReceiptSink.reserve_started()` |
 | `tool_receipt.outcome.v1` | `tool` | `RunEventToolReceiptSink.record_outcome()` |
+| `retrieval.observation.v1` | `tool` | `RunEventToolReceiptSink.record_with_receipt_outcome()` |
 
 Current middleware tags are `guardrail`, `loop_detection`, `mcp_preparation`,
 `safety_termination`, `skill_activation`, and `skill_secrets`.
@@ -332,6 +345,7 @@ Schema. It is the authoritative field-level reference.
 | Memory audit | Filters run events to `context:memory` to compare the frozen hidden block's `content_sha256`, or to `memory.observation.v1` to audit bounded tenant-bound Honcho operation evidence; full memory text is not duplicated into the event store. |
 | Workspace review | `GET /api/threads/{thread_id}/runs/{run_id}/workspace-changes` projects the latest `workspace_changes` payload. |
 | Authorized durable receipt page | `GET /api/runtime/v1/invocations/{run_id}?include_tool_receipts=true` pairs starts/outcomes with an independently scoped cursor and a 100-item cap. |
+| Authorized retrieval observations | `GET /api/threads/{thread_id}/runs/{run_id}/retrieval-observations` returns a closed safe projection with a 100-item page cap and `after_seq` cursor. |
 
 Token and cost summaries are not reconstructed by reading event rows.
 `RunJournal` accumulates usage while callbacks fire, and the worker writes the

@@ -38,11 +38,19 @@ from typing import Any
 
 from deerflow_extension_api import TenantReferenceV1
 
+from deerflow.constants import RETRIEVAL_OBSERVATION_EVENT_CATEGORY, RETRIEVAL_OBSERVATION_EVENT_TYPE
+from deerflow.retrieval import (
+    RetrievalObservationV1,
+    retrieval_observation_event_metadata,
+    validate_retrieval_pair,
+)
 from deerflow.runtime.events.appender import RuntimeEventAuthority, RuntimeEventOwnershipLost
 from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import (
     AppendOutcome,
+    RetrievalPairAppendOutcome,
     RunEventStore,
+    find_paired_retrieval_observation,
     match_ai_message_run_id,
     normalize_message_ids,
     resolve_owned_run,
@@ -60,6 +68,7 @@ from deerflow.runtime.tool_evidence import (
     require_started_transition,
     require_tool_attempt_binding_fence,
     reserve_attempt_from_events,
+    tool_writer_fence_digest,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.thread_id import validate_thread_id
@@ -738,6 +747,10 @@ class JsonlRunEventStore(RunEventStore):
                     event=dict(existing),
                     created=False,
                     terminal_event=(dict(terminal) if terminal is not None else None),
+                    retrieval_observation_event=find_paired_retrieval_observation(
+                        events,
+                        terminal,
+                    ),
                 )
             body = validate_idempotent_append(
                 event_type=TOOL_RECEIPT_STARTED_EVENT,
@@ -773,6 +786,171 @@ class JsonlRunEventStore(RunEventStore):
                 record,
             )
             return AppendOutcome(event=record, created=True)
+
+    async def append_retrieval_pair(
+        self,
+        run_id,
+        *,
+        receipt_body,
+        observation_body,
+        owner_id,
+        lease_epoch,
+    ) -> RetrievalPairAppendOutcome:
+        receipt_body, observation_body = validate_retrieval_pair(
+            receipt_body,
+            observation_body,
+        )
+        receipt = DurableToolReceiptV1.from_event_body(
+            receipt_body,
+            occurred_at=datetime.now(UTC),
+        )
+        observation = RetrievalObservationV1.from_event_body(observation_body)
+        run = await resolve_owned_run(
+            self._run_store,
+            run_id,
+            owner_id=owner_id,
+            lease_epoch=lease_epoch,
+        )
+        thread_id = run["thread_id"]
+        async with self._get_write_lock(thread_id):
+            await resolve_owned_run(
+                self._run_store,
+                run_id,
+                owner_id=owner_id,
+                lease_epoch=lease_epoch,
+            )
+            persisted = [
+                event
+                for event in await asyncio.to_thread(
+                    self._read_run_events,
+                    thread_id,
+                    run_id,
+                )
+                if self._tenant_visible(event)
+            ]
+            require_started_transition(persisted, receipt)
+            existing_receipt = next(
+                (event for event in persisted if event.get("event_type") == "tool_receipt.outcome.v1" and event.get("idempotency_key") == receipt.idempotency_key),
+                None,
+            )
+            existing_observation = next(
+                (event for event in persisted if event.get("event_type") == RETRIEVAL_OBSERVATION_EVENT_TYPE and event.get("idempotency_key") == observation.idempotency_key),
+                None,
+            )
+            if existing_receipt is not None:
+                if canonical_digest(existing_receipt.get("content")) != canonical_digest(receipt_body):
+                    raise ToolReceiptIntegrityError("receipt_idempotency_conflict")
+                parse_tool_receipt_event(existing_receipt)
+            if existing_observation is not None:
+                if canonical_digest(existing_observation.get("content")) != canonical_digest(observation_body):
+                    raise ToolReceiptIntegrityError("retrieval_observation_idempotency_conflict")
+                RetrievalObservationV1.from_event_body(existing_observation.get("content"))
+            if existing_observation is not None and existing_receipt is None:
+                raise ToolReceiptIntegrityError("retrieval_pair_incomplete")
+            if existing_receipt is not None and existing_observation is not None:
+                await resolve_owned_run(
+                    self._run_store,
+                    run_id,
+                    owner_id=owner_id,
+                    lease_epoch=lease_epoch,
+                )
+                return RetrievalPairAppendOutcome(
+                    receipt_event=existing_receipt,
+                    observation_event=existing_observation,
+                    receipt_created=False,
+                    observation_created=False,
+                )
+
+            await self._ensure_seq_loaded(thread_id)
+            next_seq = self._seq_counters[thread_id]
+            now = datetime.now(UTC).isoformat()
+            records: list[dict[str, Any]] = []
+            if existing_receipt is None:
+                next_seq += 1
+                existing_receipt = {
+                    "thread_id": thread_id,
+                    "run_id": run_id,
+                    "tenant_ref": None if self._tenant is None else self._tenant.public_ref,
+                    "tenant_digest": None if self._tenant is None else self._tenant.digest,
+                    "event_type": "tool_receipt.outcome.v1",
+                    "category": TOOL_RECEIPT_CATEGORY,
+                    "content": receipt_body,
+                    "metadata": receipt_event_metadata(
+                        receipt,
+                        writer_owner_id=owner_id,
+                        writer_lease_epoch=lease_epoch,
+                    ),
+                    "idempotency_key": receipt.idempotency_key,
+                    "seq": next_seq,
+                    "created_at": now,
+                }
+                records.append(existing_receipt)
+            next_seq += 1
+            existing_observation = {
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "tenant_ref": None if self._tenant is None else self._tenant.public_ref,
+                "tenant_digest": None if self._tenant is None else self._tenant.digest,
+                "event_type": RETRIEVAL_OBSERVATION_EVENT_TYPE,
+                "category": RETRIEVAL_OBSERVATION_EVENT_CATEGORY,
+                "content": observation_body,
+                "metadata": retrieval_observation_event_metadata(
+                    observation,
+                    task_id=receipt.context.execution_task_id,
+                    writer_fence_digest=tool_writer_fence_digest(
+                        owner_id,
+                        lease_epoch,
+                    ),
+                ),
+                "idempotency_key": observation.idempotency_key,
+                "seq": next_seq,
+                "created_at": now,
+            }
+            records.append(existing_observation)
+            target, temp_path = await self._prepare_replace_off_thread(
+                self._prepare_records_replace,
+                records,
+            )
+            try:
+                current = await resolve_owned_run(
+                    self._run_store,
+                    run_id,
+                    owner_id=owner_id,
+                    lease_epoch=lease_epoch,
+                )
+                if current["thread_id"] != thread_id:
+                    raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
+                await self._commit_under_execution_fence(
+                    target,
+                    temp_path,
+                    run_id=run_id,
+                    owner_id=owner_id,
+                    lease_epoch=lease_epoch,
+                    ownership_error=ToolReceiptOwnershipLost,
+                    committed_thread_id=thread_id,
+                    committed_seq=records[-1]["seq"],
+                )
+            except BaseException:
+                await self._finish_off_thread(temp_path.unlink, missing_ok=True)
+                raise
+            self._cache_dedupe(
+                (run_id, "tool_receipt.outcome.v1", receipt.idempotency_key),
+                existing_receipt,
+            )
+            self._cache_dedupe(
+                (
+                    run_id,
+                    RETRIEVAL_OBSERVATION_EVENT_TYPE,
+                    observation.idempotency_key,
+                ),
+                existing_observation,
+            )
+            return RetrievalPairAppendOutcome(
+                receipt_event=existing_receipt,
+                observation_event=existing_observation,
+                receipt_created=len(records) == 2,
+                observation_created=True,
+            )
 
     async def _write_batch_async(self, thread_id: str, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
         async with self._get_write_lock(thread_id):

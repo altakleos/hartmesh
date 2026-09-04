@@ -128,7 +128,8 @@ IP address. SQL audit retention defaults to 90 days.
   (`GET|POST /api/threads/{thread_id}/runs`, the POST-only `stream`, `wait`,
   `regenerate/prepare`, and `edit-regenerate/prepare` collection endpoints,
   `GET /api/threads/{thread_id}/runs/{run_id}` plus its `cancel` (POST),
-  `join`/`messages`/`events`/`workspace-changes` (GET), and
+  `join`/`messages`/`events`/`retrieval-observations`/`workspace-changes`
+  (GET), and
   `GET|POST .../runs/{run_id}/stream`, plus
   `GET|POST .../runs/{run_id}/artifacts/archive`), plus `POST /api/runs/stream|wait` and
   `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
@@ -344,6 +345,25 @@ GET /api/langgraph/threads/{thread_id}/runs
   ]
 }
 ```
+
+#### Get Retrieval Observations
+
+```http
+GET /api/threads/{thread_id}/runs/{run_id}/retrieval-observations?limit=100&after_seq=123
+```
+
+Returns the current owner's bounded safe evidence for supported external
+retrieval attempts. `limit` is 1–100 and `after_seq` is the last observed
+thread-global event sequence. The response is
+`{"items": [...], "next_after_seq": integer|null,
+"invalid_event_count": integer}`. Each item contains provider/status, timing,
+counts, truncation/partial flags, safe constraints and source references,
+accepted evidence links, and receipt/result/observation digests. It never
+contains a query, query-derived identifier, credential, result title/snippet,
+document body, provider response body, or raw error. Existing run visibility,
+`runs:read`, PAT default-deny rules, and current invocation-observation policy
+apply. See
+[EVIDENCE_BEARING_RETRIEVAL.md](EVIDENCE_BEARING_RETRIEVAL.md).
 
 #### Stream Run
 

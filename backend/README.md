@@ -114,6 +114,14 @@ LLM-powered persistent context retention across conversations:
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
 
+Supported RAGFlow, DuckDuckGo, Serply, and Tencent WSA tools add bounded
+external-retrieval observations during durable runs. Server policy is enforced
+before network access, and the terminal observation commits the existing outer
+tool receipt's exact sanitized/budgeted result digest without persisting the
+query or result text. Configuration, privacy, API, and live-qualification
+details are in
+[EVIDENCE_BEARING_RETRIEVAL.md](docs/EVIDENCE_BEARING_RETRIEVAL.md).
+
 ### Gateway API
 
 FastAPI application providing REST endpoints for frontend integration:
