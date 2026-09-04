@@ -112,9 +112,12 @@ def test_material_and_accepted_digests_are_stable_and_mutation_safe() -> None:
     assert accepted.to_persisted()["decision_evidence_json"] == {
         "version": 1,
         "decisions": [],
-        "tool_receipts": {"version": 2},
+        "tool_receipts": {
+            "version": 3,
+            "capability_marker_version": 1,
+        },
     }
-    assert accepted.tool_receipt_evidence_version == 2
+    assert accepted.tool_receipt_evidence_version == 3
     legacy = replace(
         accepted,
         decision_evidence={"version": 1, "decisions": []},

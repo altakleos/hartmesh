@@ -422,6 +422,32 @@ writes close durable admission and privileged run/runtime/MCP/batch/scheduler
 controls; routine use/failure observations are bounded daily aggregates. See the
 [actor, route, replay, and retention contract](docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
 
+### Portable terminal-run evidence
+
+An authorized user can export a terminal durable run through the dedicated
+`GET` status and `POST` download surfaces at
+`/api/threads/{thread_id}/runs/{run_id}/artifacts/evidence-bundle`. The ZIP
+contains the exact presented artifact bytes plus the canonical
+`hartmesh-evidence/manifest.v1.json`, which binds safe admission, assembly,
+lifecycle, tool, MCP, batch, sandbox, retrieval, and qualification references.
+Missing required evidence fails closed. Capabilities not accepted by the run
+are explicit `absent_by_design` sections, while an accepted but unused durable
+MCP surface is recorded as a complete empty section. Digest-only evidence links
+make child-to-receipt joins checkable offline. The existing ordinary artifact
+archive remains separate and carries no HartMesh evidence claim.
+
+Verify a downloaded bundle without application configuration, a database, or
+network access:
+
+```bash
+python -I scripts/verify_run_evidence_bundle.py path/to/bundle.zip
+```
+
+This verifies internal digests, section roots, declarations, and artifact
+bytes. Bundles are **not signed or independently attested**. Artifact names and
+contents can be sensitive, and deleting the server-side run cannot recall a
+downloaded copy. See the [bundle format, API, verifier, privacy, and limits](docs/RUN_EVIDENCE_BUNDLES.md).
+
 ### Policy that follows execution
 
 HartMesh keeps effective subject, acting service, and source evidence distinct.
@@ -614,6 +640,7 @@ Version sources report `2.1.0`, but no tag contains the audited HartMesh impleme
 
 - [Durable invocation runtime](backend/docs/INVOCATION_RUNTIME.md) — guarantees, evidence, recovery, and deferred scope
 - [Durable subagent batches](docs/DURABLE_SUBAGENT_BATCHES.md) — accepted evidence, retries, cancellation, legacy cleanup, and qualification
+- [Portable run evidence bundles](docs/RUN_EVIDENCE_BUNDLES.md) — canonical manifest, terminal snapshot, exact artifact bytes, offline verification, and trust limits
 - [Accepted sandbox execution](backend/docs/ACCEPTED_SANDBOX_EXECUTION.md) — composed run/provider authority, operation gating, capability matrix, lifecycle evidence, and qualification
 - [Runtime API](backend/packages/runtime-api/README.md) — DTOs and `DurableInvocationPort`
 - [Gateway API](backend/docs/API.md) — authenticated HTTP behavior

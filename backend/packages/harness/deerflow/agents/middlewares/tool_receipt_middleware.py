@@ -199,6 +199,7 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                 tool_name=tool_name,
                 request_projection_digest=digest_request_projection(projection),
                 dispatch=dispatch,
+                capability_kind=("retrieval" if retrieval_declaration is not None else None),
             )
             if not isinstance(reservation, ToolAttemptReservation):
                 raise ToolEvidenceError("tool_attempt_reservation_invalid")

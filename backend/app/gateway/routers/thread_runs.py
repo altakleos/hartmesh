@@ -14,7 +14,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
+import time
 import uuid
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -22,10 +25,16 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 
-from app.gateway.artifact_archive import ArtifactArchiveError, ArtifactArchiveResult, build_artifact_archive
+from app.gateway.artifact_archive import (
+    BUILD_TIMEOUT_SECONDS,
+    ArtifactArchiveError,
+    ArtifactArchiveResult,
+    build_artifact_archive,
+    build_run_evidence_archive,
+)
 from app.gateway.authz import (
     require_audited_cancel_permission_if,
     require_audited_permission,
@@ -41,9 +50,17 @@ from app.gateway.checkpoint_lineage import (
     is_duration_only_checkpoint,
 )
 from app.gateway.context_usage import build_context_usage
+from app.gateway.credential_evidence import verified_actor_context_for_request
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
+from app.gateway.run_evidence import build_gateway_run_evidence_snapshot
+from app.gateway.run_evidence_telemetry import (
+    RunEvidenceOutcome,
+    ensure_run_evidence_requested,
+    record_run_evidence_outcome,
+    set_run_evidence_actor_digest,
+)
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import (
     authorize_context_observation,
@@ -66,7 +83,17 @@ from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.constants import RETRIEVAL_OBSERVATION_EVENT_TYPE
 from deerflow.retrieval import RetrievalEvidenceError, RetrievalObservationV1
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
+from deerflow.runtime.run_evidence import (
+    RUN_EVIDENCE_CANONICALIZATION_VERSION,
+    RUN_EVIDENCE_LIMITATIONS,
+    RUN_EVIDENCE_SCHEMA,
+    RUN_EVIDENCE_SCHEMA_VERSION,
+    EvidenceSnapshotRequest,
+    RunEvidenceBundleError,
+    RunEvidenceSnapshotV1,
+)
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
+from deerflow.runtime.tenant_identity import TenantIdentityV1
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
@@ -80,6 +107,8 @@ REGENERATE_HISTORY_SCAN_LIMIT = 200
 REGENERATE_HISTORY_RAW_SCAN_LIMIT = REGENERATE_HISTORY_SCAN_LIMIT * 2
 THREAD_MESSAGE_PAGE_SCAN_BATCH = 201
 _artifact_archive_slots = asyncio.Semaphore(4)
+_EVIDENCE_GENERATION_TIMEOUT_SECONDS = BUILD_TIMEOUT_SECONDS
+_EVIDENCE_DISCONNECT_POLL_SECONDS = 0.1
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
@@ -197,6 +226,31 @@ class RunResponse(BaseModel):
 
 class ArtifactArchiveManifestResponse(BaseModel):
     file_count: int
+
+
+class RunEvidenceBundleSectionResponse(BaseModel):
+    name: str
+    state: str
+    required: bool
+    item_count: int
+    reason_code: str | None = None
+
+
+class RunEvidenceBundleStatusResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    available: bool = True
+    schema_id: str = Field(alias="schema")
+    schema_version: int
+    canonicalization_version: int
+    profile: str = "complete_durable"
+    run_ref: str
+    thread_ref: str
+    terminal_status: str
+    artifact_count: int
+    sections: list[RunEvidenceBundleSectionResponse]
+    limitations: list[str]
+    authenticity: str = "not_signed"
 
 
 class ThreadTokenUsageModelBreakdown(BaseModel):
@@ -1618,21 +1672,37 @@ async def _build_archive_without_abandoning_worker(
     *,
     extra_reserved_dir_names: set[str],
 ) -> ArtifactArchiveResult:
-    if _artifact_archive_slots.locked():
-        raise ArtifactArchiveError("Too many artifact archives are being created; try again shortly", 429)
-    await _artifact_archive_slots.acquire()
-    build_task = asyncio.create_task(
-        asyncio.to_thread(
-            build_artifact_archive,
+    return await _build_archive_with_slot(
+        lambda cancel_event: build_artifact_archive(
             outputs_dir,
             presented_paths,
             user_data_dir=user_data_dir,
             extra_reserved_dir_names=extra_reserved_dir_names,
-        )
+            cancel_event=cancel_event,
+        ),
+        busy_error=ArtifactArchiveError(
+            "Too many artifact archives are being created; try again shortly",
+            429,
+        ),
     )
+
+
+async def _build_archive_with_slot(
+    build: Callable[[threading.Event], ArtifactArchiveResult],
+    *,
+    busy_error: Exception,
+) -> ArtifactArchiveResult:
+    """Run one archive builder without releasing its slot on cancellation."""
+
+    if _artifact_archive_slots.locked():
+        raise busy_error
+    await _artifact_archive_slots.acquire()
+    cancel_event = threading.Event()
+    build_task = asyncio.create_task(asyncio.to_thread(build, cancel_event))
     try:
         return await asyncio.shield(build_task)
     except asyncio.CancelledError:
+        cancel_event.set()
         while not build_task.done():
             try:
                 await asyncio.shield(build_task)
@@ -1648,6 +1718,218 @@ async def _build_archive_without_abandoning_worker(
         raise
     finally:
         _artifact_archive_slots.release()
+
+
+async def _build_evidence_archive_without_abandoning_worker(
+    outputs_dir,
+    user_data_dir,
+    snapshot: RunEvidenceSnapshotV1,
+    *,
+    extra_reserved_dir_names: set[str],
+    deadline_monotonic: float | None = None,
+) -> ArtifactArchiveResult:
+    return await _build_archive_with_slot(
+        lambda cancel_event: build_run_evidence_archive(
+            outputs_dir,
+            snapshot.artifact_paths,
+            snapshot=snapshot,
+            user_data_dir=user_data_dir,
+            extra_reserved_dir_names=extra_reserved_dir_names,
+            deadline_monotonic=deadline_monotonic,
+            cancel_event=cancel_event,
+        ),
+        busy_error=RunEvidenceBundleError("bundle_generation_busy"),
+    )
+
+
+async def _cancel_and_drain(task: asyncio.Task[Any]) -> None:
+    task.cancel()
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                break
+            continue
+        except Exception:
+            break
+    if task.cancelled():
+        return
+    try:
+        result = task.result()
+    except (asyncio.CancelledError, Exception):
+        return
+    _close_abandoned_evidence_result(result)
+
+
+def _close_abandoned_evidence_result(value: object) -> None:
+    """Close generated archive handles when no response will own them."""
+
+    if isinstance(value, ArtifactArchiveResult):
+        value.file.close()
+    elif isinstance(value, tuple):
+        for item in value:
+            _close_abandoned_evidence_result(item)
+
+
+async def _bounded_evidence_operation(
+    request: Request,
+    operation: Callable[[float], Awaitable[Any]],
+) -> Any:
+    """Bound generation and propagate disconnect cancellation into its worker."""
+
+    timeout = _EVIDENCE_GENERATION_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout
+    operation_task = asyncio.create_task(operation(deadline))
+
+    async def wait_for_disconnect() -> None:
+        while not await request.is_disconnected():
+            await asyncio.sleep(_EVIDENCE_DISCONNECT_POLL_SECONDS)
+
+    disconnect_task = asyncio.create_task(wait_for_disconnect())
+    completed = False
+    try:
+        try:
+            async with asyncio.timeout(timeout):
+                done, _pending = await asyncio.wait(
+                    {operation_task, disconnect_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if operation_task in done:
+                    result = operation_task.result()
+                    completed = True
+                    return result
+                disconnect_task.result()
+                raise asyncio.CancelledError
+        except TimeoutError as exc:
+            raise RunEvidenceBundleError("bundle_generation_timeout") from exc
+    finally:
+        if not disconnect_task.done():
+            disconnect_task.cancel()
+        await asyncio.gather(disconnect_task, return_exceptions=True)
+        if not completed:
+            await _cancel_and_drain(operation_task)
+
+
+async def _evidence_actor_digest(request: Request) -> str | None:
+    """Return the current safe actor digest without making telemetry blocking."""
+
+    try:
+        actor_digest = (await verified_actor_context_for_request(request)).digest
+    except Exception:
+        return None
+    set_run_evidence_actor_digest(request, actor_digest)
+    return actor_digest
+
+
+def _evidence_metric(
+    request: Request,
+    outcome: RunEvidenceOutcome,
+    *,
+    actor_digest: str | None = None,
+    bundle_ref: str | None = None,
+) -> None:
+    """Emit one bounded event and process-local counter."""
+
+    record_run_evidence_outcome(
+        request,
+        outcome,
+        actor_digest=actor_digest,
+        bundle_ref=bundle_ref,
+    )
+
+
+def _evidence_error_outcome(exc: RunEvidenceBundleError) -> RunEvidenceOutcome:
+    return (
+        "refused"
+        if exc.code
+        in {
+            "bundle_generation_busy",
+            "evidence_cross_link_invalid",
+            "evidence_incomplete",
+            "evidence_legacy_unbound",
+            "evidence_pruned",
+            "evidence_snapshot_changed",
+            "run_not_found",
+            "run_not_terminal",
+            "run_operation_active",
+        }
+        else "failed"
+    )
+
+
+def _evidence_http_error(exc: RunEvidenceBundleError) -> HTTPException:
+    if exc.code == "run_not_found":
+        status_code = 404
+    elif exc.code == "bundle_limit_exceeded":
+        status_code = 413
+    elif exc.code == "bundle_generation_busy":
+        status_code = 429
+    elif exc.code == "bundle_generation_cancelled":
+        status_code = 499
+    elif exc.code == "bundle_generation_timeout":
+        status_code = 504
+    elif exc.code in {"manifest_version_unsupported"}:
+        status_code = 503
+    elif exc.code == "evidence_export_unavailable":
+        status_code = 503
+    else:
+        status_code = 409
+    return HTTPException(status_code=status_code, detail=exc.code)
+
+
+async def _run_evidence_snapshot(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+) -> tuple[RunEvidenceSnapshotV1, str]:
+    owner_id = await get_current_user(request)
+    if owner_id is None:
+        raise HTTPException(status_code=404, detail="run_not_found")
+    tenant_identity = getattr(request.app.state, "tenant_identity", None)
+    if not isinstance(tenant_identity, TenantIdentityV1):
+        raise RunEvidenceBundleError("evidence_export_unavailable")
+    evidence_request = EvidenceSnapshotRequest(
+        tenant=tenant_identity.to_persisted_reference(),
+        thread_id=str(thread_id),
+        run_id=run_id,
+        owner_id=owner_id,
+    )
+    snapshot = await build_gateway_run_evidence_snapshot(
+        request=evidence_request,
+        run_store=get_run_store(request),
+        event_store=get_run_event_store(request),
+        mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
+        subagent_batch_repo=getattr(
+            request.app.state,
+            "subagent_batch_repo",
+            None,
+        ),
+    )
+    return snapshot, make_safe_user_id(owner_id)
+
+
+def _evidence_status(snapshot: RunEvidenceSnapshotV1) -> RunEvidenceBundleStatusResponse:
+    return RunEvidenceBundleStatusResponse(
+        schema_id=RUN_EVIDENCE_SCHEMA,
+        schema_version=RUN_EVIDENCE_SCHEMA_VERSION,
+        canonicalization_version=RUN_EVIDENCE_CANONICALIZATION_VERSION,
+        run_ref=snapshot.run_ref,
+        thread_ref=snapshot.thread_ref,
+        terminal_status=snapshot.terminal_status,
+        artifact_count=len(snapshot.artifact_paths),
+        sections=[
+            RunEvidenceBundleSectionResponse(
+                name=section.name,
+                state=section.state,
+                required=section.required,
+                item_count=section.item_count,
+                reason_code=section.reason_code,
+            )
+            for section in snapshot.sections
+        ],
+        limitations=list(RUN_EVIDENCE_LIMITATIONS),
+    )
 
 
 def _presented_files_from_delivery(events: list[dict]) -> list[str]:
@@ -1745,6 +2027,174 @@ async def create_run_artifact_archive(
             "Content-Length": str(result.size),
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",
+        },
+        background=BackgroundTask(result.file.close),
+    )
+
+
+@router.get(
+    "/{thread_id}/runs/{run_id}/artifacts/evidence-bundle",
+    response_model=RunEvidenceBundleStatusResponse,
+)
+@require_permission("runs", "read", owner_check=True, require_existing=True)
+async def get_run_evidence_bundle_status(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+    response: Response,
+) -> RunEvidenceBundleStatusResponse:
+    """Return the bounded eligibility/completeness projection for an export."""
+
+    actor_digest = ensure_run_evidence_requested(request)
+
+    async def generate(_deadline: float) -> RunEvidenceSnapshotV1:
+        nonlocal actor_digest
+        actor_digest = await _evidence_actor_digest(request)
+        owner_id = await get_current_user(request)
+        if owner_id is None:
+            raise RunEvidenceBundleError("run_not_found")
+        async with get_run_manager(request).reserve_thread_operation(
+            thread_id,
+            kind=ThreadOperationKind.artifact_archive,
+            user_id=make_safe_user_id(owner_id),
+        ):
+            snapshot, _effective_user_id = await _run_evidence_snapshot(
+                thread_id,
+                run_id,
+                request,
+            )
+            return snapshot
+
+    try:
+        snapshot = await _bounded_evidence_operation(request, generate)
+    except asyncio.CancelledError:
+        _evidence_metric(request, "cancelled", actor_digest=actor_digest)
+        logger.info("Run evidence bundle status generation cancelled")
+        raise
+    except ConflictError as exc:
+        _evidence_metric(request, "refused", actor_digest=actor_digest)
+        raise HTTPException(status_code=409, detail="run_operation_active") from exc
+    except RunEvidenceBundleError as exc:
+        _evidence_metric(
+            request,
+            _evidence_error_outcome(exc),
+            actor_digest=actor_digest,
+        )
+        raise _evidence_http_error(exc) from exc
+    _evidence_metric(request, "completed", actor_digest=actor_digest)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return _evidence_status(snapshot)
+
+
+@router.post("/{thread_id}/runs/{run_id}/artifacts/evidence-bundle")
+@require_permission("runs", "read", owner_check=True, require_existing=True)
+async def create_run_evidence_bundle(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+) -> StreamingResponse:
+    """Download a terminal run's digest-bound, unsigned evidence bundle."""
+
+    actor_digest = ensure_run_evidence_requested(request)
+
+    async def generate(
+        deadline: float,
+    ) -> tuple[RunEvidenceSnapshotV1, ArtifactArchiveResult]:
+        nonlocal actor_digest
+        actor_digest = await _evidence_actor_digest(request)
+        owner_id = await get_current_user(request)
+        if owner_id is None:
+            raise RunEvidenceBundleError("run_not_found")
+        effective_user_id = make_safe_user_id(owner_id)
+        app_config = await safe_app_config_async()
+        custom_tool_output_dir = getattr(
+            getattr(app_config, "tool_output", None),
+            "storage_subdir",
+            None,
+        )
+        extra_reserved_dir_names = {custom_tool_output_dir} if isinstance(custom_tool_output_dir, str) else set()
+        paths = get_paths()
+        user_data_dir = paths.sandbox_user_data_dir(
+            thread_id,
+            user_id=effective_user_id,
+        )
+        outputs_dir = paths.sandbox_outputs_dir(
+            thread_id,
+            user_id=effective_user_id,
+        )
+        async with get_run_manager(request).reserve_thread_operation(
+            thread_id,
+            kind=ThreadOperationKind.artifact_archive,
+            user_id=effective_user_id,
+        ):
+            snapshot, _effective_user_id = await _run_evidence_snapshot(
+                thread_id,
+                run_id,
+                request,
+            )
+            result = await _build_evidence_archive_without_abandoning_worker(
+                outputs_dir,
+                user_data_dir,
+                snapshot,
+                extra_reserved_dir_names=extra_reserved_dir_names,
+                deadline_monotonic=deadline,
+            )
+            return snapshot, result
+
+    try:
+        snapshot, result = await _bounded_evidence_operation(
+            request,
+            generate,
+        )
+    except asyncio.CancelledError:
+        _evidence_metric(request, "cancelled", actor_digest=actor_digest)
+        logger.info("Run evidence bundle generation cancelled")
+        raise
+    except ConflictError as exc:
+        _evidence_metric(request, "refused", actor_digest=actor_digest)
+        raise HTTPException(status_code=409, detail="run_operation_active") from exc
+    except RunEvidenceBundleError as exc:
+        _evidence_metric(
+            request,
+            _evidence_error_outcome(exc),
+            actor_digest=actor_digest,
+        )
+        raise _evidence_http_error(exc) from exc
+    except ArtifactArchiveError as exc:
+        _evidence_metric(request, "failed", actor_digest=actor_digest)
+        status_code = 504 if exc.code == "bundle_generation_timeout" else exc.status_code
+        raise HTTPException(status_code=status_code, detail=exc.code) from exc
+    except Exception:
+        _evidence_metric(request, "failed", actor_digest=actor_digest)
+        logger.exception("Run evidence bundle generation failed")
+        raise
+
+    _evidence_metric(
+        request,
+        "completed",
+        actor_digest=actor_digest,
+        bundle_ref=result.bundle_ref,
+    )
+    logger.info(
+        "Created run evidence bundle actor_digest=%s bundle_ref=%s members=%d input_bytes=%d output_bytes=%d",
+        actor_digest or "unavailable",
+        result.bundle_ref,
+        result.member_count,
+        result.input_bytes,
+        result.size,
+    )
+    safe_run_ref = re.sub(r"[^A-Za-z0-9_-]", "", snapshot.run_ref)[:40]
+    return StreamingResponse(
+        _archive_response_chunks(result),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (f'attachment; filename="run-evidence-{safe_run_ref}.zip"'),
+            "Content-Length": str(result.size),
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-HartMesh-Evidence-Bundle": result.bundle_ref or "",
+            "X-HartMesh-Evidence-Authenticity": "not-signed",
         },
         background=BackgroundTask(result.file.close),
     )

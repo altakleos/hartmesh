@@ -60,17 +60,18 @@ emit a drift warning.
 | **GitHub Webhooks** (`/api/webhooks/github`) | `POST /` - receive GitHub App / repo webhook deliveries. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`; exempt from auth + CSRF because authenticity is enforced by HMAC. The route is fail-closed: mounted only when `GITHUB_WEBHOOK_SECRET` is set, or when explicit dev opt-in `DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1` is set. Recognized events include `ping`, `issues`, `issue_comment`, `pull_request`, `pull_request_review`, and `pull_request_review_comment`; unknown events return 200 with `handled=false`. Fan-out runtime failures return 503, keeping the delivery recorded as failed for manual/API/scripted redelivery (GitHub does not automatically retry any failed delivery, 5xx included); permanent/non-retryable conditions such as `channels.github.enabled: false`, unknown events, malformed payloads, or unavailable channel service return 200 with a skipped/handled response. |
 | **GitHub Event-Driven Agents** | Custom agents can declare a `github:` block in their `config.yaml` to bind to repos and event triggers. Webhook fan-out publishes one `InboundMessage` per matching binding to the channel bus; `GitHubChannel` routes those messages through `ChannelManager`. The response `dispatch` summarizes matched/fired/skipped agents. |
 
-Thread identifiers use the shared `deerflow.utils.thread_id` contract
-`^[A-Za-z0-9_-]{1,64}$`. Caller-provided opaque IDs remain supported; UUIDs
-are generated only for `None`, while explicit empty strings fail validation.
-Gateway creation and state-producing request boundaries, embedded-client
-entry points, filesystem/upload/event-store consumers, scheduled launches,
-and the standalone Provisioner enforce the same contract before persistence
-or workspace initialization. Route-addressable legacy IDs remain accepted by
-pure reads and cleanup/control endpoints; deleting one best-effort removes
-metadata and checkpoints but skips local filesystem cleanup, so the raw value
-is never interpolated into a host path. New runs, workspace/sandbox
-operations, and other state-producing mutations remain blocked.
+**Run evidence exports**: the evidence-bundle GET/POST is terminal-only,
+owner-scoped `runs:read`, PAT-allowlisted, no-store, and distinct from ordinary
+ZIPs. It reuses `artifact_archive`; `run_evidence.py` snapshots repositories and
+the archive binds exact copied bytes. Snapshot coverage follows accepted
+capabilities and terminal attempts; operations cancel on disconnect or the
+60-second deadline. Return stable errors/public refs; bundles are unsigned.
+
+Thread IDs use `deerflow.utils.thread_id` (`^[A-Za-z0-9_-]{1,64}$`); `None`
+generates a UUID and empty strings fail. Creation/state-producing boundaries
+validate before persistence or workspace initialization. Legacy IDs remain
+readable/controllable, but cannot drive new runs or filesystem state; cleanup
+skips their host paths.
 
 **Message feed seq** (#4666): streaming `values` frames, `GET
 /threads/{id}/state`, and `POST /threads/{id}/history` stamp serialized

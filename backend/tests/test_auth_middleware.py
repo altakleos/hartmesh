@@ -216,6 +216,23 @@ def test_public_auth_path_no_cookie(client):
     assert res.status_code == 200
 
 
+def test_unauthenticated_evidence_refusal_is_observable(client) -> None:
+    response = client.get("/api/threads/thread-1/runs/run-1/artifacts/evidence-bundle")
+
+    assert response.status_code == 401
+    assert client.app.state.run_evidence_bundle_metrics == {
+        "requested": 1,
+        "refused": 1,
+    }
+
+
+def test_unauthenticated_evidence_lookalike_is_not_observable(client) -> None:
+    response = client.get("/api/not-threads/thread-1/runs/run-1/artifacts/evidence-bundle")
+
+    assert response.status_code == 401
+    assert not hasattr(client.app.state, "run_evidence_bundle_metrics")
+
+
 @pytest.mark.parametrize(
     "encoded_path",
     [

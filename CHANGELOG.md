@@ -149,6 +149,13 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Agents & runtime
 
+- **evidence:** Add terminal-only portable run evidence bundles with a
+  canonical safe manifest, exact copied-artifact digests, explicit section
+  completeness derived from persisted accepted capabilities and terminal attempts,
+  prefix-aware MCP lineage/receipt validation, offline-checkable parent/child
+  links, current-owner/PAT authorization,
+  bounded cancellation-aware generation, and a stdlib-only offline verifier.
+  Bundles prove internal digest integrity and explicitly remain unsigned.
 - **runtime:** Accepted durable lead runs now bind a bounded fingerprint of the
   actual assembled model, prompt, authorized tools, middleware, skills, and
   policy before checkpoint or graph execution; recovery must match it, and

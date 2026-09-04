@@ -21,6 +21,10 @@ its digest. Missing/unknown fields, a wrong image/artifact/API/count tuple, or a
 wrong OCI provenance subject are fatal stable-code failures. The verifier is
 read-only and performs no network access.
 
+`verify_run_evidence_bundle.py` validates portable ZIP integrity offline using
+only stdlib under `python -I`. Keep its format, roots, paths, and bounds aligned
+with `run_evidence.py`; reject unknown versions/entries and report `not_signed`.
+
 ## Service Startup Contracts
 
 The root `PORT` value configures Docker's published nginx ingress only; local

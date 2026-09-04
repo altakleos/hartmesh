@@ -22,6 +22,10 @@ def _make_app() -> FastAPI:
     async def protected_mutation():
         return {"ok": True}
 
+    @app.post("/api/threads/{thread_id}/runs/{run_id}/artifacts/evidence-bundle")
+    async def evidence_bundle(thread_id: str, run_id: str):
+        return {"thread_id": thread_id, "run_id": run_id}
+
     @app.post("/api/v1/auth/log{gap}in/local")
     async def control_gap(gap: str):
         return {"gap": gap}
@@ -243,6 +247,21 @@ def test_non_auth_mutation_still_requires_double_submit_token():
 
     assert response.status_code == 403
     assert response.json()["detail"] == "CSRF token missing. Include X-CSRF-Token header."
+
+
+def test_csrf_evidence_refusal_is_observable() -> None:
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+
+    response = client.post(
+        "/api/threads/thread-1/runs/run-1/artifacts/evidence-bundle",
+        headers={"Origin": "https://deerflow.example"},
+    )
+
+    assert response.status_code == 403
+    assert client.app.state.run_evidence_bundle_metrics == {
+        "requested": 1,
+        "refused": 1,
+    }
 
 
 def test_non_auth_mutation_allows_valid_double_submit_token():

@@ -158,6 +158,8 @@ def _agent_lineage(repo: McpTaskRepository, *, token: str):
             extension_generation=2,
             extension_manifest_digest="d" * 64,
             accepted_origin_digest="e" * 64,
+            artifact_manifest_digest="sha256:" + "f" * 64,
+            extension_configuration_digest="sha256:" + "0" * 64,
         ),
         server_name="reports",
         tool_name="submit_report",
@@ -260,7 +262,45 @@ async def test_parent_lineage_query_is_bounded_scoped_and_cursor_checked(tmp_pat
     assert first["next_cursor"] is not None
     assert all(item["receipt_id"].startswith("tr_") for item in first["items"])
     assert all(item["server_name"] == "reports" for item in first["items"])
+    assert all("request_commitment_version" not in item for item in first["items"])
+    assert all("request_commitment_state" not in item for item in first["items"])
     assert all("remote_task_id" not in item for item in first["items"])
+    assert all("request_commitment_digest" not in item for item in first["items"])
+    assert all("request_commitment_key_id" not in item for item in first["items"])
+    assert all("evidence_anchors" not in item for item in first["items"])
+
+    evidence_page = await repo.list_by_parent_run(
+        "run-parent",
+        user_id="user-1",
+        limit=3,
+        tenant_digest=repo.tenant.digest,
+        include_evidence_anchors=True,
+    )
+    assert len(evidence_page["items"]) == 3
+    assert all(item["request_commitment_version"] == 1 and item["request_commitment_state"] == "present" for item in evidence_page["items"])
+    assert all(
+        item["evidence_anchors"]
+        == {
+            "lineage_version": 2,
+            "lineage_kind": "agent_tool",
+            "tenant_ref": repo.tenant.public_ref,
+            "tenant_digest": repo.tenant.digest,
+            "parent_run_id": "run-parent",
+            "parent_execution_task_id": "run-parent",
+            "parent_execution_kind": "lead",
+            "parent_subagent_name": None,
+            "agent_revision_digest": "a" * 64,
+            "assembly_fingerprint": "b" * 64,
+            "subagent_catalog_digest": "c" * 64,
+            "subagent_definition_digest": None,
+            "extension_generation": 2,
+            "extension_manifest_digest": "d" * 64,
+            "accepted_origin_digest": "e" * 64,
+            "artifact_manifest_digest": "sha256:" + "f" * 64,
+            "extension_configuration_digest": "sha256:" + "0" * 64,
+        }
+        for item in evidence_page["items"]
+    )
 
     second = await repo.list_by_parent_run(
         "run-parent",

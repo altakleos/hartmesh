@@ -517,11 +517,14 @@ class McpTaskRepository:
         limit: int = 50,
         cursor: str | None = None,
         tenant_digest: str,
+        include_evidence_anchors: bool = False,
     ) -> dict[str, Any]:
         """Return one bounded, indexed child projection for an authorized run."""
 
         if type(limit) is not int or not 1 <= limit <= MAX_MCP_TASK_LINEAGE_PAGE_SIZE:
             raise ValueError("MCP task lineage limit must be between 1 and 100")
+        if type(include_evidence_anchors) is not bool:
+            raise ValueError("include_evidence_anchors must be a boolean")
         stmt = select(McpTaskRow).where(
             McpTaskRow.tenant_digest == self._tenant_digest(tenant_digest),
             McpTaskRow.parent_run_id == parent_run_id,
@@ -562,22 +565,43 @@ class McpTaskRepository:
                 continue
             status = str(record.get("status") or "")
             terminal_code = "remote_failed" if status == "failed" else ("cancelled" if status == "cancelled" else None)
-            items.append(
-                {
-                    "task_id": record["id"],
-                    "lineage_digest": lineage["digest"],
-                    "submitting_task_id": lineage["parent_execution_task_id"],
-                    "receipt_id": lineage["parent_tool_receipt_id"],
-                    "server_name": lineage["mcp_server_name"],
-                    "tool_name": lineage["mcp_tool_name"],
-                    "status": status,
-                    "safe_terminal_code": terminal_code,
-                    "notification_run_id": record.get("notification_run_id"),
-                    "created_at": record["created_at"],
-                    "updated_at": record["updated_at"],
-                    "completed_at": record.get("completed_at"),
+            item = {
+                "task_id": record["id"],
+                "lineage_digest": lineage["digest"],
+                "submitting_task_id": lineage["parent_execution_task_id"],
+                "receipt_id": lineage["parent_tool_receipt_id"],
+                "server_name": lineage["mcp_server_name"],
+                "tool_name": lineage["mcp_tool_name"],
+                "status": status,
+                "safe_terminal_code": terminal_code,
+                "notification_run_id": record.get("notification_run_id"),
+                "created_at": record["created_at"],
+                "updated_at": record["updated_at"],
+                "completed_at": record.get("completed_at"),
+            }
+            if include_evidence_anchors:
+                item["request_commitment_version"] = row.request_commitment_version
+                item["request_commitment_state"] = "present" if row.request_commitment_digest is not None else "legacy_unavailable"
+                item["evidence_anchors"] = {
+                    "lineage_version": lineage["version"],
+                    "lineage_kind": lineage["kind"],
+                    "tenant_ref": lineage["tenant"]["public_ref"],
+                    "tenant_digest": lineage["tenant"]["digest"],
+                    "parent_run_id": lineage["parent_run_id"],
+                    "parent_execution_task_id": lineage["parent_execution_task_id"],
+                    "parent_execution_kind": lineage["parent_execution_kind"],
+                    "parent_subagent_name": lineage["parent_subagent_name"],
+                    "agent_revision_digest": lineage["agent_revision_digest"],
+                    "assembly_fingerprint": lineage["assembly_fingerprint"],
+                    "subagent_catalog_digest": lineage["subagent_catalog_digest"],
+                    "subagent_definition_digest": lineage["subagent_definition_digest"],
+                    "extension_generation": lineage["extension_generation"],
+                    "extension_manifest_digest": lineage["extension_manifest_digest"],
+                    "accepted_origin_digest": lineage["accepted_origin_digest"],
+                    "artifact_manifest_digest": lineage.get("artifact_manifest_digest"),
+                    "extension_configuration_digest": lineage.get("extension_configuration_digest"),
                 }
-            )
+            items.append(item)
         next_cursor = None
         if has_more and rows:
             tail = rows[-1]

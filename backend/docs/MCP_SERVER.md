@@ -482,6 +482,14 @@ headers, or credentials. The outer durable tool receipt remains the sole owner
 of the final model-visible result digest. See
 [Evidence-Bearing External Retrieval](EVIDENCE_BEARING_RETRIEVAL.md).
 
+Portable run evidence export uses an internal bounded form of the indexed
+parent-lineage page. It keeps the ordinary runtime API projection unchanged,
+but additionally revalidates lineage version/kind, tenant and parent execution,
+accepted revision/assembly/catalog/origin/extension anchors, the private request
+commitment's state/version, and the accepted server's `tool_name_prefix` naming
+rule. The private HMAC commitment, key ID, principal reference, request
+projection, remote handle, and result remain excluded.
+
 ## OAuth Support (HTTP/SSE MCP Servers)
 
 For `http` and `sse` MCP servers, DeerFlow supports OAuth token acquisition and automatic token refresh.

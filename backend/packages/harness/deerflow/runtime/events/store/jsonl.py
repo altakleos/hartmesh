@@ -703,6 +703,7 @@ class JsonlRunEventStore(RunEventStore):
         expected_attempt,
         owner_id,
         lease_epoch,
+        capability_kind=None,
     ) -> AppendOutcome:
         binding = require_tool_attempt_binding_fence(
             binding,
@@ -733,6 +734,7 @@ class JsonlRunEventStore(RunEventStore):
                 request_projection_digest=request_projection_digest,
                 observed_node_attempt=observed_node_attempt,
                 expected_attempt=expected_attempt,
+                capability_kind=capability_kind,
             )
             if existing is not None:
                 await resolve_owned_run(
@@ -769,6 +771,8 @@ class JsonlRunEventStore(RunEventStore):
                     receipt,
                     writer_owner_id=owner_id,
                     writer_lease_epoch=lease_epoch,
+                    include_capability_marker=True,
+                    capability_kind=capability_kind,
                 ),
                 "idempotency_key": receipt.idempotency_key,
                 "seq": next_seq,
