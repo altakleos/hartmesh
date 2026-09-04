@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from types import MappingProxyType, SimpleNamespace
 
@@ -121,26 +122,46 @@ def test_typed_memory_config_drops_reserved_projection_from_any_mapping() -> Non
     assert HARTMESH_TENANT_CONFIG_KEY not in config.backend_config
 
 
-def test_matching_legacy_prefix_is_accepted_but_conflict_fails(
+def test_legacy_workspace_prefix_is_dropped_instead_of_aborting_startup(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    projected = _projected_config("customer-alpha")
-    projection = projected[HARTMESH_TENANT_CONFIG_KEY]
+    """An inherited upstream prefix must not prevent the Gateway from booting.
+
+    Upstream documented ``workspace_prefix`` as the supported way to give each
+    user an isolated workspace. No operator-chosen value can ever equal the
+    host-derived tenant namespace, so treating the mismatch as fatal made every
+    such deployment fail to start in every profile. The deprecated key is now
+    dropped before the portable config is built, and the derived namespace is
+    authoritative regardless of what was configured.
+    """
+
+    projection = _projected_config("customer-alpha")[HARTMESH_TENANT_CONFIG_KEY]
     assert isinstance(projection, dict)
     namespace = projection["workspace_namespace"]
 
-    matching = _projected_config(
-        "customer-alpha",
-        {"workspace_prefix": namespace},
-    )
-    assert matching["workspace_prefix"] == namespace
-    assert "workspace_prefix is deprecated" in caplog.text
+    for legacy_prefix in ("deerflow-u-", "operator-selected-", namespace):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            projected = _projected_config(
+                "customer-alpha",
+                {"workspace_prefix": legacy_prefix},
+            )
+
+        assert "workspace_prefix" not in projected
+        assert "workspace_prefix" in caplog.text
+        assert HonchoConfig.from_backend_config(projected).workspace_prefix == namespace
+
+
+def test_portable_config_still_rejects_a_conflicting_prefix_beside_a_tenant() -> None:
+    """Defense in depth below the host projection is deliberately unchanged."""
+
+    conflicting = {
+        **_projected_config("customer-alpha"),
+        "workspace_prefix": "operator-selected-",
+    }
 
     with pytest.raises(ValueError, match="honcho_workspace_namespace_conflict"):
-        _projected_config(
-            "customer-alpha",
-            {"workspace_prefix": "operator-selected-"},
-        )
+        HonchoConfig.from_backend_config(conflicting)
 
 
 def test_production_workspace_override_must_equal_that_users_derived_workspace() -> None:

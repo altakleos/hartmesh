@@ -68,8 +68,11 @@ of the deployment's data-processing boundary.
 
 ### Legacy overrides
 
-- `workspace_prefix` is deprecated. With a host tenant projection it may be
-  retained only when it exactly equals the derived namespace.
+- `workspace_prefix` is deprecated. With a host tenant projection it is dropped
+  with a warning and the derived namespace is used, so an inherited upstream
+  value cannot block startup. Memory written under a previous prefix is not
+  migrated and is not read; see
+  [Existing-workspace migration](#existing-workspace-migration) to move it.
 - In production, every `workspace_overrides[user]` value must exactly equal
   that user's derived workspace. Escaping or sharing a workspace is rejected.
 - `user_peer_overrides` must be grammar-safe, bounded, unique for configured

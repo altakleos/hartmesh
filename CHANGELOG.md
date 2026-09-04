@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.0+hartmesh.1] — 2026-08-21
 
+- feat(runtime): add durable invocation runtime (#1)
+- fix(runtime): close durable production verification gaps (#2)
+- fix(runtime): close durable runtime release gaps (#3)
+- fix(runtime): retain post-commit ownership obligations (#4)
+- fix(runtime): close post-commit ownership gaps (#5)
+- fix(runtime): harden post-commit obligation integrity (#6)
 - feat: harden Kubernetes sandbox runtime (#7)
 - feat: configure database pool overflow (#8)
 - feat: support split sandbox namespaces (#9)

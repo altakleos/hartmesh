@@ -9,7 +9,7 @@ HartMesh est une distribution DeerFlow orientée exploitation pour des invocatio
 Elle s’appuie sur le workspace, les sandboxes, la mémoire, les skills, les outils, les sous-agents, les tâches planifiées et les canaux de DeerFlow.
 
 > [!IMPORTANT]
-> **Statut : préversion.** Cette arborescence contient le runtime implémenté et ses preuves contractuelles hors ligne, mais aucun tag de version HartMesh ne les contient encore.
+> **Statut : préversion.** Les tags publiés `v2.1.0+hartmesh.*` contiennent le runtime d’invocation durable et son API HTTP. La couche de preuves de cette arborescence — assemblage lié, reçus d’outils durables, identité de locataire détenue par le serveur, plan d’outils gouverné, preuves de bac à sable acceptées, bundles de preuves d’exécution portables et politique d’exécution — ne figure dans aucun tag de version.
 >
 > La qualification exacte d’un déploiement réel reste un contrôle distinct, lié à un artefact précis.
 
@@ -403,9 +403,9 @@ Le graphe Alembic a une seule tête : `0011_mcp_tasks` bifurque vers les migrati
 
 Les opérateurs PostgreSQL doivent arrêter les écritures et sauvegarder avant un rollback ; consultez les migrations dans [backend/AGENTS.md](backend/AGENTS.md).
 
-Les sources de version indiquent `2.1.0`, mais aucun tag ne contient l’implémentation HartMesh auditée ; cette chaîne n’établit pas une version HartMesh.
+Les sources de version indiquent `2.1.0+hartmesh.4`, le tag le plus récent. Il précède la couche de preuves ci-dessus ; une chaîne de version seule n’indique donc pas quel travail HartMesh contient une copie de travail.
 
-[RELEASING.md](RELEASING.md) décrit les mécanismes de tags DeerFlow hérités, pas un canal de publication HartMesh.
+[RELEASING.md](RELEASING.md) décrit le processus de publication de fork `X.Y.Z+hartmesh.N` utilisé pour les tags publiés.
 
 ## Documentation
 

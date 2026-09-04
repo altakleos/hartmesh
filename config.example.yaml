@@ -2043,8 +2043,8 @@ memory:
   # deriver to build user-model memory representations; no local LLM calls.
   # The Gateway derives every workspace namespace from deployment.tenant_id and
   # adds a collision-resistant user component. Never configure the reserved
-  # _hartmesh_tenant key. workspace_prefix is deprecated and, when present,
-  # must exactly equal the derived value. Production workspace overrides may
+  # _hartmesh_tenant key. workspace_prefix is deprecated and ignored; the
+  # derived namespace always wins. Production workspace overrides may
   # only repeat each user's derived workspace; sharing is local-development-only
   # and requires the explicit allow_local_shared_workspaces opt-in.
   #
