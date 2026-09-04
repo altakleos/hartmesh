@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from datetime import UTC, datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
@@ -73,7 +74,7 @@ async def _expire_lease(store: RunRepository, run_id: str) -> None:
     async with engine.begin() as connection:
         await connection.execute(
             text("UPDATE runs SET lease_expires_at = :expired WHERE run_id = :run_id"),
-            {"expired": "2000-01-01T00:00:00+00:00", "run_id": run_id},
+            {"expired": datetime(2000, 1, 1, tzinfo=UTC), "run_id": run_id},
         )
 
 
