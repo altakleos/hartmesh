@@ -389,9 +389,9 @@ Une invocation acceptée fige une génération d’extensions au démarrage. Les
 
 HartMesh préserve les namespaces `deerflow.*`, noms de packages, variables `DEER_FLOW_*`, identifiants Docker/Helm, chemins et surfaces compatibles du Gateway.
 
-La comparaison produit est la plage locale fixe `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`.
+La comparaison produit est la plage locale fixe `e16ef2969b1446162e19af7bdde1446674851e66...4023cb434aa67011b9d18e90029f473b55323856`.
 
-HartMesh `main` intègre l’amont `deerflow/main` jusqu’à `a5acc25de6742b2166b3f41c97bd895822277b94` (2026-08-20).
+HartMesh `main` intègre l’amont `deerflow/main` jusqu’à `30788c79ffd988e110d97dd69fbc17abc50a96c6` (2026-09-02).
 
 Il s’agit de contexte, pas de la référence ci-dessus, et HartMesh ne revendique pas une supériorité permanente sur l’amont.
 
