@@ -6,8 +6,26 @@ from typing import Any
 
 import httpx
 
+from deerflow.retrieval.contracts import RetrievalProviderError
+from deerflow.retrieval.provider_config import (
+    validate_json_content_type,
+    validate_response_body_size,
+)
+
 _DATASET_PAGE_SIZE = 100
 _MAX_DATASET_PAGES = 100
+
+
+def _http_provider_status(status_code: int) -> str:
+    if status_code == 429:
+        return "rate_limited"
+    if status_code in {401, 403}:
+        return "authentication_failed"
+    if status_code in {408, 504}:
+        return "timeout"
+    if status_code >= 500:
+        return "provider_unavailable"
+    return "unsafe_response"
 
 
 class RAGFlowError(Exception):
@@ -29,6 +47,15 @@ class RAGFlowConnectionError(RAGFlowError):
 class RAGFlowProtocolError(RAGFlowError):
     """RAGFlow returned an invalid or unexpected HTTP response."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_status: str = "unsafe_response",
+    ) -> None:
+        self.provider_status = provider_status
+        super().__init__(message)
+
 
 class RAGFlowClient:
     """Direct HTTP client for DeerFlow's read-only retrieval tools.
@@ -44,10 +71,14 @@ class RAGFlowClient:
         base_url: str,
         api_key: str,
         timeout: float = 30,
+        max_response_bytes: int = 8 * 1024 * 1024,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= 8 * 1024 * 1024:
+            raise ValueError("max_response_bytes must be between 1 and 8388608")
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.max_response_bytes = max_response_bytes
         self._api_key = api_key
         self._transport = transport
 
@@ -73,6 +104,7 @@ class RAGFlowClient:
             "base_url": f"{self.base_url}/api/v1",
             "headers": request_headers,
             "timeout": self.timeout,
+            "follow_redirects": False,
         }
         if self._transport is not None:
             client_kwargs["transport"] = self._transport
@@ -86,20 +118,48 @@ class RAGFlowClient:
             detail = self._redact(exc)
             raise RAGFlowConnectionError(f"{type(exc).__name__}: {detail}") from None
 
+        try:
+            validate_response_body_size(
+                response,
+                max_response_bytes=self.max_response_bytes,
+            )
+        except RetrievalProviderError as exc:
+            message = "RAGFlow response exceeded the configured size limit." if exc.status == "oversized_response" else "RAGFlow returned an invalid response body."
+            raise RAGFlowProtocolError(
+                message,
+                provider_status=exc.status,
+            ) from None
+
         if response.is_error:
+            error_payload = None
             try:
-                error_payload = response.json()
-            except ValueError:
-                error_payload = None
+                validate_json_content_type(response)
+            except RetrievalProviderError:
+                pass
+            else:
+                try:
+                    error_payload = response.json()
+                except ValueError:
+                    pass
             if isinstance(error_payload, dict) and error_payload.get("code") not in (None, 0):
                 message = self._redact(error_payload.get("message") or f"RAGFlow API error (HTTP {response.status_code})")
                 raise RAGFlowAPIError(message, code=error_payload.get("code"))
-            raise RAGFlowProtocolError(f"RAGFlow request failed (HTTP {response.status_code}).")
+            raise RAGFlowProtocolError(
+                f"RAGFlow request failed (HTTP {response.status_code}).",
+                provider_status=_http_provider_status(response.status_code),
+            )
 
         try:
             payload = response.json()
         except ValueError:
             raise RAGFlowProtocolError("RAGFlow returned invalid JSON.") from None
+        try:
+            validate_json_content_type(response)
+        except RetrievalProviderError as exc:
+            raise RAGFlowProtocolError(
+                "RAGFlow returned an invalid content type.",
+                provider_status=exc.status,
+            ) from None
         if not isinstance(payload, dict):
             raise RAGFlowProtocolError("RAGFlow returned a non-object JSON payload.")
 

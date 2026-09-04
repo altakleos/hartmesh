@@ -62,6 +62,13 @@ MCP_TASK_POLL_AFTER_MAX_SECONDS = 86_400
 RUN_EVENT_TYPE_MAX_LENGTH = 32
 RUN_EVENT_CATEGORY_MAX_LENGTH = 16
 
+# Evidence-bearing retrieval is finalized beside the authoritative terminal
+# tool receipt. Keeping the name below the runtime layer lets every event-store
+# implementation share one persistence identity without importing provider
+# code.
+RETRIEVAL_OBSERVATION_EVENT_TYPE = "retrieval.observation.v1"
+RETRIEVAL_OBSERVATION_EVENT_CATEGORY = "tool"
+
 # Workspace changes are produced below the runtime layer, so their persisted
 # event identity also lives here rather than in the runtime event catalog.
 WORKSPACE_CHANGES_EVENT_TYPE = "workspace_changes"

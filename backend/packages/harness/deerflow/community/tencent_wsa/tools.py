@@ -1,5 +1,6 @@
 """Web search tool powered by Tencent Cloud Web Search API (WSA)."""
 
+import asyncio
 import json
 import logging
 import os
@@ -10,6 +11,28 @@ import httpx
 from langchain.tools import tool
 
 from deerflow.config import get_app_config
+from deerflow.retrieval import (
+    RETRIEVAL_TOOL_METADATA_KEY,
+    EvidenceBearingRetrievalService,
+    ProviderRetrievalItem,
+    ProviderRetrievalResponse,
+    ResolvedRetrievalCredentialV1,
+    RetrievalPolicyV1,
+    RetrievalProviderError,
+    RetrievalRequestConstraintsV1,
+    RetrievalToolDeclarationV1,
+    accepted_retrieval_app_config_from_active,
+    accepted_retrieval_request_from_active,
+    get_active_retrieval_handoff,
+    run_blocking_provider_call,
+)
+from deerflow.retrieval.provider_config import (
+    configured_domains,
+    configured_int,
+    configured_timeout_ms,
+    validate_json_content_type,
+    validate_response_body_size,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,18 +45,30 @@ _REQUEST_TIMEOUT_S = 30.0
 _api_key_warned: set[str] = set()
 
 
-def _get_tool_extras(tool_name: str) -> Mapping[str, Any]:
-    config = get_app_config().get_tool_config(tool_name)
+def _get_tool_extras(
+    tool_name: str,
+    *,
+    app_config: object | None = None,
+) -> Mapping[str, Any]:
+    config_source = get_app_config() if app_config is None else app_config
+    config = config_source.get_tool_config(tool_name)
     if config is None or config.model_extra is None:
         return {}
     return config.model_extra
 
 
-def _get_api_key(tool_name: str = "web_search", *, extras: Mapping[str, Any] | None = None) -> str | None:
+def _get_api_key(
+    tool_name: str = "web_search",
+    *,
+    extras: Mapping[str, Any] | None = None,
+    allow_env_fallback: bool = True,
+) -> str | None:
     api_key = (extras if extras is not None else _get_tool_extras(tool_name)).get("api_key")
     if isinstance(api_key, str) and api_key.strip():
         return api_key.strip()
 
+    if not allow_env_fallback:
+        return None
     env_key = os.getenv(_API_KEY_ENV)
     if isinstance(env_key, str) and env_key.strip():
         return env_key.strip()
@@ -113,9 +148,19 @@ def _missing_key_error(query: str, tool_name: str) -> str:
     return _error(f"{_API_KEY_ENV} is not configured", query)
 
 
-def _search(api_key: str, payload: dict[str, object], query: str) -> tuple[dict[str, Any] | None, str | None]:
+def _search(
+    api_key: str,
+    payload: dict[str, object],
+    query: str,
+    timeout_seconds: float = _REQUEST_TIMEOUT_S,
+    max_response_bytes: int = 8 * 1024 * 1024,
+    strict_response: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
     try:
-        with httpx.Client(timeout=_REQUEST_TIMEOUT_S) as client:
+        with httpx.Client(
+            timeout=timeout_seconds,
+            follow_redirects=False,
+        ) as client:
             response = client.post(
                 _SEARCH_ENDPOINT,
                 headers={
@@ -125,19 +170,38 @@ def _search(api_key: str, payload: dict[str, object], query: str) -> tuple[dict[
                 json=payload,
             )
         response.raise_for_status()
+        validate_response_body_size(
+            response,
+            max_response_bytes=max_response_bytes,
+        )
+        validate_json_content_type(response)
         data = response.json()
+    except httpx.TimeoutException:
+        logger.error("Tencent Cloud WSA request timed out")
+        if strict_response:
+            raise RetrievalProviderError("timeout") from None
+        return None, _error("Tencent Cloud WSA request failed", query)
     except httpx.HTTPStatusError as exc:
         logger.error("Tencent Cloud WSA API returned HTTP %s", exc.response.status_code)
         return None, _error(f"Tencent Cloud WSA API error: HTTP {exc.response.status_code}", query)
     except httpx.HTTPError as exc:
-        logger.error("Tencent Cloud WSA request failed: %s", exc)
+        logger.error("Tencent Cloud WSA request failed (%s)", type(exc).__name__)
         return None, _error("Tencent Cloud WSA request failed", query)
+    except RetrievalProviderError:
+        logger.error("Tencent Cloud WSA returned an unsafe or oversized response")
+        if strict_response:
+            raise
+        return None, _error("Tencent Cloud WSA returned an unexpected response format", query)
     except (TypeError, ValueError):
         logger.error("Tencent Cloud WSA returned an invalid JSON response")
+        if strict_response:
+            raise RetrievalProviderError("unsafe_response") from None
         return None, _error("Tencent Cloud WSA returned an invalid JSON response", query)
 
     if not isinstance(data, dict):
         logger.error("Tencent Cloud WSA returned an unexpected payload type: %s", type(data).__name__)
+        if strict_response:
+            raise RetrievalProviderError("unsafe_response")
         return None, _error("Tencent Cloud WSA returned an unexpected response format", query)
     return data, None
 
@@ -153,7 +217,7 @@ def _get_response(data: dict[str, Any], query: str) -> tuple[dict[str, Any] | No
     if isinstance(api_error, dict):
         code = api_error.get("Code")
         code = code if isinstance(code, str) and code else "UnknownError"
-        logger.error("Tencent Cloud WSA API returned error code %s (request_id=%s)", code, request_id)
+        logger.error("Tencent Cloud WSA API returned a provider error response")
         return None, request_id, _error(f"Tencent Cloud WSA API error: {code}", query, request_id=request_id)
     return response, request_id, None
 
@@ -200,7 +264,9 @@ def _parse_results(response: dict[str, Any], *, max_results: int) -> list[dict[s
             if isinstance(value, (str, int, float)) and not isinstance(value, bool):
                 result[field] = value
         results.append(result)
-        if len(results) >= max_results:
+        # Keep one bounded sentinel beyond the public limit so evidence-bearing
+        # callers can distinguish an exact result count from truncation.
+        if len(results) > max_results:
             break
     return results
 
@@ -244,9 +310,10 @@ def web_search_tool(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -> str:
         return error_json
     assert response is not None
 
-    results = _parse_results(response, max_results=max_results)
-    if results is None:
+    parsed_results = _parse_results(response, max_results=max_results)
+    if parsed_results is None:
         return _error("Tencent Cloud WSA returned an unexpected response format", query, request_id=request_id)
+    results = parsed_results[:max_results]
     if not results:
         return _error("No results found", query, request_id=request_id)
 
@@ -258,3 +325,177 @@ def web_search_tool(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -> str:
     if request_id:
         output["request_id"] = request_id
     return json.dumps(output, indent=2, ensure_ascii=False)
+
+
+class _TencentWsaRetrievalProvider:
+    def __init__(self, *, extras: Mapping[str, Any]) -> None:
+        self._extras = extras
+
+    async def search(self, request) -> ProviderRetrievalResponse:
+        if not request.credential.available or not isinstance(
+            request.credential.secret,
+            str,
+        ):
+            raise RetrievalProviderError("configuration_error")
+        payload: dict[str, object] = {"Query": request.query}
+        mode = _get_mode(extras=self._extras)
+        if mode is not None:
+            payload["Mode"] = mode
+        request_count = _request_count(request.constraints.max_results)
+        if request_count is not None:
+            payload["Cnt"] = request_count
+        data, error_json = await run_blocking_provider_call(
+            _search,
+            request.credential.secret,
+            payload,
+            request.query,
+            request.constraints.timeout_ms / 1_000,
+            request.constraints.max_aggregate_bytes,
+            True,
+        )
+        if error_json is not None:
+            try:
+                error = str(json.loads(error_json).get("error", ""))
+            except (AttributeError, TypeError, ValueError):
+                raise RetrievalProviderError("unsafe_response") from None
+            if "HTTP 429" in error or "RequestLimitExceeded" in error:
+                raise RetrievalProviderError("rate_limited")
+            if "HTTP 401" in error or "HTTP 403" in error:
+                raise RetrievalProviderError("authentication_failed")
+            raise RetrievalProviderError("provider_unavailable")
+        if not isinstance(data, dict):
+            raise RetrievalProviderError("unsafe_response")
+        response, request_id, response_error = _get_response(data, request.query)
+        if response_error is not None:
+            try:
+                error = str(json.loads(response_error).get("error", ""))
+            except (AttributeError, TypeError, ValueError):
+                raise RetrievalProviderError("unsafe_response") from None
+            if "RequestLimitExceeded" in error:
+                raise RetrievalProviderError("rate_limited")
+            if any(marker in error for marker in ("Auth", "Unauthorized", "Forbidden")):
+                raise RetrievalProviderError("authentication_failed")
+            if "unexpected response format" in error:
+                raise RetrievalProviderError("unsafe_response")
+            raise RetrievalProviderError("provider_unavailable")
+        if response is None:
+            raise RetrievalProviderError("unsafe_response")
+        parsed_results = _parse_results(
+            response,
+            max_results=request.constraints.max_results,
+        )
+        if parsed_results is None:
+            raise RetrievalProviderError("unsafe_response")
+        truncated = len(parsed_results) > request.constraints.max_results
+        results = parsed_results[: request.constraints.max_results]
+        if results:
+            output: dict[str, object] = {
+                "total_results": len(results),
+                "results": results,
+            }
+            candidate = json.dumps(output, indent=2, ensure_ascii=False)
+        else:
+            candidate = json.dumps({"error": "No results found"}, ensure_ascii=False)
+        items = tuple(
+            ProviderRetrievalItem(
+                source_locator=result["url"],
+                content=result.get("snippet", ""),
+            )
+            for result in results
+            if isinstance(result.get("url"), str) and result["url"]
+        )
+        return ProviderRetrievalResponse(
+            candidate_result=candidate,
+            items=items,
+            result_count=len(results),
+            truncated=truncated,
+            # Provider request IDs are not documented as independent of query
+            # or tenant data, so the portable observation omits them.
+            safe_request_ref=None,
+        )
+
+
+async def _web_search_with_evidence(
+    query: str,
+    max_results: int = _DEFAULT_MAX_RESULTS,
+) -> str:
+    if get_active_retrieval_handoff() is None:
+        return await asyncio.to_thread(
+            web_search_tool.func,
+            query,
+            max_results,
+        )
+    app_config = accepted_retrieval_app_config_from_active()
+    extras = dict(_get_tool_extras("web_search", app_config=app_config))
+    server_max_results = configured_int(
+        extras,
+        "max_results",
+        default=_DEFAULT_MAX_RESULTS,
+        maximum=_MAX_RESULTS,
+    )
+    requested_max_results = _coerce_max_results(max_results)
+    query = query.strip()
+    api_key = _get_api_key(
+        "web_search",
+        extras=extras,
+        allow_env_fallback=False,
+    )
+    timeout_ms = configured_timeout_ms(
+        extras,
+        default_seconds=_REQUEST_TIMEOUT_S,
+    )
+    policy = RetrievalPolicyV1(
+        allowed_providers=("tencent_wsa",),
+        allowed_endpoint_origins=(_SEARCH_ENDPOINT,),
+        web_domain_allowlist=configured_domains(extras, "allowed_domains"),
+        web_domain_denylist=configured_domains(extras, "denied_domains"),
+        max_results=server_max_results,
+        max_item_bytes=configured_int(
+            extras,
+            "max_item_bytes",
+            default=16 * 1024,
+            maximum=1024 * 1024,
+        ),
+        max_aggregate_bytes=configured_int(
+            extras,
+            "max_total_bytes",
+            default=64 * 1024,
+            maximum=8 * 1024 * 1024,
+        ),
+        timeout_ms=timeout_ms,
+        allow_redirects=False,
+        source_schemes=("http", "https"),
+    )
+    accepted = accepted_retrieval_request_from_active(
+        query=query,
+        credential=ResolvedRetrievalCredentialV1(
+            provider_id="tencent_wsa",
+            selector_ref="tencent-wsa-web-search",
+            secret=api_key,
+        ),
+        policy=policy,
+        requested_constraints=RetrievalRequestConstraintsV1(
+            provider_id="tencent_wsa",
+            endpoint=_SEARCH_ENDPOINT,
+            max_results=requested_max_results,
+            timeout_ms=timeout_ms,
+        ),
+    )
+    candidate = await EvidenceBearingRetrievalService().retrieve(
+        accepted,
+        _TencentWsaRetrievalProvider(extras=extras),
+    )
+    if not isinstance(candidate.result, str):
+        raise RetrievalProviderError("unsafe_response")
+    return candidate.result
+
+
+web_search_tool.coroutine = _web_search_with_evidence
+web_search_tool.metadata = {
+    **(web_search_tool.metadata or {}),
+    RETRIEVAL_TOOL_METADATA_KEY: RetrievalToolDeclarationV1(
+        provider_id="tencent_wsa",
+        tool_kind="web_search",
+        adapter_capability_version="tencent-wsa-http-v1",
+    ).to_metadata(),
+}

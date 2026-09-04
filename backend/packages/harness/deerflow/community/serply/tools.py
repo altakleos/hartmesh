@@ -8,6 +8,7 @@ config.yaml. An API key is required. Sign up at https://serply.io and see
 https://serply.io/docs for the endpoint reference.
 """
 
+import asyncio
 import html
 import json
 import logging
@@ -18,6 +19,28 @@ import httpx
 from langchain.tools import tool
 
 from deerflow.config import get_app_config
+from deerflow.retrieval import (
+    RETRIEVAL_TOOL_METADATA_KEY,
+    EvidenceBearingRetrievalService,
+    ProviderRetrievalItem,
+    ProviderRetrievalResponse,
+    ResolvedRetrievalCredentialV1,
+    RetrievalPolicyV1,
+    RetrievalProviderError,
+    RetrievalRequestConstraintsV1,
+    RetrievalToolDeclarationV1,
+    accepted_retrieval_app_config_from_active,
+    accepted_retrieval_request_from_active,
+    get_active_retrieval_handoff,
+    run_blocking_provider_call,
+)
+from deerflow.retrieval.provider_config import (
+    configured_domains,
+    configured_int,
+    configured_timeout_ms,
+    validate_json_content_type,
+    validate_response_body_size,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +61,20 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _api_key_warned: set[str] = set()
 
 
-def _get_api_key(tool_name: str = "web_search") -> str | None:
-    config = get_app_config().get_tool_config(tool_name)
+def _get_api_key(
+    tool_name: str = "web_search",
+    *,
+    app_config: object | None = None,
+    allow_env_fallback: bool = True,
+) -> str | None:
+    config_source = get_app_config() if app_config is None else app_config
+    config = config_source.get_tool_config(tool_name)
     if config is not None:
         api_key = (config.model_extra or {}).get("api_key")
         if isinstance(api_key, str) and api_key.strip():
             return api_key.strip()
+    if not allow_env_fallback:
+        return None
     env_key = os.getenv("SERPLY_API_KEY")
     if isinstance(env_key, str) and env_key.strip():
         return env_key.strip()
@@ -104,7 +135,15 @@ def _unexpected_format_error(query: str) -> str:
     return json.dumps({"error": "Serply returned an unexpected response format", "query": query}, ensure_ascii=False)
 
 
-def _serply_get(path: str, api_key: str, query: str, params: dict[str, object]) -> tuple[dict | None, str | None]:
+def _serply_get(
+    path: str,
+    api_key: str,
+    query: str,
+    params: dict[str, object],
+    timeout_seconds: float = 30,
+    max_response_bytes: int = 8 * 1024 * 1024,
+    strict_response: bool = False,
+) -> tuple[dict | None, str | None]:
     """Send a GET request to a Serply endpoint.
 
     Returns a ``(data, error_json)`` tuple: on success ``data`` is the parsed
@@ -117,21 +156,45 @@ def _serply_get(path: str, api_key: str, query: str, params: dict[str, object]) 
         "User-Agent": "deerflow",
     }
     try:
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(
+            timeout=timeout_seconds,
+            follow_redirects=False,
+        ) as client:
             response = client.get(f"{_SERPLY_BASE_URL}/{path}/", headers=headers, params=params)
         response.raise_for_status()
+        validate_response_body_size(
+            response,
+            max_response_bytes=max_response_bytes,
+        )
+        validate_json_content_type(response)
         data = response.json()
         if not isinstance(data, dict):
             logger.error("Serply returned an unexpected payload type: %s", type(data).__name__)
+            if strict_response:
+                raise RetrievalProviderError("unsafe_response")
             return None, _unexpected_format_error(query)
         return data, None
+    except httpx.TimeoutException:
+        logger.error("Serply request timed out")
+        if strict_response:
+            raise RetrievalProviderError("timeout") from None
+        return None, json.dumps({"error": "Serply request failed", "query": query}, ensure_ascii=False)
     except httpx.HTTPStatusError as e:
-        resp_text = (e.response.text or "")[:500]
-        logger.error("Serply API returned HTTP %s: %s", e.response.status_code, resp_text)
+        logger.error("Serply API returned HTTP %s", e.response.status_code)
         return None, json.dumps({"error": f"Serply API error: HTTP {e.response.status_code}", "query": query}, ensure_ascii=False)
+    except RetrievalProviderError:
+        logger.error("Serply returned an unsafe or oversized response")
+        if strict_response:
+            raise
+        return None, _unexpected_format_error(query)
+    except (TypeError, ValueError):
+        logger.error("Serply returned an invalid JSON response")
+        if strict_response:
+            raise RetrievalProviderError("unsafe_response") from None
+        return None, _unexpected_format_error(query)
     except Exception as e:
-        logger.error("Serply request failed: %s: %s", type(e).__name__, str(e)[:500])
-        return None, json.dumps({"error": str(e)[:500], "query": query}, ensure_ascii=False)
+        logger.error("Serply request failed (%s)", type(e).__name__)
+        return None, json.dumps({"error": "Serply request failed", "query": query}, ensure_ascii=False)
 
 
 def _normalize_row(vertical: str, row: dict) -> dict:
@@ -209,3 +272,164 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
         "results": normalized_results,
     }
     return json.dumps(output, indent=2, ensure_ascii=False)
+
+
+class _SerplyRetrievalProvider:
+    def __init__(self, *, vertical: str, extras: dict[str, object]) -> None:
+        self._vertical = vertical
+        self._extras = extras
+
+    async def search(self, request) -> ProviderRetrievalResponse:
+        if not request.credential.available:
+            raise RetrievalProviderError("configuration_error")
+        api_key = request.credential.secret
+        if not isinstance(api_key, str):
+            raise RetrievalProviderError("configuration_error")
+        path, rows_key = _VERTICALS[self._vertical]
+        params: dict[str, object] = {
+            "q": request.query,
+            "num": request.constraints.max_results,
+        }
+        for key in _PASSTHROUGH_PARAMS:
+            if key in self._extras:
+                params[key] = self._extras[key]
+        data, error_json = await run_blocking_provider_call(
+            _serply_get,
+            path,
+            api_key,
+            request.query,
+            params,
+            request.constraints.timeout_ms / 1_000,
+            request.constraints.max_aggregate_bytes,
+            True,
+        )
+        if error_json is not None:
+            try:
+                error = str(json.loads(error_json).get("error", ""))
+            except (AttributeError, TypeError, ValueError):
+                raise RetrievalProviderError("unsafe_response") from None
+            if "HTTP 429" in error:
+                raise RetrievalProviderError("rate_limited")
+            if "HTTP 401" in error or "HTTP 403" in error:
+                raise RetrievalProviderError("authentication_failed")
+            raise RetrievalProviderError("provider_unavailable")
+        if not isinstance(data, dict):
+            raise RetrievalProviderError("unsafe_response")
+        rows = data.get(rows_key)
+        if rows is None:
+            rows = []
+        if not isinstance(rows, list):
+            raise RetrievalProviderError("unsafe_response")
+        normalized_results = [_normalize_row(self._vertical, row) for row in rows[: request.constraints.max_results] if isinstance(row, dict)]
+        if normalized_results:
+            candidate = json.dumps(
+                {
+                    "total_results": len(normalized_results),
+                    "results": normalized_results,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        else:
+            candidate = json.dumps(
+                {"error": "No results found"},
+                ensure_ascii=False,
+            )
+        items = tuple(
+            ProviderRetrievalItem(
+                source_locator=result["url"],
+                content=result.get("content", ""),
+            )
+            for result in normalized_results
+            if isinstance(result.get("url"), str) and result["url"]
+        )
+        return ProviderRetrievalResponse(
+            candidate_result=candidate,
+            items=items,
+            result_count=len(normalized_results),
+            truncated=len(rows) > request.constraints.max_results,
+        )
+
+
+async def _web_search_with_evidence(query: str, max_results: int = 5) -> str:
+    if get_active_retrieval_handoff() is None:
+        return await asyncio.to_thread(
+            web_search_tool.func,
+            query,
+            max_results,
+        )
+    app_config = accepted_retrieval_app_config_from_active()
+    config = app_config.get_tool_config("web_search")
+    extra = dict((config.model_extra or {}) if config is not None else {})
+    server_max_results = configured_int(
+        extra,
+        "max_results",
+        default=_DEFAULT_MAX_RESULTS,
+        maximum=_SERPLY_MAX_RESULTS,
+    )
+    requested_max_results = _coerce_max_results(max_results)
+    vertical = _coerce_vertical(extra.get("vertical"))
+    query = _clean_query(query)
+    api_key = _get_api_key(
+        "web_search",
+        app_config=app_config,
+        allow_env_fallback=False,
+    )
+    allowed_domains = configured_domains(extra, "allowed_domains")
+    denied_domains = configured_domains(extra, "denied_domains")
+    timeout_ms = configured_timeout_ms(extra, default_seconds=30)
+    policy = RetrievalPolicyV1(
+        allowed_providers=("serply",),
+        allowed_endpoint_origins=(_SERPLY_BASE_URL,),
+        web_domain_allowlist=allowed_domains,
+        web_domain_denylist=denied_domains,
+        max_results=server_max_results,
+        max_item_bytes=configured_int(
+            extra,
+            "max_item_bytes",
+            default=16 * 1024,
+            maximum=1024 * 1024,
+        ),
+        max_aggregate_bytes=configured_int(
+            extra,
+            "max_total_bytes",
+            default=64 * 1024,
+            maximum=8 * 1024 * 1024,
+        ),
+        timeout_ms=timeout_ms,
+        allow_redirects=False,
+        source_schemes=("http", "https"),
+    )
+    accepted = accepted_retrieval_request_from_active(
+        query=query,
+        credential=ResolvedRetrievalCredentialV1(
+            provider_id="serply",
+            selector_ref="serply-web-search",
+            secret=api_key,
+        ),
+        policy=policy,
+        requested_constraints=RetrievalRequestConstraintsV1(
+            provider_id="serply",
+            endpoint=f"{_SERPLY_BASE_URL}/{_VERTICALS[vertical][0]}/",
+            max_results=requested_max_results,
+            timeout_ms=timeout_ms,
+        ),
+    )
+    candidate = await EvidenceBearingRetrievalService().retrieve(
+        accepted,
+        _SerplyRetrievalProvider(vertical=vertical, extras=extra),
+    )
+    if not isinstance(candidate.result, str):
+        raise RetrievalProviderError("unsafe_response")
+    return candidate.result
+
+
+web_search_tool.coroutine = _web_search_with_evidence
+web_search_tool.metadata = {
+    **(web_search_tool.metadata or {}),
+    RETRIEVAL_TOOL_METADATA_KEY: RetrievalToolDeclarationV1(
+        provider_id="serply",
+        tool_kind="web_search",
+        adapter_capability_version="serply-http-v1",
+    ).to_metadata(),
+}

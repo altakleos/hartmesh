@@ -13,6 +13,20 @@ from langchain_core.tools import StructuredTool
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from deerflow.config import get_app_config
+from deerflow.retrieval import (
+    RETRIEVAL_TOOL_METADATA_KEY,
+    EvidenceBearingRetrievalService,
+    ProviderRetrievalItem,
+    ProviderRetrievalResponse,
+    ResolvedRetrievalCredentialV1,
+    RetrievalPolicyV1,
+    RetrievalProviderError,
+    RetrievalRequestConstraintsV1,
+    RetrievalToolDeclarationV1,
+    accepted_retrieval_app_config_from_active,
+    accepted_retrieval_request_from_active,
+    get_active_retrieval_handoff,
+)
 
 from .client import RAGFlowAPIError, RAGFlowClient, RAGFlowConnectionError, RAGFlowProtocolError
 from .formatting import format_retrieval_result
@@ -100,8 +114,12 @@ def _settings_from_extra(extra: Mapping[str, object]) -> _RAGFlowRetrievalSettin
     return _RAGFlowRetrievalSettings.model_validate(dict(extra))
 
 
-def _settings_or_error() -> tuple[_RAGFlowRetrievalSettings | None, str | None]:
-    tool_config = get_app_config().get_tool_config("knowledge_search")
+def _settings_or_error(
+    *,
+    app_config: object | None = None,
+) -> tuple[_RAGFlowRetrievalSettings | None, str | None]:
+    config_source = get_app_config() if app_config is None else app_config
+    tool_config = config_source.get_tool_config("knowledge_search")
     if tool_config is None:
         return None, "Error: knowledge_search is not configured; add its RAGFlow settings to the tools list in config.yaml."
     try:
@@ -117,7 +135,11 @@ def _settings_or_error() -> tuple[_RAGFlowRetrievalSettings | None, str | None]:
     return settings, None
 
 
-def _build_client(settings: _RAGFlowRetrievalSettings) -> RAGFlowClient:
+def _build_client(
+    settings: _RAGFlowRetrievalSettings,
+    *,
+    max_response_bytes: int = 8 * 1024 * 1024,
+) -> RAGFlowClient:
     api_key = _api_key(settings)
     if api_key is None:  # Guarded by _settings_or_error; keeps this helper total.
         raise ValueError("RAGFlow API key is missing")
@@ -125,6 +147,7 @@ def _build_client(settings: _RAGFlowRetrievalSettings) -> RAGFlowClient:
         base_url=str(settings.base_url).rstrip("/"),
         api_key=api_key,
         timeout=settings.timeout,
+        max_response_bytes=max_response_bytes,
     )
 
 
@@ -134,7 +157,7 @@ def _tool_error(exc: Exception, settings: _RAGFlowRetrievalSettings) -> str:
     base_url = _redact_error(str(settings.base_url).rstrip("/"), key)
 
     if isinstance(exc, RAGFlowAPIError):
-        logger.warning("RAGFlow API rejected a read-only tool request (code=%s)", exc.code)
+        logger.warning("RAGFlow API rejected a read-only tool request")
         return f"Error: {safe_detail}"
     if isinstance(exc, RAGFlowConnectionError):
         logger.warning("RAGFlow connection failed for %s (%s)", base_url, type(exc).__name__)
@@ -164,7 +187,7 @@ def _resolved_dataset(dataset: Mapping[str, object], *, expected_id: str | None 
             warning_key = f"empty_embedding:{clean_id}"
             if warning_key not in _warned:
                 _warned.add(warning_key)
-                logger.warning("Skipping empty RAGFlow dataset without embedding model metadata (dataset_id=%s)", clean_id)
+                logger.warning("Skipping empty RAGFlow dataset without embedding model metadata")
             embedding_model = ""
         else:
             raise RAGFlowProtocolError("RAGFlow returned a searchable dataset without embedding model metadata.")
@@ -197,11 +220,11 @@ def _missing_dataset_error(position: int) -> str:
 
 
 def _log_missing_dataset(*, position: int, dataset_id: str, code: object = None) -> None:
+    del dataset_id
     logger.warning(
-        "Configured RAGFlow dataset binding could not be resolved (position=%d, dataset_id=%s, code=%s)",
+        "Configured RAGFlow dataset binding could not be resolved (position=%d, code_category=%s)",
         position,
-        dataset_id,
-        code,
+        "provider_error" if code is not None else "not_found",
     )
 
 
@@ -340,6 +363,8 @@ async def _retrieve_dataset_groups(
 
 async def knowledge_search(query: str) -> str:
     """Search the configured RAGFlow scope, defaulting to every accessible dataset."""
+    if get_active_retrieval_handoff() is not None:
+        return await _knowledge_search_with_evidence(query)
     query = query.strip()
     if not query:
         return "Error: query must not be empty."
@@ -375,9 +400,163 @@ async def knowledge_search(query: str) -> str:
         return _tool_error(exc, settings)
 
 
+class _RAGFlowRetrievalProvider:
+    def __init__(
+        self,
+        *,
+        settings: _RAGFlowRetrievalSettings,
+        client: RAGFlowClient,
+    ) -> None:
+        self._settings = settings
+        self._client = client
+
+    async def search(self, request) -> ProviderRetrievalResponse:
+        if not request.credential.available:
+            raise RetrievalProviderError("configuration_error")
+        try:
+            datasets, resolution_error = await _resolve_datasets(
+                self._client,
+                self._settings,
+            )
+            if resolution_error is not None or not datasets:
+                raise RetrievalProviderError("configuration_error")
+            groups = _group_searchable_datasets(datasets)
+            if not groups:
+                return ProviderRetrievalResponse(
+                    candidate_result=_NO_RELEVANT_CONTENT,
+                    items=(),
+                    result_count=0,
+                )
+            result = await _retrieve_dataset_groups(
+                self._client,
+                self._settings,
+                request.query,
+                groups,
+            )
+            names_by_id = {dataset.dataset_id: dataset.name for dataset in datasets}
+            formatted = format_retrieval_result(
+                result,
+                dataset_names_by_id=names_by_id,
+                max_chars_per_chunk=self._settings.max_chars_per_chunk,
+                max_total_chars=self._settings.max_total_chars,
+            )
+            formatted = _redact_api_key(
+                formatted,
+                _api_key(self._settings),
+            )
+            chunks = _result_chunks(result)
+            items = tuple(
+                ProviderRetrievalItem(
+                    source_locator=None,
+                    collection_selector=str(chunk["dataset_id"]),
+                    document_selector=str(chunk["document_id"]),
+                    content=chunk.get("content", ""),
+                )
+                for chunk in chunks[: request.constraints.max_results]
+                if chunk.get("dataset_id") is not None and chunk.get("document_id") is not None
+            )
+            return ProviderRetrievalResponse(
+                candidate_result=formatted,
+                items=items,
+                result_count=min(
+                    len(chunks),
+                    request.constraints.max_results,
+                ),
+                truncated=(len(chunks) > request.constraints.max_results or "response truncated" in formatted),
+            )
+        except RetrievalProviderError:
+            raise
+        except RAGFlowConnectionError as exc:
+            if "timed out" in str(exc).lower():
+                raise RetrievalProviderError("timeout") from None
+            raise RetrievalProviderError("provider_unavailable") from None
+        except RAGFlowAPIError as exc:
+            code = str(exc.code or "").lower()
+            if code == "429" or "rate" in code or "limit" in code:
+                raise RetrievalProviderError("rate_limited") from None
+            if code in {"401", "403"} or any(marker in code for marker in ("auth", "token", "key")):
+                raise RetrievalProviderError("authentication_failed") from None
+            raise RetrievalProviderError("provider_unavailable") from None
+        except RAGFlowProtocolError as exc:
+            raise RetrievalProviderError(exc.provider_status) from None
+        except Exception:
+            raise RetrievalProviderError("provider_unavailable") from None
+
+
+async def _knowledge_search_with_evidence(query: str) -> str:
+    query = query.strip()
+    settings, _error = _settings_or_error(
+        app_config=accepted_retrieval_app_config_from_active(),
+    )
+    if settings is None:
+        # No provider call occurs. The outer middleware records the bounded
+        # configuration failure without copying this user-facing detail.
+        raise RetrievalProviderError("configuration_error")
+    if settings.datasets is None:
+        # Durable evidence cannot prove a tenant collection boundary from a
+        # mutable provider-wide enumeration. Direct/local calls retain the
+        # legacy credential-scoped behavior; evidence-bearing runs fail closed.
+        raise RetrievalProviderError("configuration_error")
+    handoff = get_active_retrieval_handoff()
+    if handoff is None:
+        raise RetrievalProviderError("configuration_error")
+    receipt = handoff.receipt
+    tenant = getattr(getattr(receipt, "context", None), "tenant", None)
+    if tenant is None:
+        raise RetrievalProviderError("configuration_error")
+    collection_refs = tuple(f"{tenant.public_ref}-ragflow-{position}" for position, _dataset_id in enumerate(settings.datasets, start=1))
+    timeout_ms = max(1, int(settings.timeout * 1_000))
+    policy = RetrievalPolicyV1(
+        allowed_providers=("ragflow",),
+        allowed_endpoint_origins=(str(settings.base_url),),
+        allowed_collections=tuple(settings.datasets),
+        collection_public_refs=collection_refs,
+        max_results=settings.page_size,
+        max_item_bytes=max(4 * settings.max_chars_per_chunk, 4_096),
+        max_aggregate_bytes=max(4 * settings.max_total_chars, 16_384),
+        timeout_ms=timeout_ms,
+        allow_redirects=False,
+        source_schemes=("ragflow-doc",),
+    )
+    accepted = accepted_retrieval_request_from_active(
+        query=query,
+        credential=ResolvedRetrievalCredentialV1(
+            provider_id="ragflow",
+            selector_ref="ragflow-knowledge-search",
+            secret=_api_key(settings),
+        ),
+        policy=policy,
+        requested_constraints=RetrievalRequestConstraintsV1(
+            provider_id="ragflow",
+            endpoint=str(settings.base_url),
+            collections=tuple(settings.datasets),
+            max_results=settings.page_size,
+            max_item_bytes=max(4 * settings.max_chars_per_chunk, 4_096),
+            max_aggregate_bytes=max(
+                4 * settings.max_total_chars,
+                16_384,
+            ),
+            timeout_ms=timeout_ms,
+            source_schemes=("ragflow-doc",),
+        ),
+    )
+    candidate = await EvidenceBearingRetrievalService().retrieve(
+        accepted,
+        _RAGFlowRetrievalProvider(
+            settings=settings,
+            client=_build_client(
+                settings,
+                max_response_bytes=accepted.effective_constraints.max_aggregate_bytes,
+            ),
+        ),
+    )
+    if not isinstance(candidate.result, str):
+        raise RetrievalProviderError("unsafe_response")
+    return candidate.result
+
+
 def _tool_description() -> str:
-    base = "Search the operator-approved RAGFlow datasets and return compact, citation-numbered source chunks."
-    return f"{base} If knowledge_search.datasets is omitted, all datasets accessible to the configured RAGFlow API key are searched. Dataset IDs are never shown to the model."
+    return "Search the operator-approved RAGFlow datasets and return compact, citation-numbered source chunks. Durable runs require an explicit operator-configured dataset allowlist. Dataset IDs are never shown to the model."
 
 
 async def _knowledge_search_entrypoint(query: str) -> str:
@@ -394,4 +573,11 @@ knowledge_search_tool = StructuredTool.from_function(
     name="knowledge_search",
     description=_tool_description(),
     parse_docstring=True,
+    metadata={
+        RETRIEVAL_TOOL_METADATA_KEY: RetrievalToolDeclarationV1(
+            provider_id="ragflow",
+            tool_kind="knowledge_search",
+            adapter_capability_version="ragflow-http-v1",
+        ).to_metadata()
+    },
 )

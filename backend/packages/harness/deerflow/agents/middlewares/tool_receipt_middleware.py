@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import override
 
@@ -44,6 +45,16 @@ from deerflow.agents.middlewares.tool_receipt import (
 )
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.authz.outcome import peek_policy_outcomes, pop_policy_outcomes
+from deerflow.retrieval import (
+    RetrievalEvidenceError,
+    RetrievalObservationFinalizer,
+    RetrievalObservationV1,
+    RetrievalPolicyDenied,
+    RetrievalProviderError,
+    active_retrieval_draft_context,
+    protect_retrieval_request_projection,
+    retrieval_tool_declaration,
+)
 from deerflow.runtime.tool_evidence import (
     ToolAttemptReservation,
     ToolDispatchObservationV1,
@@ -150,6 +161,19 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
             return self._stamp(result, request) if self._display_enabled else result
 
         tool_call_id = str(request.tool_call.get("id") or "")
+        retrieval_declaration = retrieval_tool_declaration(getattr(request, "tool", None))
+        if retrieval_declaration is not None:
+            if not isinstance(sink, RetrievalObservationFinalizer):
+                raise RetrievalEvidenceError("retrieval_finalizer_unavailable")
+            tool_plane = context.get("accepted_tool_plane_revision")
+            required_digests = (
+                "base_revision_digest",
+                "user_overlay_digest",
+                "projection_digest",
+                "effective_digest",
+            )
+            if binding.tenant is None or not isinstance(tool_plane, Mapping) or any(not isinstance(tool_plane.get(name), str) or re.fullmatch(r"[0-9a-f]{64}", tool_plane[name]) is None for name in required_digests):
+                raise RetrievalEvidenceError("retrieval_evidence_context_unavailable")
         dispatch = self._dispatch_observation(request)
         async with binding.serialize_dispatch(tool_call_id):
             tool_name = str(request.tool_call.get("name") or "")
@@ -161,6 +185,11 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                 arguments,
                 evidence_safe_fields=evidence_safe_fields_from_tool(getattr(request, "tool", None)),
             )
+            if retrieval_declaration is not None:
+                projection = protect_retrieval_request_projection(
+                    projection,
+                    retrieval_declaration,
+                )
             # Reservation and append are one fenced store operation. This await
             # is the side-effect boundary: no inner authorization, provider,
             # guardrail, or tool code runs before the start is durable.
@@ -176,6 +205,21 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
             started = reservation.started
             replayed_outcome = reservation.replayed_outcome
             if replayed_outcome is not None:
+                if retrieval_declaration is not None:
+                    replayed_observation = reservation.replayed_retrieval_observation
+                    if not isinstance(
+                        replayed_observation,
+                        RetrievalObservationV1,
+                    ):
+                        raise RetrievalEvidenceError("retrieval_replay_observation_missing")
+                    replayed_draft = replayed_observation.draft
+                    if (
+                        replayed_draft.provider_id != retrieval_declaration.provider_id
+                        or replayed_draft.tool_kind != retrieval_declaration.tool_kind
+                        or replayed_draft.adapter_capability_version != retrieval_declaration.adapter_capability_version
+                        or replayed_draft.mcp_evidence_ref != retrieval_declaration.mcp_evidence_ref
+                    ):
+                        raise RetrievalEvidenceError("retrieval_replay_observation_mismatch")
                 result = ToolMessage(
                     content=(f"This tool call already reached durable status '{replayed_outcome.phase}' before recovery, but its prior result is unavailable. The tool was not executed again."),
                     tool_call_id=tool_call_id,
@@ -189,21 +233,44 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                     },
                 )
                 return self._stamp(result, request) if self._display_enabled else result
+            retrieval_handoff = None
             try:
                 with active_tool_receipt_context(started):
-                    result = await handler(request)
+                    if retrieval_declaration is None:
+                        result = await handler(request)
+                    else:
+                        with active_retrieval_draft_context(
+                            started,
+                            retrieval_declaration,
+                            context,
+                        ) as retrieval_handoff:
+                            result = await handler(request)
             except asyncio.CancelledError:
                 policy = self._policy_references(context, tool_call_id)
                 try:
-                    await sink.record_outcome(
-                        started.outcome(
-                            phase="cancelled",
-                            result_projection_digest=None,
-                            result_kind=None,
-                            safe_error_code="cancelled",
-                            **policy,
-                        )
+                    outcome = started.outcome(
+                        phase="cancelled",
+                        result_projection_digest=None,
+                        result_kind=None,
+                        safe_error_code="cancelled",
+                        **policy,
                     )
+                    if retrieval_handoff is not None and retrieval_handoff.draft is not None:
+                        await sink.record_with_receipt_outcome(
+                            outcome,
+                            retrieval_handoff.draft,
+                        )
+                    elif retrieval_handoff is not None:
+                        await sink.record_with_receipt_outcome(
+                            outcome,
+                            retrieval_handoff.make_terminal_draft(
+                                provider_status="cancelled",
+                                safe_reason="cancelled",
+                                provider_finished_at=outcome.occurred_at,
+                            ),
+                        )
+                    else:
+                        await sink.record_outcome(outcome)
                 except asyncio.CancelledError:
                     pass
                 except Exception:
@@ -211,17 +278,47 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                     # failed best-effort terminal write must never replace it.
                     logger.warning("Failed to record durable tool cancellation outcome")
                 raise
-            except Exception:
+            except Exception as exc:
                 policy = self._policy_references(context, tool_call_id)
-                await sink.record_outcome(
-                    started.outcome(
-                        phase="failed",
-                        result_projection_digest=None,
-                        result_kind=None,
-                        safe_error_code="internal_error",
-                        **policy,
-                    )
+                if isinstance(exc, RetrievalPolicyDenied):
+                    phase = "denied"
+                    safe_error_code = "guardrail_denied"
+                    provider_status = "policy_denied"
+                elif isinstance(exc, RetrievalProviderError):
+                    phase = "failed"
+                    safe_error_code = self._safe_error_for_provider_status(exc.status)
+                    provider_status = exc.status
+                elif isinstance(exc, RetrievalEvidenceError):
+                    phase = "failed"
+                    safe_error_code = "configuration_error"
+                    provider_status = "configuration_error"
+                else:
+                    phase = "failed"
+                    safe_error_code = "internal_error"
+                    provider_status = "internal_error"
+                outcome = started.outcome(
+                    phase=phase,
+                    result_projection_digest=None,
+                    result_kind=None,
+                    safe_error_code=safe_error_code,
+                    **policy,
                 )
+                if retrieval_handoff is not None and retrieval_handoff.draft is not None:
+                    await sink.record_with_receipt_outcome(
+                        outcome,
+                        retrieval_handoff.draft,
+                    )
+                elif retrieval_handoff is not None:
+                    await sink.record_with_receipt_outcome(
+                        outcome,
+                        retrieval_handoff.make_terminal_draft(
+                            provider_status=provider_status,
+                            safe_reason=provider_status,
+                            provider_finished_at=outcome.occurred_at,
+                        ),
+                    )
+                else:
+                    await sink.record_outcome(outcome)
                 raise
 
             phase, safe_error_code, result_kind, result_status, model_visible = self._classify_result(
@@ -229,22 +326,99 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                 request,
                 context,
             )
+            if retrieval_handoff is not None and retrieval_handoff.draft is not None:
+                provider_status = retrieval_handoff.draft.provider_status
+                if provider_status == "policy_denied":
+                    phase = "denied"
+                    safe_error_code = "guardrail_denied"
+                elif phase == "failed" and provider_status not in {
+                    "success",
+                    "empty",
+                    "partial",
+                }:
+                    safe_error_code = self._safe_error_for_provider_status(provider_status)
             result_digest = digest_result_projection(
                 model_visible,
                 result_kind=result_kind,
                 status=result_status,
             )
             policy = self._policy_references(context, tool_call_id)
-            await sink.record_outcome(
-                started.outcome(
-                    phase=phase,
-                    result_projection_digest=result_digest,
-                    result_kind=result_kind,
-                    safe_error_code=safe_error_code,
-                    **policy,
-                )
+            outcome = started.outcome(
+                phase=phase,
+                result_projection_digest=result_digest,
+                result_kind=result_kind,
+                safe_error_code=safe_error_code,
+                **policy,
             )
+            if retrieval_declaration is not None:
+                if retrieval_handoff is None or retrieval_handoff.draft is None:
+                    if retrieval_handoff is None:
+                        raise RetrievalEvidenceError("retrieval_draft_context_unavailable")
+                    if phase == "succeeded":
+                        outcome = started.outcome(
+                            phase="failed",
+                            result_projection_digest=None,
+                            result_kind=None,
+                            safe_error_code="internal_error",
+                            **policy,
+                        )
+                        provider_status = "internal_error"
+                    else:
+                        provider_status = self._provider_status_for_terminal(
+                            phase,
+                            safe_error_code,
+                        )
+                    await sink.record_with_receipt_outcome(
+                        outcome,
+                        retrieval_handoff.make_terminal_draft(
+                            provider_status=provider_status,
+                            safe_reason=provider_status,
+                            provider_finished_at=outcome.occurred_at,
+                        ),
+                    )
+                    if phase == "succeeded":
+                        raise RetrievalEvidenceError("retrieval_draft_missing")
+                    return self._stamp(result, request) if self._display_enabled else result
+                observation = await sink.record_with_receipt_outcome(
+                    outcome,
+                    retrieval_handoff.draft,
+                )
+                if not isinstance(observation, RetrievalObservationV1):
+                    raise RetrievalEvidenceError("retrieval_observation_invalid")
+            else:
+                await sink.record_outcome(outcome)
             return self._stamp(result, request) if self._display_enabled else result
+
+    @staticmethod
+    def _safe_error_for_provider_status(provider_status: str) -> str:
+        return {
+            "timeout": "timeout",
+            "rate_limited": "rate_limited",
+            "authentication_failed": "permission_denied",
+            "configuration_error": "configuration_error",
+            "provider_unavailable": "transient_error",
+            "unsafe_response": "invalid_input",
+            "oversized_response": "invalid_input",
+        }.get(provider_status, "internal_error")
+
+    @classmethod
+    def _provider_status_for_terminal(
+        cls,
+        phase: str,
+        safe_error_code: str | None,
+    ) -> str:
+        if phase == "denied":
+            return "policy_denied"
+        if phase == "cancelled":
+            return "cancelled"
+        return {
+            "timeout": "timeout",
+            "rate_limited": "rate_limited",
+            "permission_denied": "authentication_failed",
+            "configuration_error": "configuration_error",
+            "transient_error": "provider_unavailable",
+            "invalid_input": "unsafe_response",
+        }.get(safe_error_code or "", "internal_error")
 
     @staticmethod
     def _runtime_context(request: ToolCallRequest) -> dict:
@@ -314,7 +488,18 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
             code = "authorization_denied" if any(getattr(item, "kind", None) == "authorization" for item in denied) else "guardrail_denied"
             return "denied", code, result_kind, status, model_visible
         if status == "error":
+            aliases = {
+                "auth": "permission_denied",
+                "transient": "transient_error",
+                "config": "configuration_error",
+                "permission": "permission_denied",
+                "internal": "internal_error",
+                "unknown": "unknown_error",
+            }
+            error_types = [aliases.get(item, item) for item in error_types]
             allowed = {
+                "timeout",
+                "invalid_input",
                 "rate_limited",
                 "permission_denied",
                 "transient_error",

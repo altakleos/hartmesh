@@ -45,9 +45,15 @@ def mock_config_no_key():
     patcher.stop()
 
 
-def _make_response(payload: object) -> MagicMock:
+def _make_response(
+    payload: object,
+    *,
+    content_type: str = "application/json",
+) -> MagicMock:
     mock_resp = MagicMock()
     mock_resp.json.return_value = payload
+    mock_resp.content = json.dumps(payload).encode("utf-8")
+    mock_resp.headers = {"content-type": content_type}
     mock_resp.raise_for_status = MagicMock()
     return mock_resp
 
@@ -89,6 +95,22 @@ class TestGetApiKey:
                 from deerflow.community.serply.tools import _get_api_key
 
                 assert _get_api_key("web_search") == "env-only"
+        finally:
+            patcher.stop()
+
+    def test_environment_fallback_can_be_disabled_for_accepted_runs(self):
+        patcher, _ = _patch_config({})
+        try:
+            with patch.dict("os.environ", {"SERPLY_API_KEY": "late-env-key"}):
+                from deerflow.community.serply.tools import _get_api_key
+
+                assert (
+                    _get_api_key(
+                        "web_search",
+                        allow_env_fallback=False,
+                    )
+                    is None
+                )
         finally:
             patcher.stop()
 
@@ -266,6 +288,80 @@ class TestWebSearchTool:
             mock_client.return_value.__enter__.return_value.get.return_value = _make_response(["not", "a", "dict"])
             assert "unexpected response format" in _run("q")["error"]
 
+    def test_non_json_content_type_is_rejected(self, mock_config_with_key):
+        with patch("deerflow.community.serply.tools.httpx.Client") as mock_client:
+            mock_client.return_value.__enter__.return_value.get.return_value = _make_response(
+                {"results": _search_rows(1)},
+                content_type="text/html",
+            )
+
+            assert "unexpected response format" in _run("q")["error"]
+
+    def test_strict_adapter_rejects_oversized_raw_response(
+        self,
+        mock_config_with_key,
+    ):
+        from deerflow.community.serply.tools import _serply_get
+        from deerflow.retrieval import RetrievalProviderError
+
+        response = _make_response({"results": _search_rows(1)})
+        response.content = b"x" * 65
+        with patch("deerflow.community.serply.tools.httpx.Client") as mock_client:
+            mock_client.return_value.__enter__.return_value.get.return_value = response
+
+            with pytest.raises(RetrievalProviderError) as caught:
+                _serply_get(
+                    "search",
+                    "secret",
+                    "query",
+                    {"q": "query", "num": 1},
+                    max_response_bytes=64,
+                    strict_response=True,
+                )
+
+        assert caught.value.status == "oversized_response"
+
+    def test_strict_adapter_classifies_invalid_json_as_unsafe(
+        self,
+        mock_config_with_key,
+    ):
+        from deerflow.community.serply.tools import _serply_get
+        from deerflow.retrieval import RetrievalProviderError
+
+        response = _make_response({"results": []})
+        response.content = b"not-json"
+        response.json.side_effect = ValueError("private provider body")
+        with patch("deerflow.community.serply.tools.httpx.Client") as mock_client:
+            mock_client.return_value.__enter__.return_value.get.return_value = response
+
+            with pytest.raises(RetrievalProviderError) as caught:
+                _serply_get(
+                    "search",
+                    "secret",
+                    "query",
+                    {"q": "query", "num": 1},
+                    strict_response=True,
+                )
+
+        assert caught.value.status == "unsafe_response"
+
+    def test_strict_adapter_classifies_client_timeout(self, mock_config_with_key):
+        from deerflow.community.serply.tools import _serply_get
+        from deerflow.retrieval import RetrievalProviderError
+
+        with patch("deerflow.community.serply.tools.httpx.Client") as mock_client:
+            mock_client.return_value.__enter__.return_value.get.side_effect = httpx.ReadTimeout("private timeout detail")
+            with pytest.raises(RetrievalProviderError) as caught:
+                _serply_get(
+                    "search",
+                    "secret",
+                    "query",
+                    {"q": "query", "num": 1},
+                    strict_response=True,
+                )
+
+        assert caught.value.status == "timeout"
+
     def test_missing_api_key_returns_error_json_and_warns_once(self, mock_config_no_key, caplog):
         with patch.dict("os.environ", {}, clear=True), caplog.at_level(logging.WARNING):
             first = _run("q")
@@ -293,7 +389,7 @@ class TestWebSearchTool:
             mock_client.return_value.__enter__.return_value.get.side_effect = httpx.ConnectError("boom")
             result = _run("q")
 
-        assert result == {"error": "boom", "query": "q"}
+        assert result == {"error": "Serply request failed", "query": "q"}
 
     def test_long_query_is_truncated(self, mock_config_with_key):
         with patch("deerflow.community.serply.tools.httpx.Client") as mock_client:

@@ -4,6 +4,12 @@ DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run
 
 **Convention**: every ORM model change (new column, new table, new index) MUST ship as an alembic revision under `migrations/versions/`. The Gateway runs `alembic upgrade head` automatically on startup; users do not run `alembic` manually in production.
 
+`retrieval.observation.v1` adds no ORM shape. It uses the existing generic
+`run_events` content/metadata/idempotency columns and is atomically paired with
+the existing terminal tool receipt by each store backend. Do not add an empty
+migration for a new event type; a future retrieval schema/index change still
+follows the normal migration rule above.
+
 **Hybrid bootstrap** (`persistence/bootstrap.py::bootstrap_schema`, invoked from `persistence/engine.py::init_engine`):
 
 | DB state                                  | Action                                  |

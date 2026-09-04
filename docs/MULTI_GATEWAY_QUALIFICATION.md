@@ -15,6 +15,14 @@ artifact. A Helm render,
 test collection, skipped test, candidate deployment, or
 `deployment.qualificationEvidence` reference alone is not qualification.
 
+External retrieval provider qualification is a separate, deployment-specific
+gate. The DuckDuckGo, Serply, Tencent WSA, and RAGFlow adapters being present in
+the exact-two application does not qualify their network behavior or credentials;
+each selected provider must pass the opt-in lane documented in
+[Evidence-Bearing External Retrieval](../backend/docs/EVIDENCE_BEARING_RETRIEVAL.md).
+A skipped lane or missing credential/network/dataset remains unqualified and
+cannot strengthen the `durable_two_gateway_v1` claim.
+
 The one supported scope is:
 
 ```text

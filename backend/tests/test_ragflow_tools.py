@@ -199,8 +199,8 @@ async def test_missing_bound_dataset_returns_indexed_operator_guidance(
     assert MISSING_DATASET_ID not in result
     assert fake.list_calls == [DATASET_ID_1, MISSING_DATASET_ID]
     assert fake.retrieve_calls == []
-    assert MISSING_DATASET_ID in caplog.text
-    assert "code=None" in caplog.text
+    assert MISSING_DATASET_ID not in caplog.text
+    assert "code_category=not_found" in caplog.text
 
 
 @pytest.mark.anyio
@@ -230,7 +230,8 @@ async def test_bound_dataset_api_error_uses_normal_redacted_error_handler(
         result = await ragflow_tools.knowledge_search("leave")
 
     assert result == "Error: invalid credential [REDACTED]"
-    assert "code=102" in caplog.text
+    assert "RAGFlow API rejected a read-only tool request" in caplog.text
+    assert "102" not in caplog.text
     assert fake.retrieve_calls == []
 
 
@@ -362,7 +363,7 @@ async def test_all_dataset_scope_skips_empty_dataset_without_embedding_model_and
     assert "(score 0.75)" in result
     assert DATASET_ID_1 not in result
     assert "Skipping empty RAGFlow dataset without embedding model metadata" in caplog.text
-    assert DATASET_ID_1 in caplog.text
+    assert DATASET_ID_1 not in caplog.text
 
 
 @pytest.mark.anyio
@@ -733,8 +734,8 @@ def test_tool_assembly_hides_bound_dataset_ids_without_network_io(monkeypatch: p
     tools = get_available_tools(include_mcp=False, app_config=config)
     assembled = next(tool for tool in tools if tool.name == "knowledge_search")
 
-    assert "If knowledge_search.datasets is omitted" in assembled.description
-    assert "all datasets accessible to the configured RAGFlow API key" in assembled.description
+    assert "Durable runs require an explicit" in assembled.description
+    assert "operator-configured dataset allowlist" in assembled.description
     assert DATASET_ID_1 not in assembled.description
     assert DATASET_ID_2 not in assembled.description
     assert "ragflow-secret" not in assembled.description

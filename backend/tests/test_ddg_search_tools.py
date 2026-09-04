@@ -156,3 +156,253 @@ def test_web_search_tool_reads_ddgs_options_from_config() -> None:
         backend="auto",
         time_range="week",
     )
+
+
+def test_evidence_search_owns_fixed_destination_and_disables_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeEngine:
+        search_url = "https://html.duckduckgo.com/html/"
+        search_method = "POST"
+
+        def __init__(self, *, timeout: float) -> None:
+            calls["engine_timeout"] = timeout
+            self.http_client = SimpleNamespace(client=object())
+
+        def search(self, query: str, **kwargs):
+            calls["query"] = query
+            calls["search"] = kwargs
+            self.http_client.request(
+                "POST",
+                self.search_url,
+                data={"q": query},
+            )
+            return [
+                SimpleNamespace(
+                    title="Result",
+                    href="https://example.com/private/path?q=secret",
+                    body="Snippet",
+                )
+            ]
+
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            calls["client"] = kwargs
+
+        def request(self, method: str, url: str, **kwargs):
+            calls["request"] = {"method": method, "url": url, **kwargs}
+            return SimpleNamespace(
+                status_code=200,
+                content=b"<html></html>",
+                text="<html></html>",
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+
+    monkeypatch.setattr("ddgs.engines.duckduckgo.Duckduckgo", FakeEngine)
+    monkeypatch.setattr("primp.Client", FakeClient)
+
+    results = tools._search_duckduckgo_evidence(
+        "private query",
+        max_results=2,
+        region="us-en",
+        safesearch="moderate",
+        time_range="week",
+        timeout_seconds=3,
+    )
+
+    assert results[0]["href"] == "https://example.com/private/path?q=secret"
+    assert calls["client"] == {
+        "timeout": 3,
+        "follow_redirects": False,
+        "https_only": True,
+        "verify": True,
+        "impersonate": "random",
+        "impersonate_os": "random",
+    }
+    assert calls["search"] == {
+        "region": "us-en",
+        "safesearch": "moderate",
+        "timelimit": "w",
+    }
+    assert calls["request"] == {
+        "method": "POST",
+        "url": "https://html.duckduckgo.com/html/",
+        "data": {"q": "private query"},
+        "follow_redirects": False,
+    }
+
+
+def test_evidence_search_fails_closed_if_sdk_destination_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ChangedEngine:
+        search_url = "https://redirector.invalid/search"
+        search_method = "POST"
+
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+    monkeypatch.setattr("ddgs.engines.duckduckgo.Duckduckgo", ChangedEngine)
+
+    with pytest.raises(tools.RetrievalProviderError) as caught:
+        tools._search_duckduckgo_evidence(
+            "query",
+            max_results=1,
+            region="us-en",
+            safesearch="moderate",
+            time_range=None,
+            timeout_seconds=3,
+        )
+
+    assert caught.value.status == "configuration_error"
+
+
+def test_evidence_search_classifies_sdk_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ddgs.exceptions import TimeoutException
+
+    class TimeoutEngine:
+        search_url = "https://html.duckduckgo.com/html/"
+        search_method = "POST"
+
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+            self.http_client = SimpleNamespace(client=object())
+
+        def search(self, _query: str, **_kwargs):
+            raise TimeoutException("private timeout detail")
+
+    monkeypatch.setattr("ddgs.engines.duckduckgo.Duckduckgo", TimeoutEngine)
+    monkeypatch.setattr("primp.Client", lambda **_kwargs: object())
+
+    with pytest.raises(tools.RetrievalProviderError) as caught:
+        tools._search_duckduckgo_evidence(
+            "private query",
+            max_results=1,
+            region="us-en",
+            safesearch="moderate",
+            time_range=None,
+            timeout_seconds=3,
+        )
+
+    assert caught.value.status == "timeout"
+
+
+def test_evidence_search_rejects_an_unexpected_runtime_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DivertedEngine:
+        search_url = "https://html.duckduckgo.com/html/"
+        search_method = "POST"
+
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+            self.http_client = SimpleNamespace(client=object())
+
+        def search(self, _query: str, **_kwargs):
+            self.http_client.request("POST", "https://attacker.invalid/search")
+            return []
+
+    network_client = MagicMock()
+    monkeypatch.setattr("ddgs.engines.duckduckgo.Duckduckgo", DivertedEngine)
+    monkeypatch.setattr("primp.Client", lambda **_kwargs: network_client)
+
+    with pytest.raises(tools.RetrievalProviderError) as caught:
+        tools._search_duckduckgo_evidence(
+            "private query",
+            max_results=1,
+            region="us-en",
+            safesearch="moderate",
+            time_range=None,
+            timeout_seconds=3,
+        )
+
+    assert caught.value.status == "configuration_error"
+    network_client.request.assert_not_called()
+
+
+def test_evidence_search_bounds_raw_html_before_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEngine:
+        search_url = "https://html.duckduckgo.com/html/"
+        search_method = "POST"
+
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+            self.http_client = SimpleNamespace(client=object())
+
+        def search(self, _query: str, **_kwargs):
+            self.http_client.request("POST", self.search_url)
+            raise AssertionError("oversized response must fail before parsing")
+
+    response = SimpleNamespace(
+        status_code=200,
+        content=b"x" * 65,
+        text="x" * 65,
+        headers={"content-type": "text/html"},
+    )
+    network_client = MagicMock()
+    network_client.request.return_value = response
+    monkeypatch.setattr("ddgs.engines.duckduckgo.Duckduckgo", FakeEngine)
+    monkeypatch.setattr("primp.Client", lambda **_kwargs: network_client)
+
+    with pytest.raises(tools.RetrievalProviderError) as caught:
+        tools._search_duckduckgo_evidence(
+            "private query",
+            max_results=1,
+            region="us-en",
+            safesearch="moderate",
+            time_range=None,
+            timeout_seconds=3,
+            max_response_bytes=64,
+        )
+
+    assert caught.value.status == "oversized_response"
+
+
+@pytest.mark.anyio
+async def test_evidence_provider_marks_capped_results_as_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEngine:
+        search_url = "https://html.duckduckgo.com/html/"
+        search_method = "POST"
+
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+            self.http_client = SimpleNamespace(client=object())
+
+        def search(self, _query: str, **_kwargs):
+            return [
+                {
+                    "title": f"Result {index}",
+                    "href": f"https://example.com/{index}",
+                    "body": f"Snippet {index}",
+                }
+                for index in range(3)
+            ]
+
+    monkeypatch.setattr("ddgs.engines.duckduckgo.Duckduckgo", FakeEngine)
+    monkeypatch.setattr("primp.Client", lambda **_kwargs: object())
+    provider = tools._DuckDuckGoRetrievalProvider(
+        region="us-en",
+        safesearch="moderate",
+        time_range=None,
+    )
+
+    response = await provider.search(
+        SimpleNamespace(
+            query="private query",
+            constraints=SimpleNamespace(
+                max_results=2,
+                timeout_ms=1_000,
+                max_aggregate_bytes=4_096,
+            ),
+        )
+    )
+
+    assert response.result_count == 2
+    assert response.truncated is True
+    assert len(json.loads(response.candidate_result)["results"]) == 2

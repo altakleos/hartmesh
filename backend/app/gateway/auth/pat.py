@@ -87,7 +87,7 @@ PAT_ROUTE_SCOPE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("POST", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/cancel$"), "runs:cancel"),
     (
         "GET",
-        re.compile(r"^/api/threads/[^/]+/runs/[^/]+/(join|messages|events|workspace-changes)$"),
+        re.compile(r"^/api/threads/[^/]+/runs/[^/]+/(join|messages|events|retrieval-observations|workspace-changes)$"),
         "runs:read",
     ),
     ("GET", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/artifacts/archive$"), "runs:read"),

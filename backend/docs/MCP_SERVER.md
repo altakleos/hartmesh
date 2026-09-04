@@ -465,6 +465,23 @@ support bundles intentionally contain safe IDs, digest prefixes, and stable code
 not MCP arguments, results, remote handles, credentials, principal identities, or
 provider exception text.
 
+## Recognized MCP retrieval evidence
+
+MCP lineage and retrieval evidence are separate contracts. DeerFlow emits a
+`retrieval.observation.v1` for an MCP tool only when a trusted adapter attaches
+explicit `deerflow_retrieval_v1` metadata with a provider, tool kind, adapter
+capability version, complete protected-argument list, and optional bounded
+`mcp_evidence_ref`. Names, descriptions, server prefixes, and result shapes are
+never used to infer that an arbitrary MCP tool is retrieval.
+
+The adapter must enforce endpoint, redirect, source, count, byte, timeout, and
+credential policy and return only source facts the shared retrieval service can
+normalize. The observation may link the independently authorized MCP evidence
+reference, but it does not copy MCP arguments, response content, remote handles,
+headers, or credentials. The outer durable tool receipt remains the sole owner
+of the final model-visible result digest. See
+[Evidence-Bearing External Retrieval](EVIDENCE_BEARING_RETRIEVAL.md).
+
 ## OAuth Support (HTTP/SSE MCP Servers)
 
 For `http` and `sse` MCP servers, DeerFlow supports OAuth token acquisition and automatic token refresh.

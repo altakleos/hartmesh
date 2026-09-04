@@ -12,9 +12,20 @@ from datetime import UTC, datetime
 
 from deerflow_extension_api import TenantReferenceV1
 
+from deerflow.constants import RETRIEVAL_OBSERVATION_EVENT_CATEGORY, RETRIEVAL_OBSERVATION_EVENT_TYPE
+from deerflow.retrieval import retrieval_observation_event_metadata
 from deerflow.runtime.events.appender import RuntimeEventAuthority, RuntimeEventOwnershipLost
 from deerflow.runtime.events.message_identity import message_identity
-from deerflow.runtime.events.store.base import AppendOutcome, RunEventStore, resolve_owned_run, validate_idempotent_append
+from deerflow.runtime.events.store.base import (
+    AppendOutcome,
+    RetrievalPairAppendOutcome,
+    RunEventStore,
+    find_paired_retrieval_observation,
+    prepare_retrieval_pair,
+    reconcile_existing_retrieval_pair,
+    resolve_owned_run,
+    validate_idempotent_append,
+)
 from deerflow.runtime.tool_evidence import (
     TOOL_RECEIPT_CATEGORY,
     TOOL_RECEIPT_STARTED_EVENT,
@@ -298,6 +309,7 @@ class MemoryRunEventStore(RunEventStore):
                 event=copy.deepcopy(dict(existing)),
                 created=False,
                 terminal_event=(copy.deepcopy(dict(terminal)) if terminal is not None else None),
+                retrieval_observation_event=(copy.deepcopy(find_paired_retrieval_observation(events, terminal)) if terminal is not None else None),
             )
         body = validate_idempotent_append(
             event_type=TOOL_RECEIPT_STARTED_EVENT,
@@ -319,6 +331,102 @@ class MemoryRunEventStore(RunEventStore):
         record["idempotency_key"] = receipt.idempotency_key
         self._idempotency[(run_id, TOOL_RECEIPT_STARTED_EVENT, receipt.idempotency_key)] = record
         return AppendOutcome(event=copy.deepcopy(record), created=True)
+
+    async def append_retrieval_pair(
+        self,
+        run_id,
+        *,
+        receipt_body,
+        observation_body,
+        owner_id,
+        lease_epoch,
+    ) -> RetrievalPairAppendOutcome:
+        prepared = prepare_retrieval_pair(
+            receipt_body,
+            observation_body,
+        )
+        receipt_body = prepared.receipt_body
+        observation_body = prepared.observation_body
+        receipt = prepared.receipt
+        observation = prepared.observation
+        run = await resolve_owned_run(
+            self._run_store,
+            run_id,
+            owner_id=owner_id,
+            lease_epoch=lease_epoch,
+        )
+        events = [event for event in self._events_by_run.get(run["thread_id"], {}).get(run_id, []) if self._tenant_visible(event)]
+        require_started_transition(events, receipt)
+        receipt_key = (run_id, "tool_receipt.outcome.v1", receipt.idempotency_key)
+        observation_key = (
+            run_id,
+            RETRIEVAL_OBSERVATION_EVENT_TYPE,
+            observation.idempotency_key,
+        )
+        existing_receipt = self._idempotency.get(receipt_key)
+        existing_observation = self._idempotency.get(observation_key)
+        receipt_created, observation_created = reconcile_existing_retrieval_pair(
+            prepared,
+            existing_receipt=existing_receipt,
+            existing_observation=existing_observation,
+        )
+        thread_id = run["thread_id"]
+        thread_length = len(self._events.get(thread_id, ()))
+        run_length = len(self._events_by_run.get(thread_id, {}).get(run_id, ()))
+        previous_seq = self._seq_counters.get(thread_id)
+        try:
+            if existing_receipt is None:
+                existing_receipt = self._put_one(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    event_type="tool_receipt.outcome.v1",
+                    category=TOOL_RECEIPT_CATEGORY,
+                    content=receipt_body,
+                    metadata=receipt_event_metadata(
+                        receipt,
+                        writer_owner_id=owner_id,
+                        writer_lease_epoch=lease_epoch,
+                    ),
+                )
+                existing_receipt["idempotency_key"] = receipt.idempotency_key
+                self._idempotency[receipt_key] = existing_receipt
+            if existing_observation is None:
+                existing_observation = self._put_one(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    event_type=RETRIEVAL_OBSERVATION_EVENT_TYPE,
+                    category=RETRIEVAL_OBSERVATION_EVENT_CATEGORY,
+                    content=observation_body,
+                    metadata=retrieval_observation_event_metadata(
+                        observation,
+                        task_id=receipt.context.execution_task_id,
+                        writer_fence_digest=receipt_event_metadata(
+                            receipt,
+                            writer_owner_id=owner_id,
+                            writer_lease_epoch=lease_epoch,
+                        )["writer_fence_digest"],
+                    ),
+                )
+                existing_observation["idempotency_key"] = observation.idempotency_key
+                self._idempotency[observation_key] = existing_observation
+        except BaseException:
+            del self._events.get(thread_id, [])[thread_length:]
+            del self._events_by_run.get(thread_id, {}).get(run_id, [])[run_length:]
+            if previous_seq is None:
+                self._seq_counters.pop(thread_id, None)
+            else:
+                self._seq_counters[thread_id] = previous_seq
+            if receipt_created:
+                self._idempotency.pop(receipt_key, None)
+            if observation_created:
+                self._idempotency.pop(observation_key, None)
+            raise
+        return RetrievalPairAppendOutcome(
+            receipt_event=copy.deepcopy(existing_receipt),
+            observation_event=copy.deepcopy(existing_observation),
+            receipt_created=receipt_created,
+            observation_created=observation_created,
+        )
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         # ``messages`` is messages-only and seq-sorted, so the seq window is a

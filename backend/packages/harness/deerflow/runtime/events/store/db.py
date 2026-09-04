@@ -17,15 +17,25 @@ from deerflow_extension_api import TenantReferenceV1
 from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.constants import RETRIEVAL_OBSERVATION_EVENT_CATEGORY, RETRIEVAL_OBSERVATION_EVENT_TYPE
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.sql_clock import (
     coerce_database_wall_clock,
     database_wall_clock_expression,
 )
+from deerflow.retrieval import retrieval_observation_event_metadata
 from deerflow.runtime.events.appender import RuntimeEventAuthority, RuntimeEventOwnershipLost
 from deerflow.runtime.events.message_identity import message_identity
-from deerflow.runtime.events.store.base import AppendOutcome, RunEventStore, validate_idempotent_append
+from deerflow.runtime.events.store.base import (
+    AppendOutcome,
+    RetrievalPairAppendOutcome,
+    RunEventStore,
+    find_paired_retrieval_observation,
+    prepare_retrieval_pair,
+    reconcile_existing_retrieval_pair,
+    validate_idempotent_append,
+)
 from deerflow.runtime.tool_evidence import (
     TOOL_RECEIPT_CATEGORY,
     TOOL_RECEIPT_OUTCOME_EVENT,
@@ -39,6 +49,7 @@ from deerflow.runtime.tool_evidence import (
     require_started_transition,
     require_tool_attempt_binding_fence,
     reserve_attempt_from_events,
+    tool_writer_fence_digest,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -671,7 +682,13 @@ class DbRunEventStore(RunEventStore):
                         self._scope_event(select(RunEventRow))
                         .where(
                             RunEventRow.run_id == run_id,
-                            RunEventRow.event_type.in_((TOOL_RECEIPT_STARTED_EVENT, TOOL_RECEIPT_OUTCOME_EVENT)),
+                            RunEventRow.event_type.in_(
+                                (
+                                    TOOL_RECEIPT_STARTED_EVENT,
+                                    TOOL_RECEIPT_OUTCOME_EVENT,
+                                    RETRIEVAL_OBSERVATION_EVENT_TYPE,
+                                )
+                            ),
                         )
                         .order_by(RunEventRow.seq.asc())
                     )
@@ -690,6 +707,10 @@ class DbRunEventStore(RunEventStore):
                             event=dict(existing),
                             created=False,
                             terminal_event=(dict(terminal) if terminal is not None else None),
+                            retrieval_observation_event=find_paired_retrieval_observation(
+                                events,
+                                terminal,
+                            ),
                         )
                     body = validate_idempotent_append(
                         event_type=TOOL_RECEIPT_STARTED_EVENT,
@@ -719,6 +740,150 @@ class DbRunEventStore(RunEventStore):
                     )
                     session.add(row)
                 return AppendOutcome(event=self._row_to_dict(row), created=True)
+
+    async def append_retrieval_pair(
+        self,
+        run_id,
+        *,
+        receipt_body,
+        observation_body,
+        owner_id,
+        lease_epoch,
+    ) -> RetrievalPairAppendOutcome:
+        prepared = prepare_retrieval_pair(
+            receipt_body,
+            observation_body,
+        )
+        receipt_body = prepared.receipt_body
+        observation_body = prepared.observation_body
+        receipt = prepared.receipt
+        observation = prepared.observation
+        async with self._sf() as lookup_session:
+            thread_id = await lookup_session.scalar(
+                self._scope_run(select(RunRow.thread_id)).where(
+                    RunRow.run_id == run_id,
+                )
+            )
+        if not isinstance(thread_id, str):
+            raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    run = await session.scalar(self._scope_run(select(RunRow)).where(RunRow.run_id == run_id).with_for_update())
+                    database_now = await self._lease_clock_for_run(session, run)
+                    run = self._require_owned_run(
+                        run,
+                        owner_id=owner_id,
+                        lease_epoch=lease_epoch,
+                        database_now=database_now,
+                    )
+                    max_seq = await self._max_seq_for_thread(
+                        session,
+                        thread_id,
+                        tenant=self._tenant,
+                    )
+                    rows = await session.execute(
+                        self._scope_event(select(RunEventRow)).where(
+                            RunEventRow.run_id == run_id,
+                            RunEventRow.event_type.in_(
+                                (
+                                    TOOL_RECEIPT_STARTED_EVENT,
+                                    TOOL_RECEIPT_OUTCOME_EVENT,
+                                    RETRIEVAL_OBSERVATION_EVENT_TYPE,
+                                )
+                            ),
+                        )
+                    )
+                    events = [self._row_to_dict(event_row) for event_row in rows.scalars()]
+                    require_started_transition(events, receipt)
+                    existing_receipt = next(
+                        (event for event in events if event.get("event_type") == TOOL_RECEIPT_OUTCOME_EVENT and event.get("idempotency_key") == receipt.idempotency_key),
+                        None,
+                    )
+                    existing_observation = next(
+                        (event for event in events if event.get("event_type") == RETRIEVAL_OBSERVATION_EVENT_TYPE and event.get("idempotency_key") == observation.idempotency_key),
+                        None,
+                    )
+                    receipt_created, observation_created = reconcile_existing_retrieval_pair(
+                        prepared,
+                        existing_receipt=existing_receipt,
+                        existing_observation=existing_observation,
+                    )
+                    seq = max_seq or 0
+                    created_rows: list[RunEventRow] = []
+                    if existing_receipt is None:
+                        seq += 1
+                        receipt_row = RunEventRow(
+                            **self._tenant_columns,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            user_id=run.user_id,
+                            event_type=TOOL_RECEIPT_OUTCOME_EVENT,
+                            idempotency_key=receipt.idempotency_key,
+                            category=TOOL_RECEIPT_CATEGORY,
+                            content=json.dumps(
+                                receipt_body,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            event_metadata={
+                                "content_is_json": True,
+                                "content_is_dict": True,
+                                **receipt_event_metadata(
+                                    receipt,
+                                    writer_owner_id=owner_id,
+                                    writer_lease_epoch=lease_epoch,
+                                ),
+                            },
+                            seq=seq,
+                            created_at=datetime.now(UTC),
+                        )
+                        session.add(receipt_row)
+                        created_rows.append(receipt_row)
+                    else:
+                        receipt_row = None
+                    if existing_observation is None:
+                        seq += 1
+                        observation_row = RunEventRow(
+                            **self._tenant_columns,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            user_id=run.user_id,
+                            event_type=RETRIEVAL_OBSERVATION_EVENT_TYPE,
+                            idempotency_key=observation.idempotency_key,
+                            category=RETRIEVAL_OBSERVATION_EVENT_CATEGORY,
+                            content=json.dumps(
+                                observation_body,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            event_metadata=retrieval_observation_event_metadata(
+                                observation,
+                                task_id=receipt.context.execution_task_id,
+                                writer_fence_digest=tool_writer_fence_digest(
+                                    owner_id,
+                                    lease_epoch,
+                                ),
+                            ),
+                            seq=seq,
+                            created_at=datetime.now(UTC),
+                        )
+                        session.add(observation_row)
+                        created_rows.append(observation_row)
+                    else:
+                        observation_row = None
+                    if created_rows:
+                        await session.flush()
+                    receipt_event = existing_receipt if existing_receipt is not None else self._row_to_dict(receipt_row)
+                    observation_event = existing_observation if existing_observation is not None else self._row_to_dict(observation_row)
+                return RetrievalPairAppendOutcome(
+                    receipt_event=receipt_event,
+                    observation_event=observation_event,
+                    receipt_created=receipt_created,
+                    observation_created=observation_created,
+                )
 
     async def list_messages(
         self,

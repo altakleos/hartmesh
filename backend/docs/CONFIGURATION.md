@@ -361,10 +361,12 @@ models:
 RAGFlow integration is disabled by default. It adds one read-only Agent tool,
 `knowledge_search`. DeerFlow does not persist a copy of dataset or document
 metadata; RAGFlow is the sole source of truth. The configured API key is
-tenant-scoped. An optional operator-controlled `datasets` list restricts every
-Agent on this deployment to the same dataset-ID allowlist; omitting it searches
-all datasets visible to that tenant API key. An explicitly empty `datasets: []`
-is rejected rather than being treated as tenant-wide access.
+tenant-scoped. An operator-controlled `datasets` list restricts every Agent on
+this deployment to the same dataset-ID allowlist. Evidence-bearing durable runs
+require that list to be non-empty: omitting it retains tenant-wide catalog
+search only for legacy direct/local invocation, which emits no durable
+retrieval observation. An explicitly empty `datasets: []` is rejected rather
+than being treated as tenant-wide access.
 
 ```yaml
 tool_groups:
@@ -388,8 +390,8 @@ tools:
     max_total_chars: 8000
 ```
 
-The tool is opt-in through the normal `tools:` list. `datasets` is optional but,
-when present, must contain at least one ID. If
+The tool is opt-in through the normal `tools:` list. `datasets` must contain at
+least one ID for normal durable Agent runs. If
 it contains RAGFlow dataset IDs selected by the deployment operator, DeerFlow
 does not validate their existence while loading configuration; on each search
 it verifies them with ID-filtered requests. If `datasets` is omitted, each
@@ -416,6 +418,14 @@ container or Pod, not the host machine.
 
 This integration is retrieval-only. Dataset creation, uploads, parsing, and
 deletion remain in RAGFlow and are not exposed as Agent tools or DeerFlow APIs.
+
+RAGFlow, DuckDuckGo, Serply, and Tencent WSA have provider-neutral durable
+retrieval adapters. Their policy ceilings, privacy contract, source
+normalization, observation API, and live qualification procedure are documented
+in [EVIDENCE_BEARING_RETRIEVAL.md](EVIDENCE_BEARING_RETRIEVAL.md). The web
+adapters accept optional `allowed_domains`, `denied_domains`,
+`max_item_bytes`, `max_total_bytes`, and `timeout` fields on the tool entry.
+These are server ceilings; tool arguments may narrow but never widen them.
 
 ### Tool Groups
 

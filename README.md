@@ -70,6 +70,7 @@ You still do not get active-active Gateway HA, scheduler HA, universal crash-res
 | [Lifecycle history is pruned or inconsistent](backend/tests/test_invocation_lifecycle_query.py) | Bounded observation returns typed cursor or integrity outcomes instead of silently presenting invalid history. |
 | [A signed GitHub delivery is interrupted or its thread is busy](backend/tests/test_durable_inbound_receipts.py) | PostgreSQL-backed receipt recovery can reclaim an expired lease, preserve FIFO deferral, and converge on the same accepted run. |
 | [A signed GitHub delivery becomes permanently invalid](backend/tests/test_inbound_receipt_operations.py) | An administrator can inspect only bounded evidence, then exact-fence either a requeue or a logical discard into ordinary completed-row retention. |
+| [A supported external search returns mutable or hostile content](backend/docs/EVIDENCE_BEARING_RETRIEVAL.md) | Server policy is fixed before provider I/O; safe source references and the exact post-sanitization, post-budget result digest are committed atomically with the durable tool receipt, without persisting the query or result text. |
 
 <!-- Future demo: add a 30–60 second terminal capture showing a keyed invocation, a simulated lost response, an equal retry returning the same run_id, a changed-intent conflict, and lifecycle observation. -->
 

@@ -20,6 +20,20 @@ Scheduled-task runtime note:
 
 Durable MCP task-management tools are added only while the process-local task submitter is installed. They expose bounded local task fields, including whether cancellation was requested, but never the remote handle. Cancellation records that request durably and returns immediately; the background service owns the remote call and retries. These remain ordinary business tools under an active skill's `allowed-tools` policy and must be declared explicitly.
 
+**Evidence-bearing retrieval tools**: RAGFlow `knowledge_search` and the
+DuckDuckGo, Serply, and Tencent WSA `web_search` implementations attach explicit
+`deerflow_retrieval_v1` metadata and route durable calls through
+`deerflow.retrieval.EvidenceBearingRetrievalService`. Provider SDK types, raw
+queries, credentials, and result text stop at the injected adapter port. Policy
+and credentials are resolved before network access; adapters return protected
+candidates plus only the source facts required for normalization. The service
+publishes a host-owned draft, while the outer receipt middleware owns the final
+model-visible digest. Do not add the metadata to a provider until its endpoint,
+redirect, collection/domain/recency, count/byte/timeout, failure mapping, and
+source normalization are fail-closed and tested. Direct/local calls without an
+accepted durable context retain compatibility behavior but make no evidence
+claim. See `backend/docs/EVIDENCE_BEARING_RETRIEVAL.md`.
+
 **Community tools** (`packages/harness/deerflow/community/`): optional integrations, each in its own subpackage and wired through `config.yaml`. Documented examples:
 - `tavily/` - Web search (5 results default) and web fetch (4KB limit)
 - `jina_ai/` - Web fetch via Jina reader API with readability extraction

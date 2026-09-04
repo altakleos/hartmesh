@@ -146,6 +146,30 @@ def test_tool_receipt_contract_matches_runtime_strictness() -> None:
     assert list(Draft202012Validator(outcome_schema).iter_errors(loose_context))
 
 
+def test_retrieval_safe_constraints_contract_is_closed() -> None:
+    schema = _contract_events()["retrieval.observation.v1"]["content_schema"]["properties"]["draft"]["properties"]["safe_constraints"]
+    validator = Draft202012Validator(schema)
+
+    assert list(
+        validator.iter_errors(
+            {
+                "version": 1,
+                "provider_id": "serply",
+                "query": "must never be portable",
+            }
+        )
+    )
+    assert not list(
+        validator.iter_errors(
+            {
+                "version": 1,
+                "provider_id": "serply",
+                "policy_status": "denied",
+            }
+        )
+    )
+
+
 def _subagent_batch() -> list[dict]:
     chunks = [
         {"type": "task_started", "task_id": "call-batch", "description": "research"},

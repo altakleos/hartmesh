@@ -23,7 +23,9 @@ from deerflow.runtime.events.catalog import TOOL_RECEIPT_RUN_EVENT_DEFINITIONS
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
 if TYPE_CHECKING:
+    from deerflow.retrieval import RetrievalObservationV1
     from deerflow.runtime.events.appender import RuntimeEventAuthority
+    from deerflow.runtime.tool_evidence import DurableToolReceiptV1
 
 _RECEIPT_EVENT_TYPES = frozenset(definition.event_type for definition in TOOL_RECEIPT_RUN_EVENT_DEFINITIONS)
 _MAX_IDEMPOTENCY_KEY_BYTES = 128
@@ -37,6 +39,110 @@ class AppendOutcome:
     event: dict
     created: bool
     terminal_event: dict | None = None
+    retrieval_observation_event: dict | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalPairAppendOutcome:
+    """Result of one atomic receipt-outcome/retrieval-observation append."""
+
+    receipt_event: dict
+    observation_event: dict
+    receipt_created: bool
+    observation_created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRetrievalPair:
+    """Validated immutable pair shared by every persistence backend."""
+
+    receipt_body: dict[str, object]
+    observation_body: dict[str, object]
+    receipt: DurableToolReceiptV1
+    observation: RetrievalObservationV1
+
+
+def prepare_retrieval_pair(
+    receipt_body: Mapping[str, object],
+    observation_body: Mapping[str, object],
+) -> PreparedRetrievalPair:
+    """Validate, detach, and parse an incoming terminal retrieval pair once."""
+
+    from deerflow.retrieval import RetrievalObservationV1, validate_retrieval_pair
+    from deerflow.runtime.tool_evidence import DurableToolReceiptV1
+
+    detached_receipt, detached_observation = validate_retrieval_pair(
+        receipt_body,
+        observation_body,
+    )
+    return PreparedRetrievalPair(
+        receipt_body=detached_receipt,
+        observation_body=detached_observation,
+        receipt=DurableToolReceiptV1.from_event_body(
+            detached_receipt,
+            occurred_at=datetime.now(UTC),
+        ),
+        observation=RetrievalObservationV1.from_event_body(detached_observation),
+    )
+
+
+def reconcile_existing_retrieval_pair(
+    prepared: PreparedRetrievalPair,
+    *,
+    existing_receipt: Mapping[str, object] | None,
+    existing_observation: Mapping[str, object] | None,
+) -> tuple[bool, bool]:
+    """Validate idempotent persisted halves and return their create flags."""
+
+    from deerflow.retrieval import RetrievalObservationV1
+    from deerflow.runtime.tool_evidence import (
+        ToolReceiptIntegrityError,
+        canonical_digest,
+        parse_tool_receipt_event,
+    )
+
+    if existing_receipt is not None:
+        if canonical_digest(existing_receipt.get("content")) != canonical_digest(prepared.receipt_body):
+            raise ToolReceiptIntegrityError("receipt_idempotency_conflict")
+        parse_tool_receipt_event(existing_receipt)
+    if existing_observation is not None:
+        if canonical_digest(existing_observation.get("content")) != canonical_digest(prepared.observation_body):
+            raise ToolReceiptIntegrityError("retrieval_observation_idempotency_conflict")
+        RetrievalObservationV1.from_event_body(existing_observation.get("content"))
+    if existing_observation is not None and existing_receipt is None:
+        raise ToolReceiptIntegrityError("retrieval_pair_incomplete")
+    return existing_receipt is None, existing_observation is None
+
+
+def find_paired_retrieval_observation(
+    events: Sequence[Mapping[str, object]],
+    terminal_event: Mapping[str, object] | None,
+) -> dict | None:
+    """Return the uniquely validated observation paired to a terminal receipt."""
+
+    if terminal_event is None:
+        return None
+    from deerflow.constants import RETRIEVAL_OBSERVATION_EVENT_TYPE
+    from deerflow.retrieval import RetrievalObservationV1, validate_retrieval_pair
+    from deerflow.runtime.tool_evidence import (
+        ToolReceiptIntegrityError,
+        parse_tool_receipt_event,
+    )
+
+    receipt = parse_tool_receipt_event(terminal_event).receipt
+    expected_key = f"{receipt.receipt_id}:retrieval"
+    candidates = [event for event in events if event.get("event_type") == RETRIEVAL_OBSERVATION_EVENT_TYPE and event.get("idempotency_key") == expected_key]
+    if len(candidates) > 1:
+        raise ToolReceiptIntegrityError("retrieval_observation_duplicate")
+    if not candidates:
+        return None
+    candidate = dict(candidates[0])
+    observation = RetrievalObservationV1.from_event_body(candidate.get("content"))
+    validate_retrieval_pair(
+        receipt.to_event_body(),
+        observation.to_event_body(),
+    )
+    return candidate
 
 
 async def resolve_owned_run(
@@ -259,6 +365,26 @@ class RunEventStore(abc.ABC):
         from deerflow.runtime.tool_evidence import ToolReceiptOwnershipLost
 
         raise ToolReceiptOwnershipLost("tool_receipt_store_unfenced")
+
+    async def append_retrieval_pair(
+        self,
+        run_id: str,
+        *,
+        receipt_body: Mapping[str, object],
+        observation_body: Mapping[str, object],
+        owner_id: str,
+        lease_epoch: int,
+    ) -> RetrievalPairAppendOutcome:
+        """Atomically append one terminal receipt and its observation.
+
+        Compatibility stores fail closed. A supported retrieval result must
+        never publish a terminal success through two independent mutations.
+        """
+
+        del run_id, receipt_body, observation_body, owner_id, lease_epoch
+        from deerflow.runtime.tool_evidence import ToolReceiptOwnershipLost
+
+        raise ToolReceiptOwnershipLost("retrieval_observation_store_unfenced")
 
     async def append_fenced_batch(
         self,
