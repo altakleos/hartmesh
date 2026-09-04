@@ -993,13 +993,13 @@ class RunEvidenceBundleManifestV1:
             or self.canonicalization_version != RUN_EVIDENCE_CANONICALIZATION_VERSION
         ):
             _fail("manifest_version_unsupported")
-        public_references = (
-            self.bundle_ref,
-            self.tenant_ref,
-            self.thread_ref,
-            self.run_ref,
-        )
-        if any(_PUBLIC_REFERENCE_RE.fullmatch(reference) is None for reference in public_references):
+        public_references = {
+            "bundle": self.bundle_ref,
+            "tenant": self.tenant_ref,
+            "thread": self.thread_ref,
+            "run": self.run_ref,
+        }
+        if any(_PUBLIC_REFERENCE_RE.fullmatch(reference) is None or not reference.startswith(f"{kind}-") for kind, reference in public_references.items()):
             _fail("manifest_fields_invalid")
         expected_terminal = {"status", "stop_reason", "accepted_at", "completed_at"}
         if set(self.terminal) != expected_terminal or self.terminal.get("status") not in TERMINAL_RUN_STATUSES:

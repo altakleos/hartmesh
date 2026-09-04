@@ -129,6 +129,7 @@ evidence_pruned
 evidence_legacy_unbound
 evidence_snapshot_changed
 evidence_cross_link_invalid
+evidence_export_unavailable
 artifact_changed
 artifact_unsafe
 bundle_limit_exceeded
@@ -141,9 +142,11 @@ manifest_version_unsupported
 Use generic, retry-oriented text for `evidence_snapshot_changed`,
 `artifact_changed`, `run_operation_active`, `bundle_generation_busy`, and
 `bundle_generation_timeout`.
-Legacy, pruned, incomplete, cross-link, and unsupported-version outcomes need
-operator-facing guidance rather than a retry loop. Preserve a generic 404 for
-ownership/not-found and do not distinguish those cases in telemetry or UI.
+Legacy, pruned, incomplete, cross-link, export-unavailable, and
+unsupported-version outcomes need operator-facing guidance rather than a retry
+loop. `evidence_export_unavailable` is a stable `503` configuration/runtime
+availability code. Preserve a generic 404 for ownership/not-found and do not
+distinguish those cases in telemetry or UI.
 
 ## Backend ownership
 

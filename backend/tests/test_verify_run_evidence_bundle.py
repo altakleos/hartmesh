@@ -113,6 +113,7 @@ def test_offline_verifier_accepts_valid_bundle_and_disclaims_authenticity(tmp_pa
         ("section_crosslink", "evidence_cross_link_invalid"),
         ("extra_section_anchor", "evidence_cross_link_invalid"),
         ("dangling_evidence_link", "evidence_cross_link_invalid"),
+        ("public_reference_kind_swap", "manifest_fields_invalid"),
     ],
 )
 def test_offline_verifier_rejects_tampering_and_unsupported_contracts(
@@ -167,6 +168,11 @@ def test_offline_verifier_rejects_tampering_and_unsupported_contracts(
                         "object_digest": "b" * 64,
                     }
                 ]
+            elif mutation == "public_reference_kind_swap":
+                document["run_ref"], document["thread_ref"] = (
+                    document["thread_ref"],
+                    document["run_ref"],
+                )
             body = (
                 _redigest(document)
                 if mutation
@@ -175,6 +181,7 @@ def test_offline_verifier_rejects_tampering_and_unsupported_contracts(
                     "event_count_bound",
                     "extra_section_anchor",
                     "dangling_evidence_link",
+                    "public_reference_kind_swap",
                 }
                 else json.dumps(
                     document,

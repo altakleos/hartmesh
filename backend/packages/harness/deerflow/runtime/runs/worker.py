@@ -1636,7 +1636,7 @@ async def run_agent(
     accepted_constraints = None
     accepted_for_cleanup = record.accepted_invocation
     requires_assembly_evidence = accepted_for_cleanup is not None and run_manager.requires_assembly_evidence
-    requires_tool_receipt_evidence = accepted_for_cleanup is not None and accepted_for_cleanup.tool_receipt_evidence_version in (1, 2)
+    requires_tool_receipt_evidence = accepted_for_cleanup is not None and accepted_for_cleanup.tool_receipt_evidence_version in (1, 2, 3)
     assembly_evidence_bound = False
     pinned_material_for_cleanup = accepted_for_cleanup.agent_revision.material if accepted_for_cleanup is not None else None
     skill_binding_user_id: str | None = None

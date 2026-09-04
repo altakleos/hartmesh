@@ -366,9 +366,14 @@ def validate_manifest(raw: bytes) -> dict[str, object]:
     if raw != canonical_bytes(document):
         fail("manifest_not_canonical")
 
-    for key in ("bundle_ref", "tenant_ref", "thread_ref", "run_ref"):
+    for key, kind in (
+        ("bundle_ref", "bundle"),
+        ("tenant_ref", "tenant"),
+        ("thread_ref", "thread"),
+        ("run_ref", "run"),
+    ):
         value = document.get(key)
-        if not isinstance(value, str) or PUBLIC_REF_RE.fullmatch(value) is None:
+        if not isinstance(value, str) or PUBLIC_REF_RE.fullmatch(value) is None or not value.startswith(f"{kind}-"):
             fail("manifest_fields_invalid")
 
     terminal = document.get("terminal")

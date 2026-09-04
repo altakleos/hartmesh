@@ -728,11 +728,28 @@ def require_permission(
                 auth = await _authenticate(request)
                 request.state.auth = auth
 
+            from app.gateway.run_evidence_telemetry import (
+                ensure_run_evidence_requested,
+                record_run_evidence_outcome,
+            )
+
+            evidence_actor_digest = ensure_run_evidence_requested(request)
+
             if not auth.is_authenticated:
+                record_run_evidence_outcome(
+                    request,
+                    "refused",
+                    actor_digest=evidence_actor_digest,
+                )
                 raise HTTPException(status_code=401, detail="Authentication required")
 
             # Check permission
             if not auth.has_permission(resource, action):
+                record_run_evidence_outcome(
+                    request,
+                    "refused",
+                    actor_digest=evidence_actor_digest,
+                )
                 raise HTTPException(
                     status_code=403,
                     detail=f"Permission denied: {resource}:{action}",
@@ -779,6 +796,11 @@ def require_permission(
                             require_existing=require_existing,
                         )
                 if not allowed:
+                    record_run_evidence_outcome(
+                        request,
+                        "refused",
+                        actor_digest=evidence_actor_digest,
+                    )
                     raise HTTPException(
                         status_code=404,
                         detail=f"Thread {thread_id} not found",

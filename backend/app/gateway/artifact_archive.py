@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import tempfile
+import threading
 import time
 import unicodedata
 import zipfile
@@ -88,7 +89,16 @@ def _too_large(detail: str) -> ArtifactArchiveError:
     return ArtifactArchiveError(detail, 413, "bundle_limit_exceeded")
 
 
-def _check_deadline(deadline: float) -> None:
+def _check_deadline(
+    deadline: float,
+    cancel_event: threading.Event | None = None,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise ArtifactArchiveError(
+            "Artifact archive creation was cancelled",
+            499,
+            "bundle_generation_cancelled",
+        )
     if time.monotonic() > deadline:
         raise ArtifactArchiveError(
             "Artifact archive creation timed out",
@@ -107,8 +117,9 @@ def _member(
     reserved: frozenset[str],
     deadline: float,
     root_components: tuple[tuple[Path, int, int], ...],
+    cancel_event: threading.Event | None,
 ) -> _ArchiveMember:
-    _check_deadline(deadline)
+    _check_deadline(deadline, cancel_event)
     if not virtual_path or virtual_path.startswith("//") or "\\" in virtual_path or "\x00" in virtual_path:
         raise _reject()
     stripped = virtual_path.removeprefix("/")
@@ -136,7 +147,7 @@ def _member(
     components = list(root_components)
     try:
         for part in parts:
-            _check_deadline(deadline)
+            _check_deadline(deadline, cancel_event)
             current /= part
             metadata = os.lstat(current)
             if _is_link_like(current, metadata):
@@ -151,17 +162,22 @@ def _member(
         raise
     except (OSError, ValueError) as exc:
         raise _reject() from exc
-    _check_deadline(deadline)
+    _check_deadline(deadline, cancel_event)
     return _ArchiveMember(resolved, entry, initial, tuple(components))
 
 
-def _hash_descriptor(descriptor: int, size: int, deadline: float) -> bytes:
+def _hash_descriptor(
+    descriptor: int,
+    size: int,
+    deadline: float,
+    cancel_event: threading.Event | None,
+) -> bytes:
     digest = sha256()
     remaining = size
     try:
         os.lseek(descriptor, 0, os.SEEK_SET)
         while remaining:
-            _check_deadline(deadline)
+            _check_deadline(deadline, cancel_event)
             chunk = os.read(descriptor, min(_CHUNK_BYTES, remaining))
             if not chunk:
                 raise _changed()
@@ -179,8 +195,9 @@ def _copy_member(
     member: _ArchiveMember,
     deadline: float,
     remaining_total_bytes: int,
+    cancel_event: threading.Event | None,
 ) -> _CopiedArchiveMember:
-    _check_deadline(deadline)
+    _check_deadline(deadline, cancel_event)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(member.path, flags)
@@ -188,7 +205,7 @@ def _copy_member(
         raise _changed() from exc
 
     try:
-        _check_deadline(deadline)
+        _check_deadline(deadline, cancel_event)
         before = os.fstat(descriptor)
         identity = (before.st_dev, before.st_ino)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or identity != (member.initial.st_dev, member.initial.st_ino):
@@ -205,7 +222,7 @@ def _copy_member(
         copied_digest = sha256()
         with archive.open(info, "w", force_zip64=False) as destination:
             while remaining:
-                _check_deadline(deadline)
+                _check_deadline(deadline, cancel_event)
                 chunk = os.read(descriptor, min(_CHUNK_BYTES, remaining))
                 if not chunk:
                     raise _changed()
@@ -215,11 +232,19 @@ def _copy_member(
             if os.read(descriptor, 1):
                 raise _changed()
 
-        _check_deadline(deadline)
+        _check_deadline(deadline, cancel_event)
         after = os.fstat(descriptor)
         if after.st_nlink != 1 or (after.st_dev, after.st_ino) != identity or (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
             raise _changed()
-        if _hash_descriptor(descriptor, before.st_size, deadline) != copied_digest.digest():
+        if (
+            _hash_descriptor(
+                descriptor,
+                before.st_size,
+                deadline,
+                cancel_event,
+            )
+            != copied_digest.digest()
+        ):
             raise _changed()
         after_verification = os.fstat(descriptor)
         if after_verification.st_nlink != 1 or (after_verification.st_dev, after_verification.st_ino) != identity or (after_verification.st_size, after_verification.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
@@ -252,6 +277,7 @@ def _validated_members(
     extra_reserved_dir_names: Iterable[str],
     deadline: float,
     allow_empty: bool,
+    cancel_event: threading.Event | None,
 ) -> list[_ArchiveMember]:
     try:
         if outputs_dir.parent != user_data_dir:
@@ -268,7 +294,7 @@ def _validated_members(
         raise
     except OSError as exc:
         raise _reject() from exc
-    _check_deadline(deadline)
+    _check_deadline(deadline, cancel_event)
 
     root_components = (
         (user_data_dir, user_data_metadata.st_dev, user_data_metadata.st_ino),
@@ -289,7 +315,17 @@ def _validated_members(
             *extra_reserved_dir_names,
         }
     )
-    members = [_member(root, path, reserved, deadline, root_components) for path in paths]
+    members = [
+        _member(
+            root,
+            path,
+            reserved,
+            deadline,
+            root_components,
+            cancel_event,
+        )
+        for path in paths
+    ]
     collision_keys = [unicodedata.normalize("NFC", member.entry).casefold() for member in members]
     if len(collision_keys) != len(set(collision_keys)):
         raise _reject()
@@ -308,6 +344,7 @@ def build_artifact_archive(
     *,
     user_data_dir: Path,
     extra_reserved_dir_names: Iterable[str] = (),
+    cancel_event: threading.Event | None = None,
 ) -> ArtifactArchiveResult:
     deadline = time.monotonic() + BUILD_TIMEOUT_SECONDS
     members = _validated_members(
@@ -317,9 +354,10 @@ def build_artifact_archive(
         extra_reserved_dir_names=extra_reserved_dir_names,
         deadline=deadline,
         allow_empty=False,
+        cancel_event=cancel_event,
     )
 
-    _check_deadline(deadline)
+    _check_deadline(deadline, cancel_event)
     output = tempfile.TemporaryFile("w+b")
     try:
         if hasattr(os, "fchmod"):
@@ -332,9 +370,10 @@ def build_artifact_archive(
                     member,
                     deadline,
                     MAX_TOTAL_BYTES - input_bytes,
+                    cancel_event,
                 )
                 input_bytes += copied.size
-        _check_deadline(deadline)
+        _check_deadline(deadline, cancel_event)
         size = output.tell()
         output.seek(0)
         return ArtifactArchiveResult(output, size, len(members), input_bytes)
@@ -351,6 +390,7 @@ def build_run_evidence_archive(
     user_data_dir: Path,
     extra_reserved_dir_names: Iterable[str] = (),
     deadline_monotonic: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ArtifactArchiveResult:
     """Build a manifest-bearing archive from one immutable runtime snapshot.
 
@@ -376,6 +416,7 @@ def build_run_evidence_archive(
         },
         deadline=deadline,
         allow_empty=True,
+        cancel_event=cancel_event,
     )
     members = [
         _ArchiveMember(
@@ -406,6 +447,7 @@ def build_run_evidence_archive(
                     member,
                     deadline,
                     MAX_TOTAL_BYTES - input_bytes,
+                    cancel_event,
                 )
                 copied_members.append(copied)
                 input_bytes += copied.size
@@ -423,14 +465,14 @@ def build_run_evidence_archive(
             manifest_bytes = manifest.canonical_bytes()
             if len(manifest_bytes) > MAX_MANIFEST_BYTES:
                 raise _too_large(f"An evidence manifest must be at most {MAX_MANIFEST_BYTES} bytes")
-            _check_deadline(deadline)
+            _check_deadline(deadline, cancel_event)
             info = zipfile.ZipInfo(RUN_EVIDENCE_MANIFEST_PATH)
             info.date_time = (1980, 1, 1, 0, 0, 0)
             info.create_system = 0
             info.compress_type = zipfile.ZIP_STORED
             archive.writestr(info, manifest_bytes)
 
-        _check_deadline(deadline)
+        _check_deadline(deadline, cancel_event)
         size = output.tell()
         output.seek(0)
         return ArtifactArchiveResult(

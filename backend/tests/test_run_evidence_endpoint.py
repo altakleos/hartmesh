@@ -7,12 +7,14 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import _router_auth_helpers
 import pytest
 from test_artifact_archive import RUN_ID, THREAD_ID, _archive_app
 from test_run_evidence_archive import _snapshot
 
 from app.gateway.artifact_archive import ArtifactArchiveError
 from app.gateway.auth.pat import required_pat_scope
+from app.gateway.authz import Permissions
 from app.gateway.routers import thread_runs
 from deerflow.runtime.run_evidence import (
     RUN_EVIDENCE_MANIFEST_PATH,
@@ -192,6 +194,93 @@ def test_evidence_bundle_owner_denial_is_generic_for_status_and_download(
 
     assert status.status_code == download.status_code == 404
     assert status.json() == download.json() == {"detail": f"Thread {THREAD_ID} not found"}
+    assert client.app.state.run_evidence_bundle_metrics == {
+        "requested": 2,
+        "refused": 2,
+    }
+
+
+def test_evidence_bundle_permission_denial_is_audited(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    monkeypatch.setattr(
+        _router_auth_helpers,
+        "_STUB_PERMISSIONS",
+        [Permissions.THREADS_READ],
+    )
+    client, _, _ = _archive_app(monkeypatch, outputs, paths=[])
+
+    with client:
+        status = client.get(EVIDENCE_URL)
+        download = client.post(EVIDENCE_URL)
+
+    assert status.status_code == download.status_code == 403
+    assert client.app.state.run_evidence_bundle_metrics == {
+        "requested": 2,
+        "refused": 2,
+    }
+
+
+def test_evidence_bundle_unavailable_uses_stable_code(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    client, _, _ = _archive_app(monkeypatch, outputs, paths=[])
+    client.app.state.tenant_identity = None
+
+    with client:
+        response = client.get(EVIDENCE_URL)
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "evidence_export_unavailable"}
+    assert client.app.state.run_evidence_bundle_metrics == {
+        "requested": 1,
+        "failed": 1,
+    }
+
+
+def test_evidence_bundle_timeout_bounds_stalled_actor_resolution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    client, _, _ = _archive_app(monkeypatch, outputs, paths=[])
+    client.app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
+    actor_cancelled = threading.Event()
+
+    async def stalled_actor(_request):
+        try:
+            await asyncio.Future()
+        finally:
+            actor_cancelled.set()
+
+    monkeypatch.setattr(
+        thread_runs,
+        "verified_actor_context_for_request",
+        stalled_actor,
+    )
+    monkeypatch.setattr(
+        thread_runs,
+        "_EVIDENCE_GENERATION_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    with client:
+        response = client.get(EVIDENCE_URL)
+
+    assert response.status_code == 504
+    assert response.json() == {"detail": "bundle_generation_timeout"}
+    assert actor_cancelled.is_set()
+    assert client.app.state.run_evidence_bundle_metrics == {
+        "requested": 1,
+        "failed": 1,
+    }
 
 
 def test_evidence_bundle_pat_policy_is_explicit_and_method_bounded() -> None:
@@ -244,6 +333,47 @@ async def test_repeated_cancellation_keeps_evidence_archive_slot_until_worker_ex
         release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_evidence_archive_cancellation_signals_worker_stop(monkeypatch) -> None:
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def cooperative_build(*_args, cancel_event=None, **_kwargs):
+        started.set()
+        if cancel_event is None or not cancel_event.wait(timeout=2):
+            raise RuntimeError("archive cancellation was not signalled")
+        stopped.set()
+        raise ArtifactArchiveError(
+            "cancelled",
+            499,
+            "bundle_generation_cancelled",
+        )
+
+    slots = asyncio.Semaphore(1)
+    monkeypatch.setattr(thread_runs, "_artifact_archive_slots", slots)
+    monkeypatch.setattr(
+        thread_runs,
+        "build_run_evidence_archive",
+        cooperative_build,
+    )
+    task = asyncio.create_task(
+        thread_runs._build_evidence_archive_without_abandoning_worker(
+            Path("unused"),
+            Path("unused-parent"),
+            _snapshot(paths=()),
+            extra_reserved_dir_names=set(),
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert stopped.is_set()
+    assert not slots.locked()
 
 
 @pytest.mark.asyncio

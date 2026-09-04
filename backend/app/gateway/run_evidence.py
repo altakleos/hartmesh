@@ -49,6 +49,8 @@ from deerflow.runtime.tool_evidence import (
 )
 from deerflow.sandbox.accepted_material import (
     AcceptedExecutionEvidenceV2,
+    accepted_execution_evidence_reference,
+    accepted_scope_reference,
     decode_accepted_execution_evidence,
 )
 
@@ -56,11 +58,10 @@ _EVENT_PAGE_SIZE = 2000
 _MAX_EVENTS = MAX_LIFECYCLE_EVENTS
 _EXTERNAL_PAGE_SIZE = 100
 _LEAF_DOMAIN = b"hartmesh.run-evidence-bundle.safe-leaf.v1\x00"
-_FENCE_DOMAIN = b"hartmesh.run-evidence-bundle.snapshot-fence.v1\x00"
 _MCP_TERMINAL = frozenset({"completed", "failed", "cancelled"})
 _BATCH_TERMINAL = frozenset({"completed", "failed", "cancelled"})
-_RETRIEVAL_TOOL_NAMES_V1 = frozenset({"knowledge_search", "web_search"})
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_SANDBOX_OPERATION_REF_RE = re.compile(r"^accepted-operation-[0-9a-f]{32}$")
 
 
 def _error(code: str) -> None:
@@ -69,10 +70,6 @@ def _error(code: str) -> None:
 
 def _safe_leaf(kind: str, value: object) -> str:
     return hashlib.sha256(_LEAF_DOMAIN + kind.encode("ascii") + b"\x00" + canonical_json_bytes(value)).hexdigest()
-
-
-def _snapshot_fence(value: object) -> str:
-    return hashlib.sha256(_FENCE_DOMAIN + canonical_json_bytes(value)).hexdigest()
 
 
 def _digest(value: object) -> str:
@@ -207,11 +204,27 @@ def _receipt_references(
     tuple[str, ...],
     dict[str, Mapping[str, object]],
     dict[str, str],
+    dict[str, str | None],
 ]:
     receipt_events = [dict(event) for event in events if event.get("event_type") in {TOOL_RECEIPT_STARTED_EVENT, TOOL_RECEIPT_OUTCOME_EVENT}]
     references: list[str] = []
     references_by_id: dict[str, str] = {}
     outcomes: dict[str, Mapping[str, object]] = {}
+    capabilities: dict[str, str | None] = {}
+    for event in receipt_events:
+        try:
+            parsed = parse_tool_receipt_event(event)
+        except ToolEvidenceError as exc:
+            raise RunEvidenceBundleError("evidence_cross_link_invalid") from exc
+        receipt = parsed.receipt
+        if receipt.phase == "started":
+            if parsed.capability_marker_version != 1 or receipt.receipt_id in capabilities:
+                _error("evidence_cross_link_invalid")
+            capabilities[receipt.receipt_id] = parsed.capability_kind
+        else:
+            if receipt.receipt_id in outcomes:
+                _error("evidence_cross_link_invalid")
+            outcomes[receipt.receipt_id] = receipt.to_event_body()
     cursor = None
     while True:
         page = build_tool_receipt_page(
@@ -237,7 +250,18 @@ def _receipt_references(
                 or item.extension_configuration_digest != accepted.extension_configuration_digest
             ):
                 _error("evidence_cross_link_invalid")
-            reference = _safe_leaf("tool_receipt", item.to_dict())
+            if item.receipt_id not in capabilities:
+                _error("evidence_cross_link_invalid")
+            reference = _safe_leaf(
+                "tool_receipt",
+                {
+                    **item.to_dict(),
+                    "evidence_capability": {
+                        "version": 1,
+                        "kind": capabilities[item.receipt_id],
+                    },
+                },
+            )
             references.append(reference)
             if item.receipt_id in references_by_id:
                 _error("evidence_cross_link_invalid")
@@ -250,18 +274,9 @@ def _receipt_references(
             _error("evidence_cross_link_invalid")
         cursor = page.next_cursor
 
-    for event in receipt_events:
-        try:
-            receipt = parse_tool_receipt_event(event).receipt
-        except ToolEvidenceError as exc:
-            raise RunEvidenceBundleError("evidence_cross_link_invalid") from exc
-        if receipt.phase != "started":
-            if receipt.receipt_id in outcomes:
-                _error("evidence_cross_link_invalid")
-            outcomes[receipt.receipt_id] = receipt.to_event_body()
-    if set(references_by_id) != set(outcomes):
+    if set(references_by_id) != set(outcomes) or set(capabilities) != set(outcomes):
         _error("evidence_cross_link_invalid")
-    return tuple(references), outcomes, references_by_id
+    return tuple(references), outcomes, references_by_id, capabilities
 
 
 def _retrieval_references(
@@ -270,7 +285,10 @@ def _retrieval_references(
     request: EvidenceSnapshotRequest,
     receipt_outcomes: Mapping[str, Mapping[str, object]],
     receipt_references: Mapping[str, str],
+    receipt_capabilities: Mapping[str, str | None],
     tool_plane: Mapping[str, object],
+    sandbox_execution_ref: str | None,
+    mcp_evidence_refs: frozenset[str],
 ) -> tuple[tuple[str, str], ...]:
     references: list[tuple[str, str]] = []
     receipt_ids: set[str] = set()
@@ -297,25 +315,79 @@ def _retrieval_references(
             or observation.draft.tool_plane_effective_digest != tool_plane.get("effective_digest")
         ):
             _error("evidence_cross_link_invalid")
+        accepted_execution_ref = observation.draft.accepted_execution_evidence_ref
+        operation_ref = observation.draft.accepted_sandbox_operation_ref
+        if accepted_execution_ref is not None and accepted_execution_ref != sandbox_execution_ref:
+            _error("evidence_cross_link_invalid")
+        if operation_ref is not None and (accepted_execution_ref is None or accepted_execution_ref != sandbox_execution_ref or _SANDBOX_OPERATION_REF_RE.fullmatch(operation_ref) is None):
+            _error("evidence_cross_link_invalid")
+        mcp_evidence_ref = observation.draft.mcp_evidence_ref
+        if mcp_evidence_ref is not None and mcp_evidence_ref not in mcp_evidence_refs:
+            _error("evidence_cross_link_invalid")
         receipt_ids.add(observation.receipt_id)
         if observation.receipt_id not in receipt_references:
             _error("evidence_cross_link_invalid")
         references.append((observation.observation_digest, observation.receipt_id))
     if len(references) > MAX_EVIDENCE_REFERENCES:
         _error("bundle_limit_exceeded")
-    expected_receipts = {receipt_id for receipt_id, body in receipt_outcomes.items() if body.get("tool_name") in _RETRIEVAL_TOOL_NAMES_V1}
+    expected_receipts = {receipt_id for receipt_id, capability_kind in receipt_capabilities.items() if capability_kind == "retrieval"}
     if expected_receipts != receipt_ids:
         _error("evidence_incomplete")
     return tuple(references)
 
 
-def _mcp_task_submit_names(tool_plane: Mapping[str, object]) -> frozenset[str]:
-    names: set[str] = set()
+def _sandbox_evidence(
+    row: Mapping[str, object],
+    *,
+    request: EvidenceSnapshotRequest,
+    accepted: AcceptedInvocation,
+    skill_scope_digest: str,
+    tool_plane: Mapping[str, object],
+) -> AcceptedExecutionEvidenceV2 | None:
+    raw_execution = row.get("execution_evidence_json")
+    persisted_digest = row.get("execution_evidence_digest")
+    if raw_execution is None and persisted_digest is None:
+        return None
+    try:
+        decoded = decode_accepted_execution_evidence(raw_execution)
+    except (TypeError, ValueError) as exc:
+        raise RunEvidenceBundleError("evidence_legacy_unbound") from exc
+    if not isinstance(decoded, AcceptedExecutionEvidenceV2):
+        _error("evidence_legacy_unbound")
+    expected_invocation_ref = accepted_scope_reference(
+        request.tenant,
+        kind="invocation",
+        value=f"{request.run_id}:{accepted.runtime_identity_digest}",
+    )
+    if (
+        persisted_digest != decoded.digest
+        or decoded.run_id != request.run_id
+        or decoded.tenant != request.tenant
+        or decoded.accepted_invocation_ref != expected_invocation_ref
+        or decoded.accepted_invocation_digest != accepted.runtime_identity_digest
+        or decoded.skill_scope_digest != skill_scope_digest
+        or decoded.tool_plane_base_revision_digest != tool_plane.get("base_revision_digest")
+        or decoded.tool_plane_user_overlay_digest != tool_plane.get("user_overlay_digest")
+        or decoded.tool_plane_projection_digest != tool_plane.get("projection_digest")
+        or decoded.tool_plane_effective_digest != tool_plane.get("effective_digest")
+    ):
+        _error("evidence_cross_link_invalid")
+    return decoded
+
+
+def _mcp_task_submit_declarations(
+    tool_plane: Mapping[str, object],
+) -> dict[str, tuple[str, str]]:
+    declarations: dict[str, tuple[str, str]] = {}
     servers = tool_plane.get("effective_mcp_servers")
     if not isinstance(servers, list | tuple):
         _error("evidence_cross_link_invalid")
     for server in servers:
         if not isinstance(server, Mapping):
+            _error("evidence_cross_link_invalid")
+        server_id = server.get("server_id")
+        tool_name_prefix = server.get("tool_name_prefix")
+        if not isinstance(server_id, str) or not server_id or type(tool_name_prefix) is not bool:
             _error("evidence_cross_link_invalid")
         toolsets = server.get("task_toolsets", [])
         if not isinstance(toolsets, list | tuple):
@@ -324,8 +396,11 @@ def _mcp_task_submit_names(tool_plane: Mapping[str, object]) -> frozenset[str]:
             submit_tool = toolset.get("submit_tool") if isinstance(toolset, Mapping) else None
             if not isinstance(submit_tool, str) or not submit_tool:
                 _error("evidence_cross_link_invalid")
-            names.add(submit_tool)
-    return frozenset(names)
+            callable_name = f"{server_id}_{submit_tool}" if tool_name_prefix else submit_tool
+            if callable_name in declarations:
+                _error("evidence_cross_link_invalid")
+            declarations[callable_name] = (server_id, submit_tool)
+    return declarations
 
 
 def _complete_attempt_references(
@@ -392,7 +467,7 @@ class GatewayRunEvidenceSnapshotReader:
         self._event_store = event_store
         self._mcp_task_repo = mcp_task_repo
         self._subagent_batch_repo = subagent_batch_repo
-        self._fences: dict[int, dict[str, object]] = {}
+        self._pending_revalidations: set[int] = set()
 
     async def _events(self, request: EvidenceSnapshotRequest) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -431,12 +506,17 @@ class GatewayRunEvidenceSnapshotReader:
     async def _mcp_items(
         self,
         request: EvidenceSnapshotRequest,
+        *,
+        accepted: AcceptedInvocation,
+        assembly: AssemblyEvidenceV1,
+        submit_declarations: Mapping[str, tuple[str, str]],
         receipt_outcomes: Mapping[str, Mapping[str, object]],
         receipt_references: Mapping[str, str],
-    ) -> tuple[tuple[str, str], ...]:
+    ) -> tuple[tuple[tuple[str, str], ...], frozenset[str]]:
         if self._mcp_task_repo is None:
-            return ()
+            return (), frozenset()
         references: list[tuple[str, str]] = []
+        lineage_digests: set[str] = set()
         cursor = None
         while True:
             page = await self._mcp_task_repo.list_by_parent_run(
@@ -445,6 +525,7 @@ class GatewayRunEvidenceSnapshotReader:
                 limit=_EXTERNAL_PAGE_SIZE,
                 cursor=cursor,
                 tenant_digest=request.tenant.digest,
+                include_evidence_anchors=True,
             )
             if not isinstance(page, Mapping) or page.get("pruning_status") != "not_pruned":
                 _error("evidence_pruned")
@@ -457,11 +538,79 @@ class GatewayRunEvidenceSnapshotReader:
                 receipt_id = item.get("receipt_id")
                 if item.get("status") not in _MCP_TERMINAL or not isinstance(receipt_id, str) or receipt_id not in receipt_outcomes:
                     _error("evidence_incomplete")
-                receipt_reference = receipt_references.get(receipt_id)
-                if receipt_reference is None or type(item.get("request_commitment_version")) is not int or item.get("request_commitment_version") != 1 or item.get("request_commitment_state") != "present":
+                receipt_body = receipt_outcomes[receipt_id]
+                receipt_context = receipt_body.get("context")
+                receipt_tool_name = receipt_body.get("tool_name")
+                declaration = submit_declarations.get(receipt_tool_name) if isinstance(receipt_tool_name, str) else None
+                if declaration is None or item.get("server_name") != declaration[0] or item.get("tool_name") != declaration[1] or not isinstance(receipt_context, Mapping):
                     _error("evidence_cross_link_invalid")
+                anchors = item.get("evidence_anchors")
+                if not isinstance(anchors, Mapping):
+                    _error("evidence_legacy_unbound")
+                if set(anchors) != {
+                    "lineage_version",
+                    "lineage_kind",
+                    "tenant_ref",
+                    "tenant_digest",
+                    "parent_run_id",
+                    "parent_execution_task_id",
+                    "parent_execution_kind",
+                    "parent_subagent_name",
+                    "agent_revision_digest",
+                    "assembly_fingerprint",
+                    "subagent_catalog_digest",
+                    "subagent_definition_digest",
+                    "extension_generation",
+                    "extension_manifest_digest",
+                    "accepted_origin_digest",
+                    "artifact_manifest_digest",
+                    "extension_configuration_digest",
+                }:
+                    _error("evidence_cross_link_invalid")
+                expected_lineage_version = 2 if accepted.extension_artifact_manifest_digest is not None else 1
+                catalog = accepted.agent_revision.subagent_catalog
+                if (
+                    anchors.get("lineage_version") != expected_lineage_version
+                    or anchors.get("lineage_kind") != "agent_tool"
+                    or anchors.get("tenant_ref") != request.tenant.public_ref
+                    or anchors.get("tenant_digest") != request.tenant.digest
+                    or anchors.get("parent_run_id") != request.run_id
+                    or anchors.get("parent_execution_task_id") != item.get("submitting_task_id")
+                    or anchors.get("parent_execution_task_id") != receipt_context.get("execution_task_id")
+                    or anchors.get("parent_execution_kind") != receipt_context.get("execution_kind")
+                    or anchors.get("parent_subagent_name") != receipt_context.get("subagent_name")
+                    or anchors.get("agent_revision_digest") != accepted.agent_revision.digest
+                    or anchors.get("agent_revision_digest") != receipt_context.get("agent_revision_digest")
+                    or anchors.get("assembly_fingerprint") != assembly.fingerprint
+                    or anchors.get("assembly_fingerprint") != receipt_context.get("assembly_fingerprint")
+                    or catalog is None
+                    or anchors.get("subagent_catalog_digest") != catalog.digest
+                    or anchors.get("subagent_catalog_digest") != receipt_context.get("subagent_catalog_digest")
+                    or anchors.get("subagent_definition_digest") != receipt_context.get("subagent_definition_digest")
+                    or anchors.get("extension_generation") != accepted.extension_generation
+                    or anchors.get("extension_generation") != receipt_context.get("extension_generation")
+                    or anchors.get("extension_manifest_digest") != accepted.extension_manifest_digest
+                    or anchors.get("extension_manifest_digest") != receipt_context.get("capability_manifest_digest")
+                    or anchors.get("accepted_origin_digest") != accepted.base_origin_digest
+                    or anchors.get("artifact_manifest_digest") != accepted.extension_artifact_manifest_digest
+                    or anchors.get("artifact_manifest_digest") != receipt_context.get("artifact_manifest_digest")
+                    or anchors.get("extension_configuration_digest") != accepted.extension_configuration_digest
+                    or anchors.get("extension_configuration_digest") != receipt_context.get("extension_configuration_digest")
+                ):
+                    _error("evidence_cross_link_invalid")
+                receipt_reference = receipt_references.get(receipt_id)
+                commitment_state = item.get("request_commitment_state")
+                commitment_version = item.get("request_commitment_version")
+                if commitment_state == "legacy_unavailable":
+                    _error("evidence_legacy_unbound")
+                if receipt_reference is None or type(commitment_version) is not int or commitment_version != 1 or commitment_state != "present":
+                    _error("evidence_cross_link_invalid")
+                lineage_digest = _digest(item.get("lineage_digest"))
+                if lineage_digest in lineage_digests:
+                    _error("evidence_cross_link_invalid")
+                lineage_digests.add(lineage_digest)
                 projection = {
-                    "lineage_digest": _digest(item.get("lineage_digest")),
+                    "lineage_digest": lineage_digest,
                     "request_commitment": {
                         "state": "present",
                         "version": 1,
@@ -480,7 +629,7 @@ class GatewayRunEvidenceSnapshotReader:
             if not isinstance(next_cursor, str) or next_cursor == cursor:
                 _error("evidence_cross_link_invalid")
             cursor = next_cursor
-        return tuple(references)
+        return tuple(references), frozenset(lineage_digests)
 
     async def _batch_items(
         self,
@@ -609,6 +758,9 @@ class GatewayRunEvidenceSnapshotReader:
                 or persisted_assembly_digest != assembly_evidence_digest(assembly)
                 or assembly.tenant != request.tenant
                 or assembly.accepted_agent_revision_digest != accepted.agent_revision.digest
+                or assembly.accepted_capability_manifest_digest != accepted.extension_manifest_digest
+                or assembly.accepted_artifact_manifest_digest != accepted.extension_artifact_manifest_digest
+                or assembly.accepted_extension_configuration_digest != accepted.extension_configuration_digest
             ):
                 _error("evidence_cross_link_invalid")
         except RunEvidenceBundleError:
@@ -637,7 +789,7 @@ class GatewayRunEvidenceSnapshotReader:
         tool_plane = accepted.tool_plane_revision
         if catalog is None or scopes is None or credential is None or tool_plane is None:
             _error("evidence_legacy_unbound")
-        if accepted.tool_receipt_evidence_version != 2:
+        if accepted.tool_receipt_evidence_version != 3:
             _error("evidence_legacy_unbound")
         extension_evidence = (
             accepted.extension_manifest_digest,
@@ -647,26 +799,47 @@ class GatewayRunEvidenceSnapshotReader:
         if any(item is not None for item in extension_evidence) and any(item is None for item in extension_evidence):
             _error("evidence_legacy_unbound")
 
-        receipt_refs, receipt_outcomes, receipt_references = _receipt_references(
+        sandbox = _sandbox_evidence(
+            row,
+            request=request,
+            accepted=accepted,
+            skill_scope_digest=scopes.digest,
+            tool_plane=tool_plane,
+        )
+        sandbox_execution_ref = None if sandbox is None else accepted_execution_evidence_reference(sandbox)
+
+        (
+            receipt_refs,
+            receipt_outcomes,
+            receipt_references,
+            receipt_capabilities,
+        ) = _receipt_references(
             events,
             request=request,
             accepted=accepted,
             assembly=assembly,
         )
-        mcp_submit_names = _mcp_task_submit_names(tool_plane)
+        mcp_submit_declarations = _mcp_task_submit_declarations(tool_plane)
+        mcp_submit_names = frozenset(mcp_submit_declarations)
         if mcp_submit_names and self._mcp_task_repo is None:
             _error("evidence_incomplete")
+        persisted_mcp_items, mcp_evidence_refs = await self._mcp_items(
+            request,
+            accepted=accepted,
+            assembly=assembly,
+            submit_declarations=mcp_submit_declarations,
+            receipt_outcomes=receipt_outcomes,
+            receipt_references=receipt_references,
+        )
         retrieval_items = _retrieval_references(
             events,
             request=request,
             receipt_outcomes=receipt_outcomes,
             receipt_references=receipt_references,
+            receipt_capabilities=receipt_capabilities,
             tool_plane=tool_plane,
-        )
-        persisted_mcp_items = await self._mcp_items(
-            request,
-            receipt_outcomes,
-            receipt_references,
+            sandbox_execution_ref=sandbox_execution_ref,
+            mcp_evidence_refs=mcp_evidence_refs,
         )
         persisted_batch_items = await self._batch_items(
             request,
@@ -762,26 +935,9 @@ class GatewayRunEvidenceSnapshotReader:
             (EvidenceSectionV1.complete("subagent_batches", batch_refs) if batch_refs else EvidenceSectionV1.absent_by_design("subagent_batches")),
         ]
 
-        raw_execution = row.get("execution_evidence_json")
-        sandbox: AcceptedExecutionEvidenceV2 | None = None
-        if raw_execution is None and row.get("execution_evidence_digest") is None:
+        if sandbox is None:
             sections.append(EvidenceSectionV1.absent_by_design("sandbox_execution"))
         else:
-            try:
-                decoded = decode_accepted_execution_evidence(raw_execution)
-            except (TypeError, ValueError) as exc:
-                raise RunEvidenceBundleError("evidence_legacy_unbound") from exc
-            if not isinstance(decoded, AcceptedExecutionEvidenceV2):
-                _error("evidence_legacy_unbound")
-            sandbox = decoded
-            if (
-                row.get("execution_evidence_digest") != sandbox.digest
-                or sandbox.run_id != request.run_id
-                or sandbox.tenant != request.tenant
-                or sandbox.accepted_invocation_digest != accepted.runtime_identity_digest
-                or sandbox.tool_plane_effective_digest != tool_plane["effective_digest"]
-            ):
-                _error("evidence_cross_link_invalid")
             sections.append(
                 EvidenceSectionV1.complete(
                     "sandbox_execution",
@@ -838,24 +994,7 @@ class GatewayRunEvidenceSnapshotReader:
             credential_evidence_ref=credential.credential_ref,
             credential_evidence_digest=credential.digest,
         )
-        self._fences[id(source)] = {
-            "state_version": row.get("state_version"),
-            "status": status,
-            "updated_at": row.get("updated_at"),
-            "high_water": high_water,
-            "mcp_refs": mcp_refs,
-            "batch_refs": batch_refs,
-            "fence_digest": _snapshot_fence(
-                {
-                    "state_version": row.get("state_version"),
-                    "status": status,
-                    "updated_at": row.get("updated_at"),
-                    "high_water": high_water,
-                    "mcp_refs": mcp_refs,
-                    "batch_refs": batch_refs,
-                }
-            ),
-        }
+        self._pending_revalidations.add(id(source))
         return source
 
     async def revalidate(
@@ -863,74 +1002,12 @@ class GatewayRunEvidenceSnapshotReader:
         request: EvidenceSnapshotRequest,
         source: EvidenceSnapshotSourceV1,
     ) -> bool:
-        fence = self._fences.pop(id(source), None)
-        if fence is None:
+        if id(source) not in self._pending_revalidations:
             return False
-        row = await self._run_store.get(request.run_id, user_id=request.owner_id)
-        if not isinstance(row, Mapping):
-            return False
-        if any(row.get(key) != fence[key] for key in ("state_version", "status", "updated_at")):
-            return False
-        tail = await self._event_store.list_events(
-            request.thread_id,
-            request.run_id,
-            limit=1,
-            after_seq=fence["high_water"],
-            user_id=request.owner_id,
-        )
-        if tail:
-            return False
-        # External tasks and batches were required to be terminal in ``read``;
-        # their rows can no longer make a valid transition.  Re-read their
-        # bounded pages to detect storage corruption or an illegal rewrite.
+        self._pending_revalidations.remove(id(source))
+        current: EvidenceSnapshotSourceV1 | None = None
         try:
-            # Batch cross-links need accepted/assembly objects, already strictly
-            # recoverable from the same unchanged run row.
-            accepted = AcceptedInvocation.from_persisted(row)
-            raw_assembly = row.get("assembly_evidence_json")
-            if accepted is None or not isinstance(raw_assembly, Mapping):
-                return False
-            assembly = AssemblyEvidenceV1.from_persisted_json(raw_assembly)
-            events = await self._events(request)
-            (
-                _receipt_refs,
-                receipt_outcomes,
-                receipt_references,
-            ) = _receipt_references(
-                events,
-                request=request,
-                accepted=accepted,
-                assembly=assembly,
-            )
-            tool_plane = accepted.tool_plane_revision
-            if tool_plane is None:
-                return False
-            persisted_mcp_items = await self._mcp_items(
-                request,
-                receipt_outcomes,
-                receipt_references,
-            )
-            persisted_batch_items = await self._batch_items(
-                request,
-                accepted=accepted,
-                assembly=assembly,
-                receipt_outcomes=receipt_outcomes,
-                receipt_references=receipt_references,
-            )
-            mcp_refs, _mcp_items = _complete_attempt_references(
-                kind="mcp_task",
-                accepted_tool_names=_mcp_task_submit_names(tool_plane),
-                receipt_outcomes=receipt_outcomes,
-                receipt_references=receipt_references,
-                persisted=persisted_mcp_items,
-            )
-            batch_refs, _batch_items = _complete_attempt_references(
-                kind="subagent_batch",
-                accepted_tool_names=frozenset({"batch_task"}),
-                receipt_outcomes=receipt_outcomes,
-                receipt_references=receipt_references,
-                persisted=persisted_batch_items,
-            )
+            current = await self.read(request)
         except (
             AssemblyEvidenceError,
             RunEvidenceBundleError,
@@ -939,17 +1016,10 @@ class GatewayRunEvidenceSnapshotReader:
             ValueError,
         ):
             return False
-        current_digest = _snapshot_fence(
-            {
-                "state_version": row.get("state_version"),
-                "status": row.get("status"),
-                "updated_at": row.get("updated_at"),
-                "high_water": fence["high_water"],
-                "mcp_refs": mcp_refs,
-                "batch_refs": batch_refs,
-            }
-        )
-        return current_digest == fence["fence_digest"]
+        finally:
+            if current is not None:
+                self._pending_revalidations.discard(id(current))
+        return current == source
 
 
 async def build_gateway_run_evidence_snapshot(

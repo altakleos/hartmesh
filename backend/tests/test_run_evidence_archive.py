@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 import zipfile
 from datetime import UTC, datetime
 
@@ -174,6 +175,24 @@ def test_evidence_archive_reports_expired_generation_deadline(tmp_path) -> None:
         )
 
     assert raised.value.code == "bundle_generation_timeout"
+
+
+def test_evidence_archive_honors_pre_set_worker_cancellation(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    cancelled = threading.Event()
+    cancelled.set()
+
+    with pytest.raises(ArtifactArchiveError) as raised:
+        build_run_evidence_archive(
+            outputs,
+            (),
+            snapshot=_snapshot(paths=()),
+            user_data_dir=outputs.parent,
+            cancel_event=cancelled,
+        )
+
+    assert raised.value.code == "bundle_generation_cancelled"
 
 
 def test_evidence_archive_requires_snapshot_paths_to_match_archive_input(tmp_path) -> None:

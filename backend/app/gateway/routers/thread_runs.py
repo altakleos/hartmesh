@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -54,6 +55,12 @@ from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_evidence import build_gateway_run_evidence_snapshot
+from app.gateway.run_evidence_telemetry import (
+    RunEvidenceOutcome,
+    ensure_run_evidence_requested,
+    record_run_evidence_outcome,
+    set_run_evidence_actor_digest,
+)
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import (
     authorize_context_observation,
@@ -1666,11 +1673,12 @@ async def _build_archive_without_abandoning_worker(
     extra_reserved_dir_names: set[str],
 ) -> ArtifactArchiveResult:
     return await _build_archive_with_slot(
-        lambda: build_artifact_archive(
+        lambda cancel_event: build_artifact_archive(
             outputs_dir,
             presented_paths,
             user_data_dir=user_data_dir,
             extra_reserved_dir_names=extra_reserved_dir_names,
+            cancel_event=cancel_event,
         ),
         busy_error=ArtifactArchiveError(
             "Too many artifact archives are being created; try again shortly",
@@ -1680,7 +1688,7 @@ async def _build_archive_without_abandoning_worker(
 
 
 async def _build_archive_with_slot(
-    build: Callable[[], ArtifactArchiveResult],
+    build: Callable[[threading.Event], ArtifactArchiveResult],
     *,
     busy_error: Exception,
 ) -> ArtifactArchiveResult:
@@ -1689,10 +1697,12 @@ async def _build_archive_with_slot(
     if _artifact_archive_slots.locked():
         raise busy_error
     await _artifact_archive_slots.acquire()
-    build_task = asyncio.create_task(asyncio.to_thread(build))
+    cancel_event = threading.Event()
+    build_task = asyncio.create_task(asyncio.to_thread(build, cancel_event))
     try:
         return await asyncio.shield(build_task)
     except asyncio.CancelledError:
+        cancel_event.set()
         while not build_task.done():
             try:
                 await asyncio.shield(build_task)
@@ -1719,13 +1729,14 @@ async def _build_evidence_archive_without_abandoning_worker(
     deadline_monotonic: float | None = None,
 ) -> ArtifactArchiveResult:
     return await _build_archive_with_slot(
-        lambda: build_run_evidence_archive(
+        lambda cancel_event: build_run_evidence_archive(
             outputs_dir,
             snapshot.artifact_paths,
             snapshot=snapshot,
             user_data_dir=user_data_dir,
             extra_reserved_dir_names=extra_reserved_dir_names,
             deadline_monotonic=deadline_monotonic,
+            cancel_event=cancel_event,
         ),
         busy_error=RunEvidenceBundleError("bundle_generation_busy"),
     )
@@ -1804,34 +1815,31 @@ async def _evidence_actor_digest(request: Request) -> str | None:
     """Return the current safe actor digest without making telemetry blocking."""
 
     try:
-        return (await verified_actor_context_for_request(request)).digest
+        actor_digest = (await verified_actor_context_for_request(request)).digest
     except Exception:
         return None
+    set_run_evidence_actor_digest(request, actor_digest)
+    return actor_digest
 
 
 def _evidence_metric(
     request: Request,
-    outcome: str,
+    outcome: RunEvidenceOutcome,
     *,
     actor_digest: str | None = None,
     bundle_ref: str | None = None,
 ) -> None:
     """Emit one bounded event and process-local counter."""
 
-    metrics = getattr(request.app.state, "run_evidence_bundle_metrics", None)
-    if not isinstance(metrics, dict):
-        metrics = {}
-        request.app.state.run_evidence_bundle_metrics = metrics
-    metrics[outcome] = int(metrics.get(outcome, 0)) + 1
-    logger.info(
-        "run_evidence_bundle outcome=%s actor_digest=%s bundle_ref=%s",
+    record_run_evidence_outcome(
+        request,
         outcome,
-        actor_digest or "unavailable",
-        bundle_ref or "unavailable",
+        actor_digest=actor_digest,
+        bundle_ref=bundle_ref,
     )
 
 
-def _evidence_error_outcome(exc: RunEvidenceBundleError) -> str:
+def _evidence_error_outcome(exc: RunEvidenceBundleError) -> RunEvidenceOutcome:
     return (
         "refused"
         if exc.code
@@ -1863,6 +1871,8 @@ def _evidence_http_error(exc: RunEvidenceBundleError) -> HTTPException:
         status_code = 504
     elif exc.code in {"manifest_version_unsupported"}:
         status_code = 503
+    elif exc.code == "evidence_export_unavailable":
+        status_code = 503
     else:
         status_code = 409
     return HTTPException(status_code=status_code, detail=exc.code)
@@ -1878,7 +1888,7 @@ async def _run_evidence_snapshot(
         raise HTTPException(status_code=404, detail="run_not_found")
     tenant_identity = getattr(request.app.state, "tenant_identity", None)
     if not isinstance(tenant_identity, TenantIdentityV1):
-        raise HTTPException(status_code=503, detail="Evidence export is unavailable")
+        raise RunEvidenceBundleError("evidence_export_unavailable")
     evidence_request = EvidenceSnapshotRequest(
         tenant=tenant_identity.to_persisted_reference(),
         thread_id=str(thread_id),
@@ -2035,14 +2045,14 @@ async def get_run_evidence_bundle_status(
 ) -> RunEvidenceBundleStatusResponse:
     """Return the bounded eligibility/completeness projection for an export."""
 
-    actor_digest = await _evidence_actor_digest(request)
-    _evidence_metric(request, "requested", actor_digest=actor_digest)
-    owner_id = await get_current_user(request)
-    if owner_id is None:
-        _evidence_metric(request, "refused", actor_digest=actor_digest)
-        raise HTTPException(status_code=404, detail="run_not_found")
+    actor_digest = ensure_run_evidence_requested(request)
 
     async def generate(_deadline: float) -> RunEvidenceSnapshotV1:
+        nonlocal actor_digest
+        actor_digest = await _evidence_actor_digest(request)
+        owner_id = await get_current_user(request)
+        if owner_id is None:
+            raise RunEvidenceBundleError("run_not_found")
         async with get_run_manager(request).reserve_thread_operation(
             thread_id,
             kind=ThreadOperationKind.artifact_archive,
@@ -2086,17 +2096,17 @@ async def create_run_evidence_bundle(
 ) -> StreamingResponse:
     """Download a terminal run's digest-bound, unsigned evidence bundle."""
 
-    actor_digest = await _evidence_actor_digest(request)
-    _evidence_metric(request, "requested", actor_digest=actor_digest)
-    owner_id = await get_current_user(request)
-    if owner_id is None:
-        _evidence_metric(request, "refused", actor_digest=actor_digest)
-        raise HTTPException(status_code=404, detail="run_not_found")
-    effective_user_id = make_safe_user_id(owner_id)
+    actor_digest = ensure_run_evidence_requested(request)
 
     async def generate(
         deadline: float,
     ) -> tuple[RunEvidenceSnapshotV1, ArtifactArchiveResult]:
+        nonlocal actor_digest
+        actor_digest = await _evidence_actor_digest(request)
+        owner_id = await get_current_user(request)
+        if owner_id is None:
+            raise RunEvidenceBundleError("run_not_found")
+        effective_user_id = make_safe_user_id(owner_id)
         app_config = await safe_app_config_async()
         custom_tool_output_dir = getattr(
             getattr(app_config, "tool_output", None),

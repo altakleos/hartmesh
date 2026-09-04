@@ -81,10 +81,10 @@ operation and conflict with active mutations. Download also shares the process
 archive concurrency limit and keeps that slot until an off-thread ZIP worker
 exits even when the request is cancelled. Both operations have a 60-second
 whole-generation deadline and monitor request disconnects; cancellation is
-propagated through the snapshot/archive task and partial output is drained and
-closed before its slot is released. A status response establishes
-snapshot eligibility; filesystem safety and exact artifact bytes are
-necessarily checked again while the POST archive is built.
+propagated through the snapshot/archive task and a cooperative worker stop
+signal. Partial output is drained and closed before its slot is released. A
+status response establishes snapshot eligibility; filesystem safety and exact
+artifact bytes are necessarily checked again while the POST archive is built.
 
 ## Snapshot and consistency contract
 
@@ -98,18 +98,27 @@ A V1 snapshot:
 1. requires a terminal `success`, `error`, `timeout`, or `interrupted` run;
 2. requires current accepted-invocation V4 credential/tool-plane material,
    accepted subagent catalog and skill scopes, V3 assembly evidence, terminal
-   evidence, and complete durable tool receipts;
+   evidence, and complete durable tool receipts. New accepted invocations bind
+   tool-receipt evidence V3, whose V1 capability marker records whether each
+   started attempt was admitted as retrieval rather than inferring that from a
+   tool name;
 3. validates tenant, run, parent receipt, assembly, catalog, sandbox, retrieval,
    MCP, and batch cross-links before reducing them to safe digests;
 4. pages the run journal up to 100,000 events and records its last sequence as
    the lifecycle high-water mark;
-5. derives required MCP, batch, and retrieval coverage from accepted tool-plane
-   task declarations and terminal tool attempts, including an explicit safe
-   terminal-failure reference when submission ended before a child row existed;
+5. derives required MCP and batch coverage from accepted tool-plane task
+   declarations and terminal attempts, and retrieval coverage from the persisted
+   receipt capability marker, including an explicit safe terminal-failure
+   reference when submission ended before a child row existed;
 6. uses only payload-free bounded MCP and batch lifecycle projections, recording
    MCP public lineage plus private-request-commitment presence/version without
-   exporting the HMAC digest or key ID;
-7. re-reads the terminal run fence and external terminal projections; and
+   exporting the HMAC digest or key ID. MCP submit receipt names are derived with
+   the accepted server's `tool_name_prefix` setting, and each retained lineage is
+   checked against the accepted run's revision, assembly, catalog, origin, and
+   extension anchors;
+7. re-reads and revalidates the complete bounded source projection—including
+   sandbox, retrieval, MCP, batch, receipt, assembly, and lifecycle links—and
+   requires it to equal the first read; and
 8. retries once when that fence changes, then returns
    `evidence_snapshot_changed`.
 
@@ -161,7 +170,6 @@ hartmesh.run-evidence-bundle.reference.v1\0
 hartmesh.run-evidence-bundle.public-reference.v1\0
 hartmesh.run-evidence-bundle.section-root.v1\0
 hartmesh.run-evidence-bundle.safe-leaf.v1\0
-hartmesh.run-evidence-bundle.snapshot-fence.v1\0
 ```
 
 `bundle_ref` is derived from the canonical manifest without `bundle_ref` and
@@ -251,9 +259,10 @@ The HTTP surface returns bounded codes such as `run_not_terminal`,
 `run_not_found`, `run_operation_active`, `evidence_incomplete`, `evidence_pruned`,
 `evidence_legacy_unbound`, `evidence_snapshot_changed`,
 `evidence_cross_link_invalid`, `artifact_changed`, `artifact_unsafe`,
-`bundle_limit_exceeded`, and `bundle_generation_busy`. Cross-owner requests
-remain generic `404` responses. Detailed filesystem, provider, credential, and
-evidence payloads are not returned.
+`evidence_export_unavailable`, `bundle_limit_exceeded`, and
+`bundle_generation_busy`. Cross-owner requests remain generic `404` responses.
+Detailed filesystem, provider, credential, and evidence payloads are not
+returned.
 
 `bundle_generation_timeout` is returned as `504` when the bounded whole-request
 deadline expires. A client disconnect cancels the operation and is recorded as
@@ -261,9 +270,10 @@ cancelled rather than returning a response to the closed connection.
 
 Gateway process metrics count requested, completed, refused, cancelled, and
 failed operations without raw resource identifiers. Bounded events use only
-the verified actor digest and the bundle public reference when one exists;
-authorization middleware separately audits refusals that occur before the
-endpoint handler.
+the verified actor digest and the bundle public reference when one exists. The
+outer CSRF/authentication middleware records early missing-credential,
+PAT-scope, and CSRF refusals before the endpoint handler; the permission layer
+covers owner and route-policy refusals.
 
 ## Retention, qualification, and trust
 

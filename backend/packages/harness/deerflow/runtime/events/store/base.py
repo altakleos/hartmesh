@@ -352,6 +352,7 @@ class RunEventStore(abc.ABC):
         expected_attempt: int | None,
         owner_id: str,
         lease_epoch: int,
+        capability_kind: str | None = None,
     ) -> AppendOutcome:
         """Atomically reserve and append the durable start for one attempt.
 
@@ -361,7 +362,7 @@ class RunEventStore(abc.ABC):
         append while holding the same ownership/write fence.
         """
 
-        del run_id, binding, tool_call_id, tool_name, request_projection_digest, observed_node_attempt, expected_attempt, owner_id, lease_epoch
+        del run_id, binding, tool_call_id, tool_name, request_projection_digest, observed_node_attempt, expected_attempt, owner_id, lease_epoch, capability_kind
         from deerflow.runtime.tool_evidence import ToolReceiptOwnershipLost
 
         raise ToolReceiptOwnershipLost("tool_receipt_store_unfenced")

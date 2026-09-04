@@ -265,6 +265,18 @@ def test_manifest_parser_rejects_unknown_versions_and_noncanonical_bytes() -> No
         RunEvidenceBundleManifestV1.from_bytes(pretty)
 
 
+def test_manifest_parser_rejects_public_reference_kind_swaps() -> None:
+    manifest = RunEvidenceSnapshotService.validate_source(_source()).to_manifest(())
+    document = manifest.to_dict()
+    document["run_ref"], document["thread_ref"] = (
+        document["thread_ref"],
+        document["run_ref"],
+    )
+
+    with pytest.raises(RunEvidenceBundleError, match="manifest_fields_invalid"):
+        RunEvidenceBundleManifestV1.from_dict(document)
+
+
 @pytest.mark.parametrize("field", ["schema_version", "canonicalization_version"])
 def test_manifest_parser_rejects_boolean_versions(field: str) -> None:
     manifest = RunEvidenceSnapshotService.validate_source(_source()).to_manifest(())

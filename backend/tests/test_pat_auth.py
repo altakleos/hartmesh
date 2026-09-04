@@ -448,6 +448,23 @@ def test_pat_route_scope_is_enforced_even_without_route_decorator(client):
     assert response.json()["detail"] == "Required PAT scope is unavailable"
 
 
+def test_pat_evidence_scope_refusal_is_observable(client) -> None:
+    created = _create_pat(client, scopes=["runs:create"])
+    client.cookies.clear()
+
+    response = client.get(
+        "/api/threads/thread-1/runs/run-1/artifacts/evidence-bundle",
+        headers={"Authorization": f"Bearer {created['token']}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Required PAT scope is unavailable"
+    assert client.app.state.run_evidence_bundle_metrics == {
+        "requested": 1,
+        "refused": 1,
+    }
+
+
 def test_privileged_cancel_records_required_control_audit(client, pat_env):
     _app, repo, _engine = pat_env
     created = _create_pat(client, scopes=["runs:cancel"])

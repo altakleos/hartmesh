@@ -45,6 +45,7 @@ class _RecordingSink:
     def __init__(self, order: list[str] | None = None) -> None:
         self.started = []
         self.outcomes = []
+        self.capability_kinds = []
         self.order = order if order is not None else []
 
     async def record_started(self, receipt) -> None:
@@ -59,8 +60,10 @@ class _RecordingSink:
         tool_name: str,
         request_projection_digest: str,
         dispatch: ToolDispatchObservationV1,
+        capability_kind=None,
     ):
         assert dispatch.node_attempt == 1
+        self.capability_kinds.append(capability_kind)
         receipt = binding.make_attempt(tool_call_id, len(self.started) + 1)
         from deerflow.runtime.tool_evidence import DurableToolReceiptV1
 
@@ -218,6 +221,7 @@ async def test_start_is_acknowledged_before_tool_side_effect_and_success_is_term
 
     assert order == ["started", "side_effect", "succeeded"]
     assert sink.started[0].receipt_id == sink.outcomes[0].receipt_id
+    assert sink.capability_kinds == [None]
     assert sink.outcomes[0].result_projection_digest == digest_result_projection("sanitized result", result_kind="tool_message", status="success")
     assert TOOL_RECEIPT_KEY in result.additional_kwargs
     serialized = str(sink.started[0].to_event_body())
@@ -272,6 +276,7 @@ async def test_supported_retrieval_finalizes_with_the_outer_result_digest() -> N
     await ToolReceiptMiddleware().awrap_tool_call(request, handler)
 
     assert order == ["started", "provider", "retrieval:succeeded"]
+    assert sink.capability_kinds == ["retrieval"]
     observation = sink.retrieval_observations[0]
     assert observation.result_projection_digest == digest_result_projection(
         "final sanitized and budgeted result",
@@ -539,6 +544,7 @@ async def test_completed_retrieval_replay_requires_its_paired_observation() -> N
             tool_name: str,
             request_projection_digest: str,
             dispatch: ToolDispatchObservationV1,
+            capability_kind=None,
         ):
             started = DurableToolReceiptV1.started(
                 context=binding.make_attempt(tool_call_id, 1),
@@ -594,6 +600,7 @@ async def test_completed_retrieval_replay_must_match_current_adapter_declaration
             tool_name: str,
             request_projection_digest: str,
             dispatch: ToolDispatchObservationV1,
+            capability_kind=None,
         ):
             started = DurableToolReceiptV1.started(
                 context=binding.make_attempt(tool_call_id, 1),
@@ -731,6 +738,7 @@ async def test_completed_recovery_replay_does_not_dispatch_tool_again() -> None:
             tool_name: str,
             request_projection_digest: str,
             dispatch: ToolDispatchObservationV1,
+            capability_kind=None,
         ):
             assert dispatch.node_attempt == 1
             started = DurableToolReceiptV1.started(

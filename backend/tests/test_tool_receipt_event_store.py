@@ -28,6 +28,7 @@ from deerflow.runtime.tool_evidence import (
     ToolEvidenceRuntimeBinding,
     ToolReceiptIntegrityError,
     ToolReceiptOwnershipLost,
+    parse_tool_receipt_event,
 )
 
 _DISPATCH_1 = ToolDispatchObservationV1(
@@ -228,6 +229,51 @@ async def test_identical_append_is_idempotent_and_keeps_store_timestamp(local_st
     assert duplicate.event == first.event
     assert first.event["created_at"]
     assert len(await store.list_events("thread-1", "run-1")) == 1
+
+
+@pytest.mark.anyio
+async def test_reservation_persists_capability_marker_and_rejects_replay_drift(
+    local_store,
+) -> None:
+    store, runs = local_store
+    sink = RunEventToolReceiptSink(store)
+    first = await sink.reserve_started(
+        binding=_tenant_binding(runs),
+        tool_call_id="call-declared-retrieval",
+        tool_name="arbitrary_lookup_name",
+        request_projection_digest="f" * 64,
+        dispatch=_DISPATCH_1,
+        capability_kind="retrieval",
+    )
+
+    events = await store.list_events("thread-1", "run-1")
+    parsed = parse_tool_receipt_event(events[0])
+    assert parsed.receipt == first.started
+    assert parsed.capability_marker_version == 1
+    assert parsed.capability_kind == "retrieval"
+
+    replay = await RunEventToolReceiptSink(store).reserve_started(
+        binding=_tenant_binding(runs),
+        tool_call_id="call-declared-retrieval",
+        tool_name="arbitrary_lookup_name",
+        request_projection_digest="f" * 64,
+        dispatch=_DISPATCH_1,
+        capability_kind="retrieval",
+    )
+    assert replay.started == first.started
+
+    with pytest.raises(
+        ToolReceiptIntegrityError,
+        match="receipt_attempt_replay_conflict",
+    ):
+        await RunEventToolReceiptSink(store).reserve_started(
+            binding=_tenant_binding(runs),
+            tool_call_id="call-declared-retrieval",
+            tool_name="arbitrary_lookup_name",
+            request_projection_digest="f" * 64,
+            dispatch=_DISPATCH_1,
+            capability_kind=None,
+        )
 
 
 @pytest.mark.anyio
@@ -1171,7 +1217,16 @@ async def test_database_append_is_fenced_idempotent_and_recoverable(tmp_path) ->
             tool_name="web_search",
             request_projection_digest="e" * 64,
             dispatch=_DISPATCH_1,
+            capability_kind="retrieval",
         )
+        reserved_events = await store.list_events(
+            "thread-1",
+            "run-1",
+            user_id=None,
+        )
+        parsed_reservation = parse_tool_receipt_event(next(event for event in reserved_events if event["idempotency_key"] == reserved.started.idempotency_key))
+        assert parsed_reservation.capability_marker_version == 1
+        assert parsed_reservation.capability_kind == "retrieval"
         replay_sink = RunEventToolReceiptSink(reopened)
         replay = await replay_sink.reserve_started(
             binding=reservation_binding,
@@ -1179,8 +1234,21 @@ async def test_database_append_is_fenced_idempotent_and_recoverable(tmp_path) ->
             tool_name="web_search",
             request_projection_digest="e" * 64,
             dispatch=_DISPATCH_1,
+            capability_kind="retrieval",
         )
         assert replay.started.receipt_id == reserved.started.receipt_id
+        with pytest.raises(
+            ToolReceiptIntegrityError,
+            match="receipt_attempt_replay_conflict",
+        ):
+            await replay_sink.reserve_started(
+                binding=reservation_binding,
+                tool_call_id="call-db-recovery",
+                tool_name="web_search",
+                request_projection_digest="e" * 64,
+                dispatch=_DISPATCH_1,
+                capability_kind=None,
+            )
         await replay_sink.record_outcome(
             replay.started.outcome(
                 phase="succeeded",
@@ -1195,6 +1263,7 @@ async def test_database_append_is_fenced_idempotent_and_recoverable(tmp_path) ->
             tool_name="web_search",
             request_projection_digest="e" * 64,
             dispatch=_DISPATCH_1,
+            capability_kind="retrieval",
         )
         assert completed_replay.started.receipt_id == reserved.started.receipt_id
         assert completed_replay.replayed_outcome is not None
@@ -1204,6 +1273,7 @@ async def test_database_append_is_fenced_idempotent_and_recoverable(tmp_path) ->
             tool_name="web_search",
             request_projection_digest="e" * 64,
             dispatch=_DISPATCH_2,
+            capability_kind="retrieval",
         )
         assert next_attempt.started.context.attempt == 2
 

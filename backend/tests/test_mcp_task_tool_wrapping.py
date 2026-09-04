@@ -287,6 +287,7 @@ async def test_failure_after_task_creation_keeps_one_attributed_task_and_failed_
             tool_name,
             request_projection_digest,
             dispatch,
+            capability_kind=None,
         ):
             assert dispatch.node_attempt == 1
             started = DurableToolReceiptV1.started(

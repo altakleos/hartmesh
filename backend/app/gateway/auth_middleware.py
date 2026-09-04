@@ -29,6 +29,10 @@ from app.gateway.auth_disabled import (
 from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from app.gateway.request_path import get_request_route_path
+from app.gateway.run_evidence_telemetry import (
+    ensure_run_evidence_requested,
+    record_run_evidence_outcome,
+)
 from app.gateway.runtime_http import is_runtime_api_path, runtime_error_response
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -94,6 +98,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if _is_public(get_request_route_path(request)):
             return await call_next(request)
 
+        evidence_actor_digest = ensure_run_evidence_requested(request)
+
         internal_user = None
         if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
             # Extract the channel owner user ID from the trusted header.
@@ -139,11 +145,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     route_category=credential_route_category(request.url.path),
                 )
             except HTTPException as exc:
+                record_run_evidence_outcome(
+                    request,
+                    "refused",
+                    actor_digest=evidence_actor_digest,
+                )
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
             except Exception:
                 # Driver and persistence exceptions can embed SQL parameters
                 # in their text. Fail closed without logging or reflecting the
                 # exception, preserving the non-oracular credential surface.
+                record_run_evidence_outcome(
+                    request,
+                    "failed",
+                    actor_digest=evidence_actor_digest,
+                )
                 if is_runtime_api_path(request.url.path):
                     return runtime_error_response(
                         503,
@@ -174,6 +190,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 user = await get_current_user_from_request(request)
             except HTTPException as exc:
                 if not is_auth_disabled():
+                    record_run_evidence_outcome(
+                        request,
+                        "refused",
+                        actor_digest=evidence_actor_digest,
+                    )
                     if is_runtime_api_path(request.url.path):
                         return runtime_error_response(exc.status_code, FailureCode.denied)
                     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
@@ -189,6 +210,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
             user = get_auth_disabled_user()
             auth_source = AUTH_SOURCE_AUTH_DISABLED
         else:
+            record_run_evidence_outcome(
+                request,
+                "refused",
+                actor_digest=evidence_actor_digest,
+            )
             if is_runtime_api_path(request.url.path):
                 return runtime_error_response(401, FailureCode.denied)
             return JSONResponse(
@@ -207,12 +233,24 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # JWT-decode + DB-lookup pipeline a second time per request).
         request.state.user = user
         request.state.auth_source = auth_source
-        permissions = await resolve_route_permissions(
-            user,
-            is_internal=auth_source == AUTH_SOURCE_INTERNAL,
-            resolver=getattr(request.app.state, "authorization_provider_resolver", None),
-            request=request,
-        )
+        try:
+            permissions = await resolve_route_permissions(
+                user,
+                is_internal=auth_source == AUTH_SOURCE_INTERNAL,
+                resolver=getattr(
+                    request.app.state,
+                    "authorization_provider_resolver",
+                    None,
+                ),
+                request=request,
+            )
+        except Exception:
+            record_run_evidence_outcome(
+                request,
+                "failed",
+                actor_digest=evidence_actor_digest,
+            )
+            raise
         if auth_source == AUTH_SOURCE_PAT:
             # A PAT can only narrow its owning user's permissions: the stored
             # scopes intersect the resolved route permissions, never widen
@@ -235,6 +273,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 session_payload=session_payload,
             )
         except CredentialEvidenceError:
+            record_run_evidence_outcome(
+                request,
+                "failed",
+                actor_digest=evidence_actor_digest,
+            )
             return JSONResponse(
                 status_code=503,
                 content={"detail": "Credential evidence unavailable"},
@@ -255,6 +298,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 reason_code="scope_required",
             )
             detail = "PAT credentials are not permitted on this route" if required_scope is None else "Required PAT scope is unavailable"
+            record_run_evidence_outcome(
+                request,
+                "refused",
+                actor_digest=evidence_actor_digest,
+            )
             return JSONResponse(
                 status_code=403,
                 content={"detail": detail},
