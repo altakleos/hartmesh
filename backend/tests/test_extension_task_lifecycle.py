@@ -360,6 +360,112 @@ async def test_lead_stop_interrupt_is_deferred_until_final_cleanup():
 
 
 @pytest.mark.asyncio
+async def test_lead_cleanup_preserves_the_first_interruption():
+    class _FirstInterrupt(BaseException):
+        pass
+
+    class _LaterInterrupt(BaseException):
+        pass
+
+    class _InterruptingRecorder(_RunRecorder):
+        async def on_task_stop(self, app_store, task_store, info, outcome):
+            await super().on_task_stop(
+                app_store,
+                task_store,
+                info,
+                outcome,
+            )
+            raise _LaterInterrupt("task stop")
+
+    async def interrupt_completion(_record):
+        raise _FirstInterrupt("completion")
+
+    manager = RunManager()
+    record = await manager.create("thread-first-interrupt")
+    bridge = _bridge()
+
+    with pytest.raises(_FirstInterrupt, match="completion"):
+        await run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=RunContext(
+                checkpointer=InMemorySaver(),
+                extensions=_extensions(_InterruptingRecorder()),
+                on_run_completed=interrupt_completion,
+            ),
+            agent_factory=lambda *, config: _OkAgent(),
+            graph_input={},
+            config={},
+        )
+
+    assert record.finalizing is False
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.asyncio
+async def test_lead_cleanup_drains_after_a_second_cancellation():
+    class _FirstInterrupt(BaseException):
+        pass
+
+    first_interrupt = _FirstInterrupt("completion")
+    finalizing_entered = asyncio.Event()
+    allow_finalizing = asyncio.Event()
+
+    class _BlockingRunManager(RunManager):
+        async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
+            if not finalizing:
+                finalizing_entered.set()
+                await allow_finalizing.wait()
+            await super().set_finalizing(run_id, finalizing)
+
+    async def interrupt_completion(_record):
+        raise first_interrupt
+
+    class _CancelledAgent:
+        async def astream(
+            self,
+            graph_input,
+            config=None,
+            stream_mode=None,
+            subgraphs=False,
+        ):
+            raise asyncio.CancelledError()
+            yield  # pragma: no cover
+
+    manager = _BlockingRunManager()
+    record = await manager.create("thread-repeated-interrupt")
+    bridge = _bridge()
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=RunContext(
+                checkpointer=InMemorySaver(),
+                extensions=_extensions(_RunRecorder()),
+                on_run_completed=interrupt_completion,
+            ),
+            agent_factory=lambda *, config: _CancelledAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    await asyncio.wait_for(finalizing_entered.wait(), timeout=1)
+
+    task.cancel("later cleanup cancellation")
+    await asyncio.sleep(0)
+    assert not task.done()
+    allow_finalizing.set()
+
+    with pytest.raises(_FirstInterrupt) as caught:
+        await task
+    assert caught.value is first_interrupt
+    assert record.finalizing is False
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.asyncio
 async def test_contributor_raising_cancellederror_cannot_interrupt_run_cleanup():
     # Fail-open is decided by origin, not base class: a contributor that lets a
     # CancelledError escape must not skip its successors, and must not reach the

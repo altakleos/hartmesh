@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 51
+config_version: 52
 
 # ============================================================================
 # Logging
@@ -1489,11 +1489,14 @@ sandbox:
 #   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
 #   # environment variable, not sandbox.image from this config file.
 #   # Durable accepted sandbox execution additionally requires one current,
-#   # canonical Kubernetes qualification artifact mounted read-only into the
+#   # canonical accepted-sandbox companion artifact mounted read-only into the
 #   # Gateway. The path and byte digest are an inseparable pair; neither a
 #   # declared deployment-report reference nor a candidate run is production
-#   # evidence. The Gateway also checks the live Gateway, sandbox, and
-#   # provisioner/verifier image digests before model work.
+#   # evidence. It embeds the Kubernetes v2 proof and binds the live capability
+#   # profile, portable topology policy, and explicit operation-race result.
+#   # The current namespace UID and each PVC UID plus its bound PV name are
+#   # freshly validated by the provisioner; a PV UID is not claimed and
+#   # disposable qualification object IDs are not embedded.
 #   # accepted_material_qualification_evidence: /var/run/hartmesh/qualification/evidence.json
 #   # accepted_material_qualification_digest: sha256:<64-lowercase-hex>
 #   # accepted_material_qualification_max_age_seconds: 2592000 # 30 days; 60..31536000

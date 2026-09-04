@@ -322,11 +322,6 @@ def _resolve_sandbox(request: ToolCallRequest) -> Sandbox | None:
     here, which is fine -- the caller falls back to inline truncation.
     """
     runtime = getattr(request, "runtime", None)
-    accepted_sandbox = accepted_sandbox_from_runtime_context(
-        getattr(runtime, "context", None),
-    )
-    if accepted_sandbox is not None:
-        return accepted_sandbox
     state = getattr(runtime, "state", None)
     if not isinstance(state, dict):
         return None
@@ -336,6 +331,14 @@ def _resolve_sandbox(request: ToolCallRequest) -> Sandbox | None:
     sandbox_id = sandbox_state.get("sandbox_id")
     if not sandbox_id:
         return None
+    # Eager authorization denial deliberately leaves state unset. Requiring
+    # the initialized marker prevents an unrelated large tool result from
+    # using a pre-installed facade without the sandbox:execute decision.
+    accepted_sandbox = accepted_sandbox_from_runtime_context(
+        getattr(runtime, "context", None),
+    )
+    if accepted_sandbox is not None:
+        return accepted_sandbox
     try:
         return get_sandbox_provider().get(sandbox_id)
     except Exception:

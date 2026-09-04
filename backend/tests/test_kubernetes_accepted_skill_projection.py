@@ -609,6 +609,40 @@ def test_remote_preflight_uses_and_rereads_projected_service_account_token(
     token_file = tmp_path / "token"
     token_file.write_text("token-one", encoding="utf-8")
     observed_headers: list[dict[str, str]] = []
+    runtime_topology = {
+        "version": 1,
+        "provider_kind": "aio_kubernetes",
+        "profile": "rwx_verified_copy_v2",
+        "sandbox_image_digest": "a" * 64,
+        "verifier_image_digest": "b" * 64,
+        "namespace_uid": "namespace-uid",
+        "pod_security_enforce": None,
+        "pod_security_warn": None,
+        "pod_security_audit": None,
+        "runtime_class": None,
+        "gateway_namespace": "runtime",
+        "gateway_service_account": "gateway",
+        "token_review_audience": "hartmesh-provisioner",
+        "accepted_attempt_lease_seconds": 120,
+        "accepted_attempt_reconcile_interval_seconds": 30,
+        "accepted_attempt_reconcile_limit": 100,
+        "volumes": [
+            {
+                "role": "skills",
+                "uid": "skills-uid",
+                "volume_name": "skills-volume",
+                "storage_class": "rwx-storage",
+                "access_modes": ["ReadWriteMany"],
+            },
+            {
+                "role": "userdata",
+                "uid": "userdata-uid",
+                "volume_name": "userdata-volume",
+                "storage_class": "rwx-storage",
+                "access_modes": ["ReadWriteMany"],
+            },
+        ],
+    }
 
     class Response:
         def __init__(self, payload: dict[str, object]) -> None:
@@ -633,6 +667,7 @@ def test_remote_preflight_uses_and_rereads_projected_service_account_token(
                     "profile": "rwx_verified_copy_v2",
                     "sandbox_image_digest": "a" * 64,
                     "accepted_skill_runtime_image_digest": "b" * 64,
+                    "runtime_topology": runtime_topology,
                 },
             },
         )

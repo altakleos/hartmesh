@@ -79,6 +79,14 @@ atomic operation fencing, process-loss lookup, and exact-two are false. One
 operation in the validation/delegation gap may start; later calls and stale
 terminal publication are refused once loss is observed.
 
+The runtime qualification companion binds a portable topology-policy digest.
+The provisioner separately resolves the current namespace UID, ServiceAccount,
+and each PVC UID plus its bound PV name on every live sample; it does not claim
+a PV UID. Those deployment-specific identifiers do not enter the companion or
+Project 05 observations. Accepted execution
+evidence may retain the exact current runtime-topology digest, but Project 05
+should continue linking only its safe accepted-execution reference.
+
 ## Boundaries Project 05 must preserve
 
 - Retrieval evidence is an external observation linked to the existing

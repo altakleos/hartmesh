@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import stat
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -21,6 +22,120 @@ from deerflow.sandbox.sandbox_provider import (
     AcceptedSkillSandboxBindingError,
     AcceptedSkillSandboxBindingV1,
 )
+
+
+def _accepted_runtime_topology():
+    from deerflow.qualification_evidence import (
+        AcceptedSandboxPersistentVolumeTopologyV1,
+        AcceptedSandboxRuntimeTopologyV1,
+    )
+
+    return AcceptedSandboxRuntimeTopologyV1(
+        provider_kind="aio_kubernetes",
+        profile="rwx_verified_copy_v2",
+        sandbox_image_digest="c" * 64,
+        verifier_image_digest="b" * 64,
+        namespace_uid="namespace-uid",
+        pod_security_enforce=None,
+        pod_security_warn=None,
+        pod_security_audit=None,
+        runtime_class=None,
+        gateway_namespace="runtime",
+        gateway_service_account="gateway",
+        token_review_audience="hartmesh-provisioner",
+        accepted_attempt_lease_seconds=120,
+        accepted_attempt_reconcile_interval_seconds=30,
+        accepted_attempt_reconcile_limit=100,
+        volumes=(
+            AcceptedSandboxPersistentVolumeTopologyV1(
+                role="skills",
+                uid="skills-uid",
+                volume_name="skills-volume",
+                storage_class="rwx-storage",
+                access_modes=("ReadWriteMany",),
+            ),
+            AcceptedSandboxPersistentVolumeTopologyV1(
+                role="userdata",
+                uid="userdata-uid",
+                volume_name="userdata-volume",
+                storage_class="rwx-storage",
+                access_modes=("ReadWriteMany",),
+            ),
+        ),
+    )
+
+
+def test_batch_attempt_resource_scopes_do_not_alias_parent_or_siblings() -> None:
+    aio_mod = importlib.import_module(
+        "deerflow.community.aio_sandbox.aio_sandbox_provider",
+    )
+
+    parent = aio_mod.AioSandboxProvider._accepted_resource_thread_id(
+        "thread-1",
+        None,
+    )
+    first = aio_mod.AioSandboxProvider._accepted_resource_thread_id(
+        "thread-1",
+        "batch-child-first",
+    )
+    second = aio_mod.AioSandboxProvider._accepted_resource_thread_id(
+        "thread-1",
+        "batch-child-second",
+    )
+
+    assert parent == "thread-1"
+    assert len({parent, first, second}) == 3
+    assert "batch-child" not in first
+
+
+@pytest.mark.asyncio
+async def test_cancelled_bound_acquire_waits_for_created_sandbox_cleanup() -> None:
+    aio_mod = importlib.import_module(
+        "deerflow.community.aio_sandbox.aio_sandbox_provider",
+    )
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    resource_created = threading.Event()
+    allow_return = threading.Event()
+    destroy_started = threading.Event()
+    allow_destroy = threading.Event()
+    destroyed: list[str] = []
+
+    def acquire(*_args) -> str:
+        resource_created.set()
+        assert allow_return.wait(timeout=2)
+        return "created-before-cancellation"
+
+    provider._acquire_bound_accepted_skills_with_claim = acquire
+
+    def destroy(sandbox_id: str) -> None:
+        destroy_started.set()
+        assert allow_destroy.wait(timeout=2)
+        destroyed.append(sandbox_id)
+
+    provider.destroy = destroy
+    binding = AcceptedSkillSandboxBindingV1(
+        snapshot_id="a" * 64,
+        run_id="run-cancelled-acquire",
+        generation=1,
+    )
+    task = asyncio.create_task(
+        provider.acquire_bound_accepted_skills_async(
+            "thread-1",
+            user_id="user-1",
+            binding=binding,
+        ),
+    )
+    assert await asyncio.to_thread(resource_created.wait, 2)
+
+    task.cancel("cancel after backend creation")
+    allow_return.set()
+    assert await asyncio.to_thread(destroy_started.wait, 2)
+    task.cancel("second cancellation during cleanup")
+    allow_destroy.set()
+
+    with pytest.raises(asyncio.CancelledError, match="cancel after backend creation"):
+        await task
+    assert destroyed == ["created-before-cancellation"]
 
 
 def test_accepted_material_qualification_config_requires_a_pinned_pair() -> None:
@@ -80,7 +195,12 @@ async def test_aio_qualification_rejects_an_unpinned_or_replaced_artifact(
     monkeypatch,
 ) -> None:
     from deerflow.qualification_evidence import (
+        ACCEPTED_SANDBOX_OPERATION_FENCING_MODE_V1,
         ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2,
+        AcceptedSandboxPersistentVolumeTopologyV1,
+        AcceptedSandboxQualificationArtifactV1,
+        AcceptedSandboxRaceEvidenceV1,
+        AcceptedSandboxRuntimeTopologyV1,
         AcceptedSkillMaterialEvidenceV2,
         AcceptedSkillQualificationEnvironmentV2,
         AcceptedSkillScenarioEvidenceV2,
@@ -93,7 +213,7 @@ async def test_aio_qualification_rejects_an_unpinned_or_replaced_artifact(
         "deerflow.community.aio_sandbox.aio_sandbox_provider",
     )
     now = datetime.now(UTC)
-    evidence = KubernetesAcceptedSkillQualificationEvidenceV2(
+    subordinate = KubernetesAcceptedSkillQualificationEvidenceV2(
         qualification_id="accepted-sandbox-current",
         gateway_image_reference="registry.example/gateway@sha256:" + ("a" * 64),
         gateway_image_digest="sha256:" + ("a" * 64),
@@ -146,6 +266,60 @@ async def test_aio_qualification_rejects_an_unpinned_or_replaced_artifact(
         ),
         completed_at=now - timedelta(minutes=1),
     )
+    profile = aio_mod.AioSandboxProvider.accepted_sandbox_capability_profile()
+    topology = AcceptedSandboxRuntimeTopologyV1(
+        provider_kind="aio_kubernetes",
+        profile="rwx_verified_copy_v2",
+        sandbox_image_digest="c" * 64,
+        verifier_image_digest="b" * 64,
+        namespace_uid="namespace-uid",
+        pod_security_enforce=None,
+        pod_security_warn=None,
+        pod_security_audit=None,
+        runtime_class=None,
+        gateway_namespace="runtime",
+        gateway_service_account="gateway",
+        token_review_audience="hartmesh-provisioner",
+        accepted_attempt_lease_seconds=120,
+        accepted_attempt_reconcile_interval_seconds=30,
+        accepted_attempt_reconcile_limit=100,
+        volumes=(
+            AcceptedSandboxPersistentVolumeTopologyV1(
+                role="skills",
+                uid="skills-uid",
+                volume_name="skills-volume",
+                storage_class="rwx-storage",
+                access_modes=("ReadWriteMany",),
+            ),
+            AcceptedSandboxPersistentVolumeTopologyV1(
+                role="userdata",
+                uid="userdata-uid",
+                volume_name="userdata-volume",
+                storage_class="rwx-storage",
+                access_modes=("ReadWriteMany",),
+            ),
+        ),
+    )
+    evidence = AcceptedSandboxQualificationArtifactV1(
+        qualification_id=subordinate.qualification_id,
+        accepted_skill_evidence=subordinate,
+        accepted_skill_evidence_digest=qualification_evidence_digest(
+            subordinate.canonical_bytes(),
+        ),
+        provider_kind="aio_kubernetes",
+        capability_profile_version=profile.version,
+        capability_profile_digest=profile.digest,
+        operation_fencing_mode=ACCEPTED_SANDBOX_OPERATION_FENCING_MODE_V1,
+        topology_policy_digest=topology.qualification_policy_digest,
+        race=AcceptedSandboxRaceEvidenceV1(
+            session_validation_passes=1,
+            raced_provider_calls=1,
+            post_loss_rejections=1,
+            stale_terminal_rejected=True,
+            cleanup_outcome="deleted",
+        ),
+        completed_at=subordinate.completed_at,
+    )
     artifact = tmp_path / "qualification.json"
     payload = evidence.canonical_bytes()
     artifact.write_bytes(payload)
@@ -157,18 +331,62 @@ async def test_aio_qualification_rejects_an_unpinned_or_replaced_artifact(
         ),
         "accepted_material_qualification_max_age_seconds": 86400,
     }
+    live_topology = replace(
+        topology,
+        namespace_uid="production-namespace-uid",
+        gateway_namespace="production",
+        gateway_service_account="production-gateway",
+        volumes=tuple(
+            replace(
+                volume,
+                uid=f"production-{volume.role}-uid",
+                volume_name=f"production-{volume.role}-volume",
+            )
+            for volume in topology.volumes
+        ),
+    )
     provider._backend = SimpleNamespace(
-        accepted_material_runtime_subjects=lambda: ("c" * 64, "b" * 64),
+        accepted_material_runtime_qualification_subjects=lambda: (
+            "c" * 64,
+            "b" * 64,
+            live_topology,
+        ),
     )
     monkeypatch.setenv("DEER_FLOW_IMAGE_DIGEST", "sha256:" + ("a" * 64))
-    profile = provider.accepted_sandbox_capability_profile()
 
     qualification = await provider._accepted_sandbox_qualification(
         profile=profile,
         runtime_image_digest="c" * 64,
     )
     assert qualification.is_current(now)
+    assert qualification.topology_digest == live_topology.digest
     assert profile.recoverable_resource_lookup is False
+
+    mismatched_topology = replace(evidence, topology_policy_digest="0" * 64)
+    mismatched_payload = mismatched_topology.canonical_bytes()
+    artifact.write_bytes(mismatched_payload)
+    provider._config["accepted_material_qualification_digest"] = qualification_evidence_digest(mismatched_payload)
+    with pytest.raises(AcceptedMaterialError, match="sandbox_provider_unqualified"):
+        await provider._accepted_sandbox_qualification(
+            profile=profile,
+            runtime_image_digest="c" * 64,
+        )
+
+    artifact.write_bytes(payload)
+    provider._config["accepted_material_qualification_digest"] = qualification_evidence_digest(payload)
+
+    mismatched_profile = replace(evidence, capability_profile_digest="0" * 64)
+    mismatched_payload = mismatched_profile.canonical_bytes()
+    artifact.write_bytes(mismatched_payload)
+    provider._config["accepted_material_qualification_digest"] = qualification_evidence_digest(mismatched_payload)
+    with pytest.raises(AcceptedMaterialError, match="sandbox_provider_unqualified"):
+        await provider._accepted_sandbox_qualification(
+            profile=profile,
+            runtime_image_digest="c" * 64,
+        )
+
+    artifact.write_bytes(payload)
+    provider._config["accepted_material_qualification_digest"] = qualification_evidence_digest(payload)
 
     monkeypatch.setenv("DEER_FLOW_IMAGE_DIGEST", "sha256:" + ("9" * 64))
     with pytest.raises(AcceptedMaterialError, match="sandbox_provider_unqualified"):
@@ -178,7 +396,11 @@ async def test_aio_qualification_rejects_an_unpinned_or_replaced_artifact(
         )
     monkeypatch.setenv("DEER_FLOW_IMAGE_DIGEST", "sha256:" + ("a" * 64))
     provider._backend = SimpleNamespace(
-        accepted_material_runtime_subjects=lambda: ("c" * 64, "8" * 64),
+        accepted_material_runtime_qualification_subjects=lambda: (
+            "c" * 64,
+            "8" * 64,
+            topology,
+        ),
     )
     with pytest.raises(AcceptedMaterialError, match="sandbox_provider_unqualified"):
         await provider._accepted_sandbox_qualification(
@@ -187,7 +409,11 @@ async def test_aio_qualification_rejects_an_unpinned_or_replaced_artifact(
         )
 
     provider._backend = SimpleNamespace(
-        accepted_material_runtime_subjects=lambda: ("c" * 64, "b" * 64),
+        accepted_material_runtime_qualification_subjects=lambda: (
+            "c" * 64,
+            "b" * 64,
+            live_topology,
+        ),
     )
     provider._config["accepted_material_qualification_digest"] = "sha256:" + ("f" * 64)
     with pytest.raises(AcceptedMaterialError, match="sandbox_provider_unqualified"):
@@ -208,8 +434,13 @@ async def test_aio_candidate_is_explicit_short_lived_and_never_passing(
     )
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
     provider._config = {}
+    topology = _accepted_runtime_topology()
     provider._backend = SimpleNamespace(
-        accepted_material_runtime_subjects=lambda: ("c" * 64, "b" * 64),
+        accepted_material_runtime_qualification_subjects=lambda: (
+            "c" * 64,
+            "b" * 64,
+            topology,
+        ),
     )
     profile = provider.accepted_sandbox_capability_profile()
     monkeypatch.setenv("DEER_FLOW_IMAGE_DIGEST", "sha256:" + ("a" * 64))

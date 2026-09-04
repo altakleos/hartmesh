@@ -981,6 +981,83 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
 
 
 @pytest.mark.asyncio
+async def test_batch_policy_denial_happens_before_provider_resolution(
+    monkeypatch,
+) -> None:
+    from deerflow.sandbox.exceptions import SandboxAuthorizationError
+    from deerflow.tool_plane.contracts import EffectiveToolPlaneRevisionV1
+
+    tool_plane = EffectiveToolPlaneRevisionV1(
+        base_revision_digest="1" * 64,
+        user_overlay_digest="2" * 64,
+        base_generation=1,
+        overlay_generation=2,
+        projection_digest="3" * 64,
+    )
+    snapshot = _SkillSnapshot()
+    snapshot.root = object()
+    request = _skill_bound_request(
+        snapshot,
+        tool_plane_revision=tool_plane.to_json(),
+    )
+    item = make_claimed_item(request)
+    acceptance = item["batch"]["acceptance"]
+    execution = item["batch"]["execution"]
+    token = SkillProjectionConsumerToken(
+        user_id=request.user_id,
+        thread_id=request.thread_id,
+        sandbox_id="parent-sandbox",
+        run_id=request.run_id,
+        generation=7,
+        consumer_id="subagent-batch:batch-1",
+        snapshot_id=snapshot.snapshot_id,
+    )
+    provider_resolutions = 0
+
+    async def deny(**_kwargs):
+        raise SandboxAuthorizationError("denied")
+
+    def resolve_provider():
+        nonlocal provider_resolutions
+        provider_resolutions += 1
+        return object()
+
+    monkeypatch.setattr(
+        "deerflow.authz.sandbox_authz.authorize_sandbox_execution_async",
+        deny,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "get_sandbox_provider",
+        resolve_provider,
+        raising=False,
+    )
+    service = SubagentBatchService(
+        repository=SimpleNamespace(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+        app_config=_app_config(),
+    )
+
+    with pytest.raises(BatchAdmissionError, match="policy_stopped"):
+        await service._accepted_item_sandbox_session(
+            item=item,
+            acceptance=acceptance,
+            material=request.resolved_parent_material,
+            adapters={
+                "accepted_parent": request.accepted_parent,
+                "skill_projection_token": token,
+            },
+            owner_loop=asyncio.get_running_loop(),
+            app_config=request.app_config,
+            principal=execution.parent_principal,
+            trusted_context=None,
+        )
+
+    assert provider_resolutions == 0
+
+
+@pytest.mark.asyncio
 async def test_batch_item_uses_its_own_attempt_fence_for_accepted_sandbox(
     monkeypatch,
 ) -> None:
@@ -1033,9 +1110,20 @@ async def test_batch_item_uses_its_own_attempt_fence_for_accepted_sandbox(
 
     class Repository:
         finalized = None
+        attached_sandbox = None
+        sandbox_lifecycle = None
+        reject_sandbox_attachment = False
 
         async def item_attempt_authorized(self, item_id, **kwargs):
             authority_calls.append({"item_id": item_id, **kwargs})
+            return True
+
+        async def attach_item_sandbox_evidence(self, item_id, **kwargs):
+            self.attached_sandbox = (item_id, kwargs)
+            return not self.reject_sandbox_attachment
+
+        async def append_item_sandbox_lifecycle(self, item_id, **kwargs):
+            self.sandbox_lifecycle = (item_id, kwargs)
             return True
 
         async def mark_item_running(self, *_args, **_kwargs):
@@ -1054,6 +1142,7 @@ async def test_batch_item_uses_its_own_attempt_fence_for_accepted_sandbox(
 
         def execute_command(self, command, env=None, timeout=None):
             del env, timeout
+            assert repository.attached_sandbox is not None
             self.calls.append(command)
             return "sandbox-ok"
 
@@ -1277,6 +1366,58 @@ async def test_batch_item_uses_its_own_attempt_fence_for_accepted_sandbox(
     assert materializer.validate_calls == 2
     assert materializer.released == 1
     assert repository.finalized["succeeded"] is True
+    assert repository.attached_sandbox is not None
+    attached_item_id, attached = repository.attached_sandbox
+    assert attached_item_id == item["id"]
+    assert attached["request"] is accepted_request
+    assert attached["evidence"].batch_child_attempt_ref == (accepted_request.batch_child_attempt_ref)
+    assert [row.kind.value for row in attached["observations"]] == ["acquired"]
+    assert repository.sandbox_lifecycle is not None
+    lifecycle_item_id, lifecycle = repository.sandbox_lifecycle
+    assert lifecycle_item_id == item["id"]
+    assert [row.kind.value for row in lifecycle["observations"]] == [
+        "acquired",
+        "released",
+    ]
+    assert lifecycle["execution_evidence_digest"] == attached["evidence"].digest
+
+    repository.reject_sandbox_attachment = True
+    with pytest.raises(BatchStaleAttempt):
+        await service._accepted_item_sandbox_session(
+            item=item,
+            acceptance=item["batch"]["acceptance"],
+            material=request.resolved_parent_material,
+            adapters=service._runtime_adapters["batch-1"],
+            owner_loop=asyncio.get_running_loop(),
+            app_config=request.app_config,
+            principal=item["batch"]["execution"].parent_principal,
+            trusted_context=None,
+        )
+    assert materializer.released == 2
+
+    original_interrupt = asyncio.CancelledError("attachment interrupted")
+    cleanup_interrupt = asyncio.CancelledError("release interrupted")
+
+    async def interrupted_attachment(*_args, **_kwargs):
+        raise original_interrupt
+
+    async def interrupted_release(_lease):
+        raise cleanup_interrupt
+
+    repository.attach_item_sandbox_evidence = interrupted_attachment
+    materializer.release = interrupted_release
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await service._accepted_item_sandbox_session(
+            item=item,
+            acceptance=item["batch"]["acceptance"],
+            material=request.resolved_parent_material,
+            adapters=service._runtime_adapters["batch-1"],
+            owner_loop=asyncio.get_running_loop(),
+            app_config=request.app_config,
+            principal=item["batch"]["execution"].parent_principal,
+            trusted_context=None,
+        )
+    assert caught.value is original_interrupt
 
 
 @pytest.mark.asyncio
@@ -1363,6 +1504,107 @@ async def test_terminal_publication_crosses_the_service_fault_barrier(
     await service._execute_item(item)
 
     assert transitions == ["started", "barrier", "published"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt_at", ["close", "lifecycle"])
+async def test_batch_cleanup_defers_interrupt_until_lifecycle_and_pruning_finish(
+    monkeypatch,
+    interrupt_at: str,
+) -> None:
+    request = make_parent_batch_request(app_config=_app_config())
+    item = make_claimed_item(request)
+    result = SimpleNamespace(
+        status=FakeStatus.PENDING,
+        result=None,
+        error=None,
+        stop_reason=None,
+        token_usage_records=None,
+    )
+    cleanup_interrupt = asyncio.CancelledError(f"cancel-{interrupt_at}")
+    observation = SimpleNamespace(
+        kind=SimpleNamespace(value="released"),
+        provider_kind="qualified-test",
+        qualification_scope="contract-test",
+        reason_code=None,
+        execution_evidence_digest="a" * 64,
+    )
+
+    class Repository:
+        def __init__(self) -> None:
+            self.lifecycle_attempts = 0
+
+        async def mark_item_running(self, *_args, **_kwargs):
+            return True
+
+        async def finalize_item(self, *_args, **_kwargs):
+            return True
+
+        async def append_item_sandbox_lifecycle(self, *_args, **_kwargs):
+            self.lifecycle_attempts += 1
+            if interrupt_at == "lifecycle":
+                raise cleanup_interrupt
+            return True
+
+    callback = None
+
+    class Executor:
+        def __init__(self, **kwargs) -> None:
+            nonlocal callback
+            callback = kwargs["execution_admitted_callback"]
+
+        def execute_async(self, _prompt, task_id=None):
+            async def complete() -> None:
+                assert callback is not None
+                await callback()
+                result.status = FakeStatus.COMPLETED
+                result.result = "accepted result"
+
+            asyncio.create_task(complete())
+            return "execution-1"
+
+    repository = Repository()
+    session = SimpleNamespace(
+        validate=AsyncMock(),
+        close=AsyncMock(
+            side_effect=(cleanup_interrupt if interrupt_at == "close" else None),
+        ),
+        lifecycle_observations=(observation,),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "resolve_subagent_model_name",
+        lambda *_args, **_kwargs: "model-a",
+    )
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(
+        service_module,
+        "get_background_task_result",
+        lambda _execution_id: result,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "cleanup_background_task",
+        lambda _execution_id: None,
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+        app_config=_app_config(),
+    )
+    service._accepted_item_sandbox_session = AsyncMock(return_value=session)
+    service._prune_terminal_material = AsyncMock()
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await service._execute_item(item)
+
+    assert caught.value is cleanup_interrupt
+    session.close.assert_awaited_once()
+    assert repository.lifecycle_attempts == 1
+    service._prune_terminal_material.assert_awaited_once()
 
 
 @pytest.mark.asyncio

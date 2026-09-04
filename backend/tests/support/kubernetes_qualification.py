@@ -29,8 +29,13 @@ from deerflow.community.aio_sandbox.aio_sandbox_provider import (
 )
 from deerflow.deployment.topology import MULTI_GATEWAY_QUALIFICATION_SCOPE
 from deerflow.qualification_evidence import (
+    ACCEPTED_SANDBOX_OPERATION_FENCING_MODE_V1,
     ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2,
     ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+    AcceptedSandboxPersistentVolumeTopologyV1,
+    AcceptedSandboxQualificationArtifactV1,
+    AcceptedSandboxRaceEvidenceV1,
+    AcceptedSandboxRuntimeTopologyV1,
     AcceptedSkillMaterialEvidenceV2,
     AcceptedSkillQualificationEnvironmentV2,
     AcceptedSkillQualificationExpectationV2,
@@ -2085,7 +2090,7 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
             or execution_evidence.materialization_digest != materialization_digest
             or execution_evidence.verifier_image_digest != self.config.verifier_image_digest.removeprefix("sha256:")
             or execution_evidence.verifier_contract_version != "rwx_verified_copy_v2:accepted_execution_claim_v2"
-            or execution_evidence.qualification_scope != ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2
+            or execution_evidence.qualification_scope != AcceptedSandboxQualificationArtifactV1.SCOPE
             or execution_evidence.capability_profile_digest != expected_profile.digest
             or not execution_evidence.isolation.restricted_non_root
             or not execution_evidence.isolation.read_only_accepted_material
@@ -2483,6 +2488,115 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
             )
         return uid
 
+    def _accepted_pvc_topology(
+        self,
+        role: Literal["skills", "userdata"],
+        claim_name: str,
+    ) -> AcceptedSandboxPersistentVolumeTopologyV1:
+        value = json.loads(
+            self._kubectl(
+                "get",
+                "persistentvolumeclaim",
+                claim_name,
+                "-o",
+                "json",
+            )
+        )
+        metadata = value.get("metadata") if isinstance(value, dict) else None
+        spec = value.get("spec") if isinstance(value, dict) else None
+        status = value.get("status") if isinstance(value, dict) else None
+        if not isinstance(metadata, dict) or not isinstance(spec, dict) or not isinstance(status, dict) or status.get("phase") != "Bound":
+            raise QualificationCommandError(
+                "accepted-sandbox PVC topology is unavailable",
+            )
+        try:
+            return AcceptedSandboxPersistentVolumeTopologyV1(
+                role=role,
+                uid=metadata["uid"],
+                volume_name=spec["volumeName"],
+                storage_class=spec["storageClassName"],
+                access_modes=tuple(sorted(set(spec["accessModes"]))),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise QualificationCommandError(
+                "accepted-sandbox PVC topology is invalid",
+            ) from exc
+
+    def _accepted_runtime_topology(
+        self,
+        values: Mapping[str, object],
+    ) -> AcceptedSandboxRuntimeTopologyV1:
+        value = json.loads(
+            self._kubectl(
+                "get",
+                "namespace",
+                self.config.namespace,
+                "-o",
+                "json",
+                namespaced=False,
+            )
+        )
+        metadata = value.get("metadata") if isinstance(value, dict) else None
+        if not isinstance(metadata, dict):
+            raise QualificationCommandError(
+                "accepted-sandbox namespace topology is unavailable",
+            )
+        labels = metadata.get("labels") or {}
+        sandbox_values = values.get("sandbox") or {}
+        provisioner_values = values.get("provisioner") or {}
+        if not isinstance(labels, dict) or not isinstance(sandbox_values, dict) or not isinstance(provisioner_values, dict):
+            raise QualificationCommandError(
+                "accepted-sandbox topology values are invalid",
+            )
+        accepted_attempt = provisioner_values.get("acceptedAttempt") or {}
+        if not isinstance(accepted_attempt, dict):
+            raise QualificationCommandError(
+                "accepted-sandbox topology timing is invalid",
+            )
+        try:
+            return AcceptedSandboxRuntimeTopologyV1(
+                provider_kind="aio_kubernetes",
+                profile="rwx_verified_copy_v2",
+                sandbox_image_digest=self.config.sandbox_image_digest.removeprefix(
+                    "sha256:",
+                ),
+                verifier_image_digest=self.config.verifier_image_digest.removeprefix(
+                    "sha256:",
+                ),
+                namespace_uid=metadata["uid"],
+                pod_security_enforce=labels.get(
+                    "pod-security.kubernetes.io/enforce",
+                ),
+                pod_security_warn=labels.get("pod-security.kubernetes.io/warn"),
+                pod_security_audit=labels.get(
+                    "pod-security.kubernetes.io/audit",
+                ),
+                runtime_class=sandbox_values.get("runtimeClassName") or None,
+                gateway_namespace=self.config.namespace,
+                gateway_service_account=f"{self.fullname}-gateway",
+                token_review_audience=provisioner_values.get(
+                    "gatewayTokenAudience",
+                    "hartmesh-provisioner",
+                ),
+                accepted_attempt_lease_seconds=accepted_attempt["leaseSeconds"],
+                accepted_attempt_reconcile_interval_seconds=accepted_attempt["reconcileIntervalSeconds"],
+                accepted_attempt_reconcile_limit=accepted_attempt["reconcileLimit"],
+                volumes=(
+                    self._accepted_pvc_topology(
+                        "skills",
+                        self.skill_source_claim,
+                    ),
+                    self._accepted_pvc_topology(
+                        "userdata",
+                        f"{self.fullname}-home",
+                    ),
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise QualificationCommandError(
+                "accepted-sandbox runtime topology is invalid",
+            ) from exc
+
     def _assert_provisioner_image(self) -> None:
         value = self._pod_json("provisioner")
         items = value.get("items")
@@ -2573,10 +2687,59 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
         ]
         return published
 
+    def _prove_post_upgrade_accepted_invocation(
+        self,
+        client: _RuntimeHttpSession,
+    ) -> None:
+        """Require one fresh accepted execution after the passing artifact loads."""
+
+        scenario = "active_execution"
+        payload = self._ensure_payload(scenario)
+        payload["external_key"] = "k8s-qual-v1:active_execution:post-qualification-upgrade"
+        self._arm_barrier(scenario)
+        result: dict[str, object] = {}
+
+        def ensure() -> None:
+            result["response"] = client.request(
+                "POST",
+                "/api/runtime/v1/invocations/ensure",
+                payload=payload,
+                timeout_seconds=30,
+            )
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future: Future[None] = executor.submit(ensure)
+            try:
+                run_id = self._wait_for_barrier(scenario)
+                attempt = self._accepted_attempt(
+                    scenario,
+                    run_id,
+                    gateway_node=self._gateway_node(),
+                )
+            finally:
+                self._redis("SET", self._barrier_key(scenario, "release"), "1")
+            try:
+                future.result(timeout=35)
+            except TimeoutError as exc:
+                raise QualificationTimeout(
+                    "post-upgrade accepted invocation did not leave its barrier",
+                ) from exc
+        response = result.get("response")
+        if not isinstance(response, tuple) or len(response) != 2 or response[0] not in {200, 201, 202} or not isinstance(response[1], dict) or response[1].get("run_id") != run_id:
+            raise QualificationCommandError(
+                "post-upgrade accepted invocation was not admitted",
+            )
+        observation = self._observe_until_terminal(client, run_id)
+        if observation.get("status") != "success":
+            raise QualificationCommandError(
+                "post-upgrade accepted invocation did not succeed",
+            )
+        self._wait_for_attempt_cleanup(attempt)
+
     def _publish_accepted_skill_qualification(
         self,
         values: dict[str, object],
-        evidence: KubernetesAcceptedSkillQualificationEvidenceV2,
+        evidence: AcceptedSandboxQualificationArtifactV1,
         client: _RuntimeHttpSession,
     ) -> Path:
         passing_path = self.config.evidence_path.with_suffix(
@@ -2585,24 +2748,24 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
         evidence.write(passing_path)
         evidence_digest = evidence_sha256(passing_path)
         verification = verify_qualification_evidence(
-            passing_path.read_bytes(),
-            declared_digest=evidence_digest,
+            evidence.accepted_skill_evidence.canonical_bytes(),
+            declared_digest=evidence.accepted_skill_evidence_digest,
             expected=AcceptedSkillQualificationExpectationV2(
                 qualification_id=evidence.qualification_id,
                 gateway_image_digest=self.config.image_digest,
-                provisioner_image_digest=(self.config.provisioner_image_digest),
+                provisioner_image_digest=self.config.provisioner_image_digest,
                 verifier_image_digest=self.config.verifier_image_digest,
                 sandbox_image_digest=self.config.sandbox_image_digest,
                 chart_version=self._chart_version(),
                 chart_digest=self._chart_digest(),
                 configuration_digest=_sha256_bytes(_canonical_json(values)),
-                migration_head=evidence.migration_head,
-                scope=evidence.SCOPE,
+                migration_head=evidence.accepted_skill_evidence.migration_head,
+                scope=evidence.accepted_skill_evidence.SCOPE,
                 namespace=self.config.namespace,
-                required_scenarios=evidence.REQUIRED_SCENARIOS,
+                required_scenarios=(evidence.accepted_skill_evidence.REQUIRED_SCENARIOS),
             ),
         )
-        if verification.artifact_digest != evidence_digest:
+        if verification.artifact_digest != evidence.accepted_skill_evidence_digest:
             raise QualificationCommandError(
                 "offline accepted-skill verification returned the wrong digest",
             )
@@ -2673,10 +2836,13 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
             raise QualificationCommandError(
                 "administrative report did not expose accepted-skill evidence",
             )
+        with _PortForward(self.config, self.gateway_service) as forwarded:
+            client.set_base_url(f"http://127.0.0.1:{forwarded.port}")
+            self._prove_post_upgrade_accepted_invocation(client)
         return passing_path
 
-    def qualify(self) -> KubernetesAcceptedSkillQualificationEvidenceV2:
-        """Run real faults, verify nonempty material, and publish strict v2."""
+    def qualify(self) -> AcceptedSandboxQualificationArtifactV1:
+        """Run real faults and publish the runtime-enabling companion proof."""
 
         validate_kubernetes_prerequisites(os.environ)
         self._confirm_context()
@@ -2693,6 +2859,7 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
             stores = self._shared_store_evidence()
             schedulable_nodes = self._schedulable_nodes()
             rwx_volume_uid = self._rwx_volume_identity()
+            runtime_topology = self._accepted_runtime_topology(values)
             with _PortForward(self.config, self.gateway_service) as forwarded:
                 client = _RuntimeHttpSession(f"http://127.0.0.1:{forwarded.port}")
                 self._initialize_admin(client)
@@ -2850,9 +3017,29 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
                 scenarios=scenarios,
                 completed_at=datetime.now(UTC),
             )
+            companion = AcceptedSandboxQualificationArtifactV1(
+                qualification_id=evidence.qualification_id,
+                accepted_skill_evidence=evidence,
+                accepted_skill_evidence_digest=qualification_evidence_digest(
+                    evidence.canonical_bytes(),
+                ),
+                provider_kind="aio_kubernetes",
+                capability_profile_version=1,
+                capability_profile_digest=(AioSandboxProvider.accepted_sandbox_capability_profile().digest),
+                operation_fencing_mode=(ACCEPTED_SANDBOX_OPERATION_FENCING_MODE_V1),
+                topology_policy_digest=(runtime_topology.qualification_policy_digest),
+                race=AcceptedSandboxRaceEvidenceV1(
+                    session_validation_passes=(accepted_session_race.session_validation_passes),
+                    raced_provider_calls=(accepted_session_race.raced_provider_calls),
+                    post_loss_rejections=(accepted_session_race.post_loss_rejections),
+                    stale_terminal_rejected=(accepted_session_race.stale_terminal_rejected),
+                    cleanup_outcome=cleanup[accepted_session_race.scenario],
+                ),
+                completed_at=evidence.completed_at,
+            )
             passing_path = self._publish_accepted_skill_qualification(
                 values,
-                evidence,
+                companion,
                 client,
             )
             self._kubectl(
@@ -2865,7 +3052,7 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
                 timeout_seconds=180,
             )
             os.replace(passing_path, self.config.evidence_path)
-            return evidence
+            return companion
         except Exception as exc:
             if passing_path is not None:
                 passing_path.unlink(missing_ok=True)
@@ -2874,7 +3061,7 @@ class KubernetesAcceptedSkillQualificationRunnerV2(KubernetesQualificationRunner
                 "api_version": ("deerflow.kubernetes-accepted-skill-qualification/v2"),
                 "kind": "kubernetes.qualification.evidence",
                 "status": "failed",
-                "scope": ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+                "scope": AcceptedSandboxQualificationArtifactV1.SCOPE,
                 "qualification_id": self.config.qualification_id,
                 "namespace": self.config.namespace,
                 "failure_code": type(exc).__name__,

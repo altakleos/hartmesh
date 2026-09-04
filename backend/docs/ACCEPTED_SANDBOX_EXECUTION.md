@@ -20,7 +20,12 @@ list, text write, glob, grep, and binary update—cross the same facade. Normal
 sandbox tools, sandbox middleware, output externalization, lead agents, inherited
 subagents, and durable batch children resolve that facade from host-owned runtime
 context. A batch child builds a separate session over its existing SQL
-item-attempt fence; it does not borrow the parent run's mutable authority.
+item-attempt fence; it does not borrow the parent run's mutable authority. The
+child's canonical request/evidence pair and initial `acquired` observation are
+atomically attached to that attempt after the provider call and a fresh fence
+sample, before the executor may start. Later bounded lifecycle observations are
+appended through the retained attempt/evidence/worker binding even after terminal
+publication; they cannot authorize another operation.
 
 Before every provider call the session:
 
@@ -95,8 +100,9 @@ enables production.
 ## Qualification and configuration
 
 For production durable admission, mount one canonical
-`deerflow.kubernetes-accepted-skill-qualification/v2` artifact read-only into the
-Gateway and configure all three fields:
+`deerflow.accepted-sandbox-qualification/v1` companion read-only into the
+Gateway and configure all three fields. It embeds and digest-binds the
+independently verifiable Kubernetes accepted-skill v2 evidence:
 
 ```yaml
 sandbox:
@@ -109,9 +115,16 @@ sandbox:
 ```
 
 The path and digest are an inseparable pair. Selection reads at most 64 KiB,
-requires canonical strict V2 JSON with `status: passed`, verifies the pinned byte
-digest and freshness, and compares the live Gateway, provisioner/verifier, and
-sandbox image digests with the artifact. Any mismatch returns a safe
+requires canonical strict companion JSON with `status: passed`, verifies the
+pinned byte digest and freshness, and compares its AIO capability-profile and
+portable topology-policy digests with a fresh authenticated provisioner sample.
+The sample must resolve the current namespace UID, ServiceAccount, and each
+bound PVC UID plus its `spec.volumeName`; it does not claim a PV UID. Those
+deployment-specific values are excluded from the portable policy digest because
+the qualification namespace is disposable. It records
+the non-atomic fencing race, subsequent refusal, stale-terminal refusal, and
+cleanup; the embedded v2 proof pins all image subjects. A standalone v2 artifact
+cannot unlock execution. Any mismatch returns a safe
 `sandbox_provider_unqualified` or `sandbox_image_unresolved` failure before
 model/tool work. Qualification artifacts are administrator-controlled deployment
 material, not API-writable configuration.
@@ -125,8 +138,9 @@ allowed by the worker. The harness runs a restricted non-root Pod, bounded work
 through `AcceptedSandboxSession`, deletes the authoritative provider Lease after
 both checks at a deterministic barrier, observes exactly one raced call for AIO's
 non-atomic profile, proves the next call is refused, and proves stale terminal
-success is rejected. Publishing values disable candidate mode and instead mount
-the independently retained passing artifact.
+success is rejected. Publishing disables candidate mode, mounts the companion,
+then requires one fresh accepted invocation through the restarted Gateway before
+the artifact is finalized.
 
 Exact-two remains rejected. Its enablement additionally needs recoverable
 protected resource lookup and live cross-worker atomic operation-fencing evidence;
@@ -136,7 +150,9 @@ projected Secret rotation is not linearizable revocation.
 
 `sandbox.lifecycle.v1` is a bounded, non-authoritative trace event linked to the
 accepted run/attempt and execution-evidence digest. Routine renewal success is
-coalesced. Its states are:
+coalesced. A durable batch attempt stores at most eight distinct observations;
+an overflow is rejected rather than truncating away acquisition or loss. Its
+states are:
 
 - `acquired`: a session was constructed from a validated tuple;
 - `authority_lost`: run or provider authority failed validation/renewal;
@@ -144,11 +160,14 @@ coalesced. Its states are:
 - `cleanup_pending`: release failed or was interrupted and cleanup ownership must reconcile;
 - `orphaned`: durable run reconciliation won the expired-owner CAS for persisted accepted evidence.
 
-The orphan event is written only after authoritative run takeover/terminalization.
+The orphan event is written only after authoritative run takeover/terminalization
+or a batch attempt's database-time lease-expiry transition.
 It diagnoses the abandoned resource; it does not authorize a replacement worker
-or cleanup. Event-store failure does not undo the terminal run CAS. Logs and the
-event carry safe provider kind, qualification scope, time, reason code, and
-evidence digest—not the raw resource reference.
+or cleanup. Run observations use the event store; batch-child observations remain
+on the existing append-only attempt row and are exposed through the same
+owner-scoped bounded lifecycle query. Observation failure does not undo the
+terminal CAS. Logs and observations carry safe provider kind, qualification
+scope, time, reason code, and evidence digest—not the raw resource reference.
 
 Recovery outcomes follow the existing authorities:
 

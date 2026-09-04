@@ -1015,10 +1015,17 @@ token, PVC, image, or networking failure blocks new admission while liveness rem
 Repository fake-Kubernetes and Helm-render tests cover every bound field and drift fence, but do
 not qualify live cross-node CNI/RWX execution. That claim remains absent until an artifact-bound
 opt-in Kubernetes qualification passes against the deployed image/chart/config/schema subjects.
-The live nonempty-skill gate is the separately versioned
-`deerflow.kubernetes-accepted-skill-qualification/v2` artifact with scope
-`durable_one_replica_rwx_verified_copy_v2_nonempty_skill`. The existing marked
-runner selects it only through `DEERFLOW_TEST_KUBERNETES_SCOPE` and then requires
+The live runner produces the independently verifiable
+`deerflow.kubernetes-accepted-skill-qualification/v2` proof selected by
+`DEERFLOW_TEST_KUBERNETES_SCOPE=durable_one_replica_rwx_verified_copy_v2_nonempty_skill`.
+Runtime enablement instead requires its canonical
+`deerflow.accepted-sandbox-qualification/v1` companion, scoped to
+`durable_one_replica_aio_accepted_sandbox_v1`; it binds the v2 bytes to the AIO
+capability profile, explicit race result, and portable topology-policy digest.
+Runtime selection independently requires a fresh provisioner sample with a
+valid current namespace UID and each PVC UID plus its bound PV name; it does
+not claim a PV UID, and disposable qualification IDs are not compared to
+another deployment. The marked runner requires
 exact Gateway, provisioner/verifier, and sandbox digests, an explicit RWX storage
 class, two Ready schedulable nodes, distinct admitted Gateway/sandbox nodes,
 deterministic nonempty bytes and allowed-tool metadata, a materialized verifier
@@ -1034,8 +1041,8 @@ image reference and digest to equal the provisioner subject while still reportin
 The lane also executes through the session facade, opens the exact
 post-validation/provider-call race, records AIO's one permitted raced call, and
 requires both post-loss refusal and stale-terminal refusal. On publication it
-turns candidate mode off, places the canonical passing bytes in a read-only
-Gateway ConfigMap mount, and pins their SHA-256 in `sandbox` configuration.
+turns candidate mode off, mounts and pins the companion, and proves one fresh
+post-upgrade accepted invocation. A standalone v2 proof cannot unlock runtime.
 The v1 pod recovery artifact remains readable and is not upgraded into this stronger claim.
 Both scopes remain skipped and unpassed by default; neither offline/fake coverage
 nor a declared reference qualifies live cross-node execution.

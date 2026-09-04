@@ -1720,10 +1720,103 @@ async def test_remote_materialization_failure_precedes_running_and_graph(
 
 
 @pytest.mark.asyncio
+async def test_lead_policy_denial_happens_before_provider_resolution(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.runtime.runs.worker import (
+        _materialize_accepted_skill_projection,
+    )
+    from deerflow.runtime.skill_projection import (
+        get_skill_projection_coordinator,
+    )
+    from deerflow.sandbox.exceptions import SandboxAuthorizationError
+    from deerflow.sandbox.sandbox_provider import (
+        AcceptedSkillSandboxBindingError,
+    )
+    from deerflow.subagents.batch_acceptance import (
+        PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
+    )
+
+    skill_file = _write_skill(tmp_path, body="Policy-denied material")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    material = revision.material
+    assert material is not None and material.skill_snapshot is not None
+    accepted = _accepted(revision)
+    runtime = SimpleNamespace(
+        context={
+            "thread_id": "thread-1",
+            "run_id": "run-policy-denied",
+            "app_config": AppConfig(sandbox=SandboxConfig(use="test")),
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
+            TENANT_REFERENCE_CONTEXT_KEY: _TEST_TENANT,
+            PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY: accepted,
+            "accepted_agent_revision_digest": revision.digest,
+        },
+    )
+    provider_resolutions = 0
+    claim_validations = 0
+
+    def resolve_provider():
+        nonlocal provider_resolutions
+        provider_resolutions += 1
+        return object()
+
+    async def deny(**_kwargs):
+        raise SandboxAuthorizationError("denied")
+
+    async def validate_claim(_claim):
+        nonlocal claim_validations
+        claim_validations += 1
+        return True
+
+    monkeypatch.setattr("deerflow.sandbox.get_sandbox_provider", resolve_provider)
+    monkeypatch.setattr(
+        "deerflow.authz.sandbox_authz.authorize_sandbox_execution_async",
+        deny,
+    )
+
+    try:
+        with pytest.raises(
+            AcceptedSkillSandboxBindingError,
+            match="accepted_skill_snapshot_materialization_failed",
+        ):
+            await _materialize_accepted_skill_projection(
+                runtime,
+                user_id="user-1",
+                record=SimpleNamespace(
+                    owner_worker_id="worker-pending",
+                    state_version=3,
+                    execution_takeover=False,
+                    execution_evidence_json=None,
+                    recovery_policy=None,
+                ),
+                claim_validator=validate_claim,
+            )
+    finally:
+        get_skill_projection_coordinator().release_unactivated_run(
+            user_id="user-1",
+            thread_id="thread-1",
+            run_id="run-policy-denied",
+        )
+        material.release_process_material()
+
+    assert provider_resolutions == 0
+    assert claim_validations == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cancel_after_acquire",
+    [False, True],
+    ids=["success", "cancelled-post-acquire-fence"],
+)
 async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
     monkeypatch,
     tmp_path: Path,
     snapshot_paths: Paths,
+    cancel_after_acquire: bool,
 ) -> None:
     from deerflow.community.aio_sandbox.aio_sandbox_provider import (
         AioSandboxProvider,
@@ -1752,6 +1845,9 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
         projection_digest="3" * 64,
     )
     accepted = _accepted(revision, tool_plane_revision=tool_plane.to_json())
+
+    fence_events: list[str] = []
+    sql_fence_held = False
 
     class QualifiedAioProvider(AioSandboxProvider):
         def __init__(self) -> None:
@@ -1795,6 +1891,8 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
             binding,
             execution_claim=None,
         ) -> str:
+            assert sql_fence_held is False
+            fence_events.append("provider_acquire")
             self.acquired_scope = (thread_id, user_id)
             self.execution_claim = execution_claim
             wire = {
@@ -1878,22 +1976,65 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
         },
     )
 
-    result = await _materialize_accepted_skill_projection(
-        runtime,
-        user_id="user-1",
-        record=SimpleNamespace(
-            owner_worker_id="worker-pending",
-            state_version=3,
-            execution_takeover=False,
-            execution_evidence_json=None,
-            recovery_policy=None,
-        ),
-    )
+    claim_validations = 0
+    cancellation = asyncio.CancelledError("cancelled after provider acquire")
+
+    async def validate_claim(_claim) -> bool:
+        nonlocal claim_validations
+        nonlocal sql_fence_held
+        claim_validations += 1
+        assert sql_fence_held is False
+        sql_fence_held = True
+        fence_events.append("sql_fence_enter")
+        await asyncio.sleep(0)
+        fence_events.append("sql_fence_exit")
+        sql_fence_held = False
+        if cancel_after_acquire and claim_validations == 2:
+            raise cancellation
+        return True
+
+    result = None
     try:
+        if cancel_after_acquire:
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await _materialize_accepted_skill_projection(
+                    runtime,
+                    user_id="user-1",
+                    record=SimpleNamespace(
+                        owner_worker_id="worker-pending",
+                        state_version=3,
+                        execution_takeover=False,
+                        execution_evidence_json=None,
+                        recovery_policy=None,
+                    ),
+                    claim_validator=validate_claim,
+                )
+            assert caught.value is cancellation
+            assert provider.destroyed == ["sandbox-neutral"]
+            return
+        result = await _materialize_accepted_skill_projection(
+            runtime,
+            user_id="user-1",
+            record=SimpleNamespace(
+                owner_worker_id="worker-pending",
+                state_version=3,
+                execution_takeover=False,
+                execution_evidence_json=None,
+                recovery_policy=None,
+            ),
+            claim_validator=validate_claim,
+        )
         assert provider.acquired_scope == ("thread-1", "user-1")
         assert provider.execution_claim is not None
         assert provider.execution_claim.owner_worker_id == "worker-pending"
         assert provider.execution_claim.state_version == 3
+        assert fence_events == [
+            "sql_fence_enter",
+            "sql_fence_exit",
+            "provider_acquire",
+            "sql_fence_enter",
+            "sql_fence_exit",
+        ]
         assert isinstance(result.request, AcceptedMaterialRequestV2)
         assert isinstance(result.evidence, AcceptedExecutionEvidenceV2)
         assert result.evidence.accepted_invocation_digest == (accepted.runtime_identity_digest)
@@ -1905,7 +2046,8 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
         assert result.evidence.attempt_id != provider.evidence.attempt_id
         assert await result.validate()
     finally:
-        await result.release()
+        if result is not None:
+            await result.release()
         token = runtime.context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
         if token is not None:
             coordinator = get_skill_projection_coordinator()
@@ -1918,10 +2060,34 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "cancel_lifecycle_publication",
+        "lose_authority_before_terminal_commit",
+        "cancel_terminal_validation",
+    ),
+    [
+        (None, False, False),
+        ("pre_close", False, False),
+        ("post_close", False, False),
+        (None, True, False),
+        (None, False, True),
+    ],
+    ids=[
+        "normal",
+        "pre-close-publication-cancelled",
+        "post-close-publication-cancelled",
+        "late-authority-loss",
+        "terminal-validation-cancelled",
+    ],
+)
 async def test_durable_worker_installs_running_claim_sandbox_session(
     monkeypatch,
     tmp_path: Path,
     snapshot_paths: Paths,
+    cancel_lifecycle_publication: str | None,
+    lose_authority_before_terminal_commit: bool,
+    cancel_terminal_validation: bool,
 ) -> None:
     skill_file = _write_skill(tmp_path, body="Session-gated material")
     revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
@@ -1982,6 +2148,9 @@ async def test_durable_worker_installs_running_claim_sandbox_session(
         read_only_proof_digest="7" * 64,
         qualification_scope="contract_test_only",
     )
+    terminal_validation_interrupt = asyncio.CancelledError(
+        "terminal validation interrupted",
+    )
 
     class RawSandbox(Sandbox):
         persistent_shell_sessions = False
@@ -2037,7 +2206,9 @@ async def test_durable_worker_installs_running_claim_sandbox_session(
         async def validate(self, checked_lease, checked_evidence):
             self.validated += 1
             self.validated_tuples.append((checked_lease, checked_evidence))
-            return True
+            if cancel_terminal_validation and record.status is RunStatus.success:
+                raise terminal_validation_interrupt
+            return not (lose_authority_before_terminal_commit and record.status is RunStatus.success)
 
         async def renew(self, checked_lease):
             return checked_lease
@@ -2085,26 +2256,92 @@ async def test_durable_worker_installs_running_claim_sandbox_session(
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
+    lifecycle_publication_started = asyncio.Event()
+    lifecycle_publication_interrupt: BaseException | None = None
+    completion_observer_entered = asyncio.Event()
+
+    async def blocking_completion_observer(_record) -> None:
+        completion_observer_entered.set()
+        await asyncio.Event().wait()
+
+    if cancel_lifecycle_publication is not None:
+        from deerflow.runtime.runs import worker as worker_module
+        from deerflow.sandbox.accepted_material import (
+            AcceptedSandboxLifecycleKind,
+        )
+
+        publish_lifecycle = worker_module._publish_accepted_sandbox_lifecycle
+
+        async def block_lifecycle_publication() -> None:
+            nonlocal lifecycle_publication_interrupt
+            lifecycle_publication_started.set()
+            try:
+                await asyncio.Event().wait()
+            except BaseException as exc:
+                lifecycle_publication_interrupt = exc
+                raise
+
+        async def interruptible_lifecycle_publication(
+            event_appender,
+            session,
+            *,
+            start_index,
+        ):
+            observations = session.lifecycle_observations
+            before_close = start_index == len(observations)
+            after_close = any(observation.kind is AcceptedSandboxLifecycleKind.RELEASED for observation in observations[start_index:])
+            if cancel_lifecycle_publication == "pre_close" and before_close:
+                await block_lifecycle_publication()
+            if cancel_lifecycle_publication == "post_close" and after_close:
+                await block_lifecycle_publication()
+            return await publish_lifecycle(
+                event_appender,
+                session,
+                start_index=start_index,
+            )
+
+        monkeypatch.setattr(
+            worker_module,
+            "_publish_accepted_sandbox_lifecycle",
+            interruptible_lifecycle_publication,
+        )
     event_store = MemoryRunEventStore(
         run_store=store,
         tenant=_TEST_TENANT,
     )
-    await run_agent(
-        bridge,
-        manager,
-        record,
-        ctx=RunContext(
-            checkpointer=None,
-            event_store=event_store,
-            tenant=_TEST_TENANT,
-        ),
-        agent_factory=lambda **_kwargs: _assembled_agent_for_revision(
-            revision,
-            Agent(),
-        ),
-        graph_input={},
-        config={},
+    run_task = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=RunContext(
+                checkpointer=None,
+                event_store=event_store,
+                tenant=_TEST_TENANT,
+                on_run_completed=(blocking_completion_observer if cancel_lifecycle_publication == "pre_close" else None),
+            ),
+            agent_factory=lambda **_kwargs: _assembled_agent_for_revision(
+                revision,
+                Agent(),
+            ),
+            graph_input={},
+            config={},
+        )
     )
+    if cancel_lifecycle_publication is not None:
+        await asyncio.wait_for(lifecycle_publication_started.wait(), timeout=5)
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError) as deferred_interrupt:
+            await run_task
+        assert isinstance(lifecycle_publication_interrupt, asyncio.CancelledError)
+        assert isinstance(deferred_interrupt.value, asyncio.CancelledError)
+        if cancel_lifecycle_publication == "pre_close":
+            assert not completion_observer_entered.is_set()
+    elif cancel_terminal_validation:
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+    else:
+        await run_task
 
     assert record.status is RunStatus.success, record.error
     assert len(observed_facades) == 1
@@ -2115,6 +2352,16 @@ async def test_durable_worker_installs_running_claim_sandbox_session(
     assert materializer.validated >= 2
     assert all(pair == (lease, evidence) for pair in materializer.validated_tuples)
     assert materializer.released == 1
+    persisted = await store.get(record.run_id)
+    if lose_authority_before_terminal_commit or cancel_terminal_validation:
+        assert record.ownership_lost is True
+        assert persisted["status"] == RunStatus.running.value
+        bridge.publish_end.assert_not_awaited()
+    else:
+        assert record.ownership_lost is False
+        assert persisted["status"] == RunStatus.success.value
+        bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_called_once_with(record.run_id, delay=60)
     lifecycle_events = await event_store.list_events(
         record.thread_id,
         record.run_id,

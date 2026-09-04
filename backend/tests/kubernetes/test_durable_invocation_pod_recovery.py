@@ -16,6 +16,7 @@ from support.kubernetes_qualification import (
 from deerflow.deployment.topology import MULTI_GATEWAY_QUALIFICATION_SCOPE
 from deerflow.qualification_evidence import (
     ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+    AcceptedSandboxQualificationArtifactV1,
     KubernetesAcceptedSkillQualificationEvidenceV2,
 )
 
@@ -35,12 +36,14 @@ def test_real_one_replica_pod_recovery_contract() -> None:
         evidence_v2 = KubernetesAcceptedSkillQualificationRunnerV2(
             config_v2,
         ).qualify()
-        assert evidence_v2.gateway_image_digest == config_v2.image_digest
-        assert evidence_v2.environment.namespace == config_v2.namespace
-        assert evidence_v2.environment.gateway_node != (evidence_v2.environment.sandbox_node)
-        assert evidence_v2.material.file_count > 0
-        assert tuple(item.name for item in evidence_v2.scenarios) == (KubernetesAcceptedSkillQualificationEvidenceV2.REQUIRED_SCENARIOS)
-        assert all(item.status == "passed" for item in evidence_v2.scenarios)
+        assert isinstance(evidence_v2, AcceptedSandboxQualificationArtifactV1)
+        subordinate = evidence_v2.accepted_skill_evidence
+        assert subordinate.gateway_image_digest == config_v2.image_digest
+        assert subordinate.environment.namespace == config_v2.namespace
+        assert subordinate.environment.gateway_node != (subordinate.environment.sandbox_node)
+        assert subordinate.material.file_count > 0
+        assert tuple(item.name for item in subordinate.scenarios) == (KubernetesAcceptedSkillQualificationEvidenceV2.REQUIRED_SCENARIOS)
+        assert all(item.status == "passed" for item in subordinate.scenarios)
         return
 
     config = KubernetesQualificationConfig.from_environment(os.environ)

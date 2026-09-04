@@ -213,6 +213,25 @@ def _session(*, run_current: bool = True, material_current: bool = True):
     return session, sandbox, materializer, authority_calls
 
 
+def test_session_rejects_a_sandbox_from_a_different_provider_resource() -> None:
+    lease, evidence, claim = _session_tuple()
+    sandbox = RecordingSandbox()
+    sandbox._id = "different-provider-resource"
+
+    with pytest.raises(
+        ValueError,
+        match="accepted sandbox session tuple is inconsistent",
+    ):
+        AcceptedSandboxSession(
+            sandbox=sandbox,
+            materializer=RecordingMaterializer(),
+            lease=lease,
+            evidence=evidence,
+            execution_claim=claim,
+            run_fence_validator=lambda _claim: asyncio.sleep(0, result=True),
+        )
+
+
 @pytest.mark.asyncio
 async def test_session_delegates_only_after_both_authorities_validate() -> None:
     session, sandbox, materializer, authority_calls = _session()
@@ -268,6 +287,25 @@ async def test_materializer_validation_loss_prevents_provider_delegation() -> No
     assert len(authority_calls) == 1
     assert materializer.validate_calls == 1
     assert sandbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_authority_loss_lifecycle_links_the_active_tool_receipt() -> None:
+    lease, evidence, claim = _session_tuple()
+    session = AcceptedSandboxSession(
+        sandbox=RecordingSandbox(),
+        materializer=RecordingMaterializer(valid=False),
+        lease=lease,
+        evidence=evidence,
+        execution_claim=claim,
+        run_fence_validator=lambda _claim: asyncio.sleep(0, result=True),
+        tool_receipt_ref_resolver=lambda: "tr_" + ("a" * 64),
+    )
+
+    with pytest.raises(AcceptedSandboxAuthorityLostError):
+        await session.execute(AcceptedSandboxOperationV1.read_file("/safe"))
+
+    assert session.lifecycle_observations[-1].tool_receipt_ref == ("tr_" + ("a" * 64))
 
 
 @pytest.mark.asyncio
@@ -330,6 +368,41 @@ async def test_cancellation_during_validation_permanently_invalidates_session() 
 
 
 @pytest.mark.asyncio
+async def test_cancellation_during_provider_work_permanently_invalidates_session() -> None:
+    """Cancellation cannot stop a thread, but it must revoke every later call."""
+
+    session, sandbox, materializer, _authority_calls = _session()
+    operation_started = threading.Event()
+    permit_operation = threading.Event()
+
+    def blocked_command(command, env=None, timeout=None):
+        del command, env, timeout
+        operation_started.set()
+        assert permit_operation.wait(timeout=2)
+        return "completed"
+
+    sandbox.execute_command = blocked_command
+    operation = asyncio.create_task(
+        session.execute(AcceptedSandboxOperationV1.execute_command("long")),
+    )
+    assert await asyncio.to_thread(operation_started.wait, 2)
+    operation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+    with pytest.raises(
+        AcceptedSandboxAuthorityLostError,
+        match="accepted_sandbox_session_not_open",
+    ):
+        await session.execute(AcceptedSandboxOperationV1.read_file("/later"))
+
+    assert session.lifecycle_observations[-1].reason_code == ("accepted_sandbox_session_cancelled")
+    permit_operation.set()
+    await session.close()
+    assert materializer.release_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_close_invalidates_before_awaiting_provider_release() -> None:
     session, sandbox, materializer, _authority_calls = _session()
     release_started = asyncio.Event()
@@ -354,6 +427,62 @@ async def test_close_invalidates_before_awaiting_provider_release() -> None:
     assert materializer.release_calls == 1
     assert sandbox.calls == []
     assert session.lifecycle_observations[-1].kind is (AcceptedSandboxLifecycleKind.RELEASED)
+
+
+@pytest.mark.asyncio
+async def test_close_propagates_provider_cleanup_failure() -> None:
+    session, _sandbox, materializer, _authority_calls = _session()
+
+    async def fail_release(lease):
+        del lease
+        materializer.release_calls += 1
+        raise RuntimeError("provider cleanup failed")
+
+    materializer.release = fail_release
+
+    with pytest.raises(
+        AcceptedMaterialError,
+        match="accepted_sandbox_release_failed",
+    ):
+        await session.close()
+
+    assert materializer.release_calls == 1
+    assert session.lifecycle_observations[-1].kind is (AcceptedSandboxLifecycleKind.CLEANUP_PENDING)
+    assert session.lifecycle_observations[-1].reason_code == ("accepted_sandbox_release_failed")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_records_cleanup_pending_without_false_release() -> None:
+    session, sandbox, materializer, _authority_calls = _session()
+    operation_started = threading.Event()
+    permit_operation = threading.Event()
+
+    def blocked_command(command, env=None, timeout=None):
+        del command, env, timeout
+        operation_started.set()
+        assert permit_operation.wait(timeout=2)
+        return "completed"
+
+    sandbox.execute_command = blocked_command
+    operation = asyncio.create_task(
+        session.execute(AcceptedSandboxOperationV1.execute_command("long")),
+    )
+    assert await asyncio.to_thread(operation_started.wait, 2)
+
+    close_task = asyncio.create_task(session.close())
+    await asyncio.sleep(0)
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert materializer.release_calls == 0
+    assert session.lifecycle_observations[-1].kind is (AcceptedSandboxLifecycleKind.CLEANUP_PENDING)
+    assert session.lifecycle_observations[-1].reason_code == ("accepted_sandbox_release_failed")
+
+    permit_operation.set()
+    assert await operation == "completed"
+    await session.close()
+    assert materializer.release_calls == 0
 
 
 @pytest.mark.asyncio
@@ -612,6 +741,35 @@ async def test_tool_output_externalization_resolves_the_gated_facade(
     )
 
     assert _resolve_sandbox(SimpleNamespace(runtime=runtime)) is bridge.sandbox
+
+
+@pytest.mark.asyncio
+async def test_tool_output_externalization_denies_uninitialized_session_state(
+    monkeypatch,
+) -> None:
+    from deerflow.agents.middlewares.tool_output_budget_middleware import (
+        _resolve_sandbox,
+    )
+
+    session, raw_sandbox, _materializer, _authority_calls = _session()
+    context: dict[str, object] = {}
+    install_accepted_sandbox_session(context, session)
+    provider_calls = 0
+
+    def forbidden_provider():
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("a denied call must not resolve a provider")
+
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.tool_output_budget_middleware.get_sandbox_provider",
+        forbidden_provider,
+    )
+    runtime = SimpleNamespace(context=context, state={})
+
+    assert _resolve_sandbox(SimpleNamespace(runtime=runtime)) is None
+    assert provider_calls == 0
+    assert raw_sandbox.calls == []
 
 
 @pytest.mark.asyncio

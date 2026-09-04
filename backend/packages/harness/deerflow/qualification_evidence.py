@@ -31,6 +31,10 @@ QUALIFICATION_SCOPE = "durable_one_replica_pod_recovery"
 QUALIFICATION_VERIFICATION_API_VERSION = "deerflow.qualification-verification/v1"
 ACCEPTED_SKILL_QUALIFICATION_EVIDENCE_API_VERSION_V2 = "deerflow.kubernetes-accepted-skill-qualification/v2"
 ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2 = "durable_one_replica_rwx_verified_copy_v2_nonempty_skill"
+ACCEPTED_SANDBOX_QUALIFICATION_ARTIFACT_API_VERSION_V1 = "deerflow.accepted-sandbox-qualification/v1"
+ACCEPTED_SANDBOX_QUALIFICATION_SCOPE_V1 = "durable_one_replica_aio_accepted_sandbox_v1"
+ACCEPTED_SANDBOX_QUALIFICATION_KIND = "accepted-sandbox.qualification.evidence"
+ACCEPTED_SANDBOX_OPERATION_FENCING_MODE_V1 = "preflight_revalidation_non_atomic"
 ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2 = (
     "nonempty_material_execution",
     "token_review_and_lease_renewal",
@@ -42,6 +46,7 @@ MAX_QUALIFICATION_EVIDENCE_BYTES = 64 * 1024
 
 _SAFE_NAMESPACE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?\Z")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_RAW_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
 _RFC3339 = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
@@ -645,6 +650,455 @@ class KubernetesAcceptedSkillQualificationEvidenceV2:
 
 
 @dataclass(frozen=True)
+class AcceptedSandboxPersistentVolumeTopologyV1:
+    """One live PVC identity and its bound PV name."""
+
+    role: Literal["skills", "userdata"]
+    uid: str
+    volume_name: str
+    storage_class: str
+    access_modes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.role not in {"skills", "userdata"}:
+            raise ValueError("accepted-sandbox PVC role is invalid")
+        for field_name in ("uid", "volume_name", "storage_class"):
+            _bounded_safe(
+                getattr(self, field_name),
+                name=f"accepted-sandbox PVC {field_name}",
+                limit=256,
+            )
+        modes = tuple(self.access_modes)
+        if not modes or len(modes) > 8 or modes != tuple(sorted(set(modes))) or "ReadWriteMany" not in modes:
+            raise ValueError("accepted-sandbox PVC access modes are invalid")
+        for mode in modes:
+            _bounded_safe(
+                mode,
+                name="accepted-sandbox PVC access mode",
+                limit=64,
+            )
+        object.__setattr__(self, "access_modes", modes)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "role": self.role,
+            "uid": self.uid,
+            "volume_name": self.volume_name,
+            "storage_class": self.storage_class,
+            "access_modes": list(self.access_modes),
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: object,
+    ) -> AcceptedSandboxPersistentVolumeTopologyV1:
+        fields = {
+            "role",
+            "uid",
+            "volume_name",
+            "storage_class",
+            "access_modes",
+        }
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError("accepted-sandbox PVC topology fields are invalid")
+        modes = value["access_modes"]
+        if not isinstance(modes, list):
+            raise ValueError("accepted-sandbox PVC access modes are invalid")
+        try:
+            return cls(
+                role=value["role"],
+                uid=value["uid"],
+                volume_name=value["volume_name"],
+                storage_class=value["storage_class"],
+                access_modes=tuple(modes),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "accepted-sandbox PVC topology values are invalid",
+            ) from exc
+
+
+@dataclass(frozen=True)
+class AcceptedSandboxRuntimeTopologyV1:
+    """Live provisioner topology independently sampled at qualification use."""
+
+    provider_kind: Literal["aio_kubernetes"]
+    profile: Literal["rwx_verified_copy_v2"]
+    sandbox_image_digest: str
+    verifier_image_digest: str
+    namespace_uid: str
+    pod_security_enforce: str | None
+    pod_security_warn: str | None
+    pod_security_audit: str | None
+    runtime_class: str | None
+    gateway_namespace: str
+    gateway_service_account: str
+    token_review_audience: str
+    accepted_attempt_lease_seconds: int
+    accepted_attempt_reconcile_interval_seconds: int
+    accepted_attempt_reconcile_limit: int
+    volumes: tuple[AcceptedSandboxPersistentVolumeTopologyV1, ...]
+
+    def __post_init__(self) -> None:
+        if self.provider_kind != "aio_kubernetes":
+            raise ValueError("accepted-sandbox provider kind is invalid")
+        if self.profile != "rwx_verified_copy_v2":
+            raise ValueError("accepted-sandbox topology profile is invalid")
+        for field_name in ("sandbox_image_digest", "verifier_image_digest"):
+            if _RAW_SHA256.fullmatch(getattr(self, field_name)) is None:
+                raise ValueError(f"accepted-sandbox {field_name} is invalid")
+        _bounded_safe(
+            self.namespace_uid,
+            name="accepted-sandbox namespace UID",
+            limit=128,
+        )
+        for field_name in (
+            "gateway_namespace",
+            "gateway_service_account",
+            "token_review_audience",
+        ):
+            _bounded_safe(
+                getattr(self, field_name),
+                name=f"accepted-sandbox {field_name}",
+                limit=256,
+            )
+        for field_name in (
+            "pod_security_enforce",
+            "pod_security_warn",
+            "pod_security_audit",
+            "runtime_class",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                _bounded_safe(
+                    value,
+                    name=f"accepted-sandbox {field_name}",
+                    limit=128,
+                )
+        bounded_integers = (
+            (self.accepted_attempt_lease_seconds, 30, 900),
+            (self.accepted_attempt_reconcile_interval_seconds, 5, 300),
+            (self.accepted_attempt_reconcile_limit, 1, 500),
+        )
+        if any(type(value) is not int or not minimum <= value <= maximum for value, minimum, maximum in bounded_integers):
+            raise ValueError("accepted-sandbox topology timing is invalid")
+        if self.accepted_attempt_lease_seconds < (2 * self.accepted_attempt_reconcile_interval_seconds):
+            raise ValueError("accepted-sandbox topology lease timing is unsafe")
+        volumes = tuple(self.volumes)
+        if tuple(item.role for item in volumes) != ("skills", "userdata"):
+            raise ValueError(
+                "accepted-sandbox topology volume coverage is incomplete",
+            )
+        object.__setattr__(self, "volumes", volumes)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "provider_kind": self.provider_kind,
+            "profile": self.profile,
+            "sandbox_image_digest": self.sandbox_image_digest,
+            "verifier_image_digest": self.verifier_image_digest,
+            "namespace_uid": self.namespace_uid,
+            "pod_security_enforce": self.pod_security_enforce,
+            "pod_security_warn": self.pod_security_warn,
+            "pod_security_audit": self.pod_security_audit,
+            "runtime_class": self.runtime_class,
+            "gateway_namespace": self.gateway_namespace,
+            "gateway_service_account": self.gateway_service_account,
+            "token_review_audience": self.token_review_audience,
+            "accepted_attempt_lease_seconds": (self.accepted_attempt_lease_seconds),
+            "accepted_attempt_reconcile_interval_seconds": (self.accepted_attempt_reconcile_interval_seconds),
+            "accepted_attempt_reconcile_limit": (self.accepted_attempt_reconcile_limit),
+            "volumes": [item.to_dict() for item in self.volumes],
+        }
+
+    @property
+    def digest(self) -> str:
+        """Digest the live namespace/PVC identities, PV bindings, and policy."""
+
+        return hashlib.sha256(_canonical_json_bytes(self.to_dict())).hexdigest()
+
+    def qualification_policy_dict(self) -> dict[str, object]:
+        """Return the portable policy proved by the live qualification.
+
+        Namespace, ServiceAccount, PVC UIDs, and bound PV names are
+        deliberately absent. They are deployment-instance facts: the
+        provisioner must still resolve and validate them on every fresh
+        sample, but a qualification artifact cannot bind identities belonging
+        to the disposable namespace that produced it.
+        """
+
+        return {
+            "version": 1,
+            "domain": "accepted_sandbox_topology_policy",
+            "provider_kind": self.provider_kind,
+            "profile": self.profile,
+            "sandbox_image_digest": self.sandbox_image_digest,
+            "verifier_image_digest": self.verifier_image_digest,
+            "pod_security_enforce": self.pod_security_enforce,
+            "pod_security_warn": self.pod_security_warn,
+            "pod_security_audit": self.pod_security_audit,
+            "runtime_class": self.runtime_class,
+            "token_review_audience": self.token_review_audience,
+            "accepted_attempt_lease_seconds": (self.accepted_attempt_lease_seconds),
+            "accepted_attempt_reconcile_interval_seconds": (self.accepted_attempt_reconcile_interval_seconds),
+            "accepted_attempt_reconcile_limit": (self.accepted_attempt_reconcile_limit),
+            "volumes": [
+                {
+                    "role": volume.role,
+                    "storage_class": volume.storage_class,
+                    "access_modes": list(volume.access_modes),
+                }
+                for volume in self.volumes
+            ],
+        }
+
+    @property
+    def qualification_policy_digest(self) -> str:
+        """Digest stable topology policy, excluding ephemeral object IDs."""
+
+        return hashlib.sha256(
+            _canonical_json_bytes(self.qualification_policy_dict()),
+        ).hexdigest()
+
+    @classmethod
+    def from_dict(cls, value: object) -> AcceptedSandboxRuntimeTopologyV1:
+        fields = {
+            "version",
+            "provider_kind",
+            "profile",
+            "sandbox_image_digest",
+            "verifier_image_digest",
+            "namespace_uid",
+            "pod_security_enforce",
+            "pod_security_warn",
+            "pod_security_audit",
+            "runtime_class",
+            "gateway_namespace",
+            "gateway_service_account",
+            "token_review_audience",
+            "accepted_attempt_lease_seconds",
+            "accepted_attempt_reconcile_interval_seconds",
+            "accepted_attempt_reconcile_limit",
+            "volumes",
+        }
+        if not isinstance(value, dict) or set(value) != fields or value["version"] != 1:
+            raise ValueError("accepted-sandbox topology fields are invalid")
+        volumes = value["volumes"]
+        if not isinstance(volumes, list) or len(volumes) > 8:
+            raise ValueError("accepted-sandbox topology volumes are invalid")
+        try:
+            return cls(
+                provider_kind=value["provider_kind"],
+                profile=value["profile"],
+                sandbox_image_digest=value["sandbox_image_digest"],
+                verifier_image_digest=value["verifier_image_digest"],
+                namespace_uid=value["namespace_uid"],
+                pod_security_enforce=value["pod_security_enforce"],
+                pod_security_warn=value["pod_security_warn"],
+                pod_security_audit=value["pod_security_audit"],
+                runtime_class=value["runtime_class"],
+                gateway_namespace=value["gateway_namespace"],
+                gateway_service_account=value["gateway_service_account"],
+                token_review_audience=value["token_review_audience"],
+                accepted_attempt_lease_seconds=(value["accepted_attempt_lease_seconds"]),
+                accepted_attempt_reconcile_interval_seconds=(value["accepted_attempt_reconcile_interval_seconds"]),
+                accepted_attempt_reconcile_limit=(value["accepted_attempt_reconcile_limit"]),
+                volumes=tuple(AcceptedSandboxPersistentVolumeTopologyV1.from_dict(item) for item in volumes),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("accepted-sandbox topology values are invalid") from exc
+
+
+@dataclass(frozen=True)
+class AcceptedSandboxRaceEvidenceV1:
+    """Explicit outcome of the OPEN-to-LOST accepted-session race."""
+
+    session_validation_passes: int
+    raced_provider_calls: int
+    post_loss_rejections: int
+    stale_terminal_rejected: bool
+    cleanup_outcome: Literal["deleted", "quarantined"]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.session_validation_passes) is not int
+            or self.session_validation_passes != 1
+            or type(self.raced_provider_calls) is not int
+            or self.raced_provider_calls != 1
+            or type(self.post_loss_rejections) is not int
+            or self.post_loss_rejections != 1
+            or type(self.stale_terminal_rejected) is not bool
+            or not self.stale_terminal_rejected
+            or self.cleanup_outcome not in {"deleted", "quarantined"}
+        ):
+            raise ValueError("accepted-sandbox race evidence is incomplete")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "session_validation_passes": self.session_validation_passes,
+            "raced_provider_calls": self.raced_provider_calls,
+            "post_loss_rejections": self.post_loss_rejections,
+            "stale_terminal_rejected": self.stale_terminal_rejected,
+            "cleanup_outcome": self.cleanup_outcome,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> AcceptedSandboxRaceEvidenceV1:
+        fields = {
+            "session_validation_passes",
+            "raced_provider_calls",
+            "post_loss_rejections",
+            "stale_terminal_rejected",
+            "cleanup_outcome",
+        }
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError("accepted-sandbox race evidence fields are invalid")
+        try:
+            return cls(**value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("accepted-sandbox race evidence values are invalid") from exc
+
+
+@dataclass(frozen=True)
+class AcceptedSandboxQualificationArtifactV1:
+    """Runtime-enabling proof binding live v2 evidence to the shipped seam."""
+
+    API_VERSION: ClassVar[str] = ACCEPTED_SANDBOX_QUALIFICATION_ARTIFACT_API_VERSION_V1
+    SCOPE: ClassVar[str] = ACCEPTED_SANDBOX_QUALIFICATION_SCOPE_V1
+
+    qualification_id: str
+    accepted_skill_evidence: KubernetesAcceptedSkillQualificationEvidenceV2
+    accepted_skill_evidence_digest: str
+    provider_kind: Literal["aio_kubernetes"]
+    capability_profile_version: Literal[1]
+    capability_profile_digest: str
+    operation_fencing_mode: Literal["preflight_revalidation_non_atomic"]
+    topology_policy_digest: str
+    race: AcceptedSandboxRaceEvidenceV1
+    completed_at: datetime
+
+    def __post_init__(self) -> None:
+        if _SAFE_ID.fullmatch(self.qualification_id) is None:
+            raise ValueError("accepted-sandbox qualification_id is invalid")
+        if not isinstance(
+            self.accepted_skill_evidence,
+            KubernetesAcceptedSkillQualificationEvidenceV2,
+        ):
+            raise TypeError("accepted-skill evidence is invalid")
+        expected_subordinate_digest = qualification_evidence_digest(
+            self.accepted_skill_evidence.canonical_bytes(),
+        )
+        if self.accepted_skill_evidence_digest != expected_subordinate_digest:
+            raise ValueError("accepted-skill evidence digest is invalid")
+        if self.qualification_id != self.accepted_skill_evidence.qualification_id:
+            raise ValueError("accepted-sandbox qualification identity is inconsistent")
+        if self.provider_kind != "aio_kubernetes":
+            raise ValueError("accepted-sandbox provider kind is invalid")
+        if type(self.capability_profile_version) is not int or self.capability_profile_version != 1:
+            raise ValueError("accepted-sandbox capability profile version is invalid")
+        if _RAW_SHA256.fullmatch(self.capability_profile_digest) is None:
+            raise ValueError("accepted-sandbox capability profile digest is invalid")
+        if self.operation_fencing_mode != ACCEPTED_SANDBOX_OPERATION_FENCING_MODE_V1:
+            raise ValueError("accepted-sandbox operation fencing mode is invalid")
+        if _RAW_SHA256.fullmatch(self.topology_policy_digest) is None:
+            raise ValueError("accepted-sandbox topology policy digest is invalid")
+        if not isinstance(self.race, AcceptedSandboxRaceEvidenceV1):
+            raise TypeError("accepted-sandbox race evidence is invalid")
+        if self.completed_at != self.accepted_skill_evidence.completed_at:
+            raise ValueError("accepted-sandbox completion time is inconsistent")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "api_version": self.API_VERSION,
+            "kind": ACCEPTED_SANDBOX_QUALIFICATION_KIND,
+            "status": "passed",
+            "scope": self.SCOPE,
+            "qualification_id": self.qualification_id,
+            "accepted_skill_evidence": self.accepted_skill_evidence.to_dict(),
+            "accepted_skill_evidence_digest": self.accepted_skill_evidence_digest,
+            "provider_kind": self.provider_kind,
+            "capability_profile": {
+                "version": self.capability_profile_version,
+                "digest": self.capability_profile_digest,
+            },
+            "operation_fencing_mode": self.operation_fencing_mode,
+            "topology_policy_digest": self.topology_policy_digest,
+            "race": self.race.to_dict(),
+            "completed_at": self.completed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        }
+
+    def canonical_bytes(self) -> bytes:
+        payload = _canonical_json_bytes(self.to_dict())
+        if len(payload) > MAX_QUALIFICATION_EVIDENCE_BYTES:
+            raise ValueError("qualification evidence exceeds 64 KiB")
+        return payload
+
+    @classmethod
+    def from_dict(cls, value: object) -> AcceptedSandboxQualificationArtifactV1:
+        fields = {
+            "api_version",
+            "kind",
+            "status",
+            "scope",
+            "qualification_id",
+            "accepted_skill_evidence",
+            "accepted_skill_evidence_digest",
+            "provider_kind",
+            "capability_profile",
+            "operation_fencing_mode",
+            "topology_policy_digest",
+            "race",
+            "completed_at",
+        }
+        if not isinstance(value, dict) or set(value) != fields or value["api_version"] != cls.API_VERSION or value["kind"] != ACCEPTED_SANDBOX_QUALIFICATION_KIND or value["status"] != "passed" or value["scope"] != cls.SCOPE:
+            raise ValueError("accepted-sandbox qualification fields are invalid")
+        profile = value["capability_profile"]
+        if not isinstance(profile, dict) or set(profile) != {"version", "digest"}:
+            raise ValueError("accepted-sandbox capability profile fields are invalid")
+        completed_at_raw = value["completed_at"]
+        if not isinstance(completed_at_raw, str) or len(completed_at_raw) > 64 or _RFC3339.fullmatch(completed_at_raw) is None:
+            raise ValueError("completed_at must be a bounded RFC3339 timestamp")
+        try:
+            return cls(
+                qualification_id=value["qualification_id"],
+                accepted_skill_evidence=(
+                    KubernetesAcceptedSkillQualificationEvidenceV2.from_dict(
+                        value["accepted_skill_evidence"],
+                    )
+                ),
+                accepted_skill_evidence_digest=value["accepted_skill_evidence_digest"],
+                provider_kind=value["provider_kind"],
+                capability_profile_version=profile["version"],
+                capability_profile_digest=profile["digest"],
+                operation_fencing_mode=value["operation_fencing_mode"],
+                topology_policy_digest=value["topology_policy_digest"],
+                race=AcceptedSandboxRaceEvidenceV1.from_dict(value["race"]),
+                completed_at=datetime.fromisoformat(
+                    completed_at_raw.replace("Z", "+00:00"),
+                ),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "accepted-sandbox qualification values are invalid",
+            ) from exc
+
+    @classmethod
+    def from_bytes(cls, payload: bytes) -> AcceptedSandboxQualificationArtifactV1:
+        value = _parse_canonical_qualification_json(payload)
+        evidence = cls.from_dict(value)
+        if payload != evidence.canonical_bytes():
+            raise ValueError(
+                "qualification evidence is not canonical accepted-sandbox v1 JSON",
+            )
+        return evidence
+
+    def write(self, path: Path) -> None:
+        write_qualification_evidence(path, self.canonical_bytes())
+
+
+@dataclass(frozen=True)
 class KubernetesQualificationEvidence:
     """Canonical v1 proof for one exact image/chart/configuration run."""
 
@@ -1102,9 +1556,17 @@ def verify_qualification_evidence(
 
 
 __all__ = [
+    "ACCEPTED_SANDBOX_OPERATION_FENCING_MODE_V1",
+    "ACCEPTED_SANDBOX_QUALIFICATION_ARTIFACT_API_VERSION_V1",
+    "ACCEPTED_SANDBOX_QUALIFICATION_KIND",
+    "ACCEPTED_SANDBOX_QUALIFICATION_SCOPE_V1",
     "ACCEPTED_SKILL_QUALIFICATION_EVIDENCE_API_VERSION_V2",
     "ACCEPTED_SKILL_QUALIFICATION_SCENARIOS_V2",
     "ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2",
+    "AcceptedSandboxPersistentVolumeTopologyV1",
+    "AcceptedSandboxQualificationArtifactV1",
+    "AcceptedSandboxRaceEvidenceV1",
+    "AcceptedSandboxRuntimeTopologyV1",
     "AcceptedSkillMaterialEvidenceV2",
     "AcceptedSkillQualificationEnvironmentV2",
     "AcceptedSkillQualificationExpectationV2",

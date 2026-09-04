@@ -2837,6 +2837,7 @@ class RunManager:
         state_version: int,
         terminal_state_version: int | None = None,
         revoked: bool = False,
+        allowed_active_statuses: tuple[str, ...] = ("running",),
     ) -> AsyncIterator[bool]:
         """Serialize one external mutation with durable owner changes."""
 
@@ -2848,6 +2849,7 @@ class RunManager:
             owner_worker_id=owner_worker_id,
             state_version=state_version,
             terminal_state_version=terminal_state_version,
+            allowed_active_statuses=allowed_active_statuses,
         ) as active:
             yield active
 

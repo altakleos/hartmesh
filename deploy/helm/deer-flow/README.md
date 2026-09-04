@@ -629,7 +629,8 @@ That v2 run seeds bounded deterministic skill bytes and allowed-tool metadata,
 requires Gateway and accepted sandbox Pods on different Ready schedulable nodes,
 observes the TokenReview-protected materialization and a real Lease renewal,
 faults Gateway and Lease ownership, proves cleanup of the exact owned sandbox
-resources, and writes v2 evidence only after offline exact-subject validation.
+resources, verifies the v2 proof against independent subjects, then embeds it in
+a canonical `deerflow.accepted-sandbox-qualification/v1` companion.
 The opt-in GitHub Actions Kubernetes qualification workflow selects this v2
 scope. Its dispatch therefore requires pinned Gateway, provisioner, and AIO
 sandbox images plus an RWX storage class. The runner creates the accepted
@@ -646,11 +647,15 @@ holder, and qualified duration while its bounded RFC3339 `spec.renewTime`
 strictly advances. A `metadata.resourceVersion` change by itself is not renewal
 evidence. Offline fakes pin this predicate and the v2 orchestration, but only an
 artifact from the opt-in live run qualifies cross-node Kubernetes behavior.
-An absent v2 artifact leaves nonempty remote skill execution unqualified.
+The companion also binds the shipped AIO capability profile, explicit race
+facts, and the portable policy sampled from live Pod Security, storage,
+runtime-class, TokenReview, image, and reconciliation settings. Namespace and
+volume identities must exist in each fresh provisioner sample but are not
+portable artifact fields. A v2 proof alone cannot unlock execution.
 
-The live runner publishes its passing artifact into a read-only ConfigMap mount,
-pins the exact byte digest in the application config, and turns candidate mode
-off before the final Helm upgrade. For an independently managed deployment, use
+The live runner publishes the companion into a read-only ConfigMap mount, pins
+its exact byte digest, turns candidate mode off, performs the final Helm upgrade,
+then requires one fresh accepted invocation to succeed. For an independently managed deployment, use
 the equivalent shape (the artifact is bounded evidence, not a credential):
 
 ```yaml
@@ -677,16 +682,22 @@ config: |
     accepted_material_qualification_max_age_seconds: 2592000
 ```
 
-The Gateway parses canonical V2 bytes, enforces freshness, and compares the
-current Gateway, sandbox, and provisioner/verifier image digests. A
+The Gateway parses canonical companion bytes, enforces freshness, checks the
+embedded v2 image subjects and explicit race facts, and compares capability and
+portable topology-policy digests with a fresh authenticated provisioner sample.
+That sample must resolve the current namespace UID, ServiceAccount, and each
+bound PVC UID plus its `spec.volumeName`; it does not claim a PV UID. Those
+deployment-specific values are deliberately excluded from the artifact so
+qualification output remains usable after its temporary namespace is deleted. A standalone
+v2 proof or
 `deployment.qualificationEvidence` report entry alone does not satisfy this
 runtime gate. `deployment.qualificationCandidate` is accepted only in a
 `hartmesh-qualification-*` namespace with matching internal live-test and fault
 flags; candidate status is never production qualification.
 
-After the run, obtain the declared digest/reference from the administrator report and the
-artifact from the independently configured evidence path or artifact store. Supply expected
-subjects from the deployment controller, not from untrusted fields inside the artifact:
+The live runner applies the following offline verification to the subordinate v2
+bytes before it can construct the companion. Supply expected subjects from the
+deployment controller, not from untrusted evidence fields:
 
 ```bash
 cd backend

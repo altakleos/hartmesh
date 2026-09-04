@@ -40,6 +40,9 @@ from deerflow.community.aio_sandbox.aio_sandbox_provider import (
 from deerflow.config.app_config import AppConfig
 from deerflow.qualification_evidence import (
     ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+    AcceptedSandboxPersistentVolumeTopologyV1,
+    AcceptedSandboxQualificationArtifactV1,
+    AcceptedSandboxRuntimeTopologyV1,
     AcceptedSkillMaterialEvidenceV2,
     QualificationEvidenceExpectation,
     verify_qualification_evidence,
@@ -247,6 +250,114 @@ def test_accepted_skill_live_values_select_pinned_cross_node_profile(
     assert runner._ensure_payload("terminal_before_lifecycle_commit")["external_key"].endswith(":during-tool")
 
 
+def test_accepted_sandbox_topology_records_pvc_uid_and_bound_volume_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = KubernetesAcceptedSkillQualificationRunnerV2(
+        KubernetesAcceptedSkillQualificationConfigV2.from_environment(
+            _accepted_skill_environment(tmp_path),
+        )
+    )
+    calls: list[tuple[tuple[str, ...], bool]] = []
+    claim_phase = "Bound"
+
+    def kubectl(*arguments: str, namespaced: bool = True, **_kwargs) -> str:
+        calls.append((arguments, namespaced))
+        if arguments[:2] == ("get", "persistentvolumeclaim"):
+            return json.dumps(
+                {
+                    "metadata": {"uid": "skills-pvc-uid"},
+                    "spec": {
+                        "volumeName": "skills-pv",
+                        "storageClassName": "rwx-storage",
+                        "accessModes": ["ReadWriteMany"],
+                    },
+                    "status": {"phase": claim_phase},
+                }
+            )
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(runner, "_kubectl", kubectl)
+
+    topology = runner._accepted_pvc_topology("skills", "skills-claim")
+
+    assert topology.uid == "skills-pvc-uid"
+    assert topology.volume_name == "skills-pv"
+    assert calls == [
+        (
+            (
+                "get",
+                "persistentvolumeclaim",
+                "skills-claim",
+                "-o",
+                "json",
+            ),
+            True,
+        ),
+    ]
+
+    claim_phase = "Pending"
+    with pytest.raises(
+        QualificationCommandError,
+        match="PVC topology is unavailable",
+    ):
+        runner._accepted_pvc_topology("skills", "skills-claim")
+
+
+def test_passing_artifact_must_admit_one_fresh_post_upgrade_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = KubernetesAcceptedSkillQualificationRunnerV2(
+        KubernetesAcceptedSkillQualificationConfigV2.from_environment(
+            _accepted_skill_environment(tmp_path),
+        )
+    )
+    calls: list[object] = []
+    attempt = object()
+    monkeypatch.setattr(
+        runner,
+        "_arm_barrier",
+        lambda scenario: calls.append(("armed", scenario)),
+    )
+    monkeypatch.setattr(runner, "_wait_for_barrier", lambda _scenario: "run-post")
+    monkeypatch.setattr(runner, "_gateway_node", lambda: "worker-a")
+    monkeypatch.setattr(
+        runner,
+        "_accepted_attempt",
+        lambda scenario, run_id, *, gateway_node: calls.append(("attempt", scenario, run_id, gateway_node)) or attempt,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_redis",
+        lambda *arguments: calls.append(("redis", arguments)) or "OK",
+    )
+    monkeypatch.setattr(
+        runner,
+        "_observe_until_terminal",
+        lambda _client, run_id: {"run_id": run_id, "status": "success"},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_for_attempt_cleanup",
+        lambda observed: calls.append(("cleanup", observed)),
+    )
+
+    class Client:
+        def request(self, method, path, *, payload, timeout_seconds):
+            calls.append(
+                (method, path, payload["external_key"], timeout_seconds),
+            )
+            return 202, {"run_id": "run-post"}
+
+    runner._prove_post_upgrade_accepted_invocation(Client())
+
+    assert ("armed", "active_execution") in calls
+    assert ("attempt", "active_execution", "run-post", "worker-a") in calls
+    assert ("cleanup", attempt) in calls
+
+
 def test_published_accepted_skill_values_mount_and_pin_passing_artifact(
     tmp_path: Path,
 ) -> None:
@@ -418,7 +529,7 @@ def test_accepted_skill_attempt_binds_live_receipt_images_ledger_and_bytes(
     )
     qualification = AcceptedSandboxQualificationV1.build(
         capability_profile_digest=profile.digest,
-        qualification_scope=ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2,
+        qualification_scope=AcceptedSandboxQualificationArtifactV1.SCOPE,
         artifact_digest="e" * 64,
         topology_digest="f" * 64,
         verified_at=now,
@@ -891,6 +1002,43 @@ def _wire_accepted_skill_qualify_fake(
     monkeypatch.setattr(runner, "_rwx_volume_identity", lambda: "rwx-pvc-uid")
     monkeypatch.setattr(
         runner,
+        "_accepted_runtime_topology",
+        lambda _values: AcceptedSandboxRuntimeTopologyV1(
+            provider_kind="aio_kubernetes",
+            profile="rwx_verified_copy_v2",
+            sandbox_image_digest="c" * 64,
+            verifier_image_digest="b" * 64,
+            namespace_uid="namespace-uid",
+            pod_security_enforce=None,
+            pod_security_warn=None,
+            pod_security_audit=None,
+            runtime_class=None,
+            gateway_namespace="hartmesh-qualification-a1b2c3",
+            gateway_service_account=("hartmesh-qualification-deer-flow-gateway"),
+            token_review_audience="hartmesh-provisioner",
+            accepted_attempt_lease_seconds=120,
+            accepted_attempt_reconcile_interval_seconds=30,
+            accepted_attempt_reconcile_limit=100,
+            volumes=(
+                AcceptedSandboxPersistentVolumeTopologyV1(
+                    role="skills",
+                    uid="skills-pvc-uid",
+                    volume_name="skills-pv",
+                    storage_class="rwx-storage",
+                    access_modes=("ReadWriteMany",),
+                ),
+                AcceptedSandboxPersistentVolumeTopologyV1(
+                    role="userdata",
+                    uid="userdata-pvc-uid",
+                    volume_name="userdata-pv",
+                    storage_class="rwx-storage",
+                    access_modes=("ReadWriteMany",),
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
         "_initialize_admin",
         lambda _client: events.append("admin-initialized"),
     )
@@ -1074,15 +1222,17 @@ def test_v2_qualify_maps_faults_cleans_attempts_and_publishes_atomically(
 
     evidence = runner.qualify()
 
-    assert tuple(item.name for item in evidence.scenarios) == (
+    assert isinstance(evidence, AcceptedSandboxQualificationArtifactV1)
+    subordinate = evidence.accepted_skill_evidence
+    assert tuple(item.name for item in subordinate.scenarios) == (
         "nonempty_material_execution",
         "token_review_and_lease_renewal",
         "gateway_replacement_cleanup",
         "sandbox_owner_loss_cleanup",
         "process_loss_cleanup",
     )
-    assert evidence.environment.token_review_authenticated is True
-    assert evidence.environment.lease_renewals == 1
+    assert subordinate.environment.token_review_authenticated is True
+    assert subordinate.environment.lease_renewals == 1
     assert events.count("token-review") == 1
     assert events.count("lease-renewed") == 1
     assert events.count("lease-deleted:terminal_before_lifecycle_commit") == 1
@@ -1116,7 +1266,7 @@ def test_v2_qualify_never_publishes_when_cleanup_is_incomplete(
 
     failure = json.loads(runner.config.evidence_path.read_bytes())
     assert failure["status"] == "failed"
-    assert failure["scope"] == ACCEPTED_SKILL_QUALIFICATION_SCOPE_V2
+    assert failure["scope"] == AcceptedSandboxQualificationArtifactV1.SCOPE
     assert "published" not in events
     assert "namespace-deleted" not in events
     assert events.count("failure-artifacts") == 1

@@ -1719,8 +1719,6 @@ async def _run_sync_tool_after_async_sandbox_init(
             return await asyncio.to_thread(func, runtime, *args)
     except AcceptedSandboxAuthorityLostError:
         raise
-    except AcceptedSandboxAuthorityLostError:
-        raise
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:

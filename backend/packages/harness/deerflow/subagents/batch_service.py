@@ -614,6 +614,9 @@ class SubagentBatchService:
         material: ResolvedAgentMaterialV1,
         adapters: dict[str, Any],
         owner_loop: asyncio.AbstractEventLoop,
+        app_config: AppConfig,
+        principal: dict[str, object],
+        trusted_context: TrustedRunContextV1 | None,
     ) -> AcceptedSandboxSessionBridge | None:
         """Materialize one batch-attempt session without borrowing run authority.
 
@@ -643,6 +646,35 @@ class SubagentBatchService:
             or not material.user_id
         ):
             raise BatchAdmissionError("execution_material_unavailable")
+
+        from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
+        from deerflow.authz.sandbox_authz import authorize_sandbox_execution_async
+        from deerflow.runtime.accepted_invocation import TRUSTED_RUN_CONTEXT_KEY
+        from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+        authorization_context: dict[str, object] = {
+            "user_id": material.user_id,
+            "user_role": principal.get("role"),
+            "oauth_provider": principal.get("oauth_provider"),
+            "oauth_id": principal.get("oauth_id"),
+            "channel_user_id": principal.get("channel_user_id"),
+            "is_internal": principal.get("is_internal") is True,
+        }
+        if trusted_context is not None:
+            authorization_context[TRUSTED_RUN_CONTEXT_KEY] = trusted_context
+        authorization_provider = adapters.get(
+            "authorization_provider",
+            self._authorization_provider,
+        )
+        if authorization_provider is not None:
+            authorization_context[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = authorization_provider
+        try:
+            await authorize_sandbox_execution_async(
+                context=authorization_context,
+                app_config=app_config,
+            )
+        except SandboxAuthorizationError:
+            raise BatchAdmissionError("policy_stopped") from None
         attempt_id = item.get("attempt_id")
         lease_epoch = item.get("lease_epoch")
         item_id = item.get("id")
@@ -749,17 +781,35 @@ class SubagentBatchService:
                 raise BatchAdmissionError("provider_not_qualified")
             if not await fence.validate():
                 raise BatchStaleAttempt()
+
+            def _active_tool_receipt_ref() -> str | None:
+                receipt = get_active_tool_receipt()
+                return None if receipt is None else receipt.receipt_id
+
             session = AcceptedSandboxSession(
                 sandbox=sandbox,
                 materializer=selection.materializer,
                 lease=lease,
                 evidence=evidence,
                 fence_adapter=fence,
+                tool_receipt_ref_resolver=_active_tool_receipt_ref,
             )
-            return AcceptedSandboxSessionBridge(
+            bridge = AcceptedSandboxSessionBridge(
                 session,
                 owner_loop=owner_loop,
             )
+            attached = await self._repository.attach_item_sandbox_evidence(
+                item_id,
+                attempt_id=attempt_id,
+                lease_epoch=lease_epoch,
+                lease_owner=self._lease_owner,
+                request=request,
+                evidence=evidence,
+                observations=bridge.lifecycle_observations,
+            )
+            if not attached:
+                raise BatchStaleAttempt()
+            return bridge
         except BaseException:
             if lease is not None:
                 try:
@@ -767,6 +817,11 @@ class SubagentBatchService:
                 except Exception:
                     logger.error(
                         "Durable batch sandbox cleanup failed (item_id=%s reason_code=sandbox_cleanup_pending)",
+                        item_id,
+                    )
+                except BaseException:
+                    logger.warning(
+                        "Durable batch sandbox cleanup interrupted after acquisition failed (item_id=%s); preserving the original interruption",
                         item_id,
                     )
             raise
@@ -777,6 +832,7 @@ class SubagentBatchService:
         batch_id: str | None = None
         user_id: str | None = None
         accepted_sandbox_session: AcceptedSandboxSessionBridge | None = None
+        deferred_stop_interrupt: BaseException | None = None
         service_loop = asyncio.get_running_loop()
         try:
             batch = item["batch"]
@@ -836,12 +892,28 @@ class SubagentBatchService:
                 acceptance=acceptance,
                 execution=execution,
             )
+            accepted_parent = adapters.get("accepted_parent")
+            principal = execution.parent_principal
+            trusted_context = None
+            if accepted_parent is not None:
+                trusted_context = accepted_parent.trusted_context
+                if trusted_context is not None:
+                    trusted_context = trusted_context.bind_run(
+                        acceptance.parent_run_id,
+                    )
+            elif execution.trusted_context is not None:
+                trusted_context = TrustedRunContextV1.from_persisted_json(
+                    dict(execution.trusted_context),
+                ).bind_run(acceptance.parent_run_id)
             accepted_sandbox_session = await self._accepted_item_sandbox_session(
                 item=item,
                 acceptance=acceptance,
                 material=material,
                 adapters=adapters,
                 owner_loop=service_loop,
+                app_config=app_config,
+                principal=principal,
+                trusted_context=trusted_context,
             )
             from deerflow.tools import get_available_tools
 
@@ -859,15 +931,6 @@ class SubagentBatchService:
                 app_config=app_config,
             )
             tools = self._validated_tools(acceptance, discovered_tools)
-            accepted_parent = adapters.get("accepted_parent")
-            principal = execution.parent_principal
-            trusted_context = None
-            if accepted_parent is not None:
-                trusted_context = accepted_parent.trusted_context
-                if trusted_context is not None:
-                    trusted_context = trusted_context.bind_run(acceptance.parent_run_id)
-            elif execution.trusted_context is not None:
-                trusted_context = TrustedRunContextV1.from_persisted_json(dict(execution.trusted_context)).bind_run(acceptance.parent_run_id)
             persisted_constraints = execution.constraint_projection
             execution.validate_constraint_freshness()
             supplied_constraints = adapters.get("invocation_constraints")
@@ -1029,12 +1092,12 @@ class SubagentBatchService:
                     batch_id=batch["id"],
                     user_id=batch["user_id"],
                 )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             if execution_id is not None:
                 request_cancel_background_task(execution_id)
             # Do not finalize on process shutdown. The durable lease expires and
             # another worker reclaims the same stable item key.
-            raise
+            deferred_stop_interrupt = exc
         except (BatchStaleAttempt, BatchCancelled) as exc:
             logger.warning(
                 "Durable subagent batch publication rejected (item_id=%s reason_code=%s)",
@@ -1074,6 +1137,8 @@ class SubagentBatchService:
                     else None
                 ),
             )
+        except BaseException as exc:
+            deferred_stop_interrupt = exc
         finally:
             self._execution_ids.pop(item_id, None)
             self._item_batches.pop(item_id, None)
@@ -1087,7 +1152,36 @@ class SubagentBatchService:
                         "Durable batch sandbox cleanup failed (item_id=%s reason_code=sandbox_cleanup_pending)",
                         item_id,
                     )
-                for observation in accepted_sandbox_session.lifecycle_observations:
+                except BaseException as exc:
+                    if deferred_stop_interrupt is None:
+                        deferred_stop_interrupt = exc
+                    logger.warning(
+                        "Durable batch sandbox cleanup interrupted (item_id=%s); completing lifecycle persistence first",
+                        item_id,
+                    )
+                lifecycle_observations = accepted_sandbox_session.lifecycle_observations
+                if lifecycle_observations:
+                    try:
+                        persisted = await self._repository.append_item_sandbox_lifecycle(
+                            item_id,
+                            attempt_id=item.get("attempt_id"),
+                            lease_epoch=item.get("lease_epoch"),
+                            lease_owner=self._lease_owner,
+                            execution_evidence_digest=(lifecycle_observations[0].execution_evidence_digest),
+                            observations=lifecycle_observations,
+                        )
+                    except Exception:
+                        persisted = False
+                    except BaseException as exc:
+                        if deferred_stop_interrupt is None:
+                            deferred_stop_interrupt = exc
+                        persisted = False
+                    if not persisted:
+                        logger.error(
+                            "Durable batch sandbox lifecycle persistence failed (item_id=%s reason_code=sandbox_lifecycle_persistence_failed)",
+                            item_id,
+                        )
+                for observation in lifecycle_observations:
                     logger.info(
                         "Durable batch sandbox lifecycle item_id=%s kind=%s provider_kind=%s qualification_scope=%s reason_code=%s evidence_digest=%s",
                         item_id,
@@ -1098,7 +1192,13 @@ class SubagentBatchService:
                         observation.execution_evidence_digest,
                     )
             if batch_id is not None and user_id is not None:
-                await self._prune_terminal_material()
+                try:
+                    await self._prune_terminal_material()
+                except BaseException as exc:
+                    if deferred_stop_interrupt is None:
+                        deferred_stop_interrupt = exc
+            if deferred_stop_interrupt is not None:
+                raise deferred_stop_interrupt
 
 
 def _optional_string(value: object) -> str | None:

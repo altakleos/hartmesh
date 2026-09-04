@@ -454,7 +454,7 @@ def test_provisioner_destroy_calls_delete(monkeypatch):
     assert "abc123" not in backend._attempt_execution_claims
 
 
-def test_provisioner_destroy_swallows_request_exception(monkeypatch):
+def test_provisioner_destroy_propagates_request_exception(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
     backend._attempt_capabilities["abc123"] = "capability"
     backend._attempt_execution_claims["abc123"] = object()
@@ -464,7 +464,8 @@ def test_provisioner_destroy_swallows_request_exception(monkeypatch):
 
     monkeypatch.setattr(requests, "delete", mock_delete)
 
-    backend._provisioner_destroy("abc123")
+    with pytest.raises(RuntimeError, match="Provisioner destroy failed"):
+        backend._provisioner_destroy("abc123")
 
     assert "abc123" in backend._attempt_capabilities
     assert "abc123" in backend._attempt_execution_claims

@@ -2297,6 +2297,7 @@ AcceptedRunFenceValidator = Callable[
     Awaitable[bool],
 ]
 AcceptedSandboxBeforeDelegate = Callable[[], Awaitable[None]]
+AcceptedSandboxToolReceiptResolver = Callable[[], str | None]
 
 
 class _AcceptedSandboxSessionState(StrEnum):
@@ -2339,6 +2340,7 @@ class AcceptedSandboxSession:
         run_fence_validator: AcceptedRunFenceValidator | None = None,
         fence_adapter: AcceptedSandboxFenceAdapter | None = None,
         before_delegate: AcceptedSandboxBeforeDelegate | None = None,
+        tool_receipt_ref_resolver: AcceptedSandboxToolReceiptResolver | None = None,
     ) -> None:
         if not isinstance(sandbox, Sandbox):
             raise TypeError("sandbox must be a Sandbox")
@@ -2369,6 +2371,10 @@ class AcceptedSandboxSession:
                 raise TypeError("fence_adapter must implement AcceptedSandboxFenceAdapter")
         if before_delegate is not None and not callable(before_delegate):
             raise TypeError("before_delegate must be callable")
+        if tool_receipt_ref_resolver is not None and not callable(
+            tool_receipt_ref_resolver,
+        ):
+            raise TypeError("tool_receipt_ref_resolver must be callable")
         resource_matches = (
             lease.provider_instance_ref == evidence.provider_instance_ref
             if isinstance(evidence, AcceptedExecutionEvidenceV1)
@@ -2379,7 +2385,14 @@ class AcceptedSandboxSession:
                 provider_instance_ref=lease.provider_instance_ref,
             )
         )
-        if authority_run_id != evidence.run_id or authority_tenant_digest != evidence.tenant.digest or lease.provider_kind != evidence.provider_kind or not resource_matches or lease.ownership_epoch != evidence.ownership_epoch:
+        if (
+            sandbox.id != lease.provider_instance_ref
+            or authority_run_id != evidence.run_id
+            or authority_tenant_digest != evidence.tenant.digest
+            or lease.provider_kind != evidence.provider_kind
+            or not resource_matches
+            or lease.ownership_epoch != evidence.ownership_epoch
+        ):
             raise ValueError("accepted sandbox session tuple is inconsistent")
         self._sandbox = sandbox
         self._materializer = materializer
@@ -2389,6 +2402,7 @@ class AcceptedSandboxSession:
         self._run_fence_validator = run_fence_validator
         self._fence_adapter = fence_adapter
         self._before_delegate = before_delegate
+        self._tool_receipt_ref_resolver = tool_receipt_ref_resolver
         self._state = _AcceptedSandboxSessionState.OPEN
         self._state_lock = threading.RLock()
         self._lifecycle_lock = asyncio.Lock()
@@ -2441,11 +2455,25 @@ class AcceptedSandboxSession:
         *,
         reason_code: str | None = None,
     ) -> None:
+        tool_receipt_ref = None
+        if self._tool_receipt_ref_resolver is not None:
+            try:
+                candidate = self._tool_receipt_ref_resolver()
+                if candidate is not None:
+                    tool_receipt_ref = _require_reference(
+                        candidate,
+                        "tool_receipt_ref",
+                    )
+            except Exception:
+                # Diagnostics never become authority and must not obscure the
+                # underlying sandbox loss when no safe receipt is available.
+                tool_receipt_ref = None
         observation = AcceptedSandboxLifecycleObservationV1.build(
             evidence=self._evidence,
             kind=kind,
             observed_at=datetime.now(UTC),
             reason_code=reason_code,
+            tool_receipt_ref=tool_receipt_ref,
         )
         with self._state_lock:
             self._observations.append(observation)
@@ -2548,11 +2576,18 @@ class AcceptedSandboxSession:
                 raise self._lose(
                     "accepted_sandbox_pre_delegate_check_failed",
                 ) from None
-        return await asyncio.to_thread(
-            self._delegate_if_current,
-            lease,
-            operation,
-        )
+        try:
+            return await asyncio.to_thread(
+                self._delegate_if_current,
+                lease,
+                operation,
+            )
+        except asyncio.CancelledError:
+            # ``to_thread`` cannot cancel provider work which has already
+            # started. Revoke the session synchronously so the raced call is
+            # the last call that can reach the provider.
+            self._lose("accepted_sandbox_session_cancelled")
+            raise
 
     async def renew(self) -> None:
         async with self._lifecycle_lock:
@@ -2591,7 +2626,7 @@ class AcceptedSandboxSession:
             await self._closed.wait()
             return
 
-        release_error = False
+        release_completed = False
         try:
             # Calls whose final local check won before close are already
             # delegated side effects. Let those bounded calls finish before
@@ -2601,20 +2636,19 @@ class AcceptedSandboxSession:
                 lease = self._lease
                 try:
                     await self._materializer.release(lease)
-                except asyncio.CancelledError:
-                    release_error = True
-                    raise
                 except Exception:
-                    release_error = True
+                    pass
+                else:
+                    release_completed = True
         finally:
             with self._state_lock:
                 self._state = _AcceptedSandboxSessionState.CLOSED
             self._closed.set()
             self._record_lifecycle(
-                (AcceptedSandboxLifecycleKind.CLEANUP_PENDING if release_error else AcceptedSandboxLifecycleKind.RELEASED),
-                reason_code=("accepted_sandbox_release_failed" if release_error else None),
+                (AcceptedSandboxLifecycleKind.RELEASED if release_completed else AcceptedSandboxLifecycleKind.CLEANUP_PENDING),
+                reason_code=(None if release_completed else "accepted_sandbox_release_failed"),
             )
-        if release_error:
+        if not release_completed:
             raise AcceptedMaterialError("accepted_sandbox_release_failed")
 
 
@@ -2854,6 +2888,8 @@ def is_accepted_sandbox_facade(sandbox: object) -> bool:
 def accepted_sandbox_bridge_from_runtime_context(
     context: Mapping[str, object] | None,
 ) -> AcceptedSandboxSessionBridge | None:
+    """Return the installed bridge while keeping its raw sandbox private."""
+
     if not isinstance(context, Mapping):
         return None
     candidate = context.get(ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY)

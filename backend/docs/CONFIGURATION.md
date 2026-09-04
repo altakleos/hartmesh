@@ -673,7 +673,8 @@ disabled so legacy remote AIO calls do not become anonymous.
 
 Selecting `rwx_verified_copy_v2` is necessary but is not itself production
 qualification. Durable accepted sandbox execution also requires a current,
-canonical live-qualification artifact mounted read-only into the Gateway:
+canonical `deerflow.accepted-sandbox-qualification/v1` companion mounted
+read-only into the Gateway:
 
 ```yaml
 sandbox:
@@ -686,10 +687,14 @@ sandbox:
 ```
 
 The evidence path and digest must be configured together. Before admitting a
-nonempty accepted session, the Gateway checks the artifact's status, freshness,
-scope, verifier contract, AIO capability profile, isolation facts, and exact
-Gateway, sandbox, and provisioner/verifier image digests. A candidate run or a
-deployment-report reference cannot satisfy this runtime gate. This checkout
+nonempty accepted session, the Gateway checks the companion's status, freshness,
+AIO capability profile, explicit race facts, and portable topology-policy digest
+against a fresh provisioner sample, then verifies its embedded v2 image subjects.
+The provisioner also validates the current namespace UID and each PVC UID plus
+its bound PV name on that sample; those deployment-specific values are not
+copied from the qualification namespace. A
+standalone v2 proof, candidate run, or deployment-report reference cannot satisfy
+this runtime gate. This checkout
 ships no passing artifact, so production accepted sandbox execution remains
 disabled until the live qualification lane publishes one. See
 [Accepted Sandbox Execution](ACCEPTED_SANDBOX_EXECUTION.md) for the authority,
