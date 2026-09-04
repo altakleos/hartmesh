@@ -391,9 +391,9 @@ Die verwaltete Lark/Feishu-CLI-Integration bleibt benutzerbezogen. Nach dem Verb
 
 HartMesh bewahrt bestehende `deerflow.*`-Namespaces, Paketnamen, `DEER_FLOW_*`-Variablen, Docker-/Helm-Bezeichner, Dateisystempfade und Gateway-Kompatibilitätsoberflächen.
 
-Der Produktvergleich verwendet den festen lokalen Bereich `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`.
+Der Produktvergleich verwendet den festen lokalen Bereich `e16ef2969b1446162e19af7bdde1446674851e66...4023cb434aa67011b9d18e90029f473b55323856`.
 
-HartMesh `main` enthält Upstream `deerflow/main` bis `a5acc25de6742b2166b3f41c97bd895822277b94` (2026-08-20).
+HartMesh `main` enthält Upstream `deerflow/main` bis `30788c79ffd988e110d97dd69fbc17abc50a96c6` (2026-09-02).
 
 Dieser Synchronisierungspunkt ist Kontext, nicht die obige Vergleichsbasis, und HartMesh behauptet keine dauerhafte Überlegenheit.
 

@@ -389,9 +389,9 @@ Python plugin は信頼済み operator code で、`config.yaml` の top-level `p
 
 HartMesh は既存の `deerflow.*` namespace、package 名、`DEER_FLOW_*` 変数、Docker/Helm identifier、filesystem path、Gateway compatibility surface を維持します。
 
-製品比較は固定ローカル範囲 `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0` です。
+製品比較は固定ローカル範囲 `e16ef2969b1446162e19af7bdde1446674851e66...4023cb434aa67011b9d18e90029f473b55323856` です。
 
-HartMesh `main` は upstream `deerflow/main` の `a5acc25de6742b2166b3f41c97bd895822277b94`（2026-08-20）までを取り込んでいます。
+HartMesh `main` は upstream `deerflow/main` の `30788c79ffd988e110d97dd69fbc17abc50a96c6`（2026-09-02）までを取り込んでいます。
 
 これは背景情報で、上記 baseline ではありません。HartMesh は将来も上流より優れるという主張をしません。
 

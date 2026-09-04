@@ -391,9 +391,9 @@ A integração gerenciada do Lark/Feishu CLI permanece no escopo do usuário. Ap
 
 HartMesh preserva namespaces `deerflow.*`, nomes de pacotes, variáveis `DEER_FLOW_*`, identificadores Docker e Helm, caminhos do sistema de arquivos e superfícies de compatibilidade do Gateway.
 
-A comparação do produto usa o intervalo local fixo `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`.
+A comparação do produto usa o intervalo local fixo `e16ef2969b1446162e19af7bdde1446674851e66...4023cb434aa67011b9d18e90029f473b55323856`.
 
-O `main` do HartMesh incorpora o upstream `deerflow/main` até `a5acc25de6742b2166b3f41c97bd895822277b94` (2026-08-20).
+O `main` do HartMesh incorpora o upstream `deerflow/main` até `30788c79ffd988e110d97dd69fbc17abc50a96c6` (2026-09-02).
 
 Esse ponto de sincronização é contexto, não o baseline de comparação acima, e o HartMesh não faz alegação permanente de superioridade.
 

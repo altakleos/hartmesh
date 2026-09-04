@@ -389,9 +389,9 @@ Python 插件是可信运维代码，从 `config.yaml` 顶层 `plugins:` 在启�
 
 HartMesh 保留现有 `deerflow.*` namespace、包名、`DEER_FLOW_*` 变量、Docker/Helm 标识符、文件系统路径和 Gateway 兼容接口。
 
-产品比较使用固定本地范围 `e16ef2969b1446162e19af7bdde1446674851e66...ca2400f3059b3ac93249473e97ed83c5296fb0f0`。
+产品比较使用固定本地范围 `e16ef2969b1446162e19af7bdde1446674851e66...4023cb434aa67011b9d18e90029f473b55323856`。
 
-HartMesh `main` 已同步 upstream `deerflow/main` 至 `a5acc25de6742b2166b3f41c97bd895822277b94`（2026-08-20）。
+HartMesh `main` 已同步 upstream `deerflow/main` 至 `30788c79ffd988e110d97dd69fbc17abc50a96c6`（2026-09-02）。
 
 这是背景信息，不是上述基线；HartMesh 不作持续优于上游的声明。
 
