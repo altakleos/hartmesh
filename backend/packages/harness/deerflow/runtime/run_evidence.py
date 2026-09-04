@@ -36,6 +36,8 @@ MAX_ARTIFACT_PATH_BYTES = 1024
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 MAX_TOTAL_ARTIFACT_BYTES = 100 * 1024 * 1024
 MAX_EVIDENCE_REFERENCES = 4096
+MAX_EVIDENCE_LINKS = 4096
+MAX_LIFECYCLE_EVENTS = 100_000
 MAX_SAFE_COUNTS = 32
 MAX_SAFE_STRING_BYTES = 256
 
@@ -87,6 +89,18 @@ RUN_EVIDENCE_LIMITATIONS = (
     "bundle_copy_outlives_server_retention",
     "internal_integrity_only_not_signed",
 )
+
+_EVIDENCE_LINK_SECTIONS = {
+    "mcp_task_to_tool_receipt": ("mcp_tasks", "tool_receipts"),
+    "retrieval_observation_to_tool_receipt": (
+        "retrieval_observations",
+        "tool_receipts",
+    ),
+    "subagent_batch_to_tool_receipt": (
+        "subagent_batches",
+        "tool_receipts",
+    ),
+}
 
 SectionState = Literal[
     "complete",
@@ -349,6 +363,112 @@ class EvidenceSectionV1:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceLinkV1:
+    """One digest-only relationship between two included evidence sections."""
+
+    kind: str
+    subject_section: str
+    subject_digest: str
+    object_section: str
+    object_digest: str
+
+    def __post_init__(self) -> None:
+        expected_sections = _EVIDENCE_LINK_SECTIONS.get(self.kind)
+        if expected_sections != (self.subject_section, self.object_section):
+            _fail("evidence_cross_link_invalid")
+        _require_digest(self.subject_digest)
+        _require_digest(self.object_digest)
+
+    def sort_key(self) -> tuple[str, str, str, str, str]:
+        return (
+            self.kind,
+            self.subject_section,
+            self.subject_digest,
+            self.object_section,
+            self.object_digest,
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "kind": self.kind,
+            "subject_section": self.subject_section,
+            "subject_digest": self.subject_digest,
+            "object_section": self.object_section,
+            "object_digest": self.object_digest,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> EvidenceLinkV1:
+        expected = {
+            "kind",
+            "subject_section",
+            "subject_digest",
+            "object_section",
+            "object_digest",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            _fail("manifest_fields_invalid")
+        try:
+            return cls(
+                kind=value["kind"],  # type: ignore[arg-type]
+                subject_section=value["subject_section"],  # type: ignore[arg-type]
+                subject_digest=value["subject_digest"],  # type: ignore[arg-type]
+                object_section=value["object_section"],  # type: ignore[arg-type]
+                object_digest=value["object_digest"],  # type: ignore[arg-type]
+            )
+        except RunEvidenceBundleError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RunEvidenceBundleError("manifest_fields_invalid") from exc
+
+
+def _validate_evidence_links(
+    sections: Sequence[EvidenceSectionV1],
+    links: Sequence[EvidenceLinkV1],
+) -> tuple[EvidenceLinkV1, ...]:
+    if any(not isinstance(link, EvidenceLinkV1) for link in links):
+        _fail("evidence_cross_link_invalid")
+    normalized = tuple(sorted(links, key=EvidenceLinkV1.sort_key))
+    if len(normalized) > MAX_EVIDENCE_LINKS or len({link.sort_key() for link in normalized}) != len(normalized):
+        _fail("bundle_limit_exceeded")
+    by_name = {section.name: section for section in sections}
+    for link in normalized:
+        if not isinstance(link, EvidenceLinkV1):
+            _fail("evidence_cross_link_invalid")
+        subject = by_name.get(link.subject_section)
+        object_section = by_name.get(link.object_section)
+        if subject is None or object_section is None or subject.state != "complete" or object_section.state != "complete" or link.subject_digest not in subject.references or link.object_digest not in object_section.references:
+            _fail("evidence_cross_link_invalid")
+    for kind, (subject_name, _object_name) in _EVIDENCE_LINK_SECTIONS.items():
+        section = by_name.get(subject_name)
+        if section is None:
+            _fail("evidence_cross_link_invalid")
+        linked_subjects = [link.subject_digest for link in normalized if link.kind == kind]
+        if tuple(sorted(linked_subjects)) != section.references:
+            _fail("evidence_cross_link_invalid")
+    return normalized
+
+
+def _validate_section_anchors(
+    sections: Sequence[EvidenceSectionV1],
+    anchors: Mapping[str, Sequence[str]],
+) -> None:
+    """Require each projected anchor set to exactly match its V1 section."""
+
+    by_name = {section.name: section for section in sections}
+    for name, references in anchors.items():
+        expected = tuple(sorted(references))
+        section = by_name.get(name)
+        if section is None:
+            _fail("evidence_cross_link_invalid")
+        if expected:
+            if section.state != "complete" or section.references != expected:
+                _fail("evidence_cross_link_invalid")
+        elif section.state != "absent_by_design":
+            _fail("evidence_cross_link_invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class EvidenceArtifactV1:
     path: str
     size: int
@@ -445,6 +565,7 @@ class EvidenceSnapshotSourceV1:
     lifecycle_counts: Mapping[str, int]
     sections: tuple[EvidenceSectionV1, ...]
     artifact_paths: tuple[str, ...]
+    links: tuple[EvidenceLinkV1, ...] = ()
     subagent_catalog_digest: str | None = None
     subagent_catalog_entry_count: int = 0
     skill_scopes_digest: str | None = None
@@ -453,6 +574,9 @@ class EvidenceSnapshotSourceV1:
     extension_artifact_manifest_digest: str | None = None
     extension_configuration_digest: str | None = None
     tool_plane_revision_digest: str | None = None
+    tool_plane_base_revision_digest: str | None = None
+    tool_plane_user_overlay_digest: str | None = None
+    tool_plane_projection_digest: str | None = None
     credential_evidence_ref: str | None = None
     credential_evidence_digest: str | None = None
     mutation_active: bool = False
@@ -460,6 +584,7 @@ class EvidenceSnapshotSourceV1:
     def __post_init__(self) -> None:
         object.__setattr__(self, "sections", tuple(self.sections))
         object.__setattr__(self, "artifact_paths", tuple(self.artifact_paths))
+        object.__setattr__(self, "links", tuple(self.links))
         counts = dict(self.lifecycle_counts)
         object.__setattr__(self, "lifecycle_counts", MappingProxyType(counts))
         if not isinstance(self.tenant, TenantReferenceV1):
@@ -485,6 +610,7 @@ class RunEvidenceSnapshotV1:
     lifecycle: Mapping[str, object]
     sections: tuple[EvidenceSectionV1, ...]
     artifact_paths: tuple[str, ...]
+    links: tuple[EvidenceLinkV1, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "admission", MappingProxyType(dict(self.admission)))
@@ -492,6 +618,7 @@ class RunEvidenceSnapshotV1:
         object.__setattr__(self, "lifecycle", MappingProxyType(dict(self.lifecycle)))
         object.__setattr__(self, "sections", tuple(self.sections))
         object.__setattr__(self, "artifact_paths", tuple(self.artifact_paths))
+        object.__setattr__(self, "links", tuple(self.links))
 
     def to_manifest(self, artifacts: Sequence[EvidenceArtifactV1]) -> RunEvidenceBundleManifestV1:
         qualification = next(section for section in self.sections if section.name == "qualification")
@@ -509,6 +636,7 @@ class RunEvidenceSnapshotV1:
             assembly=self.assembly,
             lifecycle=self.lifecycle,
             evidence_sections=self.sections,
+            evidence_links=self.links,
             artifacts=artifacts,
             qualification={
                 "state": qualification.state,
@@ -574,9 +702,20 @@ class RunEvidenceSnapshotService:
             source.skill_scopes_digest,
             source.capability_manifest_digest,
             source.tool_plane_revision_digest,
+            source.tool_plane_base_revision_digest,
+            source.tool_plane_user_overlay_digest,
+            source.tool_plane_projection_digest,
             source.credential_evidence_digest,
         ):
             _optional_digest(digest)
+        tool_plane_digests = (
+            source.tool_plane_base_revision_digest,
+            source.tool_plane_user_overlay_digest,
+            source.tool_plane_projection_digest,
+            source.tool_plane_revision_digest,
+        )
+        if any(digest is None for digest in tool_plane_digests) != all(digest is None for digest in tool_plane_digests):
+            _fail("evidence_cross_link_invalid")
         if source.credential_evidence_ref is not None:
             _safe_identifier(
                 source.credential_evidence_ref,
@@ -601,7 +740,7 @@ class RunEvidenceSnapshotService:
             _fail("evidence_cross_link_invalid")
         if type(source.lifecycle_high_water_mark) is not int or source.lifecycle_high_water_mark < 1:
             _fail("evidence_cross_link_invalid")
-        if type(source.lifecycle_event_count) is not int or not 1 <= source.lifecycle_event_count <= 100_000:
+        if type(source.lifecycle_event_count) is not int or not 1 <= source.lifecycle_event_count <= MAX_LIFECYCLE_EVENTS:
             _fail("bundle_limit_exceeded")
         counts = dict(source.lifecycle_counts)
         if len(counts) > MAX_SAFE_COUNTS or set(counts) - _SAFE_COUNT_KEYS:
@@ -611,31 +750,16 @@ class RunEvidenceSnapshotService:
         sections = tuple(sorted(source.sections, key=lambda section: section.name))
         if tuple(section.name for section in sections) != tuple(sorted(EXPECTED_EVIDENCE_SECTIONS)):
             _fail("evidence_incomplete")
-        by_name = {section.name: section for section in sections}
-        for name, anchor in (
-            ("accepted_invocation", source.accepted_invocation_digest),
-            ("assembly", source.assembly_evidence_digest),
-            ("lifecycle", source.terminal_event_digest),
-        ):
-            section = by_name[name]
-            if section.state != "complete" or anchor not in section.references:
-                _fail("evidence_cross_link_invalid")
-        optional_anchors: tuple[tuple[str, tuple[str, ...]], ...] = (
-            (
-                "actor_credential",
-                (() if source.credential_evidence_digest is None else (source.credential_evidence_digest,)),
-            ),
-            (
-                "subagent_catalog",
-                (() if source.subagent_catalog_digest is None else (source.subagent_catalog_digest,)),
-            ),
-            (
-                "skill_material",
-                (() if source.skill_scopes_digest is None else (source.skill_scopes_digest,)),
-            ),
-            (
-                "extension_material",
-                tuple(
+        links = _validate_evidence_links(sections, source.links)
+        _validate_section_anchors(
+            sections,
+            {
+                "accepted_invocation": (source.accepted_invocation_digest,),
+                "actor_credential": (() if source.credential_evidence_digest is None else (source.credential_evidence_digest,)),
+                "assembly": (source.assembly_evidence_digest,),
+                "subagent_catalog": (() if source.subagent_catalog_digest is None else (source.subagent_catalog_digest,)),
+                "skill_material": (() if source.skill_scopes_digest is None else (source.skill_scopes_digest,)),
+                "extension_material": tuple(
                     reference
                     for reference in (
                         source.capability_manifest_digest,
@@ -644,19 +768,10 @@ class RunEvidenceSnapshotService:
                     )
                     if reference is not None
                 ),
-            ),
-            (
-                "tool_plane",
-                (() if source.tool_plane_revision_digest is None else (source.tool_plane_revision_digest,)),
-            ),
+                "tool_plane": tuple(digest for digest in tool_plane_digests if digest is not None),
+                "lifecycle": (source.terminal_event_digest,),
+            },
         )
-        for name, anchors in optional_anchors:
-            section = by_name[name]
-            if anchors:
-                if section.state != "complete" or any(anchor not in section.references for anchor in anchors):
-                    _fail("evidence_cross_link_invalid")
-            elif section.state != "absent_by_design":
-                _fail("evidence_cross_link_invalid")
         incomplete = [section for section in sections if section.required and section.state != "complete"]
         if incomplete:
             states = {section.state for section in incomplete}
@@ -681,6 +796,9 @@ class RunEvidenceSnapshotService:
             "extension_artifact_manifest_digest": source.extension_artifact_manifest_digest,
             "extension_configuration_digest": source.extension_configuration_digest,
             "tool_plane_revision_digest": source.tool_plane_revision_digest,
+            "tool_plane_base_revision_digest": source.tool_plane_base_revision_digest,
+            "tool_plane_user_overlay_digest": source.tool_plane_user_overlay_digest,
+            "tool_plane_projection_digest": source.tool_plane_projection_digest,
             "credential_evidence_ref": source.credential_evidence_ref,
             "credential_evidence_digest": source.credential_evidence_digest,
         }
@@ -707,6 +825,7 @@ class RunEvidenceSnapshotService:
             lifecycle=lifecycle,
             sections=sections,
             artifact_paths=source.artifact_paths,
+            links=links,
         )
 
 
@@ -725,6 +844,7 @@ class RunEvidenceBundleManifestV1:
     assembly: Mapping[str, object]
     lifecycle: Mapping[str, object]
     evidence_sections: tuple[EvidenceSectionV1, ...]
+    evidence_links: tuple[EvidenceLinkV1, ...]
     artifacts: tuple[EvidenceArtifactV1, ...]
     qualification: Mapping[str, object]
     completeness: Mapping[str, object]
@@ -743,6 +863,7 @@ class RunEvidenceBundleManifestV1:
         completeness = dict(self.completeness)
         object.__setattr__(self, "completeness", MappingProxyType(completeness))
         object.__setattr__(self, "evidence_sections", tuple(self.evidence_sections))
+        object.__setattr__(self, "evidence_links", tuple(self.evidence_links))
         object.__setattr__(self, "artifacts", tuple(self.artifacts))
         object.__setattr__(self, "limitations", tuple(self.limitations))
         self._validate()
@@ -759,10 +880,12 @@ class RunEvidenceBundleManifestV1:
         assembly: Mapping[str, object],
         lifecycle: Mapping[str, object],
         evidence_sections: Sequence[EvidenceSectionV1],
+        evidence_links: Sequence[EvidenceLinkV1],
         artifacts: Sequence[EvidenceArtifactV1],
         qualification: Mapping[str, object],
     ) -> RunEvidenceBundleManifestV1:
         sorted_sections = tuple(sorted(evidence_sections, key=lambda item: item.name))
+        sorted_links = _validate_evidence_links(sorted_sections, evidence_links)
         sorted_artifacts = tuple(sorted(artifacts, key=lambda item: item.path))
         completeness = {
             "profile": "complete_durable",
@@ -785,6 +908,7 @@ class RunEvidenceBundleManifestV1:
                 "safe_counts": dict(lifecycle["safe_counts"]),
             },
             "evidence_sections": [section.to_dict() for section in sorted_sections],
+            "evidence_links": [link.to_dict() for link in sorted_links],
             "artifacts": [artifact.to_dict() for artifact in sorted_artifacts],
             "qualification": dict(qualification),
             "completeness": completeness,
@@ -816,6 +940,7 @@ class RunEvidenceBundleManifestV1:
             assembly=assembly,
             lifecycle=lifecycle,
             evidence_sections=sorted_sections,
+            evidence_links=sorted_links,
             artifacts=sorted_artifacts,
             qualification=qualification,
             completeness=completeness,
@@ -837,6 +962,7 @@ class RunEvidenceBundleManifestV1:
             "assembly": dict(self.assembly),
             "lifecycle": {**dict(self.lifecycle), "safe_counts": dict(self.lifecycle["safe_counts"])},
             "evidence_sections": [section.to_dict() for section in self.evidence_sections],
+            "evidence_links": [link.to_dict() for link in self.evidence_links],
             "artifacts": [artifact.to_dict() for artifact in self.artifacts],
             "qualification": dict(self.qualification),
             "completeness": dict(self.completeness),
@@ -858,7 +984,14 @@ class RunEvidenceBundleManifestV1:
         return _domain_digest(MANIFEST_DIGEST_DOMAIN, self._projection(manifest_digest=None))
 
     def _validate(self) -> None:
-        if self.schema != RUN_EVIDENCE_SCHEMA or self.schema_version != RUN_EVIDENCE_SCHEMA_VERSION or self.canonicalization != RUN_EVIDENCE_CANONICALIZATION or self.canonicalization_version != RUN_EVIDENCE_CANONICALIZATION_VERSION:
+        if (
+            self.schema != RUN_EVIDENCE_SCHEMA
+            or type(self.schema_version) is not int
+            or self.schema_version != RUN_EVIDENCE_SCHEMA_VERSION
+            or self.canonicalization != RUN_EVIDENCE_CANONICALIZATION
+            or type(self.canonicalization_version) is not int
+            or self.canonicalization_version != RUN_EVIDENCE_CANONICALIZATION_VERSION
+        ):
             _fail("manifest_version_unsupported")
         public_references = (
             self.bundle_ref,
@@ -889,6 +1022,9 @@ class RunEvidenceBundleManifestV1:
             "extension_artifact_manifest_digest",
             "extension_configuration_digest",
             "tool_plane_revision_digest",
+            "tool_plane_base_revision_digest",
+            "tool_plane_user_overlay_digest",
+            "tool_plane_projection_digest",
             "credential_evidence_ref",
             "credential_evidence_digest",
         }
@@ -919,6 +1055,9 @@ class RunEvidenceBundleManifestV1:
             "skill_scopes_digest",
             "capability_manifest_digest",
             "tool_plane_revision_digest",
+            "tool_plane_base_revision_digest",
+            "tool_plane_user_overlay_digest",
+            "tool_plane_projection_digest",
             "credential_evidence_digest",
         ):
             if self.admission.get(key) is not None:
@@ -927,6 +1066,18 @@ class RunEvidenceBundleManifestV1:
             value = self.admission.get(key)
             if value is not None and (not isinstance(value, str) or _SHA256_DIGEST_RE.fullmatch(value) is None):
                 _fail("manifest_fields_invalid")
+        if (self.admission.get("extension_artifact_manifest_digest") is None) != (self.admission.get("extension_configuration_digest") is None):
+            _fail("evidence_cross_link_invalid")
+        if self.admission.get("extension_artifact_manifest_digest") is not None and self.admission.get("capability_manifest_digest") is None:
+            _fail("evidence_cross_link_invalid")
+        tool_plane_digests = (
+            self.admission.get("tool_plane_base_revision_digest"),
+            self.admission.get("tool_plane_user_overlay_digest"),
+            self.admission.get("tool_plane_projection_digest"),
+            self.admission.get("tool_plane_revision_digest"),
+        )
+        if any(digest is None for digest in tool_plane_digests) != all(digest is None for digest in tool_plane_digests):
+            _fail("evidence_cross_link_invalid")
         if set(self.assembly) != {"evidence_digest", "fingerprint"}:
             _fail("manifest_fields_invalid")
         _require_digest(self.assembly.get("evidence_digest"), "manifest_fields_invalid")
@@ -936,13 +1087,41 @@ class RunEvidenceBundleManifestV1:
         high_water = self.lifecycle.get("high_water_mark")
         event_count = self.lifecycle.get("event_count")
         safe_counts = self.lifecycle.get("safe_counts")
-        if type(high_water) is not int or high_water < 1 or type(event_count) is not int or event_count < 1 or not isinstance(safe_counts, Mapping):
+        if type(high_water) is not int or high_water < 1 or type(event_count) is not int or not 1 <= event_count <= MAX_LIFECYCLE_EVENTS or not isinstance(safe_counts, Mapping):
+            if type(event_count) is int and event_count > MAX_LIFECYCLE_EVENTS:
+                _fail("bundle_limit_exceeded")
             _fail("manifest_fields_invalid")
         _require_digest(self.lifecycle.get("terminal_event_digest"), "manifest_fields_invalid")
         if set(safe_counts) - _SAFE_COUNT_KEYS or any(type(value) is not int or value < 0 for value in safe_counts.values()) or sum(safe_counts.values()) != event_count:
             _fail("manifest_fields_invalid")
         if tuple(section.name for section in self.evidence_sections) != tuple(sorted(EXPECTED_EVIDENCE_SECTIONS)):
             _fail("manifest_fields_invalid")
+        if self.evidence_links != _validate_evidence_links(
+            self.evidence_sections,
+            self.evidence_links,
+        ):
+            _fail("manifest_fields_invalid")
+        _validate_section_anchors(
+            self.evidence_sections,
+            {
+                "accepted_invocation": (self.admission["accepted_invocation_digest"],),  # type: ignore[dict-item]
+                "actor_credential": (() if self.admission["credential_evidence_digest"] is None else (self.admission["credential_evidence_digest"],)),  # type: ignore[dict-item]
+                "assembly": (self.assembly["evidence_digest"],),  # type: ignore[dict-item]
+                "subagent_catalog": (() if self.admission["subagent_catalog_digest"] is None else (self.admission["subagent_catalog_digest"],)),  # type: ignore[dict-item]
+                "skill_material": (() if self.admission["skill_scopes_digest"] is None else (self.admission["skill_scopes_digest"],)),  # type: ignore[dict-item]
+                "extension_material": tuple(
+                    reference
+                    for reference in (
+                        self.admission["capability_manifest_digest"],
+                        None if self.admission["extension_artifact_manifest_digest"] is None else str(self.admission["extension_artifact_manifest_digest"]).removeprefix("sha256:"),
+                        None if self.admission["extension_configuration_digest"] is None else str(self.admission["extension_configuration_digest"]).removeprefix("sha256:"),
+                    )
+                    if reference is not None
+                ),  # type: ignore[dict-item]
+                "tool_plane": tuple(digest for digest in tool_plane_digests if digest is not None),  # type: ignore[misc]
+                "lifecycle": (self.lifecycle["terminal_event_digest"],),  # type: ignore[dict-item]
+            },
+        )
         if any(section.required and section.state != "complete" for section in self.evidence_sections):
             _fail("evidence_incomplete")
         if len(self.artifacts) > MAX_ARTIFACTS or tuple(artifact.path for artifact in self.artifacts) != tuple(sorted(artifact.path for artifact in self.artifacts)):
@@ -990,6 +1169,7 @@ class RunEvidenceBundleManifestV1:
             "assembly",
             "lifecycle",
             "evidence_sections",
+            "evidence_links",
             "artifacts",
             "qualification",
             "completeness",
@@ -998,12 +1178,18 @@ class RunEvidenceBundleManifestV1:
         }
         if not isinstance(value, Mapping) or set(value) != expected:
             _fail("manifest_fields_invalid")
-        if value.get("schema_version") != RUN_EVIDENCE_SCHEMA_VERSION or value.get("canonicalization_version") != RUN_EVIDENCE_CANONICALIZATION_VERSION:
+        if (
+            type(value.get("schema_version")) is not int
+            or value.get("schema_version") != RUN_EVIDENCE_SCHEMA_VERSION
+            or type(value.get("canonicalization_version")) is not int
+            or value.get("canonicalization_version") != RUN_EVIDENCE_CANONICALIZATION_VERSION
+        ):
             _fail("manifest_version_unsupported")
         sections = value.get("evidence_sections")
+        links = value.get("evidence_links")
         artifacts = value.get("artifacts")
         limitations = value.get("limitations")
-        if not isinstance(sections, list) or not isinstance(artifacts, list) or not isinstance(limitations, list):
+        if not isinstance(sections, list) or not isinstance(links, list) or not isinstance(artifacts, list) or not isinstance(limitations, list):
             _fail("manifest_fields_invalid")
         mappings = (value.get("terminal"), value.get("admission"), value.get("assembly"), value.get("lifecycle"), value.get("qualification"), value.get("completeness"))
         if any(not isinstance(item, Mapping) for item in mappings):
@@ -1023,6 +1209,7 @@ class RunEvidenceBundleManifestV1:
                 assembly=value["assembly"],  # type: ignore[arg-type]
                 lifecycle=value["lifecycle"],  # type: ignore[arg-type]
                 evidence_sections=tuple(EvidenceSectionV1.from_dict(item) for item in sections),
+                evidence_links=tuple(EvidenceLinkV1.from_dict(item) for item in links),
                 artifacts=tuple(EvidenceArtifactV1.from_dict(item) for item in artifacts),
                 qualification=value["qualification"],  # type: ignore[arg-type]
                 completeness=value["completeness"],  # type: ignore[arg-type]
@@ -1053,12 +1240,16 @@ __all__ = [
     "EVIDENCE_ROOT_DOMAIN",
     "EXPECTED_EVIDENCE_SECTIONS",
     "EvidenceArtifactV1",
+    "EvidenceLinkV1",
     "EvidenceSectionV1",
     "EvidenceSnapshotRequest",
     "EvidenceSnapshotSourceV1",
     "MANIFEST_DIGEST_DOMAIN",
     "MAX_ARTIFACTS",
     "MAX_ARTIFACT_BYTES",
+    "MAX_EVIDENCE_LINKS",
+    "MAX_EVIDENCE_REFERENCES",
+    "MAX_LIFECYCLE_EVENTS",
     "MAX_MANIFEST_BYTES",
     "MAX_TOTAL_ARTIFACT_BYTES",
     "RUN_EVIDENCE_CANONICALIZATION",

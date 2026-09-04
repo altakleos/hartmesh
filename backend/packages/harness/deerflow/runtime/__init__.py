@@ -10,6 +10,7 @@ from .checkpointer import checkpointer_context, get_checkpointer, make_checkpoin
 from .run_evidence import (
     RUN_EVIDENCE_MANIFEST_PATH,
     EvidenceArtifactV1,
+    EvidenceLinkV1,
     EvidenceSectionV1,
     EvidenceSnapshotRequest,
     EvidenceSnapshotSourceV1,
@@ -79,6 +80,7 @@ __all__ = [
     # portable run evidence
     "RUN_EVIDENCE_MANIFEST_PATH",
     "EvidenceArtifactV1",
+    "EvidenceLinkV1",
     "EvidenceSectionV1",
     "EvidenceSnapshotRequest",
     "EvidenceSnapshotSourceV1",

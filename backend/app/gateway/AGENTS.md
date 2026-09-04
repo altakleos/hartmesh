@@ -63,8 +63,9 @@ emit a drift warning.
 **Run evidence exports**: the evidence-bundle GET/POST is terminal-only,
 owner-scoped `runs:read`, PAT-allowlisted, no-store, and distinct from ordinary
 ZIPs. It reuses `artifact_archive`; `run_evidence.py` snapshots repositories and
-the archive binds exact copied bytes. Return stable errors/public refs; bundles
-are unsigned.
+the archive binds exact copied bytes. Snapshot coverage follows accepted
+capabilities and terminal attempts; operations cancel on disconnect or the
+60-second deadline. Return stable errors/public refs; bundles are unsigned.
 
 Thread IDs use `deerflow.utils.thread_id` (`^[A-Za-z0-9_-]{1,64}$`); `None`
 generates a UUID and empty strings fail. Creation/state-producing boundaries

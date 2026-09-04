@@ -111,8 +111,9 @@ The current backend does not stream progress events. Treat GET as a bounded
 eligibility check and POST as one cancellable request. Project 07 can expose
 idle/checking/downloading/succeeded/failed client states, but must not infer
 server progress percentages. Cancelling the fetch disconnects the request; the
-Gateway retains its archive slot until the off-thread worker has exited and
-cleaned up.
+Gateway cancels and drains the generation task and retains its archive slot
+until the off-thread worker has exited and cleaned up. GET and POST each have a
+60-second backend deadline.
 
 ## Safe failures
 
@@ -120,6 +121,7 @@ The UI may branch on these stable `detail` values without displaying internal
 payloads:
 
 ```text
+run_not_found
 run_not_terminal
 run_operation_active
 evidence_incomplete
@@ -132,11 +134,13 @@ artifact_unsafe
 bundle_limit_exceeded
 bundle_generation_busy
 bundle_generation_cancelled
+bundle_generation_timeout
 manifest_version_unsupported
 ```
 
 Use generic, retry-oriented text for `evidence_snapshot_changed`,
-`artifact_changed`, `run_operation_active`, and `bundle_generation_busy`.
+`artifact_changed`, `run_operation_active`, `bundle_generation_busy`, and
+`bundle_generation_timeout`.
 Legacy, pruned, incomplete, cross-link, and unsupported-version outcomes need
 operator-facing guidance rather than a retry loop. Preserve a generic 404 for
 ownership/not-found and do not distinguish those cases in telemetry or UI.

@@ -260,7 +260,11 @@ async def test_parent_lineage_query_is_bounded_scoped_and_cursor_checked(tmp_pat
     assert first["next_cursor"] is not None
     assert all(item["receipt_id"].startswith("tr_") for item in first["items"])
     assert all(item["server_name"] == "reports" for item in first["items"])
+    assert all(item["request_commitment_version"] == 1 for item in first["items"])
+    assert all(item["request_commitment_state"] == "present" for item in first["items"])
     assert all("remote_task_id" not in item for item in first["items"])
+    assert all("request_commitment_digest" not in item for item in first["items"])
+    assert all("request_commitment_key_id" not in item for item in first["items"])
 
     second = await repo.list_by_parent_run(
         "run-parent",

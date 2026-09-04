@@ -156,6 +156,7 @@ def _validate_tool_plane_revision(value: object) -> dict[str, Any]:
     }
     if not isinstance(value, Mapping) or set(value) != expected_fields or value.get("version") != 1:
         raise ValueError("tool-plane revision evidence is malformed")
+    detached = _deep_thaw(value)
     for field_name in (
         "base_revision_digest",
         "user_overlay_digest",
@@ -178,16 +179,16 @@ def _validate_tool_plane_revision(value: object) -> dict[str, Any]:
         from deerflow.tool_plane.contracts import EffectiveToolPlaneRevisionV1
 
         effective = EffectiveToolPlaneRevisionV1(
-            base_revision_digest=value["base_revision_digest"],
-            user_overlay_digest=value["user_overlay_digest"],
-            base_generation=value["base_generation"],
-            overlay_generation=value["overlay_generation"],
-            projection_digest=value["projection_digest"],
-            effective_mcp_server_ids=tuple(value["effective_mcp_server_ids"]),
-            effective_mcp_servers=tuple(value["effective_mcp_servers"]),
-            effective_global_skill_states=tuple(value["effective_global_skill_states"]),
-            effective_managed_integration_ids=tuple(value["effective_managed_integration_ids"]),
-            governance_state=value["governance_state"],
+            base_revision_digest=detached["base_revision_digest"],
+            user_overlay_digest=detached["user_overlay_digest"],
+            base_generation=detached["base_generation"],
+            overlay_generation=detached["overlay_generation"],
+            projection_digest=detached["projection_digest"],
+            effective_mcp_server_ids=tuple(detached["effective_mcp_server_ids"]),
+            effective_mcp_servers=tuple(detached["effective_mcp_servers"]),
+            effective_global_skill_states=tuple(detached["effective_global_skill_states"]),
+            effective_managed_integration_ids=tuple(detached["effective_managed_integration_ids"]),
+            governance_state=detached["governance_state"],
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("tool-plane MCP or skill material is malformed") from exc
@@ -204,7 +205,7 @@ def _validate_tool_plane_revision(value: object) -> dict[str, Any]:
         effective.effective_digest,
         field_name="tool-plane effective digest",
     )
-    return {str(key): _deep_thaw(item) for key, item in value.items()}
+    return detached
 
 
 def _frozen_json_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:

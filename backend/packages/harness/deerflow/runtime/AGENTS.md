@@ -53,8 +53,8 @@ binds proof to that policy, receipt, dispatch generation, assembly digest, and
 the current takeover fence.
 
 `run_evidence.py` owns transport-neutral terminal snapshots and canonical V1
-manifests. Keep FastAPI, ZIP, storage, raw payloads/IDs, and authenticity claims
-outside it; adapters revalidate fences and bind copied artifact bytes.
+manifests. Keep FastAPI/ZIP/storage out; manifests omit raw payloads/IDs and
+authenticity claims. Adapters revalidate fences and bind copied artifact bytes.
 
 Live rich run-event writes use `events/appender.py`. A
 `FencedRunEventAppender` binds tenant, thread, run, worker owner, and lifecycle

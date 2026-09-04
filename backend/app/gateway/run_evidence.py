@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -28,6 +29,8 @@ from deerflow.runtime.failure_evidence import (
 )
 from deerflow.runtime.run_evidence import (
     MAX_EVIDENCE_REFERENCES,
+    MAX_LIFECYCLE_EVENTS,
+    EvidenceLinkV1,
     EvidenceSectionV1,
     EvidenceSnapshotRequest,
     EvidenceSnapshotSourceV1,
@@ -50,12 +53,14 @@ from deerflow.sandbox.accepted_material import (
 )
 
 _EVENT_PAGE_SIZE = 2000
-_MAX_EVENTS = 100_000
+_MAX_EVENTS = MAX_LIFECYCLE_EVENTS
 _EXTERNAL_PAGE_SIZE = 100
 _LEAF_DOMAIN = b"hartmesh.run-evidence-bundle.safe-leaf.v1\x00"
 _FENCE_DOMAIN = b"hartmesh.run-evidence-bundle.snapshot-fence.v1\x00"
 _MCP_TERMINAL = frozenset({"completed", "failed", "cancelled"})
 _BATCH_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+_RETRIEVAL_TOOL_NAMES_V1 = frozenset({"knowledge_search", "web_search"})
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _error(code: str) -> None:
@@ -68,6 +73,12 @@ def _safe_leaf(kind: str, value: object) -> str:
 
 def _snapshot_fence(value: object) -> str:
     return hashlib.sha256(_FENCE_DOMAIN + canonical_json_bytes(value)).hexdigest()
+
+
+def _digest(value: object) -> str:
+    if not isinstance(value, str) or _DIGEST_RE.fullmatch(value) is None:
+        _error("evidence_cross_link_invalid")
+    return value
 
 
 def _as_datetime(value: object) -> datetime:
@@ -192,9 +203,14 @@ def _receipt_references(
     request: EvidenceSnapshotRequest,
     accepted: AcceptedInvocation,
     assembly: AssemblyEvidenceV1,
-) -> tuple[tuple[str, ...], dict[str, Mapping[str, object]]]:
+) -> tuple[
+    tuple[str, ...],
+    dict[str, Mapping[str, object]],
+    dict[str, str],
+]:
     receipt_events = [dict(event) for event in events if event.get("event_type") in {TOOL_RECEIPT_STARTED_EVENT, TOOL_RECEIPT_OUTCOME_EVENT}]
     references: list[str] = []
+    references_by_id: dict[str, str] = {}
     outcomes: dict[str, Mapping[str, object]] = {}
     cursor = None
     while True:
@@ -221,7 +237,11 @@ def _receipt_references(
                 or item.extension_configuration_digest != accepted.extension_configuration_digest
             ):
                 _error("evidence_cross_link_invalid")
-            references.append(_safe_leaf("tool_receipt", item.to_dict()))
+            reference = _safe_leaf("tool_receipt", item.to_dict())
+            references.append(reference)
+            if item.receipt_id in references_by_id:
+                _error("evidence_cross_link_invalid")
+            references_by_id[item.receipt_id] = reference
         if len(references) > MAX_EVIDENCE_REFERENCES:
             _error("bundle_limit_exceeded")
         if page.next_cursor is None:
@@ -239,7 +259,9 @@ def _receipt_references(
             if receipt.receipt_id in outcomes:
                 _error("evidence_cross_link_invalid")
             outcomes[receipt.receipt_id] = receipt.to_event_body()
-    return tuple(references), outcomes
+    if set(references_by_id) != set(outcomes):
+        _error("evidence_cross_link_invalid")
+    return tuple(references), outcomes, references_by_id
 
 
 def _retrieval_references(
@@ -247,8 +269,10 @@ def _retrieval_references(
     *,
     request: EvidenceSnapshotRequest,
     receipt_outcomes: Mapping[str, Mapping[str, object]],
-) -> tuple[str, ...]:
-    references: list[str] = []
+    receipt_references: Mapping[str, str],
+    tool_plane: Mapping[str, object],
+) -> tuple[tuple[str, str], ...]:
+    references: list[tuple[str, str]] = []
     receipt_ids: set[str] = set()
     for event in events:
         if event.get("event_type") != RETRIEVAL_OBSERVATION_EVENT_TYPE:
@@ -266,11 +290,91 @@ def _retrieval_references(
             raise RunEvidenceBundleError("evidence_cross_link_invalid") from exc
         if observation.draft.run_id != request.run_id or observation.draft.tenant_ref != request.tenant.public_ref or observation.draft.tenant_digest != request.tenant.digest or observation.receipt_id in receipt_ids:
             _error("evidence_cross_link_invalid")
+        if (
+            observation.draft.tool_plane_base_revision_digest != tool_plane.get("base_revision_digest")
+            or observation.draft.tool_plane_user_overlay_digest != tool_plane.get("user_overlay_digest")
+            or observation.draft.tool_plane_projection_digest != tool_plane.get("projection_digest")
+            or observation.draft.tool_plane_effective_digest != tool_plane.get("effective_digest")
+        ):
+            _error("evidence_cross_link_invalid")
         receipt_ids.add(observation.receipt_id)
-        references.append(observation.observation_digest)
+        if observation.receipt_id not in receipt_references:
+            _error("evidence_cross_link_invalid")
+        references.append((observation.observation_digest, observation.receipt_id))
     if len(references) > MAX_EVIDENCE_REFERENCES:
         _error("bundle_limit_exceeded")
+    expected_receipts = {receipt_id for receipt_id, body in receipt_outcomes.items() if body.get("tool_name") in _RETRIEVAL_TOOL_NAMES_V1}
+    if expected_receipts != receipt_ids:
+        _error("evidence_incomplete")
     return tuple(references)
+
+
+def _mcp_task_submit_names(tool_plane: Mapping[str, object]) -> frozenset[str]:
+    names: set[str] = set()
+    servers = tool_plane.get("effective_mcp_servers")
+    if not isinstance(servers, list | tuple):
+        _error("evidence_cross_link_invalid")
+    for server in servers:
+        if not isinstance(server, Mapping):
+            _error("evidence_cross_link_invalid")
+        toolsets = server.get("task_toolsets", [])
+        if not isinstance(toolsets, list | tuple):
+            _error("evidence_cross_link_invalid")
+        for toolset in toolsets:
+            submit_tool = toolset.get("submit_tool") if isinstance(toolset, Mapping) else None
+            if not isinstance(submit_tool, str) or not submit_tool:
+                _error("evidence_cross_link_invalid")
+            names.add(submit_tool)
+    return frozenset(names)
+
+
+def _complete_attempt_references(
+    *,
+    kind: str,
+    accepted_tool_names: frozenset[str],
+    receipt_outcomes: Mapping[str, Mapping[str, object]],
+    receipt_references: Mapping[str, str],
+    persisted: Sequence[tuple[str, str]],
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Add explicit pre-admission terminal failures for accepted durable tools."""
+
+    by_receipt = {receipt_id: reference for reference, receipt_id in persisted}
+    if len(by_receipt) != len(persisted):
+        _error("evidence_cross_link_invalid")
+    for receipt_id in by_receipt:
+        body = receipt_outcomes.get(receipt_id)
+        if body is None or body.get("tool_name") not in accepted_tool_names:
+            _error("evidence_cross_link_invalid")
+    completed = list(persisted)
+    for receipt_id, body in receipt_outcomes.items():
+        if body.get("tool_name") not in accepted_tool_names or receipt_id in by_receipt:
+            continue
+        phase = body.get("phase")
+        if phase == "succeeded":
+            _error("evidence_incomplete")
+        if phase not in {"failed", "denied", "cancelled"}:
+            _error("evidence_cross_link_invalid")
+        receipt_reference = receipt_references.get(receipt_id)
+        if receipt_reference is None:
+            _error("evidence_cross_link_invalid")
+        completed.append(
+            (
+                _safe_leaf(
+                    f"{kind}_submission_terminal",
+                    {
+                        "receipt_reference": receipt_reference,
+                        "phase": phase,
+                        "safe_error_code": body.get("safe_error_code"),
+                    },
+                ),
+                receipt_id,
+            )
+        )
+    completed.sort()
+    return (
+        tuple(reference for reference, _receipt_id in completed),
+        tuple(completed),
+    )
 
 
 class GatewayRunEvidenceSnapshotReader:
@@ -328,10 +432,11 @@ class GatewayRunEvidenceSnapshotReader:
         self,
         request: EvidenceSnapshotRequest,
         receipt_outcomes: Mapping[str, Mapping[str, object]],
-    ) -> tuple[str, ...]:
+        receipt_references: Mapping[str, str],
+    ) -> tuple[tuple[str, str], ...]:
         if self._mcp_task_repo is None:
             return ()
-        references: list[str] = []
+        references: list[tuple[str, str]] = []
         cursor = None
         while True:
             page = await self._mcp_task_repo.list_by_parent_run(
@@ -352,14 +457,21 @@ class GatewayRunEvidenceSnapshotReader:
                 receipt_id = item.get("receipt_id")
                 if item.get("status") not in _MCP_TERMINAL or not isinstance(receipt_id, str) or receipt_id not in receipt_outcomes:
                     _error("evidence_incomplete")
+                receipt_reference = receipt_references.get(receipt_id)
+                if receipt_reference is None or type(item.get("request_commitment_version")) is not int or item.get("request_commitment_version") != 1 or item.get("request_commitment_state") != "present":
+                    _error("evidence_cross_link_invalid")
                 projection = {
-                    "lineage_digest": item.get("lineage_digest"),
-                    "receipt_id": receipt_id,
+                    "lineage_digest": _digest(item.get("lineage_digest")),
+                    "request_commitment": {
+                        "state": "present",
+                        "version": 1,
+                    },
+                    "receipt_reference": receipt_reference,
                     "status": item.get("status"),
                     "safe_terminal_code": item.get("safe_terminal_code"),
                     "completed_at": item.get("completed_at"),
                 }
-                references.append(_safe_leaf("mcp_task", projection))
+                references.append((_safe_leaf("mcp_task", projection), receipt_id))
             if len(references) > MAX_EVIDENCE_REFERENCES:
                 _error("bundle_limit_exceeded")
             next_cursor = page.get("next_cursor")
@@ -377,10 +489,11 @@ class GatewayRunEvidenceSnapshotReader:
         accepted: AcceptedInvocation,
         assembly: AssemblyEvidenceV1,
         receipt_outcomes: Mapping[str, Mapping[str, object]],
-    ) -> tuple[str, ...]:
+        receipt_references: Mapping[str, str],
+    ) -> tuple[tuple[str, str], ...]:
         if self._subagent_batch_repo is None:
             return ()
-        references: list[str] = []
+        references: list[tuple[str, str]] = []
         cursor = None
         while True:
             page = await self._subagent_batch_repo.list_lifecycle_by_parent_run(
@@ -420,6 +533,7 @@ class GatewayRunEvidenceSnapshotReader:
                     or evidence.get("subagent_catalog_digest") != catalog.digest
                     or not isinstance(parent_receipt, str)
                     or parent_receipt not in receipt_outcomes
+                    or parent_receipt not in receipt_references
                 ):
                     _error("evidence_cross_link_invalid")
                 observations = item.get("observations")
@@ -444,16 +558,19 @@ class GatewayRunEvidenceSnapshotReader:
                 if len(observation_refs) != len(observations):
                     _error("evidence_cross_link_invalid")
                 references.append(
-                    _safe_leaf(
-                        "subagent_batch",
-                        {
-                            "acceptance_digest": item.get("acceptance_digest"),
-                            "parent_tool_receipt_id": parent_receipt,
-                            "status": item.get("status"),
-                            "terminal_code": item.get("terminal_code"),
-                            "total_items": item.get("total_items"),
-                            "observation_references": sorted(observation_refs),
-                        },
+                    (
+                        _safe_leaf(
+                            "subagent_batch",
+                            {
+                                "acceptance_digest": _digest(item.get("acceptance_digest")),
+                                "parent_receipt_reference": receipt_references[parent_receipt],
+                                "status": item.get("status"),
+                                "terminal_code": item.get("terminal_code"),
+                                "total_items": item.get("total_items"),
+                                "observation_references": sorted(observation_refs),
+                            },
+                        ),
+                        parent_receipt,
                     )
                 )
             if len(references) > MAX_EVIDENCE_REFERENCES:
@@ -469,7 +586,7 @@ class GatewayRunEvidenceSnapshotReader:
     async def read(self, request: EvidenceSnapshotRequest) -> EvidenceSnapshotSourceV1:
         row = await self._run_store.get(request.run_id, user_id=request.owner_id)
         if not isinstance(row, Mapping) or row.get("thread_id") != request.thread_id or row.get("operation_kind", "run") != "run":
-            _error("evidence_incomplete")
+            _error("run_not_found")
         status = row.get("status")
         if status in {"pending", "running"}:
             _error("run_not_terminal")
@@ -530,23 +647,86 @@ class GatewayRunEvidenceSnapshotReader:
         if any(item is not None for item in extension_evidence) and any(item is None for item in extension_evidence):
             _error("evidence_legacy_unbound")
 
-        receipt_refs, receipt_outcomes = _receipt_references(
+        receipt_refs, receipt_outcomes, receipt_references = _receipt_references(
             events,
             request=request,
             accepted=accepted,
             assembly=assembly,
         )
-        retrieval_refs = _retrieval_references(
+        mcp_submit_names = _mcp_task_submit_names(tool_plane)
+        if mcp_submit_names and self._mcp_task_repo is None:
+            _error("evidence_incomplete")
+        retrieval_items = _retrieval_references(
             events,
             request=request,
             receipt_outcomes=receipt_outcomes,
+            receipt_references=receipt_references,
+            tool_plane=tool_plane,
         )
-        mcp_refs = await self._mcp_items(request, receipt_outcomes)
-        batch_refs = await self._batch_items(
+        persisted_mcp_items = await self._mcp_items(
+            request,
+            receipt_outcomes,
+            receipt_references,
+        )
+        persisted_batch_items = await self._batch_items(
             request,
             accepted=accepted,
             assembly=assembly,
             receipt_outcomes=receipt_outcomes,
+            receipt_references=receipt_references,
+        )
+        mcp_refs, mcp_items = _complete_attempt_references(
+            kind="mcp_task",
+            accepted_tool_names=mcp_submit_names,
+            receipt_outcomes=receipt_outcomes,
+            receipt_references=receipt_references,
+            persisted=persisted_mcp_items,
+        )
+        batch_refs, batch_items = _complete_attempt_references(
+            kind="subagent_batch",
+            accepted_tool_names=frozenset({"batch_task"}),
+            receipt_outcomes=receipt_outcomes,
+            receipt_references=receipt_references,
+            persisted=persisted_batch_items,
+        )
+        retrieval_refs = tuple(reference for reference, _receipt_id in retrieval_items)
+
+        links = tuple(
+            sorted(
+                (
+                    *(
+                        EvidenceLinkV1(
+                            kind="mcp_task_to_tool_receipt",
+                            subject_section="mcp_tasks",
+                            subject_digest=reference,
+                            object_section="tool_receipts",
+                            object_digest=receipt_references[receipt_id],
+                        )
+                        for reference, receipt_id in mcp_items
+                    ),
+                    *(
+                        EvidenceLinkV1(
+                            kind="subagent_batch_to_tool_receipt",
+                            subject_section="subagent_batches",
+                            subject_digest=reference,
+                            object_section="tool_receipts",
+                            object_digest=receipt_references[receipt_id],
+                        )
+                        for reference, receipt_id in batch_items
+                    ),
+                    *(
+                        EvidenceLinkV1(
+                            kind="retrieval_observation_to_tool_receipt",
+                            subject_section="retrieval_observations",
+                            subject_digest=reference,
+                            object_section="tool_receipts",
+                            object_digest=receipt_references[receipt_id],
+                        )
+                        for reference, receipt_id in retrieval_items
+                    ),
+                ),
+                key=EvidenceLinkV1.sort_key,
+            )
         )
 
         sections: list[EvidenceSectionV1] = [
@@ -567,10 +747,18 @@ class GatewayRunEvidenceSnapshotReader:
                 if accepted.extension_manifest_digest is not None and accepted.extension_artifact_manifest_digest is not None and accepted.extension_configuration_digest is not None
                 else EvidenceSectionV1.absent_by_design("extension_material")
             ),
-            EvidenceSectionV1.complete("tool_plane", (tool_plane["effective_digest"],)),
+            EvidenceSectionV1.complete(
+                "tool_plane",
+                (
+                    tool_plane["base_revision_digest"],
+                    tool_plane["user_overlay_digest"],
+                    tool_plane["projection_digest"],
+                    tool_plane["effective_digest"],
+                ),
+            ),
             EvidenceSectionV1.complete("lifecycle", (terminal_digest,)),
             EvidenceSectionV1.complete("tool_receipts", receipt_refs),
-            (EvidenceSectionV1.complete("mcp_tasks", mcp_refs) if mcp_refs else EvidenceSectionV1.absent_by_design("mcp_tasks")),
+            (EvidenceSectionV1.complete("mcp_tasks", mcp_refs) if mcp_refs or mcp_submit_names else EvidenceSectionV1.absent_by_design("mcp_tasks")),
             (EvidenceSectionV1.complete("subagent_batches", batch_refs) if batch_refs else EvidenceSectionV1.absent_by_design("subagent_batches")),
         ]
 
@@ -635,6 +823,7 @@ class GatewayRunEvidenceSnapshotReader:
             lifecycle_counts=counts,
             sections=tuple(sections),
             artifact_paths=artifact_paths,
+            links=links,
             subagent_catalog_digest=catalog.digest,
             subagent_catalog_entry_count=len(catalog.entries),
             skill_scopes_digest=scopes.digest,
@@ -643,6 +832,9 @@ class GatewayRunEvidenceSnapshotReader:
             extension_artifact_manifest_digest=(accepted.extension_artifact_manifest_digest),
             extension_configuration_digest=(accepted.extension_configuration_digest),
             tool_plane_revision_digest=tool_plane["effective_digest"],
+            tool_plane_base_revision_digest=tool_plane["base_revision_digest"],
+            tool_plane_user_overlay_digest=tool_plane["user_overlay_digest"],
+            tool_plane_projection_digest=tool_plane["projection_digest"],
             credential_evidence_ref=credential.credential_ref,
             credential_evidence_digest=credential.digest,
         )
@@ -691,22 +883,7 @@ class GatewayRunEvidenceSnapshotReader:
         # External tasks and batches were required to be terminal in ``read``;
         # their rows can no longer make a valid transition.  Re-read their
         # bounded pages to detect storage corruption or an illegal rewrite.
-        receipt_outcomes: dict[str, Mapping[str, object]] = {}
-        events = await self._event_store.list_events(
-            request.thread_id,
-            request.run_id,
-            event_types=[TOOL_RECEIPT_OUTCOME_EVENT],
-            limit=MAX_EVIDENCE_REFERENCES,
-            user_id=request.owner_id,
-        )
-        for event in events:
-            try:
-                receipt = parse_tool_receipt_event(event).receipt
-            except ToolEvidenceError:
-                return False
-            receipt_outcomes[receipt.receipt_id] = receipt.to_event_body()
         try:
-            mcp_refs = await self._mcp_items(request, receipt_outcomes)
             # Batch cross-links need accepted/assembly objects, already strictly
             # recoverable from the same unchanged run row.
             accepted = AcceptedInvocation.from_persisted(row)
@@ -714,11 +891,45 @@ class GatewayRunEvidenceSnapshotReader:
             if accepted is None or not isinstance(raw_assembly, Mapping):
                 return False
             assembly = AssemblyEvidenceV1.from_persisted_json(raw_assembly)
-            batch_refs = await self._batch_items(
+            events = await self._events(request)
+            (
+                _receipt_refs,
+                receipt_outcomes,
+                receipt_references,
+            ) = _receipt_references(
+                events,
+                request=request,
+                accepted=accepted,
+                assembly=assembly,
+            )
+            tool_plane = accepted.tool_plane_revision
+            if tool_plane is None:
+                return False
+            persisted_mcp_items = await self._mcp_items(
+                request,
+                receipt_outcomes,
+                receipt_references,
+            )
+            persisted_batch_items = await self._batch_items(
                 request,
                 accepted=accepted,
                 assembly=assembly,
                 receipt_outcomes=receipt_outcomes,
+                receipt_references=receipt_references,
+            )
+            mcp_refs, _mcp_items = _complete_attempt_references(
+                kind="mcp_task",
+                accepted_tool_names=_mcp_task_submit_names(tool_plane),
+                receipt_outcomes=receipt_outcomes,
+                receipt_references=receipt_references,
+                persisted=persisted_mcp_items,
+            )
+            batch_refs, _batch_items = _complete_attempt_references(
+                kind="subagent_batch",
+                accepted_tool_names=frozenset({"batch_task"}),
+                receipt_outcomes=receipt_outcomes,
+                receipt_references=receipt_references,
+                persisted=persisted_batch_items,
             )
         except (
             AssemblyEvidenceError,

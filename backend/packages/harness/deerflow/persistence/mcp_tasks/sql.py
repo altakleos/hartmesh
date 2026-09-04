@@ -566,6 +566,8 @@ class McpTaskRepository:
                 {
                     "task_id": record["id"],
                     "lineage_digest": lineage["digest"],
+                    "request_commitment_version": row.request_commitment_version,
+                    "request_commitment_state": ("present" if row.request_commitment_digest is not None else "legacy_unavailable"),
                     "submitting_task_id": lineage["parent_execution_task_id"],
                     "receipt_id": lineage["parent_tool_receipt_id"],
                     "server_name": lineage["mcp_server_name"],

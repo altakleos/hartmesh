@@ -61,6 +61,8 @@ def test_evidence_bundle_status_and_download_are_additive_and_no_store(
     assert status.json()["profile"] == "complete_durable"
     assert status.json()["artifact_count"] == 1
     assert status.json()["authenticity"] == "not_signed"
+    assert status.headers["cache-control"] == "private, no-store"
+    assert status.headers["x-content-type-options"] == "nosniff"
     assert response.status_code == 200
     assert response.headers["cache-control"] == "private, no-store"
     assert response.headers["x-hartmesh-evidence-authenticity"] == "not-signed"
@@ -96,6 +98,35 @@ def test_evidence_bundle_returns_safe_snapshot_failure_code(tmp_path, monkeypatc
 
     assert response.status_code == 409
     assert response.json() == {"detail": "evidence_pruned"}
+    assert client.app.state.run_evidence_bundle_metrics == {
+        "requested": 1,
+        "refused": 1,
+    }
+
+
+def test_evidence_bundle_missing_run_failure_is_generic_not_found(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    client, _, _ = _archive_app(monkeypatch, outputs, paths=[])
+    client.app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
+
+    async def fail_snapshot(**_kwargs):
+        raise RunEvidenceBundleError("run_not_found")
+
+    monkeypatch.setattr(
+        thread_runs,
+        "build_gateway_run_evidence_snapshot",
+        fail_snapshot,
+    )
+
+    with client:
+        response = client.get(EVIDENCE_URL)
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "run_not_found"}
     assert client.app.state.run_evidence_bundle_metrics == {
         "requested": 1,
         "refused": 1,
@@ -227,3 +258,145 @@ async def test_evidence_archive_reports_bounded_busy_code(monkeypatch) -> None:
             _snapshot(paths=()),
             extra_reserved_dir_names=set(),
         )
+
+
+@pytest.mark.asyncio
+async def test_evidence_generation_timeout_cancels_and_drains_operation(
+    monkeypatch,
+) -> None:
+    cancelled = asyncio.Event()
+
+    class ConnectedRequest:
+        async def is_disconnected(self) -> bool:
+            return False
+
+    async def operation(_deadline: float):
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(
+        thread_runs,
+        "_EVIDENCE_GENERATION_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    with pytest.raises(RunEvidenceBundleError, match="bundle_generation_timeout"):
+        await thread_runs._bounded_evidence_operation(  # type: ignore[arg-type]
+            ConnectedRequest(),
+            operation,
+        )
+
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_evidence_generation_disconnect_cancels_and_drains_operation() -> None:
+    cancelled = asyncio.Event()
+
+    class DisconnectedRequest:
+        async def is_disconnected(self) -> bool:
+            return True
+
+    async def operation(_deadline: float):
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await thread_runs._bounded_evidence_operation(  # type: ignore[arg-type]
+            DisconnectedRequest(),
+            operation,
+        )
+
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_evidence_generation_caller_cancellation_drains_spawned_operation() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    spawned: list[asyncio.Task[object]] = []
+
+    class ConnectedRequest:
+        async def is_disconnected(self) -> bool:
+            return False
+
+    async def operation(_deadline: float):
+        task = asyncio.current_task()
+        assert task is not None
+        spawned.append(task)
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    task = asyncio.create_task(
+        thread_runs._bounded_evidence_operation(  # type: ignore[arg-type]
+            ConnectedRequest(),
+            operation,
+        )
+    )
+    await started.wait()
+    task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cancelled.is_set()
+    finally:
+        for child in spawned:
+            child.cancel()
+        await asyncio.gather(*spawned, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_evidence_generation_probe_failure_drains_spawned_operation() -> None:
+    cancelled = asyncio.Event()
+    spawned: list[asyncio.Task[object]] = []
+
+    class BrokenRequest:
+        async def is_disconnected(self) -> bool:
+            raise RuntimeError("disconnect probe failed")
+
+    async def operation(_deadline: float):
+        task = asyncio.current_task()
+        assert task is not None
+        spawned.append(task)
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    try:
+        with pytest.raises(RuntimeError, match="disconnect probe failed"):
+            await thread_runs._bounded_evidence_operation(  # type: ignore[arg-type]
+                BrokenRequest(),
+                operation,
+            )
+        assert cancelled.is_set()
+    finally:
+        for child in spawned:
+            child.cancel()
+        await asyncio.gather(*spawned, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancel_and_drain_closes_completed_archive_result() -> None:
+    output = io.BytesIO(b"bundle")
+    result = thread_runs.ArtifactArchiveResult(
+        output,
+        len(output.getvalue()),
+        0,
+        0,
+        manifest_digest="1" * 64,
+        bundle_ref="bundle-1234567890abcdef",
+    )
+    task = asyncio.create_task(asyncio.sleep(0, result=(object(), result)))
+    await task
+
+    await thread_runs._cancel_and_drain(task)
+
+    assert output.closed

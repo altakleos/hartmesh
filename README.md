@@ -430,9 +430,11 @@ An authorized user can export a terminal durable run through the dedicated
 contains the exact presented artifact bytes plus the canonical
 `hartmesh-evidence/manifest.v1.json`, which binds safe admission, assembly,
 lifecycle, tool, MCP, batch, sandbox, retrieval, and qualification references.
-Missing required evidence fails closed; optional capabilities not accepted by
-the run are explicit `absent_by_design` sections. The existing ordinary
-artifact archive remains separate and carries no HartMesh evidence claim.
+Missing required evidence fails closed. Capabilities not accepted by the run
+are explicit `absent_by_design` sections, while an accepted but unused durable
+MCP surface is recorded as a complete empty section. Digest-only evidence links
+make child-to-receipt joins checkable offline. The existing ordinary artifact
+archive remains separate and carries no HartMesh evidence claim.
 
 Verify a downloaded bundle without application configuration, a database, or
 network access:

@@ -160,6 +160,22 @@ def test_evidence_archive_rejects_reserved_namespace_collision(tmp_path) -> None
         )
 
 
+def test_evidence_archive_reports_expired_generation_deadline(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+
+    with pytest.raises(ArtifactArchiveError) as raised:
+        build_run_evidence_archive(
+            outputs,
+            (),
+            snapshot=_snapshot(paths=()),
+            user_data_dir=outputs.parent,
+            deadline_monotonic=0,
+        )
+
+    assert raised.value.code == "bundle_generation_timeout"
+
+
 def test_evidence_archive_requires_snapshot_paths_to_match_archive_input(tmp_path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

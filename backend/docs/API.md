@@ -165,8 +165,9 @@ POST /api/threads/{thread_id}/runs/{run_id}/artifacts/evidence-bundle
 
 `GET` returns schema/canonicalization versions, pseudonymous run/thread
 references, terminal status, artifact count, all section completeness states,
-the fixed limitations, and `authenticity: "not_signed"`. It does not read or
-return raw events.
+the fixed limitations, and `authenticity: "not_signed"`. It validates raw event
+records but never returns their payloads; lifecycle evidence is reduced to
+bounded digests and counts.
 
 `POST` returns a no-store ZIP whose final entry is the canonical
 `hartmesh-evidence/manifest.v1.json`. The other entries are exactly the files
@@ -176,8 +177,10 @@ lifecycle, tool, MCP, batch, sandbox, retrieval, and qualification roots.
 
 Only the `complete_durable` profile exists in V1. Active, legacy, pruned,
 inconsistent, oversized, or concurrently changed inputs fail with bounded
-codes; there is no partial evidence mode. This is separate from the ordinary
-`.../artifacts/archive` API, which has no evidence-manifest semantics.
+codes; there is no partial evidence mode. Both operations are no-store, cancel
+on disconnect, and have a 60-second whole-generation deadline. This is separate
+from the ordinary `.../artifacts/archive` API, which has no evidence-manifest
+semantics.
 
 Use the dependency-free offline verifier from the repository root:
 

@@ -23,8 +23,9 @@ the truth. A successful verification result therefore always reports
   and must not be described as HartMesh evidence.
 - There is no partial evidence export in V1. Required legacy, pruned,
   unavailable, or inconsistent evidence fails closed with a safe error code.
-  Optional capabilities that were not accepted are recorded as
-  `absent_by_design`.
+  Optional capabilities that were neither accepted nor attempted are recorded
+  as `absent_by_design`. An accepted durable MCP task surface with no attempts
+  is a complete empty section, not a fabricated omission.
 
 ## HTTP API
 
@@ -38,7 +39,7 @@ POST /api/threads/{thread_id}/runs/{run_id}/artifacts/evidence-bundle
 ```
 
 `GET` validates the same terminal evidence snapshot used by export and returns
-a bounded status projection:
+a bounded status projection with `Cache-Control: private, no-store`:
 
 ```json
 {
@@ -76,11 +77,14 @@ returns `application/zip` with a server-created filename. The response uses
 `X-HartMesh-Evidence-Authenticity: not-signed`.
 
 Status and download reserve the existing per-thread artifact-archive
-operation. They conflict with active mutations, share the process archive
-concurrency limit, and keep that slot until an off-thread ZIP worker exits even
-when the request is cancelled. A status response establishes snapshot
-eligibility; filesystem safety and exact artifact bytes are necessarily checked
-again while the POST archive is built.
+operation and conflict with active mutations. Download also shares the process
+archive concurrency limit and keeps that slot until an off-thread ZIP worker
+exits even when the request is cancelled. Both operations have a 60-second
+whole-generation deadline and monitor request disconnects; cancellation is
+propagated through the snapshot/archive task and partial output is drained and
+closed before its slot is released. A status response establishes
+snapshot eligibility; filesystem safety and exact artifact bytes are
+necessarily checked again while the POST archive is built.
 
 ## Snapshot and consistency contract
 
@@ -99,9 +103,14 @@ A V1 snapshot:
    MCP, and batch cross-links before reducing them to safe digests;
 4. pages the run journal up to 100,000 events and records its last sequence as
    the lifecycle high-water mark;
-5. uses only payload-free bounded MCP and batch lifecycle projections;
-6. re-reads the terminal run fence and external terminal projections; and
-7. retries once when that fence changes, then returns
+5. derives required MCP, batch, and retrieval coverage from accepted tool-plane
+   task declarations and terminal tool attempts, including an explicit safe
+   terminal-failure reference when submission ended before a child row existed;
+6. uses only payload-free bounded MCP and batch lifecycle projections, recording
+   MCP public lineage plus private-request-commitment presence/version without
+   exporting the HMAC digest or key ID;
+7. re-reads the terminal run fence and external terminal projections; and
+8. retries once when that fence changes, then returns
    `evidence_snapshot_changed`.
 
 The endpoint surrounds this read with the RunManager's thread-operation
@@ -124,10 +133,11 @@ fields are fixed:
 | `canonicalization`, `canonicalization_version` | `utf8-nfc-sorted-json`, version `1` |
 | `bundle_ref`, `tenant_ref`, `thread_ref`, `run_ref` | bounded public references; raw run/thread/user/tenant IDs are excluded |
 | `terminal` | status, safe stop reason, and UTC accepted/completed timestamps |
-| `admission` | accepted invocation/context/agent digests and version; catalog/scope counts and digests; extension, tool-plane, and credential evidence references |
+| `admission` | accepted invocation/context/agent digests and version; catalog/scope counts and digests; extension and credential evidence references; accepted tool-plane base, overlay, projection, and effective digests |
 | `assembly` | bound assembly evidence digest and fingerprint |
 | `lifecycle` | high-water mark, terminal-event digest, event count, and coarse counts |
 | `evidence_sections` | fixed section set with state, requirement, bounded item count, safe references, and recomputable root |
+| `evidence_links` | sorted digest-only MCP/batch/retrieval-to-receipt edges whose endpoints must occur in the declared section roots |
 | `artifacts` | canonical relative ZIP path, byte size, SHA-256, and optional safe media type |
 | `qualification` | exact projection of the qualification section; never synthesized as passing |
 | `completeness` | profile, complete state, and expected section count |
@@ -174,7 +184,16 @@ Section states are `complete`, `absent_by_design`, `unsupported`, `legacy`,
 `pruned`, `unavailable`, and `unqualified`. A complete section has sorted safe
 references and a domain-separated root over those references. An omitted
 section has no root or references and carries a safe reason code. Required
-sections must be `complete`; V1 does not serialize a partial bundle.
+sections must be `complete`; V1 does not serialize a partial bundle. Admission,
+assembly, and lifecycle section references must exactly equal their declared
+top-level anchors rather than merely containing them.
+
+`evidence_links` makes child/parent joins checkable without a database. Every
+MCP task, subagent batch, and retrieval observation reference has exactly one
+edge to an included durable tool-receipt reference. The Gateway validates the
+underlying typed records before reducing them to these digest-only edges; the
+offline verifier then rejects missing, duplicate, dangling, or wrong-section
+edges. The edges expose no raw task, receipt, run, provider, or user identifier.
 
 No prompts, messages, tool arguments/results, retrieval text, credentials,
 friendly PAT names, user IDs, raw tenant names, provider handles, request
@@ -192,6 +211,7 @@ sensitive.
 | One artifact path | 1,024 UTF-8 bytes |
 | Manifest | 1 MiB |
 | References in one section | 4,096 |
+| Cross-section evidence links | 4,096 |
 | Run events in one snapshot | 100,000 |
 | Concurrent archive workers per Gateway process | 4 |
 | Generation deadline | 60 seconds |
@@ -228,16 +248,22 @@ names, oversized archives, and any digest or cross-link mismatch.
 ## Safe failures and operations
 
 The HTTP surface returns bounded codes such as `run_not_terminal`,
-`run_operation_active`, `evidence_incomplete`, `evidence_pruned`,
+`run_not_found`, `run_operation_active`, `evidence_incomplete`, `evidence_pruned`,
 `evidence_legacy_unbound`, `evidence_snapshot_changed`,
 `evidence_cross_link_invalid`, `artifact_changed`, `artifact_unsafe`,
 `bundle_limit_exceeded`, and `bundle_generation_busy`. Cross-owner requests
 remain generic `404` responses. Detailed filesystem, provider, credential, and
 evidence payloads are not returned.
 
+`bundle_generation_timeout` is returned as `504` when the bounded whole-request
+deadline expires. A client disconnect cancels the operation and is recorded as
+cancelled rather than returning a response to the closed connection.
+
 Gateway process metrics count requested, completed, refused, cancelled, and
-failed operations without raw resource identifiers. Successful logs use only
-the pseudonymous run and bundle references.
+failed operations without raw resource identifiers. Bounded events use only
+the verified actor digest and the bundle public reference when one exists;
+authorization middleware separately audits refusals that occur before the
+endpoint handler.
 
 ## Retention, qualification, and trust
 

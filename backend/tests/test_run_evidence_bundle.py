@@ -9,6 +9,7 @@ from deerflow_extension_api import TenantReferenceV1
 
 from deerflow.runtime.run_evidence import (
     EvidenceArtifactV1,
+    EvidenceLinkV1,
     EvidenceSectionV1,
     EvidenceSnapshotRequest,
     EvidenceSnapshotSourceV1,
@@ -233,9 +234,9 @@ def test_manifest_canonical_bytes_digest_and_reference_root_are_stable() -> None
     assert parsed.artifacts[0].path == "a/summary.json"
     assert parsed.manifest_digest == manifest.manifest_digest
     assert canonical_evidence_root("tool_receipts", (_D2, _D1)) == canonical_evidence_root("tool_receipts", (_D1, _D2))
-    assert manifest.manifest_digest == "9cf072871aae448690d1a9bb9b961a4197ce842c1dd0130119e6fa856a373619"
-    assert manifest.bundle_ref == "bundle-36bacbff9daeeed521f8d33b"
-    assert hashlib.sha256(manifest.canonical_bytes()).hexdigest() == "6e658ee2b7685887cc41f4a72226e1a37e67b48032ff760a3924a972bb4a298e"
+    assert manifest.manifest_digest == "2d00d0a141363b065bba94336271c460da99b0c4362fa42a62759349b3327bc9"
+    assert manifest.bundle_ref == "bundle-f8e37d03ceea6683c8add3ba"
+    assert hashlib.sha256(manifest.canonical_bytes()).hexdigest() == "5696bba4aeddd26d0fb3a369840b5e401c76dc79c88aef3dc98cae66c0bf9144"
 
     reordered_source = EvidenceSnapshotSourceV1(
         **{
@@ -262,6 +263,77 @@ def test_manifest_parser_rejects_unknown_versions_and_noncanonical_bytes() -> No
     pretty = json.dumps(manifest.to_dict(), indent=2).encode()
     with pytest.raises(RunEvidenceBundleError, match="manifest_not_canonical"):
         RunEvidenceBundleManifestV1.from_bytes(pretty)
+
+
+@pytest.mark.parametrize("field", ["schema_version", "canonicalization_version"])
+def test_manifest_parser_rejects_boolean_versions(field: str) -> None:
+    manifest = RunEvidenceSnapshotService.validate_source(_source()).to_manifest(())
+    document = manifest.to_dict()
+    document[field] = True
+
+    with pytest.raises(RunEvidenceBundleError, match="manifest_version_unsupported"):
+        RunEvidenceBundleManifestV1.from_dict(document)
+
+
+def test_manifest_parser_enforces_lifecycle_event_bound() -> None:
+    manifest = RunEvidenceSnapshotService.validate_source(_source()).to_manifest(())
+    document = manifest.to_dict()
+    document["lifecycle"]["event_count"] = 100_001
+    document["lifecycle"]["safe_counts"] = {"lifecycle": 100_001}
+
+    with pytest.raises(RunEvidenceBundleError, match="bundle_limit_exceeded"):
+        RunEvidenceBundleManifestV1.from_dict(document)
+
+
+def test_manifest_carries_only_bounded_section_links_and_rejects_dangling_edges() -> None:
+    source = _source()
+    child = "a" * 64
+    linked = EvidenceSnapshotSourceV1(
+        **{
+            **source.as_kwargs(),
+            "sections": tuple(EvidenceSectionV1.complete("mcp_tasks", (child,)) if section.name == "mcp_tasks" else section for section in source.sections),
+            "links": (
+                EvidenceLinkV1(
+                    kind="mcp_task_to_tool_receipt",
+                    subject_section="mcp_tasks",
+                    subject_digest=child,
+                    object_section="tool_receipts",
+                    object_digest="8" * 64,
+                ),
+            ),
+        }
+    )
+
+    manifest = RunEvidenceSnapshotService.validate_source(linked).to_manifest(())
+
+    assert manifest.evidence_links[0].kind == "mcp_task_to_tool_receipt"
+    assert RunEvidenceBundleManifestV1.from_bytes(manifest.canonical_bytes()) == manifest
+
+    dangling = EvidenceSnapshotSourceV1(
+        **{
+            **linked.as_kwargs(),
+            "links": (
+                EvidenceLinkV1(
+                    kind="mcp_task_to_tool_receipt",
+                    subject_section="mcp_tasks",
+                    subject_digest=child,
+                    object_section="tool_receipts",
+                    object_digest="f" * 64,
+                ),
+            ),
+        }
+    )
+    with pytest.raises(RunEvidenceBundleError, match="evidence_cross_link_invalid"):
+        RunEvidenceSnapshotService.validate_source(dangling)
+
+    malformed = EvidenceSnapshotSourceV1(
+        **{
+            **source.as_kwargs(),
+            "links": ("not-an-evidence-link",),
+        }
+    )
+    with pytest.raises(RunEvidenceBundleError, match="evidence_cross_link_invalid"):
+        RunEvidenceSnapshotService.validate_source(malformed)
 
 
 def test_manifest_contains_only_bounded_safe_contract_fields() -> None:
@@ -307,3 +379,33 @@ def test_manifest_rejects_admission_section_cross_link_drift() -> None:
 
     with pytest.raises(RunEvidenceBundleError, match="evidence_cross_link_invalid"):
         RunEvidenceSnapshotService.validate_source(changed)
+
+
+def test_manifest_requires_exact_admission_section_anchors() -> None:
+    source = _source()
+    changed = EvidenceSnapshotSourceV1(
+        **{
+            **source.as_kwargs(),
+            "sections": tuple(
+                EvidenceSectionV1.complete(
+                    "accepted_invocation",
+                    (_D1, _D2),
+                )
+                if section.name == "accepted_invocation"
+                else section
+                for section in source.sections
+            ),
+        }
+    )
+
+    with pytest.raises(RunEvidenceBundleError, match="evidence_cross_link_invalid"):
+        RunEvidenceSnapshotService.validate_source(changed)
+
+
+def test_manifest_parser_rechecks_admission_section_anchors() -> None:
+    manifest = RunEvidenceSnapshotService.validate_source(_source()).to_manifest(())
+    document = manifest.to_dict()
+    document["admission"]["subagent_catalog_digest"] = _D1
+
+    with pytest.raises(RunEvidenceBundleError, match="evidence_cross_link_invalid"):
+        RunEvidenceBundleManifestV1.from_dict(document)

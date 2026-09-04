@@ -36,9 +36,11 @@ MAX_ARTIFACTS = 50
 MAX_ENTRIES = MAX_ARTIFACTS + 1
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 MAX_TOTAL_ARTIFACT_BYTES = 100 * 1024 * 1024
+MAX_LIFECYCLE_EVENTS = 100_000
 MAX_ARCHIVE_BYTES = MAX_TOTAL_ARTIFACT_BYTES + MAX_MANIFEST_BYTES + 256 * 1024
 MAX_PATH_BYTES = 1024
 MAX_REFERENCES = 4096
+MAX_EVIDENCE_LINKS = 4096
 CHUNK_BYTES = 1024 * 1024
 
 EXPECTED_SECTIONS = (
@@ -91,6 +93,7 @@ TOP_LEVEL_FIELDS = {
     "assembly",
     "lifecycle",
     "evidence_sections",
+    "evidence_links",
     "artifacts",
     "qualification",
     "completeness",
@@ -110,6 +113,9 @@ ADMISSION_FIELDS = {
     "extension_artifact_manifest_digest",
     "extension_configuration_digest",
     "tool_plane_revision_digest",
+    "tool_plane_base_revision_digest",
+    "tool_plane_user_overlay_digest",
+    "tool_plane_projection_digest",
     "credential_evidence_ref",
     "credential_evidence_digest",
 }
@@ -121,6 +127,24 @@ SECTION_FIELDS = {
     "references",
     "root_digest",
     "reason_code",
+}
+EVIDENCE_LINK_FIELDS = {
+    "kind",
+    "subject_section",
+    "subject_digest",
+    "object_section",
+    "object_digest",
+}
+EVIDENCE_LINK_SECTIONS = {
+    "mcp_task_to_tool_receipt": ("mcp_tasks", "tool_receipts"),
+    "retrieval_observation_to_tool_receipt": (
+        "retrieval_observations",
+        "tool_receipts",
+    ),
+    "subagent_batch_to_tool_receipt": (
+        "subagent_batches",
+        "tool_receipts",
+    ),
 }
 ARTIFACT_FIELDS = {"path", "size", "sha256", "media_type"}
 LIMITATIONS = (
@@ -283,6 +307,47 @@ def validate_artifact(value: object) -> dict[str, object]:
     return {**value, "path": path}
 
 
+def validate_evidence_links(
+    value: object,
+    sections: Mapping[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    if not isinstance(value, list) or len(value) > MAX_EVIDENCE_LINKS:
+        fail("bundle_limit_exceeded")
+    links: list[dict[str, object]] = []
+    keys: list[tuple[str, str, str, str, str]] = []
+    for raw in value:
+        if not isinstance(raw, dict) or set(raw) != EVIDENCE_LINK_FIELDS:
+            fail("manifest_fields_invalid")
+        kind = raw.get("kind")
+        subject_section = raw.get("subject_section")
+        object_section = raw.get("object_section")
+        if not isinstance(kind, str) or EVIDENCE_LINK_SECTIONS.get(kind) != (subject_section, object_section):
+            fail("evidence_cross_link_invalid")
+        subject_digest = require_digest(raw.get("subject_digest"))
+        object_digest = require_digest(raw.get("object_digest"))
+        subject = sections.get(subject_section)  # type: ignore[arg-type]
+        object_value = sections.get(object_section)  # type: ignore[arg-type]
+        if subject is None or object_value is None or subject.get("state") != "complete" or object_value.get("state") != "complete" or subject_digest not in subject["references"] or object_digest not in object_value["references"]:
+            fail("evidence_cross_link_invalid")
+        links.append(raw)
+        keys.append(
+            (
+                kind,
+                subject_section,  # type: ignore[arg-type]
+                subject_digest,
+                object_section,  # type: ignore[arg-type]
+                object_digest,
+            )
+        )
+    if keys != sorted(keys) or len(set(keys)) != len(keys):
+        fail("manifest_fields_invalid")
+    for kind, (subject_name, _object_name) in EVIDENCE_LINK_SECTIONS.items():
+        linked_subjects = sorted(link["subject_digest"] for link in links if link["kind"] == kind)
+        if linked_subjects != sections[subject_name]["references"]:
+            fail("evidence_cross_link_invalid")
+    return links
+
+
 def validate_manifest(raw: bytes) -> dict[str, object]:
     if len(raw) > MAX_MANIFEST_BYTES:
         fail("bundle_limit_exceeded")
@@ -292,7 +357,7 @@ def validate_manifest(raw: bytes) -> dict[str, object]:
         raise VerificationError("manifest_not_canonical") from exc
     if not isinstance(document, dict):
         fail("manifest_fields_invalid")
-    if document.get("schema_version") != SCHEMA_VERSION or document.get("canonicalization_version") != CANONICALIZATION_VERSION:
+    if type(document.get("schema_version")) is not int or document.get("schema_version") != SCHEMA_VERSION or type(document.get("canonicalization_version")) is not int or document.get("canonicalization_version") != CANONICALIZATION_VERSION:
         fail("manifest_version_unsupported")
     if set(document) != TOP_LEVEL_FIELDS:
         fail("manifest_fields_invalid")
@@ -343,11 +408,22 @@ def validate_manifest(raw: bytes) -> dict[str, object]:
         "skill_scopes_digest",
         "capability_manifest_digest",
         "tool_plane_revision_digest",
+        "tool_plane_base_revision_digest",
+        "tool_plane_user_overlay_digest",
+        "tool_plane_projection_digest",
         "credential_evidence_digest",
     ):
         if admission.get(key) is not None:
             require_digest(admission[key])
     if admission.get("credential_evidence_digest") is None and credential_ref is not None:
+        fail("evidence_cross_link_invalid")
+    tool_plane_digests = (
+        admission["tool_plane_base_revision_digest"],
+        admission["tool_plane_user_overlay_digest"],
+        admission["tool_plane_projection_digest"],
+        admission["tool_plane_revision_digest"],
+    )
+    if any(digest is None for digest in tool_plane_digests) != all(digest is None for digest in tool_plane_digests):
         fail("evidence_cross_link_invalid")
     for key in (
         "extension_artifact_manifest_digest",
@@ -356,6 +432,10 @@ def validate_manifest(raw: bytes) -> dict[str, object]:
         value = admission.get(key)
         if value is not None and (not isinstance(value, str) or SHA256_DIGEST_RE.fullmatch(value) is None):
             fail("manifest_fields_invalid")
+    if (admission["extension_artifact_manifest_digest"] is None) != (admission["extension_configuration_digest"] is None):
+        fail("evidence_cross_link_invalid")
+    if admission["extension_artifact_manifest_digest"] is not None and admission["capability_manifest_digest"] is None:
+        fail("evidence_cross_link_invalid")
 
     assembly = document.get("assembly")
     if not isinstance(assembly, dict) or set(assembly) != {"evidence_digest", "fingerprint"}:
@@ -369,7 +449,9 @@ def validate_manifest(raw: bytes) -> dict[str, object]:
     high_water = lifecycle.get("high_water_mark")
     event_count = lifecycle.get("event_count")
     counts = lifecycle.get("safe_counts")
-    if type(high_water) is not int or high_water < 1 or type(event_count) is not int or event_count < 1 or not isinstance(counts, dict):
+    if type(high_water) is not int or high_water < 1 or type(event_count) is not int or not 1 <= event_count <= MAX_LIFECYCLE_EVENTS or not isinstance(counts, dict):
+        if type(event_count) is int and event_count > MAX_LIFECYCLE_EVENTS:
+            fail("bundle_limit_exceeded")
         fail("manifest_fields_invalid")
     require_digest(lifecycle.get("terminal_event_digest"))
     if set(counts) - SAFE_COUNT_KEYS or any(type(item) is not int or item < 0 for item in counts.values()) or sum(counts.values()) != event_count:
@@ -387,7 +469,7 @@ def validate_manifest(raw: bytes) -> dict[str, object]:
         ("assembly", assembly["evidence_digest"]),
         ("lifecycle", lifecycle["terminal_event_digest"]),
     ):
-        if anchor not in by_name[name]["references"]:
+        if by_name[name]["state"] != "complete" or by_name[name]["references"] != [anchor]:
             fail("evidence_cross_link_invalid")
     optional_anchors = (
         (
@@ -416,16 +498,18 @@ def validate_manifest(raw: bytes) -> dict[str, object]:
         ),
         (
             "tool_plane",
-            () if admission["tool_plane_revision_digest"] is None else (admission["tool_plane_revision_digest"],),
+            tuple(digest for digest in tool_plane_digests if digest is not None),
         ),
     )
     for name, anchors in optional_anchors:
         section = by_name[name]
         if anchors:
-            if section["state"] != "complete" or any(anchor not in section["references"] for anchor in anchors):
+            if section["state"] != "complete" or section["references"] != sorted(anchors):
                 fail("evidence_cross_link_invalid")
         elif section["state"] != "absent_by_design":
             fail("evidence_cross_link_invalid")
+
+    validate_evidence_links(document.get("evidence_links"), by_name)
 
     raw_artifacts = document.get("artifacts")
     if not isinstance(raw_artifacts, list) or len(raw_artifacts) > MAX_ARTIFACTS:

@@ -79,7 +79,7 @@ def _reject() -> ArtifactArchiveError:
 
 def _changed() -> ArtifactArchiveError:
     return ArtifactArchiveError(
-        "The files listed by this response changed during archive creation",
+        "The files listed by this response are not available for archive download",
         code="artifact_changed",
     )
 
@@ -93,7 +93,7 @@ def _check_deadline(deadline: float) -> None:
         raise ArtifactArchiveError(
             "Artifact archive creation timed out",
             503,
-            "artifact_changed",
+            "bundle_generation_timeout",
         )
 
 
@@ -350,6 +350,7 @@ def build_run_evidence_archive(
     snapshot: RunEvidenceSnapshotV1,
     user_data_dir: Path,
     extra_reserved_dir_names: Iterable[str] = (),
+    deadline_monotonic: float | None = None,
 ) -> ArtifactArchiveResult:
     """Build a manifest-bearing archive from one immutable runtime snapshot.
 
@@ -364,7 +365,7 @@ def build_run_evidence_archive(
     paths = list(dict.fromkeys(virtual_paths))
     if tuple(paths) != snapshot.artifact_paths:
         raise ArtifactArchiveError("The evidence snapshot does not match the requested artifacts")
-    deadline = time.monotonic() + BUILD_TIMEOUT_SECONDS
+    deadline = time.monotonic() + BUILD_TIMEOUT_SECONDS if deadline_monotonic is None else deadline_monotonic
     members = _validated_members(
         outputs_dir,
         paths,

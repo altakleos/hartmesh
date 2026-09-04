@@ -151,9 +151,10 @@ This section accumulates work toward the **2.1.0** milestone
 
 - **evidence:** Add terminal-only portable run evidence bundles with a
   canonical safe manifest, exact copied-artifact digests, explicit section
-  completeness, current-owner/PAT authorization, bounded cancellation-aware
-  generation, and a stdlib-only offline verifier. Bundles prove internal
-  digest integrity and explicitly remain unsigned.
+  completeness derived from accepted capabilities and terminal attempts,
+  offline-checkable parent/child links, current-owner/PAT authorization,
+  bounded cancellation-aware generation, and a stdlib-only offline verifier.
+  Bundles prove internal digest integrity and explicitly remain unsigned.
 - **runtime:** Accepted durable lead runs now bind a bounded fingerprint of the
   actual assembled model, prompt, authorized tools, middleware, skills, and
   policy before checkpoint or graph execution; recovery must match it, and
