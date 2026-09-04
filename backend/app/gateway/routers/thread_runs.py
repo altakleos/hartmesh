@@ -83,6 +83,15 @@ from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.constants import RETRIEVAL_OBSERVATION_EVENT_TYPE
 from deerflow.retrieval import RetrievalEvidenceError, RetrievalObservationV1
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
+from deerflow.runtime.events.catalog import (
+    EXECUTION_POLICY_DECISION_EVENT,
+    MIDDLEWARE_EVENT_PATTERN,
+    MIDDLEWARE_MCP_PREPARATION_TAG,
+    SANDBOX_LIFECYCLE_EVENT,
+    TOOL_RECEIPT_STARTED_EVENT,
+)
+from deerflow.runtime.evidence_summary import build_evidence_summary_v1
+from deerflow.runtime.execution_policy import ExecutionPolicyError, ExecutionPolicyStateV1
 from deerflow.runtime.run_evidence import (
     RUN_EVIDENCE_CANONICALIZATION_VERSION,
     RUN_EVIDENCE_LIMITATIONS,
@@ -91,6 +100,7 @@ from deerflow.runtime.run_evidence import (
     EvidenceSnapshotRequest,
     RunEvidenceBundleError,
     RunEvidenceSnapshotV1,
+    public_evidence_reference,
 )
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.tenant_identity import TenantIdentityV1
@@ -1957,6 +1967,151 @@ async def _archive_presented_paths(thread_id: ThreadId, run_id: str, request: Re
         limit=2,
     )
     return _presented_files_from_delivery(events)
+
+
+@router.get("/{thread_id}/runs/{run_id}/evidence", response_model=dict[str, Any])
+@require_permission("runs", "read", owner_check=True, require_existing=True)
+async def get_run_evidence_summary(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """Return one bounded authorized V1 projection for the evidence panel."""
+
+    record = await _observe_run_or_404(
+        request,
+        thread_id=thread_id,
+        run_id=run_id,
+        visibility_prevalidated=True,
+    )
+    row = await get_run_store(request).get(run_id)
+    if row is None or row.get("thread_id") != thread_id:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    accepted = record.accepted_invocation
+    budget = accepted.execution_budget if accepted is not None else None
+    policy_state = None
+    if record.execution_policy_state_json is not None:
+        try:
+            candidate = ExecutionPolicyStateV1.from_json(record.execution_policy_state_json)
+            if candidate.digest == record.execution_policy_state_digest:
+                policy_state = candidate
+        except (ExecutionPolicyError, TypeError, ValueError):
+            policy_state = None
+
+    event_types = [
+        EXECUTION_POLICY_DECISION_EVENT.event_type,
+        TOOL_RECEIPT_STARTED_EVENT.event_type,
+        SANDBOX_LIFECYCLE_EVENT.event_type,
+        RETRIEVAL_OBSERVATION_EVENT_TYPE,
+        MIDDLEWARE_EVENT_PATTERN.event_type(MIDDLEWARE_MCP_PREPARATION_TAG),
+        "run.delivery",
+    ]
+    events = await get_run_event_store(request).list_events(
+        thread_id,
+        run_id,
+        event_types=event_types,
+        limit=501,
+    )
+    events_pruned = len(events) > 500
+    events = events[:500]
+    policy_candidates = [event for event in events if event.get("event_type") == EXECUTION_POLICY_DECISION_EVENT.event_type]
+    policy_events = policy_candidates[:100]
+    counts = {
+        "tools": sum(event.get("event_type") == TOOL_RECEIPT_STARTED_EVENT.event_type for event in events),
+        "sandbox": sum(event.get("event_type") == SANDBOX_LIFECYCLE_EVENT.event_type for event in events),
+        "retrieval": sum(event.get("event_type") == RETRIEVAL_OBSERVATION_EVENT_TYPE for event in events),
+        "mcp": sum(event.get("event_type") == MIDDLEWARE_EVENT_PATTERN.event_type(MIDDLEWARE_MCP_PREPARATION_TAG) for event in events),
+        "pruned": events_pruned,
+        "policy_pruned": events_pruned or len(policy_candidates) > 100,
+    }
+    deliveries = [event for event in events if event.get("event_type") == "run.delivery"]
+    try:
+        artifact_count = len(dict.fromkeys(_presented_files_from_delivery(deliveries)))
+    except HTTPException:
+        artifact_count = 0
+
+    user_id = await get_current_user(request)
+    batch_rows: list[dict[str, Any]] = []
+    batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
+    if batch_repo is not None and user_id is not None:
+        candidates = await batch_repo.list_by_thread(
+            thread_id,
+            user_id=user_id,
+            limit=100,
+        )
+        batch_rows = [
+            {
+                "status": item.get("status"),
+                "total_items": item.get("total_items", item.get("item_count", 0)),
+            }
+            for item in candidates
+            if item.get("parent_run_id") == run_id or (isinstance(item.get("evidence"), dict) and item["evidence"].get("parent_run_id") == run_id)
+        ]
+
+    tenant_digest = row.get("tenant_digest")
+    if not isinstance(tenant_digest, str) or len(tenant_digest) != 64:
+        # Legacy rows predate tenant anchoring. The constant placeholder keys
+        # their public refs deterministically; run/thread IDs are still random
+        # UUIDs, so the refs stay non-guessable, and such rows already surface
+        # as `legacy` sections rather than governed evidence.
+        tenant_digest = "0" * 64
+    assembly = None
+    if isinstance(record.assembly_evidence_json, dict):
+        assembly = {
+            "fingerprint": record.assembly_evidence_json.get("fingerprint"),
+            "tool_plane_digest": (accepted.tool_plane_revision["effective_digest"] if accepted is not None and accepted.tool_plane_revision is not None else None),
+        }
+    admission = None
+    if accepted is not None:
+        admission = {
+            "agent_revision_digest": accepted.agent_revision.digest,
+            "actor_evidence": accepted.principal.identity is not None,
+        }
+    terminal = record.status not in {RunStatus.pending, RunStatus.running}
+    bundle_state = "not_applicable"
+    if terminal:
+        try:
+            await _run_evidence_snapshot(thread_id, run_id, request)
+            bundle_state = "available"
+        except RunEvidenceBundleError as exc:
+            bundle_state = (
+                "unsupported"
+                if exc.code
+                in {
+                    "evidence_export_unavailable",
+                    "manifest_version_unsupported",
+                }
+                else "error"
+            )
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                raise
+            bundle_state = "error"
+    summary = build_evidence_summary_v1(
+        run_ref=public_evidence_reference("run", tenant_digest, run_id),
+        thread_ref=public_evidence_reference("thread", tenant_digest, thread_id),
+        status=record.status.value,
+        accepted_at=record.created_at,
+        updated_at=record.updated_at,
+        terminal_reason=record.stop_reason,
+        budget=budget,
+        policy_state=policy_state,
+        admission=admission,
+        assembly=assembly,
+        decision_events=policy_events,
+        event_counts=counts,
+        batches=batch_rows,
+        artifacts={
+            "file_count": artifact_count,
+            "bundle_state": bundle_state,
+        },
+        qualification=("legacy" if accepted is None else "unverified" if getattr(request.app.state, "execution_policy_restart_qualified", False) is True else "unqualified"),
+    )
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return summary
 
 
 @router.get(
