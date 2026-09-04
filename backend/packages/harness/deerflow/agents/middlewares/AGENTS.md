@@ -34,6 +34,13 @@ not a copy of the prompt. `collect_release_policies()` gathers them from an
 assembled stack. Adding a behaviour-affecting field to a middleware means adding
 it to that middleware's declaration in the same change.
 
+**Execution policy observation.** Accepted durable runs report turns and
+normalized attempts to the worker-installed observer, which owns the fenced
+state CAS and returns allow/warn/stop; a stop removes pending tool calls.
+Argument equivalence uses secret-keyed commitments that must not enter logs or
+public events. Non-accepted paths keep their heuristics and make no durable
+claim. See `../../../../../docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md`.
+
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 
 1. **InputSanitizationMiddleware** - First, so it is the outermost `wrap_model_call` wrapper; every inner middleware (including LLM retries) sees sanitized messages. `additional_kwargs.original_user_content` is server-owned provenance: Gateway strips caller-supplied values for non-internal run requests, trusted IM calls may carry the string they captured before adding transport/file context, and the middleware replaces any non-string value before wrapping. Uploads and sanitization retain first-writer-wins only for validated strings.

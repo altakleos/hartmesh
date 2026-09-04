@@ -90,7 +90,7 @@ _MULTI_GATEWAY_TOPOLOGY_REVISION = "0027_multi_gateway_topology"
 _MCP_REQUEST_COMMITMENT_REVISION = "0028_mcp_request_commitment"
 _RUN_RECOVERY_REVISION = "0029_run_recovery_policy"
 _DELIVERY_OWNER_BACKFILL_REVISION = "0030_run_delivery_owner_backfill"
-_HEAD_REVISION = "0035_batch_sandbox_evidence"
+_HEAD_REVISION = "0036_execution_policy_state"
 _INVOCATION_REVISIONS = (
     "0011_accepted_invocation",
     "0012_invocation_idempotency",
@@ -184,6 +184,8 @@ _ACCEPTED_COLUMNS = {
     "execution_evidence_digest": ("character varying", 64, True),
     "assembly_evidence_json": ("json", None, True),
     "assembly_evidence_digest": ("character varying", 64, True),
+    "execution_policy_state_json": ("json", None, True),
+    "execution_policy_state_digest": ("character varying", 64, True),
 }
 _RUN_CHECKS = {
     "ck_runs_admission_cursor_positive",
@@ -209,6 +211,9 @@ _RUN_CHECKS = {
     "ck_runs_recovery_payload_policy",
     "ck_runs_terminal_projection_authority_pair",
     "ck_runs_terminal_projection_authority_version",
+    "ck_runs_execution_policy_state_pair",
+    "ck_runs_execution_policy_state_run_only",
+    "ck_runs_execution_policy_state_digest_format",
 }
 _LIFECYCLE_INDEXES = {
     "ix_run_lifecycle_events_run_cursor": ("run_id", "cursor"),

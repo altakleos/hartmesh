@@ -96,6 +96,8 @@ APP_CONFIG_FACTORY_EXCLUDED_FIELDS = frozenset(
         "subagent_runtime",
         "subagent_batches",
         "tool_plane",
+        # Bound independently as ExecutionBudgetV1 at durable admission.
+        "execution_policy",
     }
 )
 

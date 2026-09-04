@@ -166,6 +166,15 @@ class BindAssemblyEvidenceOutcome(StrEnum):
     not_found = "not_found"
 
 
+class ApplyExecutionPolicyStateOutcome(StrEnum):
+    """Finite result of one compact policy-state compare-and-set."""
+
+    applied = "applied"
+    conflict = "conflict"
+    ownership_lost = "ownership_lost"
+    not_found = "not_found"
+
+
 class DuplicateRunIdentityError(RuntimeError):
     """Raised when a candidate reuses an existing durable run identity."""
 
@@ -568,6 +577,21 @@ class RunStore(abc.ABC):
 
         del run_id, owner_id, lease_epoch, evidence_json, evidence_digest
         return BindAssemblyEvidenceOutcome.ownership_lost
+
+    async def apply_execution_policy_state(
+        self,
+        run_id: str,
+        *,
+        owner_id: str,
+        lease_epoch: int,
+        expected_digest: str | None,
+        state_json: Mapping[str, object],
+        state_digest: str,
+    ) -> ApplyExecutionPolicyStateOutcome:
+        """CAS protected policy state under the active execution fence."""
+
+        del run_id, owner_id, lease_epoch, expected_digest, state_json, state_digest
+        return ApplyExecutionPolicyStateOutcome.ownership_lost
 
     async def request_cancel_fenced(
         self,

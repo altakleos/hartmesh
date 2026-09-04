@@ -79,6 +79,21 @@ it does not make low-entropy material confidential. See
 [RUN_EVENT_STREAM.md](RUN_EVENT_STREAM.md#durable-tool-attempt-evidence) for the
 schema and limitations.
 
+### Accepted execution policy
+
+`execution_policy` defines server ceilings for newly accepted durable runs.
+The accepted `ExecutionBudgetV1` is immutable, so configuration changes apply
+only to later admissions; callers may narrow limits but cannot broaden them.
+Scheduled invocations use the named scheduler profile and the stricter
+`scheduler_max_agent_turns` and `scheduler_max_total_tool_attempts` ceilings.
+
+Durable profiles require `EXECUTION_POLICY_HMAC_KEYS` and
+`EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID` in the Gateway secret environment. Keys
+are unpadded base64url values of at least 32 bytes and never belong in YAML.
+Rotate additively and retain old keys while accepted runs can recover. Local
+mode may use an ephemeral key but remains restart-unqualified. See
+[Execution policy and evidence UI](../../docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md).
+
 ### Redis subsystem namespaces
 
 The Gateway derives every covered Redis name from the server-owned tenant

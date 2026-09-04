@@ -248,6 +248,8 @@ def test_live_candidate_uses_a_disposable_secret_backed_replay_keyring(
     string_data = manifest["stringData"]
     keys = json.loads(string_data["MCP_TASK_REPLAY_HMAC_KEYS"])
     active_key_id = string_data["MCP_TASK_REPLAY_HMAC_ACTIVE_KEY_ID"]
+    policy_keys = json.loads(string_data["EXECUTION_POLICY_HMAC_KEYS"])
+    policy_active_key_id = string_data["EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID"]
     rendered_values = json.dumps(driver.values(), sort_keys=True)
 
     assert manifest["kind"] == "Secret"
@@ -255,17 +257,26 @@ def test_live_candidate_uses_a_disposable_secret_backed_replay_keyring(
     assert set(string_data) == {
         "MCP_TASK_REPLAY_HMAC_KEYS",
         "MCP_TASK_REPLAY_HMAC_ACTIVE_KEY_ID",
+        "EXECUTION_POLICY_HMAC_KEYS",
+        "EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID",
     }
     assert len(keys) == 2
     assert active_key_id in keys
+    assert len(policy_keys) == 1
+    assert policy_active_key_id in policy_keys
     assert driver.values()["gateway"]["extraEnvFrom"] == [
         {"configMapRef": {"name": driver.runtime_config_map}},
         {"secretRef": {"name": driver.replay_keyring_secret}},
     ]
     assert all(encoded_key not in rendered_values for encoded_key in keys.values())
+    assert all(encoded_key not in rendered_values for encoded_key in policy_keys.values())
     assert re.fullmatch(
         r"sha256:[0-9a-f]{64}",
         driver.replay_keyring_confirmation.digest,
+    )
+    assert re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        driver.execution_policy_keyring_confirmation.digest,
     )
 
 
@@ -681,6 +692,7 @@ def test_live_runner_verifier_expectation_is_independent_of_artifact_bytes(
     )
     runner = KubernetesMultiGatewayQualificationRunnerV1(config)
     replay_keyring_confirmation = runner.driver.replay_keyring_confirmation
+    execution_policy_keyring_confirmation = runner.driver.execution_policy_keyring_confirmation
     tenant = TenantIdentityV1.from_canonical_id("qualification")
     redis_namespace_digest = "sha256:" + tenant.namespace(TenantSubsystem.REDIS).digest
     fingerprint = TopologyFingerprintV1.create(
@@ -695,6 +707,8 @@ def test_live_runner_verifier_expectation_is_independent_of_artifact_bytes(
         capability_manifest_digest=(config.capability_manifest_digest.removeprefix("sha256:")),
         mcp_task_replay_keyring_confirmation_version=(replay_keyring_confirmation.version),
         mcp_task_replay_keyring_confirmation_digest=(replay_keyring_confirmation.digest),
+        execution_policy_keyring_confirmation_version=(execution_policy_keyring_confirmation.version),
+        execution_policy_keyring_confirmation_digest=(execution_policy_keyring_confirmation.digest),
         migration_head=get_expected_migration_head(),
         accepted_materialization_profile="rwx_verified_copy_v2",
     )

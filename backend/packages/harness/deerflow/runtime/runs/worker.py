@@ -69,6 +69,7 @@ from deerflow.runtime.events.catalog import (
     SANDBOX_LIFECYCLE_EVENT,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
+from deerflow.runtime.execution_policy import ExecutionPolicyError
 from deerflow.runtime.failure_evidence import RuntimeFailureV1, map_runtime_failure
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -1200,6 +1201,9 @@ class RunContext:
         default=None,
         repr=False,
     )
+    # Startup-frozen private policy keyring. Accepted rows persist only its
+    # public key id; recovery must find that exact historical key here.
+    execution_policy_keyring: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.recovery_executor is not None and not isinstance(
@@ -1278,6 +1282,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             "accepted_extension_manifest_digest",
             "accepted_extension_artifact_manifest_digest",
             "accepted_extension_configuration_digest",
+            "accepted_execution_budget",
+            "execution_policy_keyring",
         ):
             if internal_key in runtime_context:
                 existing_context[internal_key] = runtime_context[internal_key]
@@ -2136,6 +2142,161 @@ async def run_agent(
                 runtime_ctx["accepted_extension_configuration_digest"] = accepted.extension_configuration_digest
             if accepted.tool_plane_revision is not None:
                 runtime_ctx["accepted_tool_plane_revision"] = accepted.tool_plane_revision
+            execution_budget = accepted.execution_budget
+            if execution_budget is not None:
+                from deerflow.runtime.events.catalog import (
+                    EXECUTION_POLICY_DECISION_EVENT,
+                )
+                from deerflow.runtime.execution_policy import (
+                    EXECUTION_POLICY_OBSERVER_CONTEXT_KEY,
+                    ExecutionPolicyEvaluator,
+                    ExecutionPolicyObservationV1,
+                    ExecutionPolicyStateV1,
+                    PolicyDecision,
+                    ToolEquivalenceKeyring,
+                    normalizer_manifest_digest,
+                )
+                from deerflow.runtime.runs.store.base import (
+                    ApplyExecutionPolicyStateOutcome,
+                )
+
+                policy_keyring = ctx.execution_policy_keyring
+                try:
+                    if not isinstance(policy_keyring, ToolEquivalenceKeyring):
+                        raise ExecutionPolicyError("policy_equivalence_key_unavailable")
+                    policy_keyring.require_key(execution_budget.equivalence_key_id)
+                    if execution_budget.equivalence_normalizer_manifest_digest != normalizer_manifest_digest():
+                        raise ExecutionPolicyError("policy_equivalence_normalizer_unavailable")
+                except ExecutionPolicyError as exc:
+                    await run_manager.set_status_if_not_cancelled(
+                        run_id,
+                        RunStatus.error,
+                        error="Accepted execution policy is unavailable",
+                        stop_reason=exc.code,
+                        **terminal_status_kwargs,
+                    )
+                    await bridge.publish(
+                        run_id,
+                        "error",
+                        {
+                            "message": "Accepted execution policy is unavailable",
+                            "name": "ExecutionPolicyUnavailableError",
+                        },
+                    )
+                    return
+                runtime_ctx["accepted_execution_budget"] = execution_budget
+                runtime_ctx["execution_policy_keyring"] = policy_keyring
+
+                async def _flush_policy_decision_outbox(
+                    state: ExecutionPolicyStateV1,
+                ) -> ExecutionPolicyStateV1:
+                    """Publish the row-backed outbox once under the live fence."""
+
+                    if not state.decision_outbox:
+                        return state
+                    if event_store is None or event_appender is None:
+                        raise ExecutionPolicyError("policy_state_inconsistent")
+                    existing = await event_store.list_events(
+                        thread_id,
+                        run_id,
+                        event_types=[EXECUTION_POLICY_DECISION_EVENT.event_type],
+                        limit=65,
+                    )
+                    published_state_digests = {content.get("state_digest") for event in existing if isinstance((content := event.get("content")), dict)}
+                    for pending in state.decision_outbox:
+                        if pending.state_digest in published_state_digests:
+                            continue
+                        await event_appender.put(
+                            event_type=EXECUTION_POLICY_DECISION_EVENT.event_type,
+                            category=EXECUTION_POLICY_DECISION_EVENT.category,
+                            content={
+                                "version": 1,
+                                "decision": pending.decision.value,
+                                "reason_code": pending.reason_code,
+                                "current": pending.current,
+                                "limit": pending.limit,
+                                "budget_digest": execution_budget.digest,
+                                "state_digest": pending.state_digest,
+                                "summary_key": pending.summary_key,
+                            },
+                            metadata={},
+                        )
+                    cleared = replace(state, decision_outbox=())
+                    cleared_outcome = await run_manager.apply_execution_policy_state(
+                        run_id,
+                        expected_digest=state.digest,
+                        state=cleared,
+                    )
+                    if cleared_outcome is not ApplyExecutionPolicyStateOutcome.applied:
+                        raise ExecutionPolicyError("policy_state_inconsistent")
+                    return cleared
+
+                try:
+                    if record.execution_policy_state_json is None:
+                        if record.execution_policy_state_digest is not None:
+                            raise ExecutionPolicyError("policy_state_inconsistent")
+                        policy_state = ExecutionPolicyStateV1.initial(execution_budget)
+                        initial_outcome = await run_manager.apply_execution_policy_state(
+                            run_id,
+                            expected_digest=None,
+                            state=policy_state,
+                        )
+                        if initial_outcome is not ApplyExecutionPolicyStateOutcome.applied:
+                            raise ExecutionPolicyError("policy_state_inconsistent")
+                    else:
+                        policy_state = ExecutionPolicyStateV1.from_json(record.execution_policy_state_json)
+                        if policy_state.digest != record.execution_policy_state_digest or policy_state.budget_digest != execution_budget.digest:
+                            raise ExecutionPolicyError("policy_state_inconsistent")
+                    policy_state = await _flush_policy_decision_outbox(policy_state)
+                    if policy_state.terminal_reason is not None:
+                        raise ExecutionPolicyError(policy_state.terminal_reason)
+                except ExecutionPolicyError as exc:
+                    await run_manager.set_status_if_not_cancelled(
+                        run_id,
+                        RunStatus.error,
+                        error="Accepted execution policy state is unavailable",
+                        stop_reason=exc.code,
+                        **terminal_status_kwargs,
+                    )
+                    await bridge.publish(
+                        run_id,
+                        "error",
+                        {
+                            "message": "Accepted execution policy state is unavailable",
+                            "name": "ExecutionPolicyStateError",
+                        },
+                    )
+                    return
+
+                policy_lock = asyncio.Lock()
+                evaluator = ExecutionPolicyEvaluator()
+
+                async def _observe_execution_policy(
+                    observation: ExecutionPolicyObservationV1,
+                ):
+                    nonlocal policy_state
+                    if not isinstance(observation, ExecutionPolicyObservationV1):
+                        raise TypeError("invalid execution policy observation")
+                    async with policy_lock:
+                        evaluation = evaluator.evaluate(
+                            execution_budget,
+                            policy_state,
+                            observation,
+                        )
+                        outcome = await run_manager.apply_execution_policy_state(
+                            run_id,
+                            expected_digest=policy_state.digest,
+                            state=evaluation.next_state,
+                        )
+                        if outcome is not ApplyExecutionPolicyStateOutcome.applied:
+                            raise ExecutionPolicyError("policy_state_inconsistent")
+                        policy_state = await _flush_policy_decision_outbox(evaluation.next_state)
+                        if evaluation.decision is PolicyDecision.stop:
+                            runtime_ctx["stop_reason"] = evaluation.reason_code
+                            runtime_ctx["execution_policy_stopped"] = True
+                        return evaluation
+
+                runtime_ctx[EXECUTION_POLICY_OBSERVER_CONTEXT_KEY] = _observe_execution_policy
             from deerflow_extension_api import SafeContextReferenceV1, SealedOriginV1
 
             from deerflow.runtime.accepted_invocation import (
@@ -3183,6 +3344,29 @@ async def run_agent(
                         "name": "AssemblyEvidenceError",
                     },
                 )
+
+    except ExecutionPolicyError as exc:
+        error_msg = "Accepted execution policy stopped this run"
+        await _ensure_finalizing_before_edit_failure(run_manager, record)
+        cancel_action = await run_manager.set_status_if_not_cancelled(
+            run_id,
+            RunStatus.error,
+            error=error_msg,
+            stop_reason=exc.code,
+            **terminal_status_kwargs,
+        )
+        if cancel_action is not None:
+            await _finish_cancellation(cancel_action)
+        else:
+            await bridge.publish(
+                run_id,
+                "error",
+                {
+                    "message": error_msg,
+                    "name": "ExecutionPolicyError",
+                    "stop_reason": exc.code,
+                },
+            )
 
     except RuntimeEventOwnershipLost:
         runtime_event_authority_rejected = True

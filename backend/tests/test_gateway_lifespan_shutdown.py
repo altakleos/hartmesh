@@ -203,6 +203,15 @@ async def test_durable_gateway_startup_fails_when_receipt_channel_cannot_start(
     raw["memory"]["enabled"] = False
     startup_config = AppConfig.model_validate(raw)
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "startup-secret")
+    encoded_policy_key = base64.urlsafe_b64encode(b"p" * 32).decode("ascii").rstrip("=")
+    monkeypatch.setenv(
+        "EXECUTION_POLICY_HMAC_KEYS",
+        json.dumps({"qualification-v1": encoded_policy_key}),
+    )
+    monkeypatch.setenv(
+        "EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID",
+        "qualification-v1",
+    )
     monkeypatch.delenv(
         "DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS",
         raising=False,

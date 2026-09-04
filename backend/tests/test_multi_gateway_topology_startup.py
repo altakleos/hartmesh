@@ -81,13 +81,17 @@ def test_fingerprint_builder_binds_runtime_manifests_and_expected_head() -> None
         config=config,
         mcp_task_replay_keyring_confirmation_version=1,
         mcp_task_replay_keyring_confirmation_digest=f"sha256:{'4' * 64}",
+        execution_policy_keyring_confirmation_version=1,
+        execution_policy_keyring_confirmation_digest=f"sha256:{'5' * 64}",
     )
-    assert fingerprint.migration_head == "0035_batch_sandbox_evidence"
+    assert fingerprint.migration_head == "0036_execution_policy_state"
     assert fingerprint.extension_artifact_digest == f"sha256:{'f' * 64}"
     assert fingerprint.redis_namespace_digest == f"sha256:{'3' * 64}"
     assert fingerprint.capability_manifest_digest == "1" * 64
     assert fingerprint.mcp_task_replay_keyring_confirmation_version == 1
     assert fingerprint.mcp_task_replay_keyring_confirmation_digest == f"sha256:{'4' * 64}"
+    assert fingerprint.execution_policy_keyring_confirmation_version == 1
+    assert fingerprint.execution_policy_keyring_confirmation_digest == f"sha256:{'5' * 64}"
 
 
 def test_exact_two_run_store_clock_gate_precedes_worker_activity() -> None:

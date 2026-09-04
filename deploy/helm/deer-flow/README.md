@@ -249,7 +249,7 @@ they resolve from the selected Secret):
 
 ```yaml
 config: |
-  config_version: 52
+  config_version: 53
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -514,12 +514,13 @@ and skills RWX claims; the in-cluster AIO provisioner with
 the exact extension artifact/configuration/capability tuple for
 `durable_two_gateway_v1_postgres_redis_aio_rwx`.
 
-Both Gateway replicas must also receive one identical dedicated MCP replay
-keyring through a Secret referenced by `gateway.extraEnvFrom`. The Gateway
-binds a versioned non-secret confirmation of every retained key and the active
-ID into topology compatibility; secrets do not enter Helm values, topology
-rows, or evidence. Any additive/removal/active-key change therefore requires
-the documented quiesced stop/restart sequence, not a rolling per-pod rotation.
+Both Gateway replicas must also receive identical dedicated MCP replay and
+execution-policy HMAC keyrings through Secrets referenced by
+`gateway.extraEnvFrom`. The Gateway binds versioned non-secret confirmations
+of every retained key and active ID into topology compatibility; secrets do
+not enter Helm values, topology rows, or evidence. Any
+additive/removal/active-key change therefore requires the documented quiesced
+stop/restart sequence, not a rolling per-pod rotation.
 
 Render validation rejects any other replica count, HPA, local/memory/JSONL
 stores, inline database or Redis credentials, mutable image tags, OpenSandbox,

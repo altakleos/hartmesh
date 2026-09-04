@@ -34,6 +34,8 @@ def _fingerprint(**overrides: object) -> TopologyFingerprintV1:
         "capability_manifest_digest": "a" * 64,
         "mcp_task_replay_keyring_confirmation_version": 1,
         "mcp_task_replay_keyring_confirmation_digest": "sha256:" + ("d" * 64),
+        "execution_policy_keyring_confirmation_version": 1,
+        "execution_policy_keyring_confirmation_digest": "sha256:" + ("e" * 64),
         "migration_head": "0030_run_delivery_owner_backfill",
         "accepted_materialization_profile": "rwx_verified_copy_v2",
     }
@@ -56,7 +58,7 @@ def test_fingerprint_is_canonical_complete_and_mapping_order_independent() -> No
     )
 
     assert first == second
-    assert first.digest == "cff382b609fdec9ad064205fd6706f85bf9d40728f89895f998915492a0fc58b"
+    assert first.digest == "e0115ddcfb676b2aa61debb0fd1de42993da843e5dc3cef5c966f11e7721efba"
     assert first.to_dict() == {
         "version": 1,
         "profile": "durable_two_gateway_v1",
@@ -78,6 +80,8 @@ def test_fingerprint_is_canonical_complete_and_mapping_order_independent() -> No
         "capability_manifest_digest": "a" * 64,
         "mcp_task_replay_keyring_confirmation_version": 1,
         "mcp_task_replay_keyring_confirmation_digest": "sha256:" + ("d" * 64),
+        "execution_policy_keyring_confirmation_version": 1,
+        "execution_policy_keyring_confirmation_digest": "sha256:" + ("e" * 64),
         "migration_head": "0030_run_delivery_owner_backfill",
         "accepted_materialization_profile": "rwx_verified_copy_v2",
         "digest": first.digest,
@@ -135,6 +139,8 @@ def test_fingerprint_rejects_any_image_set_outside_exact_profile(
         ("capability_manifest_digest", "sha256:short"),
         ("mcp_task_replay_keyring_confirmation_version", 2),
         ("mcp_task_replay_keyring_confirmation_digest", "sha256:short"),
+        ("execution_policy_keyring_confirmation_version", 2),
+        ("execution_policy_keyring_confirmation_digest", "sha256:short"),
         ("migration_head", "../../secret"),
         ("accepted_materialization_profile", "disabled"),
     ],
@@ -170,6 +176,23 @@ def test_fingerprint_detects_mcp_replay_keyring_skew(
 
     skewed = _fingerprint(**{field: value})
     assert skewed.digest != baseline.digest
+
+
+def test_fingerprint_detects_execution_policy_keyring_skew() -> None:
+    baseline = _fingerprint()
+    skewed = _fingerprint(
+        execution_policy_keyring_confirmation_digest="sha256:" + ("f" * 64),
+    )
+
+    assert skewed.digest != baseline.digest
+
+
+def test_fingerprint_reader_rejects_half_present_execution_policy_confirmation() -> None:
+    payload = _fingerprint().to_dict()
+    payload.pop("execution_policy_keyring_confirmation_digest")
+
+    with pytest.raises(ValueError, match="fields are invalid"):
+        TopologyFingerprintV1.from_dict(payload)
 
 
 def test_fingerprint_reader_preserves_legacy_v1_without_keyring_confirmation() -> None:

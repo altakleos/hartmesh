@@ -760,6 +760,7 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "max_total_subagents",
         "agent_name",
         "is_bootstrap",
+        "execution_budget",
     }
 )
 
@@ -795,6 +796,9 @@ _SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
         INVOCATION_ORIGIN_CONTEXT_KEY,
         TRUSTED_RUN_CONTEXT_KEY,
         TENANT_REFERENCE_CONTEXT_KEY,
+        "accepted_execution_budget",
+        "execution_policy_keyring",
+        "execution_policy_stopped",
         "tenant",
         "tenant_id",
         "tenantId",
@@ -1994,6 +1998,7 @@ def _effective_execution_projection(
                 else {}
             ),
             **({"tool_plane_revision": accepted.tool_plane_revision} if accepted.tool_plane_revision is not None else {}),
+            **({"execution_budget": accepted.execution_budget.to_json()} if accepted.execution_budget is not None else {}),
             "input": input_projection,
             "command": canonical_request_value(intent.command),
             "multitask_strategy": intent.multitask_strategy,
@@ -2384,6 +2389,35 @@ async def _seal_accepted_invocation(
         raise RuntimeError("accepted agent revision resolution failed")
     if revision.material is None:  # pragma: no cover - resolver contract
         raise RuntimeError("accepted agent revision is missing captured material")
+    from deerflow.config.execution_policy_config import ExecutionPolicyConfig
+    from deerflow.runtime.execution_policy import (
+        ToolEquivalenceKeyring,
+        local_ephemeral_keyring,
+        resolve_execution_budget,
+    )
+
+    execution_policy_config = getattr(app_config, "execution_policy", None)
+    if not isinstance(execution_policy_config, ExecutionPolicyConfig):
+        execution_policy_config = ExecutionPolicyConfig()
+    execution_policy_keyring = getattr(
+        app_state,
+        "execution_policy_keyring",
+        None,
+    )
+    if not isinstance(execution_policy_keyring, ToolEquivalenceKeyring):
+        if getattr(app_state, "execution_policy_restart_qualified", False) is True:
+            raise RuntimeError("policy_equivalence_key_unavailable")
+        execution_policy_keyring = local_ephemeral_keyring()
+    requested_budget = runtime_context.get("execution_budget")
+    if requested_budget is not None and not isinstance(requested_budget, Mapping):
+        raise ValueError("execution budget request must be an object")
+    execution_budget = resolve_execution_budget(
+        execution_policy_config,
+        keyring=execution_policy_keyring,
+        max_recursion_limit=int(getattr(app_config, "max_recursion_limit", 1000)),
+        non_interactive=runtime_context.get("non_interactive") is True,
+        requested_limits=requested_budget,
+    )
     # Publish the process-local lease into the already-scrubbed host context as
     # soon as it exists. The normalizer releases it if a later contributor or
     # sealing step fails before a PreparedLaunch can transfer ownership.
@@ -2549,6 +2583,7 @@ async def _seal_accepted_invocation(
         extension_artifact_manifest_digest=extension_artifact_manifest_digest,
         extension_configuration_digest=extension_configuration_digest,
         tool_plane_revision=tool_plane_revision,
+        execution_budget=execution_budget,
         contributor_execution_digest=contributor_execution_digest,
         tenant=tenant_reference,
         trusted_context=trusted_context,
@@ -2604,6 +2639,9 @@ async def _seal_accepted_invocation(
         runtime_context["accepted_extension_configuration_digest"] = extension_configuration_digest
     if accepted.tool_plane_revision is not None:
         runtime_context["accepted_tool_plane_revision"] = accepted.tool_plane_revision
+    if accepted.execution_budget is not None:
+        runtime_context["accepted_execution_budget"] = accepted.execution_budget
+        runtime_context["execution_policy_keyring"] = execution_policy_keyring
     config["context"] = runtime_context
     return accepted
 

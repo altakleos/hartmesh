@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This section accumulates work toward the **2.1.0** milestone
 ([milestone 2](https://github.com/bytedance/deer-flow/milestone/2)).
 
+### Added
+
+- Added accepted, digest-bound execution budgets with durable fenced policy
+  state, secret-keyed tool-equivalence detection, stable stop evidence, and an
+  authorized thread evidence panel with bounded public summaries and portable
+  terminal bundle download.
+
 ### ⚠ Breaking changes
 
 - **deployment tenancy:** The Gateway now resolves one operator-owned

@@ -76,6 +76,9 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `tools[]` - Tool configs with `use` variable path and `group`
 - `tool_groups[]` - Logical groupings for tools
 - `tool_plane` - Startup-frozen governed revision switch and policy: allowed MCP transports, stdio launchers, endpoint hosts/private-address policy, managed-integration providers, forbidden derived skill capabilities (the three fixed IDs or a validated `tool:<name>`), candidate count limits, and required skill review. Its canonical digest is recorded in validation evidence; edits require restart and revalidation.
+- `execution_policy` - Conservative accepted per-run circuit-breaker ceilings,
+  scheduler narrowing, category limits, and warning/stop thresholds. Durable
+  equivalence HMAC keys are environment/Secret material and never YAML values.
 - `sandbox.use` - Sandbox provider class path
 - `skills.path` / `skills.container_path` - Host and container paths to skills directory. AIO and E2B snapshot the container path at provider startup. Their local/remote backends and the Kubernetes provisioner require one canonical absolute non-root path outside reserved platform mounts; custom roots participate in deterministic sandbox identity, and E2B records the root in remote metadata.
 - `skills.deferred_discovery` - When `true`, replaces the full-metadata `<available_skills>` prompt block with a compact `<skill_index>` (names only) and registers the `describe_skill` tool so the agent fetches metadata on demand. Defaults to `false` (legacy full-metadata injection)

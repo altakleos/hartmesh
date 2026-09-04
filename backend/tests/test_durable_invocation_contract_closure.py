@@ -49,6 +49,7 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
         "Auditable credential evidence",
         "Trusted contributor and hydrated evidence",
         "Restrictive authorization and constraints",
+        "Accepted execution circuit breakers",
         "Pinned agent and extension material",
         "Bound actual agent assembly",
         "Durable tool-attempt receipts",
@@ -105,6 +106,12 @@ def test_closure_matrix_names_every_implemented_invariant_and_evidence_boundary(
         "Restrictive authorization and constraints": {
             "test_task_dispatch_inflight_equal_replay_waits_for_one_physical_start",
             "test_create_app_fails_closed_for_malformed_required_v2_constraints_provider",
+        },
+        "Accepted execution circuit breakers": {
+            "test_policy_evaluator_is_pure_and_emits_one_threshold_decision",
+            "test_policy_state_cas_is_fenced_and_survives_reload",
+            "test_evidence_summary_endpoint_authorizes_and_projects_legacy_safely",
+            "test_fingerprint_detects_execution_policy_keyring_skew",
         },
         "Pinned agent and extension material": {
             "test_remote_v1_material_receipt_is_compatibility_only",

@@ -22,6 +22,11 @@ from deerflow.runtime.accepted_invocation import (
 )
 from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
 from deerflow.runtime.constraints import INVOCATION_CONSTRAINTS_CONTEXT_KEY
+from deerflow.runtime.execution_policy import (
+    EXECUTION_POLICY_OBSERVER_CONTEXT_KEY,
+    ExecutionBudgetV1,
+    ExecutionPolicyObservationV1,
+)
 from deerflow.runtime.skill_projection import (
     SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
     SkillProjectionConsumerToken,
@@ -212,6 +217,27 @@ async def batch_task(
     batch_config = configured if isinstance(configured, SubagentBatchesConfig) else SubagentBatchesConfig()
     max_live = batch_config.default_max_live_items if max_live_items is None else max_live_items
     max_running = batch_config.default_max_running_items if max_running_items is None else max_running_items
+    execution_budget = context.get("accepted_execution_budget")
+    if isinstance(execution_budget, ExecutionBudgetV1):
+        if len(items) > execution_budget.max_batch_items or len(items) > execution_budget.max_batch_attempts:
+            return _result(
+                tool_call_id,
+                content="Batch submission rejected: policy_budget_exhausted.",
+                error=True,
+            )
+        max_live = min(max_live, execution_budget.max_batch_items)
+        max_running = min(max_running, execution_budget.max_batch_concurrency)
+        max_attempts = min(
+            batch_config.max_attempts,
+            max(1, execution_budget.max_batch_attempts // len(items)),
+        )
+        max_total_runtime_seconds = min(
+            batch_config.max_total_runtime_seconds,
+            execution_budget.max_batch_runtime_seconds,
+        )
+    else:
+        max_attempts = batch_config.max_attempts
+        max_total_runtime_seconds = batch_config.max_total_runtime_seconds
     skill_token = context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
     try:
         request = ParentBoundBatchRequest(
@@ -231,10 +257,10 @@ async def batch_task(
             limits=BatchLimitsV1(
                 max_live_items=max_live,
                 max_running_items=max_running,
-                max_attempts=batch_config.max_attempts,
+                max_attempts=max_attempts,
                 max_attempt_records_per_item=(batch_config.max_attempt_records_per_item),
                 max_result_chars=batch_config.max_result_chars,
-                max_total_runtime_seconds=(batch_config.max_total_runtime_seconds),
+                max_total_runtime_seconds=max_total_runtime_seconds,
             ),
             # Initial policy is deliberately non-cascading: parent-run
             # cancellation never mutates an independently accepted batch.
@@ -257,6 +283,17 @@ async def batch_task(
             tool_call_id,
             content="Batch submission failed: batch_internal_error.",
             error=True,
+        )
+    policy_observer = context.get(EXECUTION_POLICY_OBSERVER_CONTEXT_KEY)
+    if callable(policy_observer):
+        await policy_observer(
+            ExecutionPolicyObservationV1(
+                kind="batch",
+                count=len(items),
+                attempt_count=len(items) * max_attempts,
+                runtime_seconds=max_total_runtime_seconds,
+                observation_id=f"batch_{receipt.receipt_id}",
+            )
         )
     return _result(
         tool_call_id,

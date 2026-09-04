@@ -273,6 +273,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             validate_deployment_profile,
         )
         from deerflow.config.mcp_tasks_config import McpTasksConfig
+        from deerflow.runtime.execution_policy import (
+            ExecutionPolicyError,
+            ToolEquivalenceKeyring,
+            local_ephemeral_keyring,
+        )
 
         startup_deployment = getattr(startup_config, "deployment", None)
         tenant_identity = getattr(app.state, "tenant_identity", None)
@@ -330,6 +335,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             raise RuntimeError(exc.code) from exc
         app.state.mcp_task_replay_keyring = mcp_request_commitment_keyring
         app.state.mcp_task_replay_keyring_confirmation = mcp_request_commitment_keyring.confirmation() if mcp_request_commitment_keyring is not None else None
+        durable_policy_required = startup_profile is not DeploymentProfile.local_development
+        try:
+            execution_policy_keyring = ToolEquivalenceKeyring.from_environment(
+                required=durable_policy_required,
+            )
+        except ExecutionPolicyError as exc:
+            raise RuntimeError(exc.code) from exc
+        if execution_policy_keyring is None:
+            execution_policy_keyring = local_ephemeral_keyring()
+        app.state.execution_policy_keyring = execution_policy_keyring
+        app.state.execution_policy_keyring_confirmation = execution_policy_keyring.confirmation()
+        app.state.execution_policy_restart_qualified = durable_policy_required
         logger.info(
             "Configuration loaded successfully tenant_ref=%s tenant_digest_prefix=%s",
             tenant_identity.public_ref,

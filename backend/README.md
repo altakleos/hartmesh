@@ -493,9 +493,9 @@ nearest `packages/harness/deerflow/persistence/migrations/AGENTS.md` for the ful
 CI qualifies the durable invocation migration tail against the real PostgreSQL
 service, not SQLite: it installs an empty schema to head, then upgrades
 representative normal, auxiliary, and MCP-task rows from the real predecessor
-`0011_mcp_tasks` through HartMesh's `0019_inbound_event_identity` tail, the
-upstream result/managed-subagent/scheduled-enqueue branches, and their merges to
-the single `0026_mcp_task_lineage` head. It checks exact constraints and
+`0011_mcp_tasks` through HartMesh's durable invocation tail, the upstream
+result/managed-subagent/scheduled-enqueue branches, and their merges to the
+single `0036_execution_policy_state` head. It checks exact constraints and
 indexes (including lifecycle integrity, leased inbound receipts, run-event
 tool-receipt idempotency, safe tenant anchors, and the one-row deployment
 identity binding, plus tenant-scoped MCP task lineage joins) and runs concurrent admission/assembly/lifecycle/receipt contracts. The marked

@@ -65,6 +65,10 @@ RUN_EXECUTION_STARTED_EVENT = RunEventDefinition(
 SANDBOX_LIFECYCLE_EVENT = RunEventDefinition("sandbox.lifecycle.v1", "trace")
 RUN_END_EVENT = RunEventDefinition("run.end", "outputs")
 RUN_TERMINAL_EVENT = RunEventDefinition("run.terminal.v1", "trace")
+EXECUTION_POLICY_DECISION_EVENT = RunEventDefinition(
+    "policy.decision.v1",
+    "policy",
+)
 RUN_ERROR_EVENT = RunEventDefinition("run.error", "error")
 LLM_HUMAN_INPUT_EVENT = RunEventDefinition("llm.human.input", "message")
 LLM_AI_RESPONSE_EVENT = RunEventDefinition("llm.ai.response", "message")
@@ -150,4 +154,5 @@ FIXED_RUN_EVENT_DEFINITIONS = (
     *TOOL_RECEIPT_RUN_EVENT_DEFINITIONS,
     *RETRIEVAL_RUN_EVENT_DEFINITIONS,
     *WORKSPACE_RUN_EVENT_DEFINITIONS,
+    EXECUTION_POLICY_DECISION_EVENT,
 )

@@ -70,6 +70,7 @@
     "context": "Bounded identity/digest evidence about effective hidden or mutable context; raw context is excluded.",
     "subagent": "Subagent lifecycle and persisted step evidence.",
     "tool": "Bounded, redacted, owner-fenced durable tool-attempt evidence.",
+    "policy": "Bounded warn/stop decisions from the accepted execution policy; private equivalence commitments are excluded.",
     "workspace": "Run-scoped workspace and output file-change evidence."
   },
   "events": [
@@ -466,6 +467,28 @@
         "properties": {"task_id": {"type": "string", "minLength": 1}},
         "additionalProperties": true
       }
+    },
+    {
+      "event_type": "policy.decision.v1",
+      "category": "policy",
+      "producer": "ExecutionPolicyEvaluator adapter after a fenced compact-state compare-and-set",
+      "content_description": "A bounded warning or stop decision. Raw prompts, tool arguments/results, provider payloads, and private HMAC commitments are forbidden.",
+      "content_schema": {
+        "type": "object",
+        "required": ["version", "decision", "reason_code", "current", "limit", "budget_digest", "state_digest", "summary_key"],
+        "properties": {
+          "version": {"const": 1},
+          "decision": {"enum": ["warn", "stop"]},
+          "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+          "current": {"type": "integer", "minimum": 0},
+          "limit": {"type": "integer", "minimum": 0},
+          "budget_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "state_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "summary_key": {"type": "string", "pattern": "^execution_policy\\.[a-z][a-z0-9_]{0,63}$"}
+        },
+        "additionalProperties": false
+      },
+      "metadata_schema": {"type": "object", "additionalProperties": false}
     },
     {
       "event_type": "tool_receipt.started.v1",

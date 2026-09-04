@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from deerflow.runtime.execution_policy import ExecutionBudgetV1
     from deerflow.runtime.skill_snapshot import AcceptedSkillSnapshot
     from deerflow.runtime.subagent_snapshot import (
         ResolvedSkillScopesV1,
@@ -52,6 +53,7 @@ _EFFECTIVE_EXECUTION_FIELDS_V1 = frozenset(
         "extension_artifact_manifest_digest",
         "extension_configuration_digest",
         "tool_plane_revision",
+        "execution_budget",
         "input",
         "command",
         "multitask_strategy",
@@ -653,6 +655,30 @@ class AcceptedInvocation:
             return None
 
     @property
+    def execution_budget(self) -> ExecutionBudgetV1 | None:
+        """Immutable execution policy accepted for this invocation.
+
+        Rows created before execution-policy V1 remain explicitly legacy and
+        return ``None``; malformed new evidence never reaches this object
+        because :meth:`from_persisted` validates it fail closed.
+        """
+
+        evidence = self.decision_evidence.get("execution_budget")
+        if evidence is None:
+            return None
+        if not isinstance(evidence, Mapping):
+            return None
+        from deerflow.runtime.execution_policy import (
+            ExecutionBudgetV1,
+            ExecutionPolicyError,
+        )
+
+        try:
+            return ExecutionBudgetV1.from_json(evidence)
+        except ExecutionPolicyError:
+            return None
+
+    @property
     def tool_receipt_evidence_version(self) -> int | None:
         """Receipt capability captured when this invocation was admitted."""
 
@@ -693,6 +719,7 @@ class AcceptedInvocation:
         extension_artifact_manifest_digest: str | None = None,
         extension_configuration_digest: str | None = None,
         tool_plane_revision: Mapping[str, Any] | None = None,
+        execution_budget: ExecutionBudgetV1 | None = None,
         contributor_execution_digest: str,
         tenant: TenantReferenceV1,
         trusted_context: TrustedRunContextV1 | None = None,
@@ -716,6 +743,11 @@ class AcceptedInvocation:
         if extension_artifact_manifest_digest is not None and extension_manifest_digest is None:
             raise ValueError("extension artifact evidence requires a capability manifest digest")
         validated_tool_plane = None if tool_plane_revision is None else _validate_tool_plane_revision(tool_plane_revision)
+        if execution_budget is not None:
+            from deerflow.runtime.execution_policy import ExecutionBudgetV1
+
+            if not isinstance(execution_budget, ExecutionBudgetV1):
+                raise TypeError("execution_budget must be ExecutionBudgetV1 or None")
         if not isinstance(tenant, TenantReferenceV1):
             raise TypeError("new accepted invocations require TenantReferenceV1")
         if trusted_context is not None:
@@ -765,6 +797,7 @@ class AcceptedInvocation:
                     else {}
                 ),
                 **({"tool_plane_revision": validated_tool_plane} if validated_tool_plane is not None else {}),
+                **({"execution_budget": execution_budget.to_json()} if execution_budget is not None else {}),
                 "accepted_context_digest": accepted_context_digest,
             }
         )
@@ -784,6 +817,8 @@ class AcceptedInvocation:
             }
         if validated_tool_plane is not None:
             decision_evidence["tool_plane_revision"] = validated_tool_plane
+        if execution_budget is not None:
+            decision_evidence["execution_budget"] = execution_budget.to_json()
         return cls(
             principal=principal,
             origin=origin,
@@ -1051,6 +1086,20 @@ class AcceptedInvocation:
             configuration_digest = artifact_evidence["configuration_digest"]  # type: ignore[assignment]
         tool_plane_evidence = decision_evidence.get("tool_plane_revision")
         validated_tool_plane = None if tool_plane_evidence is None else _validate_tool_plane_revision(tool_plane_evidence)
+        execution_budget_evidence = decision_evidence.get("execution_budget")
+        execution_budget = None
+        if execution_budget_evidence is not None:
+            if not isinstance(execution_budget_evidence, Mapping):
+                raise ValueError("accepted execution policy is malformed")
+            from deerflow.runtime.execution_policy import (
+                ExecutionBudgetV1,
+                ExecutionPolicyError,
+            )
+
+            try:
+                execution_budget = ExecutionBudgetV1.from_json(execution_budget_evidence)
+            except ExecutionPolicyError as exc:
+                raise ValueError("accepted execution policy is malformed") from exc
         if trusted_context is not None:
             if trusted_context.tenant is not None and trusted_context.tenant != tenant:
                 raise ValueError("trusted context tenant contradicts accepted evidence")
@@ -1141,6 +1190,10 @@ class AcceptedInvocation:
                 expected_projection_fields.discard("extension_configuration_digest")
             if validated_tool_plane is None:
                 expected_projection_fields.discard("tool_plane_revision")
+            if execution_budget is None:
+                expected_projection_fields.discard("execution_budget")
+            else:
+                expected_projection_fields.add("execution_budget")
             projection_has_tenant = "tenant_digest" in projection_fields
             if tenant_bound_evidence and not projection_has_tenant:
                 raise ValueError("tenant-bound accepted execution is missing its tenant")
@@ -1178,6 +1231,8 @@ class AcceptedInvocation:
                 )
             if validated_tool_plane is not None:
                 expected_identities["tool_plane_revision"] = validated_tool_plane
+            if execution_budget is not None:
+                expected_identities["execution_budget"] = execution_budget.to_json()
             if projection_has_tenant:
                 assert tenant is not None
                 expected_identities["tenant_digest"] = tenant.digest
@@ -1257,6 +1312,7 @@ class AcceptedInvocation:
                             else {}
                         ),
                         **({"tool_plane_revision": validated_tool_plane} if validated_tool_plane is not None else {}),
+                        **({"execution_budget": execution_budget.to_json()} if execution_budget is not None else {}),
                         "accepted_context_digest": persisted_context_digest,
                     }
                 )

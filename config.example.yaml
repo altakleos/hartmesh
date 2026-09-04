@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 52
+config_version: 53
 
 # ============================================================================
 # Logging
@@ -1213,6 +1213,42 @@ loop_detection:
   #   bash:
   #     warn: 150
   #     hard_limit: 300
+
+# ============================================================================
+# Accepted Execution Policy
+# ============================================================================
+# New durable invocations bind this canonical budget at admission. Later YAML
+# edits affect later runs only; callers may request smaller limits but cannot
+# broaden these ceilings. Durable deployments must also provide the
+# startup-frozen EXECUTION_POLICY_HMAC_KEYS JSON map (base64url keys, at least
+# 32 bytes each) and EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID environment variables.
+execution_policy:
+  profile: interactive-v1
+  scheduler_profile: scheduled-v1
+  max_agent_turns: 1000
+  max_total_tool_attempts: 1000
+  repeated_tool_warn: 3
+  repeated_tool_stop: 5
+  repeated_tool_window: 20
+  max_no_progress_observations: 3
+  max_batches: 16
+  max_batch_items: 1000
+  max_batch_concurrency: 32
+  max_batch_attempts: 3000
+  max_batch_runtime_seconds: 86400
+  max_delegation_depth: 4
+  max_retrieval_calls: 100
+  max_retrieval_results: 1000
+  max_retrieval_sources: 1000
+  max_retrieval_bytes: 10485760
+  max_sandbox_operations: 1000
+  max_sandbox_runtime_seconds: 86400
+  terminal_grace_seconds: 30
+  scheduler_max_agent_turns: 500
+  scheduler_max_total_tool_attempts: 500
+  # Optional category ceilings; known categories include retrieval, sandbox,
+  # subagent, filesystem_read, filesystem_write, and tool.
+  per_tool_category_attempts: {}
 
 # ============================================================================
 # Tool Progress State Machine Configuration (RFC #3177)

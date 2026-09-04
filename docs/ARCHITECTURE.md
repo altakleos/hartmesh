@@ -87,6 +87,14 @@ SSE streaming carries both per-chunk messages and bounded `values` snapshots; wi
 LangGraph Platform style) rather than impersonating root frames, so SDK clients don't lose
 the parent thread view.
 
+Durable admission also seals a canonical `ExecutionBudgetV1`. The worker restores
+and advances a compact policy projection through the run ownership fence, while
+the pure evaluator decides bounded warnings/stops from normalized observations.
+Private repeated-tool equality uses startup-frozen HMAC keys and never enters
+events or browser contracts. The authorized run-evidence endpoint separately
+aggregates bounded public facts for the frontend; trace IDs and UI state remain
+correlation/display aids, never policy or authorization inputs.
+
 ### State, tools, sandbox
 
 - **`ThreadState`** extends LangGraph's `AgentState` with `sandbox`, `artifacts`,
@@ -117,7 +125,8 @@ The backend may produce **artifacts** (files/code), **todos**, and goal-state up
   `/workspace/agents/[agent_name]` (custom agents), `/showcase/[thread_id]` (allowlisted
   public read-only demos), `/api/*` route handlers, `(auth)/{login,setup,auth/callback}`.
 - `core/` — the business-logic heart. Domains: `threads/` (creation, streaming, state),
-  `api/` (LangGraph client singleton), `agents/`, `auth/`, `artifacts/`, `channels/`,
+  `api/` (LangGraph client singleton), `evidence/` (versioned bounded run evidence),
+  `agents/`, `auth/`, `artifacts/`, `channels/`,
   `integrations/`, `memory/`, `skills/`, `mcp/`, `models/`, `tasks/`, `todos/`, `tools/`,
   `workspace-changes/`, `config/`, `i18n/` (en-US, zh-CN), and more.
 - `components/` — `workspace/` (chat), `landing/`, `docs/`; `ui/` and `ai-elements/` are

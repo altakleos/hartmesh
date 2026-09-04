@@ -70,6 +70,13 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
 from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY
 from deerflow.runtime.events.catalog import MIDDLEWARE_LOOP_DETECTION_TAG
+from deerflow.runtime.execution_policy import (
+    EXECUTION_POLICY_OBSERVER_CONTEXT_KEY,
+    ExecutionBudgetV1,
+    ExecutionPolicyError,
+    ExecutionPolicyObservationV1,
+    PolicyDecision,
+)
 
 if TYPE_CHECKING:
     from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -464,37 +471,50 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return None
 
         thread_id = self._get_thread_id(runtime)
-        call_hash = _hash_tool_calls(tool_calls)
+        context = getattr(runtime, "context", None)
+        budget = context.get("accepted_execution_budget") if isinstance(context, dict) else None
+        accepted_policy = isinstance(budget, ExecutionBudgetV1)
+        if accepted_policy:
+            # Durable accepted runs are accounted at the receipt reservation
+            # seam. The synchronous compatibility path cannot acknowledge that
+            # store write and therefore must not maintain a second counter.
+            return None
+        else:
+            call_hash = _hash_tool_calls(tool_calls)
+            tracking_id = thread_id
+            warn_threshold = self.warn_threshold
+            hard_limit = self.hard_limit
+            window_size = self.window_size
 
         with self._lock:
             # Touch / create entry (move to end for LRU)
-            if thread_id in self._history:
-                self._history.move_to_end(thread_id)
+            if tracking_id in self._history:
+                self._history.move_to_end(tracking_id)
             else:
-                self._history[thread_id] = []
+                self._history[tracking_id] = []
                 self._evict_if_needed()
 
-            history = self._history[thread_id]
-            history.append(call_hash)
-            if len(history) > self.window_size:
-                history[:] = history[-self.window_size :]
+            history = self._history[tracking_id]
+            if call_hash is not None:
+                history.append(call_hash)
+            if len(history) > window_size:
+                history[:] = history[-window_size:]
 
-            warned_hashes = self._warned.get(thread_id)
+            warned_hashes = self._warned.get(tracking_id)
             if warned_hashes is not None:
                 warned_hashes.intersection_update(history)
                 if not warned_hashes:
-                    self._warned.pop(thread_id, None)
+                    self._warned.pop(tracking_id, None)
 
-            count = history.count(call_hash)
+            count = history.count(call_hash) if call_hash is not None else 0
             tool_names = [str(tc.get("name") or "?") for tc in tool_calls]
 
             # --- Layer 1: hash-based (identical call sets) ---
-            if count >= self.hard_limit:
+            if count >= hard_limit:
                 logger.error(
                     "Loop hard limit reached — forcing stop",
                     extra={
                         "thread_id": thread_id,
-                        "call_hash": call_hash,
                         "count": count,
                         "tools": tool_names,
                     },
@@ -505,18 +525,17 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     detection_layer="identical_call_set",
                     tool_names=tuple(tool_names),
                     count=count,
-                    threshold=self.hard_limit,
+                    threshold=hard_limit,
                 )
 
-            if count >= self.warn_threshold:
-                warned = self._warned[thread_id]
+            if count >= warn_threshold:
+                warned = self._warned[tracking_id]
                 if call_hash not in warned:
                     warned.add(call_hash)
                     logger.warning(
                         "Repetitive tool calls detected — injecting warning",
                         extra={
                             "thread_id": thread_id,
-                            "call_hash": call_hash,
                             "count": count,
                             "tools": tool_names,
                         },
@@ -527,12 +546,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                         detection_layer="identical_call_set",
                         tool_names=tuple(tool_names),
                         count=count,
-                        threshold=self.warn_threshold,
+                        threshold=warn_threshold,
                     )
 
             # --- Layer 2: per-tool-type frequency (windowed) ---
-            tool_name_history = self._tool_name_history[thread_id]
-            name_counter = self._tool_name_counter[thread_id]
+            tool_name_history = self._tool_name_history[tracking_id]
+            name_counter = self._tool_name_counter[tracking_id]
             for tc in tool_calls:
                 name = tc.get("name", "")
                 if not name:
@@ -577,7 +596,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     )
 
                 if freq_count >= eff_warn:
-                    freq_warned = self._tool_freq_warned[thread_id]
+                    freq_warned = self._tool_freq_warned[tracking_id]
                     if name not in freq_warned:
                         freq_warned.add(name)
                         logger.warning(
@@ -599,7 +618,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 else:
                     # Windowed count decayed below the warn threshold; allow a
                     # future burst of this tool to warn again.
-                    self._tool_freq_warned[thread_id].discard(name)
+                    self._tool_freq_warned[tracking_id].discard(name)
 
         return None
 
@@ -683,6 +702,16 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         if decision is None:
             return None
 
+        return self._apply_loop_decision(state, runtime, decision)
+
+    def _apply_loop_decision(
+        self,
+        state: AgentState,
+        runtime: Runtime,
+        decision: _LoopDecision,
+    ) -> dict | None:
+        """Apply one already-evaluated warning/stop to model state."""
+
         # Keep the shared loop-detection lock's critical section bounded; the
         # journal append is cheap and non-blocking but does not belong under it.
         self._record_audit_event(decision, runtime)
@@ -698,13 +727,14 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # agent's middleware instance is shared across concurrent Gateway
             # threads, so the bounded-dict write needs the same guard.
             run_id = self._get_run_id(runtime)
+            ctx = getattr(runtime, "context", None)
+            accepted_reason = ctx.get("stop_reason") if isinstance(ctx, dict) else None
             with self._lock:
-                self._stop_reason[run_id] = "loop_capped"
+                self._stop_reason[run_id] = accepted_reason or "loop_capped"
             # Also write to runtime.context so the lead worker can read it
             # without needing a reference to this middleware instance (#4176).
-            ctx = getattr(runtime, "context", None)
             if isinstance(ctx, dict):
-                ctx["stop_reason"] = "loop_capped"
+                ctx.setdefault("stop_reason", "loop_capped")
             # Strip tool_calls from the last AIMessage to force text output.
             # Once tool_calls are stripped, the AIMessage no longer requires
             # matching ToolMessage responses, so mutating it in place here
@@ -764,7 +794,27 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
     @override
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._apply(state, runtime)
+        context = getattr(runtime, "context", None)
+        budget = context.get("accepted_execution_budget") if isinstance(context, dict) else None
+        observer = context.get(EXECUTION_POLICY_OBSERVER_CONTEXT_KEY) if isinstance(context, dict) else None
+        if not isinstance(budget, ExecutionBudgetV1) or not callable(observer):
+            return self._apply(state, runtime)
+
+        messages = state.get("messages", [])
+        if not messages or getattr(messages[-1], "type", None) != "ai":
+            return None
+        strongest = await observer(ExecutionPolicyObservationV1(kind="turn"))
+        if strongest.decision not in (PolicyDecision.warn, PolicyDecision.stop):
+            return None
+        decision = _LoopDecision(
+            message=_HARD_STOP_MSG if strongest.decision is PolicyDecision.stop else _WARNING_MSG,
+            action=("hard_stop" if strongest.decision is PolicyDecision.stop else "warn"),
+            detection_layer="identical_call_set",
+            tool_names=(),
+            count=strongest.current or 0,
+            threshold=strongest.limit or 0,
+        )
+        return self._apply_loop_decision(state, runtime, decision)
 
     @override
     def after_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -794,6 +844,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         restriction (we use HumanMessage), and never mutates an existing
         AIMessage.
         """
+        context = getattr(request.runtime, "context", None)
+        if isinstance(context, dict) and context.get("execution_policy_stopped") is True:
+            reason = context.get("stop_reason")
+            raise ExecutionPolicyError(reason if isinstance(reason, str) else "policy_state_inconsistent")
         warnings = self._drain_pending_warnings(request.runtime)
         if not warnings:
             return request

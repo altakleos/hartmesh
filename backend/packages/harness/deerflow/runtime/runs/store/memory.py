@@ -26,6 +26,7 @@ from deerflow.runtime.assembly_evidence import (
     assembly_evidence_binding_matches,
     assembly_evidence_digest,
 )
+from deerflow.runtime.execution_policy import ExecutionPolicyStateV1
 from deerflow.runtime.runs.lifecycle_query import (
     CursorAhead,
     LifecyclePage,
@@ -39,6 +40,7 @@ from deerflow.runtime.runs.lifecycle_query import (
 )
 from deerflow.runtime.runs.store.base import (
     AdmissionOutcome,
+    ApplyExecutionPolicyStateOutcome,
     BindAssemblyEvidenceOutcome,
     CancellationRequestOutcome,
     CancellationRequestResult,
@@ -538,6 +540,40 @@ class MemoryRunStore(RunStore):
         return BindAssemblyEvidenceOutcome.mismatch
 
     @_atomic_memory_mutation
+    async def apply_execution_policy_state(
+        self,
+        run_id: str,
+        *,
+        owner_id: str,
+        lease_epoch: int,
+        expected_digest: str | None,
+        state_json: Mapping[str, object],
+        state_digest: str,
+    ) -> ApplyExecutionPolicyStateOutcome:
+        state = ExecutionPolicyStateV1.from_json(state_json)
+        if state.digest != state_digest:
+            raise ValueError("execution policy state digest mismatch")
+        row = self._visible_run(run_id)
+        if row is None or row.get("operation_kind", "run") != "run":
+            return ApplyExecutionPolicyStateOutcome.not_found
+        if (
+            row.get("status") not in {"pending", "running"}
+            or row.get("state_version") != lease_epoch
+            or not self._owned_run_fence_matches(
+                row,
+                expected_owner_worker_id=owner_id,
+                require_unexpired_lease=row.get("lease_expires_at") is not None,
+            )
+        ):
+            return ApplyExecutionPolicyStateOutcome.ownership_lost
+        if row.get("execution_policy_state_digest") != expected_digest:
+            return ApplyExecutionPolicyStateOutcome.conflict
+        row["execution_policy_state_json"] = copy.deepcopy(state.to_json())
+        row["execution_policy_state_digest"] = state_digest
+        row["updated_at"] = datetime.now(UTC).isoformat()
+        return ApplyExecutionPolicyStateOutcome.applied
+
+    @_atomic_memory_mutation
     async def request_cancel_fenced(
         self,
         run_id: str,
@@ -751,6 +787,8 @@ class MemoryRunStore(RunStore):
             "execution_evidence_digest": None,
             "assembly_evidence_json": existing.get("assembly_evidence_json") if existing else None,
             "assembly_evidence_digest": existing.get("assembly_evidence_digest") if existing else None,
+            "execution_policy_state_json": existing.get("execution_policy_state_json") if existing else None,
+            "execution_policy_state_digest": existing.get("execution_policy_state_digest") if existing else None,
             "idempotency_key": idempotency_key,
             # ``put`` is an idempotent snapshot write. Preserve a cancellation
             # request that may have raced a retry of an earlier snapshot.
@@ -1719,6 +1757,8 @@ class MemoryRunStore(RunStore):
             "execution_evidence_digest": None,
             "assembly_evidence_json": None,
             "assembly_evidence_digest": None,
+            "execution_policy_state_json": None,
+            "execution_policy_state_digest": None,
             "state_version": 1 if operation_kind == "run" else 0,
         }
         self._runs[run_id] = new_row

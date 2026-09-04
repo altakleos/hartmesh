@@ -25,6 +25,7 @@ import {
   SidecarTrigger,
 } from "@/components/workspace/sidecar";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
+import { ThreadEvidence } from "@/components/workspace/thread-evidence";
 import { ThreadScheduledTasksLink } from "@/components/workspace/thread-scheduled-tasks-link";
 import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
@@ -308,6 +309,11 @@ export default function ChatPage() {
                 {!isNewThread && !isMock && (
                   <ThreadScheduledTasksLink threadId={threadId} />
                 )}
+                {!isNewThread &&
+                  !isMock &&
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                    <ThreadEvidence threadId={threadId} />
+                  )}
                 {tokenUsageEnabled ? (
                   <TokenUsageIndicator
                     threadId={isNewThread ? undefined : threadId}

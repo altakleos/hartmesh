@@ -90,6 +90,18 @@ class RunRow(Base):
     assembly_evidence_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     assembly_evidence_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # Protected compact circuit-breaker state. The JSON may contain private
+    # HMAC commitments and is never projected directly to ordinary APIs or
+    # portable evidence bundles.
+    execution_policy_state_json: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True),
+        nullable=True,
+    )
+    execution_policy_state_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
     # Convenience fields (for listing pages without querying RunEventStore)
     message_count: Mapped[int] = mapped_column(default=0)
     first_human_message: Mapped[str | None] = mapped_column(Text)
@@ -192,6 +204,18 @@ class RunRow(Base):
             "'4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), 'b', ''), 'c', ''), 'd', ''), "
             "'e', ''), 'f', '')) = 0)",
             name="ck_runs_assembly_evidence_digest_format",
+        ),
+        CheckConstraint(
+            "(execution_policy_state_json IS NULL) = (execution_policy_state_digest IS NULL)",
+            name="ck_runs_execution_policy_state_pair",
+        ),
+        CheckConstraint(
+            "execution_policy_state_digest IS NULL OR operation_kind = 'run'",
+            name="ck_runs_execution_policy_state_run_only",
+        ),
+        CheckConstraint(
+            "execution_policy_state_digest IS NULL OR (length(execution_policy_state_digest) = 64 AND lower(execution_policy_state_digest) = execution_policy_state_digest)",
+            name="ck_runs_execution_policy_state_digest_format",
         ),
         CheckConstraint(
             "external_scope IS NULL OR length(external_scope) <= 96",
