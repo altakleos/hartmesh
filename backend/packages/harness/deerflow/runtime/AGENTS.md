@@ -52,9 +52,9 @@ name. A started receipt may resume only when a trusted recovery coordinator
 binds proof to that policy, receipt, dispatch generation, assembly digest, and
 the current takeover fence.
 
-Lifecycle summaries expose only catalog version, digest, entry count, and allowed
-names after strict revalidation. Prompts, descriptions, models, tools, skills,
-policy settings, source records, and user identifiers never enter that projection.
+`run_evidence.py` owns transport-neutral terminal snapshots and canonical V1
+manifests. Keep FastAPI, ZIP, storage, raw payloads/IDs, and authenticity claims
+outside it; adapters revalidate fences and bind copied artifact bytes.
 
 Live rich run-event writes use `events/appender.py`. A
 `FencedRunEventAppender` binds tenant, thread, run, worker owner, and lifecycle

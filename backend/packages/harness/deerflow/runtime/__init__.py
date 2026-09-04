@@ -7,6 +7,17 @@ directly from ``deerflow.runtime``.
 
 from .checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 from .checkpointer import checkpointer_context, get_checkpointer, make_checkpointer, reset_checkpointer
+from .run_evidence import (
+    RUN_EVIDENCE_MANIFEST_PATH,
+    EvidenceArtifactV1,
+    EvidenceSectionV1,
+    EvidenceSnapshotRequest,
+    EvidenceSnapshotSourceV1,
+    RunEvidenceBundleError,
+    RunEvidenceBundleManifestV1,
+    RunEvidenceSnapshotService,
+    RunEvidenceSnapshotV1,
+)
 from .runs import (
     ORPHAN_RECOVERY_STOP_REASON,
     RECOVERY_EXECUTOR_CONTEXT_KEY,
@@ -65,6 +76,16 @@ __all__ = [
     "STARTUP_ORPHAN_RECOVERY_ERROR",
     "UnsupportedStrategyError",
     "run_agent",
+    # portable run evidence
+    "RUN_EVIDENCE_MANIFEST_PATH",
+    "EvidenceArtifactV1",
+    "EvidenceSectionV1",
+    "EvidenceSnapshotRequest",
+    "EvidenceSnapshotSourceV1",
+    "RunEvidenceBundleError",
+    "RunEvidenceBundleManifestV1",
+    "RunEvidenceSnapshotService",
+    "RunEvidenceSnapshotV1",
     # serialization
     "serialize",
     "serialize_channel_values",

@@ -58,6 +58,21 @@ control action is performed; historical evidence never grants authority. PATs
 are tenant-bound and default-denied outside the checked-in route/scope matrix.
 See [the automation identity contract](docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
 
+## Portable Run Evidence
+
+Run evidence bundles require current thread ownership and `runs:read`; a bundle
+or its pseudonymous references are never bearer capabilities. The manifest
+excludes raw prompts, messages, tool arguments/results, retrieval content,
+credential material, user IDs, raw tenant/provider identifiers, headers, and
+unsafe errors. It does include requested artifact names and exact artifact
+bytes, which can themselves contain secrets or personal data.
+
+Bundles are canonical and digest-bound but not signed, timestamped, or
+independently attested. Offline verification establishes only that the ZIP,
+manifest, roots, declarations, and artifact hashes agree. Store downloaded
+bundles as sensitive data: server retention, revocation, and deletion cannot
+recall them. See [the evidence-bundle security and retention contract](docs/RUN_EVIDENCE_BUNDLES.md).
+
 ## External Honcho Memory
 
 Honcho supplies mutable contextual memory. It is tenant- and user-scoped, but it is not HartMesh's source of truth for admission, checkpoints, invocation status, authorization, or audit evidence.

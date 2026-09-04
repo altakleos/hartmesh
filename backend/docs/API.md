@@ -131,7 +131,8 @@ IP address. SQL audit retention defaults to 90 days.
   `join`/`messages`/`events`/`retrieval-observations`/`workspace-changes`
   (GET), and
   `GET|POST .../runs/{run_id}/stream`, plus
-  `GET|POST .../runs/{run_id}/artifacts/archive`), plus `POST /api/runs/stream|wait` and
+  `GET|POST .../runs/{run_id}/artifacts/archive` and
+  `GET|POST .../runs/{run_id}/artifacts/evidence-bundle`), plus `POST /api/runs/stream|wait` and
   `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
   denied until explicitly added to the policy.
   Every other authenticated route — memory, agents, models, MCP/skills
@@ -151,6 +152,44 @@ IP address. SQL audit retention defaults to 90 days.
   before durable admission or any cancel-capable control; ordinary use/failure
   audit refresh is best-effort. See the
   [full contract](../../docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
+
+### Portable Run Evidence Bundle
+
+An authenticated current owner with `runs:read` can validate or download the
+complete evidence projection for a terminal durable run:
+
+```http
+GET /api/threads/{thread_id}/runs/{run_id}/artifacts/evidence-bundle
+POST /api/threads/{thread_id}/runs/{run_id}/artifacts/evidence-bundle
+```
+
+`GET` returns schema/canonicalization versions, pseudonymous run/thread
+references, terminal status, artifact count, all section completeness states,
+the fixed limitations, and `authenticity: "not_signed"`. It does not read or
+return raw events.
+
+`POST` returns a no-store ZIP whose final entry is the canonical
+`hartmesh-evidence/manifest.v1.json`. The other entries are exactly the files
+from the run's verified `present_files` delivery receipt. The manifest binds
+their copied byte lengths and SHA-256 digests plus safe admission, assembly,
+lifecycle, tool, MCP, batch, sandbox, retrieval, and qualification roots.
+
+Only the `complete_durable` profile exists in V1. Active, legacy, pruned,
+inconsistent, oversized, or concurrently changed inputs fail with bounded
+codes; there is no partial evidence mode. This is separate from the ordinary
+`.../artifacts/archive` API, which has no evidence-manifest semantics.
+
+Use the dependency-free offline verifier from the repository root:
+
+```bash
+python -I scripts/verify_run_evidence_bundle.py path/to/bundle.zip
+```
+
+Digest verification proves only internal consistency. It is not a signature,
+creator authentication, external attestation, or recall mechanism for a copy
+already downloaded by the user. See
+[Portable Run Evidence Bundles](../../docs/RUN_EVIDENCE_BUNDLES.md) for the
+complete contract and limits.
 
 ## LangGraph-compatible API
 

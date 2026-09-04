@@ -8,8 +8,13 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from test_run_evidence_archive import _snapshot
 
-from app.gateway.routers.thread_runs import _build_archive_without_abandoning_worker
+from app.gateway.routers.thread_runs import (
+    _build_archive_without_abandoning_worker,
+    _build_evidence_archive_without_abandoning_worker,
+)
+from deerflow.runtime.run_evidence import RUN_EVIDENCE_MANIFEST_PATH
 
 pytestmark = pytest.mark.asyncio
 
@@ -32,3 +37,29 @@ async def test_artifact_archive_build_does_not_block_event_loop(tmp_path: Path) 
 
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         assert archive.read("report.txt") == b"report"
+
+
+async def test_evidence_archive_build_does_not_block_event_loop(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    await asyncio.to_thread(outputs.mkdir)
+    await asyncio.to_thread(
+        (outputs / "report.txt").write_text,
+        "report",
+        encoding="utf-8",
+    )
+    artifact_path = "/mnt/user-data/outputs/report.txt"
+
+    result = await _build_evidence_archive_without_abandoning_worker(
+        outputs,
+        outputs.parent,
+        _snapshot(paths=(artifact_path,)),
+        extra_reserved_dir_names=set(),
+    )
+    try:
+        payload = await asyncio.to_thread(result.file.read)
+    finally:
+        result.file.close()
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        assert archive.read("report.txt") == b"report"
+        assert archive.read(RUN_EVIDENCE_MANIFEST_PATH)

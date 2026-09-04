@@ -92,6 +92,8 @@ PAT_ROUTE_SCOPE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ),
     ("GET", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/artifacts/archive$"), "runs:read"),
     ("POST", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/artifacts/archive$"), "runs:read"),
+    ("GET", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/artifacts/evidence-bundle$"), "runs:read"),
+    ("POST", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/artifacts/evidence-bundle$"), "runs:read"),
     ("GET", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/stream$"), "runs:read"),
     ("POST", re.compile(r"^/api/threads/[^/]+/runs/[^/]+/stream$"), "runs:read"),
     ("POST", re.compile(r"^/api/runs/(stream|wait)$"), "runs:create"),

@@ -130,23 +130,18 @@ Durable MCP task note:
   parent evidence requires independent parent-run authorization. See
   [backend/AGENTS.md](backend/AGENTS.md) for the full contract.
 - CI waivers live in `.github/skill-review-waivers.v1.json` and are enforced by
-  `scripts/review_changed_public_skills.py`. Pull requests may validate waiver
-  edits from their head revision, but only the manifest from the trusted base
-  revision can suppress that run. Entries match one error finding exactly,
-  include the reviewed file's SHA-256 and an expiry date, remain visible in CI
-  output, and can never waive blocker findings. Adding a waiver and relying on
-  it therefore requires two steps: merge the reviewed waiver first, then update
-  the affected public skill in a later pull request.
+  `scripts/review_changed_public_skills.py`. Only the trusted base manifest can
+  suppress a run; entries bind one error to its file SHA-256 and expiry, stay
+  visible, and never waive blockers. Merge a waiver before changing the skill.
 
-Durable batches bind active parent receipts to immutable tenant material under
-database-time fences. Effects may repeat; production stays disabled.
+Durable batches are parent-receipt/tenant bound and database-time fenced;
+effects may repeat and production stays disabled.
 
-Scheduled-task note:
-- `/workspace/scheduled-tasks` and its service are gated by `scheduler.enabled`.
-  Background runs are non-interactive and use the normal durable lifecycle;
-  waiting occurrences remain queued and do not consume concurrency. Scheduler
-  semantics and live-config behavior are owned by
-  [backend/AGENTS.md](backend/AGENTS.md).
+Portable run evidence is terminal-only, complete, digest-bound, and unsigned;
+ordinary artifact ZIPs are not evidence. See `docs/RUN_EVIDENCE_BUNDLES.md`.
+
+Scheduled tasks require `scheduler.enabled`; waiting occurrences stay queued
+without consuming concurrency. See [backend/AGENTS.md](backend/AGENTS.md).
 
 ## Commands: Root vs. Module
 

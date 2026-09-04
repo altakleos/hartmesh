@@ -53,6 +53,7 @@ def _archive_app(
     run_thread_id: str = THREAD_ID,
     run_status: str = "success",
     with_receipt: bool = True,
+    owner_check_passes: bool = True,
 ) -> tuple[TestClient, MemoryRunStore, MemoryRunEventStore]:
     run_store = MemoryRunStore()
     event_store = MemoryRunEventStore()
@@ -89,7 +90,10 @@ def _archive_app(
         raising=False,
     )
 
-    app = make_authed_test_app(user_factory=_user)
+    app = make_authed_test_app(
+        user_factory=_user,
+        owner_check_passes=owner_check_passes,
+    )
     app.state.run_store = run_store
     app.state.run_event_store = event_store
     app.state.run_manager = run_manager
