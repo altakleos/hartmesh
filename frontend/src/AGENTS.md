@@ -61,6 +61,13 @@
    definitions. Only administrators see managed-definition mutation controls;
    Custom Agent settings consume the same query and preserve stale selected names
    as removable "missing" entries instead of silently widening the allowlist.
+   Current-thread operator evidence uses `core/evidence` and
+   `ThreadEvidence`. It selects the latest persisted run, polls only while that
+   run is active, parses the versioned bounded summary, and renders honest
+   section/qualification states plus public references. The panel is mounted by
+   both default and Custom Agent chat pages; it must not infer policy facts from
+   transcript text or expose internal identifiers. Terminal portable evidence
+   remains an explicit authenticated bundle download, distinct from the summary.
 6. Components subscribe to thread state and render updates
 
 The chat header's context-window control is intentionally persistent: while `context_usage` is unavailable, `ContextUsageBadge` renders a gauge placeholder rather than unmounting; once data arrives, the same position shows the percentage. `useThreadTokenUsage` retains placeholder data only when the response `thread_id` still matches the active route, so same-thread refetches do not flicker and cross-thread navigation never displays the previous chat's usage.

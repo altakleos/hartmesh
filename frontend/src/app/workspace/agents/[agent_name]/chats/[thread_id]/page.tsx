@@ -28,6 +28,7 @@ import {
   SidecarTrigger,
 } from "@/components/workspace/sidecar";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
+import { ThreadEvidence } from "@/components/workspace/thread-evidence";
 import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
@@ -291,6 +292,11 @@ export default function AgentChatPage() {
                   !isMock &&
                   env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
                     <ThreadSubagentBatches threadId={threadId} />
+                  )}
+                {!isNewThread &&
+                  !isMock &&
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                    <ThreadEvidence threadId={threadId} />
                   )}
                 <Tooltip content={t.agents.newChat}>
                   <Button

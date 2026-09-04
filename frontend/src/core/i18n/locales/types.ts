@@ -305,6 +305,36 @@ export interface Translations {
     };
   };
 
+  evidence: {
+    label: string;
+    title: string;
+    description: string;
+    empty: string;
+    loadFailed: string;
+    retry: string;
+    overview: string;
+    timeline: string;
+    sections: string;
+    status: string;
+    accepted: string;
+    terminalReason: string;
+    policy: string;
+    completeness: string;
+    copy: string;
+    copied: string;
+    downloadBundle: string;
+    generatingBundle: string;
+    cancelBundle: string;
+    bundleFailed: string;
+    stop: string;
+    warning: string;
+    noDecisions: string;
+    state: Record<string, string>;
+    qualification: Record<string, string>;
+    section: Record<string, string>;
+    reason: Record<string, string>;
+  };
+
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: { cron: string; once: string };
