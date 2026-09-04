@@ -27,24 +27,23 @@ A single `make dev` / Docker stack runs four cooperating services:
 | **Frontend**    | `3000` | Next.js web interface                                               |
 | **Provisioner** | `8002` | Optional — only when sandbox is configured for provisioner/K8s mode |
 
-Nginx is the single public entry: it serves the frontend and proxies `/api/langgraph/*`
-to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` routes; all
-other `/api/*` go straight to the Gateway REST routers. See
-[backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail.
-One tenant is frozen per Gateway; see [its contract](backend/docs/TENANT_IDENTITY.md).
-It compresses HTML and configured textual assets, while deliberately leaving SSE,
-fonts, images, audio, and video uncompressed at the proxy layer.
+Nginx is the single public entry: it serves the frontend, proxies
+`/api/langgraph/*` to the Gateway's LangGraph runtime (rewritten to native
+`/api/*`), and passes other `/api/*` to the Gateway REST routers; see
+[backend/AGENTS.md](backend/AGENTS.md). One tenant is frozen per Gateway
+([contract](backend/docs/TENANT_IDENTITY.md)). It compresses HTML/configured
+textual assets but deliberately leaves SSE, fonts, images, audio, and video
+uncompressed.
 
-Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
-— **loopback by default**, matching the README's documented deployment model. A bare
-`"${PORT}:2026"` binds `0.0.0.0`, which does not.
-The root `PORT` value is Docker ingress configuration only; local orchestration pins
-Next.js to `3000` so loading `.env` cannot make `make dev` wait on the wrong port.
-Nginx itself listens `default_server` on IPv4+IPv6 and the
-Gateway binds `0.0.0.0:8001` inside the container on purpose — both are container-
-internal; the published nginx port is the entire external surface, and the Gateway's
-`8001` is deliberately not published. Any new published port needs an explicit bind
-address; `backend/tests/test_compose_default_bind_host.py` pins this for every service
+Both compose files publish that entry as
+`"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"` — **loopback by default**; a
+bare `"${PORT}:2026"` binds `0.0.0.0`. Root `PORT` is Docker ingress only;
+local orchestration pins Next.js to `3000` so `.env` cannot make `make dev`
+wait on the wrong port. Nginx listens `default_server` (IPv4+IPv6) and the
+Gateway binds `0.0.0.0:8001` on purpose — both container-internal; the
+published nginx port is the entire external surface and `8001` is deliberately
+unpublished. Any new published port needs an explicit bind address;
+`backend/tests/test_compose_default_bind_host.py` pins this for every service
 in both compose files.
 
 `durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
@@ -87,12 +86,12 @@ deer-flow/
 ```
 
 Third-party extensions come from the operator-controlled top-level `plugins:`
-list in `config.yaml`, not API-writable `extensions_config.json`, because they
-import code. They may contribute middleware, lifecycle, model observers,
-Gateway services, and HTTP routers; the [reference extension](examples/deerflow-extension-example/)
-shows all five. Manage them with `deerflow extensions` or root `make
-extension-*`; changes require restart. Provenance records admitted bytes/config,
-but extensions run with Gateway privileges and must be trusted. See the
+list in `config.yaml` (never API-writable `extensions_config.json`) because
+they import code. They contribute middleware, lifecycle, model observers,
+Gateway services, and routers ([reference extension](examples/deerflow-extension-example/));
+manage via `deerflow extensions` / `make extension-*`, restart required.
+Provenance records admitted bytes/config, but extensions run with Gateway
+privileges and must be trusted. See the
 [extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md) and
 [provenance guide](docs/EXTENSION_ARTIFACT_PROVENANCE.md).
 
@@ -114,25 +113,23 @@ Durable qualification requires exact passing external evidence; missing
 infrastructure is an unpassed gate. See `docs/MULTI_GATEWAY_QUALIFICATION.md`.
 
 Skill quality review note:
-- `skills/public/skill-reviewer/` is the built-in read-only skill quality reviewer.
-  It uses the harness-layer `review_skill_package` tool and contracts in
-  `contracts/skill_review/`. Model-visible review data is compact and
-  tag-neutralized; full raw payloads stay in tool artifacts. See
-  [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
-  `skill-creator` ownership boundaries.
-- Durable invocations snapshot effective skills before admission and execute only
-  accepted immutable material. Nonempty packages currently require Docker/AIO;
-  unsupported providers fail before model work. Live edits affect later invocations.
+- `skills/public/skill-reviewer/` is the read-only reviewer using the
+  `review_skill_package` tool and `contracts/skill_review/`; model-visible data
+  is compact and tag-neutralized, raw payloads stay in tool artifacts. See
+  [backend/AGENTS.md](backend/AGENTS.md) for ownership boundaries.
+- Durable invocations snapshot effective skills before admission and execute
+  only accepted immutable material; nonempty packages require Docker/AIO, and
+  live edits affect later invocations only.
 
 Durable MCP task note:
-- MCP replay uses a dedicated startup-frozen HMAC keyring; exact-two key changes
-  require its quiesced restart procedure. Public lineage stays redacted, and
-  parent evidence requires independent parent-run authorization. See
-  [backend/AGENTS.md](backend/AGENTS.md) for the full contract.
-- CI waivers live in `.github/skill-review-waivers.v1.json` and are enforced by
-  `scripts/review_changed_public_skills.py`. Only the trusted base manifest can
-  suppress a run; entries bind one error to its file SHA-256 and expiry, stay
-  visible, and never waive blockers. Merge a waiver before changing the skill.
+- MCP replay uses a dedicated startup-frozen HMAC keyring; exact-two key
+  changes require its quiesced restart. Public lineage stays redacted, and
+  parent evidence requires independent parent-run authorization; see
+  [backend/AGENTS.md](backend/AGENTS.md).
+- CI skill-review waivers (`.github/skill-review-waivers.v1.json`, enforced by
+  `scripts/review_changed_public_skills.py`) come only from the trusted base
+  manifest, bind one error to its file SHA-256 and expiry, stay visible, and
+  never waive blockers. Merge the waiver before changing the skill.
 
 Durable batches are parent-receipt/tenant bound and database-time fenced;
 effects may repeat and production stays disabled.
@@ -140,11 +137,9 @@ effects may repeat and production stays disabled.
 Portable run evidence is terminal-only, complete, digest-bound, and unsigned;
 ordinary artifact ZIPs are not evidence. See `docs/RUN_EVIDENCE_BUNDLES.md`.
 
-New durable invocations also bind `ExecutionBudgetV1`. Its pure evaluator stores
-compact private HMAC-backed loop state under the run fence, while the authorized
-V1 evidence-summary API and chat Evidence panel expose only safe counters,
-reason codes, public references, and honest qualification states. See
-`docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md`.
+New durable invocations bind `ExecutionBudgetV1`; policy state is private,
+HMAC-backed, and run-fenced, and the evidence-summary API and Evidence panel
+expose only safe projections. See `docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md`.
 
 Scheduled tasks require `scheduler.enabled`; waiting occurrences stay queued
 without consuming concurrency. See [backend/AGENTS.md](backend/AGENTS.md).
@@ -161,25 +156,20 @@ make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
 make extension-install SOURCE=...  # Install and enable a trusted Python extension
-make extension-list                # List configured Python extensions
-make extension-enable NAME=...     # Enable an installed extension (restart required)
-make extension-disable NAME=...    # Disable without uninstalling (restart required)
-make extension-remove NAME=...     # Remove package and config entry (restart required)
+make extension-list / extension-enable NAME=... / extension-disable NAME=... / extension-remove NAME=...  # restart required
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
-make start       # Start all services in production mode (local, optimized); SKIP_FRONTEND_BUILD=1 reuses the last frontend build
+make start       # Production mode locally; SKIP_FRONTEND_BUILD=1 reuses the last frontend build
 make stop        # Stop all running services
 make up / down   # Build/stop the production Docker stack (browser at localhost:2026)
 make docker-start / docker-stop / docker-logs   # Docker development environment
 ```
 
-Production startup uses the image's pre-built Python environment with `uv run
---no-sync`, gives the Gateway a real `/health` probe, and makes `make up` wait
-for that probe before printing its success banner. A readiness failure must
-surface Compose status and recent Gateway logs instead of claiming the stack is
-running.
-
-Docker log and restart commands resolve `DEER_FLOW_ROOT` from the current
-checkout before invoking Compose, matching the start and stop commands.
+Production startup uses the image's pre-built Python environment (`uv run
+--no-sync`) and a real Gateway `/health` probe; `make up` waits for that probe
+before its success banner, and a readiness failure must surface Compose status
+and recent Gateway logs instead of claiming the stack is running. Docker
+log/restart commands resolve `DEER_FLOW_ROOT` from the current checkout before
+invoking Compose, matching start and stop.
 
 Run `make help` for the full list.
 
@@ -259,12 +249,11 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
-- **Version sources must stay in lockstep** — a release version must match identically in
-  `backend/pyproject.toml`, the root `deer-flow` entry in `backend/uv.lock`,
-  `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml` (`version` +
-  `appVersion`). Pushing a `v*` git tag triggers CI that runs
-  `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts. Before
-  bumping a version, run `scripts/bump_version.sh <ver>` (aligns all five fields at once) and
-  `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
+- **Version sources must stay in lockstep** — `backend/pyproject.toml`, the
+  root `deer-flow` entry in `backend/uv.lock`, `frontend/package.json`, and
+  `deploy/helm/deer-flow/Chart.yaml` (`version` + `appVersion`) must match. A
+  `v*` tag triggers `scripts/verify_versions.sh` in CI and **blocks all
+  publishing** on drift. Bump with `scripts/bump_version.sh <ver>`, verify with
+  `scripts/verify_versions.sh <ver>`. See [RELEASING.md](RELEASING.md).
 - **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
   belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.

@@ -300,8 +300,9 @@ describe("ThreadEvidence", () => {
     render(<ThreadEvidence threadId="thread-1" />);
     fireEvent.click(screen.getByRole("button", { name: "Evidence" }));
 
-    const batchesSummary = (await screen.findByText("Subagent batches"))
-      .closest("summary");
+    const batchesSummary = (
+      await screen.findByText("Subagent batches")
+    ).closest("summary");
     const batchesDetails = batchesSummary?.closest("details");
     expect(batchesDetails?.open).toBe(false);
     fireEvent.click(batchesSummary!);
@@ -329,7 +330,8 @@ describe("ThreadEvidence", () => {
     ).toBeDefined();
     expect(toast.error).toHaveBeenCalledTimes(1);
     expect(toast.error).toHaveBeenCalledWith("bundle generation busy");
-    expect(screen.queryByRole("button", { name: "Cancel bundle generation" }))
-      .toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Cancel bundle generation" }),
+    ).toBeNull();
   });
 });

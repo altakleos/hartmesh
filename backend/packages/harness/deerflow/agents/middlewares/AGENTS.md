@@ -34,15 +34,12 @@ not a copy of the prompt. `collect_release_policies()` gathers them from an
 assembled stack. Adding a behaviour-affecting field to a middleware means adding
 it to that middleware's declaration in the same change.
 
-**Execution policy observation.** For an accepted durable run,
-`LoopDetectionMiddleware.aafter_model` reports turns and normalized tool,
-retrieval, sandbox, and batch attempts through the worker-installed policy
-observer. The observer is authoritative: it performs the fenced state CAS and
-returns allow/warn/stop. A stop removes pending tool calls before dispatch;
-warnings are evidence only. Tool arguments are reduced to secret-keyed
-commitments by the startup-frozen normalizer and must not enter middleware logs
-or public event bodies. The synchronous and non-accepted paths retain their
-compatibility heuristics and make no durable policy claim.
+**Execution policy observation.** Accepted durable runs report turns and
+normalized attempts to the worker-installed observer, which owns the fenced
+state CAS and returns allow/warn/stop; a stop removes pending tool calls.
+Argument equivalence uses secret-keyed commitments that must not enter logs or
+public events. Non-accepted paths keep their heuristics and make no durable
+claim. See `../../../../../docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md`.
 
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 
