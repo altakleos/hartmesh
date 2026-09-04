@@ -140,6 +140,12 @@ effects may repeat and production stays disabled.
 Portable run evidence is terminal-only, complete, digest-bound, and unsigned;
 ordinary artifact ZIPs are not evidence. See `docs/RUN_EVIDENCE_BUNDLES.md`.
 
+New durable invocations also bind `ExecutionBudgetV1`. Its pure evaluator stores
+compact private HMAC-backed loop state under the run fence, while the authorized
+V1 evidence-summary API and chat Evidence panel expose only safe counters,
+reason codes, public references, and honest qualification states. See
+`docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md`.
+
 Scheduled tasks require `scheduler.enabled`; waiting occurrences stay queued
 without consuming concurrency. See [backend/AGENTS.md](backend/AGENTS.md).
 

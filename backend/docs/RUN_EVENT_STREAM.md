@@ -215,6 +215,7 @@ through run-event or specialized APIs:
 | `context` | Effective hidden-context identity and bounded external-memory audit evidence. |
 | `subagent` | Subagent lifecycle and step history. |
 | `tool` | Bounded durable tool-attempt start/outcome evidence. |
+| `policy` | Bounded accepted execution-policy warning/stop decisions. |
 | `workspace` | Workspace/output file-change evidence. |
 
 ## Producers
@@ -237,6 +238,15 @@ through run-event or specialized APIs:
 | `tool_receipt.started.v1` | `tool` | `RunEventToolReceiptSink.reserve_started()` |
 | `tool_receipt.outcome.v1` | `tool` | `RunEventToolReceiptSink.record_outcome()` |
 | `retrieval.observation.v1` | `tool` | `RunEventToolReceiptSink.record_with_receipt_outcome()` |
+| `policy.decision.v1` | `policy` | Execution-policy row-backed outbox through `FencedRunEventAppender` |
+
+`policy.decision.v1` contains only the decision (`warn` or `stop`), stable
+reason and summary keys, safe current/limit counters, and the accepted budget
+and compact-state digests. The compact run-row outbox is written with the
+counter transition before publication; recovery republishes a missing event
+under the current fence and clears the outbox only after the event is visible.
+Tool arguments, result text, equivalence commitments, HMAC material, prompts,
+and provider payloads are excluded.
 
 Current middleware tags are `guardrail`, `loop_detection`, `mcp_preparation`,
 `safety_termination`, `skill_activation`, and `skill_secrets`.

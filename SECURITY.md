@@ -73,6 +73,17 @@ manifest, roots, declarations, and artifact hashes agree. Store downloaded
 bundles as sensitive data: server retention, revocation, and deletion cannot
 recall them. See [the evidence-bundle security and retention contract](docs/RUN_EVIDENCE_BUNDLES.md).
 
+The execution-policy evaluator stores tool-equivalence commitments as keyed
+HMACs, never as plain argument hashes. The startup-frozen keyring is secret
+deployment material; exact-two deployments bind only its non-secret
+confirmation, and a rotation must retain historical keys until affected runs
+are terminal. The operator evidence endpoint projects bounded counters, stable
+reason codes, and public references only: it excludes prompts, tool arguments
+and results, HMAC commitments, credentials, raw identifiers, and error text.
+A policy stop prevents later dispatch but cannot roll back an external side
+effect that already occurred. See
+[the execution-policy and evidence UI contract](docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md).
+
 ## External Honcho Memory
 
 Honcho supplies mutable contextual memory. It is tenant- and user-scoped, but it is not HartMesh's source of truth for admission, checkpoints, invocation status, authorization, or audit evidence.
