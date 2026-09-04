@@ -360,3 +360,49 @@ def test_evidence_search_bounds_raw_html_before_parsing(
         )
 
     assert caught.value.status == "oversized_response"
+
+
+@pytest.mark.anyio
+async def test_evidence_provider_marks_capped_results_as_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEngine:
+        search_url = "https://html.duckduckgo.com/html/"
+        search_method = "POST"
+
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+            self.http_client = SimpleNamespace(client=object())
+
+        def search(self, _query: str, **_kwargs):
+            return [
+                {
+                    "title": f"Result {index}",
+                    "href": f"https://example.com/{index}",
+                    "body": f"Snippet {index}",
+                }
+                for index in range(3)
+            ]
+
+    monkeypatch.setattr("ddgs.engines.duckduckgo.Duckduckgo", FakeEngine)
+    monkeypatch.setattr("primp.Client", lambda **_kwargs: object())
+    provider = tools._DuckDuckGoRetrievalProvider(
+        region="us-en",
+        safesearch="moderate",
+        time_range=None,
+    )
+
+    response = await provider.search(
+        SimpleNamespace(
+            query="private query",
+            constraints=SimpleNamespace(
+                max_results=2,
+                timeout_ms=1_000,
+                max_aggregate_bytes=4_096,
+            ),
+        )
+    )
+
+    assert response.result_count == 2
+    assert response.truncated is True
+    assert len(json.loads(response.candidate_result)["results"]) == 2

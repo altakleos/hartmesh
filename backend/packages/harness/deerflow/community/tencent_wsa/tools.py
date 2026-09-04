@@ -264,7 +264,9 @@ def _parse_results(response: dict[str, Any], *, max_results: int) -> list[dict[s
             if isinstance(value, (str, int, float)) and not isinstance(value, bool):
                 result[field] = value
         results.append(result)
-        if len(results) >= max_results:
+        # Keep one bounded sentinel beyond the public limit so evidence-bearing
+        # callers can distinguish an exact result count from truncation.
+        if len(results) > max_results:
             break
     return results
 
@@ -308,9 +310,10 @@ def web_search_tool(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -> str:
         return error_json
     assert response is not None
 
-    results = _parse_results(response, max_results=max_results)
-    if results is None:
+    parsed_results = _parse_results(response, max_results=max_results)
+    if parsed_results is None:
         return _error("Tencent Cloud WSA returned an unexpected response format", query, request_id=request_id)
+    results = parsed_results[:max_results]
     if not results:
         return _error("No results found", query, request_id=request_id)
 
@@ -377,12 +380,14 @@ class _TencentWsaRetrievalProvider:
             raise RetrievalProviderError("provider_unavailable")
         if response is None:
             raise RetrievalProviderError("unsafe_response")
-        results = _parse_results(
+        parsed_results = _parse_results(
             response,
             max_results=request.constraints.max_results,
         )
-        if results is None:
+        if parsed_results is None:
             raise RetrievalProviderError("unsafe_response")
+        truncated = len(parsed_results) > request.constraints.max_results
+        results = parsed_results[: request.constraints.max_results]
         if results:
             output: dict[str, object] = {
                 "total_results": len(results),
@@ -403,6 +408,7 @@ class _TencentWsaRetrievalProvider:
             candidate_result=candidate,
             items=items,
             result_count=len(results),
+            truncated=truncated,
             # Provider request IDs are not documented as independent of query
             # or tenant data, so the portable observation omits them.
             safe_request_ref=None,

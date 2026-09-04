@@ -1,6 +1,7 @@
 """Unit tests for the Tencent Cloud Web Search API community provider."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -367,6 +368,43 @@ class TestTencentWsaSearch:
                 )
 
         assert caught.value.status == "timeout"
+
+    @pytest.mark.anyio
+    async def test_evidence_provider_marks_capped_results_as_truncated(self, monkeypatch):
+        import deerflow.community.tencent_wsa.tools as wsa
+
+        pages = [
+            json.dumps(
+                {
+                    "title": f"Result {index}",
+                    "url": f"https://example.com/{index}",
+                    "content": f"Snippet {index}",
+                }
+            )
+            for index in range(3)
+        ]
+        monkeypatch.setattr(
+            wsa,
+            "_search",
+            lambda *_args, **_kwargs: (_response(pages), None),
+        )
+        provider = wsa._TencentWsaRetrievalProvider(extras={})
+
+        response = await provider.search(
+            SimpleNamespace(
+                query="private query",
+                credential=SimpleNamespace(available=True, secret="private key"),
+                constraints=SimpleNamespace(
+                    max_results=2,
+                    timeout_ms=1_000,
+                    max_aggregate_bytes=4_096,
+                ),
+            )
+        )
+
+        assert response.result_count == 2
+        assert response.truncated is True
+        assert len(json.loads(response.candidate_result)["results"]) == 2
 
 
 class TestTencentWsaConfiguration:

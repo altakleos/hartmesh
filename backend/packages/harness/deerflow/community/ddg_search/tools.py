@@ -271,7 +271,9 @@ def _search_duckduckgo_evidence(
         raise RetrievalProviderError("provider_unavailable") from None
 
     results: list[dict[str, str]] = []
-    for raw in (raw_results or [])[:max_results]:
+    # Keep one bounded sentinel beyond the public limit so the adapter can
+    # prove whether it discarded provider results.
+    for raw in (raw_results or [])[: max_results + 1]:
         if isinstance(raw, dict):
             title = raw.get("title", "")
             href = raw.get("href", raw.get("link", ""))

@@ -406,6 +406,60 @@ async def test_timed_out_blocking_calls_keep_their_concurrency_permit() -> None:
     assert all(isinstance(outcome, RetrievalProviderError) and outcome.status == "timeout" for outcome in outcomes)
 
 
+@pytest.mark.anyio
+async def test_repeated_cancellation_keeps_blocking_call_concurrency_permit() -> None:
+    import threading
+
+    lock = threading.Lock()
+    release = threading.Event()
+    first_started = threading.Event()
+    second_started = threading.Event()
+    active = 0
+    maximum_active = 0
+    call_count = 0
+
+    def blocking_search() -> ProviderRetrievalResponse:
+        nonlocal active, maximum_active, call_count
+        with lock:
+            call_count += 1
+            current_call = call_count
+            active += 1
+            maximum_active = max(maximum_active, active)
+        (first_started if current_call == 1 else second_started).set()
+        try:
+            if not release.wait(timeout=1):
+                raise TimeoutError
+            return ProviderRetrievalResponse(candidate_result=[], items=())
+        finally:
+            with lock:
+                active -= 1
+
+    class BlockingProvider:
+        async def search(self, _request):
+            return await run_blocking_provider_call(blocking_search)
+
+    service = EvidenceBearingRetrievalService(
+        concurrency_limiter=TenantProviderConcurrencyLimiter(max_concurrency=1),
+    )
+    first = asyncio.create_task(service.retrieve(_accepted_request(timeout_ms=2_000), BlockingProvider()))
+    assert await asyncio.to_thread(first_started.wait, 0.5)
+    second = asyncio.create_task(service.retrieve(_accepted_request(timeout_ms=2_000), BlockingProvider()))
+
+    first.cancel()
+    await asyncio.sleep(0)
+    first.cancel()
+    done, _ = await asyncio.wait({first}, timeout=0.05)
+    permit_released_early = first in done
+    second_overlapped = second_started.is_set()
+    release.set()
+    outcomes = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert not permit_released_early
+    assert not second_overlapped
+    assert maximum_active == 1
+    assert isinstance(outcomes[0], asyncio.CancelledError)
+
+
 def _trusted_runtime_context(tenant: TenantReferenceV1) -> dict[str, object]:
     credential = CredentialEvidenceV1(
         method="channel",

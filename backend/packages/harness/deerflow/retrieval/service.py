@@ -6,7 +6,7 @@ import asyncio
 import threading
 import weakref
 from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
@@ -126,10 +126,15 @@ async def run_blocking_provider_call[**P, R](
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        try:
-            await task
-        except Exception:
-            pass
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with suppress(asyncio.CancelledError, Exception):
+            task.result()
         raise
 
 
