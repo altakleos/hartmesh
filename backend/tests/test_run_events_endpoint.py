@@ -110,7 +110,7 @@ async def test_retrieval_observation_endpoint_exposes_only_safe_projection():
                 "version": 1,
                 "provider_id": "serply",
                 "collection_public_refs": [],
-                "domains": [],
+                "domain_scope": "provider_default",
                 "recency_days": None,
                 "max_results": 2,
                 "max_item_bytes": 1_024,
@@ -127,7 +127,7 @@ async def test_retrieval_observation_endpoint_exposes_only_safe_projection():
             safe_reason=None,
             result_count=1,
             source_count=1,
-            source_references=("https://example.com/report",),
+            source_references=("https://example.com",),
             truncated=False,
             partial=False,
             safe_provider_request_ref=None,
@@ -168,7 +168,7 @@ async def test_retrieval_observation_endpoint_exposes_only_safe_projection():
 
     encoded = str(response)
     assert response["items"][0]["result_projection_digest"] == "f" * 64
-    assert response["items"][0]["source_references"] == ["https://example.com/report"]
+    assert response["items"][0]["source_references"] == ["https://example.com"]
     assert "query" not in encoded
     assert "result text" not in encoded
 

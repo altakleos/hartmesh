@@ -36,6 +36,7 @@ from deerflow.retrieval import (
     accepted_retrieval_request_from_active,
     active_retrieval_draft_context,
     normalize_web_source_reference,
+    run_blocking_provider_call,
     validate_retrieval_pair,
 )
 from deerflow.runtime.accepted_invocation import (
@@ -87,7 +88,7 @@ def test_policy_narrowing_and_source_normalization_are_private_and_deterministic
             allowed_domains=effective.domains,
             denied_domains=policy.web_domain_denylist,
         )
-        == "https://docs.example.com/a%20b"
+        == "https://docs.example.com"
     )
     portable = json.dumps(effective.to_safe_projection(), sort_keys=True)
     assert "password" not in portable
@@ -130,6 +131,46 @@ def test_policy_digest_cannot_be_used_as_a_collection_selector_oracle() -> None:
     # digests. The portable policy commitment intentionally uses only its safe
     # public projection, so a low-entropy selector dictionary is not an oracle.
     assert first.digest == second.digest
+
+
+def test_domain_selectors_are_not_a_portable_policy_or_projection_oracle() -> None:
+    shared = {
+        "allowed_providers": ("serply",),
+        "allowed_endpoint_origins": ("https://api.serply.io",),
+    }
+    first = RetrievalPolicyV1(
+        **shared,
+        web_domain_allowlist=("confidential-customer.example",),
+        web_domain_denylist=("blocked.confidential-customer.example",),
+    )
+    second = RetrievalPolicyV1(
+        **shared,
+        web_domain_allowlist=("another-private-tenant.example",),
+        web_domain_denylist=("blocked.another-private-tenant.example",),
+    )
+
+    assert first.digest == second.digest
+    portable = json.dumps(
+        first.narrow(
+            RetrievalRequestConstraintsV1(
+                provider_id="serply",
+                endpoint="https://api.serply.io/v1/search",
+            )
+        ).to_safe_projection(),
+        sort_keys=True,
+    )
+    assert "confidential-customer" not in portable
+    assert "domain_scope" in portable
+
+
+def test_web_source_reference_is_origin_only_when_path_reflects_query() -> None:
+    assert (
+        normalize_web_source_reference(
+            "https://docs.example.com/search/reset-password?query=reset-password#result",
+            allowed_domains=("example.com",),
+        )
+        == "https://docs.example.com"
+    )
 
 
 @pytest.mark.parametrize(
@@ -252,6 +293,7 @@ def _accepted_request(
     max_results: int = 2,
     max_aggregate_bytes: int = 4_096,
     accept_partial: bool = False,
+    timeout_ms: int = 2_000,
 ) -> AcceptedRetrievalRequest:
     receipt = _started_receipt()
     policy = RetrievalPolicyV1(
@@ -261,7 +303,7 @@ def _accepted_request(
         max_results=5,
         max_item_bytes=1_024,
         max_aggregate_bytes=max_aggregate_bytes,
-        timeout_ms=2_000,
+        timeout_ms=timeout_ms,
         source_schemes=("https",),
         accept_partial=accept_partial,
     )
@@ -325,6 +367,43 @@ async def test_provider_concurrency_is_bounded_per_tenant_and_provider() -> None
     )
 
     assert provider.maximum_active == 1
+
+
+@pytest.mark.anyio
+async def test_timed_out_blocking_calls_keep_their_concurrency_permit() -> None:
+    import threading
+    import time
+
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def blocking_search() -> ProviderRetrievalResponse:
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            time.sleep(0.04)
+            return ProviderRetrievalResponse(candidate_result=[], items=())
+        finally:
+            with lock:
+                active -= 1
+
+    class BlockingProvider:
+        async def search(self, _request):
+            return await run_blocking_provider_call(blocking_search)
+
+    service = EvidenceBearingRetrievalService(
+        concurrency_limiter=TenantProviderConcurrencyLimiter(max_concurrency=1),
+    )
+    outcomes = await asyncio.gather(
+        *(service.retrieve(_accepted_request(timeout_ms=5), BlockingProvider()) for _ in range(3)),
+        return_exceptions=True,
+    )
+
+    assert maximum_active == 1
+    assert all(isinstance(outcome, RetrievalProviderError) and outcome.status == "timeout" for outcome in outcomes)
 
 
 def _trusted_runtime_context(tenant: TenantReferenceV1) -> dict[str, object]:
@@ -552,7 +631,7 @@ async def test_serply_adapter_uses_common_service_and_accepted_runtime(
         }
     ]
     assert handoff.draft is not None
-    assert handoff.draft.source_references == ("https://example.com/report",)
+    assert handoff.draft.source_references == ("https://example.com",)
     portable = json.dumps(handoff.draft.to_event_projection(), sort_keys=True)
     for forbidden in (
         "private query",
@@ -606,7 +685,7 @@ async def test_provider_service_builds_a_query_and_credential_free_draft() -> No
 
     assert provider.calls == 1
     assert candidate.result["query"] == raw_query
-    assert candidate.draft.source_references == ("https://example.com/report",)
+    assert candidate.draft.source_references == ("https://example.com",)
     portable = json.dumps(candidate.draft.to_event_projection(), sort_keys=True)
     for forbidden in (
         raw_query,
@@ -1083,7 +1162,9 @@ async def test_internal_document_references_are_tenant_scoped_and_pseudonymous()
 
 
 @pytest.mark.anyio
-async def test_common_query_dictionary_has_no_matchable_portable_identifier() -> None:
+async def test_common_query_dictionary_has_no_matchable_portable_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     common_queries = (
         "weather",
         "benefits",
@@ -1091,18 +1172,27 @@ async def test_common_query_dictionary_has_no_matchable_portable_identifier() ->
         "reset password",
     )
 
-    class EmptyProvider:
-        async def search(self, _provider_request):
-            return ProviderRetrievalResponse(candidate_result=[], items=())
+    from deerflow.community.serply.tools import _SerplyRetrievalProvider
+    from deerflow.runtime.tool_evidence import digest_result_projection
+
+    def empty_serply(*_args, **_kwargs):
+        return {}, None
+
+    monkeypatch.setattr(
+        "deerflow.community.serply.tools._serply_get",
+        empty_serply,
+    )
+    result_digests: set[str] = set()
 
     for query in common_queries:
-        candidate = await EvidenceBearingRetrievalService().retrieve(
-            _accepted_request(query=query),
-            EmptyProvider(),
-        )
+        provider = _SerplyRetrievalProvider(vertical="search", extras={})
+        candidate = await EvidenceBearingRetrievalService().retrieve(_accepted_request(query=query), provider)
         portable = json.dumps(candidate.draft.to_event_projection(), sort_keys=True)
         assert query not in portable
         assert hashlib.sha256(query.encode()).hexdigest() not in portable
+        result_digests.add(digest_result_projection(candidate.result, result_kind="str", status="success"))
+
+    assert len(result_digests) == 1
 
 
 @pytest.mark.anyio

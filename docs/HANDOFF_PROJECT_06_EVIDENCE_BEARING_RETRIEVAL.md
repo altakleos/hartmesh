@@ -39,7 +39,7 @@ projection currently authorized for a run owner. It contains:
 - policy and accepted tool-plane base/overlay/projection/effective digests;
 - provider/terminal status, safe reason, timestamps and bounded duration;
 - result/source counts, truncation/partial flags, and closed safe constraints;
-- normalized HTTP(S) source references or tenant-scoped pseudonymous
+- normalized, origin-only HTTP(S) source references or tenant-scoped pseudonymous
   `ragflow-doc:` references;
 - exact receipt result digest/kind and observation/draft digests;
 - optional accepted sandbox execution/operation and explicit MCP evidence
@@ -55,6 +55,12 @@ Never include a raw query, query hash/embedding/length or other stable
 query-derived identifier, credential or selector, private endpoint/dataset/
 document selector, result title/snippet/body, header, provider response, raw
 error, or unnormalized URL. Do not include operational metric state.
+
+Web paths, queries, and fragments are not portable source identity: only the
+approved origin is retained. Literal private domain rules are represented by a
+coarse domain-scope category and remain committed through accepted tool-plane
+material. Evidence-path result envelopes also omit raw query echoes, including
+the deterministic no-results response.
 
 ## Pagination and completeness
 

@@ -104,6 +104,7 @@ class RAGFlowClient:
             "base_url": f"{self.base_url}/api/v1",
             "headers": request_headers,
             "timeout": self.timeout,
+            "follow_redirects": False,
         }
         if self._transport is not None:
             client_kwargs["transport"] = self._transport

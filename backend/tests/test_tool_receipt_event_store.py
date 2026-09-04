@@ -128,7 +128,7 @@ def _retrieval_draft(started: DurableToolReceiptV1) -> RetrievalObservationDraft
             "version": 1,
             "provider_id": "serply",
             "collection_public_refs": [],
-            "domains": [],
+            "domain_scope": "provider_default",
             "recency_days": None,
             "max_results": 2,
             "max_item_bytes": 1_024,
@@ -145,7 +145,7 @@ def _retrieval_draft(started: DurableToolReceiptV1) -> RetrievalObservationDraft
         safe_reason=None,
         result_count=1,
         source_count=1,
-        source_references=("https://example.com/source",),
+        source_references=("https://example.com",),
         truncated=False,
         partial=False,
         safe_provider_request_ref="request-opaque-1",
@@ -326,7 +326,7 @@ async def test_retrieval_retry_appends_new_immutable_observation(local_store) ->
         ),
         replace(
             _retrieval_draft(second.started),
-            source_references=("https://example.com/changed",),
+            source_references=("https://docs.example.com",),
         ),
     )
 
@@ -338,8 +338,8 @@ async def test_retrieval_retry_appends_new_immutable_observation(local_store) ->
     observations = [RetrievalObservationV1.from_event_body(event["content"]) for event in events]
     assert [item.attempt for item in observations] == [1, 2]
     assert observations[0].observation_id != observations[1].observation_id
-    assert observations[0].draft.source_references == ("https://example.com/source",)
-    assert observations[1].draft.source_references == ("https://example.com/changed",)
+    assert observations[0].draft.source_references == ("https://example.com",)
+    assert observations[1].draft.source_references == ("https://docs.example.com",)
 
 
 @pytest.mark.anyio

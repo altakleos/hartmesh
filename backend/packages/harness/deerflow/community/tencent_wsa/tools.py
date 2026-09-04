@@ -24,6 +24,7 @@ from deerflow.retrieval import (
     accepted_retrieval_app_config_from_active,
     accepted_retrieval_request_from_active,
     get_active_retrieval_handoff,
+    run_blocking_provider_call,
 )
 from deerflow.retrieval.provider_config import (
     configured_domains,
@@ -156,7 +157,10 @@ def _search(
     strict_response: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     try:
-        with httpx.Client(timeout=timeout_seconds) as client:
+        with httpx.Client(
+            timeout=timeout_seconds,
+            follow_redirects=False,
+        ) as client:
             response = client.post(
                 _SEARCH_ENDPOINT,
                 headers={
@@ -172,6 +176,11 @@ def _search(
         )
         validate_json_content_type(response)
         data = response.json()
+    except httpx.TimeoutException:
+        logger.error("Tencent Cloud WSA request timed out")
+        if strict_response:
+            raise RetrievalProviderError("timeout") from None
+        return None, _error("Tencent Cloud WSA request failed", query)
     except httpx.HTTPStatusError as exc:
         logger.error("Tencent Cloud WSA API returned HTTP %s", exc.response.status_code)
         return None, _error(f"Tencent Cloud WSA API error: HTTP {exc.response.status_code}", query)
@@ -332,7 +341,7 @@ class _TencentWsaRetrievalProvider:
         request_count = _request_count(request.constraints.max_results)
         if request_count is not None:
             payload["Cnt"] = request_count
-        data, error_json = await asyncio.to_thread(
+        data, error_json = await run_blocking_provider_call(
             _search,
             request.credential.secret,
             payload,
@@ -376,19 +385,12 @@ class _TencentWsaRetrievalProvider:
             raise RetrievalProviderError("unsafe_response")
         if results:
             output: dict[str, object] = {
-                "query": request.query,
                 "total_results": len(results),
                 "results": results,
             }
-            if request_id:
-                output["request_id"] = request_id
             candidate = json.dumps(output, indent=2, ensure_ascii=False)
         else:
-            candidate = _error(
-                "No results found",
-                request.query,
-                request_id=request_id,
-            )
+            candidate = json.dumps({"error": "No results found"}, ensure_ascii=False)
         items = tuple(
             ProviderRetrievalItem(
                 source_locator=result["url"],

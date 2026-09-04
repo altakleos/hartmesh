@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
@@ -105,6 +105,32 @@ class TenantProviderConcurrencyLimiter:
 
 
 _DEFAULT_CONCURRENCY_LIMITER = TenantProviderConcurrencyLimiter()
+
+
+async def run_blocking_provider_call[**P, R](
+    function: Callable[P, R],
+    /,
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> R:
+    """Offload blocking provider I/O without orphaning its live-call permit.
+
+    ``asyncio.to_thread`` cannot stop its worker when the awaiting task is
+    cancelled. Shield the worker and finish joining it before propagating
+    cancellation, so the service's surrounding tenant/provider semaphore is
+    not released while network I/O is still running. Provider clients still
+    own the finite socket timeout that bounds this join.
+    """
+
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception:
+            pass
+        raise
 
 
 def _internal_source_reference(

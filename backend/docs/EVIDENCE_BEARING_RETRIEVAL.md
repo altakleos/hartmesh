@@ -17,9 +17,9 @@ The durable evidence adapter is currently installed on these built-in tools:
 | Provider | Tool | Safe sources | Recency | Server-owned scope |
 | --- | --- | --- | --- | --- |
 | RAGFlow | `knowledge_search` | tenant-scoped pseudonymous `ragflow-doc:` references | unsupported | explicit `datasets` allowlist required for durable runs |
-| DuckDuckGo | `web_search` | normalized HTTP(S) URLs | day/week/month/year | fixed DuckDuckGo evidence backend plus configured domain and size ceilings |
-| Serply | `web_search` | normalized HTTP(S) URLs | no portable recency claim | fixed Serply endpoint, configured vertical/domain/size ceilings, resolved API key |
-| Tencent WSA | `web_search` | normalized HTTP(S) URLs | unsupported | fixed WSA endpoint, configured domain/size ceilings, resolved service API key |
+| DuckDuckGo | `web_search` | normalized HTTP(S) origins | day/week/month/year | fixed DuckDuckGo HTML endpoint, no-redirect HTTPS transport, configured domain and size ceilings |
+| Serply | `web_search` | normalized HTTP(S) origins | no portable recency claim | fixed Serply endpoint, configured vertical/domain/size ceilings, resolved API key |
+| Tencent WSA | `web_search` | normalized HTTP(S) origins | unsupported | fixed WSA endpoint, configured domain/size ceilings, resolved service API key |
 
 These rows describe implemented adapters, not live qualification. A provider is
 qualified for a deployment only after its opt-in live gate passes against that
@@ -78,10 +78,14 @@ be tested against receipt fields. The portable policy digest commits only to a
 closed safe projection; exact private configuration remains bound by the
 accepted deployment/user/projection/effective tool-plane digests.
 
-Web source references lowercase and IDNA-normalize the host, remove user info,
-default ports, fragments, and the entire query string, canonicalize percent
-encoding, enforce the accepted scheme/domain policy, and cap the serialized
-reference. Non-canonical references are rejected when an event is decoded.
+Web source references lowercase and IDNA-normalize the host, remove user info
+and default ports, and retain only the origin. Paths, query strings, and
+fragments are discarded wholesale because any of them can reflect query or
+tenant data. The adapter enforces the accepted scheme/domain policy before
+this coarse origin is recorded, and decoded events reject non-canonical
+references. Portable safe constraints expose only a `provider_default` or
+`restricted` domain category; literal allow/deny selectors remain private and
+are bound by accepted tool-plane digests.
 RAGFlow references expose a server-created collection reference and a
 tenant-scoped digest of the private document selector. They do not expose the
 dataset ID, document ID, title, or text.
@@ -113,12 +117,19 @@ timeout: 30
 ```
 
 `allowed_domains` includes the named domain and its subdomains. A deny rule
-wins. Provider endpoints are fixed by the adapter and redirects are disabled
-where the provider HTTP client exposes that control. The caller's
+wins. Provider endpoints are fixed by the adapter and redirects are disabled.
+DuckDuckGo durable retrieval bypasses the SDK aggregator, verifies the pinned
+HTML endpoint before I/O, and installs an HTTPS-only, no-redirect transport;
+an SDK endpoint change fails closed. The caller's
 `max_results` and recency choice can only narrow these values. Timeout includes
 waiting for the per-tenant/provider concurrency slot and is capped below the
 enclosing run deadline. There is no automatic provider retry in version 1;
 run/tool retry creates a separately evidenced attempt.
+
+Serply, Tencent WSA, and DuckDuckGo use cancellation-aware blocking offload.
+If the enclosing deadline fires, the tenant/provider concurrency permit stays
+held until the client's bounded network operation has actually stopped, so
+timed-out worker threads cannot escape the concurrency ceiling.
 
 For RAGFlow, configure a non-empty operator-owned `datasets` list for durable
 runs. Omitting it preserves the legacy direct/local tenant-wide catalog search,

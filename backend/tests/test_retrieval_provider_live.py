@@ -154,14 +154,13 @@ def _provider_and_request():
             _DuckDuckGoRetrievalProvider(
                 region="wt-wt",
                 safesearch="moderate",
-                backend="duckduckgo",
                 time_range=None,
             ),
             _request(
                 provider_id="duckduckgo",
-                endpoint="https://duckduckgo.com",
+                endpoint="https://html.duckduckgo.com/html/",
                 credential=True,
-                adapter_version="ddgs-v1",
+                adapter_version="ddgs-controlled-http-v1",
             ),
         )
     if _PROVIDER == "serply":

@@ -37,6 +37,7 @@ from deerflow.retrieval.service import (
     RetrievalConcurrencyLimiter,
     RetrievalProvider,
     TenantProviderConcurrencyLimiter,
+    run_blocking_provider_call,
 )
 
 __all__ = [
@@ -71,5 +72,6 @@ __all__ = [
     "protect_retrieval_request_projection",
     "retrieval_tool_declaration",
     "retrieval_observation_event_metadata",
+    "run_blocking_provider_call",
     "validate_retrieval_pair",
 ]

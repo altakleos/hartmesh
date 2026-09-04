@@ -352,6 +352,22 @@ class TestTencentWsaSearch:
 
         assert caught.value.status == "unsafe_response"
 
+    def test_strict_adapter_classifies_client_timeout(self):
+        from deerflow.community.tencent_wsa.tools import _search
+        from deerflow.retrieval import RetrievalProviderError
+
+        with patch("deerflow.community.tencent_wsa.tools.httpx.Client") as mock_client:
+            mock_client.return_value.__enter__.return_value.post.side_effect = httpx.ReadTimeout("private timeout detail")
+            with pytest.raises(RetrievalProviderError) as caught:
+                _search(
+                    "secret",
+                    {"Query": "query"},
+                    "query",
+                    strict_response=True,
+                )
+
+        assert caught.value.status == "timeout"
+
 
 class TestTencentWsaConfiguration:
     @pytest.mark.parametrize(

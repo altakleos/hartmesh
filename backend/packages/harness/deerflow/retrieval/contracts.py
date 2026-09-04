@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
-from urllib.parse import quote, unquote, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$", re.ASCII)
@@ -189,6 +189,7 @@ class EffectiveRetrievalConstraintsV1:
     collections: tuple[str, ...]
     collection_public_refs: tuple[str, ...]
     domains: tuple[str, ...]
+    domain_scope: Literal["provider_default", "restricted"]
     recency_days: int | None
     max_results: int
     max_item_bytes: int
@@ -206,7 +207,7 @@ class EffectiveRetrievalConstraintsV1:
             "version": 1,
             "provider_id": self.provider_id,
             "collection_public_refs": list(self.collection_public_refs),
-            "domains": list(self.domains),
+            "domain_scope": self.domain_scope,
             "recency_days": self.recency_days,
             "max_results": self.max_results,
             "max_item_bytes": self.max_item_bytes,
@@ -295,11 +296,8 @@ class RetrievalPolicyV1:
         return {
             "version": self.version,
             "allowed_providers": list(self.allowed_providers),
-            "endpoint_count": len(self.allowed_endpoint_origins),
-            "collection_count": len(self.allowed_collections),
             "collection_public_refs": list(self.collection_public_refs),
-            "web_domain_allowlist": list(self.web_domain_allowlist),
-            "web_domain_denylist": list(self.web_domain_denylist),
+            "domain_scope": ("restricted" if self.web_domain_allowlist or self.web_domain_denylist else "provider_default"),
             "max_recency_days": self.max_recency_days,
             "max_results": self.max_results,
             "max_item_bytes": self.max_item_bytes,
@@ -365,6 +363,7 @@ class RetrievalPolicyV1:
             collections=tuple(collections),
             collection_public_refs=public_refs,
             domains=tuple(domains),
+            domain_scope=("restricted" if self.web_domain_allowlist or self.web_domain_denylist else "provider_default"),
             recency_days=recency,
             max_results=narrowed_int("max_results"),
             max_item_bytes=narrowed_int("max_item_bytes"),
@@ -384,11 +383,12 @@ def normalize_web_source_reference(
     allowed_domains: tuple[str, ...] = (),
     denied_domains: tuple[str, ...] = (),
 ) -> str:
-    """Normalize a public web locator while discarding all query/user data.
+    """Reduce a public web locator to its approved origin.
 
-    Query parameters are intentionally removed wholesale. Tracking-key lists
-    age badly and non-tracking parameters can still contain search terms,
-    tokens, document identifiers, or user data.
+    Paths, query parameters, and fragments are intentionally removed
+    wholesale. Any of them can reflect search terms, tokens, document
+    identifiers, or user data. The returned origin is therefore a coarse
+    source reference, not a page-level locator.
     """
 
     if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 8_192:
@@ -414,11 +414,7 @@ def normalize_web_source_reference(
         authority = f"{host}:{port}"
     if re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path):
         raise RetrievalEvidenceError("retrieval_source_invalid")
-    try:
-        path = quote(unquote(parsed.path or "/"), safe="/%:@!$&'()*+,;=-._~")
-    except (UnicodeDecodeError, UnicodeEncodeError) as exc:
-        raise RetrievalEvidenceError("retrieval_source_invalid") from exc
-    normalized = urlunsplit((scheme, authority, path, "", ""))
+    normalized = f"{scheme}://{authority}"
     if len(normalized.encode("utf-8")) > _MAX_SOURCE_REFERENCE_BYTES:
         raise RetrievalEvidenceError("retrieval_source_too_large")
     return normalized
@@ -603,7 +599,7 @@ def _safe_constraints_projection(value: Mapping[str, object]) -> dict[str, objec
         "version",
         "provider_id",
         "collection_public_refs",
-        "domains",
+        "domain_scope",
         "recency_days",
         "max_results",
         "max_item_bytes",
@@ -625,14 +621,10 @@ def _safe_constraints_projection(value: Mapping[str, object]) -> dict[str, objec
         raise RetrievalEvidenceError("retrieval_constraints_invalid")
 
     refs = detached.get("collection_public_refs")
-    domains = detached.get("domains")
     schemes = detached.get("source_schemes")
     if not isinstance(refs, list) or len(refs) > 64 or any(not isinstance(item, str) or _PUBLIC_REF_RE.fullmatch(item) is None for item in refs) or len(set(refs)) != len(refs):
         raise RetrievalEvidenceError("retrieval_constraints_invalid")
-    if not isinstance(domains, list) or len(domains) > 64:
-        raise RetrievalEvidenceError("retrieval_constraints_invalid")
-    normalized_domains = tuple(_domain(item) for item in domains)
-    if list(normalized_domains) != domains or len(set(domains)) != len(domains):
+    if detached.get("domain_scope") not in {"provider_default", "restricted"}:
         raise RetrievalEvidenceError("retrieval_constraints_invalid")
     recency = detached.get("recency_days")
     if recency is not None and (type(recency) is not int or not 1 <= recency <= _MAX_RECENCY_DAYS):
@@ -669,13 +661,9 @@ def _validate_safe_source_reference(
         if match is None or "ragflow-doc" not in schemes or not isinstance(public_refs, list) or match.group(1) not in public_refs:
             raise RetrievalEvidenceError("retrieval_source_invalid")
         return
-    domains = constraints.get("domains")
-    if not isinstance(domains, list):
-        raise RetrievalEvidenceError("retrieval_source_invalid")
     normalized = normalize_web_source_reference(
         reference,
         allowed_schemes=tuple(schemes),
-        allowed_domains=tuple(domains),
     )
     if normalized != reference:
         raise RetrievalEvidenceError("retrieval_source_invalid")

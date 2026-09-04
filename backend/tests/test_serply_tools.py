@@ -345,6 +345,23 @@ class TestWebSearchTool:
 
         assert caught.value.status == "unsafe_response"
 
+    def test_strict_adapter_classifies_client_timeout(self, mock_config_with_key):
+        from deerflow.community.serply.tools import _serply_get
+        from deerflow.retrieval import RetrievalProviderError
+
+        with patch("deerflow.community.serply.tools.httpx.Client") as mock_client:
+            mock_client.return_value.__enter__.return_value.get.side_effect = httpx.ReadTimeout("private timeout detail")
+            with pytest.raises(RetrievalProviderError) as caught:
+                _serply_get(
+                    "search",
+                    "secret",
+                    "query",
+                    {"q": "query", "num": 1},
+                    strict_response=True,
+                )
+
+        assert caught.value.status == "timeout"
+
     def test_missing_api_key_returns_error_json_and_warns_once(self, mock_config_no_key, caplog):
         with patch.dict("os.environ", {}, clear=True), caplog.at_level(logging.WARNING):
             first = _run("q")

@@ -32,6 +32,7 @@ from deerflow.retrieval import (
     accepted_retrieval_app_config_from_active,
     accepted_retrieval_request_from_active,
     get_active_retrieval_handoff,
+    run_blocking_provider_call,
 )
 from deerflow.retrieval.provider_config import (
     configured_domains,
@@ -155,7 +156,10 @@ def _serply_get(
         "User-Agent": "deerflow",
     }
     try:
-        with httpx.Client(timeout=timeout_seconds) as client:
+        with httpx.Client(
+            timeout=timeout_seconds,
+            follow_redirects=False,
+        ) as client:
             response = client.get(f"{_SERPLY_BASE_URL}/{path}/", headers=headers, params=params)
         response.raise_for_status()
         validate_response_body_size(
@@ -170,6 +174,11 @@ def _serply_get(
                 raise RetrievalProviderError("unsafe_response")
             return None, _unexpected_format_error(query)
         return data, None
+    except httpx.TimeoutException:
+        logger.error("Serply request timed out")
+        if strict_response:
+            raise RetrievalProviderError("timeout") from None
+        return None, json.dumps({"error": "Serply request failed", "query": query}, ensure_ascii=False)
     except httpx.HTTPStatusError as e:
         logger.error("Serply API returned HTTP %s", e.response.status_code)
         return None, json.dumps({"error": f"Serply API error: HTTP {e.response.status_code}", "query": query}, ensure_ascii=False)
@@ -284,7 +293,7 @@ class _SerplyRetrievalProvider:
         for key in _PASSTHROUGH_PARAMS:
             if key in self._extras:
                 params[key] = self._extras[key]
-        data, error_json = await asyncio.to_thread(
+        data, error_json = await run_blocking_provider_call(
             _serply_get,
             path,
             api_key,
@@ -315,7 +324,6 @@ class _SerplyRetrievalProvider:
         if normalized_results:
             candidate = json.dumps(
                 {
-                    "query": request.query,
                     "total_results": len(normalized_results),
                     "results": normalized_results,
                 },
@@ -324,7 +332,7 @@ class _SerplyRetrievalProvider:
             )
         else:
             candidate = json.dumps(
-                {"error": "No results found", "query": request.query},
+                {"error": "No results found"},
                 ensure_ascii=False,
             )
         items = tuple(

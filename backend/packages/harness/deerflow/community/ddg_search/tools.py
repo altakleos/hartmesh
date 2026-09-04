@@ -23,6 +23,7 @@ from deerflow.retrieval import (
     accepted_retrieval_app_config_from_active,
     accepted_retrieval_request_from_active,
     get_active_retrieval_handoff,
+    run_blocking_provider_call,
 )
 from deerflow.retrieval.provider_config import (
     configured_domains,
@@ -36,6 +37,8 @@ DEFAULT_BACKEND = "auto"
 DEFAULT_REGION = "wt-wt"
 DEFAULT_SAFESEARCH = "moderate"
 DEFAULT_WIKIPEDIA_REGION = "us-en"
+_DDG_EVIDENCE_SEARCH_URL = "https://html.duckduckgo.com/html/"
+_DDG_EVIDENCE_ORIGIN = "https://html.duckduckgo.com"
 
 WIKIPEDIA_BACKENDS = {"auto", "all", "wikipedia"}
 # ddgs 9.14.1: enabled text engines whose implementations honor ``timelimit``.
@@ -175,8 +178,116 @@ def _search_text(
     except Exception as e:
         logger.error("DDGS web search failed (%s)", type(e).__name__)
         if raise_errors:
-            raise RetrievalProviderError("provider_unavailable") from None
+            status = "timeout" if type(e).__name__ == "TimeoutException" else "provider_unavailable"
+            raise RetrievalProviderError(status) from None
         return []
+
+
+def _search_duckduckgo_evidence(
+    query: str,
+    *,
+    max_results: int,
+    region: str,
+    safesearch: str,
+    time_range: SearchTimeRange | None,
+    timeout_seconds: float,
+    max_response_bytes: int = 8 * 1024 * 1024,
+) -> list[dict[str, str]]:
+    """Call the pinned DDG HTML engine through a fail-closed transport.
+
+    The public DDGS aggregator does not expose its destination or redirect
+    policy. Evidence-bearing calls therefore instantiate its pinned HTML
+    parser directly, verify the SDK endpoint before I/O, and replace the
+    underlying client with one that is HTTPS-only and never follows redirects.
+    """
+
+    try:
+        import primp
+        from ddgs.engines.duckduckgo import Duckduckgo
+        from ddgs.exceptions import DDGSException, RatelimitException, TimeoutException
+        from ddgs.http_client import Response
+    except ImportError:
+        logger.error("DDGS evidence transport is unavailable")
+        raise RetrievalProviderError("configuration_error") from None
+
+    if Duckduckgo.search_url != _DDG_EVIDENCE_SEARCH_URL or Duckduckgo.search_method != "POST":
+        logger.error("DDGS evidence endpoint contract changed")
+        raise RetrievalProviderError("configuration_error")
+
+    network_client = primp.Client(
+        timeout=timeout_seconds,
+        follow_redirects=False,
+        https_only=True,
+        verify=True,
+        impersonate="random",
+        impersonate_os="random",
+    )
+
+    class _ControlledHttpClient:
+        def request(self, method: str, url: str, *args, **kwargs):
+            if method != "POST" or url != _DDG_EVIDENCE_SEARCH_URL:
+                raise RetrievalProviderError("configuration_error")
+            kwargs["follow_redirects"] = False
+            try:
+                response = network_client.request(method, url, *args, **kwargs)
+            except primp.TimeoutError:
+                raise RetrievalProviderError("timeout") from None
+            except Exception:
+                raise RetrievalProviderError("provider_unavailable") from None
+            if response.status_code == 429:
+                raise RetrievalProviderError("rate_limited")
+            if response.status_code != 200:
+                raise RetrievalProviderError("provider_unavailable")
+            content = response.content
+            if not isinstance(content, bytes) or len(content) > max_response_bytes:
+                raise RetrievalProviderError("oversized_response")
+            content_type = response.headers.get("content-type", "")
+            if not isinstance(content_type, str) or content_type.split(";", 1)[0].strip().lower() not in {"text/html", "application/xhtml+xml"}:
+                raise RetrievalProviderError("unsafe_response")
+            return Response(response)
+
+    engine = Duckduckgo(timeout=timeout_seconds)
+    engine.http_client = _ControlledHttpClient()
+    try:
+        raw_results = engine.search(
+            query,
+            region=region,
+            safesearch=safesearch,
+            timelimit=(DDGS_TIMELIMIT_BY_TIME_RANGE[time_range] if time_range is not None else None),
+        )
+    except RetrievalProviderError:
+        raise
+    except TimeoutException:
+        logger.error("DDGS evidence request timed out")
+        raise RetrievalProviderError("timeout") from None
+    except RatelimitException:
+        logger.error("DDGS evidence request was rate limited")
+        raise RetrievalProviderError("rate_limited") from None
+    except DDGSException:
+        logger.error("DDGS evidence request failed")
+        raise RetrievalProviderError("provider_unavailable") from None
+    except Exception:
+        logger.error("DDGS evidence request failed")
+        raise RetrievalProviderError("provider_unavailable") from None
+
+    results: list[dict[str, str]] = []
+    for raw in (raw_results or [])[:max_results]:
+        if isinstance(raw, dict):
+            title = raw.get("title", "")
+            href = raw.get("href", raw.get("link", ""))
+            body = raw.get("body", raw.get("snippet", ""))
+        else:
+            title = getattr(raw, "title", "")
+            href = getattr(raw, "href", "")
+            body = getattr(raw, "body", "")
+        results.append(
+            {
+                "title": title if isinstance(title, str) else "",
+                "href": href if isinstance(href, str) else "",
+                "body": body if isinstance(body, str) else "",
+            }
+        )
+    return results
 
 
 @tool("web_search", parse_docstring=True)
@@ -248,25 +359,22 @@ class _DuckDuckGoRetrievalProvider:
         *,
         region: str,
         safesearch: str,
-        backend: str | list[str] | tuple[str, ...],
         time_range: SearchTimeRange | None,
     ) -> None:
         self._region = region
         self._safesearch = safesearch
-        self._backend = backend
         self._time_range = time_range
 
     async def search(self, request) -> ProviderRetrievalResponse:
-        results = await asyncio.to_thread(
-            _search_text,
-            query=request.query,
+        results = await run_blocking_provider_call(
+            _search_duckduckgo_evidence,
+            request.query,
             max_results=request.constraints.max_results,
             region=self._region,
             safesearch=self._safesearch,
-            backend=self._backend,
             time_range=self._time_range,
             timeout_seconds=request.constraints.timeout_ms / 1_000,
-            raise_errors=True,
+            max_response_bytes=request.constraints.max_aggregate_bytes,
         )
         normalized_results = [
             {
@@ -280,7 +388,6 @@ class _DuckDuckGoRetrievalProvider:
         if normalized_results:
             candidate = json.dumps(
                 {
-                    "query": request.query,
                     "total_results": len(normalized_results),
                     "results": normalized_results,
                 },
@@ -289,7 +396,7 @@ class _DuckDuckGoRetrievalProvider:
             )
         else:
             candidate = json.dumps(
-                {"error": "No results found", "query": request.query},
+                {"error": "No results found"},
                 ensure_ascii=False,
             )
         items = tuple(
@@ -335,12 +442,11 @@ async def _web_search_with_evidence(
     safesearch = str(extra.get("safesearch", DEFAULT_SAFESEARCH))
     # Evidence-bearing DDGS calls use one known network provider. The direct
     # compatibility path may still use its configured multi-backend mode.
-    backend = "duckduckgo"
     recency_days = _RECENCY_DAYS.get(str(time_range)) if time_range else None
     timeout_ms = configured_timeout_ms(extra, default_seconds=30)
     policy = RetrievalPolicyV1(
         allowed_providers=("duckduckgo",),
-        allowed_endpoint_origins=("https://duckduckgo.com",),
+        allowed_endpoint_origins=(_DDG_EVIDENCE_ORIGIN,),
         web_domain_allowlist=configured_domains(extra, "allowed_domains"),
         web_domain_denylist=configured_domains(extra, "denied_domains"),
         max_recency_days=366,
@@ -371,7 +477,7 @@ async def _web_search_with_evidence(
         policy=policy,
         requested_constraints=RetrievalRequestConstraintsV1(
             provider_id="duckduckgo",
-            endpoint="https://duckduckgo.com",
+            endpoint=_DDG_EVIDENCE_SEARCH_URL,
             recency_days=recency_days,
             max_results=max_results,
             timeout_ms=timeout_ms,
@@ -382,7 +488,6 @@ async def _web_search_with_evidence(
         _DuckDuckGoRetrievalProvider(
             region=region,
             safesearch=safesearch,
-            backend=backend,
             time_range=time_range,
         ),
     )
@@ -397,6 +502,6 @@ web_search_tool.metadata = {
     RETRIEVAL_TOOL_METADATA_KEY: RetrievalToolDeclarationV1(
         provider_id="duckduckgo",
         tool_kind="web_search",
-        adapter_capability_version="ddgs-v1",
+        adapter_capability_version="ddgs-controlled-http-v1",
     ).to_metadata(),
 }

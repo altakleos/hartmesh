@@ -13,11 +13,7 @@ from datetime import UTC, datetime
 from deerflow_extension_api import TenantReferenceV1
 
 from deerflow.constants import RETRIEVAL_OBSERVATION_EVENT_CATEGORY, RETRIEVAL_OBSERVATION_EVENT_TYPE
-from deerflow.retrieval import (
-    RetrievalObservationV1,
-    retrieval_observation_event_metadata,
-    validate_retrieval_pair,
-)
+from deerflow.retrieval import retrieval_observation_event_metadata
 from deerflow.runtime.events.appender import RuntimeEventAuthority, RuntimeEventOwnershipLost
 from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import (
@@ -25,6 +21,8 @@ from deerflow.runtime.events.store.base import (
     RetrievalPairAppendOutcome,
     RunEventStore,
     find_paired_retrieval_observation,
+    prepare_retrieval_pair,
+    reconcile_existing_retrieval_pair,
     resolve_owned_run,
     validate_idempotent_append,
 )
@@ -343,15 +341,14 @@ class MemoryRunEventStore(RunEventStore):
         owner_id,
         lease_epoch,
     ) -> RetrievalPairAppendOutcome:
-        receipt_body, observation_body = validate_retrieval_pair(
+        prepared = prepare_retrieval_pair(
             receipt_body,
             observation_body,
         )
-        receipt = DurableToolReceiptV1.from_event_body(
-            receipt_body,
-            occurred_at=datetime.now(UTC),
-        )
-        observation = RetrievalObservationV1.from_event_body(observation_body)
+        receipt_body = prepared.receipt_body
+        observation_body = prepared.observation_body
+        receipt = prepared.receipt
+        observation = prepared.observation
         run = await resolve_owned_run(
             self._run_store,
             run_id,
@@ -368,19 +365,11 @@ class MemoryRunEventStore(RunEventStore):
         )
         existing_receipt = self._idempotency.get(receipt_key)
         existing_observation = self._idempotency.get(observation_key)
-        if existing_receipt is not None:
-            if canonical_digest(existing_receipt["content"]) != canonical_digest(receipt_body):
-                raise ToolReceiptIntegrityError("receipt_idempotency_conflict")
-            parse_tool_receipt_event(existing_receipt)
-        if existing_observation is not None:
-            if canonical_digest(existing_observation["content"]) != canonical_digest(observation_body):
-                raise ToolReceiptIntegrityError("retrieval_observation_idempotency_conflict")
-            RetrievalObservationV1.from_event_body(existing_observation["content"])
-        if existing_observation is not None and existing_receipt is None:
-            raise ToolReceiptIntegrityError("retrieval_pair_incomplete")
-
-        receipt_created = existing_receipt is None
-        observation_created = existing_observation is None
+        receipt_created, observation_created = reconcile_existing_retrieval_pair(
+            prepared,
+            existing_receipt=existing_receipt,
+            existing_observation=existing_observation,
+        )
         thread_id = run["thread_id"]
         thread_length = len(self._events.get(thread_id, ()))
         run_length = len(self._events_by_run.get(thread_id, {}).get(run_id, ()))
