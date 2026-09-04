@@ -177,12 +177,12 @@
     {
       "id": "rate_limits_circuit_breakers_and_token_budgets",
       "classification": "process_local_cache_only",
-      "authority": "local protection only, never a deployment-wide quota claim",
-      "required_adapter": "disabled global claims; per-process diagnostics remain truthful",
-      "config_fields": ["circuit_breaker", "llm_call", "token_budget"],
+      "authority": "owner-fenced durable execution-policy state; other rate and token protections remain local only",
+      "required_adapter": "PostgreSQL policy state CAS plus one startup-frozen execution-policy HMAC keyring; no global claims for the remaining process-local counters",
+      "config_fields": ["circuit_breaker", "execution_policy", "llm_call", "token_budget"],
       "service_registrations": ["llm_call_limiter"],
-      "runtime_state_fields": [],
-      "requirement": "The profile does not reinterpret process-local counters as tenant-global enforcement."
+      "runtime_state_fields": ["execution_policy_keyring", "execution_policy_keyring_confirmation", "execution_policy_restart_qualified"],
+      "requirement": "Accepted run budgets and compact state survive ownership transfer through PostgreSQL, both replicas confirm the same private HMAC keyring, and the profile does not reinterpret other process-local counters as tenant-global enforcement."
     },
     {
       "id": "background_cleanup_and_reconciliation",

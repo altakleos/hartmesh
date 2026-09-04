@@ -9,6 +9,7 @@ from langgraph.types import Command
 
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+from deerflow.runtime.execution_policy import ExecutionBudgetV1
 from deerflow.runtime.tenant_identity import TENANT_REFERENCE_CONTEXT_KEY
 from deerflow.runtime.tool_evidence import (
     TOOL_EVIDENCE_CONTEXT_KEY,
@@ -52,6 +53,12 @@ def _runtime(request=None):
             "configurable": {"thread_id": "thread-1"},
         },
     )
+
+
+def _runtime_with_budget(request, budget: ExecutionBudgetV1):
+    runtime = _runtime(request)
+    runtime.context["accepted_execution_budget"] = budget
+    return runtime
 
 
 def _message(command: Command) -> ToolMessage:
@@ -112,6 +119,50 @@ async def test_batch_task_is_explicit_idempotent_submission(monkeypatch) -> None
     assert request.resolved_parent_material is parent.resolved_parent_material
     assert message.additional_kwargs["subagent_batch_id"] == "subagent-batch-1"
     assert "running independently" in message.content
+
+
+@pytest.mark.asyncio
+async def test_batch_task_composes_accepted_policy_with_batch_limits(monkeypatch) -> None:
+    app_config = SimpleNamespace(
+        subagent_batches=SubagentBatchesConfig(
+            max_attempts=5,
+            max_total_runtime_seconds=500,
+        )
+    )
+    parent = make_parent_batch_request(app_config=app_config)
+    submitter = AsyncMock()
+    submitter.accept.return_value = {
+        "id": "subagent-batch-1",
+        "status": "queued",
+        "total_items": 2,
+    }
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: submitter)
+    budget = ExecutionBudgetV1.build(
+        max_batch_items=4,
+        max_batch_concurrency=2,
+        max_batch_attempts=6,
+        max_batch_runtime_seconds=100,
+    )
+
+    with active_tool_receipt_context(parent.parent_tool_receipt):
+        await tool_module.batch_task.coroutine(
+            runtime=_runtime_with_budget(parent, budget),
+            title="Policy bounded",
+            items=[
+                BatchTaskItem(key="record-1", prompt="Process one"),
+                BatchTaskItem(key="record-2", prompt="Process two"),
+            ],
+            subagent_type="general-purpose",
+            tool_call_id="call-1",
+            max_live_items=20,
+            max_running_items=5,
+        )
+
+    limits = submitter.accept.await_args.args[0].limits
+    assert limits.max_live_items == 4
+    assert limits.max_running_items == 2
+    assert limits.max_attempts == 3
+    assert limits.max_total_runtime_seconds == 100
 
 
 @pytest.mark.asyncio

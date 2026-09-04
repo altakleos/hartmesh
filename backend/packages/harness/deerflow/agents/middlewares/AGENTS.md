@@ -34,6 +34,16 @@ not a copy of the prompt. `collect_release_policies()` gathers them from an
 assembled stack. Adding a behaviour-affecting field to a middleware means adding
 it to that middleware's declaration in the same change.
 
+**Execution policy observation.** For an accepted durable run,
+`LoopDetectionMiddleware.aafter_model` reports turns and normalized tool,
+retrieval, sandbox, and batch attempts through the worker-installed policy
+observer. The observer is authoritative: it performs the fenced state CAS and
+returns allow/warn/stop. A stop removes pending tool calls before dispatch;
+warnings are evidence only. Tool arguments are reduced to secret-keyed
+commitments by the startup-frozen normalizer and must not enter middleware logs
+or public event bodies. The synchronous and non-accepted paths retain their
+compatibility heuristics and make no durable policy claim.
+
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 
 1. **InputSanitizationMiddleware** - First, so it is the outermost `wrap_model_call` wrapper; every inner middleware (including LLM retries) sees sanitized messages. `additional_kwargs.original_user_content` is server-owned provenance: Gateway strips caller-supplied values for non-internal run requests, trusted IM calls may carry the string they captured before adding transport/file context, and the middleware replaces any non-string value before wrapping. Uploads and sanitization retain first-writer-wins only for validated strings.

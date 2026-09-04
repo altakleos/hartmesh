@@ -57,6 +57,7 @@ MULTI_GATEWAY_ADDITIONAL_CONFIG_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "auth",
         "circuit_breaker",
+        "execution_policy",
         "llm_call",
         "memory",
         "token_budget",
@@ -150,6 +151,8 @@ class TopologyFingerprintV1:
     accepted_materialization_profile: str
     mcp_task_replay_keyring_confirmation_version: int | None = None
     mcp_task_replay_keyring_confirmation_digest: str | None = None
+    execution_policy_keyring_confirmation_version: int | None = None
+    execution_policy_keyring_confirmation_digest: str | None = None
     digest: str = ""
 
     def __post_init__(self) -> None:
@@ -206,6 +209,18 @@ class TopologyFingerprintV1:
                 field_name="mcp_task_replay_keyring_confirmation_digest",
                 prefixed=True,
             )
+        policy_confirmation_version = self.execution_policy_keyring_confirmation_version
+        policy_confirmation_digest = self.execution_policy_keyring_confirmation_digest
+        if (policy_confirmation_version is None) != (policy_confirmation_digest is None):
+            raise ValueError("execution policy keyring confirmation fields must be paired")
+        if policy_confirmation_version is not None:
+            if type(policy_confirmation_version) is not int or policy_confirmation_version != 1:
+                raise ValueError("execution_policy_keyring_confirmation_version must be 1")
+            _require_digest(
+                policy_confirmation_digest,
+                field_name="execution_policy_keyring_confirmation_digest",
+                prefixed=True,
+            )
         if not isinstance(self.database_schema_ref, str) or _SCHEMA_REFERENCE.fullmatch(self.database_schema_ref) is None:
             raise ValueError("database_schema_ref must be a redacted schema:sha256 reference")
         if not isinstance(self.migration_head, str) or _MIGRATION_HEAD.fullmatch(self.migration_head) is None:
@@ -237,6 +252,8 @@ class TopologyFingerprintV1:
         accepted_materialization_profile: str,
         mcp_task_replay_keyring_confirmation_version: int | None = None,
         mcp_task_replay_keyring_confirmation_digest: str | None = None,
+        execution_policy_keyring_confirmation_version: int | None = None,
+        execution_policy_keyring_confirmation_digest: str | None = None,
     ) -> TopologyFingerprintV1:
         return cls(
             profile=profile,
@@ -250,6 +267,8 @@ class TopologyFingerprintV1:
             capability_manifest_digest=capability_manifest_digest,
             mcp_task_replay_keyring_confirmation_version=(mcp_task_replay_keyring_confirmation_version),
             mcp_task_replay_keyring_confirmation_digest=(mcp_task_replay_keyring_confirmation_digest),
+            execution_policy_keyring_confirmation_version=(execution_policy_keyring_confirmation_version),
+            execution_policy_keyring_confirmation_digest=(execution_policy_keyring_confirmation_digest),
             migration_head=migration_head,
             accepted_materialization_profile=accepted_materialization_profile,
         )
@@ -272,6 +291,9 @@ class TopologyFingerprintV1:
         if self.mcp_task_replay_keyring_confirmation_version is not None:
             core["mcp_task_replay_keyring_confirmation_version"] = self.mcp_task_replay_keyring_confirmation_version
             core["mcp_task_replay_keyring_confirmation_digest"] = self.mcp_task_replay_keyring_confirmation_digest
+        if self.execution_policy_keyring_confirmation_version is not None:
+            core["execution_policy_keyring_confirmation_version"] = self.execution_policy_keyring_confirmation_version
+            core["execution_policy_keyring_confirmation_digest"] = self.execution_policy_keyring_confirmation_digest
         return core
 
     def to_dict(self) -> dict[str, object]:
@@ -303,10 +325,19 @@ class TopologyFingerprintV1:
             "mcp_task_replay_keyring_confirmation_version",
             "mcp_task_replay_keyring_confirmation_digest",
         }
+        policy_confirmation_fields = {
+            "execution_policy_keyring_confirmation_version",
+            "execution_policy_keyring_confirmation_digest",
+        }
         if not isinstance(value, dict) or value.get("version") != 1:
             raise ValueError("topology fingerprint fields are invalid")
         actual_fields = set(value)
-        if actual_fields != legacy_fields and actual_fields != legacy_fields | confirmation_fields:
+        if actual_fields not in {
+            frozenset(legacy_fields),
+            frozenset(legacy_fields | confirmation_fields),
+            frozenset(legacy_fields | policy_confirmation_fields),
+            frozenset(legacy_fields | confirmation_fields | policy_confirmation_fields),
+        }:
             raise ValueError("topology fingerprint fields are invalid")
         images = value.get("image_digests")
         if not isinstance(images, dict):
@@ -327,6 +358,12 @@ class TopologyFingerprintV1:
                 ),
                 mcp_task_replay_keyring_confirmation_digest=value.get(
                     "mcp_task_replay_keyring_confirmation_digest",
+                ),
+                execution_policy_keyring_confirmation_version=value.get(
+                    "execution_policy_keyring_confirmation_version",
+                ),
+                execution_policy_keyring_confirmation_digest=value.get(
+                    "execution_policy_keyring_confirmation_digest",
                 ),
                 migration_head=value["migration_head"],
                 accepted_materialization_profile=value["accepted_materialization_profile"],
@@ -413,6 +450,8 @@ def build_topology_fingerprint(
     config: object,
     mcp_task_replay_keyring_confirmation_version: int,
     mcp_task_replay_keyring_confirmation_digest: str,
+    execution_policy_keyring_confirmation_version: int | None = None,
+    execution_policy_keyring_confirmation_digest: str | None = None,
 ) -> TopologyFingerprintV1:
     """Bind verified startup facts without serializing config or credentials."""
 
@@ -446,6 +485,8 @@ def build_topology_fingerprint(
         capability_manifest_digest=capability_digest,
         mcp_task_replay_keyring_confirmation_version=(mcp_task_replay_keyring_confirmation_version),
         mcp_task_replay_keyring_confirmation_digest=(mcp_task_replay_keyring_confirmation_digest),
+        execution_policy_keyring_confirmation_version=(execution_policy_keyring_confirmation_version),
+        execution_policy_keyring_confirmation_digest=(execution_policy_keyring_confirmation_digest),
         migration_head=get_expected_migration_head(),
         accepted_materialization_profile=accepted_profile,
     )

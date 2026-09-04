@@ -34,6 +34,7 @@ from .recovery import (
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .store.base import (
     AdmissionOutcome,
+    ApplyExecutionPolicyStateOutcome,
     BindAssemblyEvidenceOutcome,
     CancellationRequestOutcome,
     DuplicateRunIdentityError,
@@ -363,6 +364,11 @@ class RunRecord:
     execution_evidence_digest: str | None = None
     assembly_evidence_json: dict[str, Any] | None = None
     assembly_evidence_digest: str | None = None
+    execution_policy_state_json: dict[str, Any] | None = field(
+        default=None,
+        repr=False,
+    )
+    execution_policy_state_digest: str | None = field(default=None, repr=False)
     execution_lease_renewal: Callable[[], Awaitable[bool]] | None = field(
         default=None,
         repr=False,
@@ -2055,6 +2061,8 @@ class RunManager:
             execution_evidence_digest=row.get("execution_evidence_digest"),
             assembly_evidence_json=row.get("assembly_evidence_json"),
             assembly_evidence_digest=row.get("assembly_evidence_digest"),
+            execution_policy_state_json=row.get("execution_policy_state_json"),
+            execution_policy_state_digest=row.get("execution_policy_state_digest"),
             state_version=row.get("state_version") or 0,
             idempotency_key=row.get("idempotency_key"),
             recovery_policy=RecoveryPolicy(row.get("recovery_policy") or RecoveryPolicy.terminalize_v1.value),
@@ -2988,6 +2996,53 @@ class RunManager:
             if record is None:
                 raise RunStartupError(f"Cannot bind execution lease for unknown run {run_id}")
             record.execution_lease_renewal = callback
+
+    async def apply_execution_policy_state(
+        self,
+        run_id: str,
+        *,
+        expected_digest: str | None,
+        state: object,
+    ) -> ApplyExecutionPolicyStateOutcome:
+        """Persist one compact policy transition under this worker's fence."""
+
+        from deerflow.runtime.execution_policy import ExecutionPolicyStateV1
+
+        if not isinstance(state, ExecutionPolicyStateV1):
+            raise TypeError("state must be ExecutionPolicyStateV1")
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return ApplyExecutionPolicyStateOutcome.not_found
+            owner_id = record.owner_worker_id
+            lease_epoch = record.state_version
+        if self._store is None or owner_id is None:
+            return ApplyExecutionPolicyStateOutcome.ownership_lost
+
+        state_json = state.to_json()
+        outcome = await self._call_store_with_retry(
+            "apply_execution_policy_state",
+            run_id,
+            lambda: self._store.apply_execution_policy_state(
+                run_id,
+                owner_id=owner_id,
+                lease_epoch=lease_epoch,
+                expected_digest=expected_digest,
+                state_json=state_json,
+                state_digest=state.digest,
+            ),
+        )
+        if not isinstance(outcome, ApplyExecutionPolicyStateOutcome):
+            outcome = ApplyExecutionPolicyStateOutcome.ownership_lost
+        async with self._lock:
+            current = self._runs.get(run_id)
+            if current is not None:
+                if outcome is ApplyExecutionPolicyStateOutcome.applied:
+                    current.execution_policy_state_json = state_json
+                    current.execution_policy_state_digest = state.digest
+                elif outcome is ApplyExecutionPolicyStateOutcome.ownership_lost:
+                    current.ownership_lost = True
+        return outcome
 
     async def fail_start_if_pending(self, run_id: str, *, error: str) -> bool:
         """Mark an admitted run failed and report whether that failure won."""

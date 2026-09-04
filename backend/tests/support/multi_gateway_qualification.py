@@ -54,6 +54,12 @@ from deerflow.multi_gateway_qualification import (
 )
 from deerflow.persistence.bootstrap import get_expected_migration_head
 from deerflow.qualification_evidence import qualification_evidence_digest
+from deerflow.runtime.execution_policy import (
+    EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID_ENV,
+    EXECUTION_POLICY_HMAC_KEYS_ENV,
+    ToolEquivalenceKeyring,
+    ToolEquivalenceKeyringConfirmationV1,
+)
 from deerflow.runtime.tenant_identity import (
     RedisTenantComponent,
     TenantIdentityV1,
@@ -346,6 +352,10 @@ class KubernetesMultiGatewayQualificationDriverV1:
             "qualification-retained-v1": secrets.token_urlsafe(32),
             self._replay_keyring_active_key_id: secrets.token_urlsafe(32),
         }
+        self._execution_policy_keyring_active_key_id = "qualification-policy-v1"
+        self._execution_policy_keyring_keys = {
+            self._execution_policy_keyring_active_key_id: secrets.token_urlsafe(32),
+        }
         replay_keyring = McpTaskReplayKeyring.from_environment(
             required=True,
             environ={
@@ -360,6 +370,20 @@ class KubernetesMultiGatewayQualificationDriverV1:
         if replay_keyring is None:  # pragma: no cover - required=True invariant
             raise AssertionError("qualification replay keyring was not constructed")
         self._replay_keyring_confirmation = replay_keyring.confirmation()
+        execution_policy_keyring = ToolEquivalenceKeyring.from_environment(
+            required=True,
+            environ={
+                EXECUTION_POLICY_HMAC_KEYS_ENV: json.dumps(
+                    self._execution_policy_keyring_keys,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID_ENV: (self._execution_policy_keyring_active_key_id),
+            },
+        )
+        if execution_policy_keyring is None:  # pragma: no cover - required=True invariant
+            raise AssertionError("qualification execution-policy keyring was not constructed")
+        self._execution_policy_keyring_confirmation = execution_policy_keyring.confirmation()
         self._owned_namespace_uid: str | None = None
         self._namespace_owner = hashlib.sha256(
             f"{config.namespace}:{config.qualification_id}".encode(),
@@ -408,6 +432,14 @@ class KubernetesMultiGatewayQualificationDriverV1:
 
         return self._replay_keyring_confirmation
 
+    @property
+    def execution_policy_keyring_confirmation(
+        self,
+    ) -> ToolEquivalenceKeyringConfirmationV1:
+        """Return the non-secret policy-key confirmation used by topology."""
+
+        return self._execution_policy_keyring_confirmation
+
     def replay_keyring_secret_manifest(self) -> dict[str, object]:
         """Return the namespace-scoped disposable replay-key Secret."""
 
@@ -423,12 +455,18 @@ class KubernetesMultiGatewayQualificationDriverV1:
                     separators=(",", ":"),
                 ),
                 MCP_TASK_REPLAY_HMAC_ACTIVE_KEY_ID_ENV: (self._replay_keyring_active_key_id),
+                EXECUTION_POLICY_HMAC_KEYS_ENV: json.dumps(
+                    self._execution_policy_keyring_keys,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID_ENV: (self._execution_policy_keyring_active_key_id),
             },
         }
 
     def _application_config(self) -> str:
         config = {
-            "config_version": 47,
+            "config_version": 53,
             "log_level": "info",
             "models": [
                 {
@@ -5364,6 +5402,7 @@ class KubernetesMultiGatewayQualificationRunnerV1:
         )
         migration_head = get_expected_migration_head()
         replay_keyring_confirmation = self.driver.replay_keyring_confirmation
+        execution_policy_keyring_confirmation = self.driver.execution_policy_keyring_confirmation
         expected_fingerprint = TopologyFingerprintV1.create(
             profile="durable_two_gateway_v1",
             tenant_digest=tenant.digest,
@@ -5376,6 +5415,8 @@ class KubernetesMultiGatewayQualificationRunnerV1:
             capability_manifest_digest=(self.config.capability_manifest_digest.removeprefix("sha256:")),
             mcp_task_replay_keyring_confirmation_version=(replay_keyring_confirmation.version),
             mcp_task_replay_keyring_confirmation_digest=(replay_keyring_confirmation.digest),
+            execution_policy_keyring_confirmation_version=(execution_policy_keyring_confirmation.version),
+            execution_policy_keyring_confirmation_digest=(execution_policy_keyring_confirmation.digest),
             migration_head=migration_head,
             accepted_materialization_profile="rwx_verified_copy_v2",
         )

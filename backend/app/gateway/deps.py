@@ -810,6 +810,20 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 McpTaskReplayKeyringConfirmation,
             ):
                 raise RuntimeError("topology_dependency_not_shared")
+            from deerflow.runtime.execution_policy import (
+                ToolEquivalenceKeyringConfirmationV1,
+            )
+
+            policy_keyring_confirmation = getattr(
+                app.state,
+                "execution_policy_keyring_confirmation",
+                None,
+            )
+            if not isinstance(
+                policy_keyring_confirmation,
+                ToolEquivalenceKeyringConfirmationV1,
+            ):
+                raise RuntimeError("topology_dependency_not_shared")
             topology_fingerprint = build_topology_fingerprint(
                 facts=topology_facts,
                 tenant_digest=tenant_identity.digest,
@@ -818,6 +832,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 config=config,
                 mcp_task_replay_keyring_confirmation_version=(replay_keyring_confirmation.version),
                 mcp_task_replay_keyring_confirmation_digest=(replay_keyring_confirmation.digest),
+                execution_policy_keyring_confirmation_version=(policy_keyring_confirmation.version),
+                execution_policy_keyring_confirmation_digest=(policy_keyring_confirmation.digest),
             )
             topology_registration = ReplicaRegistrationV1(
                 replica_id=topology_facts.replica_id,
@@ -1606,6 +1622,11 @@ def get_app_run_context(app: FastAPI) -> RunContext:
             None,
         ),
         agent_revision_resolver=_resolve_recovered_agent_revision,
+        execution_policy_keyring=getattr(
+            app.state,
+            "execution_policy_keyring",
+            None,
+        ),
     )
 
 

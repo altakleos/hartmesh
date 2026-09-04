@@ -20,6 +20,7 @@ from deerflow.agents.middlewares.loop_detection_middleware import (
     LoopDetectionMiddleware,
     _hash_tool_calls,
 )
+from deerflow.runtime.execution_policy import ExecutionPolicyError
 
 
 def _make_runtime(thread_id="test-thread", run_id="test-run"):
@@ -60,6 +61,25 @@ def _capture_handler():
         return MagicMock()
 
     return captured, handler
+
+
+def test_accepted_policy_stop_blocks_the_next_model_call() -> None:
+    middleware = LoopDetectionMiddleware()
+    runtime = _make_runtime()
+    runtime.context.update(
+        execution_policy_stopped=True,
+        stop_reason="retrieval_budget_exhausted",
+    )
+    request = _make_request([], runtime)
+    handler = MagicMock()
+
+    with pytest.raises(
+        ExecutionPolicyError,
+        match="retrieval_budget_exhausted",
+    ):
+        middleware.wrap_model_call(request, handler)
+
+    handler.assert_not_called()
 
 
 class _CapturingFakeMessagesListChatModel(FakeMessagesListChatModel):

@@ -55,6 +55,15 @@ from deerflow.retrieval import (
     protect_retrieval_request_projection,
     retrieval_tool_declaration,
 )
+from deerflow.runtime.execution_policy import (
+    EXECUTION_POLICY_OBSERVER_CONTEXT_KEY,
+    ExecutionBudgetV1,
+    ExecutionPolicyError,
+    ExecutionPolicyObservationV1,
+    PolicyDecision,
+    ToolEquivalenceKeyring,
+    build_tool_equivalence_commitment,
+)
 from deerflow.runtime.tool_evidence import (
     ToolAttemptReservation,
     ToolDispatchObservationV1,
@@ -71,6 +80,30 @@ from deerflow.runtime.tool_evidence import (
 logger = logging.getLogger(__name__)
 
 _RECEIPT_CONTEXT_KEY = "deerflow_tool_receipt_context"
+
+
+class _ExecutionPolicyStopped(RuntimeError):
+    """Internal control flow after a fenced policy stop."""
+
+
+def _policy_tool_category(
+    tool_name: str,
+    *,
+    retrieval: bool,
+) -> str:
+    """Classify only explicit built-in names and typed retrieval tools."""
+
+    if retrieval:
+        return "retrieval"
+    if tool_name in {"batch_task", "batch_status", "cancel_batch", "task"}:
+        return "subagent"
+    if tool_name in {"read_file", "list_files", "glob", "find"}:
+        return "filesystem_read"
+    if tool_name in {"write_file", "str_replace", "apply_patch"}:
+        return "filesystem_write"
+    if tool_name in {"bash", "shell", "exec_command"}:
+        return "sandbox"
+    return "tool"
 
 
 class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
@@ -221,6 +254,10 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                         or replayed_draft.mcp_evidence_ref != retrieval_declaration.mcp_evidence_ref
                     ):
                         raise RetrievalEvidenceError("retrieval_replay_observation_mismatch")
+                    await self._observe_retrieval_policy(
+                        context,
+                        replayed_observation,
+                    )
                 result = ToolMessage(
                     content=(f"This tool call already reached durable status '{replayed_outcome.phase}' before recovery, but its prior result is unavailable. The tool was not executed again."),
                     tool_call_id=tool_call_id,
@@ -238,6 +275,14 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
             try:
                 with active_tool_receipt_context(started):
                     if retrieval_declaration is None:
+                        evaluation = await self._observe_tool_policy(
+                            context,
+                            started=started,
+                            arguments=arguments,
+                            retrieval=False,
+                        )
+                        if evaluation is not None and evaluation.decision is PolicyDecision.stop:
+                            raise _ExecutionPolicyStopped(evaluation.reason_code)
                         result = await handler(request)
                     else:
                         with active_retrieval_draft_context(
@@ -245,6 +290,14 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                             retrieval_declaration,
                             context,
                         ) as retrieval_handoff:
+                            evaluation = await self._observe_tool_policy(
+                                context,
+                                started=started,
+                                arguments=arguments,
+                                retrieval=True,
+                            )
+                            if evaluation is not None and evaluation.decision is PolicyDecision.stop:
+                                raise _ExecutionPolicyStopped(evaluation.reason_code)
                             result = await handler(request)
             except asyncio.CancelledError:
                 policy = self._policy_references(context, tool_call_id)
@@ -281,7 +334,7 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                 raise
             except Exception as exc:
                 policy = self._policy_references(context, tool_call_id)
-                if isinstance(exc, RetrievalPolicyDenied):
+                if isinstance(exc, (RetrievalPolicyDenied, _ExecutionPolicyStopped)):
                     phase = "denied"
                     safe_error_code = "guardrail_denied"
                     provider_status = "policy_denied"
@@ -320,6 +373,20 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                     )
                 else:
                     await sink.record_outcome(outcome)
+                if isinstance(exc, _ExecutionPolicyStopped):
+                    result = ToolMessage(
+                        content="Tool execution stopped by the accepted execution policy.",
+                        tool_call_id=tool_call_id,
+                        name=tool_name,
+                        status="error",
+                        additional_kwargs={
+                            TOOL_META_KEY: {
+                                "status": "error",
+                                "error_type": "policy_denied",
+                            }
+                        },
+                    )
+                    return self._stamp(result, request) if self._display_enabled else result
                 raise
 
             phase, safe_error_code, result_kind, result_status, model_visible = self._classify_result(
@@ -386,9 +453,84 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                 )
                 if not isinstance(observation, RetrievalObservationV1):
                     raise RetrievalEvidenceError("retrieval_observation_invalid")
+                await self._observe_retrieval_policy(context, observation)
             else:
                 await sink.record_outcome(outcome)
             return self._stamp(result, request) if self._display_enabled else result
+
+    @staticmethod
+    async def _observe_retrieval_policy(
+        context: dict,
+        observation: RetrievalObservationV1,
+    ) -> None:
+        """Advance aggregate retrieval facts after the durable receipt pair."""
+
+        observer = context.get(EXECUTION_POLICY_OBSERVER_CONTEXT_KEY)
+        if not callable(observer):
+            return
+        await observer(
+            ExecutionPolicyObservationV1(
+                kind="retrieval",
+                count=0,
+                result_count=observation.draft.result_count,
+                source_count=observation.draft.source_count,
+                observation_id=observation.observation_id,
+            )
+        )
+
+    @staticmethod
+    async def _observe_tool_policy(
+        context: dict,
+        *,
+        started,
+        arguments: Mapping[str, object],
+        retrieval: bool,
+    ):
+        """Advance attempts at the durable receipt reservation boundary."""
+
+        observer = context.get(EXECUTION_POLICY_OBSERVER_CONTEXT_KEY)
+        budget = context.get("accepted_execution_budget")
+        keyring = context.get("execution_policy_keyring")
+        if not callable(observer) or not isinstance(budget, ExecutionBudgetV1):
+            return None
+        if not isinstance(keyring, ToolEquivalenceKeyring):
+            raise ExecutionPolicyError("policy_equivalence_key_unavailable")
+        tenant = started.context.tenant
+        if tenant is None or not isinstance(getattr(tenant, "digest", None), str):
+            raise ExecutionPolicyError("policy_state_inconsistent")
+        candidate = build_tool_equivalence_commitment(
+            tenant_digest=tenant.digest,
+            run_ref=started.context.run_id,
+            tool_name=started.tool_name,
+            arguments=arguments,
+            keyring=keyring,
+            key_id=budget.equivalence_key_id,
+        )
+        evaluation = await observer(
+            ExecutionPolicyObservationV1.tool_attempt(
+                tool_name=started.tool_name,
+                tool_category=_policy_tool_category(
+                    started.tool_name,
+                    retrieval=retrieval,
+                ),
+                equivalence_commitment=(None if candidate is None else candidate.digest),
+                observation_id=f"tool_{started.receipt_id}",
+            )
+        )
+        if retrieval and evaluation.decision is not PolicyDecision.stop:
+            retrieval_evaluation = await observer(
+                ExecutionPolicyObservationV1(
+                    kind="retrieval",
+                    count=1,
+                    observation_id=f"retrieval_{started.receipt_id}",
+                )
+            )
+            if retrieval_evaluation.decision in {
+                PolicyDecision.warn,
+                PolicyDecision.stop,
+            }:
+                return retrieval_evaluation
+        return evaluation
 
     @staticmethod
     def _safe_error_for_provider_status(provider_status: str) -> str:
