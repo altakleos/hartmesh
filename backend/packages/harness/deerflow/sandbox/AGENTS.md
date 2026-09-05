@@ -117,7 +117,9 @@ runtime-context key): a declared execution gets its public ref and never
 provisions, a stranger's public ref resolves to nothing, an ordinary acquire on
 a mount scope held by an open accepted session is refused with
 `sandbox_session_conflict`, and release retires once. `declared_sandbox()` is
-the one resolver in tools, middleware, and output budgeting. `operations.py`
+the one resolver in tools, middleware, and output budgeting; raw provider
+`get`/`acquire` calls outside the allowlist in
+`tests/test_sandbox_handle_boundary.py` fail that test. `operations.py`
 declares every `Sandbox` verb and generates the fenced facade; it refuses to
 import if a verb is undeclared. `capabilities.py` holds the optional provider
 contracts (`AcceptedSkillProjection`, `AcceptedMaterialization`) negotiated
