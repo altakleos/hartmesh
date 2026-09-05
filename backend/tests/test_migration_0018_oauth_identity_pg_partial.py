@@ -25,6 +25,7 @@ import pytest
 import sqlalchemy as sa
 from alembic import command as alembic_command
 from sqlalchemy.ext.asyncio import create_async_engine
+from support.postgres import postgres_async_url
 
 from deerflow.persistence.bootstrap import _get_alembic_config
 
@@ -56,7 +57,9 @@ async def _index_predicate(engine, schema: str) -> str | None:
 
 async def test_0018_adds_partial_predicate_and_downgrade_restores_full_index() -> None:
     schema = f"deerflow_test_{uuid.uuid4().hex[:12]}"
-    engine = create_async_engine(POSTGRES_URL or "")
+    # HartMesh CI hands tests a driverless URL with ``sslmode``; normalize it
+    # to the asyncpg form the way the other live-PostgreSQL tests do.
+    engine = create_async_engine(postgres_async_url(POSTGRES_URL or ""))
     cfg = _get_alembic_config(engine, postgres_schema=schema)
 
     try:
