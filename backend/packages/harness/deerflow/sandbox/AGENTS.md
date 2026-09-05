@@ -1,83 +1,14 @@
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
-During a durable invocation, file tools validate skill paths against the
-accepted snapshot before provider IO; path mapping may translate that tree but
-never exposes live skill roots. Remote materialization is fenced and verified
-before `started`; unsupported nonempty material fails before graph/model work.
-
-**Accepted-material deep module**: `accepted_material.py` owns the
-provider-neutral V1/V2 contracts, capability profiles,
-`AcceptedSandboxSession`, the `AcceptedMaterializer` protocol, and the closed
-five-state lifecycle set; `operations.py` declares every `Sandbox` verb,
-`session.py` resolves every handle, `capabilities.py` declares the optional
-provider contracts, `accepted_projection.py` is the projection Material
-(capability plus consumer-token coordinator), and `diagnostics.py` is the
-bounded open-kind stream (egress and scope facts for both kinds, dropped
-oldest-first, published as `sandbox.diagnostic.v1`; accepted sessions get
-egress denied unasked and recorded). Provider SDK objects,
-credentials, and renewal handles never enter persisted evidence. A lease is
-valid only for its exact provider instance and fenced ownership epoch (stale
-workers must not validate, renew, execute, or destroy a newer epoch);
-duplicates are idempotent only on an identical canonical digest. The in-memory
-adapter and OpenSandbox control-plane fake are contract-test tools, never
-production proof.
-
-The dormant exact-two AIO recovery seam keeps the immutable accepted resource
-tuple separate from mutable execution authority: the capability Secret stays in
-the material receipt and a second, non-evidence execution-claim Secret
-(Lease-anchored name/UID, credential rotated under the
-tenant/run/owner/state/material CAS) is projected per exact-two run. It is not
-recovery authority: rotation is not linearizable revocation, so every takeover
-claim is rejected before owner CAS. Never put renewable timestamps, current
-Gateway owners, or rotating claim credentials into immutable evidence.
-
-Adapters are capabilities, not methods every provider must fake:
-`resolve_accepted_materializer` negotiates `AcceptedMaterialization` and
-returns the neutral port plus its pinned runtime/lease inputs (the worker never
-imports a concrete adapter; no capability means `empty_only`).
-`AioAcceptedMaterializer` delegates to the `rwx_verified_copy_v2` tuple with
-its qualification scope intact.
-The OpenSandbox SDK boundary offloads sync calls, validates bounded responses,
-and maps failures to secret-free codes, but its accepted adapter is unavailable
-because SDK 0.1.15 has no atomic metadata claim and cannot report a separately
-resolved image digest; never replace those controls with process-local locks,
-owner-controlled `chmod`, or echoed requested-image metadata (see
-`backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md`). The SDK is an
-optional extra pinned by `make test` only for the offline Phase 0 probe.
-
-**Interface**: `Sandbox` exposes command execution, bounded file/list/search
-operations, and additive `execute_command_in_scope` / `release_command_scope`
-hooks (pass-through by default; AIO keeps a persistent shell per scope).
-Per-call `env` carries request-scoped secrets: `LocalSandbox` merges it into
-the subprocess environment, `AioSandbox` uses a fresh `bash.exec(env=...)`.
-**Provider pattern**: `SandboxProvider` requires acquire/get/release (plus the
-async acquire); HartMesh's extras are contracts in `capabilities.py`
-offered through `capability(protocol)`: `AcceptedSkillProjection` (one
-`provision_accepted_skills` verb, bind, isolation proof, exact clear) and
-`AcceptedMaterialization`. Callers negotiate via `sandbox_capability` and fail
-closed on `None`; the session provider answers itself for the backing's
-contracts. Async paths use the async hooks so remote creation, locking,
-readiness, and release stay off the loop. Providers advertise skill isolation
-only when every Agent-accessible path enforces it; unsupported explicit
-policies fail closed.
-**Execution leases** (`sandbox/lease.py`): the process-local
-`SandboxLeaseManager` counts concurrent users of one client; only the last
-holder parks it, fork children and upload syncs are borrowers. Managers are
-keyed by `lifecycle_sandbox_provider`, so a backing provider and its session
-provider share one manager that calls through the wrapper; accepted-skill
-sandboxes are borrowers (the projection refcount parks them) and declared
-sessions take no lease.
-**Shared components** (RFC #4741): remote providers keep the compatible
-sha256/16-hex identity from `derive_sandbox_scope_token` and serialize selected
-transitions with the bounded, reclaiming `AcquireSerializer` (AIO keys by
-`(user_id, thread_id)`, E2B adds `skills_root`, BoxLite/Tenki/OpenSandbox use
-the derived id; no-thread acquires skip it; shutdown/reset closes it).
-**Authorization gate** (`sandbox:execute`, RFC #4063 Phase 3): every sandbox-backed tool call passes through the gate in `deerflow/authz/sandbox_authz.py` - a binary `authorize(principal, "sandbox", "execute", target="*")` check before either reusing a persisted sandbox id or calling `provider.acquire`. Reuse is rechecked because roles can change while a sandbox stays cached. Sync tools call `authorize_sandbox_execution`; async tools await `authorize_sandbox_execution_async` once, and a task-local `ContextVar` scopes that decision across the composed invocation (including `ReadBeforeWriteMiddleware`'s pre-write inspection, tool body, and post-read mark) and into `asyncio.to_thread` workers. Denial becomes the normal error `ToolMessage` at the composed middleware boundary and is excluded from the gate's fail-open handlers. Config loading and provider class discovery are offloaded before `aauthorize()`; provider construction stays on the loop because async providers may initialize loop-affine clients. The gate lives at the tool initialization entry point (`ensure_sandbox_initialized` / `_async` in `tools.py`); `SandboxMiddleware.before_agent` / `abefore_agent` apply the same check to eager acquisition. Deny raises `SandboxAuthorizationError` (`sandbox/exceptions.py`), surfaced as a friendly error `ToolMessage` ("sandbox execution is not permitted for your role"); the eager path skips acquisition instead and defers the deny to the first sandbox-touching tool call. Provider errors follow `authorization.fail_closed` / `fail_open`; no readable `config.yaml` or `authorization.enabled: false` makes the gate a no-op. Gateway upload/artifact sync and channel file receipt (`app/channels/sandbox_files.py`) call `try_acquire_sandbox_for_request` (`app/gateway/authz.py`), which gates via `authorize_sandbox_for_request`, returns a request lease released after the last operation, and skips the sync on deny while the edit itself still succeeds.
-
-**Environment policy** (`sandbox/env_policy.py`): `execute_command` does not inherit the full `os.environ`; `build_sandbox_env()` scrubs secret-looking names (`*KEY*`/`*SECRET*`/`*TOKEN*`/`*PASS*`/`*CREDENTIAL*`) before layering injected request secrets, so platform credentials never leak into skill subprocesses while benign vars (`PATH`, `HOME`, `LANG`, `VIRTUAL_ENV`, ...) survive.
+**Interface**: Abstract `Sandbox` exposes `execute_command(command, env=None)`, additive `execute_command_in_scope(..., scope_id=...)` / `release_command_scope(scope_id)` hooks, `read_file`, `write_file`, `list_dir`, `glob`, and `grep`. Providers without server-side shell sessions use pass-through scoped hooks, preserving third-party subclasses. `grep` accepts one text file or a directory tree. Optional `env` injects per-call variables (request-scoped secrets — see Request-Scoped Secrets below); `LocalSandbox` merges them into the host subprocess environment and `AioSandbox` uses a fresh `bash.exec(env=...)` session.
+**Provider Pattern**: `SandboxProvider` has an `acquire`, `acquire_async`, `get`, `release` lifecycle. Async agent/tool paths use async lifecycle hooks so Docker creation, discovery, cross-process locking, readiness polling, and release stay off the event loop. Providers that enforce a lead Agent's explicit skill policy across its tool surface set `supports_agent_skill_isolation=True`; bind-mount providers observe prepared thread roots, while upload providers implement `sync_agent_skills`. Host-backed providers report false whenever an enabled shell can bypass path mappings. The middleware fails closed before acquiring from an unsupported provider under an explicit policy.
+**Shared components** (RFC #4741): remote providers derive deterministic IDs with `derive_sandbox_scope_token` (`sandbox/identity.py`; its keyword-only SHA-256/16-hex contract must not change or existing containers become orphaned), and serialize selected acquire/release transitions with `AcquireSerializer` (`sandbox/acquire_serialization.py`): a refcounted per-key `threading.Lock` table with bounded growth, a bounded dedicated executor so async waits never touch the event loop or default executor, worker-owned cancellation cleanup independent of a cancelled event-loop task resuming, and idempotent `close()` from provider `shutdown()`/`reset()`. AIO keys by `(user_id, thread_id)`; E2B by `(user_id, thread_id, skills_root)`; BoxLite/Tenki/OpenSandbox by the derived id. `thread_id=None` acquires (random UUIDs) bypass the serializer.
+**Execution leases** (`sandbox/lease.py`, #5128): cross-instance ownership decides which Gateway may reap a container; process-local `SandboxLeaseManager` tracks concurrent lead, subagent, Gateway-request, and channel-upload users of one client. Runs get ephemeral owners, persisted sandboxes are retained idempotently, and the last holder performs any pending `SandboxProvider.release`. Outer lifecycle fences repeat idempotent release after their complete graph/tool/request batch drains; per-tool terminal `Command` wrappers never release because sibling handlers may still run. Fork-restored children and upload syncs use non-releasing holders: they fence the client and own scope cleanup without themselves requesting a park; an earlier normal-owner request waits for them, and a missing fork client is replaced by a normal owner. Persisted lookup plus retention is serialized per `(user_id, thread_id)`; stale bindings fall through to acquire, and a post-acquire lookup miss rolls back before raising. Provider I/O does not hold the metadata lock. Repeated cancellation cannot interrupt acquire/rollback/release reconciliation or let a `to_thread` sandbox operation outlive its enclosing execution/request holder; failures are logged without replacing the original cancellation. Lease/scope context IDs are server-owned: Gateway and worker scrub caller values; only the internal subagent path assigns a task ID. Managers are registered by provider object identity, not hash/equality, so unhashable custom providers remain valid. Subagent owners also serve as `sandbox_command_scope_id`: AIO gives each scope one ordered persistent shell session, replaces it after `ErrorObservation`, and cleans it on lease release. Registry identity is revalidated after every scope-lock wait, preventing queued commands from resurrecting released sessions. Env-bearing commands use fresh `bash.exec` sessions so secrets do not persist.
+**Authorization gate** (`sandbox:execute`, RFC #4063 Phase 3): every sandbox-backed tool call passes through the gate in `deerflow/authz/sandbox_authz.py` - a binary `authorize(principal, "sandbox", "execute", target="*")` check before either reusing a persisted sandbox id or calling `provider.acquire`. Rechecking reuse is required because authorization config and user roles can change while the sandbox remains cached. Sync tool invocations call `authorize_sandbox_execution`; async tool invocations await `authorize_sandbox_execution_async` exactly once. A task-local `ContextVar` scopes that single decision across the complete composed tool invocation, including `ReadBeforeWriteMiddleware`'s pre-write inspection, tool body, and post-read mark; the value is copied into `asyncio.to_thread` workers. Authorization denial is converted to the normal error `ToolMessage` at the composed middleware boundary and is explicitly excluded from the gate's generic fail-open handlers. Async config loading and provider class discovery/import are offloaded before `aauthorize()` so reused sandbox calls do not hash config files or import custom modules on the event loop; provider construction remains on the running event loop because async providers may initialize loop-affine clients. The gate lives at the single tool initialization entry point (`ensure_sandbox_initialized` / `ensure_sandbox_initialized_async` in `tools.py`), while `SandboxMiddleware.before_agent` / `abefore_agent` apply the matching sync/async check to eager acquisition. Deny raises `SandboxAuthorizationError` (`sandbox/exceptions.py`), which propagates out of ordinary tool execution as a friendly error `ToolMessage` ("sandbox execution is not permitted for your role") - the eager path catches it and skips acquisition instead, deferring the deny to the first sandbox-touching tool call so both paths share the same semantics. Provider errors (authorization calls and provider resolution) follow `authorization.fail_closed` / `fail_open`; no readable `config.yaml` or `authorization.enabled: false` makes the gate a no-op (`safe_app_config` tolerates missing config). Gateway upload/artifact sync calls `try_acquire_sandbox_for_request` (`app/gateway/authz.py`), which gates, returns a request lease, and skips sync on deny while preserving the primary operation. Callers release after their last sandbox operation; artifacts request normal parking, uploads do not. Tests: `tests/test_sandbox_authorization.py` and `tests/blocking_io/test_sandbox_authorization.py`.
+**Environment policy** (`sandbox/env_policy.py`): `execute_command` no longer inherits the full `os.environ`. `build_sandbox_env()` scrubs secret-looking names (`*KEY*`/`*SECRET*`/`*TOKEN*`/`*PASS*`/`*CREDENTIAL*`) from the inherited environment before layering injected request secrets on top, so platform credentials (e.g. `OPENAI_API_KEY`) never leak into skill subprocesses. Benign vars (`PATH`, `HOME`, `LANG`, `VIRTUAL_ENV`, ...) are preserved.
 **Implementations**:
-- `LocalSandboxProvider` - Local filesystem execution. `acquire(thread_id)` returns a per-user/thread `LocalSandbox` (id `local:{user_id}:{thread_id}`) whose `path_mappings` resolve `/mnt/user-data/{workspace,uploads,outputs}` and `/mnt/acp-workspace` to that thread's host directories, so the public `Sandbox` API honours the `/mnt/user-data` contract uniformly with AIO. `acquire()` / `acquire(None)` keeps the legacy generic singleton (id `local`) for callers without a thread context. Per-thread sandboxes are held in an LRU cache (default 256 entries) guarded by a `threading.Lock`. Shared runs use category mappings; a policy-scoped run replaces them with one `/mnt/skills` root mapping to the coherent thread view, so structured file tools resolve through one managed boundary. This is not a host filesystem security boundary: an enabled host `bash` subprocess can use canonical paths without `PathMapping`, so `supports_agent_skill_isolation` is dynamic and explicit Agent policies fail closed while host bash is enabled. Host-to-virtual output masking scans dynamic per-user/per-thread roots directly rather than compiling per-path regexes (evicted thread IDs never linger in the regex cache); a 256-entry root cache bounds repeated `realpath()` walks, and only the process-stable skill/integration source set uses a bounded compiled cache. On Windows, Git Bash/MSYS argument-conversion exclusions stay limited to safe non-root virtual path prefixes; host-native CLI launchers need normal MSYS conversion for their own paths.
-- `AioSandboxProvider` (`packages/harness/deerflow/community/`) - Docker-based isolation. Active-cache and warm-pool entries are checked with the backend during acquire/reuse; dead containers are dropped from every in-process map so the thread discovers or creates a fresh sandbox instead of reusing a stale client. Health-check failures are unknown, not dead; an unverifiable container is not adoptable and falls through to create. `get()` stays an in-memory lookup (never the ownership store); ownership is published on acquire/reclaim and refreshed by the renewal thread (`_renew_owned_leases`). `reset()` closes the per-instance acquire serializer so a replaced singleton retains no executor workers; full remote teardown remains `shutdown()`. `uses_thread_data_mounts` defaults to backend detection (`LocalContainerBackend=True`, remote/provisioner backends=False); the optional `sandbox.thread_data_mounts` boolean overrides it where the Gateway and sandbox share thread user-data directories. Setting it `true` skips upload-time sandbox acquire/sync; a false positive leaves uploads unavailable. An explicit Agent policy uses four thread projection category mounts and a distinct deterministic sandbox identity, so an older shared-mount container is never reused. `skills.container_path` is a provider-startup snapshot shared by mount construction, sandbox identity, the remote Gateway request, and provisioner validation; custom roots are identity-scoped so a container or Pod cannot be reused after the root changes. The Gateway and provisioner each require one canonical absolute root outside reserved platform mounts and derive the four category allowlist entries from it. The provisioner accepts all four category overrides and, when all are present, suppresses the default hostPath or skills-PVC mount. With `USERDATA_PVC_NAME`, the thread projection categories use subpaths on that PVC. Readiness probes and `agent_sandbox` clients treat loopback/private IPs, single-label cluster hosts, and Docker/Podman internal hostnames as direct (`trust_env=False`); external FQDNs and public IPs keep proxy support.
+- `LocalSandboxProvider` - Local filesystem execution. `acquire(thread_id)` returns a per-user/thread `LocalSandbox` (id `local:{user_id}:{thread_id}`) whose `path_mappings` resolve `/mnt/user-data/{workspace,uploads,outputs}` and `/mnt/acp-workspace` to that thread's host directories, so the public `Sandbox` API honours the `/mnt/user-data` contract uniformly with AIO. `acquire()` / `acquire(None)` keeps the legacy generic singleton (id `local`) for callers without a thread context. Per-thread sandboxes are held in an LRU cache (default 256 entries) guarded by a `threading.Lock`. Shared runs use category mappings; a policy-scoped run replaces them with one `/mnt/skills` root mapping to the coherent thread view, so structured file tools resolve through one managed boundary. This is not a host filesystem security boundary: an enabled host `bash` subprocess can use canonical paths without `PathMapping`, so `supports_agent_skill_isolation` is dynamic and explicit Agent policies fail closed while host bash is enabled. Host-to-virtual output masking scans dynamic per-user/per-thread roots directly instead of compiling path-specific regexes, so evicted thread IDs do not remain in Python's global regex caches; a separate 256-entry root cache prevents repeated `realpath()` walks for every glob/grep match while bounding dynamic-path retention, and only the small process-stable skill/integration source set uses a bounded compiled cache. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes; do not restore a blanket conversion disable, because host-native CLI launchers need normal MSYS path conversion for their own installation paths.
+- `AioSandboxProvider` (`packages/harness/deerflow/community/`) - Docker-based isolation. Active-cache and warm-pool entries are checked with the backend during acquire/reuse; definitively dead containers are dropped from all in-process maps so the thread can discover or create a fresh sandbox instead of reusing a stale client. Backend health-check failures are treated as unknown, not dead; local discovery likewise treats an unverifiable container as not adoptable and falls through to create rather than failing acquire. `get()` remains an in-memory lookup for event-loop-safe tool paths — it never touches the ownership store (that would be blocking IO on the event loop); ownership is published on acquire/reclaim and refreshed off the event loop by the dedicated renewal thread (`_renew_owned_leases`). `reset()` closes the per-instance acquire serializer so replacing the singleton cannot retain its executor workers; full remote sandbox teardown remains `shutdown()`. `uses_thread_data_mounts` defaults to backend detection (`LocalContainerBackend=True`, remote/provisioner backends=False), while the optional `sandbox.thread_data_mounts` boolean takes precedence for deployments that guarantee the Gateway and sandbox share the same thread user-data directories. Setting it `true` skips upload-time sandbox acquire/sync; a false positive leaves uploads unavailable to the sandbox. An explicit Agent policy uses four thread projection category mounts and a distinct deterministic sandbox identity, preventing reuse of an older container created with shared mounts. `skills.container_path` is a provider-startup snapshot shared by mount construction, sandbox identity, the remote Gateway request, and provisioner validation; custom roots are identity-scoped so a container or Pod created for one destination cannot be reused after the root changes. The Gateway and provisioner independently require one canonical absolute root that does not overlap reserved platform mounts, and both derive the four category allowlist entries from that root. The provisioner accepts all four category overrides; when all are present it suppresses the default hostPath or skills-PVC mount. With `USERDATA_PVC_NAME`, the thread projection categories use subpaths on that shared data PVC. Readiness probes and `agent_sandbox` clients classify loopback/private IPs, single-label cluster hosts, and Docker/Podman internal hostnames as direct control-plane destinations and set `trust_env=False`; external FQDNs and public IPs retain environment proxy support.
 - `E2BSandboxProvider` (`packages/harness/deerflow/community/e2b_sandbox/`) provides E2B remote isolation.
   New unrestricted sandboxes receive a one-shot upload from the enabled-only
   public, custom, legacy, and managed integration projections. For a thread
@@ -85,7 +16,7 @@ the derived id; no-thread acquires skip it; shutdown/reset closes it).
   acquire, `sync_agent_skills` clears only DeerFlow's four managed category
   directories and signature before strictly uploading the signed thread
   projection. It rejects non-canonical paths, protected mounts/homes, symlinked
-  roots, and standard OS trees first. E2B
+  roots, and standard operating-system trees before destructive work. E2B
   rebuilds the managed categories on every policy sync; it deletes legacy
   sandbox-visible signature markers instead of trusting them as proof that the
   remote tree is intact. Reset plus all four uploads hold the same per-user/thread
@@ -172,14 +103,47 @@ the derived id; no-thread acquires skip it; shutdown/reset closes it).
 - `write_file` - Write/append to files, creates directories; overwrites by default and exposes the `append` argument in the model-facing schema for end-of-file writes; subject to the read-before-write gate when `read_before_write.enabled` (see Middleware Chain)
 - `str_replace` - Substring replacement (single or all occurrences); same-path serialization is scoped to `(sandbox.id, path)` so isolated sandboxes do not contend on identical virtual paths inside one process; subject to the read-before-write gate when `read_before_write.enabled` (see Middleware Chain)
 
-## Exact two-Gateway boundary
+## HartMesh: sessions and Kinds
 
-`durable_two_gateway_v1` admits only the AIO/Kubernetes provider with shared
-tenant-prefixed Redis ownership, existing RWX home/skills claims, projected
-ServiceAccount authentication, and `rwx_verified_copy_v2`. Execution takeover
-is currently unavailable for all exact-two orphans. Projected Secret rotation and
-Redis adoption are not linearizable per-request execution revocation, so the
-Gateway rejects the claim before owner CAS. Future activation requires a
-database-authoritative request gate plus owner-fenced destruction and fresh
-qualification. Process-local warm pools are caches only. OpenSandbox and every
-other materialization profile are excluded from this scope.
+The text above is upstream's, kept verbatim so merges stay clean; HartMesh's
+sandbox rules live here and in `backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`.
+
+Every sandbox is a session of a declared Kind: `ordinary` (thread material, no
+fence, park terminal, thread-scoped diagnostics) or `accepted` (digest-bound
+material, run/attempt fence, retire terminal, evidence ledger). `session.py`
+installs one `SessionProvider` in front of `sandbox.use` and dispatches
+acquire/get/release by the executing declaration (a context variable, never a
+runtime-context key): a declared execution gets its public ref and never
+provisions, a stranger's public ref resolves to nothing, an ordinary acquire on
+a mount scope held by an open accepted session is refused with
+`sandbox_session_conflict`, and release retires once. `declared_sandbox()` is
+the one resolver in tools, middleware, and output budgeting. `operations.py`
+declares every `Sandbox` verb and generates the fenced facade; it refuses to
+import if a verb is undeclared. `capabilities.py` holds the optional provider
+contracts (`AcceptedSkillProjection`, `AcceptedMaterialization`) negotiated
+through `SandboxProvider.capability` / `sandbox_capability`, failing closed on
+`None`; `accepted_projection.py` is the projection Material (provision, then
+bind under the consumer-token coordinator). `accepted_material.py` owns the
+V1/V2 contracts, `AcceptedSandboxSession`, the `AcceptedMaterializer` protocol,
+and the closed five-state lifecycle set; `diagnostics.py` is the bounded
+open-kind stream published as `sandbox.diagnostic.v1` for both kinds. Lease
+managers are keyed by `lifecycle_sandbox_provider`, so a backing provider and
+its session provider share one manager; accepted-skill sandboxes are lease
+borrowers and declared sessions take no lease.
+
+Rules: provision before declaring, never lazily; the provider id never leaves
+the session provider (network hooks translate inside); terminal is fixed at
+provisioning; accepted sessions are denied egress unasked and recorded; during
+a durable invocation file tools validate skill paths against the accepted
+snapshot before provider IO and path mapping never exposes live skill roots;
+remote materialization is fenced and verified before `started`, and unsupported
+nonempty material fails before graph/model work; provider SDK objects,
+credentials, renewal handles, and container ids never enter evidence; a lease
+is valid only for its exact provider instance and ownership epoch; the AIO
+reconciler destroys accepted-suffixed orphans instead of adopting them. The
+in-memory adapter and OpenSandbox control-plane fake are contract-test tools,
+never production proof; OpenSandbox's accepted adapter stays unavailable (see
+`backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md`). Exact-two
+(`durable_two_gateway_v1`) admits only AIO/Kubernetes with shared Redis
+ownership and `rwx_verified_copy_v2`; takeover stays unavailable and rotating
+claim credentials never enter evidence.

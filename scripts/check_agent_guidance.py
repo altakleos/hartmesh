@@ -19,6 +19,13 @@ LOCAL_HARD = 48 * 1024
 CHAIN_SOFT = 80 * 1024
 CHAIN_HARD = 96 * 1024
 
+# A local guide that carries the upstream guide verbatim may append one
+# downstream section. The allowance is that section's size, so upstream's own
+# text is never trimmed to fit and merges of the guide stay conflict-free.
+APPENDED_SECTION_ALLOWANCE: dict[PurePosixPath, int] = {
+    PurePosixPath("backend/packages/harness/deerflow/sandbox/AGENTS.md"): 4 * 1024,
+}
+
 
 class Finding(NamedTuple):
     severity: Literal["error", "warning"]
@@ -37,7 +44,7 @@ def agent_budget(path: PurePosixPath) -> tuple[int, int]:
         return ROOT_SOFT, ROOT_HARD
     if len(path.parts) == 2:
         return MODULE_SOFT, MODULE_HARD
-    return LOCAL_SOFT, LOCAL_HARD
+    return LOCAL_SOFT + APPENDED_SECTION_ALLOWANCE.get(path, 0), LOCAL_HARD
 
 
 def guidance_paths(paths: Iterable[PurePosixPath]) -> set[PurePosixPath]:

@@ -25,19 +25,20 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   `AssemblyEvidenceV1` before checkpoint/graph/model/tool work. Missing evidence
   fails `assembly_evidence_unavailable`, drift fails `agent_assembly_drift`, and
   stale owners cannot finalize.
-- `sandbox/accepted_material.py` owns accepted material's bounded V1/V2 request,
-  lease/evidence, capability profiles, and `AcceptedSandboxSession`. The session
+- Every sandbox is a session of a declared Kind, ordinary or accepted,
+  dispatched by the session provider from `sandbox/session.py`; see
+  `docs/ACCEPTED_SANDBOX_EXECUTION.md`.
+  `sandbox/accepted_material.py` owns accepted material's V1/V2 request,
+  lease/evidence, capability profiles, and `AcceptedSandboxSession`, which
   composes the existing run or batch-item fence, exposes no raw provider handle,
   and blocks calls/publication after observed loss. Provider extras are
-  contracts in `sandbox/capabilities.py` negotiated through
-  `SandboxProvider.capability`; the required surface is acquire/get/release. AIO keeps
-  `rwx_verified_copy_v2` but declares atomic fencing, process-loss lookup, and
-  exact-two false; see `docs/ACCEPTED_SANDBOX_EXECUTION.md`. OpenSandbox
-  ordinary execution remains separate and accepted nonempty material fails
-  closed: its pinned server/SDK surface has no ownership CAS or resolved-image
-  digest readback; candidate trusted-setup surfaces remain live-unqualified. The committed Phase 0
-  no-go evidence and upstream dependency are documented in
-  `docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md`; do not advertise or add a
+  `sandbox/capabilities.py` contracts negotiated through
+  `SandboxProvider.capability`; the required surface is acquire/get/release. AIO
+  keeps `rwx_verified_copy_v2` but declares atomic fencing, process-loss lookup,
+  and exact-two false. OpenSandbox ordinary execution stays separate; its
+  accepted nonempty material fails closed (no ownership CAS or resolved-image
+  digest readback; candidate surfaces remain live-unqualified; Phase 0 no-go
+  evidence in `docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md`). No
   production profile until every live qualification scenario passes.
 - After assembly bind, a trusted fenced sink commits `started` before policy or
   tool code and one terminal afterward; gaps are `indeterminate`. Stable IDs

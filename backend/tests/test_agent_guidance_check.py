@@ -68,10 +68,18 @@ def test_normalized_utf8_size_uses_lf_and_counts_non_ascii_bytes() -> None:
         ("AGENTS.md", 16 * 1024, 20 * 1024),
         ("backend/AGENTS.md", 28 * 1024, 32 * 1024),
         ("backend/app/gateway/AGENTS.md", 40 * 1024, 48 * 1024),
+        ("backend/packages/harness/deerflow/sandbox/AGENTS.md", 44 * 1024, 48 * 1024),
     ],
 )
 def test_budget_depends_on_directory_level(path: str, soft: int, hard: int) -> None:
     assert checker.agent_budget(PurePosixPath(path)) == (soft, hard)
+
+
+def test_appended_section_allowance_names_only_upstream_verbatim_guides() -> None:
+    allowance = checker.APPENDED_SECTION_ALLOWANCE
+
+    assert set(allowance) == {PurePosixPath("backend/packages/harness/deerflow/sandbox/AGENTS.md")}
+    assert all(0 < size <= checker.LOCAL_HARD - checker.LOCAL_SOFT for size in allowance.values())
 
 
 def test_single_file_over_hard_limit_is_an_error(tmp_path: Path) -> None:
