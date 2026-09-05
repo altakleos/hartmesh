@@ -89,6 +89,19 @@ class SandboxProvider(ABC):
         """
         pass
 
+    def capability[CapabilityT](self, protocol: type[CapabilityT]) -> CapabilityT | None:
+        """Negotiate an optional capability; ``None`` when this provider lacks it.
+
+        The required provider surface is ``acquire``, its async twin, ``get``
+        and ``release``. Anything a caller needs beyond that is a contract the
+        provider offers here: by inheriting the contract, in which case this
+        default answers the provider itself, or by overriding this method to
+        answer a companion object that inherits it. Callers negotiate through
+        :func:`deerflow.sandbox.capabilities.sandbox_capability` and fail
+        closed on ``None`` instead of probing attribute names.
+        """
+        return self if isinstance(self, protocol) else None
+
     def reset(self) -> None:
         """Clear cached state that survives provider instance replacement.
 
