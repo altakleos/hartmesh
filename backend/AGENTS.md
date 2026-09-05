@@ -28,7 +28,9 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 - `sandbox/accepted_material.py` owns accepted material's bounded V1/V2 request,
   lease/evidence, capability profiles, and `AcceptedSandboxSession`. The session
   composes the existing run or batch-item fence, exposes no raw provider handle,
-  and blocks calls/publication after observed loss. AIO keeps
+  and blocks calls/publication after observed loss. Provider extras are
+  contracts in `sandbox/capabilities.py` negotiated through
+  `SandboxProvider.capability`; the required surface is acquire/get/release. AIO keeps
   `rwx_verified_copy_v2` but declares atomic fencing, process-loss lookup, and
   exact-two false; see `docs/ACCEPTED_SANDBOX_EXECUTION.md`. OpenSandbox
   ordinary execution remains separate and accepted nonempty material fails

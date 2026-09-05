@@ -305,6 +305,13 @@ class _AcceptedMaterializationResult:
     sandbox: Sandbox | None = None
     request: AcceptedMaterialRequest | None = None
 
+    def _projection(self):
+        if self.provider is None:
+            return None
+        from deerflow.sandbox.accepted_projection import accepted_skill_projection
+
+        return accepted_skill_projection(self.provider)
+
     async def validate(self) -> bool:
         if self.evidence is None:
             return True
@@ -321,9 +328,10 @@ class _AcceptedMaterializationResult:
             ) or not isinstance(self.lease, AcceptedMaterialLeaseV1):
                 return False
             return await self.materializer.validate(self.lease, self.evidence)
-        if self.provider is None:
+        projection = self._projection()
+        if projection is None:
             return False
-        return await self.provider.validate_accepted_skill_execution_async(
+        return await projection.validate_accepted_skill_execution_async(
             self.sandbox_id,
             self.evidence,
         )
@@ -338,9 +346,10 @@ class _AcceptedMaterializationResult:
                 return False
             self.lease = await self.materializer.renew(self.lease)
             return True
-        if self.provider is None:
+        projection = self._projection()
+        if projection is None:
             return False
-        return await self.provider.renew_accepted_skill_execution_async(
+        return await projection.renew_accepted_skill_execution_async(
             self.sandbox_id,
             self.evidence,
         )
@@ -403,12 +412,13 @@ async def _materialize_accepted_skill_projection(
     """Prove accepted material before the authoritative running transition."""
 
     from deerflow.sandbox import get_sandbox_provider
-    from deerflow.sandbox.sandbox_provider import (
-        AcceptedSkillSandboxBindingError,
+    from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
+    from deerflow.sandbox.accepted_projection import (
         accepted_skill_material_binding_from_runtime,
         ensure_accepted_skill_binding,
         invalidate_runtime_skill_projection_token,
         release_accepted_skill_consumer,
+        require_accepted_skill_projection,
         require_runtime_accepted_skill_isolation,
     )
 
@@ -617,12 +627,13 @@ async def _materialize_accepted_skill_projection(
             )
             sandbox_id = sandbox.id
         elif record is None:
-            sandbox_id = await provider.acquire_bound_accepted_skills_async(
+            projection = require_accepted_skill_projection(provider)
+            sandbox_id = await projection.provision_accepted_skills_async(
                 thread_id,
                 user_id=user_id,
                 binding=binding,
             )
-            evidence = provider.accepted_skill_execution_evidence(sandbox_id)
+            evidence = projection.accepted_skill_execution_evidence(sandbox_id)
         else:
             raise AcceptedMaterialError("sandbox_provider_unqualified")
         require_runtime_accepted_skill_isolation(
@@ -637,7 +648,7 @@ async def _materialize_accepted_skill_projection(
         )
         if bound is None:
             raise RuntimeError("accepted_skill_snapshot_binding_missing")
-        await provider.bind_accepted_skill_snapshot_async(
+        await require_accepted_skill_projection(provider).bind_accepted_skill_snapshot_async(
             sandbox_id,
             thread_id=thread_id,
             user_id=user_id,
@@ -3869,9 +3880,7 @@ async def run_agent(
                 consumer_id=f"run:{run_id}:lead",
             )
         if projection_token is not None:
-            from deerflow.sandbox.sandbox_provider import (
-                release_accepted_skill_consumer,
-            )
+            from deerflow.sandbox.accepted_projection import release_accepted_skill_consumer
 
             try:
                 await _await_terminal_cleanup(

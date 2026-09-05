@@ -170,7 +170,7 @@ async def test_scheduler_rejection_releases_byte_lease_when_projection_cleanup_f
 
     with _real_subagent_executor() as SubagentExecutor:
         executor_module = sys.modules[SubagentExecutor.__module__]
-        sandbox_provider = importlib.import_module("deerflow.sandbox.sandbox_provider")
+        accepted_projection = importlib.import_module("deerflow.sandbox.accepted_projection")
         retained_material = RetainedMaterial()
         executor = SubagentExecutor(
             config=SubagentConfig(
@@ -193,7 +193,7 @@ async def test_scheduler_rejection_releases_byte_lease_when_projection_cleanup_f
             raise RuntimeError("scheduler rejected task")
 
         monkeypatch.setattr(
-            sandbox_provider,
+            accepted_projection,
             "release_accepted_skill_consumer",
             fail_projection_cleanup,
         )

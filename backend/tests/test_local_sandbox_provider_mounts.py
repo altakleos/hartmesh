@@ -6,12 +6,13 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.sandbox.accepted_material import (
+    AcceptedMaterialCapability,
+    AcceptedSkillSandboxBindingError,
+    AcceptedSkillSandboxBindingV1,
+)
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
-from deerflow.sandbox.sandbox_provider import (
-    AcceptedSkillMaterialCapability,
-    AcceptedSkillSandboxBindingError,
-)
 
 
 def _symlink_to(target, link, *, target_is_directory=False):
@@ -569,6 +570,10 @@ class TestMultipleMounts:
         assert str(mount_dir) not in masked
 
 
+# The material a provisioned sandbox is for; the projection Material binds it later.
+_EMPTY_BINDING = AcceptedSkillSandboxBindingV1(snapshot_id=None)
+
+
 class TestLocalSandboxProviderMounts:
     @pytest.fixture
     def accepted_local_sandbox(self, tmp_path, monkeypatch):
@@ -600,7 +605,7 @@ class TestLocalSandboxProviderMounts:
             patch("deerflow.config.get_app_config", return_value=config),
             patch("deerflow.config.paths.get_paths", return_value=paths),
         ):
-            sandbox_id = provider.acquire_accepted_skills("thread-a", user_id="owner-a")
+            sandbox_id = provider.provision_accepted_skills("thread-a", user_id="owner-a", binding=_EMPTY_BINDING)
             sandbox = provider.get(sandbox_id)
             assert isinstance(sandbox, LocalSandbox)
             yield provider, sandbox_id
@@ -609,12 +614,10 @@ class TestLocalSandboxProviderMounts:
         provider, sandbox_id = accepted_local_sandbox
 
         assert provider.has_accepted_skill_isolation(sandbox_id)
-        assert provider.accepted_skill_material_capability(sandbox_id) is AcceptedSkillMaterialCapability.EMPTY_ONLY
+        assert provider.accepted_skill_material_capability(sandbox_id) is AcceptedMaterialCapability.EMPTY_ONLY
         from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
         from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
-        from deerflow.sandbox.sandbox_provider import (
-            require_runtime_accepted_skill_isolation,
-        )
+        from deerflow.sandbox.accepted_projection import require_runtime_accepted_skill_isolation
 
         material = ResolvedAgentMaterialV1(
             agent_id="lead-agent",
@@ -680,9 +683,10 @@ class TestLocalSandboxProviderMounts:
                 patch("deerflow.config.get_app_config", return_value=config),
                 patch("deerflow.config.paths.get_paths", return_value=paths),
             ):
-                accepted_id = provider.acquire_accepted_skills(
+                accepted_id = provider.provision_accepted_skills(
                     "thread-fenced",
                     user_id="owner-fenced",
+                    binding=_EMPTY_BINDING,
                 )
                 accepted = provider.get(accepted_id)
                 assert accepted is not None
@@ -734,7 +738,7 @@ class TestLocalSandboxProviderMounts:
             patch("deerflow.config.get_app_config", return_value=config),
             patch("deerflow.config.paths.get_paths", return_value=paths),
         ):
-            sandbox_id = provider.acquire_accepted_skills("thread-a", user_id="owner-a")
+            sandbox_id = provider.provision_accepted_skills("thread-a", user_id="owner-a", binding=_EMPTY_BINDING)
             accepted = provider.get(sandbox_id)
             assert accepted is not None
             accepted_paths = {mapping.container_path for mapping in accepted.path_mappings}
@@ -767,7 +771,7 @@ class TestLocalSandboxProviderMounts:
             assert "/mnt/skills/public" in legacy_paths
             assert "/mnt/skills/custom" in legacy_paths
 
-            reacquired_id = provider.acquire_accepted_skills("thread-a", user_id="owner-a")
+            reacquired_id = provider.provision_accepted_skills("thread-a", user_id="owner-a", binding=_EMPTY_BINDING)
             reacquired = provider.get(reacquired_id)
             assert reacquired is not None
             reacquired_paths = {mapping.container_path for mapping in reacquired.path_mappings}

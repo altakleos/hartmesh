@@ -27,12 +27,12 @@ from deerflow.community.e2b_sandbox.capacity import (
 from deerflow.community.e2b_sandbox.e2b_sandbox_provider import MountUploadResult
 from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
-from deerflow.sandbox.acquire_serialization import AcquireSerializer
-from deerflow.sandbox.exceptions import SandboxCapacityExceededError
-from deerflow.sandbox.sandbox_provider import (
+from deerflow.sandbox.accepted_material import (
     AcceptedSkillSandboxBindingError,
     AcceptedSkillSandboxBindingV1,
 )
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fakes for the e2b SDK
@@ -2291,7 +2291,7 @@ def test_recreated_accepted_sandbox_cannot_inherit_stale_quarantine(
 
     monkeypatch.setattr(provider, "_create_sandbox", recreate)
     assert (
-        provider.acquire_accepted_skills(
+        provider._acquire_accepted_skills(
             "thread-recreated",
             user_id="user-recreated",
         )

@@ -4220,7 +4220,9 @@ class TestSubagentGuardrailAttribution:
         )
         provider_releases: list[str] = []
 
-        class ProjectionProvider:
+        from deerflow.sandbox.capabilities import AcceptedSkillProjection
+
+        class ProjectionProvider(AcceptedSkillProjection):
             def clear_accepted_skill_snapshot(self, clear):
                 assert clear.run_id == "run-42"
                 assert clear.generation == lead_token.generation

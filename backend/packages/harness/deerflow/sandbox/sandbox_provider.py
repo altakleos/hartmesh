@@ -1,382 +1,14 @@
 import asyncio
 import threading
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
-from deerflow.sandbox.accepted_material import (
-    AcceptedMaterialCapability,
-    AcceptedSkillExecutionEvidence,
-    AcceptedSkillSandboxBindingError,
-    AcceptedSkillSandboxBindingV1,
-)
-from deerflow.sandbox.accepted_material import (
-    AcceptedSkillExecutionEvidenceV1 as AcceptedSkillExecutionEvidenceV1,
-)
-from deerflow.sandbox.accepted_material import (
-    AcceptedSkillExecutionEvidenceV2 as AcceptedSkillExecutionEvidenceV2,
-)
 from deerflow.sandbox.sandbox import Sandbox
 
 if TYPE_CHECKING:
-    from deerflow.runtime.skill_projection import SkillProjectionClear
     from deerflow.skills.projection import SkillProjectionPaths
-
-
-AcceptedSkillMaterialCapability = AcceptedMaterialCapability
-"""Compatibility name for the provider-neutral accepted-material capability."""
-
-
-def reject_writable_accepted_skill_aliases(
-    accepted_root: str | Path,
-    mounts: list[tuple[str, bool]],
-) -> None:
-    """Reject writable host mounts that overlap accepted material.
-
-    Container-path isolation alone is insufficient: the same host directory
-    can be mounted again at an unrelated virtual path. Either ancestor or
-    descendant overlap gives that alias write access to accepted bytes.
-    """
-    try:
-        accepted = Path(accepted_root).resolve()
-        for host_path, read_only in mounts:
-            if read_only:
-                continue
-            mounted = Path(host_path).resolve()
-            if mounted == accepted or mounted in accepted.parents or accepted in mounted.parents:
-                raise AcceptedSkillSandboxBindingError(
-                    "accepted_skill_snapshot_writable_alias",
-                )
-    except AcceptedSkillSandboxBindingError:
-        raise
-    except OSError as exc:
-        raise AcceptedSkillSandboxBindingError(
-            "accepted_skill_snapshot_writable_alias",
-        ) from exc
-
-
-def accepted_skill_binding_from_runtime(runtime: object) -> AcceptedSkillSandboxBindingV1 | None:
-    """Return the coordinator-issued binding, never caller dictionaries."""
-    context = getattr(runtime, "context", None)
-    if not isinstance(context, dict):
-        return None
-    from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY
-
-    token = context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
-    if token is None:
-        return None
-    return AcceptedSkillSandboxBindingV1.from_consumer_token(token)
-
-
-def accepted_skill_material_binding_from_runtime(
-    runtime: object,
-    *,
-    user_id: str,
-) -> AcceptedSkillSandboxBindingV1 | None:
-    """Return the committed pre-acquisition material request for this run."""
-
-    context = getattr(runtime, "context", None)
-    if not isinstance(context, dict):
-        return None
-    snapshot_id = accepted_skill_snapshot_id_from_runtime(runtime)
-    if snapshot_id is _NO_BINDING:
-        return None
-    thread_id = context.get("thread_id")
-    run_id = context.get("run_id")
-    if not isinstance(thread_id, str) or not isinstance(run_id, str):
-        raise AcceptedSkillSandboxBindingError(
-            "accepted_skill_snapshot_runtime_identity_missing",
-        )
-    from deerflow.runtime.skill_projection import (
-        SkillProjectionBusyError,
-        get_skill_projection_coordinator,
-    )
-
-    try:
-        generation, committed_snapshot_id, evidence = get_skill_projection_coordinator().binding_for_committed_run(
-            user_id=user_id,
-            thread_id=thread_id,
-            run_id=run_id,
-        )
-    except SkillProjectionBusyError as exc:
-        from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
-        from deerflow.runtime.agent_revision import (
-            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
-        )
-        from deerflow.runtime.skill_projection import SkillProjectionEvidence
-
-        material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
-        if not isinstance(material, ResolvedAgentMaterialV1):
-            raise AcceptedSkillSandboxBindingError(
-                "accepted_skill_snapshot_binding_conflict",
-            ) from exc
-        fallback_evidence = SkillProjectionEvidence.from_snapshot(
-            material.skill_snapshot,
-        )
-        try:
-            coordinator = get_skill_projection_coordinator()
-            coordinator.claim_committed_run(
-                user_id=user_id,
-                thread_id=thread_id,
-                run_id=run_id,
-                snapshot_id=snapshot_id,
-                evidence=fallback_evidence,
-            )
-            generation, committed_snapshot_id, evidence = coordinator.binding_for_committed_run(
-                user_id=user_id,
-                thread_id=thread_id,
-                run_id=run_id,
-            )
-        except Exception as fallback_exc:
-            raise AcceptedSkillSandboxBindingError(
-                "accepted_skill_snapshot_binding_conflict",
-            ) from fallback_exc
-    if committed_snapshot_id != snapshot_id:
-        raise AcceptedSkillSandboxBindingError(
-            "accepted_skill_snapshot_binding_conflict",
-        )
-    return AcceptedSkillSandboxBindingV1(
-        snapshot_id=committed_snapshot_id,
-        run_id=run_id,
-        generation=generation,
-        evidence=evidence,
-    )
-
-
-def accepted_skill_snapshot_id_from_runtime(runtime: object) -> str | None | object:
-    """Return accepted snapshot ID, explicit ``None``, or ``_NO_BINDING``."""
-    context = getattr(runtime, "context", None)
-    if not isinstance(context, dict):
-        return _NO_BINDING
-    from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
-    from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
-
-    material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
-    if not isinstance(material, ResolvedAgentMaterialV1):
-        return _NO_BINDING
-    snapshot = material.skill_snapshot
-    return None if snapshot is None else snapshot.snapshot_id
-
-
-def accepted_skill_access_from_runtime(runtime: object) -> tuple[bool, str | None]:
-    """Return whether durable accepted material is present and its snapshot ID.
-
-    The boolean distinguishes an accepted empty skill set from legacy execution,
-    for which no immutable skill-access contract exists.
-    """
-    snapshot_id = accepted_skill_snapshot_id_from_runtime(runtime)
-    if snapshot_id is _NO_BINDING:
-        return False, None
-    return True, snapshot_id
-
-
-_NO_BINDING = object()
-
-
-def require_runtime_accepted_skill_isolation(
-    provider: "SandboxProvider",
-    runtime: object,
-    *,
-    sandbox_id: str,
-) -> None:
-    """Fail before binding unless accepted acquisition proves live-path isolation."""
-    accepted, _snapshot_id = accepted_skill_access_from_runtime(runtime)
-    if accepted and not provider.has_accepted_skill_isolation(sandbox_id):
-        raise AcceptedSkillSandboxBindingError(
-            "accepted_skill_snapshot_isolation_unverified",
-        )
-    if accepted and _snapshot_id is not None:
-        capability = provider.accepted_skill_material_capability(sandbox_id)
-        if capability is not AcceptedSkillMaterialCapability.IMMUTABLE_READ_ONLY:
-            raise AcceptedSkillSandboxBindingError(
-                "accepted_skill_snapshot_immutability_unsupported",
-            )
-
-
-def ensure_accepted_skill_binding(
-    runtime: object,
-    *,
-    sandbox_id: str,
-    user_id: str,
-) -> tuple[AcceptedSkillSandboxBindingV1 | None, object | None, bool]:
-    """Activate the lead/child projection token before provider binding."""
-    context = getattr(runtime, "context", None)
-    if not isinstance(context, dict):
-        return None, None, False
-    snapshot_id = accepted_skill_snapshot_id_from_runtime(runtime)
-    if snapshot_id is _NO_BINDING:
-        return None, None, False
-    thread_id = context.get("thread_id")
-    run_id = context.get("run_id")
-    if not isinstance(thread_id, str) or not isinstance(run_id, str):
-        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_runtime_identity_missing")
-    from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
-    from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
-    from deerflow.runtime.skill_projection import (
-        SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
-        SkillProjectionConsumerToken,
-        SkillProjectionEvidence,
-        get_skill_projection_coordinator,
-    )
-
-    material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
-    if not isinstance(material, ResolvedAgentMaterialV1):
-        return None, None, False
-
-    coordinator = get_skill_projection_coordinator()
-    existing = context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
-    if isinstance(existing, SkillProjectionConsumerToken):
-        if existing.user_id != user_id or existing.thread_id != thread_id or existing.run_id != run_id or existing.sandbox_id != sandbox_id or existing.snapshot_id != snapshot_id:
-            context.pop(SKILL_PROJECTION_TOKEN_CONTEXT_KEY, None)
-            raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_binding_conflict")
-        if coordinator.owns(existing):
-            return AcceptedSkillSandboxBindingV1.from_consumer_token(existing), existing, False
-        context.pop(SKILL_PROJECTION_TOKEN_CONTEXT_KEY, None)
-
-    evidence = SkillProjectionEvidence.from_snapshot(material.skill_snapshot)
-    try:
-        coordinator.claim_committed_run(
-            user_id=user_id,
-            thread_id=thread_id,
-            run_id=run_id,
-            snapshot_id=snapshot_id,
-            evidence=evidence,
-        )
-        token = coordinator.activate(
-            user_id=user_id,
-            thread_id=thread_id,
-            sandbox_id=sandbox_id,
-            run_id=run_id,
-            snapshot_id=snapshot_id,
-            consumer_id=f"run:{run_id}:lead",
-        )
-    except Exception as exc:
-        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_binding_conflict") from exc
-    context[SKILL_PROJECTION_TOKEN_CONTEXT_KEY] = token
-    return AcceptedSkillSandboxBindingV1.from_consumer_token(token), token, True
-
-
-def invalidate_runtime_skill_projection_token(runtime: object, token: object) -> bool:
-    """Remove only the failed binding token retained by this runtime context."""
-    context = getattr(runtime, "context", None)
-    if not isinstance(context, dict):
-        return False
-    from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY
-
-    if context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY) != token:
-        return False
-    context.pop(SKILL_PROJECTION_TOKEN_CONTEXT_KEY, None)
-    return True
-
-
-def release_accepted_skill_consumer(token: object) -> bool:
-    """Release one consumer, retaining ownership through provider cleanup."""
-    from deerflow.runtime.skill_projection import (
-        SkillProjectionConsumerToken,
-        get_skill_projection_coordinator,
-    )
-
-    if not isinstance(token, SkillProjectionConsumerToken):
-        return False
-    coordinator = get_skill_projection_coordinator()
-    clear = coordinator.release(token)
-    if clear is None:
-        return False
-    provider = get_sandbox_provider()
-    cleared = provider.clear_accepted_skill_snapshot(clear)
-    if not cleared:
-        cleared = provider.ensure_accepted_skill_snapshot_absent(clear)
-    if not cleared:
-        return False
-    try:
-        provider.release(clear.sandbox_id)
-    finally:
-        # A successful compare-and-clear is the material-isolation boundary.
-        # Resource parking/teardown may fail, but it cannot make the removed
-        # accepted bytes reachable again, so stale ownership must not strand
-        # the thread indefinitely.
-        finalized = coordinator.finalize_release(clear)
-    return finalized
-
-
-def bind_runtime_accepted_skill_projection(
-    provider: "SandboxProvider",
-    runtime: object,
-    *,
-    sandbox_id: str,
-    user_id: str,
-) -> bool:
-    """Idempotently bind accepted material for middleware and cached tools."""
-    require_runtime_accepted_skill_isolation(
-        provider,
-        runtime,
-        sandbox_id=sandbox_id,
-    )
-    binding, token, _created = ensure_accepted_skill_binding(
-        runtime,
-        sandbox_id=sandbox_id,
-        user_id=user_id,
-    )
-    if binding is None:
-        return False
-    context = getattr(runtime, "context", None)
-    thread_id = context.get("thread_id") if isinstance(context, dict) else None
-    if not isinstance(thread_id, str):
-        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_runtime_identity_missing")
-    try:
-        provider.bind_accepted_skill_snapshot(
-            sandbox_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            binding=binding,
-        )
-    except Exception:
-        invalidate_runtime_skill_projection_token(runtime, token)
-        if token is not None:
-            release_accepted_skill_consumer(token)
-        raise
-    return True
-
-
-async def bind_runtime_accepted_skill_projection_async(
-    provider: "SandboxProvider",
-    runtime: object,
-    *,
-    sandbox_id: str,
-    user_id: str,
-) -> bool:
-    """Async counterpart that keeps provider I/O off the event loop."""
-    require_runtime_accepted_skill_isolation(
-        provider,
-        runtime,
-        sandbox_id=sandbox_id,
-    )
-    binding, token, _created = ensure_accepted_skill_binding(
-        runtime,
-        sandbox_id=sandbox_id,
-        user_id=user_id,
-    )
-    if binding is None:
-        return False
-    context = getattr(runtime, "context", None)
-    thread_id = context.get("thread_id") if isinstance(context, dict) else None
-    if not isinstance(thread_id, str):
-        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_runtime_identity_missing")
-    try:
-        await provider.bind_accepted_skill_snapshot_async(
-            sandbox_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            binding=binding,
-        )
-    except Exception:
-        invalidate_runtime_skill_projection_token(runtime, token)
-        if token is not None:
-            await asyncio.to_thread(release_accepted_skill_consumer, token)
-        raise
-    return True
 
 
 class SandboxProvider(ABC):
@@ -407,155 +39,6 @@ class SandboxProvider(ABC):
         of stalling the event loop.
         """
         return await asyncio.to_thread(self.acquire, thread_id, user_id=user_id)
-
-    def acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
-        """Acquire a sandbox created without mutable live skill projections."""
-        del thread_id, user_id
-        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_unsupported")
-
-    async def acquire_accepted_skills_async(self, thread_id: str, *, user_id: str) -> str:
-        return await asyncio.to_thread(
-            self.acquire_accepted_skills,
-            thread_id,
-            user_id=user_id,
-        )
-
-    def accepted_skill_execution_evidence(
-        self,
-        sandbox_id: str,
-    ) -> AcceptedSkillExecutionEvidence | None:
-        """Return bounded execution evidence when the backend has a native attempt."""
-
-        del sandbox_id
-        return None
-
-    async def validate_accepted_skill_execution_async(
-        self,
-        sandbox_id: str,
-        evidence: AcceptedSkillExecutionEvidence,
-    ) -> bool:
-        """Revalidate the exact materialized attempt before executable work."""
-
-        del sandbox_id, evidence
-        return False
-
-    async def renew_accepted_skill_execution_async(
-        self,
-        sandbox_id: str,
-        evidence: AcceptedSkillExecutionEvidence,
-    ) -> bool:
-        """Renew the exact attempt after authoritative RunRow renewal."""
-
-        del sandbox_id, evidence
-        return False
-
-    def acquire_bound_accepted_skills(
-        self,
-        thread_id: str,
-        *,
-        user_id: str,
-        binding: AcceptedSkillSandboxBindingV1,
-    ) -> str:
-        """Acquire and materialize accepted bytes before returning a sandbox."""
-
-        del binding
-        return self.acquire_accepted_skills(thread_id, user_id=user_id)
-
-    async def acquire_bound_accepted_skills_async(
-        self,
-        thread_id: str,
-        *,
-        user_id: str,
-        binding: AcceptedSkillSandboxBindingV1,
-    ) -> str:
-        # Preserve providers that already implement the accepted-only async seam.
-        # The default contract does not consume the binding during acquisition;
-        # it is still validated by bind_accepted_skill_snapshot_async below.
-        del binding
-        return await self.acquire_accepted_skills_async(
-            thread_id,
-            user_id=user_id,
-        )
-
-    def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
-        """Return whether ``sandbox_id`` was created without live skill paths."""
-        del sandbox_id
-        return False
-
-    def accepted_skill_material_capability(
-        self,
-        sandbox_id: str,
-    ) -> AcceptedSkillMaterialCapability:
-        """Return the immutable access profile available to accepted material.
-
-        The conservative default permits only the explicit empty accepted set.
-        Providers that advertise immutable read-only material must prove projected
-        files immutable to commands run inside that sandbox.
-        """
-        del sandbox_id
-        return AcceptedSkillMaterialCapability.EMPTY_ONLY
-
-    def bind_accepted_skill_snapshot(
-        self,
-        sandbox_id: str,
-        *,
-        thread_id: str,
-        user_id: str,
-        binding: AcceptedSkillSandboxBindingV1,
-    ) -> None:
-        """Expose exactly one accepted snapshot, or fail before execution.
-
-        Custom providers retain their legacy behavior until an accepted
-        invocation supplies this binding.  They must implement the same exact
-        projection contract before durable skill material can execute.
-        """
-        del sandbox_id, thread_id, user_id, binding
-        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_unsupported")
-
-    async def bind_accepted_skill_snapshot_async(
-        self,
-        sandbox_id: str,
-        *,
-        thread_id: str,
-        user_id: str,
-        binding: AcceptedSkillSandboxBindingV1,
-    ) -> None:
-        await asyncio.to_thread(
-            self.bind_accepted_skill_snapshot,
-            sandbox_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            binding=binding,
-        )
-
-    def clear_accepted_skill_snapshot(
-        self,
-        clear: "SkillProjectionClear",
-    ) -> bool:
-        """Compare-and-clear only an exact last-consumer ownership proof."""
-        del clear
-        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_projection_unsupported")
-
-    def ensure_accepted_skill_snapshot_absent(self, clear: "SkillProjectionClear") -> bool:
-        """Prove an exact failed/unpublished projection cannot be reached.
-
-        This is intentionally separate from compare-and-clear: providers may
-        use it only when no exact binding receipt exists. Custom providers fail
-        closed until they can prove an empty namespace or quarantine/destroy
-        the exact accepted-only sandbox.
-        """
-        del clear
-        return False
-
-    async def clear_accepted_skill_snapshot_async(
-        self,
-        clear: "SkillProjectionClear",
-    ) -> bool:
-        """Run exact accepted-snapshot cleanup without blocking the event loop."""
-        return await asyncio.to_thread(
-            self.clear_accepted_skill_snapshot,
-            clear,
-        )
 
     def sync_agent_skills(
         self,
@@ -612,6 +95,19 @@ class SandboxProvider(ABC):
         Provider overrides can release resources and make the instance unusable.
         """
         pass
+
+    def capability[CapabilityT](self, protocol: type[CapabilityT]) -> CapabilityT | None:
+        """Negotiate an optional capability; ``None`` when this provider lacks it.
+
+        The required provider surface is ``acquire``, its async twin, ``get``
+        and ``release``. Everything else HartMesh needs from a provider is a
+        contract in :mod:`deerflow.sandbox.capabilities`, offered here. A
+        provider offers a contract by inheriting it, in which case this
+        default answers the provider itself, or by overriding this method to
+        answer a companion object that inherits it. Callers negotiate through
+        ``sandbox_capability`` and fail closed on ``None``.
+        """
+        return self if isinstance(self, protocol) else None
 
     def sandbox_network_mode(self) -> str:
         """Return the provider's effective outbound network mode."""
@@ -793,6 +289,7 @@ def reset_sandbox_provider() -> None:
             _provider_teardown = provider
             _provider_teardown_owner = threading.get_ident()
     if provider is not None:
+        from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
         from deerflow.sandbox.lease import discard_sandbox_lease_manager
 
         try:
@@ -842,6 +339,7 @@ def shutdown_sandbox_provider() -> None:
             _provider_teardown = provider
             _provider_teardown_owner = threading.get_ident()
     if provider is not None and hasattr(provider, "shutdown"):
+        from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
         from deerflow.sandbox.lease import discard_sandbox_lease_manager
 
         try:

@@ -53,8 +53,9 @@ but the required distinct-principal enforcement remains live-unqualified. Conseq
   continue to work as documented below;
 - `accepted_materialization_profile` defaults to `disabled` and every
   non-disabled OpenSandbox value is rejected during config validation;
-- nonempty durable acquisition reports
-  `opensandbox_immutable_material_unsupported` before creating a remote; and
+- the provider offers no `AcceptedSkillProjection` capability, so durable
+  acquisition fails `accepted_skill_snapshot_projection_unsupported` before
+  any remote is created; and
 - tags or even digest-pinned image requests do not constitute qualification,
   because the provider cannot read back the independently resolved digest or
   establish the other fences.

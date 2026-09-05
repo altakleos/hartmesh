@@ -17,11 +17,11 @@ from pydantic import ValidationError
 from deerflow.config.paths import Paths, join_host_path
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.runtime.user_context import reset_current_user, set_current_user
-from deerflow.sandbox.acquire_serialization import AcquireSerializer
-from deerflow.sandbox.sandbox_provider import (
+from deerflow.sandbox.accepted_material import (
     AcceptedSkillSandboxBindingError,
     AcceptedSkillSandboxBindingV1,
 )
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
 
 
 def _accepted_runtime_topology():
@@ -105,7 +105,7 @@ async def test_cancelled_bound_acquire_waits_for_created_sandbox_cleanup() -> No
         assert allow_return.wait(timeout=2)
         return "created-before-cancellation"
 
-    provider._acquire_bound_accepted_skills_with_claim = acquire
+    provider._provision_accepted_skills_with_claim = acquire
 
     def destroy(sandbox_id: str) -> None:
         destroy_started.set()
@@ -119,7 +119,7 @@ async def test_cancelled_bound_acquire_waits_for_created_sandbox_cleanup() -> No
         generation=1,
     )
     task = asyncio.create_task(
-        provider.acquire_bound_accepted_skills_async(
+        provider.provision_accepted_skills_async(
             "thread-1",
             user_id="user-1",
             binding=binding,
@@ -830,9 +830,10 @@ def test_accepted_aio_acquisition_rejects_writable_host_alias_of_active_material
         AcceptedSkillSandboxBindingError,
         match="accepted_skill_snapshot_writable_alias",
     ):
-        provider.acquire_accepted_skills(
+        provider.provision_accepted_skills(
             "thread-alias",
             user_id="owner-alias",
+            binding=AcceptedSkillSandboxBindingV1(snapshot_id=None),
         )
 
 
@@ -886,9 +887,9 @@ async def test_aio_nonempty_accepted_snapshot_passes_pre_model_middleware(
         SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
     )
     from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+    from deerflow.sandbox.accepted_projection import release_accepted_skill_consumer
     from deerflow.sandbox.middleware import SandboxMiddleware
     from deerflow.sandbox.sandbox_provider import (
-        release_accepted_skill_consumer,
         reset_sandbox_provider,
         set_sandbox_provider,
     )

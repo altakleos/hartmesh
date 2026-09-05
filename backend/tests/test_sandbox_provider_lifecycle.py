@@ -16,11 +16,9 @@ import time
 import pytest
 
 import deerflow.sandbox.sandbox_provider as sandbox_provider
+from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import (
-    AcceptedSkillSandboxBindingError,
-    SandboxProvider,
-)
+from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.sandbox.session import unwrap_sandbox_provider
 
 

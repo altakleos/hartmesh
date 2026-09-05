@@ -9,14 +9,19 @@ from deerflow.runtime.skill_projection import (
     SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
     get_skill_projection_coordinator,
 )
-from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import (
+from deerflow.sandbox.accepted_material import (
     AcceptedSkillSandboxBindingError,
     AcceptedSkillSandboxBindingV1,
-    SandboxProvider,
+)
+from deerflow.sandbox.accepted_projection import (
     bind_runtime_accepted_skill_projection_async,
-    get_sandbox_provider,
     release_accepted_skill_consumer,
+)
+from deerflow.sandbox.capabilities import AcceptedSkillProjection
+from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox_provider import (
+    SandboxProvider,
+    get_sandbox_provider,
     reset_sandbox_provider,
     set_sandbox_provider,
     shutdown_sandbox_provider,
@@ -24,7 +29,7 @@ from deerflow.sandbox.sandbox_provider import (
 from deerflow.sandbox.session import unwrap_sandbox_provider
 
 
-class _BindingProvider(SandboxProvider):
+class _BindingProvider(SandboxProvider, AcceptedSkillProjection):
     def __init__(self) -> None:
         self.fail_next_bind = True
         self.bindings: list[AcceptedSkillSandboxBindingV1] = []

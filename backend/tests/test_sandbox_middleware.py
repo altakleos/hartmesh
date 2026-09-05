@@ -15,6 +15,8 @@ from langgraph.types import Command, Overwrite
 from deerflow.agents.thread_state import ThreadState
 from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
 from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
+from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
+from deerflow.sandbox.capabilities import AcceptedSkillProjection
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.lease import (
     get_sandbox_lease_manager,
@@ -24,7 +26,6 @@ from deerflow.sandbox.lease import (
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
-    AcceptedSkillSandboxBindingError,
     SandboxProvider,
     get_sandbox_provider,
     reset_sandbox_provider,
@@ -171,15 +172,17 @@ class _AsyncOnlyProvider(SandboxProvider):
         return None
 
 
-class _IncompleteAcceptedProvider(_AsyncOnlyProvider):
-    """Claims accepted hooks but omits the required isolation advertisement."""
+class _IncompleteAcceptedProvider(_AsyncOnlyProvider, AcceptedSkillProjection):
+    """Claims the projection capability but omits the isolation advertisement."""
 
-    async def acquire_accepted_skills_async(
+    async def provision_accepted_skills_async(
         self,
         thread_id: str,
         *,
         user_id: str,
+        binding,
     ) -> str:
+        del binding
         self.thread_ids.append(thread_id)
         self.user_ids.append(user_id)
         return "async-sandbox"
@@ -231,9 +234,7 @@ def test_sandbox_middleware_state_matches_thread_state_sandbox_field() -> None:
 
 
 def test_material_capability_probe_is_skipped_for_legacy_and_accepted_empty_runs() -> None:
-    from deerflow.sandbox.sandbox_provider import (
-        require_runtime_accepted_skill_isolation,
-    )
+    from deerflow.sandbox.accepted_projection import require_runtime_accepted_skill_isolation
 
     provider = _CapabilityProbeMustNotRunProvider()
     require_runtime_accepted_skill_isolation(

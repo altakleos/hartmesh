@@ -259,12 +259,12 @@ class AioAcceptedMaterializer:
                 }
                 if isinstance(request, AcceptedMaterialRequestV2) and request.batch_child_attempt_ref is not None:
                     acquire_kwargs["resource_scope_ref"] = request.batch_child_attempt_ref
-                sandbox_id = await self._provider.acquire_bound_accepted_skills_async(
+                sandbox_id = await self._provider.provision_accepted_skills_async(
                     thread_id,
                     **acquire_kwargs,
                 )
             else:
-                sandbox_id = await self._provider.acquire_bound_accepted_skills_async(
+                sandbox_id = await self._provider.provision_accepted_skills_async(
                     thread_id,
                     user_id=user_id,
                     binding=binding,

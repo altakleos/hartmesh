@@ -22,6 +22,16 @@ from deerflow.authz.sandbox_authz import (
 )
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
+from deerflow.sandbox.accepted_projection import (
+    _NO_BINDING,
+    accepted_skill_snapshot_id_from_runtime,
+    bind_runtime_accepted_skill_projection,
+    bind_runtime_accepted_skill_projection_async,
+    has_accepted_skill_isolation,
+    provision_runtime_accepted_skill_projection,
+    provision_runtime_accepted_skill_projection_async,
+    release_accepted_skill_consumer,
+)
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.lease import (
     ensure_sandbox_lease_owner,
@@ -29,16 +39,7 @@ from deerflow.sandbox.lease import (
     sandbox_lease_owner,
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
-from deerflow.sandbox.sandbox_provider import (
-    _NO_BINDING,
-    accepted_skill_material_binding_from_runtime,
-    accepted_skill_snapshot_id_from_runtime,
-    ensure_accepted_skill_binding,
-    get_initialized_sandbox_provider,
-    invalidate_runtime_skill_projection_token,
-    release_accepted_skill_consumer,
-    require_runtime_accepted_skill_isolation,
-)
+from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
 from deerflow.sandbox.session import declared_sandbox
 
 logger = logging.getLogger(__name__)
@@ -138,23 +139,10 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         thread_id: str,
         *,
         user_id: str,
-        owner_id: str | None = None,
-        accepted_skills_only: bool = False,
-        runtime: Runtime | None = None,
+        owner_id: str | None,
     ) -> str:
         provider = get_sandbox_provider()
-        if accepted_skills_only:
-            # Accepted-skill material is bound by the projection, whose consumer
-            # refcount owns the park; the execution lease borrows it afterwards.
-            binding = accepted_skill_material_binding_from_runtime(runtime, user_id=user_id)
-            if binding is None:
-                raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
-            sandbox_id = provider.acquire_bound_accepted_skills(
-                thread_id,
-                user_id=user_id,
-                binding=binding,
-            )
-        elif owner_id is None:
+        if owner_id is None:
             sandbox_id = provider.acquire(thread_id, user_id=user_id)
         else:
             sandbox_id = get_sandbox_lease_manager(provider).acquire(
@@ -170,21 +158,10 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         thread_id: str,
         *,
         user_id: str,
-        owner_id: str | None = None,
-        accepted_skills_only: bool = False,
-        runtime: Runtime | None = None,
+        owner_id: str | None,
     ) -> str:
         provider = get_sandbox_provider()
-        if accepted_skills_only:
-            binding = accepted_skill_material_binding_from_runtime(runtime, user_id=user_id)
-            if binding is None:
-                raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
-            sandbox_id = await provider.acquire_bound_accepted_skills_async(
-                thread_id,
-                user_id=user_id,
-                binding=binding,
-            )
-        elif owner_id is None:
+        if owner_id is None:
             sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
         else:
             sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
@@ -195,7 +172,6 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
-    @staticmethod
     def _borrow_accepted_sandbox(
         sandbox_id: str,
         *,
@@ -372,19 +348,42 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if has_accepted_binding and not isinstance(sandbox_id, str) and isinstance(runtime_sandbox_id, str) and provider.get(runtime_sandbox_id) is not None:
             sandbox_id = runtime_sandbox_id
             prebound = True
-        if has_accepted_binding and isinstance(sandbox_id, str) and provider.get(sandbox_id) is not None and not provider.has_accepted_skill_isolation(sandbox_id):
+        if has_accepted_binding and isinstance(sandbox_id, str) and provider.get(sandbox_id) is not None and not has_accepted_skill_isolation(provider, sandbox_id):
             provider.release(sandbox_id)
             sandbox_id = None
         acquired = not isinstance(sandbox_id, str) or provider.get(sandbox_id) is None
-        if acquired:
+        if has_accepted_binding:
+            # The projection material provisions and binds as one step; a
+            # sandbox the run already holds is rebound in place. Either way
+            # the projection's consumer refcount owns the park, so the
+            # execution lease only borrows the sandbox.
+            if acquired:
+                sandbox_id = provision_runtime_accepted_skill_projection(
+                    provider,
+                    runtime,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
+            else:
+                bind_runtime_accepted_skill_projection(
+                    provider,
+                    runtime,
+                    sandbox_id=sandbox_id,
+                    user_id=user_id,
+                )
+            self._borrow_accepted_sandbox(
+                sandbox_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                owner_id=owner_id,
+            )
+        elif acquired:
             sandbox_id = self._acquire_sandbox(
                 thread_id,
                 user_id=user_id,
                 owner_id=owner_id,
-                accepted_skills_only=has_accepted_binding,
-                runtime=runtime,
             )
-        elif not has_accepted_binding and owner_id is not None:
+        elif owner_id is not None:
             # A live checkpointed sandbox is reused under this execution's lease
             # so the last holder, not the first, parks it.
             get_sandbox_lease_manager(provider).retain(
@@ -393,44 +392,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 thread_id=thread_id,
                 user_id=user_id,
             )
-        if has_accepted_binding:
-            token = None
-            try:
-                require_runtime_accepted_skill_isolation(
-                    provider,
-                    runtime,
-                    sandbox_id=sandbox_id,
-                )
-                binding, token, _created_token = ensure_accepted_skill_binding(
-                    runtime,
-                    sandbox_id=sandbox_id,
-                    user_id=user_id,
-                )
-                assert binding is not None
-                provider.bind_accepted_skill_snapshot(
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    binding=binding,
-                )
-            except Exception:
-                released = False
-                invalidate_runtime_skill_projection_token(runtime, token)
-                if token is not None:
-                    try:
-                        released = release_accepted_skill_consumer(token)
-                    except Exception:
-                        logger.warning("Failed to clear a rejected accepted-skill projection", exc_info=True)
-                if acquired and token is None and not released:
-                    provider.release(sandbox_id)
-                raise
-            self._borrow_accepted_sandbox(
-                sandbox_id,
-                thread_id=thread_id,
-                user_id=user_id,
-                owner_id=owner_id,
-            )
-        elif projection is not None:
+        if projection is not None:
             try:
                 provider.sync_agent_skills(
                     sandbox_id,
@@ -563,66 +525,45 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if has_accepted_binding and not isinstance(sandbox_id, str) and isinstance(runtime_sandbox_id, str) and provider.get(runtime_sandbox_id) is not None:
             sandbox_id = runtime_sandbox_id
             prebound = True
-        if has_accepted_binding and isinstance(sandbox_id, str) and provider.get(sandbox_id) is not None and not provider.has_accepted_skill_isolation(sandbox_id):
+        if has_accepted_binding and isinstance(sandbox_id, str) and provider.get(sandbox_id) is not None and not has_accepted_skill_isolation(provider, sandbox_id):
             await self._release_sandbox_async(sandbox_id, owner_id=None)
             sandbox_id = None
         acquired = not isinstance(sandbox_id, str) or provider.get(sandbox_id) is None
-        if acquired:
-            sandbox_id = await self._acquire_sandbox_async(
-                thread_id,
-                user_id=user_id,
-                owner_id=owner_id,
-                accepted_skills_only=has_accepted_binding,
-                runtime=runtime,
-            )
-        elif not has_accepted_binding and owner_id is not None:
-            await get_sandbox_lease_manager(provider).retain_async(
-                owner_id,
-                sandbox_id,
-                thread_id=thread_id,
-                user_id=user_id,
-            )
         if has_accepted_binding:
-            token = None
-            try:
-                require_runtime_accepted_skill_isolation(
+            if acquired:
+                sandbox_id = await provision_runtime_accepted_skill_projection_async(
+                    provider,
+                    runtime,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
+            else:
+                await bind_runtime_accepted_skill_projection_async(
                     provider,
                     runtime,
                     sandbox_id=sandbox_id,
-                )
-                binding, token, _created_token = ensure_accepted_skill_binding(
-                    runtime,
-                    sandbox_id=sandbox_id,
                     user_id=user_id,
                 )
-                assert binding is not None
-                await provider.bind_accepted_skill_snapshot_async(
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    binding=binding,
-                )
-            except Exception:
-                released = False
-                invalidate_runtime_skill_projection_token(runtime, token)
-                if token is not None:
-                    try:
-                        released = await asyncio.to_thread(
-                            release_accepted_skill_consumer,
-                            token,
-                        )
-                    except Exception:
-                        logger.warning("Failed to clear a rejected accepted-skill projection", exc_info=True)
-                if acquired and token is None and not released:
-                    await self._release_sandbox_async(sandbox_id, owner_id=None)
-                raise
             await self._borrow_accepted_sandbox_async(
                 sandbox_id,
                 thread_id=thread_id,
                 user_id=user_id,
                 owner_id=owner_id,
             )
-        elif projection is not None:
+        elif acquired:
+            sandbox_id = await self._acquire_sandbox_async(
+                thread_id,
+                user_id=user_id,
+                owner_id=owner_id,
+            )
+        elif owner_id is not None:
+            await get_sandbox_lease_manager(provider).retain_async(
+                owner_id,
+                sandbox_id,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
+        if projection is not None:
             try:
                 await provider.sync_agent_skills_async(
                     sandbox_id,
