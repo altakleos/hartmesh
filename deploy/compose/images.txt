@@ -1,0 +1,7 @@
+ghcr.io/altakleos/hartmesh-backend:v2.1.0-hartmesh.4
+ghcr.io/altakleos/hartmesh-frontend:v2.1.0-hartmesh.4
+ghcr.io/altakleos/hartmesh-sandbox:v2.1.0-hartmesh.4
+ghcr.io/altakleos/hartmesh-sandbox-network-proxy:v2.1.0-hartmesh.4
+postgres:16
+redis:7-alpine
+nginx:alpine

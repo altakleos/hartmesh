@@ -228,6 +228,11 @@ _DOCKER_BRIDGE_GATEWAY_FALLBACK = "172.17.0.1"
 _DEFAULT_SANDBOX_MEMORY = "2g"
 _DEFAULT_SANDBOX_CPUS = "2"
 _DEFAULT_SANDBOX_PIDS_LIMIT = "512"
+# The trusted network-policy sidecar is a small Python process; its memory
+# limit is tunable through DEER_FLOW_SANDBOX_PROXY_MEMORY (see
+# _start_network_proxy) so a memory-budgeted host can size it from a
+# measurement instead of inheriting this default.
+_DEFAULT_PROXY_MEMORY = "256m"
 _NETWORK_PROXY_CONTAINER_SCRIPT = "/tmp/deerflow-network-proxy.py"
 _NETWORK_POLICY_DIGEST_LABEL = "deerflow.network_policy_digest"
 _NETWORK_GATEWAY_MODE_IPV4 = "com.docker.network.bridge.gateway_mode_ipv4"
@@ -466,6 +471,35 @@ def _docker_resource_limit(env_name: str, default: str) -> str | None:
     if value.lower() in {"0", "none"}:
         return None
     return value
+
+
+def _docker_oci_runtime() -> str | None:
+    """Return the OCI runtime name sandbox containers must run under, if any.
+
+    ``DEER_FLOW_SANDBOX_RUNTIME`` names a runtime registered with the Docker
+    daemon (``runtimes`` in ``daemon.json``, e.g. ``runsc`` for gVisor). It is
+    passed through as ``--runtime`` on the sandbox's ``docker run``; unset or
+    empty emits nothing so the daemon's default runtime applies unchanged.
+    This is the OCI runtime, not the container CLI that
+    ``LocalContainerBackend.runtime`` reports (``docker`` vs Apple
+    ``container``).
+    """
+    value = os.environ.get("DEER_FLOW_SANDBOX_RUNTIME", "").strip()
+    return value or None
+
+
+def _docker_memory_limit_args(env_name: str, default: str) -> list[str]:
+    """Return ``--memory``/``--memory-swap`` for a resolved memory limit.
+
+    ``--memory-swap`` is pinned to the memory limit so a bounded container
+    cannot spill past its budget into host swap (Docker's default otherwise
+    grants swap equal to the memory limit on top of it). ``0``/``none``
+    disables both, matching ``_docker_resource_limit``.
+    """
+    memory = _docker_resource_limit(env_name, default)
+    if not memory:
+        return []
+    return ["--memory", memory, "--memory-swap", memory]
 
 
 def _is_no_such_container_error(stderr: str, container_name: str) -> bool:
@@ -1061,8 +1095,10 @@ class LocalContainerBackend(SandboxBackend):
             "--cap-drop=ALL",
             "--security-opt",
             "no-new-privileges",
-            "--memory",
-            "256m",
+            *_docker_memory_limit_args("DEER_FLOW_SANDBOX_PROXY_MEMORY", _DEFAULT_PROXY_MEMORY),
+            # CPU and PID limits stay fixed: the sidecar relays one sandbox's
+            # traffic and has never needed tuning. The same environment seam
+            # pattern applies if a budget ever requires them.
             "--cpus",
             "1",
             "--pids-limit",
@@ -1674,8 +1710,7 @@ class LocalContainerBackend(SandboxBackend):
                 # https://docs.docker.com/reference/cli/docker/container/run/#optional-security-options---security-opt
                 cmd.extend(["--security-opt", "seccomp=builtin"])
 
-            if memory := _docker_resource_limit("DEER_FLOW_SANDBOX_MEMORY", _DEFAULT_SANDBOX_MEMORY):
-                cmd.extend(["--memory", memory])
+            cmd.extend(_docker_memory_limit_args("DEER_FLOW_SANDBOX_MEMORY", _DEFAULT_SANDBOX_MEMORY))
             if cpus := _docker_resource_limit("DEER_FLOW_SANDBOX_CPUS", _DEFAULT_SANDBOX_CPUS):
                 cmd.extend(["--cpus", cpus])
             if pids_limit := _docker_resource_limit("DEER_FLOW_SANDBOX_PIDS_LIMIT", _DEFAULT_SANDBOX_PIDS_LIMIT):
@@ -1688,6 +1723,11 @@ class LocalContainerBackend(SandboxBackend):
             # UID/GID ownership of its mounts) can pass it through.
             if container_user := os.environ.get("DEER_FLOW_SANDBOX_CONTAINER_USER", "").strip():
                 cmd.extend(["--user", container_user])
+
+            # Optional OCI runtime (e.g. gVisor's runsc) for the sandbox only;
+            # the network-policy sidecar deliberately keeps the daemon default.
+            if oci_runtime := _docker_oci_runtime():
+                cmd.extend(["--runtime", oci_runtime])
 
             # Default: the daemon's default network (unchanged behavior).
             # Point this at a dedicated, egress-controlled Docker network so

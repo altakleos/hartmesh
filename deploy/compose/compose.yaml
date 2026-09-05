@@ -1,0 +1,249 @@
+# HartMesh tenant VM profile: one KVM guest per customer, the whole stack under
+# Docker Compose inside it, sandboxes created by the Gateway's local Docker
+# backend as containers under the OCI runtime named by the .env contract.
+#
+# The estate copies this directory to /opt/hartmesh (root-owned, no exec bits),
+# writes exactly one .env file to the data disk, and runs:
+#
+#   docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env up -d
+#
+# Every value the stack needs is either a fixed .env contract key (listed in
+# .env.example) or derived from one here. README.md documents the contract, the
+# network model, the memory budget and the release pinning that turns every
+# `image:` below into a digest.
+name: hartmesh
+
+services:
+  # ── PostgreSQL 16 ────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16
+    # The golden image pre-creates ${HARTMESH_DATA_DIR}/postgres as 1000:1000
+    # mode 0750. The official image runs as uid 999, which cannot write there,
+    # so it runs as the directory's owner instead; its entrypoint supports an
+    # arbitrary uid through nss_wrapper. No root chown step is used.
+    user: "1000:1000"
+    # Deliberately relaxed durability (README: "Durability"): the guest's disks
+    # sit on a replicated tier and the quoted recovery point is one hour.
+    command: ["postgres", "-c", "synchronous_commit=off", "-c", "wal_writer_delay=200ms"]
+    environment:
+      POSTGRES_DB: deerflow
+      POSTGRES_USER: deerflow
+      # Used by initdb on the very first start only; later starts authenticate
+      # with it, so it must stay stable for the tenant's lifetime.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is a required .env key}
+    volumes:
+      - ${HARTMESH_DATA_DIR:?HARTMESH_DATA_DIR is a required .env key}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U deerflow -d deerflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    mem_limit: 768m
+    memswap_limit: 768m
+    stop_grace_period: 60s
+    networks: [app]
+    restart: unless-stopped
+
+  # ── Redis 7 (SSE stream bridge + sandbox ownership) ──────────────────────
+  redis:
+    image: redis:7-alpine
+    user: "1000:1000"
+    # $$ keeps the password out of the rendered command line: the container's
+    # shell reads REDIS_PASSWORD from its own environment at start.
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes --appendfsync everysec --maxmemory 200mb --maxmemory-policy allkeys-lru"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is a required .env key}
+    volumes:
+      - ${HARTMESH_DATA_DIR}/redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    mem_limit: 256m
+    memswap_limit: 256m
+    networks: [app]
+    restart: unless-stopped
+
+  # ── Gateway (FastAPI + embedded agent runtime) ───────────────────────────
+  gateway:
+    image: ghcr.io/altakleos/hartmesh-backend:v2.1.0-hartmesh.4
+    # No `user:` on purpose. The container starts as root only long enough for
+    # gateway/entrypoint.sh to read the Docker socket's group, then drops to
+    # uid/gid 1000 plus that one supplementary group before any application
+    # code runs (README: "Gateway user"). uid 1000 matches the sandbox and the
+    # data directory, so the shared workspace works in both directions.
+    command: ["sh", "/opt/hartmesh/gateway/entrypoint.sh"]
+    # The whole tenant .env is passed to the Gateway only: provider keys are
+    # consumed by config.yaml `$NAME` references and never reach the frontend
+    # or nginx. Explicit `environment:` entries below override .env values.
+    env_file:
+      # Optional only so `compose config` renders without a live data disk;
+      # on the VM the file is the one Compose itself was started with.
+      - path: ${HARTMESH_DATA_DIR}/.env
+        required: false
+    environment:
+      CI: "true"
+      PYTHONDONTWRITEBYTECODE: "1"
+      UV_CACHE_DIR: /tmp/uv-cache
+      DEER_FLOW_PROJECT_ROOT: /app
+      # The data directory is mounted at the same path it has on the host so
+      # the host Docker daemon resolves every sandbox bind-mount source the
+      # Gateway hands it (DEER_FLOW_HOST_BASE_DIR) to the same files.
+      DEER_FLOW_HOME: ${HARTMESH_DATA_DIR}/home
+      DEER_FLOW_HOST_BASE_DIR: ${HARTMESH_DATA_DIR}/home
+      # Rendered at every start by gateway/run.sh from config.yaml + providers/.
+      DEER_FLOW_CONFIG_PATH: ${HARTMESH_DATA_DIR}/home/config.yaml
+      # Seeded once from extensions_config.json; the Gateway edits it at runtime.
+      DEER_FLOW_EXTENSIONS_CONFIG_PATH: ${HARTMESH_DATA_DIR}/home/extensions_config.json
+      DEER_FLOW_TENANT_ID: ${HARTMESH_TENANT:?HARTMESH_TENANT is a required .env key}
+      # Session-signing secret from the contract, so sessions survive a home
+      # restored from backup instead of depending on a generated file there.
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?AUTH_JWT_SECRET is a required .env key}
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "8001"
+      DEER_FLOW_CHANNELS_LANGGRAPH_URL: http://gateway:8001/api
+      DEER_FLOW_CHANNELS_GATEWAY_URL: http://gateway:8001
+      # Datastore DSNs are built from the contract's stable passwords, which
+      # must therefore be URL-safe (the estate generates them that way).
+      DATABASE_URL: postgresql://deerflow:${POSTGRES_PASSWORD}@postgres:5432/deerflow
+      DEER_FLOW_STREAM_BRIDGE_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      # The login path honours X-Real-IP only from a TCP peer in this list;
+      # nginx is the peer, so this is the pinned `app` subnet, not the estate's
+      # front-door proxies (those are HARTMESH_TRUSTED_PROXIES, for nginx).
+      AUTH_TRUSTED_PROXIES: 172.30.10.0/24
+      # ── Local Docker sandbox backend ──────────────────────────────────────
+      # host.docker.internal resolves to the daemon's host-gateway address,
+      # which is where each sandbox-side port is published (README: "Ports").
+      DEER_FLOW_SANDBOX_HOST: host.docker.internal
+      # Used only under SANDBOX_EGRESS=open; allowlist mode builds its own
+      # per-sandbox networks and never reads it. Created by gateway/run.sh
+      # because Compose does not create a network no service joins.
+      DEER_FLOW_SANDBOX_NETWORK: hartmesh_sandbox
+      # OCI runtime for sandbox containers (runsc on the VM). The network-policy
+      # sidecar deliberately keeps the daemon default (README: "Network model").
+      DEER_FLOW_SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:?SANDBOX_RUNTIME is a required .env key}
+      # Per-sandbox limits from the memory budget (README: "Memory budget").
+      DEER_FLOW_SANDBOX_MEMORY: 640m
+      DEER_FLOW_SANDBOX_CPUS: "1"
+      DEER_FLOW_SANDBOX_PIDS_LIMIT: "384"
+      DEER_FLOW_SANDBOX_PROXY_MEMORY: 96m
+      # The fork's sandbox image is pre-initialised as uid 1000 and needs none
+      # of the upstream root-startup capabilities; the browser starts under
+      # Docker's built-in seccomp profile (both proved in README).
+      DEER_FLOW_SANDBOX_CONTAINER_USER: "1000:1000"
+      DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS: "0"
+      DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED: "0"
+      NO_PROXY: localhost,127.0.0.1,::1,gateway,frontend,nginx,postgres,redis,host.docker.internal
+      no_proxy: localhost,127.0.0.1,::1,gateway,frontend,nginx,postgres,redis,host.docker.internal
+    volumes:
+      # The one bind mount outside the data directory this design accepts: the
+      # Gateway cannot create sandboxes without the host daemon, and the VM
+      # exists so that this socket controls one customer's guest and nothing
+      # else. Root-equivalent on this guest; see README.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HARTMESH_DATA_DIR}/home:${HARTMESH_DATA_DIR}/home
+      # The shipped profile stays read-only; rendered files go to the data dir.
+      - ./gateway:/opt/hartmesh/gateway:ro
+      - ./config.yaml:/opt/hartmesh/config.yaml:ro
+      - ./providers:/opt/hartmesh/providers:ro
+      - ./extensions_config.json:/opt/hartmesh/extensions_config.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # /health/ready runs the dependency probes behind a 3 s endpoint
+      # deadline; the client timeout stays above that bound.
+      test: ["CMD", "python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5); raise SystemExit(0 if response.status == 200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    mem_limit: 1536m
+    memswap_limit: 1536m
+    # Covers every configured graceful-shutdown phase plus the memory flush.
+    stop_grace_period: 60s
+    networks: [app]
+    restart: unless-stopped
+
+  # ── Frontend (Next.js) ───────────────────────────────────────────────────
+  frontend:
+    image: ghcr.io/altakleos/hartmesh-frontend:v2.1.0-hartmesh.4
+    user: "1000:1000"
+    # Explicit entries only: no env_file, so provider keys never reach it. The
+    # frontend's one runtime need is the internal Gateway URL; its browser
+    # bundle derives the public origin from the page itself.
+    environment:
+      NODE_ENV: production
+      DEER_FLOW_INTERNAL_GATEWAY_BASE_URL: http://gateway:8001
+    volumes:
+      # Next.js writes its runtime cache under a root-owned directory.
+      - type: tmpfs
+        target: /app/frontend/.next/cache
+        tmpfs:
+          size: 67108864
+          mode: 0o1777
+    mem_limit: 384m
+    memswap_limit: 384m
+    networks: [app]
+    restart: unless-stopped
+
+  # ── nginx (the only published port) ─────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    user: "101:101"
+    # nginx/render.sh renders /tmp/nginx.conf from nginx/nginx.conf (a verbatim
+    # copy of docker/nginx/nginx.conf), then execs nginx on it. Invoked through
+    # `sh` because the bundle carries no exec bits, which also means the
+    # image's /docker-entrypoint.d templating never runs.
+    command: ["sh", "/opt/hartmesh/nginx/render.sh"]
+    environment:
+      # server_name only; nothing in the application consumes this host.
+      HARTMESH_PUBLIC_HOST: ${HARTMESH_PUBLIC_HOST:?HARTMESH_PUBLIC_HOST is a required .env key}
+      # The front-door proxies whose X-Forwarded-For nginx trusts as the
+      # client address (set_real_ip_from), one per comma-separated entry.
+      HARTMESH_TRUSTED_PROXIES: ${HARTMESH_TRUSTED_PROXIES:?HARTMESH_TRUSTED_PROXIES is a required .env key}
+    ports:
+      # The contract value carries its own bind address and port, so this is
+      # the only place the stack is reachable from the VM's NIC. Upstream pins
+      # 127.0.0.1 here; this profile differs on purpose because the VM's host
+      # firewall is the front door (README: "Ports").
+      - "${HARTMESH_LISTEN:?HARTMESH_LISTEN is a required .env key}:2026"
+    volumes:
+      - ./nginx:/opt/hartmesh/nginx:ro
+      - type: tmpfs
+        target: /var/cache/nginx
+        tmpfs:
+          size: 67108864
+          mode: 0o1777
+    depends_on:
+      frontend:
+        condition: service_started
+      gateway:
+        condition: service_healthy
+    mem_limit: 128m
+    memswap_limit: 128m
+    networks: [app]
+    restart: unless-stopped
+
+networks:
+  # The five services. Pinned so AUTH_TRUSTED_PROXIES above is stable.
+  app:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.10.0/24
+  # Joined by no service on purpose. Under SANDBOX_EGRESS=open the Gateway
+  # starts every sandbox on it (DEER_FLOW_SANDBOX_NETWORK), which keeps
+  # sandboxes off the daemon's default bridge and away from `app`. Under
+  # allowlist it is inert: the backend passes its own per-sandbox network.
+  # Compose only creates networks a service uses, so gateway/run.sh creates
+  # this one idempotently before the first sandbox can exist.
+  sandbox:
+    driver: bridge

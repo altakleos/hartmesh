@@ -49,8 +49,9 @@ def _documents(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
         "digest": gateway_digest,
         "revision_check": "verified",
     }
+    proxy_digest = "sha256:" + ("9" * 64)
     release: dict[str, object] = {
-        "schema": 2,
+        "schema": 3,
         "version": "2.1.0+hartmesh.1",
         "tag": "v2.1.0+hartmesh.1",
         "commit": "b" * 40,
@@ -68,6 +69,19 @@ def _documents(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
                 "repository": "ghcr.io/acme/hartmesh-provisioner",
             },
             "sandbox": {**image, "repository": "ghcr.io/acme/hartmesh-sandbox"},
+            "sandbox_network_proxy": {**image, "repository": "ghcr.io/acme/hartmesh-sandbox-network-proxy", "digest": proxy_digest},
+        },
+        "compose_profile": {
+            "images_txt_sha256": "e" * 64,
+            "images": [
+                f"ghcr.io/acme/hartmesh-backend@{gateway_digest}",
+                f"ghcr.io/acme/hartmesh-frontend@{gateway_digest}",
+                f"ghcr.io/acme/hartmesh-sandbox@{gateway_digest}",
+                f"ghcr.io/acme/hartmesh-sandbox-network-proxy@{proxy_digest}",
+                "postgres@sha256:" + ("1" * 64),
+                "redis@sha256:" + ("2" * 64),
+                "nginx@sha256:" + ("3" * 64),
+            ],
         },
         "chart": {
             "repository": "oci://ghcr.io/acme/charts/deer-flow",
@@ -94,15 +108,36 @@ def test_offline_verifier_binds_gateway_image_and_embedded_artifact(
         gateway_image_digest=gateway_digest,
     )
 
-    assert verified["schema"] == 2
+    assert verified["schema"] == 3
+    assert verified["images"]["sandbox_network_proxy"]["digest"] == "sha256:" + ("9" * 64)
 
 
 @pytest.mark.parametrize(
     ("mutation", "code"),
     [
         (
-            lambda release: release.update(schema=1),
+            lambda release: release.update(schema=2),
             "release_manifest_schema_unsupported",
+        ),
+        (
+            lambda release: release["images"].pop("sandbox_network_proxy"),
+            "release_manifest_invalid",
+        ),
+        (
+            lambda release: release.pop("compose_profile"),
+            "release_manifest_invalid",
+        ),
+        (
+            lambda release: release["compose_profile"]["images"].append("postgres:16@sha256:" + ("4" * 64)),
+            "release_manifest_invalid",
+        ),
+        (
+            lambda release: release["compose_profile"]["images"].remove(f"ghcr.io/acme/hartmesh-sandbox-network-proxy@{'sha256:' + ('9' * 64)}"),
+            "release_manifest_compose_profile_mismatch",
+        ),
+        (
+            lambda release: release["compose_profile"]["images"].__setitem__(0, "ghcr.io/acme/hartmesh-backend@sha256:" + ("5" * 64)),
+            "release_manifest_compose_profile_mismatch",
         ),
         (
             lambda release: release["images"]["backend"].update(extension_artifact_manifest_digest="sha256:" + ("e" * 64)),
@@ -168,7 +203,7 @@ def test_offline_verifier_rejects_invalid_entry_digest_even_when_outer_digests_m
 
 def test_offline_verifier_rejects_duplicate_json_keys(tmp_path: Path) -> None:
     release_path = tmp_path / "release-manifest.json"
-    release_path.write_text('{"schema":2,"schema":2}', encoding="utf-8")
+    release_path.write_text('{"schema":3,"schema":3}', encoding="utf-8")
 
     with pytest.raises(_VERIFIER.ReleaseManifestError, match="release_manifest_invalid"):
         _VERIFIER.verify_release_manifest(release_path)

@@ -1,0 +1,11 @@
+# Included when TENCENTCLOUD_WSA_APIKEY is present; replaces web_search.
+env: TENCENTCLOUD_WSA_APIKEY
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.tencent_wsa.tools:web_search_tool
+    max_results: 5
+    max_item_bytes: 16384
+    max_total_bytes: 65536
+    timeout: 30
+    api_key: $TENCENTCLOUD_WSA_APIKEY

@@ -1,18 +1,37 @@
 name: Publish Containers
 
+# Two ways in:
+#   * A v* tag push publishes the release images. Components that
+#     deploy/compose/images.txt pins to a digest are not rebuilt: the pinned
+#     digest is retagged with the release tag (a rebuild would produce a new
+#     digest and break the golden VM image's "first start pulls nothing"
+#     property). A tag-form reference in images.txt fails the release.
+#   * A workflow_dispatch with the release version builds the candidate
+#     images from the dispatched ref under that release's tag spelling, so
+#     scripts/pin_compose_images.py can resolve their digests before the tag
+#     exists. See RELEASING.md, "Fork release procedure".
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the leading v (for example, 2.1.0+hartmesh.5); the dispatched ref must already carry it
+        required: true
+        type: string
 
 jobs:
   verify-versions:
-    # Gate the release: every version source must match the v* tag. A forgotten
-    # bump in Chart.yaml, pyproject.toml, uv.lock, or package.json fails here and skips
-    # all image builds. See scripts/verify_versions.sh.
+    # Gate the release: every version source must match the v* tag (or the
+    # dispatched version). A forgotten bump in Chart.yaml, pyproject.toml,
+    # uv.lock, or package.json fails here and skips every image build. See
+    # scripts/verify_versions.sh.
     uses: ./.github/workflows/verify-versions.yml
+    with:
+      version: ${{ inputs.version || '' }}
 
-  backend-container:
+  container:
     needs: verify-versions
     runs-on: ubuntu-latest
     permissions:
@@ -20,191 +39,101 @@ jobs:
       packages: write
       attestations: write
       id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: backend
+            context: .
+            file: backend/Dockerfile
+            # Bake the `postgres` extra into the published image so multi-replica
+            # deployments (K8s/Helm) can use shared Postgres persistence instead of
+            # file-based SQLite. sqlite/redis-only single-replica setups still work;
+            # this only adds the Postgres driver. See backend/Dockerfile `UV_EXTRAS`.
+            build-args: UV_EXTRAS=postgres
+          - component: frontend
+            context: .
+            file: frontend/Dockerfile
+            build-args: ""
+          - component: provisioner
+            context: docker/provisioner
+            file: docker/provisioner/Dockerfile
+            build-args: ""
+          - component: sandbox
+            context: docker/sandbox
+            file: docker/sandbox/Dockerfile
+            build-args: BASE_IMAGE=ghcr.io/${{ github.repository }}-sandbox-base@sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7
+          - component: sandbox-network-proxy
+            context: .
+            file: docker/sandbox-network-proxy/Dockerfile
+            build-args: ""
     env:
       REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository }}-backend
+      IMAGE_NAME: ${{ github.repository }}-${{ matrix.component }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
+      - name: Compute the release image tags
+        id: identity
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          set -euo pipefail
+          scripts/release_tag_spellings.sh "${VERSION#v}" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
       - name: Log in to the Container registry
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 #v3.4.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Adopt the digest deploy/compose pins for this component
+        id: adopt
+        env:
+          IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
+          SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          REPOSITORY="${REGISTRY}/${IMAGE_NAME}"
+          PIN="$(grep -E "^${REPOSITORY}@sha256:[0-9a-f]{64}$" deploy/compose/images.txt || true)"
+          if [ -z "$PIN" ]; then
+            if [ "$GITHUB_EVENT_NAME" = "push" ] && grep -Eq "^${REPOSITORY}:" deploy/compose/images.txt; then
+              echo "::error::deploy/compose/images.txt still references ${REPOSITORY} by tag; run scripts/pin_compose_images.py before tagging the release"
+              exit 1
+            fi
+            echo "adopted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! docker buildx imagetools inspect "$PIN" >/dev/null 2>&1; then
+            echo "::error::${PIN} is pinned by deploy/compose/images.txt but is not in the registry; dispatch the candidate build before pinning"
+            exit 1
+          fi
+          docker buildx imagetools create --tag "${REPOSITORY}:${IMAGE_TAG}" --tag "${REPOSITORY}:sha-${SHORT_SHA}" "$PIN"
+          echo "Adopted ${PIN} as ${REPOSITORY}:${IMAGE_TAG} and ${REPOSITORY}:sha-${SHORT_SHA} without rebuilding" >> "$GITHUB_STEP_SUMMARY"
+          echo "adopted=true" >> "$GITHUB_OUTPUT"
       - name: Extract metadata (tags, labels) for Docker
+        if: steps.adopt.outputs.adopted != 'true'
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 #v5.7.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=tag
-            type=ref,event=branch
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.identity.outputs.image_tag }}
+            type=raw,value=sha-${{ steps.identity.outputs.short_sha }}
       - name: Build and push Docker image
+        if: steps.adopt.outputs.adopted != 'true'
         id: push
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 #v6.18.0
         with:
-          context: .
-          file: backend/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Bake the `postgres` extra into the published image so multi-replica
-          # deployments (K8s/Helm) can use shared Postgres persistence instead of
-          # file-based SQLite. sqlite/redis-only single-replica setups still work;
-          # this only adds the Postgres driver. See backend/Dockerfile `UV_EXTRAS`.
-          build-args: |
-            UV_EXTRAS=postgres
+          build-args: ${{ matrix.build-args }}
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be #v2.4.0
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
-
-  frontend-container:
-    needs: verify-versions
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      id-token: write
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository }}-frontend
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
-      - name: Log in to the Container registry
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 #v3.4.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 #v5.7.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=tag
-            type=ref,event=branch
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-      - name: Build and push Docker image
-        id: push
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 #v6.18.0
-        with:
-          context: .
-          file: frontend/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be #v2.4.0
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
-
-  provisioner-container:
-    needs: verify-versions
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      id-token: write
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository }}-provisioner
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
-      - name: Log in to the Container registry
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 #v3.4.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 #v5.7.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=tag
-            type=ref,event=branch
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-      - name: Build and push Docker image
-        id: push
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 #v6.18.0
-        with:
-          context: docker/provisioner
-          file: docker/provisioner/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be #v2.4.0
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
-
-  sandbox-container:
-    needs: verify-versions
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      id-token: write
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository }}-sandbox
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
-      - name: Log in to the Container registry
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 #v3.4.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 #v5.7.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=tag
-            type=ref,event=branch
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-      - name: Build and push Docker image
-        id: push
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 #v6.18.0
-        with:
-          context: docker/sandbox
-          file: docker/sandbox/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=ghcr.io/${{ github.repository }}-sandbox-base@sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7
-
-      - name: Generate artifact attestation
+        if: steps.adopt.outputs.adopted != 'true'
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be #v2.4.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}

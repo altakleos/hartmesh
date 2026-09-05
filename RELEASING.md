@@ -27,10 +27,18 @@ For `2.1.0+hartmesh.1`, the published spellings are:
 The shared implementation of the two registry spellings is
 `scripts/release_tag_spellings.sh`; release workflows must call it instead of
 reimplementing the substitutions. Published image repositories are
-`ghcr.io/<owner>/<repo>-backend`, `-frontend`, `-provisioner`, and `-sandbox`.
-The chart is `oci://ghcr.io/<owner>/charts/deer-flow`. The separately managed
-upstream base cache is `ghcr.io/<owner>/<repo>-sandbox-base`; it is not a
-deployable HartMesh image.
+`ghcr.io/<owner>/<repo>-backend`, `-frontend`, `-provisioner`, `-sandbox`, and
+`-sandbox-network-proxy` (the restricted-sandbox policy sidecar, built under
+the fork's own name because upstream's proxy workflow never publishes from a
+fork and its `:latest` is a moving tag). The chart is
+`oci://ghcr.io/<owner>/charts/deer-flow`. The separately managed upstream base
+cache is `ghcr.io/<owner>/<repo>-sandbox-base`; it is not a deployable HartMesh
+image.
+
+The tenant VM compose profile under `deploy/compose/` is the second released
+deployment path. Its `images.txt` and its image references must be digest
+pins in the tagged tree (see [Compose profile pins](#compose-profile-pins)),
+which is why a release now builds its images *before* the tag exists.
 
 ## Version sources
 
@@ -95,23 +103,69 @@ distinguishes it from a release.
    ```
    [2.1.0+hartmesh.1]: https://github.com/<owner>/<repo>/releases/tag/v2.1.0+hartmesh.1
    ```
-4. **Verify and commit** the version + changelog changes:
+4. **Verify and commit** the version + changelog changes, and push that
+   commit (a branch is fine; the candidate build reads the ref you dispatch):
    ```bash
    scripts/verify_versions.sh 2.1.0+hartmesh.1
    git add -A
    git commit -m "release: v2.1.0+hartmesh.1"
+   git push origin HEAD
    ```
-5. **Tag and push**:
+5. **Build the candidate images** from that commit under the release tag
+   spelling, before any tag exists. The dispatch verifies the version sources
+   against the input and publishes all five images as `:v2.1.0-hartmesh.1` and
+   `:sha-<short-commit>`:
+   ```bash
+   gh workflow run container.yaml --ref <that branch> -f version=2.1.0+hartmesh.1
+   ```
+   Wait for every matrix job to succeed.
+6. **Pin the compose profile** to the digests the candidate build published,
+   then commit the pins (see [Compose profile pins](#compose-profile-pins)):
+   ```bash
+   scripts/pin_compose_images.py
+   scripts/pin_compose_images.py --check
+   git add deploy/compose
+   git commit -m "release: pin compose profile for v2.1.0+hartmesh.1"
+   ```
+   The pin commit changes only `deploy/compose/`, which no image contains, so
+   the candidate images are the release's code.
+7. **Tag and push** the pin commit:
    ```bash
    git tag v2.1.0+hartmesh.1
    git push origin v2.1.0+hartmesh.1
    ```
-   Pushing the tag triggers the publishing workflows below. Wait for both the
-   chart and all four container jobs to succeed before recording the release
-   identity.
-6. **Mirror and record identities.** Follow
+   Pushing the tag triggers the publishing workflows below. The container
+   workflow does not rebuild a component the profile pins: it re-tags the
+   pinned digest with the release tag and the tag commit's `sha-` tag, and it
+   fails if a pin is still tag-form or names a digest the registry lacks. Wait
+   for the chart and all five container jobs to succeed before recording the
+   release identity.
+8. **Mirror and record identities.** Follow
    [Manual release workflows](#manual-release-workflows), then perform the
    first-publish visibility checks if these packages are new.
+
+## Compose profile pins
+
+`deploy/compose/images.txt` is what the estate's golden VM image pre-pulls:
+one `<repository>@sha256:<64 hex>` per line, no tags, no comments. The
+property it promises, that a tenant's first start pulls nothing, holds only
+when `deploy/compose/compose.yaml` and the `sandbox.image` /
+`network.proxy_image` values in `deploy/compose/config.yaml` are the same
+strings. `scripts/pin_compose_images.py` keeps the three files in lockstep:
+
+- With no arguments it resolves every tag-form line of `images.txt` through
+  `crane digest` (or `docker buildx imagetools inspect` when crane is absent),
+  rewrites the matching references in both YAML files, writes `images.txt`
+  from the same strings, and verifies.
+- `--check` verifies only and exits non-zero while any reference still carries
+  a tag or the three files disagree. `release-manifest.yaml` runs it on the
+  tagged tree and additionally requires each fork image line to equal the
+  published release digest, so the release asset cross-checks the commit.
+
+Between releases the tree carries the previous release's tag-form references
+as development placeholders; the estate's grammar refuses such a bundle, which
+is intended. Seven lines are pinned: backend, frontend, sandbox, the network
+proxy, `postgres`, `redis`, and `nginx`.
 
 ## Durable runtime qualification evidence
 
@@ -146,12 +200,17 @@ and upstream [issue #1690](https://github.com/opensandbox-group/OpenSandbox/issu
 
 ## What CI publishes on a `v*` tag
 
-- `.github/workflows/container.yaml` — builds and pushes `backend`,
-  `frontend`, `provisioner`, and `sandbox` images to `ghcr.io`, tagged with the
-  release tag's registry-safe image spelling and `sha-<short-commit>`. The
-  sandbox image adapts the upstream AIO runtime to uid 1000 and the Kubernetes
-  Pod Security `restricted` profile; build-time source assertions deliberately
-  stop publication when the pinned vendor entrypoint changes.
+- `.github/workflows/container.yaml` — publishes `backend`, `frontend`,
+  `provisioner`, `sandbox`, and `sandbox-network-proxy` images to `ghcr.io`,
+  tagged with the release tag's registry-safe image spelling and
+  `sha-<short-commit>`. A component pinned by digest in
+  `deploy/compose/images.txt` is re-tagged from that digest rather than
+  rebuilt; the others are built from the tagged commit. The same workflow's
+  `workflow_dispatch` builds the candidate images for a version before its
+  tag exists. The sandbox image adapts the upstream AIO runtime to uid 1000
+  and the Kubernetes Pod Security `restricted` profile; build-time source
+  assertions deliberately stop publication when the pinned vendor entrypoint
+  changes.
 - `.github/workflows/chart.yaml` — packages the Helm chart and pushes it as an
   OCI artifact to `ghcr.io`. Users install with:
   ```bash
@@ -178,7 +237,7 @@ not depend on the third-party registry. The mirror has a distinct package name
 because `.github/workflows/container.yaml` is the sole publisher of the
 deployable `<repo>-sandbox` package.
 
-After the tag-triggered chart and four image jobs succeed, dispatch the
+After the tag-triggered chart and five image jobs succeed, dispatch the
 manifest workflow without a sandbox input:
 
 ```bash
@@ -191,9 +250,12 @@ against its `sha-` tag when present, resolves the chart, creates the GitHub
 Release if needed, and attaches `release-manifest.json` as both a workflow
 artifact and a release asset. A missing `sha-` tag is recorded as
 `revision_check: tag-not-found`; a resolved digest mismatch remains fatal. The
-schema-2 manifest always records all four built images under `images`, including
-`images.sandbox`, with the same repository, digest, tag, and revision-check
-shape. The backend entry additionally records the embedded extension artifact
+schema-3 manifest always records all five built images under `images`,
+including `images.sandbox` and `images.sandbox_network_proxy`, with the same
+repository, digest, tag, and revision-check shape, plus `compose_profile`: the
+SHA-256 of the tagged tree's `deploy/compose/images.txt` and its lines, each
+fork line verified equal to the published digest and each third-party line
+verified resolvable. The backend entry additionally records the embedded extension artifact
 manifest digest, pinned extension API version, entry count, and OCI provenance
 subject. The workflow exports the exact backend image by digest, extracts
 `/app/hartmesh/extension-artifacts.json`, verifies its canonical digest, and
@@ -225,13 +287,14 @@ sandbox base must be mirrored before the sandbox build can publish.
 
 GHCR creates each package as private on first publish, and package visibility
 cannot be changed by these workflows or a GHCR API. In the GitHub Packages UI,
-open package settings and change visibility to **Public** for all five
+open package settings and change visibility to **Public** for all six
 deployment packages:
 
 - `<repo>-backend`
 - `<repo>-frontend`
 - `<repo>-provisioner`
 - `<repo>-sandbox`
+- `<repo>-sandbox-network-proxy`
 - `charts/deer-flow`
 
 Log out of GHCR (or use a clean shell with no registry credentials) and verify
@@ -242,7 +305,7 @@ authentication:
 crane manifest <ref> >/dev/null
 ```
 
-For example, check the four image references from `release-manifest.json` and
+For example, check the five image references from `release-manifest.json` and
 `ghcr.io/<owner>/charts/deer-flow:2.1.0_hartmesh.1`. A successful authenticated
 pull is not evidence that visibility was changed.
 

@@ -67,13 +67,14 @@ deer-flow/
 │   ├── packages/runtime-api/       # deerflow-runtime-api — stdlib-only embedded durable runtime contracts
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
 ├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
+├── deploy/                         # compose/ tenant VM profile (.env contract, image pins); helm/ chart
 ├── docker/                         # docker-compose files, nginx config, provisioner
 ├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
 │                                    # Integration credentials and enabled state remain per-user
-├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
+├── contracts/                      # Cross-component JSON contracts
 ├── examples/deerflow-extension-example/ # Standalone package demonstrating all extension contribution kinds
-├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
+├── scripts/                        # Root orchestration and release scripts invoked by the Makefile
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```

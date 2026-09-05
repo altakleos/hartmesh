@@ -1,0 +1,169 @@
+# HartMesh tenant VM profile: config.yaml TEMPLATE.
+#
+# This file is never read by the Gateway directly. gateway/run.sh renders the
+# effective config.yaml into the tenant's data directory at every start
+# (gateway/render_config.py), pointing DEER_FLOW_CONFIG_PATH at the result:
+#
+#   - `models:` is filled from providers/models/*.yaml for every provider whose
+#     environment variable is present and non-empty in the tenant .env, and
+#     `tools:` entries are replaced by providers/tools/*.yaml the same way, so
+#     no `$NAME` reference survives for a key the tenant does not carry
+#     (`$NAME` expansion is whole-string, secrets-only, and raises on an unset
+#     name, which would otherwise be a hard start requirement).
+#   - `sandbox.network` is chosen by SANDBOX_EGRESS: the allowlist block below
+#     when the key is `allowlist` or absent, `mode: open` alone for `open`;
+#     any other value refuses to render.
+#
+# Everything else is copied through unchanged. Paths are literal because this
+# file cannot interpolate them: HARTMESH_DATA_DIR is therefore fixed at
+# /srv/hartmesh by this file (README: "Mount points").
+config_version: 55
+log_level: info
+
+models: []
+
+# ── Sandbox: the Gateway's local Docker backend (no provisioner_url) ────────
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  image: ghcr.io/altakleos/hartmesh-sandbox:v2.1.0-hartmesh.4
+  port: 8080
+  # Concurrent-sandbox ceiling from the memory budget (README: "Memory
+  # budget"). This is a maximum with LRU eviction: a third acquisition evicts
+  # the least-recently-used sandbox instead of failing.
+  replicas: 2
+  # How long an idle sandbox keeps one of the two slots. The budget reserves
+  # both slots whether or not they are used, and a cold start of the sandbox
+  # image under gVisor takes tens of seconds, so idle sandboxes are kept warm
+  # for 30 minutes; a third thread still evicts the least recently used one.
+  idle_timeout: 1800
+  network:
+    mode: allowlist
+    approval: prompt
+    temporary_grant_ttl: 300
+    # Bounded on purpose: the package-installation set from
+    # config.example.yaml and nothing else. Everything beyond installs goes
+    # through the approval card per session; widening this standing list is
+    # the operator's decision. web_search/web_fetch run from the Gateway and
+    # are not governed by this list.
+    allow_domains:
+      - pypi.org
+      - files.pythonhosted.org
+      - registry.npmjs.org
+      - github.com
+    proxy_image: ghcr.io/altakleos/hartmesh-sandbox-network-proxy:v2.1.0-hartmesh.4
+
+skills:
+  # Operator-managed skill library on the tenant data disk (created empty by
+  # gateway/run.sh); the same host path is what the sandbox bind-mounts.
+  path: /srv/hartmesh/home/skills
+  container_path: /mnt/skills
+
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+  pool_recycle: 300
+  command_timeout: 30
+
+dedupe_storage:
+  backend: auto
+
+run_events:
+  backend: db
+
+# local_development is the self-migrating profile this single Gateway runs
+# with. durable_production is also self-migrating but hard-requires the
+# EXECUTION_POLICY_HMAC_KEYS / EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID credentials,
+# which are not in the .env contract (README: "Deployment profile").
+deployment:
+  profile: local_development
+  readiness:
+    capability_cache_seconds: 10.0
+    admission_health_max_age_seconds: 10.0
+    required_health_stale_seconds: 30.0
+    capability_probe_timeout_seconds: 2.0
+    overall_timeout_seconds: 5.0
+    required_failure_threshold: 1
+  shutdown:
+    admission_seconds: 2.0
+    channel_seconds: 5.0
+    scheduler_seconds: 3.0
+    run_seconds: 8.0
+    dependencies_seconds: 5.0
+
+# The LangGraph Store reads this legacy section and does not fall back to
+# `database:`; point it at the same PostgreSQL so checkpoints survive restarts.
+checkpointer:
+  type: postgres
+  connection_string: $DATABASE_URL
+
+# URL comes from DEER_FLOW_STREAM_BRIDGE_REDIS_URL in the Gateway environment.
+stream_bridge:
+  type: redis
+
+memory:
+  storage_path: memory.json
+
+verification:
+  receipts_enabled: true
+  receipts_render_mode: "delegation_only"
+  judge_enabled: false
+  judge_model_name: null
+
+tool_plane:
+  enabled: true
+  policy_version: deerflow-default-v1
+  allowed_mcp_transports: [stdio, sse, http, streamable_http]
+  allowed_mcp_stdio_commands: [npx, uvx]
+  allowed_mcp_endpoint_hosts: []
+  allow_private_mcp_endpoints: false
+  allowed_managed_integration_providers: []
+  forbidden_skill_capabilities: []
+  maximum_mcp_servers: 128
+  maximum_skills: 512
+  validation_requires_skill_review: true
+
+tool_groups:
+  - name: web
+  - name: file:read
+  - name: file:write
+  - name: bash
+
+# Keyless defaults. A providers/tools fragment whose key is present replaces
+# the entry with the same name (first fragment in file order wins), so a
+# tenant with no search key still has web_search, web_fetch and image_search.
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.ddg_search.tools:web_search_tool
+    max_results: 5
+  - name: web_fetch
+    group: web
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
+    timeout: 10
+  - name: image_search
+    group: web
+    use: deerflow.community.image_search.tools:image_search_tool
+    max_results: 5
+  - name: ls
+    group: file:read
+    use: deerflow.sandbox.tools:ls_tool
+  - name: read_file
+    group: file:read
+    use: deerflow.sandbox.tools:read_file_tool
+  - name: glob
+    group: file:read
+    use: deerflow.sandbox.tools:glob_tool
+    max_results: 200
+  - name: grep
+    group: file:read
+    use: deerflow.sandbox.tools:grep_tool
+    max_results: 100
+  - name: write_file
+    group: file:write
+    use: deerflow.sandbox.tools:write_file_tool
+  - name: str_replace
+    group: file:write
+    use: deerflow.sandbox.tools:str_replace_tool
+  - name: bash
+    group: bash
+    use: deerflow.sandbox.tools:bash_tool

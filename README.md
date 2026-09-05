@@ -651,6 +651,7 @@ Version sources report `2.1.0+hartmesh.4`, the newest tag. It predates the evide
 - [Tenant identity](backend/docs/TENANT_IDENTITY.md) — server-owned trust boundary, schema/Redis migration, ACLs, and rollback
 - [Honcho memory backend](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md) — tenant/user isolation, durable observation limits, and existing-workspace migration
 - [Helm deployment](deploy/helm/deer-flow/README.md) — production and candidate qualification contracts
+- [Tenant VM compose profile](deploy/compose/README.md) — one Docker Compose stack per customer VM with gVisor sandboxes
 - [Exact two-Gateway qualification](docs/MULTI_GATEWAY_QUALIFICATION.md) — topology boundary, live evidence, maintenance upgrade, rollback, and exclusions
 - [Configuration](config.example.yaml) — operator settings
 - [Backend guide](backend/AGENTS.md) and [frontend guide](frontend/AGENTS.md) — architecture and tests
