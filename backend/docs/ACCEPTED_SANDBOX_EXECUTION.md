@@ -57,7 +57,11 @@ A third population is a code change, not a configuration.
    sandbox middleware, output externalization, lead agents, inherited
    subagents, and durable batch children resolve their handle through one
    resolver, `declared_sandbox()`, which answers from the executing context's
-   declaration; nothing in a runtime context dict can stand in for it.
+   declaration; nothing in a runtime context dict can stand in for it. The
+   raw provider verbs (`get`, `acquire`, `acquire_async`) are called only
+   from the modules that own resolution; `tests/test_sandbox_handle_boundary.py`
+   scans the harness and the Gateway and fails on any other caller, so the
+   opt-out is one allowlist entry, visible in the diff.
 
 ## Session provider
 
