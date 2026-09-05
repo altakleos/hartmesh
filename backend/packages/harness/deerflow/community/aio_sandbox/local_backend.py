@@ -980,7 +980,7 @@ class LocalContainerBackend(SandboxBackend):
         try:
             self._create_internal_network(network_name, sandbox_id)
             self._create_egress_network(egress_network_name, sandbox_id)
-            self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token)
+            proxy_address = self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token)
             proxy_url = f"http://{proxy_name}:3128"
             return self._start_container(
                 container_name,
@@ -989,6 +989,12 @@ class LocalContainerBackend(SandboxBackend):
                 config_mount_exclusion_root=config_mount_exclusion_root,
                 network_override=network_name,
                 publish_port=False,
+                # The sandbox reaches its proxy by name. Docker's embedded DNS
+                # (127.0.0.11) is a NAT rule in the host network namespace,
+                # which a sandbox running under its own network stack (gVisor's
+                # runsc) never sees, so the name is also pinned in /etc/hosts
+                # with the address Docker assigned on the internal network.
+                extra_hosts={proxy_name: proxy_address} if proxy_address else None,
                 extra_environment={
                     "HTTP_PROXY": proxy_url,
                     "HTTPS_PROXY": proxy_url,
@@ -1083,7 +1089,8 @@ class LocalContainerBackend(SandboxBackend):
         port: int,
         sandbox_id: str,
         relay_token: str,
-    ) -> None:
+    ) -> str | None:
+        """Create, connect, start and provision the sidecar; return its internal-network address."""
         allow_domains = self._network_config.get("allow_domains", [])
         proxy_image = self._proxy_image()
         labels = self._restricted_labels(sandbox_id, "network-proxy")
@@ -1165,6 +1172,30 @@ class LocalContainerBackend(SandboxBackend):
         )
         if copied.returncode != 0:
             raise RuntimeError(f"Failed to install sandbox network proxy: {(copied.stderr or b'').decode(errors='replace').strip()}")
+        return self._container_network_address(proxy_name, network_name)
+
+    def _container_network_address(self, container_name: str, network_name: str) -> str | None:
+        """Return the IPv4 address Docker assigned to ``container_name`` on ``network_name``."""
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", "--format", "{{(index .NetworkSettings.Networks " + json.dumps(network_name) + ").IPAddress}}", container_name],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning("Could not read the network address of %s on %s: %s", container_name, network_name, exc)
+            return None
+        candidate = (result.stdout or "").strip()
+        if result.returncode != 0 or not candidate:
+            logger.warning("Could not read the network address of %s on %s: %s", container_name, network_name, (result.stderr or "").strip() or "<empty>")
+            return None
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            logger.warning("Docker reported a non-address %r for %s on %s", candidate, container_name, network_name)
+            return None
+        return candidate
 
     def destroy(self, info: SandboxInfo) -> None:
         """Stop the container and release its port."""
@@ -1614,6 +1645,7 @@ class LocalContainerBackend(SandboxBackend):
         publish_port: bool = True,
         extra_environment: dict[str, str] | None = None,
         labels: dict[str, str] | None = None,
+        extra_hosts: dict[str, str] | None = None,
     ) -> str:
         """Start a new container.
 
@@ -1788,6 +1820,9 @@ class LocalContainerBackend(SandboxBackend):
         if labels and self._runtime == "docker":
             for key, value in labels.items():
                 cmd.extend(["--label", f"{key}={value}"])
+        if extra_hosts and self._runtime == "docker":
+            for host, address in extra_hosts.items():
+                cmd.extend(["--add-host", f"{host}:{address}"])
 
         # Environment variables
         for key, value in self._environment.items():

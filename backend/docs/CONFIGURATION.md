@@ -935,7 +935,11 @@ rejected. Traffic that ignores proxy environment variables still has no route
 out of the internal bridge. DeerFlow also sets the upstream AIO image's
 `PROXY_SERVER`/`PROXY_EXCLUDE` variables so its Chromium service uses the same
 policy sidecar; standard upper/lower-case HTTP, HTTPS, and ALL proxy variables
-cover shell and package-manager clients.
+cover shell and package-manager clients. The sidecar's name is also pinned in
+the sandbox's `/etc/hosts` (`--add-host`) with the address Docker assigned on
+the internal bridge: Docker's embedded DNS at `127.0.0.11` is a NAT rule in the
+host network namespace, which a sandbox running under its own network stack
+(gVisor's `runsc` via `DEER_FLOW_SANDBOX_RUNTIME`) never sees.
 
 The sidecar is dual-homed between the sandbox's internal bridge and a separate
 per-sandbox egress bridge with inter-container communication disabled. It is

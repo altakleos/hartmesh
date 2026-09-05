@@ -462,6 +462,104 @@ def test_restricted_sandbox_has_no_published_port_and_forces_proxy_env(monkeypat
     assert proxy_values[-1] == "HTTP_PROXY=http://deer-flow-netproxy-test:3128"
 
 
+def test_restricted_start_pins_the_proxy_name_in_the_sandbox_hosts_file(monkeypatch):
+    """A sandbox under its own network stack (gVisor) cannot use Docker's
+    embedded DNS, so the proxy name it is told to use must also resolve from
+    /etc/hosts with the address Docker assigned on the internal network."""
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    backend._network_mode = "allowlist"
+    backend._network_config = {"mode": "allowlist", "allow_domains": [], "approval": "prompt", "proxy_image": "proxy:latest"}
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "missing")
+    monkeypatch.setattr(backend, "_create_internal_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_create_egress_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
+    captured: dict[str, object] = {}
+
+    def fake_start(container_name, port, extra_mounts, **kwargs):
+        captured.update(kwargs)
+        return "container-id"
+
+    monkeypatch.setattr(backend, "_start_container", fake_start)
+
+    backend._start_restricted_sandbox("sandbox-id", "sandbox-name", 18080, None, config_mount_exclusion_root=None, relay_token="test-relay-token")
+
+    proxy_name, _ = backend._resource_names("sandbox-id")
+    assert captured["extra_hosts"] == {proxy_name: "172.24.0.2"}
+    assert captured["extra_environment"]["HTTPS_PROXY"] == f"http://{proxy_name}:3128"
+
+
+def test_start_container_emits_add_host_entries_for_docker_only(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **_kwargs):
+        captured_cmd.extend(cmd)
+        return SimpleNamespace(stdout="container-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._start_container("sandbox-test", 18080, extra_hosts={"proxy-name": "172.24.0.2"})
+    assert captured_cmd[captured_cmd.index("--add-host") + 1] == "proxy-name:172.24.0.2"
+
+    captured_cmd.clear()
+    monkeypatch.setattr(backend, "_runtime", "container")
+    backend._start_container("sandbox-test", 18080, extra_hosts={"proxy-name": "172.24.0.2"})
+    assert "--add-host" not in captured_cmd
+
+
+def test_start_network_proxy_returns_its_internal_network_address(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    backend._network_mode = "allowlist"
+    backend._network_config = {"mode": "allowlist", "allow_domains": [], "approval": "prompt", "proxy_image": "proxy:latest"}
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        if cmd[:2] == ["docker", "inspect"]:
+            assert "network-name" in cmd[3]
+            return SimpleNamespace(stdout="172.24.0.2\n", stderr="", returncode=0)
+        return SimpleNamespace(stdout="proxy-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    address = backend._start_network_proxy("proxy-name", "network-name", "egress-network-name", "sandbox-name", 18080, "sandbox-id", "test-relay-token")
+
+    assert address == "172.24.0.2"
+    assert commands[-1][:2] == ["docker", "inspect"] and commands[-1][-1] == "proxy-name"
+
+
+def test_container_network_address_tolerates_inspect_failures(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="not-an-address\n", stderr="", returncode=0))
+    assert backend._container_network_address("proxy-name", "network-name") is None
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="", stderr="No such object", returncode=1))
+    assert backend._container_network_address("proxy-name", "network-name") is None
+
+
 def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
     backend = LocalContainerBackend(
         image="sandbox:latest",
