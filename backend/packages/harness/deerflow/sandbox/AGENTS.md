@@ -1,66 +1,68 @@
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
 During a durable invocation, file tools validate skill paths against the
-accepted snapshot before provider IO. Provider path mapping may translate that
-tree, but it must not expose mutable live skill roots. Remote materialization is
-fenced and verified before the run enters `started`; unsupported nonempty
-accepted material fails before graph/model work.
+accepted snapshot before provider IO; path mapping may translate that tree but
+never exposes live skill roots. Remote materialization is fenced and verified
+before `started`; unsupported nonempty material fails before graph/model work.
 
-**Accepted-material deep module**: `accepted_material.py` owns the canonical
+**Accepted-material deep module**: `accepted_material.py` owns the
 provider-neutral V1/V2 contracts, capability profiles,
-`AcceptedSandboxSession`, and `AcceptedMaterializer` protocol; `operations.py`
-declares every `Sandbox` verb, `session.py` resolves every handle. Provider SDK objects,
-credentials, and opaque renewal handles never enter persisted evidence. A lease
-is valid only for its exact provider instance and monotonically fenced ownership
-epoch; stale workers must not validate, renew, execute, or destroy a newer
-epoch. Duplicate requests are idempotent only when their canonical digest is
-identical. The in-memory adapter and OpenSandbox stateful control-plane fake are
+`AcceptedSandboxSession`, and the `AcceptedMaterializer` protocol;
+`operations.py` declares every `Sandbox` verb, `session.py` resolves every
+handle. Provider SDK objects, credentials, and renewal handles never enter
+persisted evidence. A lease is valid only for its exact provider instance and
+fenced ownership epoch (stale workers must not validate, renew, execute, or
+destroy a newer epoch); duplicates are idempotent only on an identical
+canonical digest. The in-memory adapter and OpenSandbox control-plane fake are
 contract-test tools, never production proof.
 
 The dormant exact-two AIO recovery seam keeps the immutable accepted resource
-tuple separate from mutable execution authority. Its candidate design retains
-the immutable capability Secret in the material receipt and projects a second,
-non-evidence execution-claim Secret for newly admitted exact-two runs. The
-claim's name and UID are Lease-anchored and its credential rotates under the
-tenant/run/owner/state/material CAS. This is not current recovery authority:
-Secret projection/rotation is not linearizable revocation, so every takeover
+tuple separate from mutable execution authority: the capability Secret stays in
+the material receipt and a second, non-evidence execution-claim Secret
+(Lease-anchored name/UID, credential rotated under the
+tenant/run/owner/state/material CAS) is projected per exact-two run. It is not
+recovery authority: rotation is not linearizable revocation, so every takeover
 claim is rejected before owner CAS. Never put renewable timestamps, current
 Gateway owners, or rotating claim credentials into immutable evidence.
 
-Adapters are opt-in rather than methods every ordinary `SandboxProvider` must
-fake. `resolve_accepted_materializer` discovers only the optional provider
-selection hook and returns the neutral port plus its pinned runtime/lease
-inputs; the worker never imports a concrete adapter. No adapter means
-`empty_only`. `AioAcceptedMaterializer` delegates to the
-existing `rwx_verified_copy_v2` acquisition/revalidation/renewal tuple and keeps
-its qualification scope unchanged. The OpenSandbox SDK boundary offloads sync
-calls, validates bounded responses, and maps failures to secret-free codes, but
-its accepted adapter is intentionally unavailable because SDK 0.1.15 has no
-atomic metadata claim and cannot report a separately resolved image digest;
-candidate trusted-setup surfaces remain live-unqualified. Never replace those controls with process-local locks,
-ordinary owner-controlled `chmod`, or echoed requested-image metadata. See
-`backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md`.
-The SDK remains an optional harness/runtime dependency; the backend `make test`
-recipe selects its exact lock-pinned extra solely for the offline Phase 0 byte
-and surface probe.
+Adapters are opt-in, not methods every `SandboxProvider` must fake:
+`resolve_accepted_materializer` discovers only the optional provider selection
+hook and returns the neutral port plus its pinned runtime/lease inputs (the
+worker never imports a concrete adapter; no adapter means `empty_only`).
+`AioAcceptedMaterializer` delegates to the `rwx_verified_copy_v2` tuple with
+its qualification scope unchanged.
+The OpenSandbox SDK boundary offloads sync calls, validates bounded responses,
+and maps failures to secret-free codes, but its accepted adapter is unavailable
+because SDK 0.1.15 has no atomic metadata claim and cannot report a separately
+resolved image digest; never replace those controls with process-local locks,
+owner-controlled `chmod`, or echoed requested-image metadata (see
+`backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md`). The SDK is an
+optional extra pinned by `make test` only for the offline Phase 0 probe.
 
-**Interface**: `Sandbox` exposes command execution and bounded file/list/search
-operations. Optional per-call `env` carries request-scoped secrets;
-`LocalSandbox` merges it into the subprocess environment and `AioSandbox` uses
-a fresh `bash.exec(env=...)` session.
+**Interface**: `Sandbox` exposes command execution, bounded file/list/search
+operations, and additive `execute_command_in_scope` / `release_command_scope`
+hooks (pass-through by default; AIO keeps a persistent shell per scope).
+Per-call `env` carries request-scoped secrets: `LocalSandbox` merges it into
+the subprocess environment, `AioSandbox` uses a fresh `bash.exec(env=...)`.
 **Provider pattern**: `SandboxProvider` owns acquire/get/release lifecycle. Async
 paths use its async hooks so remote creation, locking, readiness, and release
 stay off the event loop. Providers advertise skill isolation only when every
 Agent-accessible path enforces it; unsupported explicit policies fail closed.
+**Execution leases** (`sandbox/lease.py`): the process-local
+`SandboxLeaseManager` counts concurrent users of one client; only the last
+holder parks it, fork children and upload syncs are borrowers. Managers are
+keyed by `lifecycle_sandbox_provider`, so a backing provider and its session
+provider share one manager that calls through the wrapper; accepted-skill
+sandboxes are borrowers (the projection refcount parks them) and declared
+sessions take no lease.
 **Shared components** (RFC #4741): remote providers keep the compatible
 sha256/16-hex identity from `derive_sandbox_scope_token` and serialize selected
-transitions with the bounded, reclaiming `AcquireSerializer`. AIO keys by
-`(user_id, thread_id)`, E2B by `(user_id, thread_id, skills_root)`, and
-BoxLite/Tenki/OpenSandbox by derived sandbox id. Random no-thread acquisitions
-do not enter the serializer; provider shutdown/reset closes it idempotently.
-**Authorization gate** (`sandbox:execute`, RFC #4063 Phase 3): every sandbox-backed tool call passes through the gate in `deerflow/authz/sandbox_authz.py` - a binary `authorize(principal, "sandbox", "execute", target="*")` check before either reusing a persisted sandbox id or calling `provider.acquire`. Rechecking reuse is required because authorization config and user roles can change while the sandbox remains cached. Sync tool invocations call `authorize_sandbox_execution`; async tool invocations await `authorize_sandbox_execution_async` exactly once. A task-local `ContextVar` scopes that single decision across the complete composed tool invocation, including `ReadBeforeWriteMiddleware`'s pre-write inspection, tool body, and post-read mark; the value is copied into `asyncio.to_thread` workers. Authorization denial is converted to the normal error `ToolMessage` at the composed middleware boundary and is explicitly excluded from the gate's generic fail-open handlers. Async config loading and provider class discovery/import are offloaded before `aauthorize()` so reused sandbox calls do not hash config files or import custom modules on the event loop; provider construction remains on the running event loop because async providers may initialize loop-affine clients. The gate lives at the single tool initialization entry point (`ensure_sandbox_initialized` / `ensure_sandbox_initialized_async` in `tools.py`), while `SandboxMiddleware.before_agent` / `abefore_agent` apply the matching sync/async check to eager acquisition. Deny raises `SandboxAuthorizationError` (`sandbox/exceptions.py`), which propagates out of ordinary tool execution as a friendly error `ToolMessage` ("sandbox execution is not permitted for your role") - the eager path catches it and skips acquisition instead, deferring the deny to the first sandbox-touching tool call so both paths share the same semantics. Provider errors (authorization calls and provider resolution) follow `authorization.fail_closed` / `fail_open`; no readable `config.yaml` or `authorization.enabled: false` makes the gate a no-op (`safe_app_config` tolerates missing config). Gateway auxiliary sync paths (uploads/artifacts routers) call `try_acquire_sandbox_for_request` (`app/gateway/authz.py`), which gates via `authorize_sandbox_for_request` and skips the sync on deny - the upload/artifact edit itself still succeeds. Tests: `tests/test_sandbox_authorization.py` and `tests/blocking_io/test_sandbox_authorization.py`.
+transitions with the bounded, reclaiming `AcquireSerializer` (AIO keys by
+`(user_id, thread_id)`, E2B adds `skills_root`, BoxLite/Tenki/OpenSandbox use
+the derived id; no-thread acquires skip it; shutdown/reset closes it).
+**Authorization gate** (`sandbox:execute`, RFC #4063 Phase 3): every sandbox-backed tool call passes through the gate in `deerflow/authz/sandbox_authz.py` - a binary `authorize(principal, "sandbox", "execute", target="*")` check before either reusing a persisted sandbox id or calling `provider.acquire`. Reuse is rechecked because authorization config and roles can change while the sandbox stays cached. Sync tools call `authorize_sandbox_execution`; async tools await `authorize_sandbox_execution_async` once, and a task-local `ContextVar` scopes that decision across the composed invocation (including `ReadBeforeWriteMiddleware`'s pre-write inspection, tool body, and post-read mark) and into `asyncio.to_thread` workers. Denial becomes the normal error `ToolMessage` at the composed middleware boundary and is excluded from the gate's fail-open handlers. Config loading and provider class discovery are offloaded before `aauthorize()`; provider construction stays on the running loop because async providers may initialize loop-affine clients. The gate lives at the tool initialization entry point (`ensure_sandbox_initialized` / `_async` in `tools.py`); `SandboxMiddleware.before_agent` / `abefore_agent` apply the same check to eager acquisition. Deny raises `SandboxAuthorizationError` (`sandbox/exceptions.py`), surfaced as a friendly error `ToolMessage` ("sandbox execution is not permitted for your role"); the eager path skips acquisition instead and defers the deny to the first sandbox-touching tool call. Provider errors follow `authorization.fail_closed` / `fail_open`; no readable `config.yaml` or `authorization.enabled: false` makes the gate a no-op. Gateway upload/artifact sync and channel file receipt (`app/channels/sandbox_files.py`) call `try_acquire_sandbox_for_request` (`app/gateway/authz.py`), which gates via `authorize_sandbox_for_request`, returns a request lease released after the last operation, and skips the sync on deny while the edit itself still succeeds. Tests: `tests/test_sandbox_authorization.py` and `tests/blocking_io/test_sandbox_authorization.py`.
 
-**Environment policy** (`sandbox/env_policy.py`): `execute_command` no longer inherits the full `os.environ`. `build_sandbox_env()` scrubs secret-looking names (`*KEY*`/`*SECRET*`/`*TOKEN*`/`*PASS*`/`*CREDENTIAL*`) from the inherited environment before layering injected request secrets on top, so platform credentials (e.g. `OPENAI_API_KEY`) never leak into skill subprocesses. Benign vars (`PATH`, `HOME`, `LANG`, `VIRTUAL_ENV`, ...) are preserved.
+**Environment policy** (`sandbox/env_policy.py`): `execute_command` does not inherit the full `os.environ`; `build_sandbox_env()` scrubs secret-looking names (`*KEY*`/`*SECRET*`/`*TOKEN*`/`*PASS*`/`*CREDENTIAL*`) before layering injected request secrets, so platform credentials never leak into skill subprocesses while benign vars (`PATH`, `HOME`, `LANG`, `VIRTUAL_ENV`, ...) survive.
 **Implementations**:
 - `LocalSandboxProvider` - Local filesystem execution. `acquire(thread_id)` returns a per-user/thread `LocalSandbox` (id `local:{user_id}:{thread_id}`) whose `path_mappings` resolve `/mnt/user-data/{workspace,uploads,outputs}` and `/mnt/acp-workspace` to that thread's host directories, so the public `Sandbox` API honours the `/mnt/user-data` contract uniformly with AIO. `acquire()` / `acquire(None)` keeps the legacy generic singleton (id `local`) for callers without a thread context. Per-thread sandboxes are held in an LRU cache (default 256 entries) guarded by a `threading.Lock`. Shared runs use category mappings; a policy-scoped run replaces them with one `/mnt/skills` root mapping to the coherent thread view, so structured file tools resolve through one managed boundary. This is not a host filesystem security boundary: an enabled host `bash` subprocess can use canonical paths without `PathMapping`, so `supports_agent_skill_isolation` is dynamic and explicit Agent policies fail closed while host bash is enabled. Host-to-virtual output masking scans dynamic per-user/per-thread roots directly instead of compiling path-specific regexes, so evicted thread IDs do not remain in Python's global regex caches; a separate 256-entry root cache prevents repeated `realpath()` walks for every glob/grep match while bounding dynamic-path retention, and only the small process-stable skill/integration source set uses a bounded compiled cache. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes; do not restore a blanket conversion disable, because host-native CLI launchers need normal MSYS path conversion for their own installation paths.
 - `AioSandboxProvider` (`packages/harness/deerflow/community/`) - Docker-based isolation. Active-cache and warm-pool entries are checked with the backend during acquire/reuse; definitively dead containers are dropped from all in-process maps so the thread can discover or create a fresh sandbox instead of reusing a stale client. Backend health-check failures are treated as unknown, not dead; local discovery likewise treats an unverifiable container as not adoptable and falls through to create rather than failing acquire. `get()` remains an in-memory lookup for event-loop-safe tool paths — it never touches the ownership store (that would be blocking IO on the event loop); ownership is published on acquire/reclaim and refreshed off the event loop by the dedicated renewal thread (`_renew_owned_leases`). `reset()` closes the per-instance acquire serializer so replacing the singleton cannot retain its executor workers; full remote sandbox teardown remains `shutdown()`. `uses_thread_data_mounts` defaults to backend detection (`LocalContainerBackend=True`, remote/provisioner backends=False), while the optional `sandbox.thread_data_mounts` boolean takes precedence for deployments that guarantee the Gateway and sandbox share the same thread user-data directories. Setting it `true` skips upload-time sandbox acquire/sync; a false positive leaves uploads unavailable to the sandbox. An explicit Agent policy uses four thread projection category mounts and a distinct deterministic sandbox identity, preventing reuse of an older container created with shared mounts. `skills.container_path` is a provider-startup snapshot shared by mount construction, sandbox identity, the remote Gateway request, and provisioner validation; custom roots are identity-scoped so a container or Pod created for one destination cannot be reused after the root changes. The Gateway and provisioner independently require one canonical absolute root that does not overlap reserved platform mounts, and both derive the four category allowlist entries from that root. The provisioner accepts all four category overrides; when all are present it suppresses the default hostPath or skills-PVC mount. With `USERDATA_PVC_NAME`, the thread projection categories use subpaths on that shared data PVC. Readiness probes and `agent_sandbox` clients classify loopback/private IPs, single-label cluster hosts, and Docker/Podman internal hostnames as direct control-plane destinations and set `trust_env=False`; external FQDNs and public IPs retain environment proxy support.
@@ -150,7 +152,7 @@ do not enter the serializer; provider shutdown/reset closes it idempotently.
 
 **Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
 - Every sandbox tool keeps a model-visible `description` field for a human-readable progress label, but the field is optional and defaults to an empty string. Tool execution must depend only on its operational arguments; the frontend supplies localized fallback labels when a provider omits `description`.
-- `bash` - Execute commands with path translation and error handling. For `LocalSandbox` (host bash), output on POSIX and Windows is captured through bounded pipe-drain threads and stdin is `/dev/null`; Windows capture decodes with the platform text encoding and applies universal-newline translation, matching the former `subprocess.run(..., text=True)` behavior for locale-code-page output, Python UTF-8 Mode, CRLF, and bare CR. That translation is Windows-only so the pre-existing POSIX output contract remains byte-decoded without newline rewriting. On POSIX, a backgrounded long-lived process (`server &`) returns immediately instead of blocking the turn on an inherited pipe, while unredirected background output is drained without growing anonymous temp files. Commands that read stdin get immediate EOF. The command runs in its own process group with a wall-clock timeout (`sandbox.bash_command_timeout`, default 600s); on timeout the whole POSIX process group or Windows process tree is killed and the agent gets a notice telling it to background long-lived processes. The bash tool description itself also instructs the model to background long-lived processes (e.g. servers) up front so it doesn't waste the turn waiting on a foreground server. See `LocalSandbox.execute_command`, its platform runners, and `bash_tool`'s docstring.
+- `bash` - Execute commands with path translation and error handling. For `LocalSandbox` (host bash), output on POSIX and Windows is captured through bounded pipe-drain threads and stdin is `/dev/null`; Windows capture decodes with the platform text encoding and applies universal-newline translation, matching the former `subprocess.run(..., text=True)` behavior for locale-code-page output, Python UTF-8 Mode, CRLF, and bare CR. That translation is Windows-only so the pre-existing POSIX output contract remains byte-decoded without newline rewriting. On POSIX, a backgrounded long-lived process (`server &`) returns immediately instead of blocking the turn on an inherited pipe, while unredirected background output is drained without growing anonymous temp files. Commands that read stdin get immediate EOF. The command runs in its own process group with a wall-clock timeout (`sandbox.bash_command_timeout`, default 600s); on timeout the whole POSIX process group or Windows process tree is killed and the agent gets a notice telling it to background long-lived processes. The shared bash tool description scopes host environment detection to LocalSandbox: start with `uname -s`, follow with `sw_vers` on Darwin, and read Linux host system files only when the active policy permits them. Local path and `file://` rejections provide the same conditional recovery guidance: command-only probes for environment questions, allowed virtual paths otherwise, and no repetition of the rejected path. The description also instructs the model to background long-lived processes (e.g. servers) up front so it doesn't waste the turn waiting on a foreground server. See `LocalSandbox.execute_command`, its platform runners, and `bash_tool`'s docstring.
 - `ls` - Directory listing (tree format, max 2 levels)
 - `glob` - Find files or directories below a root directory with bounded results
 - `grep` - Search one text file or recursively search a directory, with optional glob filtering and bounded line-level results

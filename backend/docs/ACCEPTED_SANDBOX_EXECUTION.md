@@ -103,6 +103,24 @@ stale worker cannot publish accepted terminal success. A provider may set
 `atomic_provider_operation_fencing=true` only when the expected epoch travels in
 the operation request and is checked atomically with starting that operation.
 
+Upstream's execution leases (`sandbox/lease.py`) sit beside this, not inside
+it. The lease manager only ever calls the provider's `acquire`, `get`, and
+`release`, and HartMesh keys every manager by the installed session provider
+(`lifecycle_sandbox_provider`), so a caller holding the backing provider and a
+caller holding the wrapper share one manager whose calls go through the
+declaration dispatch above. A declared execution never takes a lease: its
+tools and middleware resolve the declared handle before any lease code runs,
+and the declarer owns the terminal. Accepted-skill sandboxes (the projection
+material, not an accepted session) are held under the execution lease as
+borrowers, because the projection's consumer refcount is what parks them.
+
+Provider hooks that are keyed by sandbox id, today the network policy hooks
+(`consume`, `deny_pending`, `decide`), receive whatever id state carries. For a
+declared session that is the public ref, so the session provider translates it
+to the provider's own id, which the declaration carries as `provider_ref`, for
+the declaring execution only; a stranger's call resolves to no events and no
+decision, and the provider id never appears in state, logs, or evidence.
+
 ## V1 and V2 persistence boundary
 
 V1 remains strictly decodable under its original guarantees. It is never silently

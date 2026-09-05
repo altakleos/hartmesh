@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0036_execution_policy_state"
+HEAD = "0037_merge_upstream_0018"
 BASELINE = "0001_baseline"
 
 

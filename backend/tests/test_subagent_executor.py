@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from packaging.version import Version
 
+from deerflow.sandbox.lease import SandboxLeaseManager
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import SubagentCapacityRejected
 from deerflow.trace_context import request_trace_context
@@ -661,6 +662,63 @@ class TestAgentConstruction:
         assert isinstance(messages[0], SystemMessage)
         assert base_config.system_prompt in messages[0].content
         assert isinstance(messages[1], HumanMessage)
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_seeds_current_upload_snapshot(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A delegated graph receives the parent's current-run upload boundary."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        parent_uploads = [
+            {
+                "filename": "fresh.pdf",
+                "size": 128,
+                "path": "/mnt/user-data/uploads/fresh.pdf",
+                "extension": ".pdf",
+                "outline": [{"line": 1, "title": "Summary"}],
+            }
+        ]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            uploaded_files=parent_uploads,
+        )
+
+        parent_uploads[0]["filename"] = "mutated-after-dispatch.pdf"
+        parent_uploads[0]["outline"][0]["title"] = "Mutated"
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+
+        assert state["uploaded_files"] == [
+            {
+                "filename": "fresh.pdf",
+                "size": 128,
+                "path": "/mnt/user-data/uploads/fresh.pdf",
+                "extension": ".pdf",
+                "outline": [{"line": 1, "title": "Summary"}],
+            }
+        ]
+        assert state["uploaded_files"] is not parent_uploads
+        assert state["uploaded_files"][0] is not parent_uploads[0]
+
+        empty_executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            uploaded_files=[],
+        )
+        empty_state, _final_tools, _deferred_setup = await empty_executor._build_initial_state("Find earlier uploads")
+        assert "uploaded_files" in empty_state
+        assert empty_state["uploaded_files"] == []
 
     @pytest.mark.anyio
     async def test_build_initial_state_no_system_prompt_with_skills(
@@ -1729,6 +1787,125 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
+    async def test_aexecute_finally_releases_only_the_failing_subagent_lease(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        monkeypatch,
+    ):
+        """The executor's outer finally must clean up a lease on graph failure."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        sandbox = MagicMock()
+        provider = MagicMock()
+        provider.get.return_value = sandbox
+        manager = SandboxLeaseManager(provider)
+        manager.retain(
+            "lead",
+            "shared",
+            thread_id="test-thread",
+            user_id="default",
+        )
+        captured_owner: list[str] = []
+
+        async def failing_stream(*args, context, **kwargs):
+            owner_id = context["sandbox_lease_owner_id"]
+            captured_owner.append(owner_id)
+            context["sandbox_id"] = "shared"
+            manager.retain(
+                owner_id,
+                "shared",
+                thread_id=context["thread_id"],
+                user_id=context.get("user_id") or "default",
+            )
+            raise RuntimeError("Agent error after sandbox acquisition")
+            yield  # pragma: no cover - make this an async generator
+
+        mock_agent.astream = failing_stream
+        sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = provider
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(lease_module, "get_sandbox_lease_manager", lambda _provider: manager)
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.FAILED
+        assert "Agent error after sandbox acquisition" in result.error
+        assert len(captured_owner) == 1
+        assert manager.binding_for(captured_owner[0]) is None
+        assert manager.binding_for("lead") == "shared"
+        assert sandbox.release_command_scope.call_args_list == [((captured_owner[0],), {})]
+        provider.release.assert_not_called()
+
+        manager.release("lead")
+        provider.release.assert_called_once_with("shared")
+
+    @pytest.mark.anyio
+    async def test_aexecute_fork_restored_state_cleans_scope_without_parking_parent(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        monkeypatch,
+    ):
+        """A fork-restored child is a client user even though it cannot park the parent."""
+        from langgraph.types import Overwrite
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        sandbox = MagicMock()
+        provider = MagicMock()
+        provider.get.return_value = sandbox
+        manager = SandboxLeaseManager(provider)
+        captured_owner: list[str] = []
+
+        async def failing_stream(state, *args, context, **kwargs):
+            assert isinstance(state["sandbox"], Overwrite)
+            owner_id = context["sandbox_lease_owner_id"]
+            captured_owner.append(owner_id)
+            manager.retain(
+                owner_id,
+                "shared",
+                thread_id=context["thread_id"],
+                user_id=context.get("user_id") or "default",
+                release_on_last=False,
+            )
+            context["sandbox_id"] = "shared"
+            raise RuntimeError("forked child failed after opening a scope")
+            yield  # pragma: no cover - make this an async generator
+
+        mock_agent.astream = failing_stream
+        sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = provider
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(lease_module, "get_sandbox_lease_manager", lambda _provider: manager)
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            sandbox_state=Overwrite({"sandbox_id": "shared"}),
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.FAILED
+        assert "forked child failed after opening a scope" in result.error
+        assert len(captured_owner) == 1
+        assert manager.binding_for(captured_owner[0]) is None
+        sandbox.release_command_scope.assert_called_once_with(captured_owner[0])
+        provider.release.assert_not_called()
+
+    @pytest.mark.anyio
     async def test_aexecute_recursion_error_with_partial_surfaces_completed_turn_capped(self, classes, base_config, mock_agent, msg):
         """#3875 Phase 2: ``GraphRecursionError`` (``recursion_limit`` ==
         ``max_turns``) with usable partial work surfaces as ``completed`` +
@@ -2510,7 +2687,9 @@ class TestThreadSafety:
 
         class BlockingDateTime:
             @staticmethod
-            def now():
+            def now(tz=None):
+                # Signature mirrors datetime.now's optional tz argument: the
+                # production writer stamps UTC via datetime.now(UTC).
                 now_entered.set()
                 release_now.wait(timeout=5)
                 return completed_at
@@ -4003,6 +4182,10 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
         assert context.get("is_subagent") is True
+        lease_owner = context.get("sandbox_lease_owner_id")
+        assert isinstance(lease_owner, str)
+        assert lease_owner.startswith("subagent:")
+        assert context.get("sandbox_command_scope_id") == lease_owner
 
     @pytest.mark.anyio
     async def test_background_subagent_retains_and_propagates_projection_consumer(
@@ -5480,3 +5663,27 @@ class TestBashExecutionHarvest:
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.bash_executions is None
+
+
+def test_timestamp_writers_stamp_utc_aware_datetimes(classes):
+    """Terminal transitions must stamp UTC-aware datetimes, not naive local wall-clock values."""
+    SubagentResult = classes["SubagentResult"]
+    SubagentStatus = classes["SubagentStatus"]
+
+    result = SubagentResult(task_id="tz-check", trace_id="trace-1", status=SubagentStatus.PENDING)
+    assert result.try_set_terminal(SubagentStatus.COMPLETED, result="done")
+
+    assert result.completed_at is not None
+    assert result.completed_at.tzinfo is not None
+    assert result.completed_at.utcoffset() is not None
+    assert result.completed_at.utcoffset().total_seconds() == 0.0
+
+
+def test_utcnow_helper_returns_utc_aware_datetime(classes):
+    """The shared timestamp writer must never depend on the host wall clock."""
+    executor_module = sys.modules["deerflow.subagents.executor"]
+
+    now = executor_module._utcnow()
+    assert now.tzinfo is not None
+    assert now.utcoffset() is not None
+    assert now.utcoffset().total_seconds() == 0.0

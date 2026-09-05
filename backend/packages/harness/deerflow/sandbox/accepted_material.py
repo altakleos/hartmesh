@@ -2649,6 +2649,9 @@ class AcceptedSandboxSessionBridge:
             handle=self._sandbox,
             is_live=lambda: self.is_open,
             retire=self.close_sync,
+            # The provider's own id stays inside the session provider, which
+            # translates the public ref for id-keyed provider hooks.
+            provider_ref=session._sandbox.id,
         )
 
     @property

@@ -196,6 +196,33 @@ class _MountPassLimitExceeded(Exception):
     """Stop the current mount upload pass at its aggregate resource limit."""
 
 
+@dataclass(frozen=True)
+class MountUploadResult:
+    """Structured outcome of a mount upload pass.
+
+    ``truncated`` is ``True`` only when the upload pass was stopped early
+    by a resource limit (deadline, file count, or byte budget).  Individual
+    mount failures (missing host path, SDK errors) are logged but do NOT
+    set ``truncated`` — use ``completed_files < attempted_files`` or
+    Gateway logs to diagnose those.
+
+    Carried on :attr:`E2BSandbox.mount_upload_result` so downstream code
+    (logging, system-prompt injection, Gateway status) can discover
+    truncation without re-parsing Gateway logs.
+
+    ``None`` on a reclaimed sandbox means "not available" (the result was
+    recorded at creation time and is only preserved within the same
+    Gateway process lifetime).
+    """
+
+    truncated: bool
+    reason: str | None
+    attempted_files: int
+    attempted_bytes: int
+    completed_files: int
+    completed_bytes: int
+
+
 @dataclass
 class _MountUploadBudget:
     deadline: float
@@ -283,6 +310,9 @@ class E2BSandboxProvider(SandboxProvider):
         # Per-(user,thread,skills_root) serializer for acquire() and release() state
         # transitions without holding the provider-wide lock across remote IO.
         self._acquire_serializer: AcquireSerializer[tuple[str, str, str]] = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
+        # Mount upload results keyed by sandbox id. Survives warm-pool
+        # reclaim so the result is available after reconnect.
+        self._mount_results: dict[str, MountUploadResult] = {}
         # Warm pool: released sandboxes whose remote micro-VM is still alive.
         # ``OrderedDict`` maintains insertion / move_to_end order for LRU.
         self._warm_pool: OrderedDict[str, tuple[str, float]] = OrderedDict()
@@ -923,6 +953,7 @@ class E2BSandboxProvider(SandboxProvider):
             with self._lock:
                 self._sandboxes.pop(sid, None)
                 self._thread_sandboxes.pop(key, None)
+            self._forget_mount_result(sid)
             try:
                 sandbox.close()
             except Exception:
@@ -974,6 +1005,7 @@ class E2BSandboxProvider(SandboxProvider):
                 target_id,
                 e,
             )
+            self._forget_mount_result(target_id)
             self._complete_transition_remote_op(target_id, remote_destroyed=False)
             return None
 
@@ -982,12 +1014,14 @@ class E2BSandboxProvider(SandboxProvider):
                 "Warm-pool e2b sandbox %s is no longer alive (reaped by control plane); dropping and falling back to create",
                 target_id,
             )
+            self._forget_mount_result(target_id)
             self._complete_transition_remote_op(target_id, remote_destroyed=True)
             return None
 
         try:
             self._publish_ownership(target_id)
         except Exception:
+            self._forget_mount_result(target_id)
             self._complete_transition_remote_op(target_id, remote_destroyed=False)
             self._safe_close_client(client)
             raise
@@ -995,6 +1029,7 @@ class E2BSandboxProvider(SandboxProvider):
         self._refresh_remote_timeout(client)
         bootstrap_error, remote_destroyed = self._bootstrap_or_discard(client, target_id)
         if bootstrap_error is not None:
+            self._forget_mount_result(target_id)
             self._complete_transition_remote_op(target_id, remote_destroyed=remote_destroyed)
             return None
 
@@ -1012,6 +1047,7 @@ class E2BSandboxProvider(SandboxProvider):
                 self._end_transition_locked()
 
         if discard_after_shutdown:
+            self._forget_mount_result(target_id)
             if self._claim_ownership(target_id, for_destroy=True):
                 self._kill_client(client)
                 self._release_ownership(target_id)
@@ -1605,8 +1641,9 @@ class E2BSandboxProvider(SandboxProvider):
 
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
+        mount_result: MountUploadResult | None = None
         try:
-            self._apply_mounts(
+            mount_result = self._apply_mounts(
                 client,
                 user_id=user_id,
                 thread_id=thread_id,
@@ -1616,6 +1653,7 @@ class E2BSandboxProvider(SandboxProvider):
             logger.warning("Failed to apply some mounts to e2b sandbox %s: %s", sandbox_id, e)
 
         sandbox = E2BSandbox(id=sandbox_id, client=client, home_dir=self._config["home_dir"])
+        sandbox.mount_upload_result = mount_result
 
         # Commit atomically.  If the provider shut down during bootstrap or
         # mounts, kill the VM rather than parking it under ``_sandboxes``
@@ -1628,6 +1666,8 @@ class E2BSandboxProvider(SandboxProvider):
                 self._remote_ops_in_progress.discard(sandbox_id)
                 self._commit_capacity()
                 self._sandboxes[sandbox_id] = sandbox
+                if mount_result is not None:
+                    self._mount_results[sandbox_id] = mount_result
                 if thread_id:
                     self._thread_sandboxes[self._thread_key(thread_id, user_id)] = sandbox_id
 
@@ -1780,6 +1820,7 @@ class E2BSandboxProvider(SandboxProvider):
             for key, sid in list(self._thread_sandboxes.items()):
                 if sid == sandbox_id:
                     self._thread_sandboxes.pop(key, None)
+        self._forget_mount_result(sandbox_id)
         if sandbox is not None:
             try:
                 sandbox.close()
@@ -2118,6 +2159,7 @@ class E2BSandboxProvider(SandboxProvider):
         The caller must hold ``self._lock``.
         """
         sandbox = E2BSandbox(id=sandbox_id, client=client, home_dir=self._config["home_dir"])
+        sandbox.mount_upload_result = self._mount_results.get(sandbox_id)
         self._sandboxes[sandbox_id] = sandbox
         self._warm_pool.pop(sandbox_id, None)
         if thread_id:
@@ -2324,13 +2366,14 @@ class E2BSandboxProvider(SandboxProvider):
         user_id: str | None = None,
         accepted_skills_only: bool = False,
         thread_id: str | None = None,
-    ) -> None:
+    ) -> MountUploadResult:
         started_at = time.monotonic()
         deadline_seconds = self._config.get("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)
         budget = _MountUploadBudget(
             deadline=started_at + deadline_seconds,
             deadline_seconds=deadline_seconds,
         )
+        truncation_reason: str | None = None
 
         def warn_pass_stopped(reason: str) -> None:
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
@@ -2367,7 +2410,8 @@ class E2BSandboxProvider(SandboxProvider):
 
         for host_path, container_path, read_only in mounts:
             if budget.expired:
-                warn_pass_stopped(_mount_deadline_reason(deadline_seconds))
+                truncation_reason = _mount_deadline_reason(deadline_seconds)
+                warn_pass_stopped(truncation_reason)
                 break
             if not host_path.exists():
                 logger.warning("Skipping e2b mount: host_path %s does not exist", host_path)
@@ -2389,10 +2433,20 @@ class E2BSandboxProvider(SandboxProvider):
             try:
                 self._upload_tree(client, host_path, container_path, read_only, budget=budget)
             except _MountPassLimitExceeded as e:
-                warn_pass_stopped(str(e))
+                truncation_reason = str(e)
+                warn_pass_stopped(truncation_reason)
                 break
             except Exception as e:
                 logger.warning("Failed to upload mount %s -> %s: %s", host_path, container_path, e)
+
+        return MountUploadResult(
+            truncated=truncation_reason is not None,
+            reason=truncation_reason,
+            attempted_files=budget.attempted_files,
+            attempted_bytes=budget.attempted_bytes,
+            completed_files=budget.completed_files,
+            completed_bytes=budget.completed_bytes,
+        )
 
     def sync_agent_skills(
         self,
@@ -2905,6 +2959,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._evictions_in_progress.discard(evict_id)
                     if not self._shutdown_called:
                         self._eviction_tombstones.add(evict_id)
+            self._forget_mount_result(evict_id)
             self._release_ownership(evict_id)
             return None
 
@@ -2914,6 +2969,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._evictions_in_progress.discard(evict_id)
                     self._eviction_tombstones.discard(evict_id)
                     self._end_transition_locked()
+            self._forget_mount_result(evict_id)
             self._release_ownership(evict_id)
             logger.info("Evicted warm-pool e2b sandbox %s was already gone", evict_id)
             return evict_id
@@ -2926,6 +2982,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._evictions_in_progress.discard(evict_id)
                     if not self._shutdown_called:
                         self._eviction_tombstones.add(evict_id)
+            self._forget_mount_result(evict_id)
             self._release_ownership(evict_id)
             return None
 
@@ -2935,6 +2992,7 @@ class E2BSandboxProvider(SandboxProvider):
                 self._evictions_in_progress.discard(evict_id)
                 self._eviction_tombstones.discard(evict_id)
                 self._end_transition_locked()
+        self._forget_mount_result(evict_id)
         self._release_ownership(evict_id)
         logger.info("Evicted warm-pool e2b sandbox %s", evict_id)
         return evict_id
@@ -3074,6 +3132,10 @@ class E2BSandboxProvider(SandboxProvider):
             if transition_slot_held:
                 self._free_transitioning_slot()
 
+    def _forget_mount_result(self, sandbox_id: str) -> None:
+        """Drop the cached mount upload result for a sandbox that will not be reused."""
+        self._mount_results.pop(sandbox_id, None)
+
     def _kill_and_close(self, sandbox: E2BSandbox) -> None:
         if not self._claim_ownership(sandbox.id, for_destroy=True):
             logger.info("Not killing E2B sandbox %s because a peer owns it", sandbox.id)
@@ -3082,6 +3144,7 @@ class E2BSandboxProvider(SandboxProvider):
             except Exception:
                 pass
             return
+        self._forget_mount_result(sandbox.id)
         if error := self._kill_client(getattr(sandbox, "_client", None)):
             logger.debug(
                 "kill() on e2b sandbox %s raised (probably already gone): %s",

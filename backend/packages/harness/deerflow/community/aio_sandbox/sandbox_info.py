@@ -170,6 +170,12 @@ class SandboxInfo:
         repr=False,
         compare=False,
     )
+    # Discovery-only lifecycle signal. A backend may report a running sandbox
+    # whose persisted provisioning policy is incompatible with this process,
+    # but it must not destroy that sandbox while merely enumerating it. The
+    # provider consumes this flag and performs replacement only after obtaining
+    # its local teardown reservation and cross-instance teardown lease.
+    requires_replacement: bool = field(default=False, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {

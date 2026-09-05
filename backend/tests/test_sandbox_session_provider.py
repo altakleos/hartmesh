@@ -108,8 +108,23 @@ class _Backing(SandboxProvider):
     def destroy(self, sandbox_id):
         self.calls.append(("destroy", sandbox_id))
 
+    def sandbox_network_mode(self):
+        return "allowlist"
 
-def _declaration(*, public_ref="accepted-session-abc", mount_scope=("user-1", "thread-1"), live=True):
+    def consume_network_policy_events(self, sandbox_id):
+        self.calls.append(("consume_network_policy_events", sandbox_id))
+        return [{"request_id": "req-1", "host": "example.com", "port": 443}]
+
+    def deny_pending_network_policy_events(self, sandbox_id):
+        self.calls.append(("deny_pending_network_policy_events", sandbox_id))
+        return True
+
+    def decide_network_policy_request(self, sandbox_id, request_id, decision):
+        self.calls.append(("decide_network_policy_request", sandbox_id, request_id, decision))
+        return True
+
+
+def _declaration(*, public_ref="accepted-session-abc", mount_scope=("user-1", "thread-1"), live=True, provider_ref=None):
     state = {"live": live, "retired": 0}
 
     def retire() -> None:
@@ -124,6 +139,7 @@ def _declaration(*, public_ref="accepted-session-abc", mount_scope=("user-1", "t
         handle=_Handle(public_ref),
         is_live=lambda: state["live"],
         retire=retire,
+        provider_ref=provider_ref,
     )
     return declaration, state
 
@@ -363,3 +379,125 @@ def test_a_declaration_without_a_mount_scope_never_refuses_an_ordinary_acquire(s
 
     assert sandbox_id == "box:user-1:thread-1"
     assert ("acquire", "thread-1", "user-1") in backing.calls
+
+
+# -- provider hooks keyed by sandbox id translate the public ref ---------------
+
+
+def test_network_policy_hooks_translate_the_public_ref_only_for_the_declaring_execution(stack):
+    backing, registry, provider = stack
+    declaration, _ = _declaration(provider_ref="box:real")
+    registry.declare(declaration)
+
+    # A stranger holding the public ref learns nothing and reaches no container.
+    assert provider.consume_network_policy_events("accepted-session-abc") == []
+    assert provider.deny_pending_network_policy_events("accepted-session-abc") is False
+    assert provider.decide_network_policy_request("accepted-session-abc", "req-1", "deny") is False
+    assert backing.calls == []
+
+    with bind_sandbox_session(declaration):
+        assert provider.consume_network_policy_events("accepted-session-abc") == [{"request_id": "req-1", "host": "example.com", "port": 443}]
+        assert provider.deny_pending_network_policy_events("accepted-session-abc") is True
+        assert provider.decide_network_policy_request("accepted-session-abc", "req-1", "allow_temporary") is True
+    assert backing.calls == [
+        ("consume_network_policy_events", "box:real"),
+        ("deny_pending_network_policy_events", "box:real"),
+        ("decide_network_policy_request", "box:real", "req-1", "allow_temporary"),
+    ]
+    assert "accepted-session-abc" not in repr(backing.calls)
+
+    # An ordinary id passes through unchanged; a retired ref reaches nothing.
+    backing.calls.clear()
+    assert provider.deny_pending_network_policy_events("box:user-1:thread-9") is True
+    assert backing.calls == [("deny_pending_network_policy_events", "box:user-1:thread-9")]
+    registry.revoke("accepted-session-abc")
+    backing.calls.clear()
+    with bind_sandbox_session(declaration):
+        assert provider.consume_network_policy_events("accepted-session-abc") == []
+    assert backing.calls == []
+
+
+@pytest.mark.asyncio
+async def test_async_network_policy_hooks_translate_the_public_ref(stack):
+    backing, registry, provider = stack
+    declaration, _ = _declaration(provider_ref="box:real")
+    registry.declare(declaration)
+    assert await provider.consume_network_policy_events_async("accepted-session-abc") == []
+    assert await provider.deny_pending_network_policy_events_async("accepted-session-abc") is False
+    assert await provider.decide_network_policy_request_async("accepted-session-abc", "req-1", "deny") is False
+    assert backing.calls == []
+    with bind_sandbox_session(declaration):
+        assert await provider.consume_network_policy_events_async("accepted-session-abc") == [{"request_id": "req-1", "host": "example.com", "port": 443}]
+        assert await provider.deny_pending_network_policy_events_async("accepted-session-abc") is True
+        assert await provider.decide_network_policy_request_async("accepted-session-abc", "req-1", "allow_sandbox") is True
+    assert [call[1] for call in backing.calls] == ["box:real", "box:real", "box:real"]
+
+
+def test_a_declaration_without_a_provider_ref_never_reaches_the_backing_hooks(stack):
+    backing, registry, provider = stack
+    declaration, _ = _declaration()
+    registry.declare(declaration)
+    with bind_sandbox_session(declaration):
+        assert provider.consume_network_policy_events("accepted-session-abc") == []
+        assert provider.get("accepted-session-abc") is declaration.handle
+    assert backing.calls == []
+
+
+def test_provider_ref_must_be_a_non_empty_string_or_none():
+    with pytest.raises(ValueError, match="provider_ref"):
+        _declaration(provider_ref="")
+
+
+# -- lifecycle registries follow the installed session provider --------------
+
+
+def test_each_backing_provider_is_wrapped_exactly_once():
+    backing, other = _Backing(), _Backing()
+    wrapper = sandbox_session_provider(backing)
+    assert sandbox_session_provider(backing) is wrapper
+    assert sandbox_session_provider(wrapper) is wrapper
+    assert wrapper.backing is backing
+    assert sandbox_session_provider(other) is not wrapper
+    assert unwrap_sandbox_provider(wrapper) is backing
+
+
+def test_lease_manager_identity_follows_the_installed_session_provider():
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+    from deerflow.sandbox.session import get_sandbox_session_registry
+
+    backing = _Backing()
+    set_sandbox_provider(backing)
+    registry = get_sandbox_session_registry()
+    declaration, _ = _declaration(public_ref="accepted-session-lease")
+    try:
+        installed = get_sandbox_provider()
+        assert installed is not backing
+        manager = get_sandbox_lease_manager(backing)
+        # Whoever holds the backing provider and whoever holds the installed
+        # wrapper share one manager, and that manager calls through the wrapper.
+        assert get_sandbox_lease_manager(installed) is manager
+        assert manager.acquire("owner-1", "thread-2", user_id="user-1") == "box:user-1:thread-2"
+        assert manager.binding_for("owner-1") == "box:user-1:thread-2"
+        registry.declare(declaration)
+        with pytest.raises(SandboxSessionConflict):
+            manager.acquire("owner-2", "thread-1", user_id="user-1")
+        assert ("acquire", "thread-1", "user-1") not in backing.calls
+        manager.release("owner-1")
+        assert ("release", "box:user-1:thread-2") in backing.calls
+    finally:
+        registry.revoke("accepted-session-lease")
+        reset_sandbox_provider()
+    # Resetting the provider discards its manager with it.
+    assert get_sandbox_lease_manager(backing) is not manager
+    assert get_sandbox_lease_manager(backing).binding_for("owner-1") is None
+
+
+def test_a_partial_provider_double_keeps_its_own_lease_identity():
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+    from deerflow.sandbox.sandbox_provider import lifecycle_sandbox_provider
+
+    partial = SimpleNamespace(get=lambda sandbox_id: None, release=lambda sandbox_id: None)
+    assert lifecycle_sandbox_provider(partial) is partial
+    manager = get_sandbox_lease_manager(partial)
+    assert get_sandbox_lease_manager(partial) is manager
+    assert manager.binding_for("owner") is None

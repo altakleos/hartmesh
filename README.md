@@ -619,7 +619,7 @@ HartMesh preserves existing `deerflow.*` namespaces, package names, `DEER_FLOW_*
 The product comparison is the fixed local range `e16ef2969b1446162e19af7bdde1446674851e66...4023cb434aa67011b9d18e90029f473b55323856`.
 
 HartMesh `main` incorporates upstream `deerflow/main` through
-`30788c79ffd988e110d97dd69fbc17abc50a96c6` (2026-09-02).
+`0f7d8709d3bbf0be26460b6277fbad9329302243` (2026-09-04).
 
 That synchronization point is context, not the comparison baseline above, and
 HartMesh makes no evergreen superiority claim.

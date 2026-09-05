@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from deerflow_extension_api import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -23,6 +23,7 @@ from app.gateway.csrf_middleware import (
     get_configured_cors_origins,
 )
 from app.gateway.deps import langgraph_runtime
+from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, readiness_payload
 from app.gateway.routers import (
     agents,
     artifacts,
@@ -1465,6 +1466,28 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             status_code=200 if ready else 503,
             content=payload,
         )
+
+    @app.get("/health/ready", tags=["health"])
+    async def persistence_readiness_check(request: Request, response: Response) -> dict[str, str]:
+        """Persistence readiness: 200 when the persistence backends are reachable.
+
+        ``/ready`` above is HartMesh's authoritative readiness (runtime
+        readiness, tenant identity, provenance, topology) and is what the Helm
+        probe uses; this upstream endpoint is what Compose polls.
+
+        Probes the ORM engine behind ``database:`` and the effective LangGraph
+        checkpointer/Store backend (legacy ``checkpointer:`` section, otherwise
+        derived from ``database:``) concurrently beneath one bounded deadline.
+        The checkpointer config comes from the startup snapshot recorded by
+        ``langgraph_runtime`` (never hot-reloaded config), so orchestrators can
+        gate on the gateway actually being ready rather than merely alive.
+        Returns 503 with ``status: degraded`` when either probe fails or the
+        startup backend cannot be resolved.
+        """
+        checkpointer_config = getattr(request.app.state, READINESS_CHECKPOINTER_CONFIG_ATTR, None)
+        status_code, payload = await readiness_payload(checkpointer_config)
+        response.status_code = status_code
+        return payload
 
     # Extension routes are deliberately last: FastAPI/Starlette dispatches in
     # registration order, so every host route (including conditional routes
