@@ -2466,3 +2466,99 @@ def test_deterministic_sandbox_id_matches_shared_identity():
 
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     assert aio_mod.AioSandboxProvider._deterministic_sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+
+
+# --- per-sandbox request headers take upstream's shape (session provider phase 5) ---
+
+
+def _headers_provider(tmp_path, aio_mod, monkeypatch, infos: dict):
+    provider = _make_provider(tmp_path)
+    provider._config = {"replicas": 3}
+    provider._lock = aio_mod.threading.Lock()
+    provider._backend = SimpleNamespace(
+        create=lambda _thread_id, sandbox_id, **_kwargs: infos[sandbox_id],
+        destroy=MagicMock(),
+        discover=MagicMock(return_value=None),
+    )
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_a, **_k: [])
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_lark_integration_active", staticmethod(lambda user_id=None: False))
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_lark_broker_active", staticmethod(lambda user_id=None: False))
+    monkeypatch.setattr(provider, "_register_created_sandbox", lambda _thread_id, sandbox_id, _info, **_k: sandbox_id)
+    return provider
+
+
+def test_register_created_sandbox_hands_request_headers_to_the_sandbox(tmp_path, monkeypatch):
+    """The provider passes ``info.request_headers`` straight through, empty or
+    not: one call shape, no conditional construction, exactly as upstream."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    constructed: list[dict] = []
+
+    class _FakeSandbox:
+        def __init__(self, **kwargs):
+            constructed.append(kwargs)
+            self.id = kwargs["id"]
+
+    monkeypatch.setattr(aio_mod, "AioSandbox", _FakeSandbox)
+    headers = {"Authorization": "Bearer attempt"}
+
+    provider._register_created_sandbox("thread-h", "sb-h", aio_mod.SandboxInfo(sandbox_id="sb-h", sandbox_url="http://sb", request_headers=headers), user_id="alice")
+    provider._register_created_sandbox("thread-p", "sb-p", aio_mod.SandboxInfo(sandbox_id="sb-p", sandbox_url="http://sb"), user_id="alice")
+
+    assert constructed == [
+        {"id": "sb-h", "base_url": "http://sb", "request_headers": headers},
+        {"id": "sb-p", "base_url": "http://sb", "request_headers": {}},
+    ]
+
+
+def test_create_sandbox_passes_request_headers_to_readiness_only_when_present(tmp_path, monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    headers = {"Authorization": "Bearer attempt"}
+    infos = {
+        "sb-h": aio_mod.SandboxInfo(sandbox_id="sb-h", sandbox_url="http://sb-h", request_headers=headers),
+        "sb-p": aio_mod.SandboxInfo(sandbox_id="sb-p", sandbox_url="http://sb-p"),
+    }
+    provider = _headers_provider(tmp_path, aio_mod, monkeypatch, infos)
+    readiness_calls: list[tuple[str, dict]] = []
+
+    def fake_ready(url, **kwargs):
+        readiness_calls.append((url, kwargs))
+        return True
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", fake_ready)
+
+    assert provider._create_sandbox("thread-h", "sb-h", user_id="alice") == "sb-h"
+    assert provider._create_sandbox("thread-p", "sb-p", user_id="alice") == "sb-p"
+
+    assert readiness_calls == [
+        ("http://sb-h", {"timeout": aio_mod.SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, "headers": headers}),
+        ("http://sb-p", {"timeout": aio_mod.SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT}),
+    ]
+
+
+@pytest.mark.anyio
+async def test_create_sandbox_async_passes_request_headers_to_readiness_only_when_present(tmp_path, monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    headers = {"Authorization": "Bearer attempt"}
+    infos = {
+        "sb-h": aio_mod.SandboxInfo(sandbox_id="sb-h", sandbox_url="http://sb-h", request_headers=headers),
+        "sb-p": aio_mod.SandboxInfo(sandbox_id="sb-p", sandbox_url="http://sb-p"),
+    }
+    provider = _headers_provider(tmp_path, aio_mod, monkeypatch, infos)
+    readiness_calls: list[tuple[str, dict]] = []
+
+    async def fake_ready_async(url, **kwargs):
+        readiness_calls.append((url, kwargs))
+        return True
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", fake_ready_async)
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("sync readiness should not be used")))
+
+    assert await provider._create_sandbox_async("thread-h", "sb-h", user_id="alice") == "sb-h"
+    assert await provider._create_sandbox_async("thread-p", "sb-p", user_id="alice") == "sb-p"
+
+    assert readiness_calls == [
+        ("http://sb-h", {"timeout": aio_mod.SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, "headers": headers}),
+        ("http://sb-p", {"timeout": aio_mod.SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT}),
+    ]
