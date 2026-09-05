@@ -644,6 +644,19 @@ def _wait_for_provider_teardown_locked() -> SandboxProvider | None:
     return None
 
 
+def _as_session_provider(provider: SandboxProvider) -> SandboxProvider:
+    """Install every provider behind the session provider, exactly once.
+
+    The session provider is the single resolution point for sandbox handles:
+    it dispatches acquire, get and release by the executing session's
+    declaration and forwards everything else to the configured provider. One
+    wrapper per process keeps ``id(provider)``-keyed registries stable.
+    """
+    from deerflow.sandbox.session import sandbox_session_provider
+
+    return sandbox_session_provider(provider)
+
+
 def get_sandbox_provider(**kwargs) -> SandboxProvider:
     """Get the sandbox provider singleton.
 
@@ -668,7 +681,7 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
     # lock. The construction may race another caller; we reconcile under the lock.
     config = get_app_config()
     cls = resolve_class(config.sandbox.use, SandboxProvider)
-    provider = cls(**kwargs)
+    provider = _as_session_provider(cls(**kwargs))
 
     with _provider_condition:
         reentrant_provider = _wait_for_provider_teardown_locked()
@@ -807,4 +820,4 @@ def set_sandbox_provider(provider: SandboxProvider) -> None:
     with _provider_condition:
         if _wait_for_provider_teardown_locked() is not None:
             raise RuntimeError("sandbox provider cannot be replaced during its teardown callback")
-        _default_sandbox_provider = provider
+        _default_sandbox_provider = _as_session_provider(provider)

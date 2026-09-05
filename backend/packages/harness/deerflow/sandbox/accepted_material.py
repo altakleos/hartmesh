@@ -2342,6 +2342,13 @@ class AcceptedSandboxSession:
             ),
         ]
 
+    @property
+    def is_open(self) -> bool:
+        """Whether operations may still be admitted; false once lost or closing."""
+
+        with self._state_lock:
+            return self._state is _AcceptedSandboxSessionState.OPEN
+
     def _snapshot_open_lease(self) -> AcceptedMaterialLeaseV1:
         with self._state_lock:
             if self._state is not _AcceptedSandboxSessionState.OPEN:
@@ -2699,6 +2706,34 @@ class AcceptedSandboxSessionBridge:
         )
         await asyncio.wrap_future(future)
 
+    @property
+    def is_open(self) -> bool:
+        return self._session.is_open
+
+    def close_sync(self) -> None:
+        """Retire the session from a worker thread; the provider's terminal.
+
+        Mirrors ``execute_sync``: it must not be called on the owner loop, and
+        it blocks until the materializer has released the lease.
+        """
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self._owner_loop:
+            raise AcceptedSandboxAuthorityLostError(
+                "accepted_sandbox_sync_call_on_owner_loop",
+            )
+        if self._owner_loop.is_closed() or not self._owner_loop.is_running():
+            raise AcceptedSandboxAuthorityLostError(
+                "accepted_sandbox_owner_loop_unavailable",
+            )
+        future = asyncio.run_coroutine_threadsafe(
+            self._session.close(),
+            self._owner_loop,
+        )
+        future.result()
+
     async def close(self) -> None:
         if asyncio.get_running_loop() is self._owner_loop:
             await self._session.close()
@@ -2723,7 +2758,45 @@ def install_accepted_sandbox_session(
         owner_loop=asyncio.get_running_loop(),
     )
     context[ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY] = bridge
+    _declare_accepted_sandbox_session(context, bridge)
     return bridge
+
+
+def _declare_accepted_sandbox_session(
+    context: Mapping[str, object],
+    bridge: AcceptedSandboxSessionBridge,
+) -> None:
+    """Register the bridge as this execution's declared session.
+
+    The declaration is what the session provider resolves: the executing
+    context acquires the bridge's public ref instead of provisioning, the ref
+    resolves to the facade only for this context, and an ordinary acquire on
+    the same user and thread is refused while the session is open.
+    """
+
+    from deerflow.sandbox.session import (
+        SandboxSessionDeclaration,
+        SandboxSessionKind,
+        SandboxSessionTerminal,
+        get_sandbox_session_registry,
+        set_current_sandbox_session,
+    )
+
+    thread_id = context.get("thread_id")
+    user_id = context.get("user_id")
+    mount_scope = (user_id, thread_id) if isinstance(thread_id, str) and thread_id and isinstance(user_id, str) and user_id else None
+    declaration = SandboxSessionDeclaration(
+        public_ref=bridge.safe_reference,
+        mount_scope=mount_scope,
+        kind=SandboxSessionKind.ACCEPTED,
+        terminal=SandboxSessionTerminal.RETIRE,
+        handle=bridge.sandbox,
+        is_live=lambda: bridge.is_open,
+        retire=bridge.close_sync,
+    )
+    get_sandbox_session_registry().declare(declaration)
+    set_current_sandbox_session(declaration)
+    bridge._declaration = declaration
 
 
 def accepted_sandbox_from_runtime_context(
@@ -2767,9 +2840,25 @@ def accepted_sandbox_bridge_from_runtime_context(
 
 
 def strip_accepted_sandbox_session(context: dict[str, object]) -> None:
-    """Remove any caller-supplied session capability before host installation."""
+    """Remove any caller-supplied session capability before host installation.
 
-    context.pop(ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY, None)
+    A host-installed bridge is also withdrawn from the session registry and
+    from the executing context, so its public ref stops resolving at once.
+    """
+
+    candidate = context.pop(ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY, None)
+    declaration = getattr(candidate, "_declaration", None) if isinstance(candidate, AcceptedSandboxSessionBridge) else None
+    if declaration is None:
+        return
+    from deerflow.sandbox.session import (
+        current_sandbox_session,
+        get_sandbox_session_registry,
+        set_current_sandbox_session,
+    )
+
+    get_sandbox_session_registry().revoke(declaration.public_ref)
+    if current_sandbox_session() is declaration:
+        set_current_sandbox_session(None)
 
 
 @dataclass(frozen=True, slots=True)

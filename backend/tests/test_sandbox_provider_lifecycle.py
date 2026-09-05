@@ -21,6 +21,7 @@ from deerflow.sandbox.sandbox_provider import (
     AcceptedSkillSandboxBindingError,
     SandboxProvider,
 )
+from deerflow.sandbox.session import unwrap_sandbox_provider
 
 
 class SlowSandboxProvider(SandboxProvider):
@@ -325,8 +326,8 @@ def test_refused_teardown_blocks_replacement_get_and_restores_owner(
         assert not getter_thread.is_alive()
         assert len(teardown_errors) == 1
         assert isinstance(teardown_errors[0], AcceptedSkillSandboxBindingError)
-        assert results == [provider]
-        assert sandbox_provider.get_sandbox_provider() is provider
+        assert [unwrap_sandbox_provider(result) for result in results] == [provider]
+        assert unwrap_sandbox_provider(sandbox_provider.get_sandbox_provider()) is provider
         assert not construction_attempted.is_set()
     finally:
         provider.refuse_teardown = False
@@ -374,7 +375,7 @@ def test_losing_cold_start_racer_shuts_down_its_orphan(monkeypatch):
         assert winner.shutdown_calls == 0
         # ...and every loser that was constructed had shutdown() called on it
         # exactly once.
-        losers = [inst for inst in ShutdownSandboxProvider.registry if inst is not winner]
+        losers = [inst for inst in ShutdownSandboxProvider.registry if inst is not unwrap_sandbox_provider(winner)]
         assert len(losers) == ShutdownSandboxProvider.instances_created - 1
         assert all(inst.shutdown_calls == 1 for inst in losers)
     finally:

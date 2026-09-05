@@ -47,6 +47,37 @@ later calls. Close refuses new calls immediately, waits for an already-delegated
 call, then releases through the materializer. Terminal publication independently
 revalidates the tuple and remains fenced by the durable run/item store.
 
+### Session provider
+
+Every path that resolves a sandbox handle, including Gateway routes, channels,
+and upstream's own middleware and tools, goes through the configured provider's
+`acquire`, `get`, and `release`. HartMesh installs a session provider
+(`sandbox/session.py`) in front of whatever `sandbox.use` resolves, exactly once
+per process, and dispatches those three verbs by the executing session's
+declaration:
+
+- an execution that installed an accepted session acquires that session's
+  public ref and never provisions; if the session is no longer open the acquire
+  fails with `sandbox_session_conflict` rather than falling back to an ordinary
+  thread sandbox;
+- a public ref resolves to the fenced facade only for the execution that
+  declared it, so a fork, a Gateway request, or a channel with no declaration
+  gets nothing back and takes its own ordinary path;
+- an ordinary acquire for a user and thread held by an open accepted session is
+  refused with `sandbox_session_conflict`, which is what makes "destroy while
+  another holder is attached" impossible rather than merely unlikely; and
+- releasing a public ref retires the session, once, and only from the declaring
+  execution.
+
+The declaration travels with the execution as a context variable that child
+tasks and worker threads inherit. Installing a session declares it; stripping
+or closing it withdraws the declaration. Every other provider method and
+attribute is forwarded unchanged, so ordinary sessions behave exactly as the
+backing provider does, and `isinstance` checks against the configured provider
+class keep working. Accepted-suffixed containers found by the AIO startup
+reconciler are destroyed once this instance can claim them, never adopted into
+the warm pool.
+
 This is a check-then-call guarantee, not distributed atomicity. A call accepted
 before loss may finish. For a provider without atomic operation fencing, one call
 may also enter the provider when takeover/loss occurs after both checks but before
@@ -183,6 +214,7 @@ Recovery outcomes follow the existing authorities:
 | Resource created before materializer return | Adapter compensates with provider destroy; a failed compensation is `cleanup_pending` for existing reconciliation |
 | Material placed before evidence joins `RunRow` | Pending run cannot execute; release/cleanup paths own the resource |
 | Worker dies after evidence persistence, before first operation | Expired run owner is terminalized, an `orphaned` observation is emitted, and provider cleanup reconciliation proceeds |
+| Process dies with an accepted container running | The AIO reconciler destroys the accepted-suffixed orphan instead of parking it in the warm pool; it never becomes an ordinary thread sandbox |
 | Run/provider loss during an operation | Already-issued work may finish; later operations and stale terminal publication fail closed |
 | Release succeeds but final observation fails | Resource remains released; diagnostics may be incomplete and never become authority |
 | Release fails after local close | Session stays closed, records `cleanup_pending`, and existing cleanup ownership/reconciliation retries or reaps |

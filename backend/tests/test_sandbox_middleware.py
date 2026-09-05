@@ -20,6 +20,7 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
     AcceptedSkillSandboxBindingError,
     SandboxProvider,
+    get_sandbox_provider,
     reset_sandbox_provider,
     set_sandbox_provider,
 )
@@ -681,13 +682,16 @@ async def test_aafter_agent_releases_sandbox_off_thread(
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
     set_sandbox_provider(provider)
     try:
+        installed = get_sandbox_provider()
         result = await SandboxMiddleware().aafter_agent(state, runtime)
     finally:
         reset_sandbox_provider()
 
     assert result is None
     assert provider.released_ids == [expected_sandbox_id]
-    assert to_thread_calls == [(provider.release, (expected_sandbox_id,))]
+    # The installed provider is the session provider in front of the fake; its
+    # release forwards to the fake's, and that is the callable handed to to_thread.
+    assert to_thread_calls == [(installed.release, (expected_sandbox_id,))]
 
 
 @pytest.mark.anyio
