@@ -15,7 +15,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
 
@@ -140,6 +140,41 @@ class _LeaseBinding:
     release_on_last: bool = True
 
 
+class SandboxLeaseObserver(Protocol):
+    """Observe holder transitions on execution leases.
+
+    An observer records facts about who held which sandbox and when the last
+    holder left; it never changes the lifecycle. It is called with the
+    manager's metadata lock held, so it must return promptly and must not call
+    back into the manager. Exceptions are logged and swallowed.
+    """
+
+    def lease_bound(self, *, owner_id: str, sandbox_id: str, thread_id: str, user_id: str, borrowed: bool) -> None:
+        """An execution owner was bound to a sandbox it did not hold before."""
+
+    def lease_released(self, *, owner_id: str, sandbox_id: str, last_holder: bool) -> None:
+        """An owner's binding was removed; ``last_holder`` when a provider release follows."""
+
+
+_observer: SandboxLeaseObserver | None = None
+
+
+def set_sandbox_lease_observer(observer: SandboxLeaseObserver | None) -> None:
+    """Install the process-wide lease observer, or remove it with ``None``."""
+    global _observer
+    _observer = observer
+
+
+def _observe(event: Callable[[SandboxLeaseObserver], None]) -> None:
+    observer = _observer
+    if observer is None:
+        return
+    try:
+        event(observer)
+    except Exception:
+        logger.warning("Sandbox lease observer failed", exc_info=True)
+
+
 class SandboxLeaseManager:
     """Coordinate active agent users of one sandbox provider.
 
@@ -167,6 +202,17 @@ class SandboxLeaseManager:
         owner_id: str,
         *,
         request_release: bool = True,
+    ) -> tuple[_LeaseBinding | None, bool]:
+        binding, release_provider = self._pop_binding_locked(owner_id, request_release=request_release)
+        if binding is not None:
+            _observe(lambda observer: observer.lease_released(owner_id=owner_id, sandbox_id=binding.sandbox_id, last_holder=release_provider))
+        return binding, release_provider
+
+    def _pop_binding_locked(
+        self,
+        owner_id: str,
+        *,
+        request_release: bool,
     ) -> tuple[_LeaseBinding | None, bool]:
         binding = self._bindings_by_owner.pop(owner_id, None)
         if binding is None:
@@ -225,6 +271,8 @@ class SandboxLeaseManager:
             release_on_last=release_on_last,
         )
         self._owners_by_sandbox.setdefault(sandbox_id, set()).add(owner_id)
+        user_id, thread_id = key
+        _observe(lambda observer: observer.lease_bound(owner_id=owner_id, sandbox_id=sandbox_id, thread_id=thread_id, user_id=user_id, borrowed=not release_on_last))
 
         return previous, release_previous
 
