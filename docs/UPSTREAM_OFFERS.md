@@ -6,17 +6,18 @@ taken verbatim. A few small seams would let HartMesh delete the hunks it still
 patches into upstream files and would serve upstream's own roadmap (the
 per-user quota RFC, prewarm #5002, lease work #5128, tool receipts #4651). Each
 seam is prepared as a standalone patch against `deerflow/main`, with tests, on
-an `upstream-offer/*` branch of this repository. Nothing here has been
-submitted; submission is a maintainer decision.
+an `upstream-offer/*` branch of this repository. Two are open upstream as
+draft pull requests and the proposal is open as a discussion; the other two
+wait for a consumer to ship with. Submission is a maintainer decision.
 
 | Offer | Status | Branch | Upstream files |
 | --- | --- | --- | --- |
-| Capability negotiation | patch ready | `upstream-offer/capability-negotiation` | `sandbox/sandbox_provider.py`, new `sandbox/capabilities.py` |
-| Declared-sandbox resolver | patch ready | `upstream-offer/declared-sandbox-resolver` | new `sandbox/resolution.py`, `sandbox/middleware.py`, `sandbox/tools.py` |
-| Admission before acquire | patch ready | `upstream-offer/acquire-admission` | `sandbox/sandbox_provider.py`, `sandbox/exceptions.py`, `sandbox/lease.py`, `sandbox/middleware.py`, `sandbox/tools.py` |
-| Lease observer | patch ready | `upstream-offer/lease-observer` | `sandbox/lease.py` |
+| Capability negotiation | held until it ships with a consumer | `upstream-offer/capability-negotiation` | `sandbox/sandbox_provider.py`, new `sandbox/capabilities.py` |
+| Declared-sandbox resolver | draft [bytedance/deer-flow#5203](https://github.com/bytedance/deer-flow/pull/5203) | `upstream-offer/declared-sandbox-resolver` | new `sandbox/resolution.py`, `sandbox/middleware.py`, `sandbox/tools.py` |
+| Admission before acquire | draft [bytedance/deer-flow#5202](https://github.com/bytedance/deer-flow/pull/5202) | `upstream-offer/acquire-admission` | `sandbox/sandbox_provider.py`, `sandbox/exceptions.py`, `sandbox/lease.py`, `sandbox/middleware.py`, `sandbox/tools.py` |
+| Lease observer | held until upstream eviction or TTL work needs holder facts | `upstream-offer/lease-observer` | `sandbox/lease.py` |
 | Acquire-epoch and lost-sandbox guards | already upstream | none | `community/aio_sandbox/aio_sandbox_provider.py` |
-| The egress verdict belongs to the command | proposal | none | `sandbox/middleware.py`, `sandbox/sandbox.py`, providers |
+| The egress verdict belongs to the command | discussion [bytedance/deer-flow#5204](https://github.com/bytedance/deer-flow/discussions/5204) | none | `sandbox/middleware.py`, `sandbox/sandbox.py`, providers |
 
 Each branch is one commit on top of `deerflow/main` (`27b2b676` at the time
 of writing), formatted with upstream's ruff configuration and tested with the
@@ -28,9 +29,13 @@ soft budget; a submission that must touch it has to trim it first.
 
 1. `git fetch deerflow && git rebase deerflow/main upstream-offer/<name>` and
    rerun the tests named in the commit message from a clean upstream checkout.
-2. Push the branch to a fork of `bytedance/deer-flow` and open the pull request
-   with the description below; drop the `Claude-Session` trailer if the
-   maintainers prefer plain commits.
+2. Push the branch to the fork `makutaku/deer-flow` (remote `fork`) and open
+   the pull request as a draft with upstream's template; drop the
+   `Claude-Session` trailer if the maintainers prefer plain commits. A draft
+   stays a draft until a person has reviewed the diff and checked the
+   template's responsibility box, which no tool may check on their behalf.
+   Upstream asks for a discussion before a non-trivial feature; proposals go to
+   the Ideas category.
 3. Once merged, take the upstream commit on the next sync and delete the
    HartMesh code listed under "HartMesh drops".
 
