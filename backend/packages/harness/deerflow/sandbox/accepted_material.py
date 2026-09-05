@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, Self
 
 from deerflow_extension_api import TenantReferenceV1
 
+from deerflow.sandbox.operations import SandboxOperationKind, fenced_sandbox_facade, sandbox_operations
 from deerflow.sandbox.sandbox import Sandbox
 
 if TYPE_CHECKING:
@@ -2133,17 +2134,11 @@ class AcceptedMaterializer(Protocol):
     async def release(self, lease: AcceptedMaterialLeaseV1) -> None: ...
 
 
-class AcceptedSandboxOperationKind(StrEnum):
-    """Closed set of privileged operations admitted by an accepted session."""
-
-    EXECUTE_COMMAND = "execute_command"
-    READ_FILE = "read_file"
-    DOWNLOAD_FILE = "download_file"
-    LIST_DIR = "list_dir"
-    WRITE_FILE = "write_file"
-    GLOB = "glob"
-    GREP = "grep"
-    UPDATE_FILE = "update_file"
+# The closed set of privileged operations an accepted session admits is
+# generated from the single declaration point in ``deerflow.sandbox.operations``.
+# Every public ``Sandbox`` method is a member, so a verb cannot exist on the
+# provider without a fenced form on the facade.
+AcceptedSandboxOperationKind = SandboxOperationKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -2177,109 +2172,21 @@ class AcceptedSandboxOperationV1:
             )
 
     @classmethod
-    def execute_command(
-        cls,
-        command: str,
-        env: dict[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> Self:
-        return cls(
-            version=1,
-            kind=AcceptedSandboxOperationKind.EXECUTE_COMMAND,
-            args=(command,),
-            kwargs={"env": env, "timeout": timeout},
-        )
+    def for_operation(cls, name: str, /, *args: object, **kwargs: object) -> Self:
+        """Build the envelope for one declared operation from a live call.
 
-    @classmethod
-    def read_file(
-        cls,
-        path: str,
-        start_line: int | None = None,
-        end_line: int | None = None,
-    ) -> Self:
+        The argument split follows the declaration: parameters without a
+        default travel positionally, parameters with a default by keyword.
+        """
+        spec = sandbox_operations().get(name)
+        if spec is None:
+            raise ValueError(f"unknown sandbox operation {name!r}")
+        positional, keyword = spec.envelope_arguments(args, kwargs)
         return cls(
             version=1,
-            kind=AcceptedSandboxOperationKind.READ_FILE,
-            args=(path,),
-            kwargs={"start_line": start_line, "end_line": end_line},
-        )
-
-    @classmethod
-    def download_file(cls, path: str) -> Self:
-        return cls(
-            version=1,
-            kind=AcceptedSandboxOperationKind.DOWNLOAD_FILE,
-            args=(path,),
-        )
-
-    @classmethod
-    def list_dir(cls, path: str, max_depth: int = 2) -> Self:
-        return cls(
-            version=1,
-            kind=AcceptedSandboxOperationKind.LIST_DIR,
-            args=(path,),
-            kwargs={"max_depth": max_depth},
-        )
-
-    @classmethod
-    def write_file(
-        cls,
-        path: str,
-        content: str,
-        append: bool = False,
-    ) -> Self:
-        return cls(
-            version=1,
-            kind=AcceptedSandboxOperationKind.WRITE_FILE,
-            args=(path, content),
-            kwargs={"append": append},
-        )
-
-    @classmethod
-    def glob(
-        cls,
-        path: str,
-        pattern: str,
-        *,
-        include_dirs: bool = False,
-        max_results: int = 200,
-    ) -> Self:
-        return cls(
-            version=1,
-            kind=AcceptedSandboxOperationKind.GLOB,
-            args=(path, pattern),
-            kwargs={"include_dirs": include_dirs, "max_results": max_results},
-        )
-
-    @classmethod
-    def grep(
-        cls,
-        path: str,
-        pattern: str,
-        *,
-        glob: str | None = None,
-        literal: bool = False,
-        case_sensitive: bool = False,
-        max_results: int = 100,
-    ) -> Self:
-        return cls(
-            version=1,
-            kind=AcceptedSandboxOperationKind.GREP,
-            args=(path, pattern),
-            kwargs={
-                "glob": glob,
-                "literal": literal,
-                "case_sensitive": case_sensitive,
-                "max_results": max_results,
-            },
-        )
-
-    @classmethod
-    def update_file(cls, path: str, content: bytes) -> Self:
-        return cls(
-            version=1,
-            kind=AcceptedSandboxOperationKind.UPDATE_FILE,
-            args=(path, content),
+            kind=AcceptedSandboxOperationKind(name),
+            args=positional,
+            kwargs=keyword,
         )
 
     def delegate(self, sandbox: Sandbox) -> object:
@@ -2289,6 +2196,23 @@ class AcceptedSandboxOperationV1:
             raise TypeError("accepted sandbox session requires a Sandbox")
         operation = getattr(sandbox, self.kind.value)
         return operation(*self.args, **self.kwargs)
+
+
+def _install_operation_constructors() -> None:
+    """Expose one ``AcceptedSandboxOperationV1.<verb>(...)`` constructor per declaration."""
+
+    for spec in sandbox_operations().values():
+
+        def constructor(cls, *args: object, __name: str = spec.name, **kwargs: object) -> AcceptedSandboxOperationV1:
+            return cls.for_operation(__name, *args, **kwargs)
+
+        constructor.__name__ = spec.name
+        constructor.__qualname__ = f"AcceptedSandboxOperationV1.{spec.name}"
+        constructor.__doc__ = spec.doc
+        setattr(AcceptedSandboxOperationV1, spec.name, classmethod(constructor))
+
+
+_install_operation_constructors()
 
 
 AcceptedSandboxResult = object
@@ -2655,90 +2579,30 @@ class AcceptedSandboxSession:
 ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY = "__deerflow_accepted_sandbox_session_v1"
 
 
+@fenced_sandbox_facade
 class _AcceptedSandboxFacade(Sandbox):
-    """Sandbox-compatible sync view that cannot bypass session validation."""
+    """Sandbox-compatible sync view that cannot bypass session validation.
+
+    Every public ``Sandbox`` method is generated from the declarations in
+    ``deerflow.sandbox.operations`` and routed through
+    ``_execute_fenced_operation``. The decorator refuses to build the class if
+    any base-class method would be inherited as an unfenced passthrough, so a
+    verb added upstream fails at import rather than skipping the fence.
+    """
 
     def __init__(self, bridge: AcceptedSandboxSessionBridge) -> None:
         super().__init__(bridge.safe_reference)
         self._bridge = bridge
         self.persistent_shell_sessions = bridge.persistent_shell_sessions
 
-    def execute_command(
+    def _execute_fenced_operation(
         self,
-        command: str,
-        env: dict[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> str:
+        name: str,
+        args: tuple[object, ...],
+        kwargs: Mapping[str, object],
+    ) -> object:
         return self._bridge.execute_sync(
-            AcceptedSandboxOperationV1.execute_command(command, env, timeout),
-        )  # type: ignore[return-value]
-
-    def read_file(
-        self,
-        path: str,
-        start_line: int | None = None,
-        end_line: int | None = None,
-    ) -> str:
-        return self._bridge.execute_sync(
-            AcceptedSandboxOperationV1.read_file(path, start_line, end_line),
-        )  # type: ignore[return-value]
-
-    def download_file(self, path: str) -> bytes:
-        return self._bridge.execute_sync(
-            AcceptedSandboxOperationV1.download_file(path),
-        )  # type: ignore[return-value]
-
-    def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
-        return self._bridge.execute_sync(
-            AcceptedSandboxOperationV1.list_dir(path, max_depth),
-        )  # type: ignore[return-value]
-
-    def write_file(self, path: str, content: str, append: bool = False) -> None:
-        self._bridge.execute_sync(
-            AcceptedSandboxOperationV1.write_file(path, content, append),
-        )
-
-    def glob(
-        self,
-        path: str,
-        pattern: str,
-        *,
-        include_dirs: bool = False,
-        max_results: int = 200,
-    ) -> tuple[list[str], bool]:
-        return self._bridge.execute_sync(
-            AcceptedSandboxOperationV1.glob(
-                path,
-                pattern,
-                include_dirs=include_dirs,
-                max_results=max_results,
-            ),
-        )  # type: ignore[return-value]
-
-    def grep(
-        self,
-        path: str,
-        pattern: str,
-        *,
-        glob: str | None = None,
-        literal: bool = False,
-        case_sensitive: bool = False,
-        max_results: int = 100,
-    ) -> tuple[list[Any], bool]:
-        return self._bridge.execute_sync(
-            AcceptedSandboxOperationV1.grep(
-                path,
-                pattern,
-                glob=glob,
-                literal=literal,
-                case_sensitive=case_sensitive,
-                max_results=max_results,
-            ),
-        )  # type: ignore[return-value]
-
-    def update_file(self, path: str, content: bytes) -> None:
-        self._bridge.execute_sync(
-            AcceptedSandboxOperationV1.update_file(path, content),
+            AcceptedSandboxOperationV1.for_operation(name, *args, **kwargs),
         )
 
 

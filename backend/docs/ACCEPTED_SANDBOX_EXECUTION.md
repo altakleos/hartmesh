@@ -14,9 +14,16 @@ tuple. HartMesh does not add another execution lease, epoch, table, or heartbeat
 | `AcceptedSandboxSession` | Composes the run fence and materializer tuple before each operation | New authority of its own |
 | Cleanup ownership | Reaps provider resources and reconciles orphans | Sandbox execution |
 
-The session exposes operations, never its backing provider sandbox. All eight
-`Sandbox` operations—command execution, full/ranged read, download, directory
-list, text write, glob, grep, and binary update—cross the same facade. Normal
+The session exposes operations, never its backing provider sandbox. Every
+public `Sandbox` operation crosses the same facade. The set is declared once in
+`sandbox/operations.py` (ten today: command execution, scoped command
+execution, scope release, full/ranged read, download, directory list, text
+write, glob, grep, and binary update); the facade's methods are generated from
+those declarations, and the module refuses to import if a `Sandbox` method has
+no declaration or the facade would inherit one as an unfenced passthrough.
+Upstream's scoped-shell hooks are declared already; providers keep the base
+class's pass-through defaults until they implement scoping, so a scoped call on
+the facade is fenced and recorded even where it is not yet isolated. Normal
 sandbox tools, sandbox middleware, output externalization, lead agents, inherited
 subagents, and durable batch children resolve that facade from host-owned runtime
 context. A batch child builds a separate session over its existing SQL
