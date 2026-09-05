@@ -1023,9 +1023,19 @@ Content-Type: multipart/form-data
       "markdown_artifact_url": "/api/threads/abc123/artifacts/mnt/user-data/uploads/document.md"
     }
   ],
-  "message": "Successfully uploaded 1 file(s)"
+  "message": "Successfully uploaded 1 file(s)",
+  "skipped_files": [],
+  "sandbox_sync_skipped": null
 }
 ```
+
+`sandbox_sync_skipped` is `null` when the files were also copied into the
+thread sandbox. It is `sandbox_execution_denied` when the caller's role may not
+execute in the sandbox, or `sandbox_session_conflict` when an accepted run
+holds the thread's sandbox until it ends; the upload itself succeeded either
+way, `message` ends with the plain reason, and a refused sync is recorded on
+that run as a `session.refused` sandbox diagnostic. The artifact update
+response carries the same field.
 
 **Supported Document Formats** (auto-converted to Markdown):
 - PDF (`.pdf`)

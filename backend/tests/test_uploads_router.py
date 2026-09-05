@@ -1144,3 +1144,28 @@ def test_upload_files_failed_conversion_does_not_push_the_next_companion_to_suff
     assert result.files[1].markdown_file == "notes.md"
     assert (thread_uploads_dir / "notes.md").read_text(encoding="utf-8") == "FROM:notes.pdf"
     assert not (thread_uploads_dir / "notes_1.md").exists()
+
+
+def test_upload_reports_a_sandbox_sync_refused_by_an_accepted_run(tmp_path):
+    from app.gateway.authz import SandboxRequestLease
+
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    refused = SandboxRequestLease(sandbox=None, sandbox_id=None, denied=True, owner_id=None, provider=None, reason="sandbox_session_conflict")
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "try_acquire_sandbox_for_request", AsyncMock(return_value=refused)),
+    ):
+        file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-held", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success is True
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello uploads"
+    assert result.sandbox_sync_skipped == "sandbox_session_conflict"
+    assert result.message.endswith("; sandbox sync skipped: an accepted run holds this thread's sandbox until it ends")
+    provider.acquire_async.assert_not_called()

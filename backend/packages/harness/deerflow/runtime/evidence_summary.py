@@ -209,6 +209,7 @@ def build_evidence_summary_v1(
             {
                 "observation_count": _safe_count(event_counts.get("sandbox")),
                 "diagnostic_count": _safe_count(event_counts.get("sandbox_diagnostics")),
+                "refusal_count": _safe_count(event_counts.get("sandbox_refusals")),
             },
         ),
         "retrieval": _section(

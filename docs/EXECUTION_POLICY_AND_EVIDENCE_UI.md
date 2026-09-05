@@ -72,7 +72,10 @@ plane, tool, batch, sandbox, retrieval, MCP, artifact, and export sections.
 Section states are `available`, `not_applicable`, `unsupported`, `legacy`,
 `pruned`, `unqualified`, or `error`. The sandbox section counts the closed
 lifecycle observations (`sandbox.lifecycle.v1`) and the bounded diagnostics
-(`sandbox.diagnostic.v1`: egress and scope facts for both session kinds)
+(`sandbox.diagnostic.v1`: egress and scope facts for both session kinds, and
+`session.refused` when an upload, artifact edit, or channel attachment could
+not be copied into a container an accepted run holds; `refusal_count` counts
+those separately)
 separately; see `backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`.
 
 The chat Evidence panel consumes only this projection. It supports native

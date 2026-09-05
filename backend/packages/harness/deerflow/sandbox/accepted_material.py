@@ -2641,6 +2641,7 @@ class AcceptedSandboxSessionBridge:
         *,
         owner_loop: asyncio.AbstractEventLoop,
         mount_scope: tuple[str, str] | None = None,
+        thread_id: str | None = None,
     ) -> None:
         if not isinstance(session, AcceptedSandboxSession):
             raise TypeError("session must be AcceptedSandboxSession")
@@ -2652,8 +2653,13 @@ class AcceptedSandboxSessionBridge:
             SandboxSessionTerminal,
         )
 
+        if thread_id is None and mount_scope is not None:
+            thread_id = mount_scope[1]
+        if thread_id is not None and (not isinstance(thread_id, str) or not thread_id):
+            raise ValueError("thread_id must be a non-empty string or None")
         self._session = session
         self._owner_loop = owner_loop
+        self._thread_id = thread_id
         self._sandbox = _AcceptedSandboxFacade(self)
         self._declaration = SandboxSessionDeclaration(
             public_ref=self.safe_reference,
@@ -2666,6 +2672,32 @@ class AcceptedSandboxSessionBridge:
             # The provider's own id stays inside the session provider, which
             # translates the public ref for id-keyed provider hooks.
             provider_ref=session._sandbox.id,
+            observe=self._observe,
+        )
+
+    def _observe(self, kind: str, facts: Mapping[str, str | int | bool]) -> None:
+        """The accepted Kind's Observer: a run-bound diagnostic under the public ref.
+
+        Facts observed outside the run (an ordinary acquire refused because
+        this session holds the thread) land on the run's diagnostic stream with
+        the same anchors the run's own facts carry, and never the container id.
+        A session declared without a thread records nothing.
+        """
+        if self._thread_id is None:
+            return
+        from deerflow.sandbox.diagnostics import record_session_diagnostic
+        from deerflow.sandbox.session import SandboxSessionKind
+
+        record_session_diagnostic(
+            kind,
+            session_kind=SandboxSessionKind.ACCEPTED,
+            run_id=self._session._evidence.run_id,
+            thread_id=self._thread_id,
+            sandbox_ref=self.safe_reference,
+            facts=facts,
+            attempt_ref=self._session.attempt_ref,
+            batch_child_attempt_ref=self._session.batch_child_attempt_ref,
+            execution_evidence_digest=self._session.execution_evidence_digest,
         )
 
     @property
@@ -2805,6 +2837,7 @@ def declare_accepted_sandbox_session(
     *,
     mount_scope: tuple[str, str] | None,
     owner_loop: asyncio.AbstractEventLoop | None = None,
+    thread_id: str | None = None,
 ) -> AcceptedSandboxSessionBridge:
     """Declare one host-owned accepted session to the session provider.
 
@@ -2834,6 +2867,7 @@ def declare_accepted_sandbox_session(
         session,
         owner_loop=owner_loop if owner_loop is not None else asyncio.get_running_loop(),
         mount_scope=mount_scope,
+        thread_id=thread_id,
     )
     registry.declare(bridge.declaration)
     return bridge

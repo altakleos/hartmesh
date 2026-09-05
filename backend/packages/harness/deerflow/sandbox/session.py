@@ -29,7 +29,7 @@ import logging
 import threading
 import weakref
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -100,10 +100,18 @@ class SandboxSessionDeclaration:
     # the session provider: provider hooks that are keyed by sandbox id (the
     # network policy hooks) receive the public ref and translate to it inside.
     provider_ref: str | None = None
+    # The Kind's Observer: records a bounded fact about this session where its
+    # owner keeps the record (the run, for an accepted session). It is how a
+    # fact observed outside the executing context, such as an ordinary acquire
+    # refused because this session holds the thread, reaches the session's
+    # own record. ``None`` records nothing.
+    observe: Callable[[str, Mapping[str, str | int | bool]], None] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.public_ref, str) or not self.public_ref:
             raise ValueError("public_ref must be a non-empty string")
+        if self.observe is not None and not callable(self.observe):
+            raise TypeError("observe must be a callable or None")
         if self.provider_ref is not None and (not isinstance(self.provider_ref, str) or not self.provider_ref):
             raise ValueError("provider_ref must be a non-empty string or None")
         if self.mount_scope is not None and (not isinstance(self.mount_scope, tuple) or len(self.mount_scope) != 2 or not all(isinstance(part, str) and part for part in self.mount_scope)):
@@ -236,6 +244,23 @@ class SandboxSessionRegistry:
     def live(self) -> tuple[SandboxSessionDeclaration, ...]:
         with self._lock:
             return tuple(declaration for declaration in self._by_ref.values() if declaration.is_live())
+
+    def observe(self, public_ref: str, kind: str, *, facts: Mapping[str, str | int | bool]) -> bool:
+        """Record a fact on the live session ``public_ref`` through its Observer.
+
+        Returns ``False`` when the ref is not a live declaration, the session
+        declared no observer, or the observer failed. Observation never changes
+        the session.
+        """
+        declaration = self.lookup(public_ref)
+        if declaration is None or declaration.observe is None:
+            return False
+        try:
+            declaration.observe(kind, facts)
+        except Exception:
+            logger.debug("Sandbox session %s did not record %s", public_ref, kind, exc_info=True)
+            return False
+        return True
 
 
 _REGISTRY = SandboxSessionRegistry()

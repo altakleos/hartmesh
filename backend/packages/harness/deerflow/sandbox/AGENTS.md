@@ -128,7 +128,10 @@ through `SandboxProvider.capability` / `sandbox_capability`, failing closed on
 bind under the consumer-token coordinator). `accepted_material.py` owns the
 V1/V2 contracts, `AcceptedSandboxSession`, the `AcceptedMaterializer` protocol,
 and the closed five-state lifecycle set; `diagnostics.py` is the bounded
-open-kind stream published as `sandbox.diagnostic.v1` for both kinds. Lease
+open-kind stream published as `sandbox.diagnostic.v1` for both kinds, and a
+declaration's `observe` is the Kind's Observer for facts recorded from outside
+the run (the Gateway records `session.refused` there and answers a skipped
+sync with `sandbox_sync_skipped`). Lease
 managers are keyed by `lifecycle_sandbox_provider`, so a backing provider and
 its session provider share one manager; accepted-skill sandboxes are lease
 borrowers and declared sessions take no lease.

@@ -10,7 +10,7 @@ Kind. A Kind is four policies:
 | Material | What is the container made of? | The mutable thread workspace, plus the bound accepted-skills snapshot under an explicit Agent policy | Digest-bound admitted material placed by the qualified materializer before the run starts |
 | Fence | What is checked before each operation? | Nothing beyond upstream's authorization gate and execution lease | The durable run or batch-item attempt fence, then the materializer's lease validation |
 | Terminal | What happens when the last holder leaves? | Park: the provider keeps the container for the next turn | Retire: destroy once, from the declaring execution, never park |
-| Observer | Where are operations recorded? | Thread-scoped diagnostics | The evidence ledger (the closed lifecycle set) plus run-bound diagnostics |
+| Observer | Where are operations recorded? | Thread-scoped diagnostics | The evidence ledger (the closed lifecycle set) plus run-bound diagnostics; the declaration's `observe` carries a fact observed outside the run onto the run's record |
 
 Ordinary is the degenerate accepted session: no fence, no ledger, park instead
 of destroy. The public surface is two constructors. `SandboxSessionKind.ORDINARY`
@@ -81,7 +81,12 @@ declaration:
   gets nothing back and takes its own ordinary path;
 - an ordinary acquire for a user and thread held by an open accepted session is
   refused with `sandbox_session_conflict`, which is what makes "destroy while
-  another holder is attached" impossible rather than merely unlikely; and
+  another holder is attached" impossible rather than merely unlikely. The
+  Gateway's upload and artifact sync and the channel attachment copy turn that
+  refusal into a skipped sync: the file lands in thread storage, the response
+  says `sandbox_sync_skipped: sandbox_session_conflict` with a plain sentence
+  in its message, and the refusal is recorded on the holding run as a
+  `session.refused` diagnostic; and
 - releasing a public ref retires the session, once, and only from the declaring
   execution.
 
@@ -374,7 +379,11 @@ Those five states are the closed, authority-relevant set. Everything else worth
 knowing about a sandbox session is a diagnostic (`sandbox/diagnostics.py`):
 `sandbox.diagnostic.v1` events whose kind is open but namespaced
 (`egress.blocked`, `egress.decided`, `egress.denied`, `scope.opened`,
-`scope.released`) and whose facts are a bounded mapping of scalars. Both
+`scope.released`, `session.refused`) and whose facts are a bounded mapping of
+scalars. A fact observed outside the run, such as an upload refused because
+the run holds the thread, reaches the run through the declaration's Observer
+(`SandboxSessionRegistry.observe`), which the accepted bridge answers with the
+same run-bound anchors. Both
 session Kinds record into one per-run stream of 64 entries that drops oldest
 rather than refusing a write; each published event carries its sequence and
 the drop count, so a quiet run and a truncated one look different. Ordinary
