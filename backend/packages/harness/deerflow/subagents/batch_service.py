@@ -42,6 +42,7 @@ from deerflow.sandbox.accepted_material import (
     accepted_scope_reference,
     capture_accepted_file_manifest,
     declare_accepted_sandbox_session,
+    rendered_egress_allowance,
     resolve_accepted_materializer,
     validate_accepted_materialization,
     withdraw_accepted_sandbox_session,
@@ -766,6 +767,7 @@ class SubagentBatchService:
                 value=child_identity,
             ),
             capability_profile_digest=selection.capability_profile.digest,
+            egress_allowance=accepted_parent.egress_allowance,
         )
         lease = None
         bridge: AcceptedSandboxSessionBridge | None = None
@@ -805,7 +807,9 @@ class SubagentBatchService:
                 session,
                 mount_scope=None,
                 owner_loop=owner_loop,
+                thread_id=acceptance.parent_thread_id,
             )
+            bridge.record_egress_allowance(rendered_egress_allowance(request))
             attached = await self._repository.attach_item_sandbox_evidence(
                 item_id,
                 attempt_id=attempt_id,

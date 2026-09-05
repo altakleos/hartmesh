@@ -138,7 +138,9 @@ borrowers and declared sessions take no lease.
 
 Rules: provision before declaring, never lazily; the provider id never leaves
 the session provider (network hooks translate inside); terminal is fixed at
-provisioning; accepted sessions are denied egress unasked and recorded; during
+provisioning; an accepted session's egress is declared at admission
+(`egress.py`: operator ceiling, caller narrows, the Material renders it and the
+provisioner attests the digest) and a sidecar denial is recorded, never asked; during
 a durable invocation file tools validate skill paths against the accepted
 snapshot before provider IO and path mapping never exposes live skill roots;
 remote materialization is fenced and verified before `started`, and unsupported

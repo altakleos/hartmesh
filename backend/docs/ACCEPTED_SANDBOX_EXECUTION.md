@@ -139,12 +139,30 @@ what parks them.
 
 An ordinary interactive session is asked (the Human Input card) and both the
 blocked request and the applied decision are recorded; a subagent or
-non-interactive execution is denied unasked and recorded once; an accepted
-session is denied unasked by Kind, because a grant would bind to the container
-rather than to the run that is held to it, until an approval can be run-bound.
-Recording never changes the tool result the receipt layer digests: the card is
-emitted after the fact is recorded and the sandbox middleware stays inner of
-the receipt middleware.
+non-interactive execution is denied unasked and recorded once. A grant made
+that way lives in the container's sidecar, so it can never be the accepted
+Kind's egress: the accepted session is held to a run, not to a container.
+
+The accepted Kind declares its egress at admission instead, the way it
+declares its execution budget (`sandbox/egress.py`, `EgressAllowanceV1`). The
+operator's `execution_policy.accepted_egress` is the ceiling (public CIDR
+rules with protocol and optional port, plus whether cluster DNS is allowed;
+the default allows nothing); a caller may only narrow it through
+`context.egress_allowance`; the canonical allowance and its digest are part of
+the accepted invocation's runtime identity and of the V2 material request. The
+Material renders it: the provisioner writes it into the accepted Pod's
+NetworkPolicy (private, loopback, link-local, carrier-NAT, multicast,
+documentation, and cloud-metadata ranges are carved out of any wide rule and
+can never be allowed), binds its digest to the attempt Lease, and echoes the
+digest; the remote backend destroys a Pod whose attestation is missing or
+differs. Recovery re-provisions the same allowance because it is read from the
+accepted row, and nothing mid-run can widen it. A request sealed before
+allowances existed renders as deny-all, never as the cluster default. The
+session records `egress.bound` (profile, rule count, DNS) once on its
+diagnostic stream; a sidecar denial on an accepted session is still recorded,
+never asked. Recording never changes the tool result the receipt layer
+digests: the card is emitted after the fact is recorded and the sandbox
+middleware stays inner of the receipt middleware.
 
 ## Operations and the facade
 
@@ -378,8 +396,8 @@ scope, time, reason code, and evidence digest, never the raw resource reference.
 Those five states are the closed, authority-relevant set. Everything else worth
 knowing about a sandbox session is a diagnostic (`sandbox/diagnostics.py`):
 `sandbox.diagnostic.v1` events whose kind is open but namespaced
-(`egress.blocked`, `egress.decided`, `egress.denied`, `scope.opened`,
-`scope.released`, `session.refused`) and whose facts are a bounded mapping of
+(`egress.blocked`, `egress.bound`, `egress.decided`, `egress.denied`,
+`scope.opened`, `scope.released`, `session.refused`) and whose facts are a bounded mapping of
 scalars. A fact observed outside the run, such as an upload refused because
 the run holds the thread, reaches the run through the declaration's Observer
 (`SandboxSessionRegistry.observe`), which the accepted bridge answers with the

@@ -2,7 +2,45 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class AcceptedEgressRuleConfig(BaseModel):
+    """One destination the accepted Kind may be allowed to reach."""
+
+    cidr: str = Field(min_length=1, max_length=64, description="Public destination network in CIDR notation; private, loopback, link-local, multicast, and cloud-metadata ranges are refused.")
+    protocol: str = Field(default="TCP", description="TCP or UDP.")
+    port: int | None = Field(default=None, ge=1, le=65535, description="Destination port, or every port when omitted.")
+
+    @model_validator(mode="after")
+    def validate_rule(self) -> AcceptedEgressRuleConfig:
+        from deerflow.sandbox.egress import EgressRuleV1
+
+        rule = EgressRuleV1.build(cidr=self.cidr, protocol=self.protocol, port=self.port)
+        self.cidr = rule.cidr
+        self.protocol = rule.protocol
+        return self
+
+
+class AcceptedEgressConfig(BaseModel):
+    """The egress ceiling every new accepted invocation binds at admission.
+
+    The default allows nothing: an accepted sandbox reaches no destination and
+    resolves no name unless the operator lists it here, and a caller may only
+    narrow this list through ``context.egress_allowance``.
+    """
+
+    profile: str = Field(default="accepted-egress-v1", min_length=1, max_length=64)
+    dns: bool = Field(default=False, description="Whether accepted sandboxes may use cluster DNS.")
+    allow: list[AcceptedEgressRuleConfig] = Field(default_factory=list, max_length=64)
+
+    @field_validator("profile")
+    @classmethod
+    def validate_profile(cls, value: str) -> str:
+        from deerflow.sandbox.egress import EgressAllowanceV1
+
+        EgressAllowanceV1.build(profile=value, dns=False, rules=())
+        return value
 
 
 class ExecutionPolicyConfig(BaseModel):
@@ -32,6 +70,7 @@ class ExecutionPolicyConfig(BaseModel):
     terminal_grace_seconds: int = Field(default=30, ge=1, le=3600)
     scheduler_max_agent_turns: int = Field(default=500, ge=1, le=1_000_000)
     scheduler_max_total_tool_attempts: int = Field(default=500, ge=1, le=1_000_000)
+    accepted_egress: AcceptedEgressConfig = Field(default_factory=AcceptedEgressConfig)
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> ExecutionPolicyConfig:
@@ -46,4 +85,4 @@ class ExecutionPolicyConfig(BaseModel):
         return self
 
 
-__all__ = ["ExecutionPolicyConfig"]
+__all__ = ["AcceptedEgressConfig", "AcceptedEgressRuleConfig", "ExecutionPolicyConfig"]

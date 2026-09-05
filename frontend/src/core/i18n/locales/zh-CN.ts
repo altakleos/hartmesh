@@ -399,6 +399,7 @@ export const zhCN: Translations = {
     },
     diagnostic: {
       "egress.blocked": "出站已拦截，等待审批",
+      "egress.bound": "出站许可已绑定到本次运行",
       "egress.decided": "出站决定已应用",
       "egress.denied": "出站未经询问即被拒绝",
       "scope.opened": "Shell 作用域已打开",

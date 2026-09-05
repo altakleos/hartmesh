@@ -53,6 +53,7 @@ rs.mock("@/core/i18n/hooks", () => ({
           accepted: "Accepted session",
         },
         diagnostic: {
+          "egress.bound": "Egress allowance bound to the run",
           "session.refused": "Sync refused: an accepted run holds the sandbox",
         },
         state: {
@@ -159,7 +160,14 @@ describe("ThreadEvidence", () => {
         sections: {
           policy: {
             state: "available",
-            data: { counters: { turns: 4 }, decision_count: 1 },
+            data: {
+              counters: { turns: 4 },
+              decision_count: 1,
+              egress_profile: "team-egress-v1",
+              egress_digest: "c".repeat(64),
+              egress_rule_count: 2,
+              egress_dns: false,
+            },
           },
           artifacts: {
             state: "not_applicable",
@@ -181,6 +189,9 @@ describe("ThreadEvidence", () => {
     expect(
       screen.getByText("Execution policy").closest("summary"),
     ).toBeDefined();
+    expect(screen.getByText("egress profile")).toBeDefined();
+    expect(screen.getByText("team-egress-v1")).toBeDefined();
+    expect(screen.getByText("egress rule count")).toBeDefined();
     expect(
       screen.getByRole("button", { name: "Download evidence bundle" }),
     ).toBeDefined();
@@ -348,6 +359,14 @@ describe("ThreadEvidence", () => {
           facts: { scope_ref: "scope-1" },
           dropped: 2,
         },
+        {
+          seq: 8,
+          at: "2026-09-04T12:00:55Z",
+          kind: "egress.bound",
+          session_kind: "accepted",
+          facts: { profile: "team-egress-v1", rule_count: 2, dns: false },
+          dropped: 3,
+        },
       ],
     });
 
@@ -358,11 +377,12 @@ describe("ThreadEvidence", () => {
       await screen.findByRole("heading", { name: "Sandbox diagnostics" }),
     ).toBeDefined();
     const items = screen.getAllByTestId("evidence-diagnostic");
-    expect(items).toHaveLength(2);
+    expect(items).toHaveLength(3);
+    expect(screen.getByText("Egress allowance bound to the run")).toBeDefined();
     expect(
       screen.getByText("Sync refused: an accepted run holds the sandbox"),
     ).toBeDefined();
-    expect(screen.getByText("Accepted session")).toBeDefined();
+    expect(screen.getAllByText("Accepted session")).toHaveLength(2);
     expect(screen.getByText("gateway:upload")).toBeDefined();
     expect(screen.getByText("scope.opened")).toBeDefined();
     expect(screen.getByText(/2 dropped/)).toBeDefined();

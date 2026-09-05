@@ -87,6 +87,14 @@ only to later admissions; callers may narrow limits but cannot broaden them.
 Scheduled invocations use the named scheduler profile and the stricter
 `scheduler_max_agent_turns` and `scheduler_max_total_tool_attempts` ceilings.
 
+`execution_policy.accepted_egress` is the run-bound egress ceiling for
+accepted (durable) sandboxes: a `profile`, whether cluster `dns` is allowed,
+and `allow` rules of public `cidr`, `protocol` (TCP or UDP), and optional
+`port`. The default allows no destination and no DNS. Private, loopback,
+link-local, carrier-NAT, multicast, documentation, and cloud-metadata ranges
+are refused. Callers may narrow it through `context.egress_allowance`; the
+provisioner renders the sealed allowance into the accepted Pod's NetworkPolicy.
+
 Durable profiles require `EXECUTION_POLICY_HMAC_KEYS` and
 `EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID` in the Gateway secret environment. Keys
 are unpadded base64url values of at least 32 bytes and never belong in YAML.

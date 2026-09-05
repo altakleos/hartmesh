@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from typing import Literal
 
 from deerflow.runtime.execution_policy import ExecutionBudgetV1, ExecutionPolicyStateV1
+from deerflow.sandbox.egress import EgressAllowanceV1
 
 EVIDENCE_SUMMARY_SCHEMA = "hartmesh.run-evidence-summary"
 EVIDENCE_SUMMARY_SCHEMA_VERSION = 1
@@ -201,6 +202,7 @@ def build_evidence_summary_v1(
     terminal_reason: str | None,
     budget: ExecutionBudgetV1 | None,
     policy_state: ExecutionPolicyStateV1 | None,
+    egress_allowance: EgressAllowanceV1 | None = None,
     admission: Mapping[str, object] | None,
     assembly: Mapping[str, object] | None,
     decision_events: Sequence[Mapping[str, object]],
@@ -265,6 +267,12 @@ def build_evidence_summary_v1(
                     "budget_digest": budget.digest,
                     "counters": {} if policy_state is None else _policy_counters(policy_state),
                     "decision_count": len(timeline),
+                    # The accepted Kind's run-bound egress: profile, digest, and
+                    # shape only; the rule values stay in the accepted row.
+                    "egress_profile": None if egress_allowance is None else egress_allowance.profile,
+                    "egress_digest": None if egress_allowance is None else egress_allowance.digest,
+                    "egress_rule_count": None if egress_allowance is None else len(egress_allowance.rules),
+                    "egress_dns": None if egress_allowance is None else egress_allowance.dns,
                 },
             )
         ),

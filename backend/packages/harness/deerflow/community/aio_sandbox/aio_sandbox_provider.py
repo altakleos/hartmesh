@@ -65,6 +65,7 @@ from deerflow.sandbox.capabilities import (
     AcceptedSkillProjection,
     reject_writable_accepted_skill_aliases,
 )
+from deerflow.sandbox.egress import EgressAllowanceV1
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
@@ -2182,6 +2183,7 @@ class AioSandboxProvider(
         binding: AcceptedSkillSandboxBindingV1,
         execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
         resource_scope_ref: str | None = None,
+        egress_allowance: EgressAllowanceV1 | None = None,
     ) -> str:
         acquire_task = asyncio.create_task(
             asyncio.to_thread(
@@ -2191,6 +2193,7 @@ class AioSandboxProvider(
                 binding,
                 execution_claim,
                 resource_scope_ref,
+                egress_allowance,
             ),
             name=f"aio-accepted-acquire:{binding.run_id}",
         )
@@ -2238,6 +2241,7 @@ class AioSandboxProvider(
         binding: AcceptedSkillSandboxBindingV1,
         execution_claim: AcceptedMaterialExecutionClaimV1 | None,
         resource_scope_ref: str | None,
+        egress_allowance: EgressAllowanceV1 | None = None,
     ) -> str:
         sandbox_id = self._acquire_accepted_skills_internal(
             thread_id,
@@ -2245,6 +2249,7 @@ class AioSandboxProvider(
             binding=binding,
             execution_claim=execution_claim,
             resource_scope_ref=resource_scope_ref,
+            egress_allowance=egress_allowance,
         )
         try:
             identity_thread_id = self._accepted_resource_thread_id(
@@ -2293,6 +2298,7 @@ class AioSandboxProvider(
         user_id: str,
         binding: AcceptedSkillSandboxBindingV1,
         execution_claim: AcceptedMaterialExecutionClaimV1,
+        egress_allowance: EgressAllowanceV1 | None = None,
     ) -> str:
         if not execution_claim.execution_takeover:
             raise AcceptedSkillSandboxBindingError(
@@ -2303,6 +2309,7 @@ class AioSandboxProvider(
             user_id=user_id,
             binding=binding,
             execution_claim=execution_claim,
+            egress_allowance=egress_allowance,
         )
 
     def _acquire_accepted_skills_internal(
@@ -2313,6 +2320,7 @@ class AioSandboxProvider(
         binding: AcceptedSkillSandboxBindingV1,
         execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
         resource_scope_ref: str | None = None,
+        egress_allowance: EgressAllowanceV1 | None = None,
     ) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)
         try:
@@ -2364,6 +2372,7 @@ class AioSandboxProvider(
                 accepted_skill_binding=binding,
                 accepted_execution_claim=execution_claim,
                 identity_thread_id=identity_thread_id,
+                egress_allowance=egress_allowance,
             )
             with self._lock:
                 accepted_ids = getattr(self, "_accepted_only_sandbox_ids", None)
@@ -2882,6 +2891,7 @@ class AioSandboxProvider(
         accepted_skill_binding: AcceptedSkillSandboxBindingV1 | None = None,
         accepted_execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
         identity_thread_id: str | None = None,
+        egress_allowance: EgressAllowanceV1 | None = None,
     ) -> str:
         """Create a new sandbox via the backend.
 
@@ -2926,6 +2936,8 @@ class AioSandboxProvider(
             create_kwargs["accepted_skills_only"] = accepted_skills_only
             create_kwargs["accepted_skill_binding"] = accepted_skill_binding
             create_kwargs["accepted_execution_claim"] = accepted_execution_claim
+            if egress_allowance is not None:
+                create_kwargs["egress_allowance"] = egress_allowance
         info = self._backend.create(
             thread_id,
             sandbox_id,

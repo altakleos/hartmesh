@@ -50,7 +50,8 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   stays disabled (`docs/DURABLE_SUBAGENT_BATCHES.md`). Terminal evidence export
   uses a runtime snapshot fence and Gateway exact-byte archive; required
   missing, pruned, or legacy material fails closed and bundles are unsigned
-  (`../docs/RUN_EVIDENCE_BUNDLES.md`). Admission seals `ExecutionBudgetV1`; the
+  (`../docs/RUN_EVIDENCE_BUNDLES.md`). Admission seals `ExecutionBudgetV1` and
+  the run-bound `EgressAllowanceV1` the accepted Material renders; the
   worker advances `ExecutionPolicyStateV1` with an owner/epoch/lease-fenced CAS,
   fails closed on missing keys, drift, or a stale writer, and only safe
   projections leave the runtime (`../docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md`).

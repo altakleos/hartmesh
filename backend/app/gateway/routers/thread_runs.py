@@ -2117,6 +2117,7 @@ async def get_run_evidence_summary(
         terminal_reason=record.stop_reason,
         budget=budget,
         policy_state=policy_state,
+        egress_allowance=(accepted.egress_allowance if accepted is not None else None),
         admission=admission,
         assembly=assembly,
         decision_events=policy_events,
