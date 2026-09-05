@@ -2120,6 +2120,7 @@ async def get_run_evidence_summary(
         admission=admission,
         assembly=assembly,
         decision_events=policy_events,
+        diagnostic_events=[event for event in events if event.get("event_type") == SANDBOX_DIAGNOSTIC_EVENT.event_type],
         event_counts=counts,
         batches=batch_rows,
         artifacts={

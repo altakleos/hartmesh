@@ -391,6 +391,20 @@ export const zhCN: Translations = {
     stop: "停止",
     warning: "警告",
     noDecisions: "没有记录策略警告或停止。",
+    sandboxDiagnostics: "沙箱诊断",
+    noDiagnostics: "没有记录沙箱诊断。",
+    sessionKind: {
+      ordinary: "普通会话",
+      accepted: "准入会话",
+    },
+    diagnostic: {
+      "egress.blocked": "出站已拦截，等待审批",
+      "egress.decided": "出站决定已应用",
+      "egress.denied": "出站未经询问即被拒绝",
+      "scope.opened": "Shell 作用域已打开",
+      "scope.released": "Shell 作用域已释放",
+      "session.refused": "同步被拒绝：准入运行持有该沙箱",
+    },
     state: {
       available: "可用",
       not_applicable: "不适用",

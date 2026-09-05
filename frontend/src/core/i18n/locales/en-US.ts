@@ -411,6 +411,20 @@ export const enUS: Translations = {
     stop: "Stop",
     warning: "Warning",
     noDecisions: "No policy warnings or stops were recorded.",
+    sandboxDiagnostics: "Sandbox diagnostics",
+    noDiagnostics: "No sandbox diagnostics were recorded.",
+    sessionKind: {
+      ordinary: "Ordinary session",
+      accepted: "Accepted session",
+    },
+    diagnostic: {
+      "egress.blocked": "Egress blocked, approval requested",
+      "egress.decided": "Egress decision applied",
+      "egress.denied": "Egress denied without asking",
+      "scope.opened": "Shell scope opened",
+      "scope.released": "Shell scope released",
+      "session.refused": "Sync refused: an accepted run holds the sandbox",
+    },
     state: {
       available: "Available",
       not_applicable: "Not applicable",
