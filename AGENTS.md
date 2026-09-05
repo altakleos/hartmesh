@@ -31,30 +31,27 @@ Nginx is the single public entry: it serves the frontend, proxies
 `/api/langgraph/*` to the Gateway's LangGraph runtime (rewritten to native
 `/api/*`), and passes other `/api/*` to the Gateway REST routers; see
 [backend/AGENTS.md](backend/AGENTS.md). One tenant is frozen per Gateway
-([contract](backend/docs/TENANT_IDENTITY.md)). It compresses HTML/configured
-textual assets but deliberately leaves SSE, fonts, images, audio, and video
-uncompressed.
+([contract](backend/docs/TENANT_IDENTITY.md)). It compresses HTML and
+configured textual assets but not SSE, fonts, images, audio, or video.
 
 Both compose files publish that entry as
 `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"` — **loopback by default**; a
 bare `"${PORT}:2026"` binds `0.0.0.0`. Root `PORT` is Docker ingress only;
 local orchestration pins Next.js to `3000` so `.env` cannot make `make dev`
 wait on the wrong port. Nginx listens `default_server` (IPv4+IPv6) and the
-Gateway binds `0.0.0.0:8001` on purpose — both container-internal; the
-published nginx port is the entire external surface and `8001` is deliberately
-unpublished. Any new published port needs an explicit bind address;
-`backend/tests/test_compose_default_bind_host.py` pins this for every service
-in both compose files.
+Gateway binds `0.0.0.0:8001` on purpose, both container-internal: the published
+nginx port is the entire external surface and `8001` stays unpublished. Any new
+published port needs an explicit bind address;
+`backend/tests/test_compose_default_bind_host.py` pins this for every service.
 
 `durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
 AIO/RWX artifact, not arbitrary scaling, IM HA, cross-region operation, or
-zero-downtime upgrades. This checkout has no passing artifact; operator claims
-cannot unlock production rendering or startup.
+zero-downtime upgrades. No passing artifact exists here; operator claims cannot
+unlock production rendering or startup.
 
-The chart may put sandboxes in a pre-created `sandboxNamespace`. The provisioner
-stays in the release namespace, gets sandbox lifecycle RBAC only in the sandbox
-namespace, and retains name-pinned namespace get plus TokenReview create at
-cluster scope. `K8S_NAMESPACE` selects sandbox resources;
+The chart may put sandboxes in a pre-created `sandboxNamespace`: the provisioner
+stays in the release namespace with sandbox lifecycle RBAC only there, plus
+name-pinned namespace get and TokenReview create at cluster scope. `K8S_NAMESPACE` selects sandbox resources;
 `PROVISIONER_GATEWAY_NAMESPACE` selects the release namespace for Gateway
 ServiceAccount validation. Empty `sandboxNamespace` keeps single-namespace
 behavior; empty `namespace` follows the Helm release.
@@ -69,7 +66,7 @@ deer-flow/
 ├── backend/                        # Python backend — see backend/AGENTS.md
 │   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
 │   ├── extensions/sources/         # Deployable snapshots of locally installed Python extensions
-│   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
+│   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*), the public contract
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
 │   ├── packages/runtime-api/       # deerflow-runtime-api — stdlib-only embedded durable runtime contracts
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
@@ -123,16 +120,15 @@ Skill quality review note:
 
 Durable MCP task note:
 - MCP replay uses a dedicated startup-frozen HMAC keyring; exact-two key
-  changes require its quiesced restart. Public lineage stays redacted, and
-  parent evidence requires independent parent-run authorization; see
+  changes need its quiesced restart. Public lineage stays redacted and parent
+  evidence needs independent parent-run authorization; see
   [backend/AGENTS.md](backend/AGENTS.md).
 - CI skill-review waivers (`.github/skill-review-waivers.v1.json`, enforced by
   `scripts/review_changed_public_skills.py`) come only from the trusted base
   manifest, bind one error to its file SHA-256 and expiry, stay visible, and
-  never waive blockers. An entry may also preapprove a bounded list of future
-  full-file SHA-256 values, effective only once that manifest change lands in
-  the trusted base. Merge the waiver before changing the skill; afterwards
-  promote the consumed hash to `file_sha256` and drop the preapproval.
+  never waive blockers; an entry may preapprove future full-file SHA-256 values,
+  effective once that manifest lands in the trusted base. Merge the waiver
+  before changing the skill, then promote the consumed hash to `file_sha256`.
 
 Durable batches are parent-receipt/tenant bound and database-time fenced;
 effects may repeat and production stays disabled.
@@ -170,9 +166,9 @@ make docker-start / docker-stop / docker-logs   # Docker development environment
 Production startup uses the image's pre-built Python environment (`uv run
 --no-sync`) and a real Gateway `/health` probe; `make up` waits for that probe
 before its success banner, and a readiness failure must surface Compose status
-and recent Gateway logs instead of claiming the stack is running. Docker
-log/restart commands resolve `DEER_FLOW_ROOT` from the current checkout before
-invoking Compose, matching start and stop.
+and recent Gateway logs rather than claim the stack is running. Docker
+log/restart commands resolve `DEER_FLOW_ROOT` from the current checkout,
+matching start and stop.
 
 Run `make help` for the full list.
 
