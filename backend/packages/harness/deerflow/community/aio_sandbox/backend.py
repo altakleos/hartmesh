@@ -7,6 +7,7 @@ import ipaddress
 import logging
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from urllib.parse import urlparse
 
 import httpx
@@ -52,7 +53,7 @@ def wait_for_sandbox_ready(
     sandbox_url: str,
     timeout: int = 30,
     *,
-    headers: dict[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> bool:
     """Poll sandbox health endpoint until ready or timeout.
 
@@ -66,15 +67,11 @@ def wait_for_sandbox_ready(
     start_time = time.time()
     with requests.Session() as session:
         session.trust_env = sandbox_http_trust_env(sandbox_url)
+        if headers:
+            session.headers.update(headers)
         while time.time() - start_time < timeout:
             try:
-                request_kwargs: dict[str, object] = {"timeout": 5}
-                if headers:
-                    request_kwargs["headers"] = headers
-                response = session.get(
-                    f"{sandbox_url}/v1/sandbox",
-                    **request_kwargs,
-                )
+                response = session.get(f"{sandbox_url}/v1/sandbox", timeout=5)
                 if response.status_code == 200:
                     return True
             except requests.exceptions.RequestException:
@@ -88,7 +85,7 @@ async def wait_for_sandbox_ready_async(
     timeout: int = 30,
     poll_interval: float = 1.0,
     *,
-    headers: dict[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> bool:
     """Async variant of sandbox readiness polling.
 
@@ -99,21 +96,19 @@ async def wait_for_sandbox_ready_async(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
 
-    async with httpx.AsyncClient(timeout=5, trust_env=sandbox_http_trust_env(sandbox_url)) as client:
+    client_kwargs: dict[str, object] = {
+        "timeout": 5,
+        "trust_env": sandbox_http_trust_env(sandbox_url),
+    }
+    if headers:
+        client_kwargs["headers"] = dict(headers)
+    async with httpx.AsyncClient(**client_kwargs) as client:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
             try:
-                request_kwargs: dict[str, object] = {
-                    "timeout": min(5.0, remaining),
-                }
-                if headers:
-                    request_kwargs["headers"] = headers
-                response = await client.get(
-                    f"{sandbox_url}/v1/sandbox",
-                    **request_kwargs,
-                )
+                response = await client.get(f"{sandbox_url}/v1/sandbox", timeout=min(5.0, remaining))
                 if response.status_code == 200:
                     return True
             except httpx.RequestError:

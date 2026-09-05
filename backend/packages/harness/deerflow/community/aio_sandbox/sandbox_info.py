@@ -6,9 +6,7 @@ import hashlib
 import json
 import re
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -163,19 +161,15 @@ class SandboxInfo:
     container_name: str | None = None  # Only for local container backend
     container_id: str | None = None  # Only for local container backend
     created_at: float = field(default_factory=time.time)
-    request_headers: Mapping[str, str] = field(
-        default_factory=lambda: MappingProxyType({}),
-        repr=False,
-        compare=False,
-    )
+    # Ephemeral control-plane credentials reconstructed from local Docker
+    # discovery. Intentionally excluded from to_dict() and repr so they cannot
+    # leak through metadata persistence or routine lifecycle logs.
+    request_headers: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
     accepted_skill_material: AcceptedSkillMaterialReceipt | None = field(
         default=None,
         repr=False,
         compare=False,
     )
-
-    def __post_init__(self) -> None:
-        self.request_headers = MappingProxyType(dict(self.request_headers))
 
     def to_dict(self) -> dict:
         return {
