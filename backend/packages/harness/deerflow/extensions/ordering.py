@@ -84,6 +84,7 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
     from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
     from deerflow.guardrails.middleware import GuardrailMiddleware
+    from deerflow.sandbox.middleware import SandboxMiddleware
 
     return (
         OrderingConstraint(
@@ -118,5 +119,14 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
                 ReadBeforeWriteMiddleware,
                 ToolProgressMiddleware,
             )
+        ),
+        OrderingConstraint(
+            outer=ToolReceiptMiddleware,
+            inner=SandboxMiddleware,
+            reason=(
+                "SandboxMiddleware rebuilds tool results into Commands that carry sandbox state and, once upstream's "
+                "egress approval card lands, can replace a result with an approval message and end the turn; "
+                "ToolReceiptMiddleware must enclose it so a receipt never closes over a result the model does not see"
+            ),
         ),
     )

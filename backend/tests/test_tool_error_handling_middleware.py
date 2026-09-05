@@ -1235,3 +1235,22 @@ def test_subagent_summarization_fires_mid_run_and_produces_usable_result(monkeyp
     ai_finals = [m for m in final_messages if isinstance(m, AIMessage)]
     assert ai_finals, "the run must produce a final AIMessage after compaction"
     assert ai_finals[-1].content == "final answer after compaction"
+
+
+def test_runtime_chains_keep_the_receipt_outer_of_sandbox_middleware():
+    """Both runtime builders must satisfy the declared receipt/sandbox constraint
+    with real classes, so a reorder of either spine fails here rather than at
+    the first governed run."""
+    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+    from deerflow.extensions.ordering import assert_ordering, core_ordering_constraints
+    from deerflow.sandbox.middleware import SandboxMiddleware
+
+    core_ordering_constraints.cache_clear()
+    app_config = _make_app_config()
+    for builder in (build_lead_runtime_middlewares, build_subagent_runtime_middlewares):
+        middlewares = builder(app_config=app_config)
+        receipt = [index for index, middleware in enumerate(middlewares) if isinstance(middleware, ToolReceiptMiddleware)]
+        sandbox = [index for index, middleware in enumerate(middlewares) if isinstance(middleware, SandboxMiddleware)]
+        assert receipt and sandbox, builder.__name__
+        assert max(receipt) < min(sandbox), builder.__name__
+        assert_ordering(middlewares, {})

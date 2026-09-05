@@ -190,6 +190,13 @@ on first use — `ordering.py::core_ordering_constraints()` and `stack.py::_anch
 which is `assert_ordering` / composition time, already inside the middleware builder.
 Defer by deferring the *call*; do not fake a resolved value with a lazy container
 subclass, which reports one answer when iterated and another when measured.
+`ToolReceiptMiddleware` must enclose every middleware that can return or rebuild a
+`ToolMessage` without invoking its handler: Guardrail, SandboxAudit, ReadBeforeWrite,
+ToolProgress, and `SandboxMiddleware`. The sandbox middleware rebuilds tool results into
+`Command`s carrying sandbox state and, once upstream's egress approval card is absorbed,
+can replace a result with an approval message and end the turn; a receipt closed outside
+it would commit the ledger to a result the model never saw. Both runtime builders satisfy
+the constraint today and `tests/test_tool_error_handling_middleware.py` pins it.
 
 **Agent assembly observation.** `assemble_lead_agent()` returns
 `LeadAgentAssembly(graph, descriptor)`; `make_lead_agent()` remains the
