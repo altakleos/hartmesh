@@ -21,7 +21,7 @@ async def test_fresh_sqlite_bootstrap_installs_tool_plane_schema_at_0034(
             tables = await connection.run_sync(lambda conn: set(sa.inspect(conn).get_table_names()))
             head = (await connection.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one()
 
-        assert head == "0036_execution_policy_state"
+        assert head == "0037_merge_upstream_0018"
         assert {
             "tool_plane_scopes",
             "tool_plane_revisions",

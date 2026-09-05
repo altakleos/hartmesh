@@ -94,6 +94,7 @@ on installs that never enabled it. The convention is:
 - `migrations/versions/0015_scheduled_task_enqueue.py` — interrupts legacy transient queued rows, adds durable scheduled-run launch leases and attempt counts, expands the one-active-occurrence index to `queued`/`launching`/`running`, and migrates the overlap policy from `skip` to `enqueue`; chains after `0014_managed_subagents`
 - `migrations/versions/0016_subagent_batches.py` — creates durable native-subagent batch and item tables, including owner/submission idempotency, item identity, lease/recovery state, and result fields
 - `migrations/versions/0017_personal_access_tokens.py` — adds hashed personal access tokens for API authentication
+- `migrations/versions/0018_oauth_identity_pg_partial.py` — upstream: converts `idx_users_oauth_identity` to a partial index on Postgres (`postgresql_where`), matching `UserRow.__table_args__`; idempotent, Postgres-only, no-op on SQLite; chains after `0017_personal_access_tokens` and is joined by `0037`
 - `migrations/versions/0020_merge_mcp_task_results.py` — no-op merge of `0019_inbound_event_identity` and sibling `0012_mcp_task_results`
 - `migrations/versions/0021_merge_managed_subagents.py` — no-op merge of the published HartMesh head and upstream's managed-subagent branch
 - `migrations/versions/0022_merge_scheduled_enqueue.py` — no-op merge of the HartMesh head and upstream's scheduled-enqueue branch
@@ -114,6 +115,7 @@ on installs that never enabled it. The convention is:
   protected compact execution-policy JSON/digest pair to runs. Historical rows
   remain explicitly legacy; downgrade blocks once any policy projection exists
   because removing it would make accepted recovery forget counters or stops.
+- `migrations/versions/0037_merge_upstream_0018.py` — no-op merge of the HartMesh head `0036_execution_policy_state` and upstream `0018_oauth_identity_pg_partial`
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch decision + locking
 - `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps)

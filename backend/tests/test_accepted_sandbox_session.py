@@ -904,6 +904,19 @@ async def test_sandbox_middleware_uses_session_without_provider_lifecycle(
 
 
 @pytest.mark.asyncio
+async def test_declaration_carries_the_provider_ref_for_translation_only() -> None:
+    """The provider's own id rides on the declaration so id-keyed provider
+    hooks can translate the public ref inside the session provider; it is not
+    the public ref and it never reaches state or the handle."""
+    session, raw_sandbox, _materializer, _authority_calls = _session()
+    with _declared(session) as bridge:
+        declaration = bridge.declaration
+        assert declaration.provider_ref == raw_sandbox.id == "raw-provider-resource"
+        assert declaration.public_ref == bridge.safe_reference != declaration.provider_ref
+        assert bridge.sandbox.id == declaration.public_ref
+
+
+@pytest.mark.asyncio
 async def test_declared_session_is_registered_bound_by_its_owner_and_withdrawn() -> None:
     """Declaring registers the session; binding is the owner's explicit act
     (the worker binds for a whole run, the executor for one child execution);

@@ -8,7 +8,7 @@ Entry points and binders: Gateway HTTP — `TraceMiddleware`; scheduled occurren
 
 Only the first is HTTP; the rest run outside ASGI, so the binding cannot live in middleware alone. Each scopes **one unit of work**, never a poller loop — a leaked binding on a reused worker task would tag later occurrences with the first id. `ensure_trace_context` inherits, keeping layered scheduled bindings and a manual trigger inside a Gateway request on one trace.
 
-**Every other carrier is a derived output, never read back as an input.** `worker._bind_trace_id` stamps the runtime context and `config["metadata"]`; `services.start_run` stamps the run record; a caller-sent `deerflow_trace_id` (`body.metadata`, `body.config.context`) is replaced — honouring it would let the persisted run disagree with the header and the logs. `_SERVER_OWNED_RUNTIME_CONTEXT_KEYS` covers the embedded path, `redact_config_secrets` scrubs the kwargs echo (`runs.kwargs_json`), and `build_run_config` merges metadata onto a copy so the stamp cannot reach `body.config`. Callers pin an id with `X-Trace-Id`.
+**Every other carrier is a derived output, never read back as an input.** `worker._bind_trace_id` stamps the runtime context and `config["metadata"]`; `services.start_run` stamps the run record; a caller-sent `deerflow_trace_id` (`body.metadata`, `body.config.context`) is replaced — honouring it would let the persisted run disagree with the header and the logs. `_SERVER_OWNED_RUNTIME_CONTEXT_KEYS` covers the embedded path and also rejects caller-supplied sandbox lease/scope identities, `redact_config_secrets` scrubs the kwargs echo (`runs.kwargs_json`), and `build_run_config` merges metadata onto a copy so the stamp cannot reach `body.config`. Callers pin an id with `X-Trace-Id`.
 
 Accepted divergence: a crash-recovered scheduled launch reuses its run via the idempotency key without restamping — the record keeps the first attempt's id, the retry's logs a fresh one; restamping would rewrite an existing record. Not a bug. Thread metadata omits the key entirely — a thread spans many runs.
 
@@ -89,6 +89,18 @@ CI.
 
 **Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
 
+### AIO Sandbox Network Policy
+
+Restricted AIO keeps sandboxes internal; a per-sandbox, ICC-disabled sidecar
+handles egress and its token-authenticated API relay. Parse headers strictly;
+reject policy-denied names before DNS and try all validated answers. Claim the
+oldest unsurfaced denial; subagent/non-interactive runs drain and deny. Approvals
+never replay tools; policy labels fence reuse. CONNECT/SNI cannot inspect
+encrypted authority. Discovery and enumeration are read-only, including on a
+policy or network-mode mismatch; only the provider may replace it after the
+orphan grace, local teardown reservation, and cross-instance teardown lease.
+Destroy the sandbox, sidecar, and both networks together.
+
 ### E2B Mount Uploads
 
 The E2B provider uploads host mounts during sandbox creation. It passes binary file objects to the E2B SDK.
@@ -121,3 +133,7 @@ An invalid mount does not block later mounts.
 Each successful upload logs its source, destination, file count, byte count, and elapsed time.
 
 A stopped pass logs its limit reason and elapsed time. It reports attempted and completed upload totals separately.
+
+`E2BSandbox.mount_upload_result` carries the creation-time `MountUploadResult`;
+`truncated` is set only by a resource limit (deadline, file cap, byte budget),
+not by individual mount failures, and is `None` when not available.

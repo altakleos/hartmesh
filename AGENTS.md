@@ -129,7 +129,10 @@ Durable MCP task note:
 - CI skill-review waivers (`.github/skill-review-waivers.v1.json`, enforced by
   `scripts/review_changed_public_skills.py`) come only from the trusted base
   manifest, bind one error to its file SHA-256 and expiry, stay visible, and
-  never waive blockers. Merge the waiver before changing the skill.
+  never waive blockers. An entry may also preapprove a bounded list of future
+  full-file SHA-256 values, effective only once that manifest change lands in
+  the trusted base. Merge the waiver before changing the skill; afterwards
+  promote the consumed hash to `file_sha256` and drop the preapproval.
 
 Durable batches are parent-receipt/tenant bound and database-time fenced;
 effects may repeat and production stays disabled.
@@ -249,6 +252,9 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
+- **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
+  Python utilities that read or write them must pass `encoding="utf-8"` rather than
+  relying on the platform locale.
 - **Version sources must stay in lockstep** — `backend/pyproject.toml`, the
   root `deer-flow` entry in `backend/uv.lock`, `frontend/package.json`, and
   `deploy/helm/deer-flow/Chart.yaml` (`version` + `appVersion`) must match. A

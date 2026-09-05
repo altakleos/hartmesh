@@ -249,7 +249,7 @@ they resolve from the selected Secret):
 
 ```yaml
 config: |
-  config_version: 53
+  config_version: 54
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI

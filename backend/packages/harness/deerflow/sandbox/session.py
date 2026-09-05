@@ -12,7 +12,9 @@ three verbs by the executing session's declaration:
   mount scope, which is what makes "destroy with a co-holder" impossible; and
 * releasing a public ref runs the declaration's terminal, once.
 
-The real provider identifier never leaves the declaring session. Ordinary
+The real provider identifier never leaves the declaring session: the provider
+hooks that are keyed by sandbox id (the network policy hooks) receive the
+public ref and translate it inside, for the declaring execution only. Ordinary
 sessions are the default kind: everything not declared is forwarded to the
 backing provider unchanged. The declaration travels with the execution as a
 context variable; ``declared_sandbox`` is the one resolver the tools and
@@ -25,6 +27,7 @@ from __future__ import annotations
 import inspect
 import logging
 import threading
+import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -92,10 +95,16 @@ class SandboxSessionDeclaration:
     handle: Sandbox
     is_live: Callable[[], bool]
     retire: Callable[[], None]
+    # The backing provider's own identifier for the container. It never leaves
+    # the session provider: provider hooks that are keyed by sandbox id (the
+    # network policy hooks) receive the public ref and translate to it inside.
+    provider_ref: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.public_ref, str) or not self.public_ref:
             raise ValueError("public_ref must be a non-empty string")
+        if self.provider_ref is not None and (not isinstance(self.provider_ref, str) or not self.provider_ref):
+            raise ValueError("provider_ref must be a non-empty string or None")
         if self.mount_scope is not None and (not isinstance(self.mount_scope, tuple) or len(self.mount_scope) != 2 or not all(isinstance(part, str) and part for part in self.mount_scope)):
             raise ValueError("mount_scope must be a (user_id, thread_id) pair or None")
         if not isinstance(self.kind, SandboxSessionKind) or not isinstance(self.terminal, SandboxSessionTerminal):
@@ -236,7 +245,12 @@ def get_sandbox_session_registry() -> SandboxSessionRegistry:
     return _REGISTRY
 
 
-_OVERRIDDEN = frozenset({"acquire", "acquire_async", "get", "release"})
+_NETWORK_HOOKS = (
+    "consume_network_policy_events",
+    "deny_pending_network_policy_events",
+    "decide_network_policy_request",
+)
+_OVERRIDDEN = frozenset({"acquire", "acquire_async", "get", "release", *_NETWORK_HOOKS, *(f"{name}_async" for name in _NETWORK_HOOKS)})
 
 
 def _forwarded_names() -> tuple[tuple[str, bool], ...]:
@@ -355,6 +369,59 @@ class SessionProvider(SandboxProvider):
             return
         self._backing.release(sandbox_id)
 
+    # -- provider hooks keyed by sandbox id: translate the public ref ---------
+
+    def _backing_ref(self, sandbox_id: str) -> str | None:
+        """The backing id behind ``sandbox_id``, for the declaring execution only.
+
+        A public ref resolves to its container id only for the execution that
+        declared it, exactly as ``get`` resolves the handle; a stranger, a
+        retired ref, or a declaration without a provider ref resolves to
+        nothing. An ordinary id passes through unchanged.
+        """
+        declaration = self._registry.lookup(sandbox_id)
+        if declaration is not None:
+            return declaration.provider_ref if _CURRENT.get() is declaration else None
+        if self._registry.was_declared(sandbox_id):
+            return None
+        return sandbox_id
+
+    def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
+        backing_ref = self._backing_ref(sandbox_id)
+        if backing_ref is None:
+            return []
+        return self._backing.consume_network_policy_events(backing_ref)
+
+    async def consume_network_policy_events_async(self, sandbox_id: str) -> list[dict[str, object]]:
+        backing_ref = self._backing_ref(sandbox_id)
+        if backing_ref is None:
+            return []
+        return await self._backing.consume_network_policy_events_async(backing_ref)
+
+    def deny_pending_network_policy_events(self, sandbox_id: str) -> bool:
+        backing_ref = self._backing_ref(sandbox_id)
+        if backing_ref is None:
+            return False
+        return self._backing.deny_pending_network_policy_events(backing_ref)
+
+    async def deny_pending_network_policy_events_async(self, sandbox_id: str) -> bool:
+        backing_ref = self._backing_ref(sandbox_id)
+        if backing_ref is None:
+            return False
+        return await self._backing.deny_pending_network_policy_events_async(backing_ref)
+
+    def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        backing_ref = self._backing_ref(sandbox_id)
+        if backing_ref is None:
+            return False
+        return self._backing.decide_network_policy_request(backing_ref, request_id, decision)
+
+    async def decide_network_policy_request_async(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        backing_ref = self._backing_ref(sandbox_id)
+        if backing_ref is None:
+            return False
+        return await self._backing.decide_network_policy_request_async(backing_ref, request_id, decision)
+
     # -- everything else is the backing provider ----------------------------
 
     def __getattr__(self, name: str) -> Any:
@@ -391,11 +458,32 @@ def _install_forwarders() -> None:
 _install_forwarders()
 
 
+_wrappers_lock = threading.Lock()
+# One wrapper per backing provider object. Lifecycle registries (the lease
+# manager) are keyed by provider identity, so a backing provider and the
+# wrapper installed in front of it must always resolve to the same wrapper.
+# Values are weak: a wrapper lives exactly as long as something holds it, and
+# it holds its backing strongly, so an id cannot be reused while its entry is
+# still present.
+_wrappers: weakref.WeakValueDictionary[int, SessionProvider] = weakref.WeakValueDictionary()
+
+
 def sandbox_session_provider(provider: SandboxProvider, *, registry: SandboxSessionRegistry | None = None) -> SessionProvider:
-    """Wrap ``provider`` once; an already wrapped provider is returned as is."""
+    """Wrap ``provider`` once; an already wrapped provider is returned as is.
+
+    The same backing provider always yields the same wrapper, so identity-keyed
+    lifecycle state cannot fork between callers holding the backing provider
+    and callers holding the installed session provider.
+    """
     if isinstance(provider, SessionProvider):
         return provider
-    return SessionProvider(provider, registry=registry)
+    with _wrappers_lock:
+        existing = _wrappers.get(id(provider))
+        if existing is not None and existing.backing is provider and (registry is None or existing.registry is registry):
+            return existing
+        wrapper = SessionProvider(provider, registry=registry)
+        _wrappers[id(provider)] = wrapper
+        return wrapper
 
 
 def unwrap_sandbox_provider(provider: SandboxProvider) -> SandboxProvider:
