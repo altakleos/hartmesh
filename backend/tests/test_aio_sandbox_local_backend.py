@@ -570,6 +570,83 @@ def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatc
     assert "--cap-drop=ALL" in create
     assert "no-new-privileges" in create
     assert "DEERFLOW_RELAY_TOKEN=test-relay-token" in create
+    # The sidecar keeps the daemon's default OCI runtime: it is the trusted
+    # policy enforcement point, runs no model-authored code, and the sandbox
+    # runtime seam must not leak into it.
+    assert "--runtime" not in create
+
+
+def _capture_proxy_create_command(monkeypatch, backend: LocalContainerBackend) -> list[str]:
+    backend._network_mode = "allowlist"
+    backend._network_config = {
+        "mode": "allowlist",
+        "allow_domains": [],
+        "approval": "prompt",
+        "proxy_image": "proxy:latest",
+    }
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(stdout="proxy-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._start_network_proxy("proxy-name", "network-name", "egress-network-name", "sandbox-name", 18080, "sandbox-id", "test-relay-token")
+    return commands[0]
+
+
+def test_network_proxy_memory_limit_defaults_to_256m_with_equal_swap(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
+
+    create = _capture_proxy_create_command(monkeypatch, backend)
+
+    assert create[create.index("--memory") + 1] == "256m"
+    assert create[create.index("--memory-swap") + 1] == "256m"
+    assert create[create.index("--cpus") + 1] == "1"
+    assert create[create.index("--pids-limit") + 1] == "128"
+    assert "--runtime" not in create
+
+
+def test_network_proxy_memory_limit_is_tunable(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_PROXY_MEMORY", "96m")
+
+    create = _capture_proxy_create_command(monkeypatch, backend)
+
+    assert create[create.index("--memory") + 1] == "96m"
+    assert create[create.index("--memory-swap") + 1] == "96m"
+
+
+def test_network_proxy_memory_limit_can_be_disabled(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_PROXY_MEMORY", "none")
+
+    create = _capture_proxy_create_command(monkeypatch, backend)
+
+    assert "--memory" not in create
+    assert "--memory-swap" not in create
 
 
 def test_start_container_filters_nested_config_mounts_for_policy_scoped_skills(
@@ -784,6 +861,8 @@ def _clear_hardening_env(monkeypatch):
         "DEER_FLOW_SANDBOX_CONTAINER_USER",
         "DEER_FLOW_SANDBOX_NETWORK",
         "DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS",
+        "DEER_FLOW_SANDBOX_RUNTIME",
+        "DEER_FLOW_SANDBOX_PROXY_MEMORY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -905,11 +984,79 @@ def test_start_container_hardens_docker_run_by_default(monkeypatch):
     # hardening that does not break the shipped image is kept.
     assert "seccomp=unconfined" in security_opts
     assert captured_cmd[captured_cmd.index("--memory") + 1] == "2g"
+    # Swap is capped at the memory limit so the budget is the whole budget.
+    assert captured_cmd[captured_cmd.index("--memory-swap") + 1] == "2g"
     assert captured_cmd[captured_cmd.index("--cpus") + 1] == "2"
     assert captured_cmd[captured_cmd.index("--pids-limit") + 1] == "512"
     # Opt-in-only knobs stay absent unless explicitly configured.
     assert "--user" not in captured_cmd
     assert "--network" not in captured_cmd
+    assert "--runtime" not in captured_cmd
+
+
+def test_start_container_passes_oci_runtime_with_builtin_seccomp(monkeypatch):
+    """The gVisor profile needs both flags on the sandbox's docker run.
+
+    Asserting only that ``seccomp=unconfined`` is absent would pass on a
+    regression that emits no seccomp option at all and silently inherits the
+    daemon default, which is exactly what the explicit opt-out exists to
+    prevent. The OCI runtime is the daemon-registered name, distinct from the
+    container CLI that ``backend.runtime`` reports.
+    """
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED", "0")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("--runtime") + 1] == "runsc"
+    security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
+    assert "seccomp=builtin" in security_opts
+    assert "seccomp=unconfined" not in security_opts
+    assert "no-new-privileges" in security_opts
+    assert backend.runtime == "docker"
+
+
+def test_start_container_emits_no_runtime_when_unset(monkeypatch):
+    """Unset or blank keeps the upstream self-host path byte-for-byte."""
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "   ")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert "--runtime" not in captured_cmd
+    assert "runsc" not in captured_cmd
+
+
+def test_start_container_does_not_pass_runtime_to_apple_container(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend, runtime="container")
+
+    assert "--runtime" not in captured_cmd
+    assert "--memory-swap" not in captured_cmd
 
 
 def test_start_container_seccomp_can_opt_out_to_default_profile(monkeypatch):
@@ -992,6 +1139,7 @@ def test_start_container_resource_limits_env_override(monkeypatch):
     captured_cmd = _capture_start_container_command(monkeypatch, backend)
 
     assert captured_cmd[captured_cmd.index("--memory") + 1] == "4g"
+    assert captured_cmd[captured_cmd.index("--memory-swap") + 1] == "4g"
     assert captured_cmd[captured_cmd.index("--cpus") + 1] == "4"
     assert captured_cmd[captured_cmd.index("--pids-limit") + 1] == "1024"
 
@@ -1012,6 +1160,7 @@ def test_start_container_resource_limits_can_be_disabled(monkeypatch):
     captured_cmd = _capture_start_container_command(monkeypatch, backend)
 
     assert "--memory" not in captured_cmd
+    assert "--memory-swap" not in captured_cmd
     assert "--cpus" not in captured_cmd
     assert "--pids-limit" not in captured_cmd
 
@@ -1101,6 +1250,7 @@ def test_start_container_does_not_add_docker_hardening_to_apple_container(monkey
     assert "--cap-drop=ALL" not in captured_cmd
     assert "--security-opt" not in captured_cmd
     assert "--memory" not in captured_cmd
+    assert "--memory-swap" not in captured_cmd
     assert "--cpus" not in captured_cmd
     assert "--pids-limit" not in captured_cmd
 

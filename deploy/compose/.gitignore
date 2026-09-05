@@ -1,0 +1,3 @@
+# The tenant .env lives on the VM's data disk, never in this tree: the golden
+# build refuses a bundle that carries one.
+.env

@@ -66,8 +66,8 @@ jobs:
             fi
           }
 
-          for COMPONENT in backend frontend provisioner sandbox; do
-            IMAGE_REPOSITORY="${IMAGE_BASE}-${COMPONENT}"
+          for COMPONENT in backend frontend provisioner sandbox sandbox_network_proxy; do
+            IMAGE_REPOSITORY="${IMAGE_BASE}-${COMPONENT//_/-}"
             TAG_REFERENCE="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
             SHA_REFERENCE="${IMAGE_REPOSITORY}:sha-${SHORT_SHA}"
             TAG_DIGEST="$(crane digest "$TAG_REFERENCE")"
@@ -159,6 +159,59 @@ jobs:
               output.write(f"extension_entry_count={entry_count}\n")
           PY
 
+      - name: Cross-check the compose profile pins against the published digests
+        id: compose
+        env:
+          IMAGE_BASE: ghcr.io/${{ github.repository }}
+          BACKEND_DIGEST: ${{ steps.resolve.outputs.backend_digest }}
+          FRONTEND_DIGEST: ${{ steps.resolve.outputs.frontend_digest }}
+          SANDBOX_DIGEST: ${{ steps.resolve.outputs.sandbox_digest }}
+          SANDBOX_NETWORK_PROXY_DIGEST: ${{ steps.resolve.outputs.sandbox_network_proxy_digest }}
+        run: |
+          set -euo pipefail
+          # The tagged tree must already be digest-pinned (RELEASING.md): the
+          # golden VM image pre-pulls exactly these lines and a first start
+          # pulls nothing only if the running stack references the same strings.
+          python3 scripts/pin_compose_images.py --check
+          IMAGES_TXT=deploy/compose/images.txt
+          while IFS= read -r LINE; do
+            [ -n "$LINE" ] || continue
+            REPOSITORY="${LINE%%@*}"
+            DIGEST="${LINE##*@}"
+            case "$REPOSITORY" in
+              "${IMAGE_BASE}-"*)
+                COMPONENT="${REPOSITORY#"${IMAGE_BASE}-"}"
+                VARIABLE="$(printf '%s' "$COMPONENT" | tr 'a-z-' 'A-Z_')_DIGEST"
+                EXPECTED="${!VARIABLE:-}"
+                if [ -z "$EXPECTED" ]; then
+                  echo "::error::${LINE} pins a component this release does not publish"
+                  exit 1
+                fi
+                if [ "$DIGEST" != "$EXPECTED" ]; then
+                  echo "::error::${LINE} differs from the published release digest ${EXPECTED}"
+                  exit 1
+                fi
+                ;;
+              *)
+                if ! crane manifest "$LINE" >/dev/null; then
+                  echo "::error::${LINE} is not resolvable in its registry"
+                  exit 1
+                fi
+                ;;
+            esac
+          done < "$IMAGES_TXT"
+          printf 'images_txt_sha256=%s\n' "$(sha256sum "$IMAGES_TXT" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          python3 - "$IMAGES_TXT" "$RUNNER_TEMP/compose-profile-images.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          images_txt, output_path = sys.argv[1:]
+          lines = [line.strip() for line in Path(images_txt).read_text(encoding="utf-8").splitlines() if line.strip()]
+          Path(output_path).write_text(json.dumps(lines), encoding="utf-8")
+          PY
+          printf 'images_json=%s\n' "$RUNNER_TEMP/compose-profile-images.json" >> "$GITHUB_OUTPUT"
+
       - name: Write release-manifest.json
         env:
           VERSION: ${{ inputs.version }}
@@ -180,6 +233,11 @@ jobs:
           SANDBOX_REPOSITORY: ${{ steps.resolve.outputs.sandbox_repository }}
           SANDBOX_DIGEST: ${{ steps.resolve.outputs.sandbox_digest }}
           SANDBOX_REVISION_CHECK: ${{ steps.resolve.outputs.sandbox_revision_check }}
+          SANDBOX_NETWORK_PROXY_REPOSITORY: ${{ steps.resolve.outputs.sandbox_network_proxy_repository }}
+          SANDBOX_NETWORK_PROXY_DIGEST: ${{ steps.resolve.outputs.sandbox_network_proxy_digest }}
+          SANDBOX_NETWORK_PROXY_REVISION_CHECK: ${{ steps.resolve.outputs.sandbox_network_proxy_revision_check }}
+          COMPOSE_IMAGES_TXT_SHA256: ${{ steps.compose.outputs.images_txt_sha256 }}
+          COMPOSE_IMAGES_JSON: ${{ steps.compose.outputs.images_json }}
           CHART_REPOSITORY: ${{ steps.resolve.outputs.chart_repository }}
           CHART_MANIFEST_DIGEST: ${{ steps.resolve.outputs.chart_manifest_digest }}
           PACKAGE_SHA256: ${{ steps.resolve.outputs.package_sha256 }}
@@ -189,8 +247,10 @@ jobs:
           import os
 
           image_tag = os.environ["IMAGE_TAG"]
+          with open(os.environ["COMPOSE_IMAGES_JSON"], encoding="utf-8") as compose_images:
+              compose_profile_images = json.load(compose_images)
           manifest = {
-              "schema": 2,
+              "schema": 3,
               "version": os.environ["VERSION"],
               "tag": f"v{os.environ['VERSION']}",
               "commit": os.environ["COMMIT"],
@@ -213,7 +273,11 @@ jobs:
                           else {}
                       ),
                   }
-                  for name in ("backend", "frontend", "provisioner", "sandbox")
+                  for name in ("backend", "frontend", "provisioner", "sandbox", "sandbox_network_proxy")
+              },
+              "compose_profile": {
+                  "images_txt_sha256": os.environ["COMPOSE_IMAGES_TXT_SHA256"],
+                  "images": compose_profile_images,
               },
               "chart": {
                   "repository": os.environ["CHART_REPOSITORY"],
@@ -266,6 +330,8 @@ jobs:
             echo '| frontend | `${{ steps.resolve.outputs.frontend_repository }}@${{ steps.resolve.outputs.frontend_digest }}` | `${{ steps.resolve.outputs.frontend_revision_check }}` |'
             echo '| provisioner | `${{ steps.resolve.outputs.provisioner_repository }}@${{ steps.resolve.outputs.provisioner_digest }}` | `${{ steps.resolve.outputs.provisioner_revision_check }}` |'
             echo '| sandbox | `${{ steps.resolve.outputs.sandbox_repository }}@${{ steps.resolve.outputs.sandbox_digest }}` | `${{ steps.resolve.outputs.sandbox_revision_check }}` |'
+            echo '| sandbox-network-proxy | `${{ steps.resolve.outputs.sandbox_network_proxy_repository }}@${{ steps.resolve.outputs.sandbox_network_proxy_digest }}` | `${{ steps.resolve.outputs.sandbox_network_proxy_revision_check }}` |'
+            echo '| compose profile images.txt SHA-256 | `${{ steps.compose.outputs.images_txt_sha256 }}` | n/a |'
             echo '| chart manifest | `${{ steps.resolve.outputs.chart_manifest_digest }}` | n/a |'
             echo '| chart package SHA-256 | `${{ steps.resolve.outputs.package_sha256 }}` | n/a |'
           } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,21 @@
+# Included when STEPFUN_API_KEY is present. From config.example.yaml.
+env: STEPFUN_API_KEY
+models:
+  - name: step-3.7-flash
+    display_name: Step 3.7 Flash
+    use: deerflow.models.patched_stepfun:PatchedChatStepFun
+    model: step-3.7-flash
+    api_key: $STEPFUN_API_KEY
+    base_url: https://api.stepfun.com/v1
+    request_timeout: 600.0
+    max_retries: 2
+    max_tokens: 4096
+    supports_thinking: true
+    supports_reasoning_effort: true
+    supports_vision: true
+    when_thinking_enabled:
+      extra_body:
+        reasoning_format: deepseek-style
+    when_thinking_disabled:
+      extra_body:
+        reasoning_format: deepseek-style

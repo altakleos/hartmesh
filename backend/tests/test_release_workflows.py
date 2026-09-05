@@ -37,18 +37,31 @@ def _assert_actions_are_pinned(workflow: str) -> None:
     assert all(_PINNED_ACTION.fullmatch(line) for line in action_lines)
 
 
-def test_release_builds_and_attests_four_version_gated_images() -> None:
+def test_release_builds_and_attests_five_version_gated_images() -> None:
     workflow = _CONTAINERS.read_text(encoding="utf-8")
 
-    for component in ("backend", "frontend", "provisioner", "sandbox"):
-        assert f"  {component}-container:" in workflow
-        assert f"IMAGE_NAME: ${{{{ github.repository }}}}-{component}" in workflow
-    assert workflow.count("needs: verify-versions") == 4
-    assert workflow.count("docker/metadata-action@") == 4
-    assert workflow.count("docker/build-push-action@") == 4
-    assert workflow.count("actions/attest-build-provenance@") == 4
-    assert "context: docker/sandbox" in workflow
+    for component in ("backend", "frontend", "provisioner", "sandbox", "sandbox-network-proxy"):
+        assert f"          - component: {component}\n" in workflow
+    assert "IMAGE_NAME: ${{ github.repository }}-${{ matrix.component }}" in workflow
+    assert workflow.count("needs: verify-versions") == 1
+    assert workflow.count("docker/metadata-action@") == 1
+    assert workflow.count("docker/build-push-action@") == 1
+    assert workflow.count("actions/attest-build-provenance@") == 1
+    assert "context: docker/sandbox\n" in workflow
     assert "file: docker/sandbox/Dockerfile" in workflow
+    assert "file: docker/sandbox-network-proxy/Dockerfile" in workflow
+    # A candidate build for a version that has no tag yet, so the compose
+    # profile can be digest-pinned before the release commit is tagged.
+    assert "workflow_dispatch:" in workflow
+    assert "scripts/release_tag_spellings.sh" in workflow
+    assert "version: ${{ inputs.version || '' }}" in workflow
+    # The tag build adopts a digest already pinned by the profile instead of
+    # rebuilding it, and refuses a tag-form pin outright.
+    assert "deploy/compose/images.txt" in workflow
+    assert "docker buildx imagetools create --tag" in workflow
+    assert "run scripts/pin_compose_images.py before tagging the release" in workflow
+    assert workflow.count("if: steps.adopt.outputs.adopted != 'true'") == 3
+    assert "value=latest" not in workflow
     action_lines = [line.strip() for line in workflow.splitlines() if "uses:" in line and "uses: ./" not in line]
     assert action_lines
     assert all(re.fullmatch(r"uses: [^\s]+@[0-9a-f]{40} # ?v\d+(?:\.\d+)*", line) for line in action_lines)
@@ -94,7 +107,7 @@ def test_release_manifest_resolves_and_records_every_published_identity() -> Non
         "package_sha256",
     ):
         assert f'"{field}"' in workflow
-    for component in ("backend", "frontend", "provisioner", "sandbox"):
+    for component in ("backend", "frontend", "provisioner", "sandbox", "sandbox_network_proxy"):
         assert f'"{component}"' in workflow
     assert "actions/upload-artifact@" in workflow
     assert "gh release create" in workflow
@@ -124,7 +137,7 @@ def test_release_manifest_records_revision_check_without_requiring_sha_tag() -> 
     assert 'printf \'%s_digest=%s\\n\' "$COMPONENT" "$TAG_DIGEST"' in workflow
     assert 'printf \'%s_revision_check=%s\\n\' "$COMPONENT" "$REVISION_CHECK"' in workflow
     assert '"revision_check": os.environ[f"{name.upper()}_REVISION_CHECK"]' in workflow
-    for component in ("backend", "frontend", "provisioner", "sandbox"):
+    for component in ("backend", "frontend", "provisioner", "sandbox", "sandbox_network_proxy"):
         assert f"{component}_revision_check" in workflow
 
 
@@ -140,13 +153,14 @@ def test_release_workflows_pass_registry_tokens_over_stdin() -> None:
 def test_release_manifest_resolves_sandbox_as_a_built_image() -> None:
     workflow = _MANIFEST.read_text(encoding="utf-8")
 
-    assert "for COMPONENT in backend frontend provisioner sandbox; do" in workflow
-    assert 'for name in ("backend", "frontend", "provisioner", "sandbox")' in workflow
+    assert "for COMPONENT in backend frontend provisioner sandbox sandbox_network_proxy; do" in workflow
+    assert 'IMAGE_REPOSITORY="${IMAGE_BASE}-${COMPONENT//_/-}"' in workflow
+    assert 'for name in ("backend", "frontend", "provisioner", "sandbox", "sandbox_network_proxy")' in workflow
     assert "SANDBOX_PRESENT" not in workflow
     assert "inputs.sandbox" not in workflow
     assert 'manifest["sandbox"]' not in workflow
     assert '"sandbox"' in workflow
-    assert '"schema": 2' in workflow
+    assert '"schema": 3' in workflow
     assert "extension_artifact_manifest_digest" in workflow
     assert "extension_api_version" in workflow
     assert "extension_entry_count" in workflow
@@ -202,10 +216,12 @@ def test_only_the_release_container_workflow_publishes_the_sandbox_package() -> 
         r"MIRROR_REPOSITORY: ghcr\.io/\$\{\{ github\.repository \}\}-sandbox)\s*$",
         flags=re.MULTILINE,
     )
+    matrix_declaration = re.compile(r"^\s+IMAGE_NAME: \$\{\{ github\.repository \}\}-\$\{\{ matrix\.component \}\}\s*$", flags=re.MULTILINE)
+    matrix_component = re.compile(r"^\s+- component: sandbox\s*$", flags=re.MULTILINE)
 
     for workflow_path in sorted((_ROOT / ".github/workflows").glob("*.y*ml")):
         workflow = workflow_path.read_text(encoding="utf-8")
-        if package_declaration.search(workflow):
+        if package_declaration.search(workflow) or (matrix_declaration.search(workflow) and matrix_component.search(workflow)):
             sandbox_publishers.append(workflow_path.name)
 
     assert sandbox_publishers == ["container.yaml"]

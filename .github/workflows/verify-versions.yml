@@ -1,9 +1,10 @@
 name: Verify Versions
 
 # Reusable workflow: checks that every project version source agrees with the
-# git tag that triggered the release. Called by chart.yaml and container.yaml
-# on v* tags so a forgotten version bump blocks the entire release (container
-# images + chart), not just the chart.
+# git tag that triggered the release, or with an explicitly passed version for
+# a candidate build dispatched before the tag exists. Called by chart.yaml and
+# container.yaml on v* tags so a forgotten version bump blocks the entire
+# release (container images + chart), not just the chart.
 #
 # Sources verified: deploy/helm/deer-flow/Chart.yaml (version + appVersion),
 # backend/pyproject.toml, backend/uv.lock, frontend/package.json. Logic lives in
@@ -11,6 +12,12 @@ name: Verify Versions
 
 on:
   workflow_call:
+    inputs:
+      version:
+        description: Release version to verify against; empty derives it from the v* tag that triggered the caller
+        required: false
+        type: string
+        default: ""
 
 jobs:
   verify-versions:
@@ -22,6 +29,9 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
 
       - name: Verify all version sources match tag
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${INPUT_VERSION:-${GITHUB_REF_NAME#v}}"
+          TAG_VERSION="${TAG_VERSION#v}"
           bash scripts/verify_versions.sh "$TAG_VERSION"

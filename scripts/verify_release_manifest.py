@@ -42,6 +42,11 @@ _ARTIFACT_ENTRY_FIELDS = {
     "installed_record_digest",
     "entry_digest",
 }
+_COMPOSE_REFERENCE = re.compile(r"[a-z0-9./_-]+@sha256:[0-9a-f]{64}\Z")
+_IMAGE_NAMES = ("backend", "frontend", "provisioner", "sandbox", "sandbox_network_proxy")
+# Images the tenant VM compose profile runs; the provisioner is cluster-only.
+_COMPOSE_PROFILE_IMAGE_NAMES = ("backend", "frontend", "sandbox", "sandbox_network_proxy")
+_MAX_COMPOSE_PROFILE_IMAGES = 32
 _IMAGE_FIELDS = {"repository", "tag", "digest", "revision_check"}
 _GATEWAY_IMAGE_FIELDS = _IMAGE_FIELDS | {
     "extension_artifact_manifest_digest",
@@ -226,10 +231,10 @@ def verify_release_manifest(
 ) -> Mapping[str, Any]:
     manifest = _object(
         _read_json(path, "release_manifest_invalid"),
-        {"schema", "version", "tag", "commit", "images", "chart"},
+        {"schema", "version", "tag", "commit", "images", "compose_profile", "chart"},
         "release_manifest_invalid",
     )
-    if manifest["schema"] != 2 or type(manifest["schema"]) is not int:
+    if manifest["schema"] != 3 or type(manifest["schema"]) is not int:
         raise ReleaseManifestError("release_manifest_schema_unsupported")
     version = _text(manifest["version"], "release_manifest_invalid", max_bytes=128)
     if manifest["tag"] != f"v{version}":
@@ -238,10 +243,10 @@ def verify_release_manifest(
         raise ReleaseManifestError("release_manifest_invalid")
     images = _object(
         manifest["images"],
-        {"backend", "frontend", "provisioner", "sandbox"},
+        set(_IMAGE_NAMES),
         "release_manifest_invalid",
     )
-    for name in ("backend", "frontend", "provisioner", "sandbox"):
+    for name in _IMAGE_NAMES:
         fields = _GATEWAY_IMAGE_FIELDS if name == "backend" else _IMAGE_FIELDS
         image = _object(images[name], fields, "release_manifest_invalid")
         repository = _text(image["repository"], "release_manifest_invalid")
@@ -289,6 +294,23 @@ def verify_release_manifest(
             raise ReleaseManifestError("extension_api_version_mismatch")
         if actual_entry_count != entry_count:
             raise ReleaseManifestError("extension_entry_count_mismatch")
+    compose_profile = _object(
+        manifest["compose_profile"],
+        {"images_txt_sha256", "images"},
+        "release_manifest_invalid",
+    )
+    if not isinstance(compose_profile["images_txt_sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", compose_profile["images_txt_sha256"]) is None:
+        raise ReleaseManifestError("release_manifest_invalid")
+    compose_images = compose_profile["images"]
+    if not isinstance(compose_images, list) or not compose_images or len(compose_images) > _MAX_COMPOSE_PROFILE_IMAGES or len(set(compose_images)) != len(compose_images):
+        raise ReleaseManifestError("release_manifest_invalid")
+    for reference in compose_images:
+        if not isinstance(reference, str) or _COMPOSE_REFERENCE.fullmatch(reference) is None:
+            raise ReleaseManifestError("release_manifest_invalid")
+    for name in _COMPOSE_PROFILE_IMAGE_NAMES:
+        pinned = f"{images[name]['repository']}@{images[name]['digest']}"
+        if pinned not in compose_images:
+            raise ReleaseManifestError("release_manifest_compose_profile_mismatch")
     chart = _object(
         manifest["chart"],
         {
