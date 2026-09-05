@@ -611,7 +611,15 @@ def snapshot_effective_skills(
     user_id: str | None,
     limits: SkillSnapshotLimits = DEFAULT_SKILL_SNAPSHOT_LIMITS,
 ) -> AcceptedSkillSnapshot | None:
-    """Copy effective skill bytes, publish atomically, and acquire one lease."""
+    """Copy effective skill bytes, publish atomically, and acquire one lease.
+
+    The snapshot is content addressed, so the digest is computed from one
+    stable read of every source tree before anything is written. When that
+    digest is already published (another live lease holds it), the published
+    tree is re-verified and leased without staging a second copy: copying and
+    fsyncing every file again would cost seconds on slow storage and prove
+    nothing the verification does not.
+    """
     if not skills:
         return None
     if len(skills) > limits.max_skills:
@@ -624,39 +632,80 @@ def snapshot_effective_skills(
     identities: set[tuple[str, str]] = set()
     scope_root = get_paths().skill_snapshot_scope_dir(user_id)
     scope_root.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".building-", dir=scope_root))
+    captured: list[tuple[Skill, str, str, list[_CapturedFile]]] = []
     projections: list[SkillSnapshotProjection] = []
-    parsed_by_identity: dict[tuple[str, str], Skill] = {}
     total_files = 0
     total_bytes = 0
-    try:
-        for source_skill in ordered:
-            category = str(source_skill.category)
-            relative_path = _bounded_relative(
-                source_skill.relative_path,
-                limits=limits,
+    for source_skill in ordered:
+        category = str(source_skill.category)
+        relative_path = _bounded_relative(
+            source_skill.relative_path,
+            limits=limits,
+        )
+        identity = (category, relative_path)
+        if identity in identities:
+            raise SkillSnapshotError("skill_snapshot_duplicate_path")
+        identities.add(identity)
+        files = _walk_skill_files(Path(source_skill.skill_dir), limits=limits)
+        skill_bytes = sum(len(item.data) for item in files)
+        if skill_bytes > limits.max_skill_bytes:
+            raise SkillSnapshotError("skill_snapshot_skill_too_large")
+        total_files += len(files)
+        total_bytes += skill_bytes
+        if total_files > limits.max_total_files:
+            raise SkillSnapshotError("skill_snapshot_too_many_files")
+        if total_bytes > limits.max_total_bytes:
+            raise SkillSnapshotError("skill_snapshot_total_too_large")
+        manifest = next(item.data for item in files if item.relative_path.as_posix() == SKILL_MD_FILE)
+        # The staged or published manifest is parsed below and must carry
+        # this name, so the digest computed here is the digest the published
+        # snapshot carries.
+        projections.append(
+            SkillSnapshotProjection(
+                name=source_skill.name,
+                category=category,
+                relative_path=relative_path,
+                manifest_digest=hashlib.sha256(manifest).hexdigest(),
+                content_digest=_skill_tree_digest(category, relative_path, files),
+                file_count=len(files),
+                total_bytes=skill_bytes,
             )
-            identity = (category, relative_path)
-            if identity in identities:
-                raise SkillSnapshotError("skill_snapshot_duplicate_path")
-            identities.add(identity)
-            files = _walk_skill_files(Path(source_skill.skill_dir), limits=limits)
-            skill_bytes = sum(len(captured.data) for captured in files)
-            if skill_bytes > limits.max_skill_bytes:
-                raise SkillSnapshotError("skill_snapshot_skill_too_large")
-            total_files += len(files)
-            total_bytes += skill_bytes
-            if total_files > limits.max_total_files:
-                raise SkillSnapshotError("skill_snapshot_too_many_files")
-            if total_bytes > limits.max_total_bytes:
-                raise SkillSnapshotError("skill_snapshot_total_too_large")
+        )
+        captured.append((source_skill, category, relative_path, files))
 
+    content_digest = _snapshot_digest(projections)
+    final_root = scope_root / content_digest
+    with _leases_lock:
+        if final_root.exists():
+            published_digest, published_files, published_bytes = _digest_published_snapshot(
+                final_root,
+                tuple(projections),
+                limits,
+            )
+            if published_digest != content_digest or published_files != total_files or published_bytes != total_bytes:
+                raise SkillSnapshotError("skill_snapshot_drift")
+            parsed_by_identity = _parse_snapshot_manifests(final_root, captured)
+            _lease_counts[final_root] = _lease_counts.get(final_root, 0) + 1
+            return _assemble_snapshot(
+                skills,
+                root=final_root,
+                content_digest=content_digest,
+                projections=projections,
+                parsed_by_identity=parsed_by_identity,
+                total_files=total_files,
+                total_bytes=total_bytes,
+                lease=_SnapshotLease(final_root),
+            )
+
+    stage = Path(tempfile.mkdtemp(prefix=".building-", dir=scope_root))
+    try:
+        for source_skill, category, relative_path, files in captured:
             target = stage / category / Path(relative_path)
-            for captured in files:
+            for item in files:
                 _write_private_file(
-                    target / captured.relative_path,
-                    captured.data,
-                    executable=captured.executable,
+                    target / item.relative_path,
+                    item.data,
+                    executable=item.executable,
                 )
             staged_files = _walk_skill_files(target, limits=limits)
             if staged_files != files:
@@ -671,33 +720,8 @@ def snapshot_effective_skills(
             )
             if confirmed_files != files:
                 raise SkillSnapshotError("skill_snapshot_changed")
-            parsed = parse_skill_file(
-                target / SKILL_MD_FILE,
-                SkillCategory(category),
-                relative_path=Path(relative_path),
-            )
-            if parsed is None or parsed.name != source_skill.name:
-                raise SkillSnapshotError("skill_snapshot_manifest_invalid")
-            parsed_by_identity[identity] = replace(parsed, enabled=True)
-            manifest = next(captured.data for captured in staged_files if captured.relative_path.as_posix() == SKILL_MD_FILE)
-            projections.append(
-                SkillSnapshotProjection(
-                    name=parsed.name,
-                    category=category,
-                    relative_path=relative_path,
-                    manifest_digest=hashlib.sha256(manifest).hexdigest(),
-                    content_digest=_skill_tree_digest(
-                        category,
-                        relative_path,
-                        staged_files,
-                    ),
-                    file_count=len(staged_files),
-                    total_bytes=skill_bytes,
-                )
-            )
+        parsed_by_identity = _parse_snapshot_manifests(stage, captured)
 
-        content_digest = _snapshot_digest(projections)
-        final_root = scope_root / content_digest
         with _leases_lock:
             published_new = False
             if final_root.exists():
@@ -724,13 +748,55 @@ def snapshot_effective_skills(
             pass
         raise
 
+    return _assemble_snapshot(
+        skills,
+        root=final_root,
+        content_digest=content_digest,
+        projections=projections,
+        parsed_by_identity=parsed_by_identity,
+        total_files=total_files,
+        total_bytes=total_bytes,
+        lease=lease,
+    )
+
+
+def _parse_snapshot_manifests(
+    root: Path,
+    captured: list[tuple[Skill, str, str, list[_CapturedFile]]],
+) -> dict[tuple[str, str], Skill]:
+    """Parse each copied manifest and require the name the source declared."""
+
+    parsed_by_identity: dict[tuple[str, str], Skill] = {}
+    for source_skill, category, relative_path, _files in captured:
+        parsed = parse_skill_file(
+            root / category / Path(relative_path) / SKILL_MD_FILE,
+            SkillCategory(category),
+            relative_path=Path(relative_path),
+        )
+        if parsed is None or parsed.name != source_skill.name:
+            raise SkillSnapshotError("skill_snapshot_manifest_invalid")
+        parsed_by_identity[(category, relative_path)] = replace(parsed, enabled=True)
+    return parsed_by_identity
+
+
+def _assemble_snapshot(
+    skills: tuple[Skill, ...],
+    *,
+    root: Path,
+    content_digest: str,
+    projections: list[SkillSnapshotProjection],
+    parsed_by_identity: dict[tuple[str, str], Skill],
+    total_files: int,
+    total_bytes: int,
+    lease: _SnapshotLease,
+) -> AcceptedSkillSnapshot:
     projection_by_identity = {(projection.category, projection.relative_path): projection for projection in projections}
     snapshot_skills: list[Skill] = []
     for source_skill in skills:
         identity = (str(source_skill.category), source_skill.relative_path.as_posix())
         projection = projection_by_identity[identity]
         parsed = parsed_by_identity[identity]
-        skill_root = final_root / projection.category / Path(projection.relative_path)
+        skill_root = root / projection.category / Path(projection.relative_path)
         snapshot_skills.append(
             replace(
                 parsed,
@@ -746,7 +812,7 @@ def snapshot_effective_skills(
         projections=tuple(projections),
         file_count=total_files,
         total_bytes=total_bytes,
-        root=final_root,
+        root=root,
         _lease=lease,
     )
 
