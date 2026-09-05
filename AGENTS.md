@@ -104,7 +104,9 @@ requires stage→validate→promote for writes; direct routes require
 `tool_plane.enabled: false`. It separates deployment material from user overlays,
 binds accepted runs, detects drift, and mounts no exact-two mutation/bootstrap
 routes. See the
-[operator guide](docs/GOVERNED_TOOL_PLANE.md) and [backend guide](backend/AGENTS.md).
+[operator guide](docs/GOVERNED_TOOL_PLANE.md).
+
+Upstream offers: see [docs/UPSTREAM_OFFERS.md](docs/UPSTREAM_OFFERS.md).
 
 Durable qualification requires exact passing external evidence; missing
 infrastructure is an unpassed gate. See `docs/MULTI_GATEWAY_QUALIFICATION.md`.
