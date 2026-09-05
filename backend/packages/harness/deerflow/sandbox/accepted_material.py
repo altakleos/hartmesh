@@ -2371,6 +2371,20 @@ class AcceptedSandboxSession:
         return accepted_execution_evidence_reference(self._evidence)
 
     @property
+    def execution_evidence_digest(self) -> str:
+        """The evidence digest that run-bound diagnostics link to."""
+
+        return self._evidence.digest
+
+    @property
+    def attempt_ref(self) -> str:
+        return self._evidence.attempt_id
+
+    @property
+    def batch_child_attempt_ref(self) -> str | None:
+        return self._evidence.batch_child_attempt_ref if isinstance(self._evidence, AcceptedExecutionEvidenceV2) else None
+
+    @property
     def persistent_shell_sessions(self) -> bool | None:
         return self._sandbox.persistent_shell_sessions
 
@@ -2666,6 +2680,18 @@ class AcceptedSandboxSessionBridge:
     @property
     def execution_evidence_reference(self) -> str:
         return self._session.execution_evidence_reference
+
+    @property
+    def execution_evidence_digest(self) -> str:
+        return self._session.execution_evidence_digest
+
+    @property
+    def attempt_ref(self) -> str:
+        return self._session.attempt_ref
+
+    @property
+    def batch_child_attempt_ref(self) -> str | None:
+        return self._session.batch_child_attempt_ref
 
     @property
     def persistent_shell_sessions(self) -> bool | None:

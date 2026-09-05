@@ -205,8 +205,11 @@ def build_evidence_summary_v1(
             {"count": len(safe_batches), "items": safe_batches},
         ),
         "sandbox": _section(
-            "pruned" if events_pruned else "available" if _safe_count(event_counts.get("sandbox")) else "not_applicable",
-            {"observation_count": _safe_count(event_counts.get("sandbox"))},
+            "pruned" if events_pruned else "available" if _safe_count(event_counts.get("sandbox")) or _safe_count(event_counts.get("sandbox_diagnostics")) else "not_applicable",
+            {
+                "observation_count": _safe_count(event_counts.get("sandbox")),
+                "diagnostic_count": _safe_count(event_counts.get("sandbox_diagnostics")),
+            },
         ),
         "retrieval": _section(
             "pruned" if events_pruned else "available" if _safe_count(event_counts.get("retrieval")) else "not_applicable",

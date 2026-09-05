@@ -45,13 +45,14 @@ def test_evidence_summary_is_versioned_bounded_and_excludes_private_state() -> N
                 },
             }
         ],
-        event_counts={"tools": 3, "sandbox": 1, "retrieval": 2, "mcp": 0},
+        event_counts={"tools": 3, "sandbox": 1, "sandbox_diagnostics": 4, "retrieval": 2, "mcp": 0},
         batches=[{"status": "running", "total_items": 8}],
         artifacts={"file_count": 2, "bundle_state": "available"},
         qualification="unverified",
     )
 
     assert summary["schema"] == "hartmesh.run-evidence-summary"
+    assert summary["sections"]["sandbox"] == {"state": "available", "data": {"observation_count": 1, "diagnostic_count": 4}}
     assert summary["schema_version"] == 1
     assert summary["overview"]["policy"]["digest"] == budget.digest
     assert summary["timeline"][0]["reason_code"] == "repeated_tool_loop"

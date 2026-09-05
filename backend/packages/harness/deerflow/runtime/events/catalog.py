@@ -63,6 +63,7 @@ RUN_EXECUTION_STARTED_EVENT = RunEventDefinition(
     "trace",
 )
 SANDBOX_LIFECYCLE_EVENT = RunEventDefinition("sandbox.lifecycle.v1", "trace")
+SANDBOX_DIAGNOSTIC_EVENT = RunEventDefinition("sandbox.diagnostic.v1", "trace")
 RUN_END_EVENT = RunEventDefinition("run.end", "outputs")
 RUN_TERMINAL_EVENT = RunEventDefinition("run.terminal.v1", "trace")
 EXECUTION_POLICY_DECISION_EVENT = RunEventDefinition(
