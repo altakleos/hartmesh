@@ -31,11 +31,11 @@ soft budget; a submission that must touch it has to trim it first.
    rerun the tests named in the commit message from a clean upstream checkout.
 2. Push the branch to the fork `makutaku/deer-flow` (remote `fork`) and open
    the pull request as a draft with upstream's template; drop the
-   `Claude-Session` trailer if the maintainers prefer plain commits. A draft
-   stays a draft until a person has reviewed the diff and checked the
-   template's responsibility box, which no tool may check on their behalf.
-   Upstream asks for a discussion before a non-trivial feature; proposals go to
-   the Ideas category.
+   `Claude-Session` trailer if the maintainers prefer plain commits. The
+   template's responsibility box is the author's attestation; check it on the
+   author's say-so, and keep the draft a draft until the full offline suite
+   result is posted. Upstream asks for a discussion before a non-trivial
+   feature; proposals go to the Ideas category.
 3. Once merged, take the upstream commit on the next sync and delete the
    HartMesh code listed under "HartMesh drops".
 
