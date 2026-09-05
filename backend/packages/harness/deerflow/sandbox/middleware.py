@@ -32,6 +32,7 @@ from deerflow.sandbox.accepted_projection import (
     provision_runtime_accepted_skill_projection_async,
     release_accepted_skill_consumer,
 )
+from deerflow.sandbox.diagnostics import record_sandbox_diagnostic
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.lease import (
     ensure_sandbox_lease_owner,
@@ -40,7 +41,7 @@ from deerflow.sandbox.lease import (
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
-from deerflow.sandbox.session import declared_sandbox
+from deerflow.sandbox.session import SandboxSessionKind, current_sandbox_session, declared_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,24 @@ _NETWORK_POLICY_DECISIONS = frozenset({"deny", "allow_temporary", "allow_sandbox
 
 def _network_approval_is_non_interactive(context: Mapping[str, object]) -> bool:
     return bool(context.get("disable_clarification") or context.get("non_interactive"))
+
+
+def _egress_denial_reason(context: Mapping[str, object]) -> str | None:
+    """Why this execution cannot ask a person about a blocked destination.
+
+    An accepted session is denied by kind: a grant would bind to the container
+    rather than to the run that would be held to it, so until an approval can
+    be run-bound the policy is deny-and-record. Subagents and non-interactive
+    executions have nobody to ask.
+    """
+    declaration = current_sandbox_session()
+    if declaration is not None and declaration.kind is SandboxSessionKind.ACCEPTED:
+        return "accepted_session"
+    if context.get("is_subagent"):
+        return "subagent"
+    if _network_approval_is_non_interactive(context):
+        return "non_interactive"
+    return None
 
 
 class SandboxMiddlewareState(AgentState):
@@ -452,6 +471,10 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if not provider.decide_network_policy_request(sandbox_id, response["request_id"], decision):
             raise SandboxRuntimeError("The sandbox network approval is stale or does not belong to this sandbox")
         applied.add(marker)
+        facts: dict[str, str | int | bool] = {"request_ref": response["request_id"], "decision": decision}
+        if decision == "allow_temporary":
+            facts["ttl_seconds"] = provider.sandbox_network_temporary_grant_ttl()
+        record_sandbox_diagnostic(context, "egress.decided", facts=facts, sandbox_ref=sandbox_id)
 
     @override
     async def abefore_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
@@ -759,9 +782,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return result
         if provider.sandbox_network_mode() != "allowlist":
             return result
-        if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
-            if not await provider.deny_pending_network_policy_events_async(sandbox_id):
+        denial_reason = _egress_denial_reason(context)
+        if denial_reason is not None:
+            drained = await provider.deny_pending_network_policy_events_async(sandbox_id)
+            if not drained:
                 logger.warning("Failed to drain sandbox network policy events for non-interactive sandbox %s", sandbox_id)
+            self._record_egress_denial(context, sandbox_id, reason=denial_reason, drained=drained)
             return result
         events = await provider.consume_network_policy_events_async(sandbox_id)
         return self._network_approval_result(request, result, sandbox_id, events)
@@ -780,12 +806,26 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return result
         if provider.sandbox_network_mode() != "allowlist":
             return result
-        if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
-            if not provider.deny_pending_network_policy_events(sandbox_id):
+        denial_reason = _egress_denial_reason(context)
+        if denial_reason is not None:
+            drained = provider.deny_pending_network_policy_events(sandbox_id)
+            if not drained:
                 logger.warning("Failed to drain sandbox network policy events for non-interactive sandbox %s", sandbox_id)
+            self._record_egress_denial(context, sandbox_id, reason=denial_reason, drained=drained)
             return result
         events = provider.consume_network_policy_events(sandbox_id)
         return self._network_approval_result(request, result, sandbox_id, events)
+
+    @staticmethod
+    def _record_egress_denial(context: Mapping[str, object], sandbox_id: str, *, reason: str, drained: bool) -> None:
+        """Record once per sandbox that pending egress requests are denied unasked."""
+        record_sandbox_diagnostic(
+            context,
+            "egress.denied",
+            facts={"reason": reason, "drained": drained},
+            sandbox_ref=sandbox_id,
+            once=True,
+        )
 
     def _network_approval_result(
         self,
@@ -803,6 +843,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if not isinstance(request_id, str) or not isinstance(host, str) or not isinstance(port, int):
             logger.warning("Ignoring malformed trusted sandbox network event: %r", event)
             return result
+        blocked_facts: dict[str, str | int | bool] = {"request_ref": request_id, "host": host, "port": port}
+        method = event.get("method")
+        if isinstance(method, str):
+            blocked_facts["method"] = method
+        record_sandbox_diagnostic(getattr(request.runtime, "context", None) or {}, "egress.blocked", facts=blocked_facts, sandbox_ref=sandbox_id)
         tool_call_id = str(request.tool_call.get("id") or "")
         tool_name = str(request.tool_call.get("name") or "sandbox")
         ttl_seconds = get_sandbox_provider().sandbox_network_temporary_grant_ttl()

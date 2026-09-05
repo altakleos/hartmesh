@@ -70,7 +70,10 @@ Authorized clients use
 ordered policy timeline, safe counters, and bounded admission, assembly/tool
 plane, tool, batch, sandbox, retrieval, MCP, artifact, and export sections.
 Section states are `available`, `not_applicable`, `unsupported`, `legacy`,
-`pruned`, `unqualified`, or `error`.
+`pruned`, `unqualified`, or `error`. The sandbox section counts the closed
+lifecycle observations (`sandbox.lifecycle.v1`) and the bounded diagnostics
+(`sandbox.diagnostic.v1`: egress and scope facts for both session kinds)
+separately; see `backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`.
 
 The chat Evidence panel consumes only this projection. It supports native
 keyboard-expandable sections, public-reference copy, active-run refresh,

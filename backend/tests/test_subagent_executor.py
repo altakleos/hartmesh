@@ -1849,6 +1849,57 @@ class TestAsyncExecutionPath:
         provider.release.assert_called_once_with("shared")
 
     @pytest.mark.anyio
+    async def test_aexecute_records_the_scope_release_for_the_run(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        monkeypatch,
+    ):
+        """A subagent's lease release is a scope fact on its run's diagnostics."""
+        import types
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        AIMessage = classes["AIMessage"]
+        recorded: list[tuple[str, dict, object, object]] = []
+        diagnostics_stub = types.ModuleType("deerflow.sandbox.diagnostics")
+        diagnostics_stub.record_sandbox_diagnostic = lambda context, kind, *, facts, sandbox_ref=None, once=False: recorded.append((kind, dict(facts), context.get("sandbox_id"), context.get("run_id")))
+        monkeypatch.setitem(sys.modules, "deerflow.sandbox.diagnostics", diagnostics_stub)
+
+        sandbox = MagicMock()
+        provider = MagicMock()
+        provider.get.return_value = sandbox
+        manager = SandboxLeaseManager(provider)
+        captured_owner: list[str] = []
+
+        async def stream(*args, context, **kwargs):
+            owner_id = context["sandbox_lease_owner_id"]
+            captured_owner.append(owner_id)
+            context["sandbox_id"] = "shared"
+            manager.retain(owner_id, "shared", thread_id=context["thread_id"], user_id=context.get("user_id") or "default")
+            yield {"messages": [AIMessage(content="done")]}
+
+        mock_agent.astream = stream
+        sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = provider
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(lease_module, "get_sandbox_lease_manager", lambda _provider: manager)
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            run_id="run-scope-release",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert len(captured_owner) == 1
+        assert recorded == [("scope.released", {"scope_ref": captured_owner[0]}, "shared", "run-scope-release")]
+
+    @pytest.mark.anyio
     async def test_aexecute_fork_restored_state_cleans_scope_without_parking_parent(
         self,
         classes,

@@ -66,6 +66,7 @@ from deerflow.runtime.events.appender import (
 )
 from deerflow.runtime.events.catalog import (
     RUN_EXECUTION_STARTED_EVENT,
+    SANDBOX_DIAGNOSTIC_EVENT,
     SANDBOX_LIFECYCLE_EVENT,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
@@ -753,6 +754,52 @@ async def _publish_accepted_sandbox_lifecycle(
                 observation.kind.value,
             )
     return len(observations)
+
+
+async def _publish_sandbox_diagnostics(
+    event_appender: Any | None,
+    run_id: str,
+    *,
+    start_sequence: int,
+) -> int:
+    """Publish the run's newly recorded sandbox diagnostics; never authority.
+
+    Both session kinds record into one bounded stream; each observation is
+    appended as its own ``sandbox.diagnostic.v1`` event with its sequence and
+    the count the stream has dropped so far, so a reader can tell a quiet run
+    from a truncated one.
+    """
+    from deerflow.sandbox.diagnostics import sandbox_diagnostics
+
+    stream = sandbox_diagnostics(run_id)
+    next_sequence = start_sequence
+    for sequence, observation in stream.since(start_sequence):
+        next_sequence = sequence + 1
+        logger.info(
+            "Sandbox diagnostic run_id=%s kind=%s session_kind=%s sandbox_ref=%s",
+            run_id,
+            observation.kind,
+            observation.session_kind.value,
+            observation.sandbox_ref,
+        )
+        if event_appender is None:
+            continue
+        try:
+            await event_appender.put(
+                thread_id=event_appender.authority.thread_id,
+                run_id=run_id,
+                event_type=SANDBOX_DIAGNOSTIC_EVENT.event_type,
+                category=SANDBOX_DIAGNOSTIC_EVENT.category,
+                content=observation.to_persisted(),
+                metadata={"sequence": sequence, "dropped": stream.dropped},
+            )
+        except Exception:
+            logger.warning(
+                "Sandbox diagnostic could not be persisted run_id=%s kind=%s",
+                run_id,
+                observation.kind,
+            )
+    return next_sequence
 
 
 def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1644,6 +1691,7 @@ async def run_agent(
     materialization_evidence = None
     accepted_sandbox_session: AcceptedSandboxSessionBridge | None = None
     accepted_sandbox_lifecycle_count = 0
+    sandbox_diagnostic_sequence = 0
     dispatch_ledger = None
     thread_projection_owner_id: str | None = None
     thread_projection_active_state_version: int | None = None
@@ -1669,6 +1717,29 @@ async def run_agent(
             else:
                 logger.warning(
                     "Accepted sandbox lifecycle publication failed while another terminal interruption was pending for run %s",
+                    run_id,
+                    exc_info=True,
+                )
+
+    async def _publish_sandbox_diagnostics_during_cleanup() -> None:
+        nonlocal sandbox_diagnostic_sequence, deferred_stop_interrupt
+
+        try:
+            sandbox_diagnostic_sequence = await _publish_sandbox_diagnostics(
+                event_appender,
+                run_id,
+                start_sequence=sandbox_diagnostic_sequence,
+            )
+        except BaseException as exc:
+            if deferred_stop_interrupt is None:
+                deferred_stop_interrupt = exc
+                logger.warning(
+                    "Sandbox diagnostic publication interrupted for run %s; completing terminal cleanup first",
+                    run_id,
+                )
+            else:
+                logger.warning(
+                    "Sandbox diagnostic publication failed while another terminal interruption was pending for run %s",
                     run_id,
                     exc_info=True,
                 )
@@ -3427,6 +3498,10 @@ async def run_agent(
                 _publish_accepted_sandbox_lifecycle_during_cleanup(),
                 interrupt_current=True,
             )
+        await _await_terminal_cleanup(
+            _publish_sandbox_diagnostics_during_cleanup(),
+            interrupt_current=True,
+        )
         if started and getattr(run_manager, "heartbeat_enabled", False) and not record.ownership_lost:
             try:
                 refreshed_cancel = await _await_terminal_cleanup(
@@ -3940,6 +4015,15 @@ async def run_agent(
                     run_id,
                     exc_info=True,
                 )
+        # Both session kinds: publish what the run's sandbox recorded after the
+        # last release, then forget the stream so a later run starts clean.
+        await _await_terminal_cleanup(
+            _publish_sandbox_diagnostics_during_cleanup(),
+            interrupt_current=True,
+        )
+        from deerflow.sandbox.diagnostics import discard_sandbox_diagnostics
+
+        discard_sandbox_diagnostics(run_id)
 
         if pinned_material_for_cleanup is not None:
             try:

@@ -271,6 +271,30 @@ owner-scoped bounded lifecycle query. Observation failure does not undo the
 terminal CAS. Logs and observations carry safe provider kind, qualification
 scope, time, reason code, and evidence digest—not the raw resource reference.
 
+### Diagnostics
+
+Those five states are the closed, authority-relevant set. Everything else worth
+knowing about a sandbox session is a diagnostic (`sandbox/diagnostics.py`):
+`sandbox.diagnostic.v1` events whose kind is open but namespaced
+(`egress.blocked`, `egress.decided`, `egress.denied`, `scope.opened`,
+`scope.released`) and whose facts are a bounded mapping of scalars. Both
+session kinds record into one per-run stream of 64 entries that drops oldest
+rather than refusing a write; each published event carries its sequence and
+the drop count, so a quiet run and a truncated one look different. Ordinary
+sessions record thread-scoped facts under the provider's own sandbox id;
+accepted sessions record run-bound facts under the public ref, the attempt,
+and the execution evidence digest, and never the container id. The worker
+publishes the stream at terminal cleanup and then forgets it.
+
+Egress policy is per kind. An ordinary interactive session is asked (the
+Human Input card) and both the blocked request and the applied decision are
+recorded; a subagent or non-interactive execution is denied unasked and
+recorded once; an accepted session is denied unasked by kind, because a grant
+would bind to the container rather than to the run that is held to it, until
+an approval can be run-bound. Recording never changes the tool result the
+receipt layer digests: the card is emitted after the fact is recorded and the
+sandbox middleware stays inner of the receipt middleware.
+
 Recovery outcomes follow the existing authorities:
 
 | Failure point | Deterministic outcome |

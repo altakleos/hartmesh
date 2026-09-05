@@ -778,6 +778,20 @@ def _copy_isolated_subagent_context() -> Context:
     return context
 
 
+def _record_scope_release(context: object, scope_ref: str) -> None:
+    """Record the subagent's shell-scope release as a run diagnostic.
+
+    Diagnostics are best effort and never authority: the sandbox package is
+    imported lazily here like the lease helpers, and an environment without
+    it simply records nothing.
+    """
+    try:
+        from deerflow.sandbox.diagnostics import record_sandbox_diagnostic
+    except Exception:
+        return
+    record_sandbox_diagnostic(context, "scope.released", facts={"scope_ref": scope_ref})
+
+
 def _filter_tools(
     all_tools: list[BaseTool],
     allowed: list[str] | None,
@@ -1984,6 +1998,8 @@ class SubagentExecutor:
                         self.config.name,
                         exc_info=True,
                     )
+                else:
+                    _record_scope_release(execution_context, sandbox_lease_owner_id)
             if task_lifecycle_started and task_info is not None and task_store is not None:
                 try:
                     await notify_task_stop(

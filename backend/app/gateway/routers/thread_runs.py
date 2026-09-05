@@ -87,6 +87,7 @@ from deerflow.runtime.events.catalog import (
     EXECUTION_POLICY_DECISION_EVENT,
     MIDDLEWARE_EVENT_PATTERN,
     MIDDLEWARE_MCP_PREPARATION_TAG,
+    SANDBOX_DIAGNOSTIC_EVENT,
     SANDBOX_LIFECYCLE_EVENT,
     TOOL_RECEIPT_STARTED_EVENT,
 )
@@ -2004,6 +2005,7 @@ async def get_run_evidence_summary(
         EXECUTION_POLICY_DECISION_EVENT.event_type,
         TOOL_RECEIPT_STARTED_EVENT.event_type,
         SANDBOX_LIFECYCLE_EVENT.event_type,
+        SANDBOX_DIAGNOSTIC_EVENT.event_type,
         RETRIEVAL_OBSERVATION_EVENT_TYPE,
         MIDDLEWARE_EVENT_PATTERN.event_type(MIDDLEWARE_MCP_PREPARATION_TAG),
         "run.delivery",
@@ -2021,6 +2023,7 @@ async def get_run_evidence_summary(
     counts = {
         "tools": sum(event.get("event_type") == TOOL_RECEIPT_STARTED_EVENT.event_type for event in events),
         "sandbox": sum(event.get("event_type") == SANDBOX_LIFECYCLE_EVENT.event_type for event in events),
+        "sandbox_diagnostics": sum(event.get("event_type") == SANDBOX_DIAGNOSTIC_EVENT.event_type for event in events),
         "retrieval": sum(event.get("event_type") == RETRIEVAL_OBSERVATION_EVENT_TYPE for event in events),
         "mcp": sum(event.get("event_type") == MIDDLEWARE_EVENT_PATTERN.event_type(MIDDLEWARE_MCP_PREPARATION_TAG) for event in events),
         "pruned": events_pruned,

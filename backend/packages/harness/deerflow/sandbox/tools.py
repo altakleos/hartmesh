@@ -37,6 +37,7 @@ from deerflow.sandbox.accepted_projection import (
     provision_runtime_accepted_skill_projection,
     provision_runtime_accepted_skill_projection_async,
 )
+from deerflow.sandbox.diagnostics import record_sandbox_diagnostic
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -1855,6 +1856,7 @@ def _execute_bash_command(
     scope_id = sandbox_command_scope(runtime.context)
     scoped_execute = getattr(sandbox, "execute_command_in_scope", None)
     if scope_id is not None and callable(scoped_execute):
+        record_sandbox_diagnostic(runtime.context, "scope.opened", facts={"scope_ref": scope_id}, once=True)
         return scoped_execute(
             command,
             env=env,
