@@ -19,6 +19,10 @@ EVIDENCE_SUMMARY_SCHEMA_VERSION = 1
 MAX_EVIDENCE_SUMMARY_BYTES = 64 * 1024
 MAX_TIMELINE_ITEMS = 100
 MAX_BATCHES = 100
+MAX_DIAGNOSTIC_ITEMS = 128
+MAX_DIAGNOSTIC_FACTS = 16
+MAX_DIAGNOSTIC_FACT_TEXT = 256
+MAX_DIAGNOSTIC_FACT_INT = 2**53
 
 EvidenceState = Literal[
     "available",
@@ -40,6 +44,8 @@ QualificationState = Literal[
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_REASON = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_DIAGNOSTIC_KIND = re.compile(r"^[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}){1,2}$")
+_FACT_KEY = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
 
 def _section(state: EvidenceState, data: Mapping[str, object] | None = None) -> dict[str, object]:
@@ -97,6 +103,69 @@ def _safe_policy_events(
     return sorted(items, key=lambda item: int(item["seq"]))
 
 
+def _safe_facts(value: object) -> dict[str, str | int | bool] | None:
+    """Bounded scalar facts only; anything else disqualifies the observation."""
+    if not isinstance(value, Mapping) or len(value) > MAX_DIAGNOSTIC_FACTS:
+        return None
+    facts: dict[str, str | int | bool] = {}
+    for key in sorted(value):
+        item = value[key]
+        if not isinstance(key, str) or _FACT_KEY.fullmatch(key) is None:
+            return None
+        if isinstance(item, bool):
+            facts[key] = item
+        elif type(item) is int and abs(item) <= MAX_DIAGNOSTIC_FACT_INT:
+            facts[key] = item
+        elif isinstance(item, str) and len(item) <= MAX_DIAGNOSTIC_FACT_TEXT:
+            facts[key] = item
+        else:
+            return None
+    return facts
+
+
+def _safe_sandbox_diagnostics(events: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """Project ``sandbox.diagnostic.v1`` events to their kind, session kind, time, and facts.
+
+    The sandbox reference, run and thread identifiers, accepted anchors, and
+    digest stay behind: the summary already carries the run's public refs, and
+    an ordinary session's reference is the provider's own container id.
+    """
+    items: list[dict[str, object]] = []
+    for event in events[:MAX_DIAGNOSTIC_ITEMS]:
+        content = event.get("content")
+        if not isinstance(content, Mapping) or content.get("version") != 1:
+            continue
+        kind = content.get("kind")
+        session_kind = content.get("session_kind")
+        observed_at = content.get("observed_at")
+        facts = _safe_facts(content.get("facts"))
+        seq = event.get("seq")
+        metadata = event.get("metadata")
+        dropped = metadata.get("dropped") if isinstance(metadata, Mapping) else 0
+        if (
+            not isinstance(kind, str)
+            or _DIAGNOSTIC_KIND.fullmatch(kind) is None
+            or session_kind not in {"ordinary", "accepted"}
+            or not isinstance(observed_at, str)
+            or len(observed_at) > 64
+            or facts is None
+            or type(seq) is not int
+            or seq < 0
+        ):
+            continue
+        items.append(
+            {
+                "seq": seq,
+                "at": observed_at,
+                "kind": kind,
+                "session_kind": session_kind,
+                "facts": facts,
+                "dropped": _safe_count(dropped),
+            }
+        )
+    return sorted(items, key=lambda item: int(item["seq"]))
+
+
 def _policy_counters(state: ExecutionPolicyStateV1) -> dict[str, object]:
     """Project safe counters only; omit commitments and dedupe internals."""
 
@@ -139,6 +208,7 @@ def build_evidence_summary_v1(
     batches: Sequence[Mapping[str, object]],
     artifacts: Mapping[str, object],
     qualification: QualificationState,
+    diagnostic_events: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """Build one strict, finite public projection from authorized facts."""
 
@@ -151,7 +221,9 @@ def build_evidence_summary_v1(
 
     budget_digest = None if budget is None else budget.digest
     timeline = _safe_policy_events(decision_events, budget_digest=budget_digest)
+    diagnostics = _safe_sandbox_diagnostics(diagnostic_events)
     events_pruned = event_counts.get("pruned") is True
+    diagnostics_pruned = events_pruned or len(diagnostic_events) > MAX_DIAGNOSTIC_ITEMS
     policy_pruned = events_pruned or event_counts.get("policy_pruned") is True
     safe_batches = [
         {
@@ -210,6 +282,8 @@ def build_evidence_summary_v1(
                 "observation_count": _safe_count(event_counts.get("sandbox")),
                 "diagnostic_count": _safe_count(event_counts.get("sandbox_diagnostics")),
                 "refusal_count": _safe_count(event_counts.get("sandbox_refusals")),
+                "diagnostics_shown": len(diagnostics),
+                "diagnostics_pruned": diagnostics_pruned,
             },
         ),
         "retrieval": _section(
@@ -248,6 +322,7 @@ def build_evidence_summary_v1(
             "completeness": completeness,
         },
         "timeline": timeline,
+        "sandbox_diagnostics": diagnostics,
         "sections": sections,
         "qualification": {"state": qualification},
     }
@@ -259,6 +334,7 @@ def build_evidence_summary_v1(
 __all__ = [
     "EVIDENCE_SUMMARY_SCHEMA",
     "EVIDENCE_SUMMARY_SCHEMA_VERSION",
+    "MAX_DIAGNOSTIC_ITEMS",
     "MAX_EVIDENCE_SUMMARY_BYTES",
     "build_evidence_summary_v1",
 ]

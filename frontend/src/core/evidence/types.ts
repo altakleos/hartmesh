@@ -30,6 +30,15 @@ export interface EvidenceTimelineItem {
   state_digest: string;
 }
 
+export interface EvidenceSandboxDiagnostic {
+  seq: number;
+  at: string;
+  kind: string;
+  session_kind: "ordinary" | "accepted";
+  facts: Record<string, string | number | boolean>;
+  dropped: number;
+}
+
 export interface RunEvidenceSummaryV1 {
   schema: "hartmesh.run-evidence-summary";
   schema_version: 1;
@@ -44,6 +53,7 @@ export interface RunEvidenceSummaryV1 {
     completeness: "complete" | "partial" | "in_progress";
   };
   timeline: EvidenceTimelineItem[];
+  sandbox_diagnostics?: EvidenceSandboxDiagnostic[];
   sections: Record<string, EvidenceSection>;
   qualification: { state: QualificationState };
 }
@@ -96,6 +106,39 @@ function isTimelineItem(value: unknown): value is EvidenceTimelineItem {
   );
 }
 
+const diagnosticKind = /^[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}){1,2}$/;
+const factKey = /^[a-z][a-z0-9_]{0,31}$/;
+
+function isSandboxDiagnostic(
+  value: unknown,
+): value is EvidenceSandboxDiagnostic {
+  if (
+    !isRecord(value) ||
+    !Number.isSafeInteger(value.seq) ||
+    (value.seq as number) < 0 ||
+    !isBoundedString(value.at, 64) ||
+    !isBoundedString(value.kind, 66) ||
+    !diagnosticKind.test(value.kind) ||
+    (value.session_kind !== "ordinary" && value.session_kind !== "accepted") ||
+    !Number.isSafeInteger(value.dropped) ||
+    (value.dropped as number) < 0 ||
+    !isRecord(value.facts)
+  ) {
+    return false;
+  }
+  const facts = Object.entries(value.facts);
+  return (
+    facts.length <= 16 &&
+    facts.every(
+      ([key, fact]) =>
+        factKey.test(key) &&
+        (typeof fact === "boolean" ||
+          (typeof fact === "number" && Number.isSafeInteger(fact)) ||
+          isBoundedString(fact, 256)),
+    )
+  );
+}
+
 export function parseEvidenceSummary(value: unknown): RunEvidenceSummaryV1 {
   if (
     !isRecord(value) ||
@@ -134,7 +177,13 @@ export function parseEvidenceSummary(value: unknown): RunEvidenceSummaryV1 {
     !qualificationStates.has(qualification.state as QualificationState) ||
     !Array.isArray(value.timeline) ||
     value.timeline.length > 100 ||
-    !value.timeline.every(isTimelineItem)
+    !value.timeline.every(isTimelineItem) ||
+    !(
+      value.sandbox_diagnostics === undefined ||
+      (Array.isArray(value.sandbox_diagnostics) &&
+        value.sandbox_diagnostics.length <= 128 &&
+        value.sandbox_diagnostics.every(isSandboxDiagnostic))
+    )
   ) {
     throw new Error("Invalid evidence summary");
   }

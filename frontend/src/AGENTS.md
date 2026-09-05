@@ -63,8 +63,10 @@
    as removable "missing" entries instead of silently widening the allowlist.
    Current-thread operator evidence uses `core/evidence` and
    `ThreadEvidence`. It selects the latest persisted run, polls only while that
-   run is active, parses the versioned bounded summary, and renders honest
-   section/qualification states plus public references. The panel is mounted by
+   run is active, parses the versioned bounded summary (including the optional
+   `sandbox_diagnostics` list, validated item by item), and renders honest
+   section/qualification states, sandbox diagnostics, and public references.
+   The panel is mounted by
    both default and Custom Agent chat pages; it must not infer policy facts from
    transcript text or expose internal identifiers. Terminal portable evidence
    remains an explicit authenticated bundle download, distinct from the summary.

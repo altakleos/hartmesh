@@ -46,6 +46,15 @@ rs.mock("@/core/i18n/hooks", () => ({
         stop: "Stop",
         warning: "Warning",
         noDecisions: "No policy decisions",
+        sandboxDiagnostics: "Sandbox diagnostics",
+        noDiagnostics: "No sandbox diagnostics",
+        sessionKind: {
+          ordinary: "Ordinary session",
+          accepted: "Accepted session",
+        },
+        diagnostic: {
+          "session.refused": "Sync refused: an accepted run holds the sandbox",
+        },
         state: {
           available: "Available",
           not_applicable: "Not applicable",
@@ -86,6 +95,7 @@ function summaryFixture(
   overrides: Partial<{
     terminal_reason: string | null;
     timeline: unknown[];
+    sandbox_diagnostics: unknown[];
     sections: Record<string, unknown>;
   }> = {},
 ) {
@@ -105,6 +115,7 @@ function summaryFixture(
         completeness: "complete",
       },
       timeline: overrides.timeline ?? [],
+      sandbox_diagnostics: overrides.sandbox_diagnostics,
       sections: overrides.sections ?? {
         artifacts: {
           state: "available",
@@ -313,6 +324,57 @@ describe("ThreadEvidence", () => {
     expect(screen.getByText("Pruned")).toBeDefined();
     expect(screen.getByText("observation count")).toBeDefined();
     expect(screen.getByText("2")).toBeDefined();
+  });
+
+  it("renders sandbox diagnostics with labels, session kind, and facts", async () => {
+    evidenceState.data = summaryFixture({
+      sandbox_diagnostics: [
+        {
+          seq: 4,
+          at: "2026-09-04T12:00:40Z",
+          kind: "session.refused",
+          session_kind: "accepted",
+          facts: {
+            requester: "gateway:upload",
+            reason: "sandbox_session_conflict",
+          },
+          dropped: 0,
+        },
+        {
+          seq: 6,
+          at: "2026-09-04T12:00:50Z",
+          kind: "scope.opened",
+          session_kind: "ordinary",
+          facts: { scope_ref: "scope-1" },
+          dropped: 2,
+        },
+      ],
+    });
+
+    render(<ThreadEvidence threadId="thread-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Evidence" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Sandbox diagnostics" }),
+    ).toBeDefined();
+    const items = screen.getAllByTestId("evidence-diagnostic");
+    expect(items).toHaveLength(2);
+    expect(
+      screen.getByText("Sync refused: an accepted run holds the sandbox"),
+    ).toBeDefined();
+    expect(screen.getByText("Accepted session")).toBeDefined();
+    expect(screen.getByText("gateway:upload")).toBeDefined();
+    expect(screen.getByText("scope.opened")).toBeDefined();
+    expect(screen.getByText(/2 dropped/)).toBeDefined();
+  });
+
+  it("says when no sandbox diagnostics were recorded", async () => {
+    evidenceState.data = summaryFixture();
+
+    render(<ThreadEvidence threadId="thread-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Evidence" }));
+
+    expect(await screen.findByText("No sandbox diagnostics")).toBeDefined();
   });
 
   it("surfaces a bundle generation failure and recovers the download control", async () => {

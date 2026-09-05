@@ -329,10 +329,14 @@ export interface Translations {
     stop: string;
     warning: string;
     noDecisions: string;
+    sandboxDiagnostics: string;
+    noDiagnostics: string;
     state: Record<string, string>;
     qualification: Record<string, string>;
     section: Record<string, string>;
     reason: Record<string, string>;
+    sessionKind: Record<string, string>;
+    diagnostic: Record<string, string>;
   };
 
   // Scheduled tasks

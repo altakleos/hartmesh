@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ActivityIcon,
   CheckCircle2Icon,
   ClipboardIcon,
   DownloadIcon,
@@ -24,6 +25,7 @@ import {
 } from "@/components/ui/sheet";
 import {
   fetchEvidenceBundle,
+  type EvidenceSandboxDiagnostic,
   type EvidenceSection,
   type EvidenceState,
   type EvidenceTimelineItem,
@@ -270,6 +272,23 @@ function EvidenceBody({
         )}
       </section>
 
+      <section aria-labelledby="evidence-diagnostics-heading">
+        <h2 id="evidence-diagnostics-heading" className="text-sm font-semibold">
+          {t.evidence.sandboxDiagnostics}
+        </h2>
+        {evidence.sandbox_diagnostics?.length ? (
+          <ol className="mt-2 space-y-2">
+            {evidence.sandbox_diagnostics.map((item) => (
+              <DiagnosticItem key={item.seq} item={item} />
+            ))}
+          </ol>
+        ) : (
+          <p className="text-muted-foreground mt-2 text-xs">
+            {t.evidence.noDiagnostics}
+          </p>
+        )}
+      </section>
+
       <section aria-labelledby="evidence-sections-heading">
         <h2 id="evidence-sections-heading" className="text-sm font-semibold">
           {t.evidence.sections}
@@ -300,6 +319,43 @@ function TimelineItem({ item }: { item: EvidenceTimelineItem }) {
         <p className="text-muted-foreground mt-1">
           {item.current} / {item.limit}
           {item.at ? ` · ${item.at}` : ""}
+        </p>
+      </div>
+    </li>
+  );
+}
+
+function DiagnosticItem({ item }: { item: EvidenceSandboxDiagnostic }) {
+  const { t } = useI18n();
+  const facts = Object.entries(item.facts);
+  return (
+    <li
+      className="border-border flex gap-3 rounded-lg border p-3 text-xs"
+      data-testid="evidence-diagnostic"
+    >
+      <ActivityIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+      <div className="min-w-0">
+        <p className="flex flex-wrap items-center gap-2 font-medium">
+          <span>{t.evidence.diagnostic[item.kind] ?? item.kind}</span>
+          <Badge variant="outline">
+            {t.evidence.sessionKind[item.session_kind] ?? item.session_kind}
+          </Badge>
+        </p>
+        {facts.length > 0 && (
+          <dl className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+            {facts.map(([key, value]) => (
+              <div className="flex gap-1" key={key}>
+                <dt className="text-muted-foreground">
+                  {key.replaceAll("_", " ")}
+                </dt>
+                <dd className="break-all">{String(value)}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+        <p className="text-muted-foreground mt-1">
+          {item.at}
+          {item.dropped > 0 ? ` · ${item.dropped} dropped` : ""}
         </p>
       </div>
     </li>

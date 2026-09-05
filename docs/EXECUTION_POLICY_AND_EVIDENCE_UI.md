@@ -67,19 +67,26 @@ context, evidence APIs, and bundles.
 Authorized clients use
 `GET /api/threads/{thread_id}/runs/{run_id}/evidence`. The versioned
 `hartmesh.run-evidence-summary` V1 response supplies public refs, a server-
-ordered policy timeline, safe counters, and bounded admission, assembly/tool
-plane, tool, batch, sandbox, retrieval, MCP, artifact, and export sections.
+ordered policy timeline, a bounded `sandbox_diagnostics` list, safe counters,
+and bounded admission, assembly/tool plane, tool, batch, sandbox, retrieval,
+MCP, artifact, and export sections.
 Section states are `available`, `not_applicable`, `unsupported`, `legacy`,
 `pruned`, `unqualified`, or `error`. The sandbox section counts the closed
 lifecycle observations (`sandbox.lifecycle.v1`) and the bounded diagnostics
 (`sandbox.diagnostic.v1`: egress and scope facts for both session kinds, and
 `session.refused` when an upload, artifact edit, or channel attachment could
 not be copied into a container an accepted run holds; `refusal_count` counts
-those separately)
-separately; see `backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`.
+those separately); see `backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`. The
+`sandbox_diagnostics` list projects each diagnostic to its kind, session kind,
+observation time, bounded scalar facts, and the stream's drop count, at most
+128 items in server order; the sandbox section's `diagnostics_shown` and
+`diagnostics_pruned` say how many and whether the list is complete. The
+sandbox reference, run and thread identifiers, accepted anchors, and digests
+stay out of the projection.
 
 The chat Evidence panel consumes only this projection. It supports native
-keyboard-expandable sections, public-reference copy, active-run refresh,
+keyboard-expandable sections, a sandbox diagnostics list with translated kind
+labels and session-kind badges, public-reference copy, active-run refresh,
 retryable errors, and Project 06 bundle download. `qualified` requires a
 relevant passing artifact; `unqualified` means a gate failed; `unverified`
 means no qualifying evidence was supplied; `legacy` and `unsupported` are
