@@ -103,37 +103,22 @@ Destroy the sandbox, sidecar, and both networks together.
 
 ### E2B Mount Uploads
 
-The E2B provider uploads host mounts during sandbox creation. It passes binary file objects to the E2B SDK.
-
-Each mount has these fixed limits:
-
-- 100 MiB for one file.
-- 512 MiB for all files.
-- 2,000 files.
-
-The full sandbox creation pass also allows 512 MiB and 2,000 files. Skill
-projections and configured mounts share this budget.
-
-The pass has a cooperative deadline controlled by
-``mount_upload_deadline_seconds`` (default: 120 seconds). The provider checks it before
-each mount, during directory preflight, and before each SDK write. The deadline
-does not interrupt active filesystem or E2B SDK calls.
-
-The provider checks mount limits before upload. It rechecks each opened file descriptor against its preflight size before SDK upload.
-
-For policy-scoped turns, clearing the four managed remote skill categories and
-uploading their prepared projection is one per-user/thread/skills-root critical
-section, shared with acquire and release. The provider snapshots that canonical
-root at startup and carries it through warm-pool identity and E2B metadata; a VM
-from another root is never adopted. A second policy sync cannot reset the remote
-tree until the first upload pass has completed.
-
-An invalid mount does not block later mounts.
-
-Each successful upload logs its source, destination, file count, byte count, and elapsed time.
-
-A stopped pass logs its limit reason and elapsed time. It reports attempted and completed upload totals separately.
-
-`E2BSandbox.mount_upload_result` carries the creation-time `MountUploadResult`;
-`truncated` is set only by a resource limit (deadline, file cap, byte budget),
-not by individual mount failures, and is `None` when not available.
+The E2B provider uploads host mounts during sandbox creation as binary file
+objects. Limits: 100 MiB per file, and 512 MiB / 2,000 files per mount and per
+creation pass (skill projections and configured mounts share that budget),
+checked before upload and rechecked per opened descriptor against its preflight
+size. A cooperative deadline (`mount_upload_deadline_seconds`, default 120) is
+checked before each mount, during directory preflight, and before each SDK
+write, but never interrupts an active filesystem or SDK call. An invalid mount
+does not block later mounts; each upload logs source, destination, counts, and
+elapsed time, and a stopped pass logs its limit reason with attempted and
+completed totals separately. `E2BSandbox.mount_upload_result` carries the
+creation-time `MountUploadResult`; `truncated` is set only by a resource limit
+(deadline, file cap, byte budget), never by an individual mount failure, and is
+`None` when unavailable. Policy-scoped turns clear the four managed remote
+skill categories and upload the prepared projection inside one
+per-user/thread/skills-root critical section shared with acquire and release;
+the canonical root is snapshotted at startup and carried through warm-pool
+identity and E2B metadata, a VM from another root is never adopted, and a
+second policy sync cannot reset the remote tree before the first upload pass
+completes.

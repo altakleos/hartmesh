@@ -13,18 +13,18 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 **Runtime**:
 - Tenant and credential evidence are server-owned at durable boundaries; see
   [tenant](docs/TENANT_IDENTITY.md) and
-  [actor evidence](../docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
-- Honcho receives tenant context, never durable authority (see the memory guide).
-- HartMesh durable launches from HTTP, Scheduled Tasks, signed native channels,
-  and embedded services all enter the application-owned `InvocationRuntime`.
-  Admission seals identity, Origin, trusted context, constraints, agent revision,
+  [actor evidence](../docs/AUDITABLE_AUTOMATION_IDENTITIES.md). Honcho receives
+  tenant context, never durable authority (see the memory guide).
+- Every durable launch (HTTP, Scheduled Tasks, signed native channels, embedded
+  services) enters the application-owned `InvocationRuntime`, whose admission
+  seals identity, Origin, trusted context, constraints, agent revision,
   extension generation, and effective skill material before worker/model work;
-  keyed replay, lifecycle observation, and fenced cancellation use that same
-  accepted record. Fail closed rather than falling back to a less durable path.
-- Durable runs verify material, fence start, and bind
-  `AssemblyEvidenceV1` before checkpoint/graph/model/tool work. Missing evidence
-  fails `assembly_evidence_unavailable`, drift fails `agent_assembly_drift`, and
-  stale owners cannot finalize.
+  keyed replay, lifecycle observation, and fenced cancellation use that accepted
+  record. Durable runs then verify material, fence start, and bind
+  `AssemblyEvidenceV1` before checkpoint/graph/model/tool work (missing evidence
+  fails `assembly_evidence_unavailable`, drift fails `agent_assembly_drift`,
+  stale owners cannot finalize). Fail closed rather than falling back to a less
+  durable path; see the runtime guide and `docs/INVOCATION_RUNTIME.md`.
 - Every sandbox is a session of a declared Kind, ordinary or accepted,
   dispatched by the session provider from `sandbox/session.py`; see
   `docs/ACCEPTED_SANDBOX_EXECUTION.md`.
@@ -41,67 +41,113 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   evidence in `docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md`). No
   production profile until every live qualification scenario passes.
 - After assembly bind, a trusted fenced sink commits `started` before policy or
-  tool code and one terminal afterward; gaps are `indeterminate`. Stable IDs
-  bind accepted anchors and graph dispatches; bodies omit raw arguments,
-  results, and errors. A
-  durable receipt records HartMesh's observation of a tool attempt. It
-  does not guarantee an external side effect occurred exactly once or that the
-  tool result was correct. Production requires `run_events.backend: db`.
-- Batch acceptance is parent/tenant-bound and database-time fenced. Production
-  stays disabled; see `docs/DURABLE_SUBAGENT_BATCHES.md`.
-- Terminal evidence export uses a runtime snapshot fence and Gateway exact-byte
-  archive. Required missing, pruned, or legacy material fails closed; bundles
-  are unsigned. See `../docs/RUN_EVIDENCE_BUNDLES.md`.
-- Admission seals the effective `ExecutionBudgetV1`; the worker advances
-  compact `ExecutionPolicyStateV1` with an owner/epoch/lease-fenced CAS and
-  fails closed on missing keys, drift, or a stale writer. Equivalence uses
-  startup-frozen secret HMAC keys; only safe projections leave the runtime.
-  See `../docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md`.
-- Live journal, subagent, workspace, and delivery event writes are authority-
-  bound to tenant/run/owner/epoch. Recovery uses a separate explicit
-  administrative appender. Arbitrary runtime failures are converted once to
-  bounded correlated V1 evidence for run rows, SSE, logs, `run.error`, and
-  `llm.error`; `run.terminal.v1` adds terminal facts without changing opaque
-  authorized `run.end` or conversation content.
+  tool code and one terminal afterward; gaps are `indeterminate`. Receipts bind
+  accepted anchors and graph dispatches, omit raw arguments/results/errors, and
+  record HartMesh's observation of a tool attempt, never an exactly-once
+  external effect or a correct result. Production requires
+  `run_events.backend: db`.
+- Batch acceptance is parent/tenant-bound and database-time fenced; production
+  stays disabled (`docs/DURABLE_SUBAGENT_BATCHES.md`). Terminal evidence export
+  uses a runtime snapshot fence and Gateway exact-byte archive; required
+  missing, pruned, or legacy material fails closed and bundles are unsigned
+  (`../docs/RUN_EVIDENCE_BUNDLES.md`). Admission seals `ExecutionBudgetV1`; the
+  worker advances `ExecutionPolicyStateV1` with an owner/epoch/lease-fenced CAS,
+  fails closed on missing keys, drift, or a stale writer, and only safe
+  projections leave the runtime (`../docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md`).
+- Live journal, subagent, workspace, and delivery event writes are
+  authority-bound to tenant/run/owner/epoch; recovery uses a separate explicit
+  administrative appender. Runtime failures become bounded correlated V1
+  evidence once (run rows, SSE, logs, `run.error`, `llm.error`);
+  `run.terminal.v1` adds terminal facts without changing opaque authorized
+  `run.end` or conversation content.
 - `packages/runtime-api/` is the stdlib-only portable contract; Gateway HTTP and
-  in-process adapters must remain behaviorally identical. The synchronous
-  `DeerFlowClient` is a legacy local graph client and does not enter `InvocationRuntime`;
-  it makes no durability claim.
+  in-process adapters must stay behaviorally identical. The synchronous
+  `DeerFlowClient` is a legacy local graph client outside `InvocationRuntime`
+  and makes no durability claim.
 - Artifact provenance proves which extension bytes/configuration HartMesh
-  admitted. Extensions still execute with Gateway privileges and must come from
-  a trusted operator source. Provenance and enforcement remain host-owned within
-  one startup-frozen process generation.
-- `durable_two_gateway_v1` is an exact-two, evidence-gated boundary; it does not
-  claim arbitrary scaling or IM/upgrade HA. See `docs/MULTI_GATEWAY_QUALIFICATION.md`.
+  admitted within one startup-frozen process generation; extensions still run
+  with Gateway privileges and must come from a trusted operator source.
+- `durable_two_gateway_v1` is an exact-two, evidence-gated boundary, not
+  arbitrary scaling or IM/upgrade HA (`docs/MULTI_GATEWAY_QUALIFICATION.md`).
 - Provisioner-created Kubernetes sandbox Pods take their optional RuntimeClass
-  from `SANDBOX_RUNTIME_CLASS` and apply the restricted container baseline
-  (no privilege escalation, all capabilities dropped, RuntimeDefault seccomp)
-  to the sandbox, init containers, and sidecars. The Pod-level context fixes
-  `runAsUser`, `runAsGroup`, and `fsGroup` at 1000 and requires non-root, so
-  every companion image must tolerate that identity. Sandbox mounts must stay
-  away from the image entrypoint's ownership paths (`/home/gem`, its
-  `Downloads`, `/var/log/gem`, `/var/lib/aio-sandbox`, `/opt/gem`, and
-  `/opt/jupyter`). Sandbox volume mode is resolved once at provisioner startup:
-  explicit `SANDBOX_VOLUME_MODE=pvc` requires both PVC names, explicit
-  `hostpath` keeps the legacy layout, and inference accepts only both claim
-  names set or both unset. Generated sandbox Pods use values-driven startup and
-  liveness probes. The 200-second startup default leaves 66 seconds beyond a
-  measured 134-second three-way concurrent gVisor start. The liveness default
-  preserves the 40-second refused-connection budget while allowing up to 61
-  seconds for a wedged listener whose three probes each consume the 10-second
-  timeout.
-- `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
-- Gateway streams `write_file` and `str_replace` argument deltas in bounded batches for multi-mode `messages-tuple` consumers; single-mode message consumers retain the original per-chunk contract. Non-message frames flush pending batches, and `values` remains an optional complete-state snapshot rather than a prerequisite for batching.
-- With `stream_subgraphs`, subgraph frames keep their namespace in the SSE event name (`values|<ns>`, LangGraph Platform style) instead of impersonating root frames — a delegated subagent inherits the parent checkpoint namespace, so publishing its `values` snapshot as bare `values` replaces the whole thread view in SDK clients (#4399). Root-only consumers (file-tool chunk batcher, subagent event persistence, LLM error-fallback detection) ignore namespaced frames. The web frontend does not request subgraph streaming; subtask progress rides root-namespace `task_*` custom events.
-- Background subagent identity is deliberately split: the provider `tool_call_id` remains the correlation key for `ToolMessage`, `task_*` SSE events, persisted lifecycle events, frontend cards, and the public `ExtensionData.scope_id` contract (stored as `SubagentResult.external_task_id`), while `SubagentExecutor.execute_async()` generates a full server-side `execution_id` for `SubagentResult.task_id`, the process-wide registry, polling, cancellation, timeout handling, and cleanup. Provider IDs are not globally unique across parent runs, so they must never become registry ownership keys; scheduler closures retain their own `SubagentResult` rather than resolving ownership again through the mutable registry. Terminal subagent token usage travels in the current run's `ToolMessage.additional_kwargs` and is attributed from message state, never through a process-global provider-ID cache.
-- Scheduled-task executions must reuse that same Gateway run lifecycle. The scheduler may decide *when* work runs, but it must dispatch through the existing run path rather than introducing a parallel execution stack. Scheduled launches pass `scheduler.recursion_limit` (default 1000, matching the web UI's `recursion_limit: 1000`, clamped by `max_recursion_limit`) via `launch_scheduled_thread_run`; the value is read from `get_app_config()` at dispatch.
-- The background scheduler is single-instance by default. `scheduler.multi_instance=true` opts into lease-aware recovery across Gateway instances and requires shared Postgres, `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`; otherwise startup rejects the configuration. Live scheduled runs are preserved when a peer starts; expired launch claims return to the durable queue, expired `terminalize_v1` run leases are atomically terminalized, exact-two rows stay fail-closed while execution takeover is unavailable, stale launch writes are fenced by lease ownership, and the Postgres advisory-locked budget makes `max_concurrent_runs` a shared global cap for `launching`/`running` rows.
-- Long-running MCP work uses a separate durable task runtime; submission persists the remote handle before returning a local ID. `McpTaskService` leases due rows and stores normalized snapshots in `mcp_tasks`. Shutdown closes submit admission, cancels/awaits admitted submits, and drains late remote compensation; start reopens admission. Expired leases recover after restart; stale or post-cancel results are discarded. Cancellation fences polling, batch failures stay task-local, and idempotent Agent runs deliver terminal/input-required events. The database remains authoritative; `ThreadState` gets only a bounded projection, and task-toolset config changes require restart. New tasks persist immutable lineage beside the handle; Agent submissions require accepted run facts and the active `started` receipt, while standalone API submissions ignore client provenance. Recovery revalidates tenant and credential commitments, links require independent authorization, and parent/task cancellation remain independent. MCP task lineage records who submitted a task and how its completion was correlated. It does not guarantee exactly-once execution by the remote MCP server.
-- MCP replay equality is separate from public lineage. `replay_commitment.py` HMACs the canonical request with the startup-frozen dedicated keyring; SQL stores only version/key ID/HMAC, and startup fails if enabled without keys. Exact-two topology binds a non-secret confirmation of all key bytes/IDs and the active ID, so any rotation uses the quiesced restart procedure. Missing historical keys fail replay closed without disabling durable polling/cancellation. Parent evidence requires independent parent-run authorization.
-- MCP notification failures use a consecutive counter separate from the idempotency-key `dispatch_attempt`, capped exponential backoff, latest-event rebuilding before a run launches, and a five-attempt budget before `dead_letter`. A permanently missing/mismatched target thread is dead-lettered immediately instead of being recreated or reclaimed. HTTP and Agent cancellation requests return after the durable cancel fence; the first request separately persists a pseudonymous actor and fixed source reason, while the background loop alone owns the potentially slow remote call and retry schedule. The HTTP cancel endpoint rejects requests with 503 when the loop is not running (`mcp_tasks_available` false, e.g. `mcp_tasks.enabled=false` with SQL persistence), so a cancellation is never acknowledged without a worker to perform it. The bounded notification error/count/status join poll and cancellation diagnostics in the task detail API and expanded card.
+  from `SANDBOX_RUNTIME_CLASS`, apply the restricted baseline (no privilege
+  escalation, all capabilities dropped, RuntimeDefault seccomp) to sandbox,
+  init, and sidecar containers, and fix `runAsUser`/`runAsGroup`/`fsGroup` at
+  1000 non-root, so every companion image must tolerate that identity. Mounts
+  must avoid the entrypoint's ownership paths (`/home/gem` and its `Downloads`,
+  `/var/log/gem`, `/var/lib/aio-sandbox`, `/opt/gem`, `/opt/jupyter`).
+  `SANDBOX_VOLUME_MODE` is resolved once at provisioner startup: explicit `pvc`
+  requires both PVC names, explicit `hostpath` keeps the legacy layout, and
+  inference accepts only both claim names set or both unset. Startup and
+  liveness probes are values-driven: the 200-second startup default leaves 66
+  seconds beyond a measured 134-second three-way concurrent gVisor start, and
+  the liveness default keeps the 40-second refused-connection budget while
+  allowing 61 seconds for a wedged listener (three 10-second probes).
+- `make dev`, Docker dev, and production all run the agent runtime in Gateway
+  via `RunManager` + `run_agent()` + `StreamBridge`
+  (`packages/harness/deerflow/runtime/`); Nginx exposes it at
+  `/api/langgraph/*`, rewritten to native `/api/*`.
+- Gateway batches `write_file`/`str_replace` argument deltas for multi-mode
+  `messages-tuple` consumers (single-mode consumers keep the per-chunk
+  contract); non-message frames flush pending batches, and `values` stays an
+  optional snapshot, not a batching prerequisite. With `stream_subgraphs`,
+  subgraph frames keep their namespace in the SSE event name (`values|<ns>`)
+  instead of impersonating root frames, because a delegated subagent's bare
+  `values` would replace the whole thread view (#4399); root-only consumers
+  ignore namespaced frames, and the web frontend rides root-namespace `task_*`
+  events instead of subgraph streaming.
+- Background subagent identity is split: the provider `tool_call_id` stays the
+  correlation key for `ToolMessage`, `task_*` events, persisted lifecycle
+  events, frontend cards, and `ExtensionData.scope_id`
+  (`SubagentResult.external_task_id`), while `SubagentExecutor.execute_async()`
+  mints a server-side `execution_id` for `SubagentResult.task_id`, the registry,
+  polling, cancellation, timeouts, and cleanup. Provider IDs are not unique
+  across parent runs and must never become registry ownership keys; scheduler
+  closures keep their own `SubagentResult`. Terminal subagent token usage
+  travels in the run's `ToolMessage.additional_kwargs`, never a process-global
+  provider-ID cache.
+- Scheduled executions dispatch through the same Gateway run path
+  (`launch_scheduled_thread_run`; `scheduler.recursion_limit` default 1000,
+  clamped by `max_recursion_limit`, read from `get_app_config()` at dispatch);
+  the scheduler only decides when. It is single-instance by default:
+  `scheduler.multi_instance=true` requires shared Postgres,
+  `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`
+  (startup rejects anything else), preserves live runs when a peer starts,
+  returns expired launch claims to the queue, terminalizes expired
+  `terminalize_v1` leases atomically, keeps exact-two rows fail-closed, fences
+  stale launch writes by lease ownership, and makes `max_concurrent_runs` a
+  shared advisory-locked cap over `launching`/`running` rows.
+  `uq_scheduled_task_run_active` allows one `queued`/`launching`/`running`
+  occurrence per task: queued work is durable and consumes no concurrency,
+  only a short lease-fenced `launching` row invokes the Gateway path under a
+  stable admission key so recovery reuses the run, thread conflicts requeue,
+  other launch errors fail, repeated triggers coalesce, same-thread FIFO spans
+  every active state, definition mutations lock the parent first (pause/delete
+  interrupt queued work but reject launched/running work; PATCH/resume reject
+  all active states), recovery locks task/run pairs in deterministic order and
+  reconstructs live fields before releasing a claim, launch/failure/timeout
+  update parent and occurrence atomically (timeout also advances cadence), and
+  repositories coerce serialized timestamps before SQL binding.
+- Durable MCP tasks (`McpTaskService`, `mcp_tasks`; details in the MCP guide):
+  submission persists the remote handle before returning a local ID, the
+  database stays authoritative with only a bounded `ThreadState` projection,
+  Agent submissions require accepted run facts and the active `started` receipt
+  while standalone API submissions ignore client provenance, replay equality
+  uses the startup-frozen dedicated HMAC keyring (`replay_commitment.py`; any
+  rotation is a quiesced restart, missing historical keys fail replay closed
+  without disabling polling/cancellation), public lineage stays redacted and
+  parent evidence needs independent parent-run authorization, notification
+  failures back off to `dead_letter` after five attempts, cancellation is
+  acknowledged only after the durable fence and only while the loop runs, and
+  nothing guarantees exactly-once remote execution.
 - Retrieval evidence: `docs/EVIDENCE_BEARING_RETRIEVAL.md`.
-- `uq_scheduled_task_run_active` permits one `queued`/`launching`/`running` occurrence per task. Queued work is durable and consumes no concurrency; only a short lease-fenced `launching` row may invoke the normal Gateway path, using a stable admission key so recovery reuses the run. Thread conflicts requeue; other launch errors fail. Repeated triggers coalesce and same-thread FIFO includes every active state. Definition mutations lock the parent first: pause/delete interrupt queued work but reject launched/running work, while PATCH/resume reject all active states. Recovery locks task/run pairs in deterministic order and reconstructs live fields before releasing a claim. Launch, failure, and timeout update parent plus occurrence atomically; timeout also advances scheduled cadence. Repository boundaries coerce serialized timestamps before SQL binding.
-- `packages/harness/deerflow/tool_plane/` owns canonical secret-safe base/user revisions, validation, SQL generations/attestations, locked projection, bootstrap, drift, and reconciliation. Default-enabled governance makes it the only skill/MCP writer; legacy routes require opt-out, and exact-two mounts only governed reads. Admission pins its coherent effective revision and captured skill/MCP material. Do not bypass the service from routers, clients, tools, or UI; see `docs/GOVERNED_TOOL_PLANE.md` and `test_tool_plane_*`.
+- `packages/harness/deerflow/tool_plane/` is the only skill/MCP writer under
+  default governance (secret-safe base/user revisions, validation, SQL
+  generations/attestations, locked projection, bootstrap, drift,
+  reconciliation); legacy routes require opt-out, exact-two mounts only
+  governed reads, and admission pins the coherent effective revision with its
+  captured skill/MCP material. Never bypass it from routers, clients, tools, or
+  UI; see `docs/GOVERNED_TOOL_PLANE.md` and `test_tool_plane_*`.
 
 **Backend map**: `app/` owns Gateway and channel application code;
 `packages/harness/deerflow/` owns the agent framework; `packages/extension-api/`
