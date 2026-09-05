@@ -21,6 +21,7 @@ from deerflow.sandbox.sandbox_provider import (
     set_sandbox_provider,
     shutdown_sandbox_provider,
 )
+from deerflow.sandbox.session import unwrap_sandbox_provider
 
 
 class _BindingProvider(SandboxProvider):
@@ -264,7 +265,7 @@ def test_refused_provider_teardown_preserves_installed_provider(teardown) -> Non
         ):
             teardown()
 
-        assert get_sandbox_provider() is provider
+        assert unwrap_sandbox_provider(get_sandbox_provider()) is provider
     finally:
         provider.refuse_teardown = False
         teardown()

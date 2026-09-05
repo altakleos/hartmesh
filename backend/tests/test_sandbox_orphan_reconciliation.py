@@ -2843,3 +2843,32 @@ def test_a_container_adopted_during_register_is_not_reaped_from_the_warm_pool():
     provider._reap_expired_warm(0.01)
     provider._backend.destroy.assert_not_called()
     assert provider.get("adopted") is not None, "warm expiry stopped a container this turn is holding"
+
+
+def test_reconcile_destroys_accepted_orphans_instead_of_adopting_them(tmp_path):
+    """A digest-bound accepted container must never be parked as an ordinary
+    warm-pool sandbox after a crash; it is destroyed once this instance can
+    claim it, and the ordinary orphan beside it is still adopted."""
+    provider = _make_provider_for_reconciliation(tmp_path)
+    now = time.time()
+    accepted = SandboxInfo(
+        sandbox_id="abc12345-accepted",
+        sandbox_url="http://localhost:8083",
+        container_name="deer-flow-sandbox-abc12345-accepted",
+        created_at=now - 1200,
+    )
+    ordinary = SandboxInfo(
+        sandbox_id="plain123",
+        sandbox_url="http://localhost:8084",
+        container_name="deer-flow-sandbox-plain123",
+        created_at=now - 1200,
+    )
+    provider._backend.list_running.return_value = [accepted, ordinary]
+
+    provider._reconcile_orphans()
+
+    provider._backend.destroy.assert_called_once_with(accepted)
+    assert "abc12345-accepted" not in provider._warm_pool
+    assert "abc12345-accepted" not in provider._sandboxes
+    assert "plain123" in provider._warm_pool
+    assert provider._ownership.owner("abc12345-accepted") is None

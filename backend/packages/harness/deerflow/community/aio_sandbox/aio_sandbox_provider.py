@@ -93,6 +93,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
 DEFAULT_PORT = 8080
 DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
+# Containers that carry digest-bound accepted material. They are never adopted
+# into the warm pool: a crashed accepted run must not turn into an ordinary,
+# reusable thread sandbox.
+ACCEPTED_SANDBOX_ID_SUFFIX = "-accepted"
 IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
 
 
@@ -724,6 +728,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         current_time = time.time()
         adopted = 0
+        destroyed = 0
         skipped_live = 0
         deferred = 0
 
@@ -732,6 +737,25 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if not self._adoptable_after_grace(info.sandbox_id, current_time):
                 deferred += 1
                 logger.debug("Deferring container %s during reconciliation: owned, or not yet past the recovery grace", info.sandbox_id)
+                continue
+            if info.sandbox_id.endswith(ACCEPTED_SANDBOX_ID_SUFFIX):
+                # Accepted material is digest-bound to the run that admitted it.
+                # An orphan of that kind is evidence of a crash, never a warm
+                # sandbox: claim it as a teardown and stop it, under the same
+                # held marker an explicit destroy uses.
+                if not self._claim_ownership(info.sandbox_id, for_destroy=True):
+                    skipped_live += 1
+                    logger.debug("Skipping accepted container %s during reconciliation: owned by another instance", info.sandbox_id)
+                    continue
+                try:
+                    with self._held_teardown_lease(info.sandbox_id):
+                        self._backend.destroy(info)
+                except Exception:
+                    logger.warning("Failed to destroy orphaned accepted container %s during reconciliation", info.sandbox_id, exc_info=True)
+                    continue
+                self._unowned_since.pop(info.sandbox_id, None)
+                destroyed += 1
+                logger.info(f"Destroyed orphaned accepted container {info.sandbox_id} instead of adopting it (age: {age:.0f}s)")
                 continue
 
             # Claim second: a successful claim proves the container is not a
@@ -770,8 +794,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
 
         logger.info(
-            "Startup reconciliation complete: %s adopted into warm pool, %s skipped (live peer ownership), %s deferred (owned or within recovery grace), %s total found",
+            "Startup reconciliation complete: %s adopted into warm pool, %s accepted destroyed, %s skipped (live peer ownership), %s deferred (owned or within recovery grace), %s total found",
             adopted,
+            destroyed,
             skipped_live,
             deferred,
             len(running),
@@ -2277,7 +2302,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 if existing in accepted_ids:
                     return existing
                 raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_isolation_conflict")
-            sandbox_id = f"{self._sandbox_id_for_thread(identity_thread_id, effective_user_id)}-accepted"
+            sandbox_id = f"{self._sandbox_id_for_thread(identity_thread_id, effective_user_id)}{ACCEPTED_SANDBOX_ID_SUFFIX}"
             created = self._create_sandbox(
                 thread_id,
                 sandbox_id,
