@@ -762,6 +762,7 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "agent_name",
         "is_bootstrap",
         "execution_budget",
+        "egress_allowance",
     }
 )
 
@@ -801,6 +802,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             TRUSTED_RUN_CONTEXT_KEY,
             TENANT_REFERENCE_CONTEXT_KEY,
             "accepted_execution_budget",
+            "accepted_egress_allowance",
             "execution_policy_keyring",
             "execution_policy_stopped",
             "tenant",
@@ -2005,6 +2007,7 @@ def _effective_execution_projection(
             ),
             **({"tool_plane_revision": accepted.tool_plane_revision} if accepted.tool_plane_revision is not None else {}),
             **({"execution_budget": accepted.execution_budget.to_json()} if accepted.execution_budget is not None else {}),
+            **({"egress_allowance": accepted.egress_allowance.to_json()} if accepted.egress_allowance is not None else {}),
             "input": input_projection,
             "command": canonical_request_value(intent.command),
             "multitask_strategy": intent.multitask_strategy,
@@ -2424,6 +2427,19 @@ async def _seal_accepted_invocation(
         non_interactive=runtime_context.get("non_interactive") is True,
         requested_limits=requested_budget,
     )
+    # The accepted Kind's egress is declared here, like its budget: the
+    # operator ceiling narrowed by an optional caller request, sealed into the
+    # runtime identity, and rendered by the Material rather than granted to a
+    # container later.
+    from deerflow.sandbox.egress import resolve_egress_allowance
+
+    requested_egress = runtime_context.get("egress_allowance")
+    if requested_egress is not None and not isinstance(requested_egress, Mapping):
+        raise ValueError("egress allowance request must be an object")
+    egress_allowance = resolve_egress_allowance(
+        getattr(execution_policy_config, "accepted_egress", None),
+        requested=requested_egress,
+    )
     # Publish the process-local lease into the already-scrubbed host context as
     # soon as it exists. The normalizer releases it if a later contributor or
     # sealing step fails before a PreparedLaunch can transfer ownership.
@@ -2590,6 +2606,7 @@ async def _seal_accepted_invocation(
         extension_configuration_digest=extension_configuration_digest,
         tool_plane_revision=tool_plane_revision,
         execution_budget=execution_budget,
+        egress_allowance=egress_allowance,
         contributor_execution_digest=contributor_execution_digest,
         tenant=tenant_reference,
         trusted_context=trusted_context,
@@ -2648,6 +2665,8 @@ async def _seal_accepted_invocation(
     if accepted.execution_budget is not None:
         runtime_context["accepted_execution_budget"] = accepted.execution_budget
         runtime_context["execution_policy_keyring"] = execution_policy_keyring
+    if accepted.egress_allowance is not None:
+        runtime_context["accepted_egress_allowance"] = accepted.egress_allowance
     config["context"] = runtime_context
     return accepted
 

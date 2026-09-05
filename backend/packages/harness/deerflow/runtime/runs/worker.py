@@ -546,6 +546,7 @@ async def _materialize_accepted_skill_projection(
                     tool_plane_effective_digest=tool_plane["effective_digest"],
                     batch_child_attempt_ref=None,
                     capability_profile_digest=selection.capability_profile.digest,
+                    egress_allowance=accepted_invocation.egress_allowance,
                 )
             else:
                 request = AcceptedMaterialRequestV1.build(**request_arguments)
@@ -2658,6 +2659,11 @@ async def run_agent(
                     ),
                 )
                 set_current_sandbox_session(accepted_sandbox_session.declaration)
+                from deerflow.sandbox.accepted_material import rendered_egress_allowance
+
+                accepted_sandbox_session.record_egress_allowance(
+                    rendered_egress_allowance(materialization.request),
+                )
                 _install_runtime_context(config, runtime_ctx)
                 accepted_sandbox_lifecycle_count = await _publish_accepted_sandbox_lifecycle(
                     event_appender,

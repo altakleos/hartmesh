@@ -132,6 +132,7 @@ class _AioProviderPort:
         binding: AcceptedSkillSandboxBindingV1,
         execution_claim: object | None = None,
         resource_scope_ref: str | None = None,
+        egress_allowance: object | None = None,
     ) -> str:
         self.acquire_calls += 1
         self.resource_scope_refs.append(resource_scope_ref)
@@ -169,6 +170,7 @@ class _FreshTakeoverProviderPort(_AioProviderPort):
         user_id: str,
         binding: AcceptedSkillSandboxBindingV1,
         execution_claim: object,
+        egress_allowance: object | None = None,
     ) -> str:
         self.takeover_claims.append(execution_claim)
         assert (thread_id, user_id) == ("thread-ref", "user-ref")

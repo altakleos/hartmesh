@@ -32,6 +32,7 @@ from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.qualification_evidence import AcceptedSandboxRuntimeTopologyV1
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.accepted_material import AcceptedMaterialExecutionClaimV1
+from deerflow.sandbox.egress import EgressAllowanceV1
 from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .backend import SandboxBackend
@@ -391,6 +392,7 @@ class RemoteSandboxBackend(SandboxBackend):
         accepted_skills_only: bool = False,
         accepted_skill_binding: object | None = None,
         accepted_execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
+        egress_allowance: EgressAllowanceV1 | None = None,
     ) -> SandboxInfo:
         """Create a sandbox Pod + Service via the provisioner.
 
@@ -409,6 +411,8 @@ class RemoteSandboxBackend(SandboxBackend):
             kwargs["accepted_skill_binding"] = accepted_skill_binding
         if accepted_execution_claim is not None:
             kwargs["accepted_execution_claim"] = accepted_execution_claim
+        if egress_allowance is not None:
+            kwargs["egress_allowance"] = egress_allowance
         return self._provisioner_create(
             thread_id,
             sandbox_id,
@@ -499,8 +503,11 @@ class RemoteSandboxBackend(SandboxBackend):
         accepted_skills_only: bool = False,
         accepted_skill_binding: object | None = None,
         accepted_execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
+        egress_allowance: EgressAllowanceV1 | None = None,
     ) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
+        if egress_allowance is not None and not isinstance(egress_allowance, EgressAllowanceV1):
+            raise TypeError("egress_allowance must be EgressAllowanceV1 or None")
         accepted_skills_only = accepted_skills_only or accepted_skill_binding is not None
         effective_user_id = user_id or get_effective_user_id()
         include_legacy_skills = user_should_see_legacy_skills(effective_user_id)
@@ -549,6 +556,11 @@ class RemoteSandboxBackend(SandboxBackend):
                             "accepted_material_execution_claim_mismatch",
                         )
                     payload["accepted_execution_claim"] = accepted_execution_claim.to_wire()
+                if egress_allowance is not None:
+                    # The accepted Kind's run-bound egress. The provisioner
+                    # renders it into the Pod's NetworkPolicy and must echo the
+                    # digest it rendered; see the attestation check below.
+                    payload["egress_allowance"] = egress_allowance.to_json()
         provisioner_extra_mounts = _provisioner_extra_mounts_payload(
             extra_mounts,
             skills_container_path=normalized_skills_container_path,
@@ -600,6 +612,13 @@ class RemoteSandboxBackend(SandboxBackend):
                     or not receipt.lease_uid
                 ):
                     raise RuntimeError("accepted_skill_snapshot_receipt_mismatch")
+                if egress_allowance is not None and data.get("egress_allowance_digest") != egress_allowance.digest:
+                    # A provisioner that ignored the allowance would leave the
+                    # Pod on the cluster default while the run's evidence
+                    # claims a bound allowance. Fail closed: tear the Pod down
+                    # before anything can execute in it.
+                    self._discard_unattested_accepted_pod(sandbox_id, receipt)
+                    raise RuntimeError("accepted_egress_allowance_unattested")
                 if accepted_execution_claim is not None:
                     with self._attempt_capabilities_lock:
                         self._attempt_execution_claims[sandbox_id] = accepted_execution_claim
@@ -619,6 +638,24 @@ class RemoteSandboxBackend(SandboxBackend):
                 type(exc).__name__,
             )
             raise RuntimeError("Provisioner create failed") from exc
+
+    def _discard_unattested_accepted_pod(
+        self,
+        sandbox_id: str,
+        receipt: AcceptedSkillMaterialReceipt | None,
+    ) -> None:
+        """Best-effort teardown of a Pod whose egress the provisioner did not attest."""
+
+        with self._attempt_capabilities_lock:
+            self._attempt_capabilities.pop(sandbox_id, None)
+            self._attempt_execution_claims.pop(sandbox_id, None)
+        try:
+            self._provisioner_destroy(sandbox_id, receipt)
+        except RuntimeError:
+            logger.error(
+                "Accepted sandbox %s was created without an attested egress allowance and could not be destroyed",
+                sandbox_id,
+            )
 
     def _provisioner_destroy(
         self,

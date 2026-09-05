@@ -419,6 +419,7 @@ export const enUS: Translations = {
     },
     diagnostic: {
       "egress.blocked": "Egress blocked, approval requested",
+      "egress.bound": "Egress allowance bound to the run",
       "egress.decided": "Egress decision applied",
       "egress.denied": "Egress denied without asking",
       "scope.opened": "Shell scope opened",

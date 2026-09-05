@@ -1894,6 +1894,7 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
             user_id,
             binding,
             execution_claim=None,
+            egress_allowance=None,
         ) -> str:
             assert sql_fence_held is False
             fence_events.append("provider_acquire")

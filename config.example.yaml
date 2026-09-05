@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 54
+config_version: 55
 
 # ============================================================================
 # Logging
@@ -1258,6 +1258,19 @@ execution_policy:
   # Optional category ceilings; known categories include retrieval, sandbox,
   # subagent, filesystem_read, filesystem_write, and tool.
   per_tool_category_attempts: {}
+  # Run-bound egress for accepted (durable) sandboxes, rendered into the Pod's
+  # NetworkPolicy by the provisioner. The default allows no destination and no
+  # cluster DNS. Public CIDRs only: private, loopback, link-local, carrier-NAT,
+  # multicast, documentation, and cloud-metadata ranges are refused. Callers may
+  # narrow this through context.egress_allowance, never widen it.
+  accepted_egress:
+    profile: accepted-egress-v1
+    dns: false
+    allow: []
+    # allow:
+    #   - cidr: 140.82.112.0/20
+    #     protocol: TCP
+    #     port: 443
 
 # ============================================================================
 # Tool Progress State Machine Configuration (RFC #3177)

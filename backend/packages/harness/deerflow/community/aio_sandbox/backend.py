@@ -140,6 +140,7 @@ class SandboxBackend(ABC):
         provision_lark_cli_broker: bool = False,
         accepted_skills_only: bool = False,
         accepted_skill_binding: object | None = None,
+        egress_allowance: object | None = None,
     ) -> SandboxInfo:
         """Create/provision a new sandbox.
 
@@ -160,6 +161,9 @@ class SandboxBackend(ABC):
                 Only a backend with a verified materialization contract may use it.
             accepted_skills_only: Exclude every mutable live-skill projection even
                 when the accepted set is empty.
+            egress_allowance: The accepted Kind's run-bound ``EgressAllowanceV1``.
+                Only a backend that renders it into the sandbox's network policy
+                and attests the rendered digest may accept it.
 
         Returns:
             SandboxInfo with connection details.

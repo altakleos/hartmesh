@@ -889,6 +889,182 @@ class AcceptedExecutionClaimV1(BaseModel):
         return self
 
 
+# ── Run-bound egress for accepted attempts ──────────────────────────────────
+# Kept byte-for-byte identical to ``deerflow.sandbox.egress.NEVER_ALLOWED_NETWORKS``;
+# ``backend/tests/test_provisioner_egress.py`` pins the two copies together.
+EGRESS_NEVER_ALLOWED_NETWORKS: tuple[str, ...] = (
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.0.2.0/24",
+    "192.88.99.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+    "::/128",
+    "::1/128",
+    "::ffff:0:0/96",
+    "64:ff9b:1::/48",
+    "100::/64",
+    "2001:db8::/32",
+    "fc00::/7",
+    "fe80::/10",
+    "ff00::/8",
+)
+_EGRESS_NEVER_ALLOWED = tuple(ipaddress.ip_network(value) for value in EGRESS_NEVER_ALLOWED_NETWORKS)
+_EGRESS_ALLOWANCE_DOMAIN = b"hartmesh.egress-allowance/v1\0"
+_EGRESS_ALLOWANCE_VERSION = 1
+_EGRESS_ALLOWANCE_ANNOTATION = "hartmesh.io/accepted-egress-allowance"
+_EGRESS_ALLOWANCE_DIGEST_ANNOTATION = "hartmesh.io/accepted-egress-allowance-digest"
+
+
+def _egress_allowance_digest(projection: dict[str, object]) -> str:
+    """Recompute the Gateway's allowance digest over the digest-free projection."""
+
+    return hashlib.sha256(
+        _EGRESS_ALLOWANCE_DOMAIN
+        + json.dumps(
+            projection,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8"),
+    ).hexdigest()
+
+
+def _egress_network(cidr: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+    try:
+        network = ipaddress.ip_network(cidr, strict=True)
+    except ValueError as exc:
+        raise ValueError("egress_rule_cidr_invalid") from exc
+    if network.compressed != cidr:
+        raise ValueError("egress_rule_cidr_invalid")
+    if any(network.version == never.version and network.subnet_of(never) for never in _EGRESS_NEVER_ALLOWED):
+        raise ValueError("egress_rule_not_public")
+    return network
+
+
+class EgressRuleV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cidr: str = Field(min_length=1, max_length=64)
+    protocol: Literal["TCP", "UDP"]
+    port: int | None = Field(default=None, ge=1, le=65535)
+
+    @model_validator(mode="after")
+    def validate_rule(self):
+        _egress_network(self.cidr)
+        return self
+
+    def sort_key(self) -> tuple[int, int, int, str, int]:
+        network = ipaddress.ip_network(self.cidr)
+        return (network.version, int(network.network_address), network.prefixlen, self.protocol, -1 if self.port is None else self.port)
+
+
+class EgressAllowanceV1(BaseModel):
+    """The accepted Kind's run-bound egress, exactly as the Gateway sealed it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1]
+    profile: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+    dns: bool
+    rules: list[EgressRuleV1] = Field(max_length=64)
+    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_allowance(self):
+        keys = [rule.sort_key() for rule in self.rules]
+        if keys != sorted(keys) or len(set(keys)) != len(keys):
+            raise ValueError("egress_allowance_not_canonical")
+        if self.digest != _egress_allowance_digest(self.projection()):
+            raise ValueError("egress_allowance_digest_invalid")
+        return self
+
+    def projection(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "profile": self.profile,
+            "dns": self.dns,
+            "rules": [{"cidr": rule.cidr, "protocol": rule.protocol, "port": rule.port} for rule in self.rules],
+        }
+
+    def to_wire(self) -> str:
+        return json.dumps({**self.projection(), "digest": self.digest}, sort_keys=True, separators=(",", ":"))
+
+
+def _parse_lease_egress_allowance(lease_annotations: dict[str, str]) -> EgressAllowanceV1 | None:
+    """Read the allowance the attempt Lease admitted; malformed evidence is a conflict."""
+
+    raw = lease_annotations.get(_EGRESS_ALLOWANCE_ANNOTATION)
+    digest = lease_annotations.get(_EGRESS_ALLOWANCE_DIGEST_ANNOTATION)
+    if raw is None and digest is None:
+        return None
+    try:
+        allowance = EgressAllowanceV1.model_validate(json.loads(raw))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=409,
+            detail="accepted_attempt_egress_allowance_invalid",
+        ) from None
+    if allowance.digest != digest:
+        raise HTTPException(
+            status_code=409,
+            detail="accepted_attempt_egress_allowance_invalid",
+        )
+    return allowance
+
+
+def _render_egress_rules(allowance: EgressAllowanceV1) -> list[k8s_client.V1NetworkPolicyEgressRule] | None:
+    """Render the allowance; ``None`` (no rule at all) is Kubernetes' deny-all."""
+
+    rules: list[k8s_client.V1NetworkPolicyEgressRule] = []
+    if allowance.dns:
+        rules.append(
+            k8s_client.V1NetworkPolicyEgressRule(
+                to=[
+                    k8s_client.V1NetworkPolicyPeer(
+                        namespace_selector=k8s_client.V1LabelSelector(
+                            match_labels={"kubernetes.io/metadata.name": "kube-system"},
+                        ),
+                        pod_selector=k8s_client.V1LabelSelector(
+                            match_labels={"k8s-app": "kube-dns"},
+                        ),
+                    )
+                ],
+                ports=[
+                    k8s_client.V1NetworkPolicyPort(port=53, protocol="UDP"),
+                    k8s_client.V1NetworkPolicyPort(port=53, protocol="TCP"),
+                ],
+            )
+        )
+    for rule in allowance.rules:
+        network = ipaddress.ip_network(rule.cidr)
+        carved = [str(never) for never in _EGRESS_NEVER_ALLOWED if never.version == network.version and never != network and never.subnet_of(network)]
+        rules.append(
+            k8s_client.V1NetworkPolicyEgressRule(
+                to=[
+                    k8s_client.V1NetworkPolicyPeer(
+                        ip_block=k8s_client.V1IPBlock(
+                            cidr=rule.cidr,
+                            _except=carved or None,
+                        ),
+                    )
+                ],
+                ports=[k8s_client.V1NetworkPolicyPort(port=rule.port, protocol=rule.protocol)],
+            )
+        )
+    return rules or None
+
+
 class CreateSandboxRequest(BaseModel):
     sandbox_id: str
     thread_id: str | None = Field(default=None, pattern=SAFE_THREAD_ID_PATTERN)
@@ -914,6 +1090,9 @@ class CreateSandboxRequest(BaseModel):
         pattern=r"^[A-Za-z0-9_-]{43,128}$",
     )
     accepted_execution_claim: AcceptedExecutionClaimV1 | None = None
+    # The accepted Kind's run-bound egress. Absent for the accepted-skills
+    # projection population, whose Pods keep the cluster's default egress.
+    egress_allowance: EgressAllowanceV1 | None = None
 
     @model_validator(mode="after")
     def validate_accepted_projection_pair(self):
@@ -921,6 +1100,8 @@ class CreateSandboxRequest(BaseModel):
             raise ValueError(
                 "accepted_skill_projection and attempt_capability must be supplied together",
             )
+        if self.egress_allowance is not None and self.accepted_skill_projection is None:
+            raise ValueError("egress_allowance requires accepted material")
         if self.accepted_skill_projection is not None and not self.accepted_skills_only:
             raise ValueError(
                 "accepted_skill_projection requires accepted_skills_only",
@@ -938,6 +1119,9 @@ class SandboxResponse(BaseModel):
     sandbox_id: str
     sandbox_url: str
     status: str
+    # Attests which egress allowance the accepted attempt's NetworkPolicy
+    # renders; the Gateway refuses a Pod whose attestation is missing or differs.
+    egress_allowance_digest: str | None = None
     accepted_skill_material: dict[str, object] | None = None
 
 
@@ -1003,6 +1187,7 @@ def _build_accepted_attempt_lease(
     isolation_digest: str = "0" * 64,
     execution_claim: AcceptedExecutionClaimV1 | None = None,
     now: datetime | None = None,
+    egress_allowance: EgressAllowanceV1 | None = None,
 ) -> k8s_client.V1Lease:
     """Build the single owner root for one immutable sandbox attempt."""
 
@@ -1017,6 +1202,9 @@ def _build_accepted_attempt_lease(
         "hartmesh.io/accepted-isolation-digest": isolation_digest,
         "hartmesh.io/accepted-attempt-state": "claimed",
     }
+    if egress_allowance is not None:
+        annotations[_EGRESS_ALLOWANCE_DIGEST_ANNOTATION] = egress_allowance.digest
+        annotations[_EGRESS_ALLOWANCE_ANNOTATION] = egress_allowance.to_wire()
     if execution_claim is not None:
         annotations.update(
             {
@@ -1099,9 +1287,11 @@ def _lease_matches_attempt(
     *,
     isolation_digest: str = "0" * 64,
     execution_claim: AcceptedExecutionClaimV1 | None = None,
+    egress_allowance: EgressAllowanceV1 | None = None,
 ) -> bool:
     annotations = getattr(getattr(lease, "metadata", None), "annotations", None)
     expected = {
+        _EGRESS_ALLOWANCE_DIGEST_ANNOTATION: (None if egress_allowance is None else egress_allowance.digest),
         "hartmesh.io/accepted-attempt-identity": _accepted_attempt_identity(
             projection,
         ),
@@ -1138,6 +1328,7 @@ def _claim_accepted_attempt(
     isolation_digest: str = "0" * 64,
     execution_claim: AcceptedExecutionClaimV1 | None = None,
     now: datetime | None = None,
+    egress_allowance: EgressAllowanceV1 | None = None,
 ) -> k8s_client.V1Lease:
     """Create or replay one exact live attempt; never adopt another identity."""
 
@@ -1153,6 +1344,7 @@ def _claim_accepted_attempt(
         isolation_digest=isolation_digest,
         execution_claim=execution_claim,
         now=now,
+        egress_allowance=egress_allowance,
     )
     try:
         return coordination_v1.create_namespaced_lease(
@@ -1181,6 +1373,7 @@ def _claim_accepted_attempt(
         capability,
         isolation_digest=isolation_digest,
         execution_claim=execution_claim,
+        egress_allowance=egress_allowance,
     ):
         raise HTTPException(
             status_code=409,
@@ -2381,6 +2574,7 @@ def _build_pod(
     attempt_capability: str | None = None,
     accepted_execution_claim: AcceptedExecutionClaimV1 | None = None,
     accepted_attempt_owner: k8s_client.V1OwnerReference | None = None,
+    egress_allowance: EgressAllowanceV1 | None = None,
 ) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
     if (accepted_skill_projection is None) != (attempt_capability is None):
@@ -2496,6 +2690,8 @@ def _build_pod(
                 attempt_capability or "",
             ),
         }
+        if egress_allowance is not None:
+            annotations[_EGRESS_ALLOWANCE_DIGEST_ANNOTATION] = egress_allowance.digest
     elif accepted_skills_only:
         labels["hartmesh.io/accepted-skill-profile"] = "empty_only"
     pod = k8s_client.V1Pod(
@@ -2661,8 +2857,16 @@ def _build_accepted_network_policy(
     sandbox_id: str,
     *,
     accepted_attempt_owner: k8s_client.V1OwnerReference | None = None,
+    egress_allowance: EgressAllowanceV1 | None = None,
 ) -> k8s_client.V1NetworkPolicy:
-    """Expose the capability gate only to Gateway control-plane Pods."""
+    """Expose the capability gate only to Gateway control-plane Pods.
+
+    With an ``egress_allowance`` the policy also owns egress: only the
+    allowance's public destinations (and cluster DNS when allowed) are
+    reachable, and an allowance with no rule denies every destination. Without
+    one, egress stays at the cluster default, which is what the accepted-skills
+    projection population has always had.
+    """
 
     gateway_namespace_selector = k8s_client.V1LabelSelector(
         match_labels={
@@ -2679,12 +2883,14 @@ def _build_accepted_network_policy(
                 "sandbox-id": sandbox_id,
             },
             owner_references=([accepted_attempt_owner] if accepted_attempt_owner is not None else None),
+            annotations=({_EGRESS_ALLOWANCE_DIGEST_ANNOTATION: egress_allowance.digest} if egress_allowance is not None else None),
         ),
         spec=k8s_client.V1NetworkPolicySpec(
             pod_selector=k8s_client.V1LabelSelector(
                 match_labels={"sandbox-id": sandbox_id},
             ),
-            policy_types=["Ingress"],
+            policy_types=(["Ingress", "Egress"] if egress_allowance is not None else ["Ingress"]),
+            egress=(None if egress_allowance is None else _render_egress_rules(egress_allowance)),
             ingress=[
                 k8s_client.V1NetworkPolicyIngressRule(
                     _from=[
@@ -2832,6 +3038,7 @@ def _accepted_pod_response(
     attempt_lease: object | None = None,
     verifier_receipt: dict[str, object] | None = None,
     pod: object | None = None,
+    expected_egress_allowance_digest: str | None = None,
 ) -> SandboxResponse | None:
     """Return the exact accepted Pod identity, never a replacement by name."""
 
@@ -2904,6 +3111,15 @@ def _accepted_pod_response(
     lease_annotations = dict(
         getattr(lease_metadata, "annotations", None) or {},
     )
+    # The attempt Lease admitted one allowance; the Pod and the caller must
+    # agree with it, and the NetworkPolicy below is re-proved against it.
+    egress_allowance = _parse_lease_egress_allowance(lease_annotations)
+    admitted_egress_digest = None if egress_allowance is None else egress_allowance.digest
+    if annotations.get(_EGRESS_ALLOWANCE_DIGEST_ANNOTATION) != admitted_egress_digest or (expected_egress_allowance_digest is not None and expected_egress_allowance_digest != admitted_egress_digest):
+        raise HTTPException(
+            status_code=409,
+            detail="accepted_attempt_egress_allowance_conflict",
+        )
     bound_pod_uid = lease_annotations.get("hartmesh.io/accepted-pod-uid")
     if bound_pod_uid is not None and bound_pod_uid != pod_uid:
         raise HTTPException(
@@ -3005,6 +3221,7 @@ def _accepted_pod_response(
         projection=(expected if isinstance(expected, AcceptedSkillProjectionV2) else None),
         capability=expected_capability,
         capability_digest=capability_digest,
+        egress_allowance=egress_allowance,
     )
     sandbox_image_digest = SANDBOX_IMAGE.rsplit("@sha256:", 1)[-1]
     accepted_skill_runtime_image_digest = ACCEPTED_SKILL_RUNTIME_IMAGE.rsplit(
@@ -3073,6 +3290,7 @@ def _accepted_pod_response(
             **materialization_evidence,
             "materialization_evidence_digest": materialization_digest,
         },
+        egress_allowance_digest=admitted_egress_digest,
     )
 
 
@@ -3319,10 +3537,12 @@ def _create_accepted_network_policy_exact(
     sandbox_id: str,
     *,
     accepted_attempt_owner: k8s_client.V1OwnerReference,
+    egress_allowance: EgressAllowanceV1 | None = None,
 ) -> None:
     policy = _build_accepted_network_policy(
         sandbox_id,
         accepted_attempt_owner=accepted_attempt_owner,
+        egress_allowance=egress_allowance,
     )
     try:
         networking_v1.create_namespaced_network_policy(
@@ -3359,6 +3579,7 @@ def _accepted_supporting_resource_evidence(
     projection: AcceptedSkillProjectionV2 | None,
     capability: str | None,
     capability_digest: str,
+    egress_allowance: EgressAllowanceV1 | None = None,
 ) -> dict[str, str]:
     """Re-read and prove the exact NetworkPolicy and immutable Secrets."""
 
@@ -3376,6 +3597,7 @@ def _accepted_supporting_resource_evidence(
     expected_policy = _build_accepted_network_policy(
         sandbox_id,
         accepted_attempt_owner=owner,
+        egress_allowance=egress_allowance,
     )
     try:
         policy = networking_v1.read_namespaced_network_policy(
@@ -3838,6 +4060,7 @@ def create_sandbox(req: CreateSandboxRequest):
             accepted_skill_projection=accepted_projection,
             attempt_capability=req.attempt_capability,
             accepted_execution_claim=req.accepted_execution_claim,
+            egress_allowance=req.egress_allowance,
         )
         isolation_digest = accepted_pod.metadata.annotations["hartmesh.io/accepted-isolation-digest"]
         if req.accepted_execution_claim is not None and req.accepted_execution_claim.execution_takeover:
@@ -3855,14 +4078,17 @@ def create_sandbox(req: CreateSandboxRequest):
                 req.attempt_capability,
                 isolation_digest=isolation_digest,
                 execution_claim=req.accepted_execution_claim,
+                egress_allowance=req.egress_allowance,
             )
         attempt_owner = _accepted_attempt_owner_reference(attempt_lease)
+        expected_egress_allowance_digest = None if req.egress_allowance is None else req.egress_allowance.digest
         existing_accepted = _accepted_pod_response(
             sandbox_id,
             expected=accepted_projection,
             expected_capability=(None if req.accepted_execution_claim is not None and req.accepted_execution_claim.execution_takeover else req.attempt_capability),
             expected_lease_uid=attempt_owner.uid,
             attempt_lease=attempt_lease,
+            expected_egress_allowance_digest=expected_egress_allowance_digest,
         )
         if existing_accepted is not None:
             receipt = existing_accepted.accepted_skill_material
@@ -3893,6 +4119,7 @@ def create_sandbox(req: CreateSandboxRequest):
         _create_accepted_network_policy_exact(
             sandbox_id,
             accepted_attempt_owner=attempt_owner,
+            egress_allowance=req.egress_allowance,
         )
         attempt_lease, create_accepted_pod = _prepare_accepted_pod_creation(attempt_lease)
         accepted_pod.metadata.owner_references = [attempt_owner]
@@ -3999,6 +4226,7 @@ def create_sandbox(req: CreateSandboxRequest):
                 expected_lease_uid=attempt_owner.uid,
                 attempt_lease=attempt_lease,
                 pod=observed_pod,
+                expected_egress_allowance_digest=expected_egress_allowance_digest,
             )
             if accepted_response is not None:
                 break

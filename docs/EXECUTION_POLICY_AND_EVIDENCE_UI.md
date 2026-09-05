@@ -62,6 +62,36 @@ Local mode uses a process-ephemeral key and is restart-unqualified. Key bytes,
 normalized values, and commitments stay out of events, logs, metrics, model
 context, evidence APIs, and bundles.
 
+## Run-bound egress
+
+The accepted session Kind declares its egress at admission the same way:
+`execution_policy.accepted_egress` is the ceiling (a profile, whether cluster
+DNS is allowed, and public CIDR rules with protocol and optional port; the
+default allows nothing), a caller may only narrow it through
+`context.egress_allowance` (`dns` and `rules`, each rule covered by a ceiling
+rule), and the canonical `EgressAllowanceV1` and its digest join the accepted
+invocation's runtime identity. Private, loopback, link-local, carrier-NAT,
+multicast, documentation, and cloud-metadata ranges are refused in
+configuration and requests and carved out of any wide rule when rendered.
+
+The accepted Kind's Material renders the allowance: the provisioner writes it
+into the accepted Pod's NetworkPolicy, binds its digest to the attempt Lease,
+and echoes the digest, and the remote backend destroys a Pod whose attestation
+is missing or differs. Recovery re-provisions the same allowance from the
+accepted row; nothing mid-run can widen it; an invocation sealed before
+allowances existed renders as deny-all. The accepted-skills projection
+population (ordinary sessions with a bound snapshot) declares no allowance and
+keeps its existing egress. See `backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`.
+
+```yaml
+execution_policy:
+  accepted_egress:
+    profile: accepted-egress-v1
+    dns: false
+    allow:
+      - { cidr: 140.82.112.0/20, protocol: TCP, port: 443 }
+```
+
 ## Evidence summary and panel
 
 Authorized clients use
@@ -73,10 +103,14 @@ MCP, artifact, and export sections.
 Section states are `available`, `not_applicable`, `unsupported`, `legacy`,
 `pruned`, `unqualified`, or `error`. The sandbox section counts the closed
 lifecycle observations (`sandbox.lifecycle.v1`) and the bounded diagnostics
-(`sandbox.diagnostic.v1`: egress and scope facts for both session kinds, and
+(`sandbox.diagnostic.v1`: egress and scope facts for both session kinds,
+`egress.bound` when an accepted session's rendered allowance is recorded, and
 `session.refused` when an upload, artifact edit, or channel attachment could
 not be copied into a container an accepted run holds; `refusal_count` counts
 those separately); see `backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`. The
+policy section also carries the accepted egress allowance's profile, digest,
+rule count, and DNS decision (`egress_*`, null for legacy rows); the rule
+values stay in the accepted row. The
 `sandbox_diagnostics` list projects each diagnostic to its kind, session kind,
 observation time, bounded scalar facts, and the stream's drop count, at most
 128 items in server order; the sandbox section's `diagnostics_shown` and

@@ -26,6 +26,7 @@ from deerflow.sandbox.accepted_material import (
     AcceptedSandboxQualificationV1,
     AcceptedSkillExecutionEvidenceV2,
     AcceptedSkillSandboxBindingV1,
+    rendered_egress_allowance,
 )
 from deerflow.sandbox.sandbox import Sandbox
 
@@ -236,6 +237,7 @@ class AioAcceptedMaterializer:
             thread_id, user_id = self._scope_resolver(request)
             if not isinstance(thread_id, str) or not thread_id or not isinstance(user_id, str) or not user_id:
                 raise AcceptedMaterialError("accepted_material_scope_unavailable")
+            egress_allowance = rendered_egress_allowance(request)
             if execution_claim is not None and execution_claim.execution_takeover:
                 recover = getattr(
                     self._provider,
@@ -251,11 +253,13 @@ class AioAcceptedMaterializer:
                     user_id=user_id,
                     binding=binding,
                     execution_claim=execution_claim,
+                    egress_allowance=egress_allowance,
                 )
             elif execution_claim is None:
                 acquire_kwargs = {
                     "user_id": user_id,
                     "binding": binding,
+                    "egress_allowance": egress_allowance,
                 }
                 if isinstance(request, AcceptedMaterialRequestV2) and request.batch_child_attempt_ref is not None:
                     acquire_kwargs["resource_scope_ref"] = request.batch_child_attempt_ref
@@ -269,6 +273,7 @@ class AioAcceptedMaterializer:
                     user_id=user_id,
                     binding=binding,
                     execution_claim=execution_claim,
+                    egress_allowance=egress_allowance,
                 )
             try:
                 sandbox = self._provider.get(sandbox_id)

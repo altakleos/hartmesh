@@ -102,6 +102,14 @@ uncertain.
 
 **Idempotent**: Calling with the same `sandbox_id` returns the existing sandbox info.
 
+An accepted (durable) request may carry `egress_allowance`, the Gateway's sealed
+`EgressAllowanceV1` (`version`, `profile`, `dns`, canonical public-CIDR `rules`,
+`digest`). The provisioner recomputes the digest, renders the allowance into the
+accepted Pod's NetworkPolicy, binds the digest to the attempt Lease and Pod, and
+echoes it as `egress_allowance_digest` in the response; the Gateway destroys a Pod
+whose echo is missing or differs. Without the field the accepted policy stays
+ingress-only, as it always was for the accepted-skills projection population.
+
 ### `GET /api/sandboxes/{sandbox_id}`
 Get status and URL of a specific sandbox.
 
@@ -238,6 +246,16 @@ A bounded
 reconciler deletes expired Lease UIDs, letting Kubernetes garbage collection remove children.
 Process restart does not adopt such a Pod because the capability is intentionally unrecoverable;
 the corresponding lost worker follows the existing orphan-terminalization contract.
+
+Run-bound egress: when the request carries `egress_allowance`, the accepted
+NetworkPolicy owns egress as well as ingress. Each rule renders as an `ipBlock`
+with the never-allowed ranges (private, loopback, link-local, carrier-NAT,
+multicast, documentation, cloud metadata; identical to
+`deerflow.sandbox.egress.NEVER_ALLOWED_NETWORKS`) carved out, `dns: true` adds
+`kube-system` `kube-dns` on port 53, and an allowance with no rule denies every
+destination. The allowance digest is part of the attempt Lease identity, so a
+replay with a different allowance is an identity conflict, and the re-read fence
+rebuilds the expected policy from the Lease-recorded allowance.
 
 The provider-neutral `AcceptedMaterializer` refactor does not change this
 provisioner protocol or qualification scope. `AioAcceptedMaterializer` retains

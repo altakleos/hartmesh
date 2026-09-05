@@ -56,10 +56,11 @@ def _network_approval_is_non_interactive(context: Mapping[str, object]) -> bool:
 def _egress_denial_reason(context: Mapping[str, object]) -> str | None:
     """Why this execution cannot ask a person about a blocked destination.
 
-    An accepted session is denied by kind: a grant would bind to the container
-    rather than to the run that would be held to it, so until an approval can
-    be run-bound the policy is deny-and-record. Subagents and non-interactive
-    executions have nobody to ask.
+    An accepted session is denied by kind: its egress was declared at admission
+    and rendered by its Material (``deerflow.sandbox.egress``), so a sidecar
+    grant, which would bind to the container rather than to the run, is never
+    offered; the denial is recorded. Subagents and non-interactive executions
+    have nobody to ask.
     """
     declaration = current_sandbox_session()
     if declaration is not None and declaration.kind is SandboxSessionKind.ACCEPTED:

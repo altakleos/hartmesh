@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, Self
 
 from deerflow_extension_api import TenantReferenceV1
 
+from deerflow.sandbox.egress import EgressAllowanceV1, EgressPolicyError
 from deerflow.sandbox.operations import SandboxOperationKind, fenced_sandbox_facade, sandbox_operations
 from deerflow.sandbox.sandbox import Sandbox
 
@@ -1121,10 +1122,15 @@ class AcceptedMaterialRequestV2:
     batch_child_attempt_ref: str | None
     capability_profile_digest: str
     digest: str
+    # The run-bound egress the accepted Kind's Material renders; ``None`` only
+    # for requests sealed before egress allowances existed.
+    egress_allowance: EgressAllowanceV1 | None = None
 
     def __post_init__(self) -> None:
         if type(self.version) is not int or self.version != 2:
             raise ValueError("accepted material request version must be 2")
+        if self.egress_allowance is not None and not isinstance(self.egress_allowance, EgressAllowanceV1):
+            raise TypeError("egress_allowance must be EgressAllowanceV1 or None")
         for field_name in (
             "run_id",
             "attempt_id",
@@ -1198,6 +1204,7 @@ class AcceptedMaterialRequestV2:
             "tool_plane_effective_digest": self.tool_plane_effective_digest,
             "batch_child_attempt_ref": self.batch_child_attempt_ref,
             "capability_profile_digest": self.capability_profile_digest,
+            **({"egress_allowance": self.egress_allowance.to_json()} if self.egress_allowance is not None else {}),
         }
 
     def to_persisted(self) -> dict[str, object]:
@@ -1226,12 +1233,15 @@ class AcceptedMaterialRequestV2:
         tool_plane_effective_digest: str,
         batch_child_attempt_ref: str | None,
         capability_profile_digest: str,
+        egress_allowance: EgressAllowanceV1 | None = None,
     ) -> Self:
         if not isinstance(file_manifest, Sequence) or isinstance(
             file_manifest,
             (str, bytes, bytearray),
         ):
             raise ValueError("accepted material file manifest is invalid")
+        if egress_allowance is not None and not isinstance(egress_allowance, EgressAllowanceV1):
+            raise TypeError("egress_allowance must be EgressAllowanceV1 or None")
         manifest = tuple(sorted(file_manifest, key=lambda entry: entry.path))
         payload = {
             "version": 2,
@@ -1254,6 +1264,7 @@ class AcceptedMaterialRequestV2:
             "tool_plane_effective_digest": tool_plane_effective_digest,
             "batch_child_attempt_ref": batch_child_attempt_ref,
             "capability_profile_digest": capability_profile_digest,
+            **({"egress_allowance": egress_allowance.to_json()} if egress_allowance is not None else {}),
         }
         return cls(
             version=2,
@@ -1277,6 +1288,7 @@ class AcceptedMaterialRequestV2:
             batch_child_attempt_ref=batch_child_attempt_ref,
             capability_profile_digest=capability_profile_digest,
             digest=_canonical_digest(payload),
+            egress_allowance=egress_allowance,
         )
 
     @classmethod
@@ -1304,8 +1316,14 @@ class AcceptedMaterialRequestV2:
             "capability_profile_digest",
             "digest",
         }
-        if not isinstance(value, Mapping) or set(value) != fields:
+        if not isinstance(value, Mapping) or set(value) - {"egress_allowance"} != fields:
             raise ValueError("accepted material request has unknown or missing fields")
+        egress_allowance = None
+        if value.get("egress_allowance") is not None:
+            try:
+                egress_allowance = EgressAllowanceV1.from_json(value["egress_allowance"])
+            except EgressPolicyError as exc:
+                raise ValueError("accepted material request egress allowance is invalid") from exc
         raw_manifest = value["file_manifest"]
         if not isinstance(raw_manifest, Sequence) or isinstance(
             raw_manifest,
@@ -1334,10 +1352,24 @@ class AcceptedMaterialRequestV2:
             batch_child_attempt_ref=value["batch_child_attempt_ref"],  # type: ignore[arg-type]
             capability_profile_digest=value["capability_profile_digest"],  # type: ignore[arg-type]
             digest=value["digest"],  # type: ignore[arg-type]
+            egress_allowance=egress_allowance,
         )
 
 
 AcceptedMaterialRequest = AcceptedMaterialRequestV1 | AcceptedMaterialRequestV2
+
+
+def rendered_egress_allowance(request: AcceptedMaterialRequest | None) -> EgressAllowanceV1:
+    """The egress the accepted Kind's Material renders for ``request``.
+
+    The accepted Kind always declares its egress: a V1 request, or a V2
+    request sealed before allowances existed, renders as deny-all rather than
+    inheriting a cluster or container default.
+    """
+
+    if isinstance(request, AcceptedMaterialRequestV2) and request.egress_allowance is not None:
+        return request.egress_allowance
+    return EgressAllowanceV1.deny_all()
 
 
 def decode_accepted_material_request(value: object) -> AcceptedMaterialRequest:
@@ -2675,7 +2707,7 @@ class AcceptedSandboxSessionBridge:
             observe=self._observe,
         )
 
-    def _observe(self, kind: str, facts: Mapping[str, str | int | bool]) -> None:
+    def _observe(self, kind: str, facts: Mapping[str, str | int | bool], *, once: bool = False) -> None:
         """The accepted Kind's Observer: a run-bound diagnostic under the public ref.
 
         Facts observed outside the run (an ordinary acquire refused because
@@ -2698,6 +2730,23 @@ class AcceptedSandboxSessionBridge:
             attempt_ref=self._session.attempt_ref,
             batch_child_attempt_ref=self._session.batch_child_attempt_ref,
             execution_evidence_digest=self._session.execution_evidence_digest,
+            once=once,
+        )
+
+    def record_egress_allowance(self, allowance: EgressAllowanceV1) -> None:
+        """Record once which run-bound egress this session's Material rendered.
+
+        The allowance itself is authority in the accepted invocation; this is
+        the session's diagnostic of it, so the run's stream shows the profile,
+        rule count, and DNS decision beside the egress facts the sandbox
+        observes, and never the container id or the rule values.
+        """
+        if not isinstance(allowance, EgressAllowanceV1):
+            raise TypeError("allowance must be EgressAllowanceV1")
+        self._observe(
+            "egress.bound",
+            {"profile": allowance.profile, "rule_count": len(allowance.rules), "dns": allowance.dns},
+            once=True,
         )
 
     @property
@@ -3355,6 +3404,7 @@ __all__ = [
     "accepted_scope_reference",
     "current_accepted_sandbox_bridge",
     "declare_accepted_sandbox_session",
+    "rendered_egress_allowance",
     "is_accepted_sandbox_facade",
     "withdraw_accepted_sandbox_session",
     "InMemoryAcceptedMaterialState",
