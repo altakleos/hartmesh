@@ -642,7 +642,7 @@ Version sources report `2.1.0+hartmesh.4`, the newest tag. It predates the evide
 - [Durable subagent batches](docs/DURABLE_SUBAGENT_BATCHES.md) — accepted evidence, retries, cancellation, legacy cleanup, and qualification
 - [Portable run evidence bundles](docs/RUN_EVIDENCE_BUNDLES.md) — canonical manifest, terminal snapshot, exact artifact bytes, offline verification, and trust limits
 - [Execution policy and Evidence panel](docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md) — accepted budgets, private repeated-call commitments, circuit breakers, and bounded operator projections
-- [Accepted sandbox execution](backend/docs/ACCEPTED_SANDBOX_EXECUTION.md) — composed run/provider authority, operation gating, capability matrix, lifecycle evidence, and qualification
+- [Accepted sandbox execution](backend/docs/ACCEPTED_SANDBOX_EXECUTION.md) — sessions and Kinds, the session provider, composed run/provider authority, operation gating, capability matrix, lifecycle evidence, and qualification
 - [Runtime API](backend/packages/runtime-api/README.md) — DTOs and `DurableInvocationPort`
 - [Gateway API](backend/docs/API.md) — authenticated HTTP behavior
 - [Extension API](backend/packages/extension-api/README.md) — policy and trust boundaries

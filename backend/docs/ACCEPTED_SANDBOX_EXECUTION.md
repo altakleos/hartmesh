@@ -1,55 +1,65 @@
-# Tenant-bound accepted sandbox execution
+# Sandbox sessions and tenant-bound accepted execution
 
-## Status and guarantee
+## Every sandbox is a session of a declared Kind
 
-Durable accepted sandbox work is authorized by the existing accepted-material
-tuple. HartMesh does not add another execution lease, epoch, table, or heartbeat:
+HartMesh runs every sandbox, ordinary or accepted, as one session under one
+Kind. A Kind is four policies:
 
-| Component | Responsibility | Not authority for |
-| --- | --- | --- |
-| `AcceptedMaterialExecutionClaimV1` | Current tenant/run/worker/state fence from the durable run store | Provider cleanup or immutable evidence |
-| `AcceptedMaterialLeaseV1` | Provider resource, provider ownership epoch, expiry, and private renewal handle | Durable run ownership |
-| `AcceptedExecutionEvidenceV1` / `V2` | Immutable material, image, provider, epoch, qualification, and isolation proof | Current execution or cleanup permission |
-| `AcceptedMaterializer` | Provider acquisition, validation, renewal, and release | Durable run-state transitions |
-| `AcceptedSandboxSession` | Composes the run fence and materializer tuple before each operation | New authority of its own |
-| Cleanup ownership | Reaps provider resources and reconciles orphans | Sandbox execution |
+| Policy | Question it answers | Ordinary Kind | Accepted Kind |
+| --- | --- | --- | --- |
+| Material | What is the container made of? | The mutable thread workspace, plus the bound accepted-skills snapshot under an explicit Agent policy | Digest-bound admitted material placed by the qualified materializer before the run starts |
+| Fence | What is checked before each operation? | Nothing beyond upstream's authorization gate and execution lease | The durable run or batch-item attempt fence, then the materializer's lease validation |
+| Terminal | What happens when the last holder leaves? | Park: the provider keeps the container for the next turn | Retire: destroy once, from the declaring execution, never park |
+| Observer | Where are operations recorded? | Thread-scoped diagnostics | The evidence ledger (the closed lifecycle set) plus run-bound diagnostics |
 
-The session exposes operations, never its backing provider sandbox. Every
-public `Sandbox` operation crosses the same facade. The set is declared once in
-`sandbox/operations.py` (ten today: command execution, scoped command
-execution, scope release, full/ranged read, download, directory list, text
-write, glob, grep, and binary update); the facade's methods are generated from
-those declarations, and the module refuses to import if a `Sandbox` method has
-no declaration or the facade would inherit one as an unfenced passthrough.
-Upstream's scoped-shell hooks are declared already; providers keep the base
-class's pass-through defaults until they implement scoping, so a scoped call on
-the facade is fenced and recorded even where it is not yet isolated. Normal
-sandbox tools, sandbox middleware, output externalization, lead agents, inherited
-subagents, and durable batch children resolve that facade through one resolver,
-`declared_sandbox()`, which answers from the executing context's session
-declaration; nothing in a runtime context dict can stand in for it. A batch
-child declares a separate session over its existing SQL item-attempt fence; it
-does not borrow the parent run's mutable authority. The
-child's canonical request/evidence pair and initial `acquired` observation are
-atomically attached to that attempt after the provider call and a fresh fence
-sample, before the executor may start. Later bounded lifecycle observations are
-appended through the retained attempt/evidence/worker binding even after terminal
-publication; they cannot authorize another operation.
+Ordinary is the degenerate accepted session: no fence, no ledger, park instead
+of destroy. The public surface is two constructors. `SandboxSessionKind.ORDINARY`
+is the default and nothing declares it; `SandboxSessionKind.ACCEPTED` is
+declared by the durable worker or the batch service after the material exists.
+A third population is a code change, not a configuration.
 
-Before every provider call the session:
+### Concepts
 
-1. samples the current durable run or batch-item attempt fence;
-2. calls `AcceptedMaterializer.validate(lease, evidence)`;
-3. performs a final process-local open/lease identity check; and
-4. delegates the closed operation envelope to the private sandbox object.
+| Concept | What it is | Module | Owner |
+| --- | --- | --- | --- |
+| Session | One container in use by one or more holders under one Kind | `sandbox/session.py` | HartMesh |
+| Kind | Material, Fence, Terminal, and Observer, declared once per execution as a `SandboxSessionDeclaration` | `sandbox/session.py` | HartMesh |
+| Resource key | The principal and resource the registry serializes on. Distinct from the mount scope, which is whose thread the material is projected from; a batch child shares its parent's mount scope and owns its resource key | providers | HartMesh derivation, upstream tuple shape |
+| Public ref | The only identifier that leaves the provider: the provider's own id for an ordinary session, `accepted-execution-<evidence-digest>` for an accepted one. It is what state, logs, and evidence carry | `sandbox/accepted_material.py` | HartMesh |
+| Operation | The closed set of `Sandbox` verbs, declared once; the declaration generates the fenced facade method, the envelope, and the evidence label | `sandbox/operations.py` | HartMesh |
+| Registry | Holders, borrowers, per-key serialization, last-holder release | `sandbox/lease.py` | Upstream, verbatim |
+| Session provider | Dispatches acquire, get, and release by the declared Kind, translates public refs, refuses conflicting admission, and runs the Kind's terminal | `sandbox/session.py` | HartMesh |
+| Capability | Optional provider contracts negotiated at runtime; the required provider surface stays acquire, its async twin, get, and release | `sandbox/capabilities.py` | HartMesh, upstream-shaped |
 
-Renewal reuses the worker's supervised run heartbeat. Run-fence loss, provider
-validation or renewal loss, cancellation, and close invalidate the session for
-later calls. Close refuses new calls immediately, waits for an already-delegated
-call, then releases through the materializer. Terminal publication independently
-revalidates the tuple and remains fenced by the durable run/item store.
+### The populations, as one Kind four ways
 
-### Session provider
+| Population | Kind | Resource key | Material | Fence | Terminal | Handle |
+| --- | --- | --- | --- | --- | --- | --- |
+| Ordinary thread | ordinary | `(user, thread)` | mutable thread workspace | none | park | provider's own `Sandbox` |
+| Accepted-skills projection | ordinary | `(user, thread)` | thread workspace plus the bound snapshot; the consumer-token coordinator lives inside the Material | none | park | provider's own `Sandbox` |
+| Accepted durable lead | accepted | `(user ref, thread ref)` | digest-bound admitted material via the materializer | run claim against the SQL fence | retire | generated facade |
+| Batch child | accepted | `(user ref, accepted-attempt digest)` | same | item-attempt fence | retire | generated facade |
+
+### Rules
+
+1. **Public refs resolve only for the declaring execution.** A fork, a Gateway
+   request, or a channel with no declaration gets nothing back and falls
+   through to its own ordinary acquire.
+2. **Accepted material is provisioned before it is declared**, never lazily by
+   the registry. A missing declaration is a typed failure, never an ordinary
+   acquire, so the registry's synchronous acquire path never has to provision
+   accepted material.
+3. **Terminal is a property of the container, fixed at provisioning.** A
+   retire-terminal container refuses a second mount-scope holder at admission.
+4. **The real provider identifier never leaves the session provider.** Network
+   hooks and scope release receive public refs and translate inside.
+5. **Every operation crosses the declared facade.** Normal sandbox tools,
+   sandbox middleware, output externalization, lead agents, inherited
+   subagents, and durable batch children resolve their handle through one
+   resolver, `declared_sandbox()`, which answers from the executing context's
+   declaration; nothing in a runtime context dict can stand in for it.
+
+## Session provider
 
 Every path that resolves a sandbox handle, including Gateway routes, channels,
 and upstream's own middleware and tools, goes through the configured provider's
@@ -80,7 +90,7 @@ session, calls `declare_accepted_sandbox_session` with the run's
 every task and thread the run spawns inherits it, and withdraws it after the
 session closes. An in-run subagent borrows its parent's declaration: the task
 tool hands the current declaration to the executor, which binds it for exactly
-the child's execution. A durable batch child is the same kind under its own
+the child's execution. A durable batch child is the same Kind under its own
 attempt key: the batch service declares the child's session with no mount
 scope, because no ordinary acquire is keyed by an attempt and so none can
 collide with it, and the executor binds that declaration on the isolated
@@ -95,25 +105,6 @@ against the configured provider class keep working. Accepted-suffixed
 containers found by the AIO startup reconciler are destroyed once this instance
 can claim them, never adopted into the warm pool.
 
-This is a check-then-call guarantee, not distributed atomicity. A call accepted
-before loss may finish. For a provider without atomic operation fencing, one call
-may also enter the provider when takeover/loss occurs after both checks but before
-provider acceptance. Once loss is observed, every later call is refused, and the
-stale worker cannot publish accepted terminal success. A provider may set
-`atomic_provider_operation_fencing=true` only when the expected epoch travels in
-the operation request and is checked atomically with starting that operation.
-
-Upstream's execution leases (`sandbox/lease.py`) sit beside this, not inside
-it. The lease manager only ever calls the provider's `acquire`, `get`, and
-`release`, and HartMesh keys every manager by the installed session provider
-(`lifecycle_sandbox_provider`), so a caller holding the backing provider and a
-caller holding the wrapper share one manager whose calls go through the
-declaration dispatch above. A declared execution never takes a lease: its
-tools and middleware resolve the declared handle before any lease code runs,
-and the declarer owns the terminal. Accepted-skill sandboxes (the projection
-material, not an accepted session) are held under the execution lease as
-borrowers, because the projection's consumer refcount is what parks them.
-
 Provider hooks that are keyed by sandbox id, today the network policy hooks
 (`consume`, `deny_pending`, `decide`), receive whatever id state carries. For a
 declared session that is the public ref, so the session provider translates it
@@ -121,7 +112,48 @@ to the provider's own id, which the declaration carries as `provider_ref`, for
 the declaring execution only; a stranger's call resolves to no events and no
 decision, and the provider id never appears in state, logs, or evidence.
 
-### Provider capabilities
+### Execution leases beside sessions
+
+Upstream's execution leases (`sandbox/lease.py`) sit beside the session
+provider, not inside it. The lease manager only ever calls the provider's
+`acquire`, `get`, and `release`, and HartMesh keys every manager by the
+installed session provider (`lifecycle_sandbox_provider`), so a caller holding
+the backing provider and a caller holding the wrapper share one manager whose
+calls go through the declaration dispatch above. A declared execution never
+takes a lease: its tools and middleware resolve the declared handle before any
+lease code runs, and the declarer owns the terminal. Accepted-skill sandboxes
+(the projection Material, not an accepted session) are held under the
+execution lease as borrowers, because the projection's consumer refcount is
+what parks them.
+
+### Egress, per Kind
+
+An ordinary interactive session is asked (the Human Input card) and both the
+blocked request and the applied decision are recorded; a subagent or
+non-interactive execution is denied unasked and recorded once; an accepted
+session is denied unasked by Kind, because a grant would bind to the container
+rather than to the run that is held to it, until an approval can be run-bound.
+Recording never changes the tool result the receipt layer digests: the card is
+emitted after the fact is recorded and the sandbox middleware stays inner of
+the receipt middleware.
+
+## Operations and the facade
+
+An accepted session exposes operations, never its backing provider sandbox.
+Every public `Sandbox` operation crosses the same facade. The set is declared
+once in `sandbox/operations.py` (ten today: command execution, scoped command
+execution, scope release, full/ranged read, download, directory list, text
+write, glob, grep, and binary update); the facade's methods are generated from
+those declarations, and the module refuses to import if a `Sandbox` method has
+no declaration or the facade would inherit one as an unfenced passthrough.
+Upstream's scoped-shell hooks are declared already; providers keep the base
+class's pass-through defaults until they implement scoping, so a scoped call on
+the facade is fenced and recorded even where it is not yet isolated. A provider
+reporting persistent shells as a class constant cannot upgrade an acceptance
+check: the tests-passed degradation stays until the provider proves per-scope
+shell freshness.
+
+## Provider capabilities
 
 The required provider surface is `acquire`, its async twin, `get`, and
 `release`. Everything accepted execution needs beyond that is an optional
@@ -130,7 +162,7 @@ contract in `sandbox/capabilities.py`, offered through
 
 | Capability | Carries | Offered by |
 | --- | --- | --- |
-| `AcceptedSkillProjection` | `provision_accepted_skills` (the one provisioning verb, replacing the former acquire and bound-acquire pairs), snapshot bind, isolation and immutability proof, exact compare-and-clear, native attempt evidence/validate/renew | Local host, AIO, E2B |
+| `AcceptedSkillProjection` | `provision_accepted_skills` (the one provisioning verb), snapshot bind, isolation and immutability proof, exact compare-and-clear, native attempt evidence/validate/renew | Local host, AIO, E2B |
 | `AcceptedMaterialization` | `accepted_materializer_selection`, the qualified provider-neutral adapter | Remote AIO `rwx_verified_copy_v2` |
 
 A provider offers a contract by inheriting it, in which case negotiation
@@ -150,7 +182,52 @@ second refcount inside the Material because its membership (every lead and
 child consumer of one projection) differs from the execution lease's; the lease
 only ever borrows an accepted-skill sandbox.
 
-## V1 and V2 persistence boundary
+## The accepted Kind
+
+### Authority
+
+Durable accepted sandbox work is authorized by the existing accepted-material
+tuple. HartMesh does not add another execution lease, epoch, table, or heartbeat:
+
+| Component | Responsibility | Not authority for |
+| --- | --- | --- |
+| `AcceptedMaterialExecutionClaimV1` | Current tenant/run/worker/state fence from the durable run store | Provider cleanup or immutable evidence |
+| `AcceptedMaterialLeaseV1` | Provider resource, provider ownership epoch, expiry, and private renewal handle | Durable run ownership |
+| `AcceptedExecutionEvidenceV1` / `V2` | Immutable material, image, provider, epoch, qualification, and isolation proof | Current execution or cleanup permission |
+| `AcceptedMaterializer` | Provider acquisition, validation, renewal, and release | Durable run-state transitions |
+| `AcceptedSandboxSession` | Composes the run fence and materializer tuple before each operation | New authority of its own |
+| Cleanup ownership | Reaps provider resources and reconciles orphans | Sandbox execution |
+
+A batch child declares a separate session over its existing SQL item-attempt
+fence; it does not borrow the parent run's mutable authority. The child's
+canonical request/evidence pair and initial `acquired` observation are
+atomically attached to that attempt after the provider call and a fresh fence
+sample, before the executor may start. Later bounded lifecycle observations are
+appended through the retained attempt/evidence/worker binding even after
+terminal publication; they cannot authorize another operation.
+
+Before every provider call the session:
+
+1. samples the current durable run or batch-item attempt fence;
+2. calls `AcceptedMaterializer.validate(lease, evidence)`;
+3. performs a final process-local open/lease identity check; and
+4. delegates the closed operation envelope to the private sandbox object.
+
+Renewal reuses the worker's supervised run heartbeat. Run-fence loss, provider
+validation or renewal loss, cancellation, and close invalidate the session for
+later calls. Close refuses new calls immediately, waits for an already-delegated
+call, then releases through the materializer. Terminal publication independently
+revalidates the tuple and remains fenced by the durable run/item store.
+
+This is a check-then-call guarantee, not distributed atomicity. A call accepted
+before loss may finish. For a provider without atomic operation fencing, one call
+may also enter the provider when takeover/loss occurs after both checks but before
+provider acceptance. Once loss is observed, every later call is refused, and the
+stale worker cannot publish accepted terminal success. A provider may set
+`atomic_provider_operation_fencing=true` only when the expected epoch travels in
+the operation request and is checked atomically with starting that operation.
+
+### V1 and V2 persistence boundary
 
 V1 remains strictly decodable under its original guarantees. It is never silently
 upgraded. V2 retains every V1 semantic field and adds the missing accepted
@@ -180,7 +257,7 @@ capability mismatch, or absent current qualification fails before model work.
 AIO process takeover remains unavailable because the per-attempt capability is
 not recoverable across processes.
 
-## Provider capability and qualification matrix
+### Provider capability and qualification matrix
 
 Capability is an adapter declaration. Qualification is current, exact external
 evidence for a configured deployment. Both are required for durable admission.
@@ -199,7 +276,7 @@ and `exact_two=false`. The repository does not ship a passing artifact. Missing
 cluster infrastructure or an unrun lane is an unpassed gate, never a skip that
 enables production.
 
-## Qualification and configuration
+### Qualification and configuration
 
 For production durable admission, mount one canonical
 `deerflow.accepted-sandbox-qualification/v1` companion read-only into the
@@ -244,11 +321,27 @@ success is rejected. Publishing disables candidate mode, mounts the companion,
 then requires one fresh accepted invocation through the restarted Gateway before
 the artifact is finalized.
 
-Exact-two remains rejected. Its enablement additionally needs recoverable
-protected resource lookup and live cross-worker atomic operation-fencing evidence;
-projected Secret rotation is not linearizable revocation.
+### Exact-two boundary
 
-## Lifecycle and recovery
+`durable_two_gateway_v1` admits only the AIO/Kubernetes provider with shared
+tenant-prefixed Redis ownership, existing RWX home/skills claims, projected
+ServiceAccount authentication, and `rwx_verified_copy_v2`. Execution takeover
+is currently unavailable for all exact-two orphans. The dormant AIO recovery
+seam keeps the immutable accepted resource tuple separate from mutable
+execution authority: the capability Secret stays in the material receipt and a
+second, non-evidence execution-claim Secret (Lease-anchored name/UID, credential
+rotated under the tenant/run/owner/state/material CAS) is projected per
+exact-two run. It is not recovery authority. Projected Secret rotation and
+Redis adoption are not linearizable per-request execution revocation, so the
+Gateway rejects every takeover claim before owner CAS. Never put renewable
+timestamps, current Gateway owners, or rotating claim credentials into
+immutable evidence. Future activation requires a database-authoritative request
+gate, owner-fenced destruction, recoverable protected resource lookup, live
+cross-worker atomic operation-fencing evidence, and fresh qualification.
+Process-local warm pools are caches only. OpenSandbox and every other
+materialization profile are excluded from this scope.
+
+### Lifecycle: the closed authority set
 
 `sandbox.lifecycle.v1` is a bounded, non-authoritative trace event linked to the
 accepted run/attempt and execution-evidence digest. Routine renewal success is
@@ -269,33 +362,27 @@ or cleanup. Run observations use the event store; batch-child observations remai
 on the existing append-only attempt row and are exposed through the same
 owner-scoped bounded lifecycle query. Observation failure does not undo the
 terminal CAS. Logs and observations carry safe provider kind, qualification
-scope, time, reason code, and evidence digest—not the raw resource reference.
+scope, time, reason code, and evidence digest, never the raw resource reference.
 
-### Diagnostics
+### Diagnostics: the bounded stream for both Kinds
 
 Those five states are the closed, authority-relevant set. Everything else worth
 knowing about a sandbox session is a diagnostic (`sandbox/diagnostics.py`):
 `sandbox.diagnostic.v1` events whose kind is open but namespaced
 (`egress.blocked`, `egress.decided`, `egress.denied`, `scope.opened`,
 `scope.released`) and whose facts are a bounded mapping of scalars. Both
-session kinds record into one per-run stream of 64 entries that drops oldest
+session Kinds record into one per-run stream of 64 entries that drops oldest
 rather than refusing a write; each published event carries its sequence and
 the drop count, so a quiet run and a truncated one look different. Ordinary
 sessions record thread-scoped facts under the provider's own sandbox id;
 accepted sessions record run-bound facts under the public ref, the attempt,
 and the execution evidence digest, and never the container id. The worker
-publishes the stream at terminal cleanup and then forgets it.
+publishes the stream at terminal cleanup and then forgets it. Diagnostics may
+be incomplete and never become authority.
 
-Egress policy is per kind. An ordinary interactive session is asked (the
-Human Input card) and both the blocked request and the applied decision are
-recorded; a subagent or non-interactive execution is denied unasked and
-recorded once; an accepted session is denied unasked by kind, because a grant
-would bind to the container rather than to the run that is held to it, until
-an approval can be run-bound. Recording never changes the tool result the
-receipt layer digests: the card is emitted after the fact is recorded and the
-sandbox middleware stays inner of the receipt middleware.
+### Recovery outcomes
 
-Recovery outcomes follow the existing authorities:
+Recovery follows the existing authorities:
 
 | Failure point | Deterministic outcome |
 | --- | --- |
