@@ -11,7 +11,7 @@ from typing import BinaryIO
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import SandboxRequestLease, require_permission, try_acquire_sandbox_for_request
+from app.gateway.authz import SandboxRequestLease, require_permission, sandbox_sync_skip_message, try_acquire_sandbox_for_request
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
@@ -78,6 +78,10 @@ class UploadResponse(BaseModel):
     files: list[UploadedFileInfo]
     message: str
     skipped_files: list[str] = Field(default_factory=list)
+    # Why the files were not copied into the thread sandbox, when they were
+    # not: ``sandbox_execution_denied`` or ``sandbox_session_conflict``. The
+    # upload itself succeeded either way.
+    sandbox_sync_skipped: str | None = None
 
 
 class UploadListResponse(BaseModel):
@@ -457,12 +461,16 @@ async def upload_files(
         message = f"Successfully uploaded {len(uploaded_files)} file(s)"
         if skipped_files:
             message += f"; skipped {len(skipped_files)} unsafe file(s)"
+        sandbox_sync_skipped = sandbox_lease.reason if sandbox_lease is not None and sandbox_lease.denied else None
+        if sandbox_sync_skipped is not None:
+            message += f"; sandbox sync skipped: {sandbox_sync_skip_message(sandbox_sync_skipped)}"
 
         return UploadResponse(
             success=not skipped_files,
             files=uploaded_files,
             message=message,
             skipped_files=skipped_files,
+            sandbox_sync_skipped=sandbox_sync_skipped,
         )
 
     finally:

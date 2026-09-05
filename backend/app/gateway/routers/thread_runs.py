@@ -111,6 +111,30 @@ from deerflow.utils.thread_id import ThreadId
 from deerflow.workspace_changes import get_workspace_changes_response
 
 logger = logging.getLogger(__name__)
+
+
+def _sandbox_diagnostic_kind(event: dict[str, Any]) -> str | None:
+    if event.get("event_type") != SANDBOX_DIAGNOSTIC_EVENT.event_type:
+        return None
+    content = event.get("content")
+    kind = content.get("kind") if isinstance(content, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
+def _evidence_event_counts(events: list[dict[str, Any]], *, events_pruned: bool, policy_pruned: bool) -> dict[str, Any]:
+    """Bounded counts the evidence summary projects; never event bodies."""
+    return {
+        "tools": sum(event.get("event_type") == TOOL_RECEIPT_STARTED_EVENT.event_type for event in events),
+        "sandbox": sum(event.get("event_type") == SANDBOX_LIFECYCLE_EVENT.event_type for event in events),
+        "sandbox_diagnostics": sum(event.get("event_type") == SANDBOX_DIAGNOSTIC_EVENT.event_type for event in events),
+        "sandbox_refusals": sum(_sandbox_diagnostic_kind(event) == "session.refused" for event in events),
+        "retrieval": sum(event.get("event_type") == RETRIEVAL_OBSERVATION_EVENT_TYPE for event in events),
+        "mcp": sum(event.get("event_type") == MIDDLEWARE_EVENT_PATTERN.event_type(MIDDLEWARE_MCP_PREPARATION_TAG) for event in events),
+        "pruned": events_pruned,
+        "policy_pruned": policy_pruned,
+    }
+
+
 router = APIRouter(prefix="/api/threads", tags=["runs"])
 REGENERATE_HISTORY_SCAN_LIMIT = 200
 # Doubled to keep ~200 effective checkpoints when duration-only checkpoints
@@ -2020,15 +2044,7 @@ async def get_run_evidence_summary(
     events = events[:500]
     policy_candidates = [event for event in events if event.get("event_type") == EXECUTION_POLICY_DECISION_EVENT.event_type]
     policy_events = policy_candidates[:100]
-    counts = {
-        "tools": sum(event.get("event_type") == TOOL_RECEIPT_STARTED_EVENT.event_type for event in events),
-        "sandbox": sum(event.get("event_type") == SANDBOX_LIFECYCLE_EVENT.event_type for event in events),
-        "sandbox_diagnostics": sum(event.get("event_type") == SANDBOX_DIAGNOSTIC_EVENT.event_type for event in events),
-        "retrieval": sum(event.get("event_type") == RETRIEVAL_OBSERVATION_EVENT_TYPE for event in events),
-        "mcp": sum(event.get("event_type") == MIDDLEWARE_EVENT_PATTERN.event_type(MIDDLEWARE_MCP_PREPARATION_TAG) for event in events),
-        "pruned": events_pruned,
-        "policy_pruned": events_pruned or len(policy_candidates) > 100,
-    }
+    counts = _evidence_event_counts(events, events_pruned=events_pruned, policy_pruned=events_pruned or len(policy_candidates) > 100)
     deliveries = [event for event in events if event.get("event_type") == "run.delivery"]
     try:
         artifact_count = len(dict.fromkeys(_presented_files_from_delivery(deliveries)))

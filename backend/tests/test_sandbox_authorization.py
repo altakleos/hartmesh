@@ -421,6 +421,8 @@ def test_upload_sandbox_sync_skipped_when_denied(monkeypatch, tmp_path):
     resp = client.post("/api/threads/upload-test/uploads", files={"files": ("a.txt", b"hello")})
     assert resp.status_code == 200, resp.text
     sandbox_provider.acquire_async.assert_not_called()
+    assert resp.json()["sandbox_sync_skipped"] == "sandbox_execution_denied"
+    assert resp.json()["message"].endswith("; sandbox sync skipped: sandbox execution is not permitted for your role")
 
 
 def test_upload_sandbox_sync_proceeds_when_allowed(monkeypatch, tmp_path):

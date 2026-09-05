@@ -53,6 +53,9 @@ class ArtifactUpdateResponse(BaseModel):
     path: str
     sha256: str
     size: int
+    # Why the edit was not copied into the thread sandbox, when it was not;
+    # the host-side artifact was still updated.
+    sandbox_sync_skipped: str | None = None
 
 
 @asynccontextmanager
@@ -585,4 +588,5 @@ async def update_artifact(
         path=virtual_path,
         sha256=content_sha256,
         size=len(updated),
+        sandbox_sync_skipped=sandbox_lease.reason if sandbox_lease is not None and sandbox_lease.denied else None,
     )

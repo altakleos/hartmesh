@@ -331,6 +331,52 @@ def current_accepted_sandbox_bridge():  # pragma: no cover - thin indirection fo
     return resolve()
 
 
+def record_session_diagnostic(
+    kind: str,
+    *,
+    session_kind: SandboxSessionKind,
+    run_id: str,
+    thread_id: str,
+    sandbox_ref: str,
+    facts: Mapping[str, str | int | bool],
+    attempt_ref: str | None = None,
+    batch_child_attempt_ref: str | None = None,
+    execution_evidence_digest: str | None = None,
+    once: bool = False,
+) -> SandboxDiagnosticObservationV1 | None:
+    """Record a fact on ``run_id``'s stream for a session known by its anchors.
+
+    This is the entry point for a session owner that holds the run and the
+    anchors itself, such as an accepted session's Observer answering a fact
+    observed outside the run. Returns ``None``, and never raises, when the
+    fact is malformed or ``once`` finds it already recorded.
+    """
+    try:
+        observation = SandboxDiagnosticObservationV1.build(
+            kind=kind,
+            session_kind=session_kind,
+            run_id=run_id,
+            thread_id=thread_id,
+            sandbox_ref=sandbox_ref,
+            observed_at=datetime.now(UTC),
+            facts=facts,
+            attempt_ref=attempt_ref,
+            batch_child_attempt_ref=batch_child_attempt_ref,
+            execution_evidence_digest=execution_evidence_digest,
+        )
+        stream = sandbox_diagnostics(run_id)
+        if once:
+            key = (kind, sandbox_ref, tuple(sorted(observation.facts.items())))
+            if stream.record_once(key, observation) is None:
+                return None
+        else:
+            stream.record(observation)
+        return observation
+    except Exception:
+        logger.debug("Sandbox diagnostic %s was not recorded", kind, exc_info=True)
+        return None
+
+
 def record_sandbox_diagnostic(
     context: object,
     kind: str,
@@ -373,26 +419,18 @@ def record_sandbox_diagnostic(
             sandbox_ref = candidate if isinstance(candidate, str) and candidate else None
         if sandbox_ref is None:
             return None
-        observation = SandboxDiagnosticObservationV1.build(
-            kind=kind,
+        return record_session_diagnostic(
+            kind,
             session_kind=session_kind,
             run_id=run_id,
             thread_id=thread_id,
             sandbox_ref=sandbox_ref,
-            observed_at=datetime.now(UTC),
             facts=facts,
             attempt_ref=attempt_ref,
             batch_child_attempt_ref=batch_child_attempt_ref,
             execution_evidence_digest=execution_evidence_digest,
+            once=once,
         )
-        stream = sandbox_diagnostics(run_id)
-        if once:
-            key = (kind, sandbox_ref, tuple(sorted(observation.facts.items())))
-            if stream.record_once(key, observation) is None:
-                return None
-        else:
-            stream.record(observation)
-        return observation
     except Exception:
         logger.debug("Sandbox diagnostic %s was not recorded", kind, exc_info=True)
         return None
@@ -404,5 +442,6 @@ __all__ = [
     "SandboxDiagnosticStream",
     "discard_sandbox_diagnostics",
     "record_sandbox_diagnostic",
+    "record_session_diagnostic",
     "sandbox_diagnostics",
 ]

@@ -1102,3 +1102,55 @@ async def test_declare_refuses_a_session_that_is_already_declared() -> None:
         withdraw_accepted_sandbox_session(bridge)
     again = declare_accepted_sandbox_session(session, mount_scope=None)
     withdraw_accepted_sandbox_session(again)
+
+
+def test_the_bridge_observer_records_a_run_bound_diagnostic_under_the_public_ref() -> None:
+    from deerflow.sandbox.diagnostics import discard_sandbox_diagnostics, sandbox_diagnostics
+    from deerflow.sandbox.session import SandboxSessionKind, get_sandbox_session_registry
+
+    session, _sandbox, _materializer, _calls = _session()
+    discard_sandbox_diagnostics("run-1")
+
+    async def refuse_from_outside_the_run() -> bool:
+        bridge = declare_accepted_sandbox_session(session, mount_scope=("user-1", "thread-1"))
+        try:
+            return get_sandbox_session_registry().observe(
+                bridge.declaration.public_ref,
+                "session.refused",
+                facts={"requester": "gateway:upload", "reason": "sandbox_session_conflict"},
+            )
+        finally:
+            withdraw_accepted_sandbox_session(bridge)
+
+    assert asyncio.run(refuse_from_outside_the_run()) is True
+    recorded = [observation for _sequence, observation in sandbox_diagnostics("run-1").since(0)]
+    discard_sandbox_diagnostics("run-1")
+
+    assert [observation.kind for observation in recorded] == ["session.refused"]
+    observation = recorded[0]
+    assert observation.session_kind is SandboxSessionKind.ACCEPTED
+    assert observation.thread_id == "thread-1"
+    assert observation.sandbox_ref == session.safe_reference
+    assert observation.attempt_ref == session.attempt_ref
+    assert observation.execution_evidence_digest == session.execution_evidence_digest
+    assert observation.facts == {"requester": "gateway:upload", "reason": "sandbox_session_conflict"}
+    assert "raw-provider-resource" not in repr(observation.to_persisted())
+
+
+def test_a_bridge_without_a_thread_observes_nothing() -> None:
+    from deerflow.sandbox.diagnostics import discard_sandbox_diagnostics, sandbox_diagnostics
+    from deerflow.sandbox.session import get_sandbox_session_registry
+
+    session, _sandbox, _materializer, _calls = _session()
+    discard_sandbox_diagnostics("run-1")
+
+    async def observe_a_child() -> bool:
+        bridge = declare_accepted_sandbox_session(session, mount_scope=None)
+        try:
+            return get_sandbox_session_registry().observe(bridge.declaration.public_ref, "session.refused", facts={})
+        finally:
+            withdraw_accepted_sandbox_session(bridge)
+
+    assert asyncio.run(observe_a_child()) is True
+    assert list(sandbox_diagnostics("run-1").since(0)) == []
+    discard_sandbox_diagnostics("run-1")

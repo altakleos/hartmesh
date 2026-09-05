@@ -518,6 +518,21 @@ def authorize_sandbox_for_request(
             raise SandboxAuthorizationError(role=context.get("user_role")) from None
 
 
+SANDBOX_SYNC_SKIPPED_DENIED = "sandbox_execution_denied"
+SANDBOX_SYNC_SKIPPED_SESSION_CONFLICT = "sandbox_session_conflict"
+_SANDBOX_SYNC_SKIP_MESSAGES = {
+    SANDBOX_SYNC_SKIPPED_DENIED: "sandbox execution is not permitted for your role",
+    SANDBOX_SYNC_SKIPPED_SESSION_CONFLICT: "an accepted run holds this thread's sandbox until it ends",
+}
+
+
+def sandbox_sync_skip_message(reason: str | None) -> str | None:
+    """A plain sentence for a skipped sandbox sync, or ``None`` when nothing was skipped."""
+    if reason is None:
+        return None
+    return _SANDBOX_SYNC_SKIP_MESSAGES.get(reason, reason)
+
+
 @dataclass(slots=True)
 class SandboxRequestLease:
     """One Gateway request's process-local use of a sandbox client."""
@@ -527,6 +542,9 @@ class SandboxRequestLease:
     denied: bool
     owner_id: str | None
     provider: object | None
+    # Why acquisition was skipped when ``denied``: a stable code callers put
+    # in their response, never a provider message.
+    reason: str | None = None
 
     async def release(self) -> None:
         """Drop the request holder without bypassing concurrent executions."""
@@ -559,7 +577,11 @@ async def try_acquire_sandbox_for_request(
 
     - denied role → no sandbox/owner and ``denied=True``: acquisition was skipped by policy;
       the primary operation (upload / artifact edit) proceeds without the
-      sandbox copy.
+      sandbox copy. ``reason`` says which policy: the authorization gate
+      (``sandbox_execution_denied``) or the session provider refusing an
+      ordinary acquire of a thread an accepted run holds
+      (``sandbox_session_conflict``); the latter is recorded on that run as a
+      ``session.refused`` diagnostic through the session's Observer.
     - allowed → ``sandbox`` is the acquired instance, or ``sandbox is None`` when
       the provider lost it right after acquiring (infrastructure error —
       callers surface it as 500 / RuntimeError respectively, since that is
@@ -589,23 +611,57 @@ async def try_acquire_sandbox_for_request(
             denied=True,
             owner_id=None,
             provider=None,
+            reason=SANDBOX_SYNC_SKIPPED_DENIED,
         )
 
     from deerflow.sandbox.lease import get_sandbox_lease_manager
+    from deerflow.sandbox.session import SandboxSessionConflict
 
     owner_id = f"{owner_prefix}:{uuid.uuid4()}"
-    sandbox_id = await get_sandbox_lease_manager(sandbox_provider).acquire_async(
-        owner_id,
-        thread_id,
-        user_id=user_id,
-        release_on_last=release_on_last,
-    )
+    try:
+        sandbox_id = await get_sandbox_lease_manager(sandbox_provider).acquire_async(
+            owner_id,
+            thread_id,
+            user_id=user_id,
+            release_on_last=release_on_last,
+        )
+    except SandboxSessionConflict as exc:
+        logger.info("Sandbox sync skipped: %s (requester=%s)", exc, owner_prefix)
+        record_refused_sandbox_acquire(exc, requester=owner_prefix)
+        return SandboxRequestLease(
+            sandbox=None,
+            sandbox_id=None,
+            denied=True,
+            owner_id=None,
+            provider=None,
+            reason=exc.code,
+        )
     return SandboxRequestLease(
         sandbox=sandbox_provider.get(sandbox_id),
         sandbox_id=sandbox_id,
         denied=False,
         owner_id=owner_id,
         provider=sandbox_provider,
+    )
+
+
+def record_refused_sandbox_acquire(conflict: Exception, *, requester: str) -> bool:
+    """Record a refused ordinary acquire on the accepted run that holds the thread.
+
+    The refusal is a fact about that run (an upload or attachment could not be
+    copied into its container), so it goes through the holding session's
+    Observer onto the run's diagnostic stream as ``session.refused``. Returns
+    ``False`` when the conflict names no live session.
+    """
+    from deerflow.sandbox.session import get_sandbox_session_registry
+
+    public_ref = getattr(conflict, "public_ref", None)
+    if not isinstance(public_ref, str) or not public_ref:
+        return False
+    return get_sandbox_session_registry().observe(
+        public_ref,
+        "session.refused",
+        facts={"requester": requester, "reason": SANDBOX_SYNC_SKIPPED_SESSION_CONFLICT},
     )
 
 
