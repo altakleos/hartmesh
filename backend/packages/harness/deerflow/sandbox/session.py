@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from deerflow.sandbox.capabilities import sandbox_capability
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -250,7 +251,7 @@ _NETWORK_HOOKS = (
     "deny_pending_network_policy_events",
     "decide_network_policy_request",
 )
-_OVERRIDDEN = frozenset({"acquire", "acquire_async", "get", "release", *_NETWORK_HOOKS, *(f"{name}_async" for name in _NETWORK_HOOKS)})
+_OVERRIDDEN = frozenset({"acquire", "acquire_async", "get", "release", "capability", *_NETWORK_HOOKS, *(f"{name}_async" for name in _NETWORK_HOOKS)})
 
 
 def _forwarded_names() -> tuple[tuple[str, bool], ...]:
@@ -421,6 +422,19 @@ class SessionProvider(SandboxProvider):
         if backing_ref is None:
             return False
         return await self._backing.decide_network_policy_request_async(backing_ref, request_id, decision)
+
+    # -- capabilities: the backing provider never leaves through negotiation --
+
+    def capability[CapabilityT](self, protocol: type[CapabilityT]) -> CapabilityT | None:
+        """Negotiate on the backing provider; answer this wrapper in its place.
+
+        A capability the backing provider implements on itself is answered as
+        the session provider, so the methods reached through it dispatch like
+        every other forwarded verb and the raw provider object never leaves.
+        A companion object is answered unchanged.
+        """
+        found = sandbox_capability(self._backing, protocol)
+        return self if found is self._backing else found  # type: ignore[return-value]
 
     # -- everything else is the backing provider ----------------------------
 

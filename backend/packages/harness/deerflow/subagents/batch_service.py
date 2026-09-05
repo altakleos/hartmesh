@@ -46,7 +46,7 @@ from deerflow.sandbox.accepted_material import (
     validate_accepted_materialization,
     withdraw_accepted_sandbox_session,
 )
-from deerflow.sandbox.sandbox_provider import release_accepted_skill_consumer
+from deerflow.sandbox.accepted_projection import release_accepted_skill_consumer
 from deerflow.subagents.batch_acceptance import (
     AcceptedBatchItemV1,
     AcceptedBatchV1,

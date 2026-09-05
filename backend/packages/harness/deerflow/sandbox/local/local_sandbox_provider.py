@@ -5,13 +5,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
-from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import (
+from deerflow.sandbox.accepted_material import (
     AcceptedSkillSandboxBindingError,
     AcceptedSkillSandboxBindingV1,
-    SandboxProvider,
 )
+from deerflow.sandbox.capabilities import AcceptedSkillProjection
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.sandbox.security import is_host_bash_allowed
 
 if TYPE_CHECKING:
@@ -42,7 +43,7 @@ _ACP_WORKSPACE_VIRTUAL_PREFIX = "/mnt/acp-workspace"
 DEFAULT_MAX_CACHED_THREAD_SANDBOXES = 256
 
 
-class LocalSandboxProvider(SandboxProvider):
+class LocalSandboxProvider(SandboxProvider, AcceptedSkillProjection):
     """Local-filesystem sandbox provider with per-thread path scoping.
 
     Earlier revisions of this provider returned a single process-wide
@@ -568,7 +569,17 @@ class LocalSandboxProvider(SandboxProvider):
             accepted_skills_only=False,
         )
 
-    def acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
+    def provision_accepted_skills(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+    ) -> str:
+        # The stable per-thread mount is bound by the projection Material once
+        # the coordinator has issued the run's token; nothing is materialized
+        # at creation, so ``binding`` only names the material this sandbox is for.
+        del binding
         return self._acquire_thread(
             thread_id,
             user_id=user_id,

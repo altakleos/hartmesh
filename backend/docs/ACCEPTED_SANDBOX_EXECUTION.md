@@ -121,6 +121,35 @@ to the provider's own id, which the declaration carries as `provider_ref`, for
 the declaring execution only; a stranger's call resolves to no events and no
 decision, and the provider id never appears in state, logs, or evidence.
 
+### Provider capabilities
+
+The required provider surface is `acquire`, its async twin, `get`, and
+`release`. Everything accepted execution needs beyond that is an optional
+contract in `sandbox/capabilities.py`, offered through
+`SandboxProvider.capability(protocol)` and discovered with `sandbox_capability`:
+
+| Capability | Carries | Offered by |
+| --- | --- | --- |
+| `AcceptedSkillProjection` | `provision_accepted_skills` (the one provisioning verb, replacing the former acquire and bound-acquire pairs), snapshot bind, isolation and immutability proof, exact compare-and-clear, native attempt evidence/validate/renew | Local host, AIO, E2B |
+| `AcceptedMaterialization` | `accepted_materializer_selection`, the qualified provider-neutral adapter | Remote AIO `rwx_verified_copy_v2` |
+
+A provider offers a contract by inheriting it, in which case negotiation
+answers the provider itself, or by answering a companion object that inherits
+it. Every member fails closed until implemented, so a partial provider refuses
+accepted material with `accepted_skill_snapshot_projection_unsupported` rather
+than executing it against live skill roots. OpenSandbox, BoxLite, and Tenki
+offer neither. The session provider answers itself for contracts its backing
+provider implements, so the raw provider object never leaves negotiation.
+
+The accepted-skills projection Material (`sandbox/accepted_projection.py`)
+composes the capability with the consumer-token coordinator: provisioning
+precedes binding, the run's token is activated after provisioning, the
+coordinator-issued snapshot is bound, and a failure unwinds the token and, when
+no token ever owned the sandbox, the sandbox itself. The coordinator stays a
+second refcount inside the Material because its membership (every lead and
+child consumer of one projection) differs from the execution lease's; the lease
+only ever borrows an accepted-skill sandbox.
+
 ## V1 and V2 persistence boundary
 
 V1 remains strictly decodable under its original guarantees. It is never silently

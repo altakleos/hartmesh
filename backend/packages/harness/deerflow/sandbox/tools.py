@@ -29,6 +29,14 @@ from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.accepted_material import (
     AcceptedSandboxAuthorityLostError,
 )
+from deerflow.sandbox.accepted_projection import (
+    accepted_skill_access_from_runtime,
+    bind_runtime_accepted_skill_projection,
+    bind_runtime_accepted_skill_projection_async,
+    has_accepted_skill_isolation,
+    provision_runtime_accepted_skill_projection,
+    provision_runtime_accepted_skill_projection_async,
+)
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -46,10 +54,6 @@ from deerflow.sandbox.path_patterns import build_output_mask_pattern, replace_ou
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
     SandboxProvider,
-    accepted_skill_access_from_runtime,
-    accepted_skill_material_binding_from_runtime,
-    bind_runtime_accepted_skill_projection,
-    bind_runtime_accepted_skill_projection_async,
     get_sandbox_provider,
 )
 from deerflow.sandbox.search import GrepMatch
@@ -1648,19 +1652,20 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
                 if not fork_restored:
                     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
             sandbox = provider.get(sandbox_id)
-            if sandbox is not None and accepted_skills_only and not provider.has_accepted_skill_isolation(sandbox_id):
+            if sandbox is not None and accepted_skills_only and not has_accepted_skill_isolation(provider, sandbox_id):
                 provider.release(sandbox_id)
                 sandbox = None
             if sandbox is not None:
                 user_id = resolve_runtime_user_id(runtime)
-                bind_runtime_accepted_skill_projection(
-                    provider,
-                    runtime,
-                    sandbox_id=sandbox_id,
-                    user_id=user_id,
-                )
-                if accepted_skills_only and owner_id is not None and thread_id is not None:
-                    _borrow_accepted_sandbox_lease(provider, owner_id, sandbox_id, thread_id=thread_id, user_id=user_id)
+                if accepted_skills_only:
+                    bind_runtime_accepted_skill_projection(
+                        provider,
+                        runtime,
+                        sandbox_id=sandbox_id,
+                        user_id=user_id,
+                    )
+                    if owner_id is not None and thread_id is not None:
+                        _borrow_accepted_sandbox_lease(provider, owner_id, sandbox_id, thread_id=thread_id, user_id=user_id)
                 if runtime.context is not None:
                     runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
                 return sandbox
@@ -1680,18 +1685,11 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     # execution lease, so that path unwinds through the provider directly.
     lease_owner_id: str | None = None
     if accepted_skills_only:
-        binding = accepted_skill_material_binding_from_runtime(
+        sandbox_id = provision_runtime_accepted_skill_projection(
+            provider,
             runtime,
+            thread_id=thread_id,
             user_id=user_id,
-        )
-        if binding is None:
-            raise SandboxRuntimeError(
-                "Accepted skill material binding is unavailable",
-            )
-        sandbox_id = provider.acquire_bound_accepted_skills(
-            thread_id,
-            user_id=user_id,
-            binding=binding,
         )
     elif owner_id is None:
         sandbox_id = provider.acquire(thread_id, user_id=user_id)
@@ -1702,16 +1700,6 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             user_id=user_id,
         )
         lease_owner_id = owner_id
-    try:
-        bind_runtime_accepted_skill_projection(
-            provider,
-            runtime,
-            sandbox_id=sandbox_id,
-            user_id=user_id,
-        )
-    except Exception:
-        _rollback_failed_sandbox_lookup(provider, sandbox_id, lease_owner_id)
-        raise
 
     # Update runtime state - this persists across tool calls
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
@@ -1775,19 +1763,20 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
                 if not fork_restored:
                     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
             sandbox = provider.get(sandbox_id)
-            if sandbox is not None and accepted_skills_only and not provider.has_accepted_skill_isolation(sandbox_id):
+            if sandbox is not None and accepted_skills_only and not has_accepted_skill_isolation(provider, sandbox_id):
                 await asyncio.to_thread(provider.release, sandbox_id)
                 sandbox = None
             if sandbox is not None:
                 user_id = resolve_runtime_user_id(runtime)
-                await bind_runtime_accepted_skill_projection_async(
-                    provider,
-                    runtime,
-                    sandbox_id=sandbox_id,
-                    user_id=user_id,
-                )
-                if accepted_skills_only and owner_id is not None and thread_id is not None:
-                    await _borrow_accepted_sandbox_lease_async(provider, owner_id, sandbox_id, thread_id=thread_id, user_id=user_id)
+                if accepted_skills_only:
+                    await bind_runtime_accepted_skill_projection_async(
+                        provider,
+                        runtime,
+                        sandbox_id=sandbox_id,
+                        user_id=user_id,
+                    )
+                    if owner_id is not None and thread_id is not None:
+                        await _borrow_accepted_sandbox_lease_async(provider, owner_id, sandbox_id, thread_id=thread_id, user_id=user_id)
                 if runtime.context is not None:
                     runtime.context["sandbox_id"] = sandbox_id
                 return sandbox
@@ -1802,18 +1791,11 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     accepted_skills_only, _snapshot_id = accepted_skill_access_from_runtime(runtime)
     lease_owner_id: str | None = None
     if accepted_skills_only:
-        binding = accepted_skill_material_binding_from_runtime(
+        sandbox_id = await provision_runtime_accepted_skill_projection_async(
+            provider,
             runtime,
+            thread_id=thread_id,
             user_id=user_id,
-        )
-        if binding is None:
-            raise SandboxRuntimeError(
-                "Accepted skill material binding is unavailable",
-            )
-        sandbox_id = await provider.acquire_bound_accepted_skills_async(
-            thread_id,
-            user_id=user_id,
-            binding=binding,
         )
     elif owner_id is None:
         sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
@@ -1824,16 +1806,6 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             user_id=user_id,
         )
         lease_owner_id = owner_id
-    try:
-        await bind_runtime_accepted_skill_projection_async(
-            provider,
-            runtime,
-            sandbox_id=sandbox_id,
-            user_id=user_id,
-        )
-    except Exception:
-        await _rollback_failed_sandbox_lookup_async(provider, sandbox_id, lease_owner_id)
-        raise
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 

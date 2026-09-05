@@ -61,15 +61,16 @@ from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.accepted_material import (
+    AcceptedSkillSandboxBindingError,
+    AcceptedSkillSandboxBindingV1,
+)
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.capabilities import AcceptedSkillProjection
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import (
-    AcceptedSkillSandboxBindingError,
-    AcceptedSkillSandboxBindingV1,
-    SandboxProvider,
-)
+from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 from ..aio_sandbox.ownership import (
     OwnershipBackendError,
@@ -285,7 +286,7 @@ class ReconciliationStats:
     budget_exhausted: bool = False
 
 
-class E2BSandboxProvider(SandboxProvider):
+class E2BSandboxProvider(SandboxProvider, AcceptedSkillProjection):
     """Sandbox provider backed by the e2b code-interpreter cloud SDK."""
 
     # e2b sandboxes are remote: there is no shared host filesystem with the
@@ -574,7 +575,18 @@ class E2BSandboxProvider(SandboxProvider):
                 return self._acquire_internal(thread_id, user_id=effective_user_id)
         return self._acquire_internal(thread_id, user_id=effective_user_id)
 
-    def acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
+    def provision_accepted_skills(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+    ) -> str:
+        """Create an accepted-only VM; the Material uploads ``binding`` afterwards."""
+        del binding
+        return self._acquire_accepted_skills(thread_id, user_id=user_id)
+
+    def _acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
         """Create a VM without uploading any mutable live skill projection."""
         effective_user_id = self._effective_acquire_user_id(user_id)
         key = self._thread_key(thread_id, effective_user_id)

@@ -2036,9 +2036,7 @@ class SubagentExecutor:
         try:
             if self._owns_skill_projection_token:
                 self._owns_skill_projection_token = False
-                from deerflow.sandbox.sandbox_provider import (
-                    release_accepted_skill_consumer,
-                )
+                from deerflow.sandbox.accepted_projection import release_accepted_skill_consumer
 
                 release_accepted_skill_consumer(self.skill_projection_token)
         finally:

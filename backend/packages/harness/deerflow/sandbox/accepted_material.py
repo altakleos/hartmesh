@@ -2946,14 +2946,19 @@ async def resolve_accepted_materializer(
     require_exact_two: bool = False,
     allow_qualification_candidate: bool = False,
 ) -> AcceptedMaterializerSelection | None:
-    """Resolve an optional provider adapter without exposing its concrete type."""
+    """Negotiate the provider's accepted materialization capability, if any.
 
-    hook = getattr(provider, "accepted_materializer_selection", None)
-    if hook is None:
+    The worker never imports a concrete adapter: a provider that inherits
+    ``AcceptedMaterialization`` answers its own qualified selection, and one
+    that does not admits only the explicit empty accepted set.
+    """
+
+    from deerflow.sandbox.capabilities import AcceptedMaterialization, sandbox_capability
+
+    materialization = sandbox_capability(provider, AcceptedMaterialization)
+    if materialization is None:
         return None
-    if not callable(hook):
-        raise TypeError("accepted_materializer_selection must be callable")
-    selection = await hook(
+    selection = await materialization.accepted_materializer_selection(
         binding=binding,
         thread_id=thread_id,
         user_id=user_id,

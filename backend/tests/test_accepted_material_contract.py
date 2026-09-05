@@ -44,8 +44,8 @@ from deerflow.sandbox.accepted_material import (
     resolve_accepted_materializer,
     validate_accepted_materialization,
 )
+from deerflow.sandbox.capabilities import AcceptedMaterialization
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import AcceptedSkillMaterialCapability
 
 
 def _tenant() -> TenantReferenceV1:
@@ -686,8 +686,11 @@ def test_repository_has_no_second_sandbox_execution_authority() -> None:
             assert all(name not in text for name in forbidden_names), source
 
 
-def test_legacy_provider_capability_name_is_the_neutral_contract() -> None:
-    assert AcceptedSkillMaterialCapability is AcceptedMaterialCapability
+def test_legacy_provider_capability_alias_is_gone() -> None:
+    import deerflow.sandbox.sandbox_provider as sandbox_provider_module
+
+    assert not hasattr(sandbox_provider_module, "AcceptedSkillMaterialCapability")
+    assert not hasattr(sandbox_provider_module, "AcceptedMaterialCapability")
 
 
 @pytest.mark.asyncio
@@ -834,7 +837,7 @@ async def test_materializer_resolution_uses_only_an_opt_in_provider_hook() -> No
     )
     observed: dict[str, object] = {}
 
-    class ProviderWithAdapter:
+    class ProviderWithAdapter(AcceptedMaterialization):
         async def accepted_materializer_selection(self, **kwargs):
             observed.update(kwargs)
             profile = _capability_profile()
@@ -892,7 +895,7 @@ async def test_candidate_qualification_is_not_passing_and_requires_explicit_opt_
         generation=1,
     )
 
-    class CandidateProvider:
+    class CandidateProvider(AcceptedMaterialization):
         async def accepted_materializer_selection(self, **_kwargs):
             return AcceptedMaterializerSelection(
                 materializer=adapter,
@@ -945,7 +948,7 @@ async def test_materializer_resolution_rejects_unqualified_durable_profile() -> 
         exact_two=False,
     )
 
-    class OneReplicaOnlyProvider:
+    class OneReplicaOnlyProvider(AcceptedMaterialization):
         async def accepted_materializer_selection(self, **_kwargs):
             return AcceptedMaterializerSelection(
                 materializer=adapter,

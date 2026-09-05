@@ -26,9 +26,10 @@ import pytest
 from deerflow.community.opensandbox.provider import OpenSandboxProvider, _import_sdk
 from deerflow.community.opensandbox.sandbox import OpenSandboxSandbox
 from deerflow.sandbox.accepted_material import (
-    AcceptedMaterialCapability,
     AcceptedSkillSandboxBindingError,
 )
+from deerflow.sandbox.accepted_projection import require_accepted_skill_projection
+from deerflow.sandbox.capabilities import AcceptedSkillProjection
 
 
 @dataclass
@@ -246,14 +247,16 @@ def test_accepted_nonempty_material_is_explicitly_unavailable(
 ) -> None:
     provider, sdk = _install(monkeypatch)
 
-    assert provider.accepted_skill_material_capability("not-created") is AcceptedMaterialCapability.EMPTY_ONLY
+    # OpenSandbox offers no accepted-skill projection: SDK 0.1.15 has no
+    # compare-and-set metadata primitive, so no ownership lease can be proven.
+    assert provider.capability(AcceptedSkillProjection) is None
     with pytest.raises(
         AcceptedSkillSandboxBindingError,
-        match="opensandbox_immutable_material_unsupported",
+        match="accepted_skill_snapshot_projection_unsupported",
     ) as exc_info:
-        provider.acquire_accepted_skills("thread-1", user_id="user-1")
+        require_accepted_skill_projection(provider)
 
-    assert exc_info.value.code == "opensandbox_immutable_material_unsupported"
+    assert exc_info.value.code == "accepted_skill_snapshot_projection_unsupported"
     assert sdk.create_calls == []
     provider.shutdown()
 

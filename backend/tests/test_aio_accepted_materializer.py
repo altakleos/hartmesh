@@ -124,7 +124,7 @@ class _AioProviderPort:
         self.acquire_calls = 0
         self.resource_scope_refs: list[str | None] = []
 
-    async def acquire_bound_accepted_skills_async(
+    async def provision_accepted_skills_async(
         self,
         thread_id: str,
         *,

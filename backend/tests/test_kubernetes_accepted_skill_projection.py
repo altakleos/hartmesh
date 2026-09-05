@@ -29,11 +29,11 @@ from deerflow.runtime.runs.manager import RunManager, RunStartOutcome, RunStartu
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.skill_projection import SkillProjectionEvidence
 from deerflow.runtime.skill_snapshot import SkillSnapshotProjection
-from deerflow.sandbox.accepted_material import AcceptedMaterialExecutionClaimV1
-from deerflow.sandbox.sandbox_provider import (
+from deerflow.sandbox.accepted_material import (
+    AcceptedMaterialCapability,
+    AcceptedMaterialExecutionClaimV1,
     AcceptedSkillExecutionEvidenceV1,
     AcceptedSkillExecutionEvidenceV2,
-    AcceptedSkillMaterialCapability,
     AcceptedSkillSandboxBindingError,
     AcceptedSkillSandboxBindingV1,
 )
@@ -337,7 +337,7 @@ def test_remote_v1_material_receipt_is_compatibility_only() -> None:
         )
     }
 
-    assert provider.accepted_skill_material_capability("sandbox-legacy") is AcceptedSkillMaterialCapability.EMPTY_ONLY
+    assert provider.accepted_skill_material_capability("sandbox-legacy") is AcceptedMaterialCapability.EMPTY_ONLY
 
 
 def test_v1_remote_profile_configuration_fails_with_migration_guidance() -> None:
@@ -1099,7 +1099,7 @@ def test_remote_aio_advertises_immutable_only_for_an_exact_verified_receipt() ->
         )
     }
 
-    assert provider.accepted_skill_material_capability("sandbox-1") is AcceptedSkillMaterialCapability.EMPTY_ONLY
+    assert provider.accepted_skill_material_capability("sandbox-1") is AcceptedMaterialCapability.EMPTY_ONLY
 
     receipt_wire = _v2_receipt_wire(evidence)
     provider._sandbox_infos["sandbox-1"].accepted_skill_material = AcceptedSkillMaterialReceiptV2(**{key: value for key, value in receipt_wire.items() if key != "version"})
@@ -1116,7 +1116,7 @@ def test_remote_aio_advertises_immutable_only_for_an_exact_verified_receipt() ->
         user_id="owner-1",
         binding=binding,
     )
-    assert provider.accepted_skill_material_capability("sandbox-1") is AcceptedSkillMaterialCapability.IMMUTABLE_READ_ONLY
+    assert provider.accepted_skill_material_capability("sandbox-1") is AcceptedMaterialCapability.IMMUTABLE_READ_ONLY
 
     with pytest.raises(
         AcceptedSkillSandboxBindingError,

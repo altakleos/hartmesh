@@ -54,19 +54,20 @@ from deerflow.sandbox.accepted_material import (
     AcceptedMaterializerSelection,
     AcceptedSandboxCapabilityProfileV1,
     AcceptedSandboxQualificationV1,
-)
-from deerflow.sandbox.acquire_serialization import AcquireSerializer
-from deerflow.sandbox.identity import derive_sandbox_scope_token
-from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import (
     AcceptedSkillExecutionEvidence,
     AcceptedSkillExecutionEvidenceV2,
-    AcceptedSkillMaterialCapability,
     AcceptedSkillSandboxBindingError,
     AcceptedSkillSandboxBindingV1,
-    SandboxProvider,
+)
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.capabilities import (
+    AcceptedMaterialization,
+    AcceptedSkillProjection,
     reject_writable_accepted_skill_aliases,
 )
+from deerflow.sandbox.identity import derive_sandbox_scope_token
+from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.skills.types import SkillCategory
 
 from .aio_sandbox import AioSandbox
@@ -157,7 +158,12 @@ def _open_lock_file(lock_path):
     return open(lock_path, "a", encoding="utf-8")
 
 
-class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
+class AioSandboxProvider(
+    WarmPoolLifecycleMixin[SandboxInfo],
+    SandboxProvider,
+    AcceptedSkillProjection,
+    AcceptedMaterialization,
+):
     """Sandbox provider that manages containers running the AIO sandbox.
 
     Architecture:
@@ -2147,21 +2153,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return self._acquire_internal(thread_id, user_id=effective_user_id)
         return self._acquire_internal(thread_id, user_id=effective_user_id)
 
-    def acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
-        """Create a durable-run sandbox whose only skills mount is ``.accepted``."""
-        return self._acquire_accepted_skills_internal(
-            thread_id,
-            user_id=user_id,
-            binding=None,
-        )
-
-    def acquire_bound_accepted_skills(
+    def provision_accepted_skills(
         self,
         thread_id: str,
         *,
         user_id: str,
         binding: AcceptedSkillSandboxBindingV1,
     ) -> str:
+        """Create a durable-run sandbox whose only skills mount is ``.accepted``."""
         sandbox_id = self._acquire_accepted_skills_internal(
             thread_id,
             user_id=user_id,
@@ -2175,7 +2174,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         )
         return sandbox_id
 
-    async def acquire_bound_accepted_skills_async(
+    async def provision_accepted_skills_async(
         self,
         thread_id: str,
         *,
@@ -2186,7 +2185,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     ) -> str:
         acquire_task = asyncio.create_task(
             asyncio.to_thread(
-                self._acquire_bound_accepted_skills_with_claim,
+                self._provision_accepted_skills_with_claim,
                 thread_id,
                 user_id,
                 binding,
@@ -2232,7 +2231,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     )
             raise cancellation
 
-    def _acquire_bound_accepted_skills_with_claim(
+    def _provision_accepted_skills_with_claim(
         self,
         thread_id: str,
         user_id: str,
@@ -2299,7 +2298,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             raise AcceptedSkillSandboxBindingError(
                 "accepted_material_execution_takeover_invalid",
             )
-        return await self.acquire_bound_accepted_skills_async(
+        return await self.provision_accepted_skills_async(
             thread_id,
             user_id=user_id,
             binding=binding,
@@ -2311,7 +2310,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         thread_id: str,
         *,
         user_id: str,
-        binding: AcceptedSkillSandboxBindingV1 | None,
+        binding: AcceptedSkillSandboxBindingV1,
         execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
         resource_scope_ref: str | None = None,
     ) -> str:
@@ -2380,9 +2379,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def accepted_skill_material_capability(
         self,
         sandbox_id: str,
-    ) -> AcceptedSkillMaterialCapability:
+    ) -> AcceptedMaterialCapability:
         if not self.has_accepted_skill_isolation(sandbox_id):
-            return AcceptedSkillMaterialCapability.EMPTY_ONLY
+            return AcceptedMaterialCapability.EMPTY_ONLY
         if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
             with self._lock:
                 info = self._sandbox_infos.get(sandbox_id)
@@ -2390,8 +2389,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 info.accepted_skill_material,
                 AcceptedSkillMaterialReceiptV2,
             ):
-                return AcceptedSkillMaterialCapability.EMPTY_ONLY
-        return AcceptedSkillMaterialCapability.IMMUTABLE_READ_ONLY
+                return AcceptedMaterialCapability.EMPTY_ONLY
+        return AcceptedMaterialCapability.IMMUTABLE_READ_ONLY
 
     def provider_neutral_accepted_materialization_enabled(self) -> bool:
         """Return whether this instance is the qualified remote AIO v2 adapter."""

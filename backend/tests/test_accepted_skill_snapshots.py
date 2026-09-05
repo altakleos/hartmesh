@@ -69,11 +69,12 @@ from deerflow.sandbox.accepted_material import (
     AcceptedMaterialRequestV2,
     AcceptedSandboxCapabilityProfileV1,
     AcceptedSandboxQualificationV1,
+    AcceptedSkillExecutionEvidenceV1,
     AcceptedSkillExecutionEvidenceV2,
 )
+from deerflow.sandbox.capabilities import AcceptedSkillProjection
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import AcceptedSkillExecutionEvidenceV1
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import Skill, SkillCategory
 
@@ -450,8 +451,8 @@ def test_local_sandbox_exposes_only_the_bound_accepted_snapshot(
     import deerflow.config as config_module
     from deerflow.config import paths as paths_module
     from deerflow.runtime.skill_projection import SkillProjectionClear, SkillProjectionEvidence
+    from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingV1
     from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
-    from deerflow.sandbox.sandbox_provider import AcceptedSkillSandboxBindingV1
 
     first_file = _write_skill(
         tmp_path / "first",
@@ -497,17 +498,18 @@ def test_local_sandbox_exposes_only_the_bound_accepted_snapshot(
     )
 
     provider = LocalSandboxProvider()
-    sandbox_id = provider.acquire_accepted_skills("thread-1", user_id="user-1")
+    first_binding = AcceptedSkillSandboxBindingV1(
+        snapshot_id=first.snapshot_id,
+        run_id="run-first",
+        generation=1,
+        evidence=SkillProjectionEvidence.from_snapshot(first),
+    )
+    sandbox_id = provider.provision_accepted_skills("thread-1", user_id="user-1", binding=first_binding)
     provider.bind_accepted_skill_snapshot(
         sandbox_id,
         thread_id="thread-1",
         user_id="user-1",
-        binding=AcceptedSkillSandboxBindingV1(
-            snapshot_id=first.snapshot_id,
-            run_id="run-first",
-            generation=1,
-            evidence=SkillProjectionEvidence.from_snapshot(first),
-        ),
+        binding=first_binding,
     )
     sandbox = provider.get(sandbox_id)
     assert sandbox is not None
@@ -529,18 +531,19 @@ def test_local_sandbox_exposes_only_the_bound_accepted_snapshot(
         )
     )
     provider.release(sandbox_id)
-    cached_id = provider.acquire_accepted_skills("thread-1", user_id="user-1")
+    empty_binding = AcceptedSkillSandboxBindingV1(
+        snapshot_id=None,
+        run_id="run-empty",
+        generation=2,
+        evidence=SkillProjectionEvidence.from_snapshot(None),
+    )
+    cached_id = provider.provision_accepted_skills("thread-1", user_id="user-1", binding=empty_binding)
     assert cached_id == sandbox_id
     provider.bind_accepted_skill_snapshot(
         cached_id,
         thread_id="thread-1",
         user_id="user-1",
-        binding=AcceptedSkillSandboxBindingV1(
-            snapshot_id=None,
-            run_id="run-empty",
-            generation=2,
-            evidence=SkillProjectionEvidence.from_snapshot(None),
-        ),
+        binding=empty_binding,
     )
     with pytest.raises(FileNotFoundError):
         sandbox.read_file(selected_path)
@@ -631,10 +634,10 @@ def test_replacement_waits_until_prior_projection_cleanup_finishes(
         SkillProjectionEvidence,
         get_skill_projection_coordinator,
     )
+    from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingV1
+    from deerflow.sandbox.accepted_projection import release_accepted_skill_consumer
     from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
     from deerflow.sandbox.sandbox_provider import (
-        AcceptedSkillSandboxBindingV1,
-        release_accepted_skill_consumer,
         reset_sandbox_provider,
         set_sandbox_provider,
     )
@@ -670,9 +673,10 @@ def test_replacement_waits_until_prior_projection_cleanup_finishes(
     provider = LocalSandboxProvider()
     set_sandbox_provider(provider)
     coordinator = get_skill_projection_coordinator()
-    sandbox_id = provider.acquire_accepted_skills(
+    sandbox_id = provider.provision_accepted_skills(
         "thread-fenced",
         user_id="fenced-user",
+        binding=AcceptedSkillSandboxBindingV1(snapshot_id=None),
     )
 
     def activate(run_id: str, snapshot) -> object:
@@ -1448,9 +1452,9 @@ async def test_terminal_worker_clears_explicit_empty_view_before_later_binding(
     import deerflow.config as config_module
     from deerflow.config import paths as paths_module
     from deerflow.runtime import agent_revision as revision_module
+    from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingV1
     from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
     from deerflow.sandbox.sandbox_provider import (
-        AcceptedSkillSandboxBindingV1,
         reset_sandbox_provider,
         set_sandbox_provider,
     )
@@ -1516,9 +1520,10 @@ async def test_terminal_worker_clears_explicit_empty_view_before_later_binding(
         snapshot_id=None,
         evidence=SkillProjectionEvidence.from_snapshot(None),
     )
-    sandbox_id = provider.acquire_accepted_skills(
+    sandbox_id = provider.provision_accepted_skills(
         "thread-worker",
         user_id="user-1",
+        binding=AcceptedSkillSandboxBindingV1(snapshot_id=None),
     )
     token = coordinator.activate(
         user_id="user-1",
@@ -1565,17 +1570,19 @@ async def test_terminal_worker_clears_explicit_empty_view_before_later_binding(
             user_id="user-1",
         )
         assert later is not None
+        later_binding = AcceptedSkillSandboxBindingV1(
+            snapshot_id=later.snapshot_id,
+            evidence=SkillProjectionEvidence.from_snapshot(later),
+        )
         provider.bind_accepted_skill_snapshot(
-            provider.acquire_accepted_skills(
+            provider.provision_accepted_skills(
                 "thread-worker",
                 user_id="user-1",
+                binding=later_binding,
             ),
             thread_id="thread-worker",
             user_id="user-1",
-            binding=AcceptedSkillSandboxBindingV1(
-                snapshot_id=later.snapshot_id,
-                evidence=SkillProjectionEvidence.from_snapshot(later),
-            ),
+            binding=later_binding,
         )
         sandbox = provider.get(sandbox_id)
         assert sandbox is not None
@@ -1730,10 +1737,8 @@ async def test_lead_policy_denial_happens_before_provider_resolution(
     from deerflow.runtime.skill_projection import (
         get_skill_projection_coordinator,
     )
+    from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
     from deerflow.sandbox.exceptions import SandboxAuthorizationError
-    from deerflow.sandbox.sandbox_provider import (
-        AcceptedSkillSandboxBindingError,
-    )
     from deerflow.subagents.batch_acceptance import (
         PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
     )
@@ -1882,7 +1887,7 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
                 expires_at=now + timedelta(days=1),
             )
 
-        async def acquire_bound_accepted_skills_async(
+        async def provision_accepted_skills_async(
             self,
             thread_id,
             *,
@@ -2484,12 +2489,11 @@ async def test_remote_materialization_is_refenced_immediately_before_astream(
     async def validate_attempt(*_args, **_kwargs) -> bool:
         return attempt_valid
 
-    provider = SimpleNamespace(
-        validate_accepted_skill_execution_async=AsyncMock(
-            side_effect=validate_attempt,
-        ),
-        renew_accepted_skill_execution_async=AsyncMock(return_value=True),
-    )
+    class _FenceProvider(AcceptedSkillProjection):
+        validate_accepted_skill_execution_async = AsyncMock(side_effect=validate_attempt)
+        renew_accepted_skill_execution_async = AsyncMock(return_value=True)
+
+    provider = _FenceProvider()
     monkeypatch.setattr(
         "deerflow.runtime.runs.worker._materialize_accepted_skill_projection",
         AsyncMock(return_value=("sandbox-1", evidence)),

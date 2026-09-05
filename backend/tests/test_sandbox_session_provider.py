@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.sandbox import sandbox_provider as provider_module
+from deerflow.sandbox.capabilities import AcceptedSkillProjection
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
     SandboxProvider,
@@ -65,7 +66,7 @@ class _Handle(Sandbox):
         return None
 
 
-class _Backing(SandboxProvider):
+class _Backing(SandboxProvider, AcceptedSkillProjection):
     uses_thread_data_mounts = True
     supports_agent_skill_isolation = True
 
@@ -261,6 +262,7 @@ async def test_ordinary_paths_delegate_to_the_backing_provider(stack):
     assert provider.custom_extra(1) == ("extra", 1)
     assert provider.uses_thread_data_mounts is True
     assert provider.supports_agent_skill_isolation is True
+    assert provider.capability(AcceptedSkillProjection) is provider
     assert provider.has_accepted_skill_isolation("x-accepted") is True
     assert isinstance(provider, SandboxProvider)
 

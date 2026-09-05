@@ -9,10 +9,15 @@ import pytest
 from langchain.tools import ToolRuntime
 from langgraph.types import Overwrite
 
+from deerflow.sandbox.capabilities import AcceptedSkillProjection
 from deerflow.sandbox.exceptions import SandboxNotFoundError
 from deerflow.sandbox.lease import SANDBOX_LEASE_OWNER_CONTEXT_KEY, get_sandbox_lease_manager
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
+from deerflow.sandbox.sandbox_provider import (
+    SandboxProvider,
+    reset_sandbox_provider,
+    set_sandbox_provider,
+)
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.tools import (
     _run_sync_tool_after_async_sandbox_init,
@@ -128,40 +133,17 @@ class _PostAcquireLookupFailureProvider(SandboxProvider):
         self.released.append(sandbox_id)
 
 
-class _BoundAcceptedProvider(_FallthroughProvider):
+class _BoundAcceptedProvider(_FallthroughProvider, AcceptedSkillProjection):
     def __init__(self) -> None:
         super().__init__()
         self.bound_acquisitions = []
         self.bound_material = []
 
-    def acquire_accepted_skills(self, thread_id: str, *, user_id: str) -> str:
-        raise AssertionError("accepted lazy acquisition must carry its committed binding")
-
-    async def acquire_accepted_skills_async(
-        self,
-        thread_id: str,
-        *,
-        user_id: str,
-    ) -> str:
-        raise AssertionError("accepted lazy acquisition must carry its committed binding")
-
-    def acquire_bound_accepted_skills(
-        self,
-        thread_id: str,
-        *,
-        user_id: str,
-        binding,
-    ) -> str:
+    def provision_accepted_skills(self, thread_id: str, *, user_id: str, binding) -> str:
         self.bound_acquisitions.append((thread_id, user_id, binding))
         return "fresh-sandbox"
 
-    async def acquire_bound_accepted_skills_async(
-        self,
-        thread_id: str,
-        *,
-        user_id: str,
-        binding,
-    ) -> str:
+    async def provision_accepted_skills_async(self, thread_id: str, *, user_id: str, binding) -> str:
         self.bound_acquisitions.append((thread_id, user_id, binding))
         return "fresh-sandbox"
 

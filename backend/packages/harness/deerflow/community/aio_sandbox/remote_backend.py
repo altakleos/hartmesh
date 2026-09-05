@@ -519,7 +519,7 @@ class RemoteSandboxBackend(SandboxBackend):
         attempt_capability: str | None = None
         if accepted_skill_binding is not None:
             from deerflow.runtime.skill_projection import SkillProjectionEvidence
-            from deerflow.sandbox.sandbox_provider import AcceptedSkillSandboxBindingV1
+            from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingV1
 
             if not isinstance(accepted_skill_binding, AcceptedSkillSandboxBindingV1):
                 raise RuntimeError("accepted_skill_snapshot_binding_invalid")
