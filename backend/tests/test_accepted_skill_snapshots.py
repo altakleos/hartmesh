@@ -832,6 +832,53 @@ def test_active_view_rejects_source_mutation_during_verified_copy(
     snapshot.release()
 
 
+def test_live_snapshot_is_leased_again_without_copying(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    """A second admission of the same skills verifies and leases the published tree."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    skill_file = _write_skill(tmp_path / "reused", body="accepted")
+    support = skill_file.parent / "references" / "guide.txt"
+    support.parent.mkdir()
+    support.write_text("accepted support", encoding="utf-8")
+    first = snapshot_effective_skills((_parsed_skill(skill_file),), user_id="reuse-user")
+    assert first is not None
+
+    writes: list[Path] = []
+    original_write = snapshot_module._write_private_file
+    monkeypatch.setattr(snapshot_module, "_write_private_file", lambda path, data, **kwargs: writes.append(path) or original_write(path, data, **kwargs))
+    second = snapshot_effective_skills((_parsed_skill(skill_file),), user_id="reuse-user")
+    assert second is not None
+    assert writes == []
+    assert second.snapshot_id == first.snapshot_id
+    assert second.root == first.root
+    assert second.projections == first.projections
+    assert (second.file_count, second.total_bytes) == (first.file_count, first.total_bytes)
+    assert [skill.skill_dir for skill in second.skills] == [skill.skill_dir for skill in first.skills]
+    assert snapshot_module._lease_counts[first.root] == 2
+    assert not any(path.name.startswith(".building-") for path in first.root.parent.iterdir())
+
+    first.release()
+    assert first.root.exists()
+    second.release()
+    assert not first.root.exists()
+
+    # Once every lease is gone the tree is copied again, and a published
+    # tree that no longer matches its digest is drift, never reused.
+    third = snapshot_effective_skills((_parsed_skill(skill_file),), user_id="reuse-user")
+    assert third is not None and writes
+    copied_support = third.root / third.projections[0].category / third.projections[0].relative_path / "references" / "guide.txt"
+    copied_support.chmod(0o600)
+    copied_support.write_text("corrupted", encoding="utf-8")
+    with pytest.raises(SkillSnapshotError, match="skill_snapshot_drift"):
+        snapshot_effective_skills((_parsed_skill(skill_file),), user_id="reuse-user")
+    assert snapshot_module._lease_counts[third.root] == 1
+    third.release()
+
+
 def test_deleting_live_tree_cannot_remove_accepted_supporting_material(
     monkeypatch,
     tmp_path: Path,

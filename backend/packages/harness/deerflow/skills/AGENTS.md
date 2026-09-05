@@ -7,6 +7,8 @@ projection. Docker/AIO can mount nonempty accepted material read-only; Local,
 E2B, and custom providers are currently empty-only for durable execution and
 must fail before model work when effective skills exist. A live edit affects
 only later admissions, and cleanup waits for all parent/subagent material leases.
+The tree is content addressed: an admission whose digest is already leased
+verifies and leases the published tree instead of copying and fsyncing it again.
 
 With `tool_plane.enabled=true`, skill packages and state are governed revision
 material. Archive upload only creates inert content-addressed candidate bytes;
