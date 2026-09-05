@@ -25,9 +25,11 @@ Upstream's scoped-shell hooks are declared already; providers keep the base
 class's pass-through defaults until they implement scoping, so a scoped call on
 the facade is fenced and recorded even where it is not yet isolated. Normal
 sandbox tools, sandbox middleware, output externalization, lead agents, inherited
-subagents, and durable batch children resolve that facade from host-owned runtime
-context. A batch child builds a separate session over its existing SQL
-item-attempt fence; it does not borrow the parent run's mutable authority. The
+subagents, and durable batch children resolve that facade through one resolver,
+`declared_sandbox()`, which answers from the executing context's session
+declaration; nothing in a runtime context dict can stand in for it. A batch
+child declares a separate session over its existing SQL item-attempt fence; it
+does not borrow the parent run's mutable authority. The
 child's canonical request/evidence pair and initial `acquired` observation are
 atomically attached to that attempt after the provider call and a fresh fence
 sample, before the executor may start. Later bounded lifecycle observations are
@@ -56,7 +58,7 @@ and upstream's own middleware and tools, goes through the configured provider's
 per process, and dispatches those three verbs by the executing session's
 declaration:
 
-- an execution that installed an accepted session acquires that session's
+- an execution that declared an accepted session acquires that session's
   public ref and never provisions; if the session is no longer open the acquire
   fails with `sandbox_session_conflict` rather than falling back to an ordinary
   thread sandbox;
@@ -70,13 +72,28 @@ declaration:
   execution.
 
 The declaration travels with the execution as a context variable that child
-tasks and worker threads inherit. Installing a session declares it; stripping
-or closing it withdraws the declaration. Every other provider method and
-attribute is forwarded unchanged, so ordinary sessions behave exactly as the
-backing provider does, and `isinstance` checks against the configured provider
-class keep working. Accepted-suffixed containers found by the AIO startup
-reconciler are destroyed once this instance can claim them, never adopted into
-the warm pool.
+tasks and worker threads inherit, and it is the only carrier: no runtime
+context key holds a session, so a caller-supplied context cannot plant one.
+Provisioning always precedes declaring. The durable worker materializes the
+session, calls `declare_accepted_sandbox_session` with the run's
+`(user_id, thread_id)` mount scope, binds the declaration to the run's task so
+every task and thread the run spawns inherits it, and withdraws it after the
+session closes. An in-run subagent borrows its parent's declaration: the task
+tool hands the current declaration to the executor, which binds it for exactly
+the child's execution. A durable batch child is the same kind under its own
+attempt key: the batch service declares the child's session with no mount
+scope, because no ordinary acquire is keyed by an attempt and so none can
+collide with it, and the executor binds that declaration on the isolated
+subagent loop for the child alone; the service loop is never bound. Closing a
+session ends its declaration; withdrawing is idempotent and never disturbs a
+later declaration of the same public ref. A session that is already declared
+and still open cannot be declared again.
+
+Every other provider method and attribute is forwarded unchanged, so ordinary
+sessions behave exactly as the backing provider does, and `isinstance` checks
+against the configured provider class keep working. Accepted-suffixed
+containers found by the AIO startup reconciler are destroyed once this instance
+can claim them, never adopted into the warm pool.
 
 This is a check-then-call guarantee, not distributed atomicity. A call accepted
 before loss may finish. For a provider without atomic operation fencing, one call

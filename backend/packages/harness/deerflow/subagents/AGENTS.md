@@ -15,7 +15,11 @@ attempt rows; start occurs only after process-capacity admission,
 and renewal/cancellation/completion compare attempt ID, owner, lease epoch, and
 database time. Accepted sandbox request/evidence is joined atomically to that
 same fenced attempt before child execution, and its bounded handle-free
-lifecycle observations remain attached after terminal publication. Queue
+lifecycle observations remain attached after terminal publication. The child's
+session is declared to the session provider under its own attempt key (no
+mount scope) and bound by the executor for the child alone; in-run subagents
+borrow the parent's declaration the same way. See
+`docs/ACCEPTED_SANDBOX_EXECUTION.md`. Queue
 rejection is non-consuming, while execution and expired
 claims consume the retry budget. Delivery is at-least-once and external
 side effects may repeat even though only one terminal database publication can

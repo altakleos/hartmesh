@@ -14,7 +14,10 @@ three verbs by the executing session's declaration:
 
 The real provider identifier never leaves the declaring session. Ordinary
 sessions are the default kind: everything not declared is forwarded to the
-backing provider unchanged.
+backing provider unchanged. The declaration travels with the execution as a
+context variable; ``declared_sandbox`` is the one resolver the tools and
+middleware consult, and it is the only carrier: nothing in a runtime context
+dict can stand in for it.
 """
 
 from __future__ import annotations
@@ -132,6 +135,31 @@ def bind_sandbox_session(declaration: SandboxSessionDeclaration) -> Iterator[San
         yield declaration
     finally:
         _CURRENT.reset(token)
+
+
+def declared_sandbox() -> Sandbox | None:
+    """The executing context's declared handle, or ``None`` on the ordinary path.
+
+    This is the one resolver the sandbox tools and middleware consult before
+    they touch runtime state or the provider. Liveness is the handle's own
+    business: a fenced handle raises its typed authority error on use, and the
+    tools propagate that untouched, so resolving never converts a lost session
+    into a different error class or into an ordinary acquire.
+    """
+    current = _CURRENT.get()
+    return None if current is None else current.handle
+
+
+def sandbox_mount_scope(user_id: object, thread_id: object) -> tuple[str, str] | None:
+    """The ``(user_id, thread_id)`` an ordinary acquire is keyed by, or ``None``.
+
+    A session keyed by something else, such as a batch child keyed by its
+    attempt, declares no mount scope: no ordinary acquire can collide with it,
+    so none is refused because of it.
+    """
+    if isinstance(user_id, str) and user_id and isinstance(thread_id, str) and thread_id:
+        return (user_id, thread_id)
+    return None
 
 
 class SandboxSessionRegistry:
@@ -279,13 +307,14 @@ class SessionProvider(SandboxProvider):
         return current
 
     def _refuse_held_mount_scope(self, thread_id: str | None, user_id: str | None) -> None:
-        if not isinstance(thread_id, str) or not thread_id or not isinstance(user_id, str) or not user_id:
+        mount_scope = sandbox_mount_scope(user_id, thread_id)
+        if mount_scope is None:
             return
-        holder = self._registry.retire_terminal_holder((user_id, thread_id))
+        holder = self._registry.retire_terminal_holder(mount_scope)
         if holder is not None:
             raise SandboxSessionConflict(
                 f"sandbox for user {user_id!r} thread {thread_id!r} is held by accepted session {holder.public_ref}",
-                mount_scope=(user_id, thread_id),
+                mount_scope=mount_scope,
                 public_ref=holder.public_ref,
             )
 
@@ -383,7 +412,9 @@ __all__ = [
     "SessionProvider",
     "bind_sandbox_session",
     "current_sandbox_session",
+    "declared_sandbox",
     "get_sandbox_session_registry",
+    "sandbox_mount_scope",
     "sandbox_session_provider",
     "set_current_sandbox_session",
     "unwrap_sandbox_provider",

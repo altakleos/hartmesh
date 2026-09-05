@@ -29,10 +29,10 @@ from deerflow.agents.middlewares.tool_transform_meta import append_tool_transfor
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.sandbox.accepted_material import (
     AcceptedSandboxAuthorityLostError,
-    accepted_sandbox_from_runtime_context,
     is_accepted_sandbox_facade,
 )
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.session import declared_sandbox
 
 if TYPE_CHECKING:
     from deerflow.sandbox.sandbox import Sandbox
@@ -334,11 +334,9 @@ def _resolve_sandbox(request: ToolCallRequest) -> Sandbox | None:
     # Eager authorization denial deliberately leaves state unset. Requiring
     # the initialized marker prevents an unrelated large tool result from
     # using a pre-installed facade without the sandbox:execute decision.
-    accepted_sandbox = accepted_sandbox_from_runtime_context(
-        getattr(runtime, "context", None),
-    )
-    if accepted_sandbox is not None:
-        return accepted_sandbox
+    declared = declared_sandbox()
+    if declared is not None:
+        return declared
     try:
         return get_sandbox_provider().get(sandbox_id)
     except Exception:

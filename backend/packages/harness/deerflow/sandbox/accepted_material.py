@@ -29,6 +29,7 @@ from deerflow.sandbox.sandbox import Sandbox
 
 if TYPE_CHECKING:
     from deerflow.runtime.skill_projection import SkillProjectionConsumerToken
+    from deerflow.sandbox.session import SandboxSessionDeclaration
 
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _OPERATION_REF_PATTERN = re.compile(
@@ -2583,9 +2584,6 @@ class AcceptedSandboxSession:
             raise AcceptedMaterialError("accepted_sandbox_release_failed")
 
 
-ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY = "__deerflow_accepted_sandbox_session_v1"
-
-
 @fenced_sandbox_facade
 class _AcceptedSandboxFacade(Sandbox):
     """Sandbox-compatible sync view that cannot bypass session validation.
@@ -2614,21 +2612,49 @@ class _AcceptedSandboxFacade(Sandbox):
 
 
 class AcceptedSandboxSessionBridge:
-    """Thread-safe bridge from synchronous tools to one owner-loop session."""
+    """Thread-safe bridge from synchronous tools to one owner-loop session.
+
+    The bridge is the accepted kind's declaration owner: it knows the session's
+    public ref, its handle (the fenced facade), whether it is still open, and
+    how to retire it, and packages those as the ``SandboxSessionDeclaration``
+    the session provider resolves. ``declare_accepted_sandbox_session`` is the
+    only way a bridge reaches the registry.
+    """
 
     def __init__(
         self,
         session: AcceptedSandboxSession,
         *,
         owner_loop: asyncio.AbstractEventLoop,
+        mount_scope: tuple[str, str] | None = None,
     ) -> None:
         if not isinstance(session, AcceptedSandboxSession):
             raise TypeError("session must be AcceptedSandboxSession")
         if not isinstance(owner_loop, asyncio.AbstractEventLoop):
             raise TypeError("owner_loop must be an event loop")
+        from deerflow.sandbox.session import (
+            SandboxSessionDeclaration,
+            SandboxSessionKind,
+            SandboxSessionTerminal,
+        )
+
         self._session = session
         self._owner_loop = owner_loop
         self._sandbox = _AcceptedSandboxFacade(self)
+        self._declaration = SandboxSessionDeclaration(
+            public_ref=self.safe_reference,
+            mount_scope=mount_scope,
+            kind=SandboxSessionKind.ACCEPTED,
+            terminal=SandboxSessionTerminal.RETIRE,
+            handle=self._sandbox,
+            is_live=lambda: self.is_open,
+            retire=self.close_sync,
+        )
+
+    @property
+    def declaration(self) -> SandboxSessionDeclaration:
+        """What the session provider resolves for this session."""
+        return self._declaration
 
     @property
     def safe_reference(self) -> str:
@@ -2745,120 +2771,93 @@ class AcceptedSandboxSessionBridge:
         await asyncio.wrap_future(future)
 
 
-def install_accepted_sandbox_session(
-    context: dict[str, object],
+def declare_accepted_sandbox_session(
     session: AcceptedSandboxSession,
+    *,
+    mount_scope: tuple[str, str] | None,
+    owner_loop: asyncio.AbstractEventLoop | None = None,
 ) -> AcceptedSandboxSessionBridge:
-    """Install one host-owned session bridge in trusted runtime context."""
+    """Declare one host-owned accepted session to the session provider.
 
-    if not isinstance(context, dict):
-        raise TypeError("runtime context must be a dict")
+    Provisioning precedes declaring, never the reverse: ``session`` already
+    holds its materialized sandbox and lease. Declaring registers the
+    session's public ref so the provider resolves it; binding it to an
+    execution is the owner's explicit act (``set_current_sandbox_session`` for
+    a whole durable run, ``bind_sandbox_session`` around one subagent
+    execution). ``mount_scope`` is the ``(user_id, thread_id)`` whose ordinary
+    sandbox the session displaces while it is open, or ``None`` for a session
+    keyed by its own attempt, such as a batch child, which no ordinary acquire
+    can collide with.
+
+    One session, one declaration: a session that is already declared and
+    still open is refused rather than re-registered, because re-registering
+    would silently stop the first bridge's handle from resolving.
+    """
+
+    from deerflow.sandbox.session import get_sandbox_session_registry
+
+    if not isinstance(session, AcceptedSandboxSession):
+        raise TypeError("session must be AcceptedSandboxSession")
+    registry = get_sandbox_session_registry()
+    if registry.lookup(session.safe_reference) is not None:
+        raise AcceptedMaterialError("accepted_sandbox_session_already_declared")
     bridge = AcceptedSandboxSessionBridge(
         session,
-        owner_loop=asyncio.get_running_loop(),
+        owner_loop=owner_loop if owner_loop is not None else asyncio.get_running_loop(),
+        mount_scope=mount_scope,
     )
-    context[ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY] = bridge
-    _declare_accepted_sandbox_session(context, bridge)
+    registry.declare(bridge.declaration)
     return bridge
 
 
-def _declare_accepted_sandbox_session(
-    context: Mapping[str, object],
-    bridge: AcceptedSandboxSessionBridge,
-) -> None:
-    """Register the bridge as this execution's declared session.
+def withdraw_accepted_sandbox_session(bridge: AcceptedSandboxSessionBridge) -> None:
+    """Withdraw ``bridge``'s declaration so its public ref stops resolving.
 
-    The declaration is what the session provider resolves: the executing
-    context acquires the bridge's public ref instead of provisioning, the ref
-    resolves to the facade only for this context, and an ordinary acquire on
-    the same user and thread is refused while the session is open.
+    Revokes the registration if it is still this bridge's, and clears the
+    executing context's binding if it is this bridge's. Idempotent, and safe
+    to call after a later bridge has taken over the same public ref.
     """
 
     from deerflow.sandbox.session import (
         SandboxSessionDeclaration,
-        SandboxSessionKind,
-        SandboxSessionTerminal,
+        current_sandbox_session,
         get_sandbox_session_registry,
         set_current_sandbox_session,
     )
 
-    thread_id = context.get("thread_id")
-    user_id = context.get("user_id")
-    mount_scope = (user_id, thread_id) if isinstance(thread_id, str) and thread_id and isinstance(user_id, str) and user_id else None
-    declaration = SandboxSessionDeclaration(
-        public_ref=bridge.safe_reference,
-        mount_scope=mount_scope,
-        kind=SandboxSessionKind.ACCEPTED,
-        terminal=SandboxSessionTerminal.RETIRE,
-        handle=bridge.sandbox,
-        is_live=lambda: bridge.is_open,
-        retire=bridge.close_sync,
-    )
-    get_sandbox_session_registry().declare(declaration)
-    set_current_sandbox_session(declaration)
-    bridge._declaration = declaration
+    # Validated by what it carries, not by its type: a cleanup path hands the
+    # bridge it was given, and lifecycle tests stand doubles in for the bridge.
+    declaration = getattr(bridge, "declaration", None)
+    if not isinstance(declaration, SandboxSessionDeclaration):
+        raise TypeError("bridge must carry a SandboxSessionDeclaration")
+    registry = get_sandbox_session_registry()
+    if registry.lookup(declaration.public_ref) is declaration:
+        registry.revoke(declaration.public_ref)
+    if current_sandbox_session() is declaration:
+        set_current_sandbox_session(None)
 
 
-def accepted_sandbox_from_runtime_context(
-    context: Mapping[str, object] | None,
-) -> Sandbox | None:
-    """Resolve the gated facade, failing closed on a forged context value."""
+def current_accepted_sandbox_bridge() -> AcceptedSandboxSessionBridge | None:
+    """The bridge behind the executing context's declared accepted session.
 
-    if not isinstance(context, Mapping):
+    Evidence consumers that need more than the handle (the execution evidence
+    reference, an operation link) find the bridge here. An ordinary declared
+    handle is not an accepted session and yields ``None``.
+    """
+
+    from deerflow.sandbox.session import current_sandbox_session
+
+    declaration = current_sandbox_session()
+    if declaration is None:
         return None
-    candidate = context.get(ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY)
-    if candidate is None:
-        return None
-    if not isinstance(candidate, AcceptedSandboxSessionBridge):
-        raise AcceptedSandboxAuthorityLostError(
-            "accepted_sandbox_session_invalid",
-        )
-    return candidate.sandbox
+    handle = declaration.handle
+    return handle._bridge if isinstance(handle, _AcceptedSandboxFacade) else None
 
 
 def is_accepted_sandbox_facade(sandbox: object) -> bool:
     """Identify the host-owned facade without exposing its backing session."""
 
     return isinstance(sandbox, _AcceptedSandboxFacade)
-
-
-def accepted_sandbox_bridge_from_runtime_context(
-    context: Mapping[str, object] | None,
-) -> AcceptedSandboxSessionBridge | None:
-    """Return the installed bridge while keeping its raw sandbox private."""
-
-    if not isinstance(context, Mapping):
-        return None
-    candidate = context.get(ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY)
-    if candidate is None:
-        return None
-    if not isinstance(candidate, AcceptedSandboxSessionBridge):
-        raise AcceptedSandboxAuthorityLostError(
-            "accepted_sandbox_session_invalid",
-        )
-    return candidate
-
-
-def strip_accepted_sandbox_session(context: dict[str, object]) -> None:
-    """Remove any caller-supplied session capability before host installation.
-
-    A host-installed bridge is also withdrawn from the session registry and
-    from the executing context, so its public ref stops resolving at once.
-    """
-
-    candidate = context.pop(ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY, None)
-    declaration = getattr(candidate, "_declaration", None) if isinstance(candidate, AcceptedSandboxSessionBridge) else None
-    if declaration is None:
-        return
-    from deerflow.sandbox.session import (
-        current_sandbox_session,
-        get_sandbox_session_registry,
-        set_current_sandbox_session,
-    )
-
-    get_sandbox_session_registry().revoke(declaration.public_ref)
-    if current_sandbox_session() is declaration:
-        set_current_sandbox_session(None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3248,7 +3247,6 @@ class InMemoryAcceptedMaterializer:
 
 
 __all__ = [
-    "ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY",
     "AcceptedExecutionEvidence",
     "AcceptedExecutionEvidenceV1",
     "AcceptedExecutionEvidenceV2",
@@ -3287,13 +3285,12 @@ __all__ = [
     "decode_accepted_material_request",
     "accepted_sandbox_resource_commitment",
     "accepted_scope_reference",
-    "accepted_sandbox_bridge_from_runtime_context",
-    "accepted_sandbox_from_runtime_context",
+    "current_accepted_sandbox_bridge",
+    "declare_accepted_sandbox_session",
     "is_accepted_sandbox_facade",
-    "install_accepted_sandbox_session",
+    "withdraw_accepted_sandbox_session",
     "InMemoryAcceptedMaterialState",
     "InMemoryAcceptedMaterializer",
     "resolve_accepted_materializer",
-    "strip_accepted_sandbox_session",
     "validate_accepted_materialization",
 ]

@@ -28,7 +28,6 @@ from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.accepted_material import (
     AcceptedSandboxAuthorityLostError,
-    accepted_sandbox_from_runtime_context,
 )
 from deerflow.sandbox.exceptions import (
     SandboxError,
@@ -48,6 +47,7 @@ from deerflow.sandbox.sandbox_provider import (
 )
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.sandbox.session import declared_sandbox
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
@@ -1437,9 +1437,9 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Tool runtime not available")
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
-    accepted_sandbox = accepted_sandbox_from_runtime_context(runtime.context)
-    if accepted_sandbox is not None:
-        return accepted_sandbox
+    declared = declared_sandbox()
+    if declared is not None:
+        return declared
     # Read-only lookup: this only resolves the provider entry, and ownership
     # (release) stays with after_agent's short-circuit on the wrapped state.
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
@@ -1526,9 +1526,9 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             app_config=safe_app_config(),
         )
 
-    accepted_sandbox = accepted_sandbox_from_runtime_context(runtime.context)
-    if accepted_sandbox is not None:
-        return accepted_sandbox
+    declared = declared_sandbox()
+    if declared is not None:
+        return declared
 
     # Check if sandbox already exists in state
     # Discarding fork_restored is safe: after_agent short-circuits on the
@@ -1628,9 +1628,9 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             app_config=await safe_app_config_async(),
         )
 
-    accepted_sandbox = accepted_sandbox_from_runtime_context(runtime.context)
-    if accepted_sandbox is not None:
-        return accepted_sandbox
+    declared = declared_sandbox()
+    if declared is not None:
+        return declared
 
     # Same discard as the sync path above: the reuse path never releases,
     # because after_agent short-circuits on the still-wrapped state first.

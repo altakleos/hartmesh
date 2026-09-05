@@ -20,7 +20,6 @@ from deerflow.authz.sandbox_authz import (
 )
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
-from deerflow.sandbox.accepted_material import accepted_sandbox_from_runtime_context
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.sandbox_provider import (
@@ -32,6 +31,7 @@ from deerflow.sandbox.sandbox_provider import (
     release_accepted_skill_consumer,
     require_runtime_accepted_skill_isolation,
 )
+from deerflow.sandbox.session import declared_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +160,8 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if thread_id is None:
             return super().before_agent(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
-        accepted_sandbox = accepted_sandbox_from_runtime_context(runtime.context)
-        if accepted_sandbox is not None:
+        declared = declared_sandbox()
+        if declared is not None:
             try:
                 authorize_sandbox_execution(
                     context=runtime.context or {},
@@ -174,13 +174,13 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 )
                 return None
             existing_sandbox_id = self._read_sandbox_id_from_state(state)
-            if existing_sandbox_id == accepted_sandbox.id:
+            if existing_sandbox_id == declared.id:
                 return super().before_agent(state, runtime)
             if existing_sandbox_id is not None:
                 return {
-                    "sandbox": Overwrite({"sandbox_id": accepted_sandbox.id}),
+                    "sandbox": Overwrite({"sandbox_id": declared.id}),
                 }
-            return {"sandbox": {"sandbox_id": accepted_sandbox.id}}
+            return {"sandbox": {"sandbox_id": declared.id}}
         projection = None if has_accepted_binding else self._prepare_agent_skill_projection(thread_id, user_id=user_id)
 
         # Durable accepted material and policy-scoped legacy views must be
@@ -279,8 +279,8 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if thread_id is None:
             return await super().abefore_agent(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
-        accepted_sandbox = accepted_sandbox_from_runtime_context(runtime.context)
-        if accepted_sandbox is not None:
+        declared = declared_sandbox()
+        if declared is not None:
             try:
                 await authorize_sandbox_execution_async(
                     context=runtime.context or {},
@@ -293,13 +293,13 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 )
                 return None
             existing_sandbox_id = self._read_sandbox_id_from_state(state)
-            if existing_sandbox_id == accepted_sandbox.id:
+            if existing_sandbox_id == declared.id:
                 return await super().abefore_agent(state, runtime)
             if existing_sandbox_id is not None:
                 return {
-                    "sandbox": Overwrite({"sandbox_id": accepted_sandbox.id}),
+                    "sandbox": Overwrite({"sandbox_id": declared.id}),
                 }
-            return {"sandbox": {"sandbox_id": accepted_sandbox.id}}
+            return {"sandbox": {"sandbox_id": declared.id}}
         projection = (
             None
             if has_accepted_binding
@@ -399,7 +399,9 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        if accepted_sandbox_from_runtime_context(runtime.context) is not None:
+        if declared_sandbox() is not None:
+            # The declaring execution owns the terminal; the agent loop is a
+            # holder inside it and must not retire the session on its way out.
             return None
         from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY, SkillProjectionConsumerToken
 
@@ -430,7 +432,9 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        if accepted_sandbox_from_runtime_context(runtime.context) is not None:
+        if declared_sandbox() is not None:
+            # The declaring execution owns the terminal; the agent loop is a
+            # holder inside it and must not retire the session on its way out.
             return None
         from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY, SkillProjectionConsumerToken
 

@@ -134,6 +134,27 @@ class _SkillProjection:
         }
 
 
+def _stub_declaration(public_ref: str):
+    """A real declaration over a stub sandbox, for doubles that stand in for a bridge."""
+    from deerflow.sandbox.sandbox import Sandbox
+    from deerflow.sandbox.session import (
+        SandboxSessionDeclaration,
+        SandboxSessionKind,
+        SandboxSessionTerminal,
+    )
+
+    stub_type = type("StubSandbox", (Sandbox,), {name: (lambda self, *args, **kwargs: None) for name in Sandbox.__abstractmethods__})
+    return SandboxSessionDeclaration(
+        public_ref=public_ref,
+        mount_scope=None,
+        kind=SandboxSessionKind.ACCEPTED,
+        terminal=SandboxSessionTerminal.RETIRE,
+        handle=stub_type(public_ref),
+        is_live=lambda: True,
+        retire=lambda: None,
+    )
+
+
 class _SkillSnapshot:
     snapshot_id = "e" * 64
     content_digest = "e" * 64
@@ -1071,9 +1092,15 @@ async def test_batch_item_uses_its_own_attempt_fence_for_accepted_sandbox(
         AcceptedSandboxCapabilityProfileV1,
         AcceptedSandboxIsolationFactsV1,
         AcceptedSandboxQualificationV1,
-        AcceptedSandboxSessionBridge,
     )
     from deerflow.sandbox.sandbox import Sandbox
+    from deerflow.sandbox.session import (
+        SandboxSessionDeclaration,
+        SandboxSessionKind,
+        SandboxSessionTerminal,
+        current_sandbox_session,
+        get_sandbox_session_registry,
+    )
     from deerflow.tool_plane.contracts import EffectiveToolPlaneRevisionV1
 
     tool_plane = EffectiveToolPlaneRevisionV1(
@@ -1270,6 +1297,7 @@ async def test_batch_item_uses_its_own_attempt_fence_for_accepted_sandbox(
         return selection
 
     executor_kwargs: dict[str, object] = {}
+    declared_refs: list[str] = []
 
     class Executor:
         def __init__(self, **kwargs) -> None:
@@ -1279,11 +1307,17 @@ async def test_batch_item_uses_its_own_attempt_fence_for_accepted_sandbox(
             assert task_id == item["id"]
 
             async def complete() -> None:
-                bridge = executor_kwargs["accepted_sandbox_session_bridge"]
-                assert isinstance(bridge, AcceptedSandboxSessionBridge)
+                declaration = executor_kwargs["sandbox_session"]
+                assert isinstance(declaration, SandboxSessionDeclaration)
+                assert declaration.kind is SandboxSessionKind.ACCEPTED
+                assert declaration.terminal is SandboxSessionTerminal.RETIRE
+                assert declaration.mount_scope is None, "a batch child is keyed by its attempt, not the parent thread"
+                assert get_sandbox_session_registry().lookup(declaration.public_ref) is declaration
+                assert current_sandbox_session() is None, "the service loop must not be bound to a child's session"
+                declared_refs.append(declaration.public_ref)
                 assert (
                     await asyncio.to_thread(
-                        bridge.sandbox.execute_command,
+                        declaration.handle.execute_command,
                         "echo child",
                     )
                     == "sandbox-ok"
@@ -1365,6 +1399,7 @@ async def test_batch_item_uses_its_own_attempt_fence_for_accepted_sandbox(
     assert raw_sandbox.calls == ["echo child"]
     assert materializer.validate_calls == 2
     assert materializer.released == 1
+    assert declared_refs and get_sandbox_session_registry().lookup(declared_refs[0]) is None, "the child's declaration is withdrawn with its session"
     assert repository.finalized["succeeded"] is True
     assert repository.attached_sandbox is not None
     attached_item_id, attached = repository.attached_sandbox
@@ -1394,6 +1429,7 @@ async def test_batch_item_uses_its_own_attempt_fence_for_accepted_sandbox(
             trusted_context=None,
         )
     assert materializer.released == 2
+    assert get_sandbox_session_registry().live() == (), "a rejected attachment leaves no declaration behind"
 
     original_interrupt = asyncio.CancelledError("attachment interrupted")
     cleanup_interrupt = asyncio.CancelledError("release interrupted")
@@ -1570,6 +1606,7 @@ async def test_batch_cleanup_defers_interrupt_until_lifecycle_and_pruning_finish
             side_effect=(cleanup_interrupt if interrupt_at == "close" else None),
         ),
         lifecycle_observations=(observation,),
+        declaration=_stub_declaration("accepted-session-cleanup"),
     )
     monkeypatch.setattr(
         service_module,

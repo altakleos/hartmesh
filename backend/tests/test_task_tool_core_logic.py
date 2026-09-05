@@ -129,6 +129,28 @@ class FakeSubagentStatus(Enum):
     TIMED_OUT = "timed_out"
 
 
+def _stub_declaration(public_ref: str, *, mount_scope=None):
+    from deerflow.sandbox.sandbox import Sandbox
+    from deerflow.sandbox.session import (
+        SandboxSessionDeclaration,
+        SandboxSessionKind,
+        SandboxSessionTerminal,
+    )
+
+    stub_type = type("StubSandbox", (Sandbox,), {name: (lambda self, *args, **kwargs: None) for name in Sandbox.__abstractmethods__})
+    handle = stub_type(public_ref)
+    handle.persistent_shell_sessions = False
+    return SandboxSessionDeclaration(
+        public_ref=public_ref,
+        mount_scope=mount_scope,
+        kind=SandboxSessionKind.ACCEPTED,
+        terminal=SandboxSessionTerminal.RETIRE,
+        handle=handle,
+        is_live=lambda: True,
+        retire=lambda: None,
+    )
+
+
 def _make_runtime(*, app_config=None) -> SimpleNamespace:
     # Minimal ToolRuntime-like object; task_tool only reads these three attributes.
     context = {"thread_id": "thread-1"}
@@ -668,6 +690,45 @@ def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-no-ext")
 
     assert "extensions" not in captured["executor_kwargs"]
+
+
+def test_task_tool_hands_the_parent_declaration_to_the_child_and_omits_it_otherwise(monkeypatch):
+    """An in-run subagent borrows its parent's declared session: the task
+    tool passes the executing context's declaration, never a value read
+    from the runtime context dict, and passes nothing when none is bound."""
+    from deerflow.sandbox.session import bind_sandbox_session
+
+    runtime = _make_runtime()
+    runtime.context["__deerflow_accepted_sandbox_session_v1"] = object()
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-undeclared")
+    assert "sandbox_session" not in captured["executor_kwargs"]
+    assert "accepted_sandbox_session_bridge" not in captured["executor_kwargs"]
+
+    declaration = _stub_declaration("accepted-session-parent", mount_scope=("user-1", "thread-1"))
+    with bind_sandbox_session(declaration):
+        _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-declared")
+    assert captured["executor_kwargs"]["sandbox_session"] is declaration
 
 
 def test_bound_task_tool_forwards_explicit_execution_capacity(monkeypatch):

@@ -152,7 +152,7 @@ class RetrievalDraftHandoffV1:
 
         from deerflow.runtime.tool_evidence import DurableToolReceiptV1
         from deerflow.sandbox.accepted_material import (
-            accepted_sandbox_bridge_from_runtime_context,
+            current_accepted_sandbox_bridge,
         )
 
         # Middleware deliberately finalizes after leaving the context manager,
@@ -184,7 +184,7 @@ class RetrievalDraftHandoffV1:
             "provider_id": self.declaration.provider_id,
             "policy_status": "not_evaluated",
         }
-        sandbox_bridge = accepted_sandbox_bridge_from_runtime_context(self.runtime_context)
+        sandbox_bridge = current_accepted_sandbox_bridge()
         finished_at = provider_finished_at or datetime.now(UTC)
         if finished_at < self.receipt.occurred_at:
             finished_at = self.receipt.occurred_at
@@ -301,7 +301,7 @@ def accepted_retrieval_request_from_active(
     from deerflow.runtime.accepted_invocation import TRUSTED_RUN_CONTEXT_KEY
     from deerflow.runtime.tool_evidence import DurableToolReceiptV1
     from deerflow.sandbox.accepted_material import (
-        accepted_sandbox_bridge_from_runtime_context,
+        current_accepted_sandbox_bridge,
     )
 
     handoff = get_active_retrieval_handoff()
@@ -327,7 +327,7 @@ def accepted_retrieval_request_from_active(
     }
     if not isinstance(tool_plane, Mapping) or any(not isinstance(tool_plane.get(name), str) for name in required_digests):
         raise RetrievalEvidenceError("retrieval_tool_plane_context_unavailable")
-    sandbox_bridge = accepted_sandbox_bridge_from_runtime_context(handoff.runtime_context)
+    sandbox_bridge = current_accepted_sandbox_bridge()
     try:
         return AcceptedRetrievalRequest(
             thread_id=trusted.thread_id,
