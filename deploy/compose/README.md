@@ -151,7 +151,13 @@ topology per sandbox, verified on `main`:
   `<sandbox>:8080`, and the Gateway authenticates with a per-sandbox relay
   token. The sandbox's own HTTP API has no authentication, so this is what
   closes the sandbox-to-sandbox reach: each sandbox sits alone on an internal
-  network, reachable only through a relay that holds a token.
+  network, reachable only through a relay that holds a token;
+- the sandbox is told to use the proxy by container name, and that name is
+  also pinned in its `/etc/hosts` with the address Docker assigned on the
+  internal bridge. Docker's embedded DNS at `127.0.0.11` is a NAT rule in the
+  host network namespace; a sandbox under gVisor runs its own network stack
+  and never sees it, so without the hosts entry every proxied request fails
+  with "could not resolve proxy" (observed live, fixed in the backend).
 
 `DEER_FLOW_SANDBOX_NETWORK` is inert here: the backend passes its own
 per-sandbox network as an override and never reads it. The proxy allows HTTP on
@@ -244,6 +250,22 @@ about 600 MiB of its 640 MiB cgroup limit with reclaim active
 (`memory.events` `max` counting up) and no OOM kill through the measured
 turn. Every per-sandbox limit is therefore set explicitly; inheriting the
 backend defaults would give a tenant 2 GiB sandboxes and an OOM-killed guest.
+
+**Under gVisor the design's 640 MiB does not hold.** The Sentry keeps the
+guest's file cache in its own memory, which the host cannot reclaim, so the
+cgroup fills to whatever limit it is given and the excess is an OOM kill of the
+whole sandbox rather than a slow page cache. Measured with the profile's exact
+flags on `runsc` (systrap): at 640 MiB the sandbox reached its API and a
+working browser but was OOM-killed (`exit 137`, `OOMKilled=true`) during its
+first load round (a shell session plus one package download); at 768 MiB and
+at 1 GiB the same load ran twice with no OOM kill. The value in `compose.yaml`
+stays at the design's 640 MiB because it is the operator's number; a gVisor
+tenant needs it raised to at least 768 MiB, which with two sandboxes and two
+96 MiB proxies is 3072 + 2 × (768 + 96) = 4800 MiB, still under the 5.0 GiB
+ceiling. gVisor start-up is also slower: the API answered after 53 to 59
+seconds and the image's browser supervisor, which restarts Chromium when its
+CDP port is not up within 30 seconds, needed one or two restarts before
+reporting `Chromium ready`; expect 75 to 80 seconds to a working browser.
 
 `replicas` is a maximum with **LRU eviction**: a third acquisition does not
 fail, it evicts the least-recently-used sandbox, which is what keeps the count
@@ -405,12 +427,28 @@ files carried no exec bit.
 - After release and process exit, no sandbox containers or per-sandbox
   networks remained.
 
-Unproved here, because the host has no `runsc`:
+Then with `runsc` release-20260817.0 registered on the systrap platform
+(`SANDBOX_RUNTIME=runsc`, the same Docker Engine 28.4.0):
 
-- `docker inspect <sandbox> --format '{{.HostConfig.Runtime}}'` printing
-  `runsc` after `SANDBOX_RUNTIME=runsc` (the argument builder is unit-tested to
-  emit `--runtime runsc`; the flag arrived as `--runtime runc` live).
-- The sandbox and its browser starting under `seccomp=builtin` **with gVisor**:
-  the same `GET /v1/browser/info` and `/v1/browser/screenshot` checks against a
-  sandbox created with `SANDBOX_RUNTIME=runsc`.
+- Full provider-driven proof under `allowlist`, memory raised to 1 GiB by a
+  scratch override for the reason recorded under "Memory budget": `docker
+  inspect` shows `Runtime=runsc`, `ExtraHosts=[<proxy name>:<internal
+  address>]`, `SecurityOpt=[no-new-privileges, seccomp=builtin]`,
+  `CapDrop=[ALL]`, `User=1000:1000`, no published port; inside the sandbox
+  `uname -r` is `4.19.0-gvisor`; `GET /v1/browser/info` and
+  `/v1/browser/screenshot` answer `200` (the browser starts under Docker's
+  built-in seccomp profile with gVisor); the isolation transcript is identical
+  to the `runc` one (datastores and peer unreachable, pypi `200` through the
+  proxy, example.com refused after CONNECT, `neverssl.com` `403`, the metadata
+  address refused as an IP literal, direct DNS unavailable); the workspace
+  round-trips; the proxy sidecar runs under `runc` at its 96 MiB limit
+  (`memory.peak` 45 MiB); nothing remained after release.
+- The first gVisor attempt, before the hosts entry existed, failed every
+  proxied request with `Could not resolve proxy`, which is what the backend
+  change fixes; the standalone reproduction is a plain `docker run --runtime
+  runsc` on a user-defined network, where `getent hosts <peer>` fails and
+  `--add-host` succeeds.
+- At the profile's own 640 MiB the gVisor sandbox was OOM-killed under load
+  (see "Memory budget"); the figures there are from three standalone runs at
+  640 MiB, 768 MiB and 1 GiB with the profile's other flags unchanged.
 

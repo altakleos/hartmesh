@@ -126,6 +126,8 @@ services:
       # sidecar deliberately keeps the daemon default (README: "Network model").
       DEER_FLOW_SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:?SANDBOX_RUNTIME is a required .env key}
       # Per-sandbox limits from the memory budget (README: "Memory budget").
+      # 640 MiB is the design's figure; under gVisor it was OOM-killed under
+      # load and 768 MiB was the smallest measured value that held (README).
       DEER_FLOW_SANDBOX_MEMORY: 640m
       DEER_FLOW_SANDBOX_CPUS: "1"
       DEER_FLOW_SANDBOX_PIDS_LIMIT: "384"
