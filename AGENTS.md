@@ -47,14 +47,10 @@ published port needs an explicit bind address;
 `durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
 AIO/RWX artifact, not arbitrary scaling, IM HA, cross-region operation, or
 zero-downtime upgrades. No passing artifact exists here; operator claims cannot
-unlock production rendering or startup.
-
-The chart may put sandboxes in a pre-created `sandboxNamespace`: the provisioner
-stays in the release namespace with sandbox lifecycle RBAC only there, plus
-name-pinned namespace get and TokenReview create at cluster scope. `K8S_NAMESPACE` selects sandbox resources;
-`PROVISIONER_GATEWAY_NAMESPACE` selects the release namespace for Gateway
-ServiceAccount validation. Empty `sandboxNamespace` keeps single-namespace
-behavior; empty `namespace` follows the Helm release.
+unlock production rendering or startup. The chart's optional pre-created
+`sandboxNamespace` split (`K8S_NAMESPACE` selects sandbox resources,
+`PROVISIONER_GATEWAY_NAMESPACE` the release namespace for Gateway
+ServiceAccount validation) is documented in the Helm README.
 
 ## Repository Map
 
@@ -92,11 +88,6 @@ privileges and must be trusted. See the
 [extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md) and
 [provenance guide](docs/EXTENSION_ARTIFACT_PROVENANCE.md).
 
-`deerflow-runtime-api` provides transport-neutral durable invocation records for
-the Gateway-owned in-process adapter and authenticated `/api/runtime/v1/*` routes.
-Deployment provenance and qualification remain administrator-only; the
-`durable_production` profile rejects process-local invocation state.
-
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
 servers + skills). Both real files are gitignored. The default governed tool plane
@@ -108,42 +99,24 @@ routes. See the
 
 Upstream offers: see [docs/UPSTREAM_OFFERS.md](docs/UPSTREAM_OFFERS.md).
 
-Durable qualification requires exact passing external evidence; missing
-infrastructure is an unpassed gate. See `docs/MULTI_GATEWAY_QUALIFICATION.md`.
+Durable-runtime invariants (accepted admission, `deerflow-runtime-api`,
+execution budgets and evidence projections, run evidence bundles, durable
+batches, MCP tasks and replay keys, scheduled tasks, exact-two qualification)
+live in [backend/AGENTS.md](backend/AGENTS.md) and the `docs/` files it links.
+Missing qualification infrastructure is an unpassed gate, never a skip.
 
-Skill quality review note:
-- `skills/public/skill-reviewer/` is the read-only reviewer using the
-  `review_skill_package` tool and `contracts/skill_review/`; model-visible data
-  is compact and tag-neutralized, raw payloads stay in tool artifacts. See
-  [backend/AGENTS.md](backend/AGENTS.md) for ownership boundaries.
-- Durable invocations snapshot effective skills before admission and execute
-  only accepted immutable material; nonempty packages require Docker/AIO, and
-  live edits affect later invocations only.
-
-Durable MCP task note:
-- MCP replay uses a dedicated startup-frozen HMAC keyring; exact-two key
-  changes need its quiesced restart. Public lineage stays redacted and parent
-  evidence needs independent parent-run authorization; see
-  [backend/AGENTS.md](backend/AGENTS.md).
-- CI skill-review waivers (`.github/skill-review-waivers.v1.json`, enforced by
-  `scripts/review_changed_public_skills.py`) come only from the trusted base
-  manifest, bind one error to its file SHA-256 and expiry, stay visible, and
-  never waive blockers; an entry may preapprove future full-file SHA-256 values,
-  effective once that manifest lands in the trusted base. Merge the waiver
-  before changing the skill, then promote the consumed hash to `file_sha256`.
-
-Durable batches are parent-receipt/tenant bound and database-time fenced;
-effects may repeat and production stays disabled.
-
-Portable run evidence is terminal-only, complete, digest-bound, and unsigned;
-ordinary artifact ZIPs are not evidence. See `docs/RUN_EVIDENCE_BUNDLES.md`.
-
-New durable invocations bind `ExecutionBudgetV1`; policy state is private,
-HMAC-backed, and run-fenced, and the evidence-summary API and Evidence panel
-expose only safe projections. See `docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md`.
-
-Scheduled tasks require `scheduler.enabled`; waiting occurrences stay queued
-without consuming concurrency. See [backend/AGENTS.md](backend/AGENTS.md).
+Skill review: `skills/public/skill-reviewer/` is the read-only reviewer using
+the `review_skill_package` tool and `contracts/skill_review/`; model-visible
+data is compact and tag-neutralized, raw payloads stay in tool artifacts.
+Durable invocations snapshot effective skills before admission and execute only
+accepted immutable material (nonempty packages require Docker/AIO); live edits
+affect later invocations only. CI skill-review waivers
+(`.github/skill-review-waivers.v1.json`, enforced by
+`scripts/review_changed_public_skills.py`) come only from the trusted base
+manifest, bind one error to its file SHA-256 and expiry, stay visible, and never
+waive blockers; an entry may preapprove future full-file SHA-256 values,
+effective once that manifest lands in the trusted base. Merge the waiver before
+changing the skill, then promote the consumed hash to `file_sha256`.
 
 ## Commands: Root vs. Module
 
@@ -193,7 +166,7 @@ cd frontend && pnpm test      # Unit tests
 Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
 (`pnpm`) = per-module work.**
 
-Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. Diagnostic scripts resolve the runner and frontend directory to absolute paths before changing the child process working directory, so they remain independent of the caller's current directory. The runner preserves direct `pnpm`/`pnpm.cmd` priority, falls back to `corepack pnpm`, and is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
+Host-side pnpm consumers (root/frontend Makefiles, diagnostic scripts) run through `scripts/pnpm.py`: it prefers a direct `pnpm`/`pnpm.cmd`, falls back to `corepack pnpm`, resolves absolute paths before changing directory, and runs from `frontend/` so Corepack honors that project's pinned package-manager version.
 
 ### Prerequisites before `make dev`
 
