@@ -1,3 +1,8 @@
 # The tenant .env lives on the VM's data disk, never in this tree: the golden
 # build refuses a bundle that carries one.
 .env
+# The root .gitignore hides the repo's runtime config.yaml and
+# extensions_config.json; this directory's copies are the shipped template
+# and seed, so re-include them.
+!config.yaml
+!extensions_config.json
