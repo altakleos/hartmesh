@@ -62,8 +62,8 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   `run.end` or conversation content.
 - `packages/runtime-api/` is the stdlib-only portable contract; Gateway HTTP and
   in-process adapters must stay behaviorally identical. The synchronous
-  `DeerFlowClient` is a legacy local graph client outside `InvocationRuntime`
-  and makes no durability claim.
+  `DeerFlowClient` is a legacy local graph client and does not enter `InvocationRuntime`;
+  it makes no durability claim.
 - Artifact provenance proves which extension bytes/configuration HartMesh
   admitted within one startup-frozen process generation; extensions still run
   with Gateway privileges and must come from a trusted operator source.
