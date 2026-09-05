@@ -774,11 +774,11 @@ async def task_tool(
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     parent_context = runtime.context if runtime is not None else None
     parent_context = parent_context if isinstance(parent_context, dict) else {}
-    from deerflow.sandbox.accepted_material import (
-        accepted_sandbox_bridge_from_runtime_context,
-    )
+    from deerflow.sandbox.session import current_sandbox_session
 
-    accepted_sandbox_session_bridge = accepted_sandbox_bridge_from_runtime_context(parent_context)
+    # The child borrows the parent's declared session. The declaration is the
+    # only carrier: nothing read from the runtime context dict can stand in.
+    sandbox_session = current_sandbox_session()
     resolved_agent_material = parent_context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
     if not isinstance(resolved_agent_material, ResolvedAgentMaterialV1):
         resolved_agent_material = None
@@ -1107,8 +1107,8 @@ async def task_tool(
         executor_kwargs["resolved_agent_material"] = resolved_agent_material
     if skill_projection_token is not None:
         executor_kwargs["skill_projection_token"] = skill_projection_token
-    if accepted_sandbox_session_bridge is not None:
-        executor_kwargs["accepted_sandbox_session_bridge"] = accepted_sandbox_session_bridge
+    if sandbox_session is not None:
+        executor_kwargs["sandbox_session"] = sandbox_session
     if tool_evidence_binding is not None and tool_evidence_sink is not None:
         executor_kwargs["tool_evidence_parent_binding"] = tool_evidence_binding
         executor_kwargs["tool_evidence_sink"] = cross_loop_receipt_sink(tool_evidence_sink)

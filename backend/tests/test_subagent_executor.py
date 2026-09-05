@@ -84,6 +84,7 @@ def _setup_executor_classes():
     original_executor = sys.modules.get("deerflow.subagents.executor")
     original_audit_context = sys.modules.get("deerflow.agents.middlewares.audit_context")
     original_sandbox_overwrite = sys.modules.get("deerflow.sandbox.overwrite")
+    original_sandbox_session = sys.modules.get("deerflow.sandbox.session")
     original_tool_search = sys.modules.get("deerflow.tools.builtins.tool_search")
 
     # Preload real executor dependencies before replacing their parent packages
@@ -91,6 +92,7 @@ def _setup_executor_classes():
     # sys.modules makes this fixture independent of test collection order.
     audit_context_module = importlib.import_module("deerflow.agents.middlewares.audit_context")
     sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
+    sandbox_session_module = importlib.import_module("deerflow.sandbox.session")
     tool_search_module = importlib.import_module("deerflow.tools.builtins.tool_search")
 
     # Remove mocked executor if exists (from conftest.py)
@@ -107,6 +109,7 @@ def _setup_executor_classes():
     sys.modules["deerflow.skills.storage"] = storage_module
     sys.modules["deerflow.agents.middlewares.audit_context"] = audit_context_module
     sys.modules["deerflow.sandbox.overwrite"] = sandbox_overwrite_module
+    sys.modules["deerflow.sandbox.session"] = sandbox_session_module
     sys.modules["deerflow.tools.builtins.tool_search"] = tool_search_module
 
     # Import real classes inside fixture
@@ -160,6 +163,10 @@ def _setup_executor_classes():
         sys.modules["deerflow.sandbox.overwrite"] = original_sandbox_overwrite
     else:
         sys.modules.pop("deerflow.sandbox.overwrite", None)
+    if original_sandbox_session is not None:
+        sys.modules["deerflow.sandbox.session"] = original_sandbox_session
+    else:
+        sys.modules.pop("deerflow.sandbox.session", None)
     if original_tool_search is not None:
         sys.modules["deerflow.tools.builtins.tool_search"] = original_tool_search
     else:
@@ -222,6 +229,28 @@ async def async_iterator(items):
 # -----------------------------------------------------------------------------
 # Fixtures
 # -----------------------------------------------------------------------------
+
+
+def _stub_declaration(public_ref: str, *, mount_scope=None):
+    from deerflow.sandbox.sandbox import Sandbox
+    from deerflow.sandbox.session import (
+        SandboxSessionDeclaration,
+        SandboxSessionKind,
+        SandboxSessionTerminal,
+    )
+
+    stub_type = type("StubSandbox", (Sandbox,), {name: (lambda self, *args, **kwargs: None) for name in Sandbox.__abstractmethods__})
+    handle = stub_type(public_ref)
+    handle.persistent_shell_sessions = False
+    return SandboxSessionDeclaration(
+        public_ref=public_ref,
+        mount_scope=mount_scope,
+        kind=SandboxSessionKind.ACCEPTED,
+        terminal=SandboxSessionTerminal.RETIRE,
+        handle=handle,
+        is_live=lambda: True,
+        retire=lambda: None,
+    )
 
 
 @pytest.fixture
@@ -1139,6 +1168,54 @@ class TestAgentConstruction:
 
 class TestAsyncExecutionPath:
     """Test _aexecute() async execution path."""
+
+    @pytest.mark.anyio
+    async def test_aexecute_binds_the_handed_sandbox_session_for_the_child_only(self, classes, base_config, mock_agent, msg):
+        """A batch child runs on a loop whose context has no declaration; an
+        in-run subagent inherits its parent's. Either way the executor binds
+        the declaration it was handed for exactly the child's execution, so the
+        child's tools and middleware resolve that session and nothing else."""
+        from deerflow.sandbox.session import current_sandbox_session
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        declaration = _stub_declaration("accepted-session-child")
+        observed = []
+        final_state = {"messages": [msg.human("Do something"), msg.ai("done", "msg-1")]}
+
+        async def astream(*_args, **kwargs):
+            observed.append(current_sandbox_session())
+            assert "__deerflow_accepted_sandbox_session_v1" not in kwargs["context"]
+            yield final_state
+
+        mock_agent.astream = astream
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+            sandbox_session=declaration,
+        )
+
+        assert current_sandbox_session() is None
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Do something")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert observed == [declaration]
+        assert current_sandbox_session() is None
+
+    def test_executor_refuses_a_sandbox_session_that_is_not_a_declaration(self, classes, base_config):
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        with pytest.raises(TypeError, match="sandbox_session must be SandboxSessionDeclaration or None"):
+            SubagentExecutor(
+                config=base_config,
+                tools=[],
+                thread_id="test-thread",
+                trace_id="test-trace",
+                sandbox_session=SimpleNamespace(handle=object()),
+            )
 
     @pytest.mark.anyio
     async def test_aexecute_success(self, classes, base_config, mock_agent, msg):
@@ -5251,8 +5328,8 @@ class TestBashExecutionHarvest:
         classes,
         monkeypatch,
     ):
-        """Accepted state carries only a safe session reference; its trusted
-        bridge owns the producing sandbox capability declaration."""
+        """Accepted state carries only a safe session reference; the declared
+        session's handle owns the producing sandbox capability declaration."""
         executor_module = importlib.import_module("deerflow.subagents.executor")
         monkeypatch.setitem(
             sys.modules,
@@ -5268,11 +5345,11 @@ class TestBashExecutionHarvest:
         )
         state = self._final_state(classes)
         state["sandbox"] = {"sandbox_id": "accepted-session-safe-ref"}
-        bridge = SimpleNamespace(persistent_shell_sessions=True)
+        declaration = SimpleNamespace(handle=SimpleNamespace(persistent_shell_sessions=True))
 
         executions = executor_module._harvest_bash_executions(
             state,
-            accepted_sandbox_session_bridge=bridge,
+            sandbox_session=declaration,
         )
 
         assert executions[0]["shell_persistent"] is True

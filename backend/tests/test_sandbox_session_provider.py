@@ -32,6 +32,8 @@ from deerflow.sandbox.session import (
     SessionProvider,
     bind_sandbox_session,
     current_sandbox_session,
+    declared_sandbox,
+    sandbox_mount_scope,
     sandbox_session_provider,
     unwrap_sandbox_provider,
 )
@@ -313,3 +315,51 @@ def test_cold_start_wraps_the_configured_provider_class(monkeypatch):
         assert isinstance(unwrap_sandbox_provider(installed), _Backing)
     finally:
         reset_sandbox_provider()
+
+
+def test_declared_sandbox_is_the_one_resolver_for_the_executing_context(stack):
+    """Tools and middleware ask one question before touching state or the
+    provider: what is this execution's declared sandbox? Nothing declared is
+    the ordinary path."""
+    declaration, _state = _declaration()
+
+    assert declared_sandbox() is None
+    with bind_sandbox_session(declaration):
+        assert declared_sandbox() is declaration.handle
+    assert declared_sandbox() is None
+
+
+def test_declared_sandbox_leaves_liveness_to_the_handle(stack):
+    """A fenced handle raises its own typed authority error on use, which the
+    tools already propagate untouched. Resolving must not convert that into a
+    different error class or fall through to an ordinary acquire."""
+    _backing, _registry, provider = stack
+    declaration, state = _declaration(live=False)
+    del state
+
+    with bind_sandbox_session(declaration):
+        assert declared_sandbox() is declaration.handle
+        with pytest.raises(SandboxSessionConflict):
+            provider.acquire("thread-1", user_id="user-1")
+
+
+def test_sandbox_mount_scope_needs_both_identities():
+    assert sandbox_mount_scope("user-1", "thread-1") == ("user-1", "thread-1")
+    assert sandbox_mount_scope(None, "thread-1") is None
+    assert sandbox_mount_scope("user-1", None) is None
+    assert sandbox_mount_scope("", "thread-1") is None
+    assert sandbox_mount_scope("user-1", "") is None
+    assert sandbox_mount_scope(1, "thread-1") is None
+
+
+def test_a_declaration_without_a_mount_scope_never_refuses_an_ordinary_acquire(stack):
+    """A batch child is keyed by its attempt, not by the parent's thread, so
+    no ordinary acquire can collide with it and none is refused because of it."""
+    backing, registry, provider = stack
+    declaration, _state = _declaration(public_ref="accepted-session-child", mount_scope=None)
+    registry.declare(declaration)
+
+    sandbox_id = provider.acquire("thread-1", user_id="user-1")
+
+    assert sandbox_id == "box:user-1:thread-1"
+    assert ("acquire", "thread-1", "user-1") in backing.calls

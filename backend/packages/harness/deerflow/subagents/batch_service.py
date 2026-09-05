@@ -41,8 +41,10 @@ from deerflow.sandbox.accepted_material import (
     AcceptedSkillSandboxBindingV1,
     accepted_scope_reference,
     capture_accepted_file_manifest,
+    declare_accepted_sandbox_session,
     resolve_accepted_materializer,
     validate_accepted_materialization,
+    withdraw_accepted_sandbox_session,
 )
 from deerflow.sandbox.sandbox_provider import release_accepted_skill_consumer
 from deerflow.subagents.batch_acceptance import (
@@ -766,6 +768,7 @@ class SubagentBatchService:
             capability_profile_digest=selection.capability_profile.digest,
         )
         lease = None
+        bridge: AcceptedSandboxSessionBridge | None = None
         try:
             sandbox, lease, evidence = await selection.materializer.acquire_and_materialize(
                 request,
@@ -794,8 +797,13 @@ class SubagentBatchService:
                 fence_adapter=fence,
                 tool_receipt_ref_resolver=_active_tool_receipt_ref,
             )
-            bridge = AcceptedSandboxSessionBridge(
+            # A batch child is the accepted kind under its own attempt key. It
+            # declares no mount scope, so no ordinary acquire can collide with
+            # it, and the executor binds the declaration for the child alone;
+            # this service loop is never bound to it.
+            bridge = declare_accepted_sandbox_session(
                 session,
+                mount_scope=None,
                 owner_loop=owner_loop,
             )
             attached = await self._repository.attach_item_sandbox_evidence(
@@ -811,6 +819,8 @@ class SubagentBatchService:
                 raise BatchStaleAttempt()
             return bridge
         except BaseException:
+            if bridge is not None:
+                withdraw_accepted_sandbox_session(bridge)
             if lease is not None:
                 try:
                     await selection.materializer.release(lease)
@@ -989,7 +999,7 @@ class SubagentBatchService:
                 accepted_extension_configuration_digest=(acceptance.extension_configuration_digest),
                 execution_capacity=self._execution_capacity,
                 execution_admitted_callback=persist_execution_started,
-                accepted_sandbox_session_bridge=accepted_sandbox_session,
+                sandbox_session=(None if accepted_sandbox_session is None else accepted_sandbox_session.declaration),
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
             execution_id = executor.execute_async(prompt, task_id=item_id)
@@ -1159,6 +1169,7 @@ class SubagentBatchService:
                         "Durable batch sandbox cleanup interrupted (item_id=%s); completing lifecycle persistence first",
                         item_id,
                     )
+                withdraw_accepted_sandbox_session(accepted_sandbox_session)
                 lifecycle_observations = accepted_sandbox_session.lifecycle_observations
                 if lifecycle_observations:
                     try:

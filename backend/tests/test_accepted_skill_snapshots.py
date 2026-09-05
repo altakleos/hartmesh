@@ -70,7 +70,6 @@ from deerflow.sandbox.accepted_material import (
     AcceptedSandboxCapabilityProfileV1,
     AcceptedSandboxQualificationV1,
     AcceptedSkillExecutionEvidenceV2,
-    accepted_sandbox_from_runtime_context,
 )
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
@@ -2235,13 +2234,16 @@ async def test_durable_worker_installs_running_claim_sandbox_session(
 
     observed_facades = []
     observed_results = []
+    observed_declarations = []
 
     class Agent:
         async def astream(self, *_args, **kwargs):
-            facade = accepted_sandbox_from_runtime_context(
-                kwargs["config"]["context"],
-            )
+            from deerflow.sandbox.session import current_sandbox_session, declared_sandbox
+
+            assert "__deerflow_accepted_sandbox_session_v1" not in kwargs["config"]["context"]
+            facade = declared_sandbox()
             observed_facades.append(facade)
+            observed_declarations.append(current_sandbox_session())
             if facade is not None:
                 observed_results.append(
                     await asyncio.to_thread(
@@ -2348,6 +2350,13 @@ async def test_durable_worker_installs_running_claim_sandbox_session(
     assert observed_facades[0] is not raw_sandbox
     assert raw_sandbox.id not in observed_facades[0].id
     assert observed_results == ["gated"]
+    from deerflow.sandbox.session import current_sandbox_session, get_sandbox_session_registry
+
+    assert observed_declarations[0] is not None
+    assert observed_declarations[0].handle is observed_facades[0]
+    assert observed_declarations[0].mount_scope == ("user-1", record.thread_id)
+    assert get_sandbox_session_registry().lookup(observed_facades[0].id) is None
+    assert current_sandbox_session() is None
     assert raw_sandbox.commands == ["echo gated"]
     assert materializer.validated >= 2
     assert all(pair == (lease, evidence) for pair in materializer.validated_tuples)

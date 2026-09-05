@@ -16,12 +16,15 @@ The deep module is
 - `AcceptedSandboxOperationV1.operation_ref` is a fresh
   `accepted-operation-<32-lowercase-hex>` identifier. Operation arguments are
   process-local and intentionally have no portable serializer.
-- `accepted_sandbox_bridge_from_runtime_context(context)` resolves only the
-  host-installed bridge and fails closed on a forged value. Project 05 may read
-  the evidence reference from it. If retrieval itself submits a sandbox
-  operation through the bridge, construct one `AcceptedSandboxOperationV1`,
-  retain its `operation_ref`, and call `bridge.execute(operation)`; do not reach
-  through the facade to recover a provider ID.
+- `current_accepted_sandbox_bridge()` resolves the bridge behind the executing
+  context's declared accepted session, or `None` when the execution declared
+  none. The declaration is the only carrier: nothing placed in a runtime
+  context dict can stand in for it, so there is no value to forge. Project 05
+  may read the evidence reference from the bridge. If retrieval itself submits
+  a sandbox operation through the bridge, construct one
+  `AcceptedSandboxOperationV1`, retain its `operation_ref`, and call
+  `bridge.execute(operation)`; do not reach through the facade to recover a
+  provider ID.
 
 The ordinary `Sandbox` facade creates operation envelopes internally, so a
 caller that needs an operation link must capture the envelope at its typed

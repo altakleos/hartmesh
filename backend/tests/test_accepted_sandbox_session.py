@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -23,15 +24,26 @@ from deerflow.sandbox.accepted_material import (
     AcceptedSandboxSession,
     AcceptedSandboxSessionBridge,
     accepted_execution_evidence_reference,
-    accepted_sandbox_from_runtime_context,
-    install_accepted_sandbox_session,
-    strip_accepted_sandbox_session,
+    current_accepted_sandbox_bridge,
+    declare_accepted_sandbox_session,
+    withdraw_accepted_sandbox_session,
 )
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
     SandboxProvider,
     reset_sandbox_provider,
     set_sandbox_provider,
+)
+from deerflow.sandbox.session import (
+    SandboxSessionDeclaration,
+    SandboxSessionKind,
+    SandboxSessionTerminal,
+    bind_sandbox_session,
+    current_sandbox_session,
+    declared_sandbox,
+    get_sandbox_session_registry,
+    sandbox_mount_scope,
+    set_current_sandbox_session,
 )
 from deerflow.sandbox.tools import bash_tool, ensure_sandbox_initialized_async
 
@@ -212,6 +224,25 @@ def _session(*, run_current: bool = True, material_current: bool = True):
         run_fence_validator=validate_run,
     )
     return session, sandbox, materializer, authority_calls
+
+
+@contextmanager
+def _declared(session: AcceptedSandboxSession, *, user_id: str | None = "user-1", thread_id: str | None = "thread-1"):
+    """Declare ``session`` and bind it to the executing context for the block.
+
+    This is the shape the durable worker and the subagent executor use: the
+    declaration is registered once, bound to the execution that owns it, and
+    withdrawn when that execution ends.
+    """
+    bridge = declare_accepted_sandbox_session(
+        session,
+        mount_scope=sandbox_mount_scope(user_id, thread_id),
+    )
+    try:
+        with bind_sandbox_session(bridge.declaration):
+            yield bridge
+    finally:
+        withdraw_accepted_sandbox_session(bridge)
 
 
 def test_session_rejects_a_sandbox_from_a_different_provider_resource() -> None:
@@ -622,10 +653,9 @@ async def test_session_covers_every_sandbox_operation(operation, expected) -> No
 @pytest.mark.asyncio
 async def test_session_bridge_returns_only_a_safe_sandbox_facade() -> None:
     session, sandbox, materializer, authority_calls = _session()
-    context: dict[str, object] = {}
 
-    bridge = install_accepted_sandbox_session(context, session)
-    facade = accepted_sandbox_from_runtime_context(context)
+    with _declared(session) as bridge:
+        facade = declared_sandbox()
 
     assert isinstance(bridge, AcceptedSandboxSessionBridge)
     assert facade is bridge.sandbox
@@ -638,12 +668,11 @@ async def test_session_bridge_returns_only_a_safe_sandbox_facade() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_sandbox_resolution_cannot_bypass_an_installed_session(
+async def test_tool_sandbox_resolution_cannot_bypass_a_declared_session(
     monkeypatch,
 ) -> None:
     session, raw_sandbox, _materializer, _authority_calls = _session()
     context: dict[str, object] = {"thread_id": "thread-1"}
-    bridge = install_accepted_sandbox_session(context, session)
 
     class PoisonProvider(SandboxProvider):
         def acquire(self, thread_id=None, *, user_id=None):
@@ -673,7 +702,8 @@ async def test_tool_sandbox_resolution_cannot_bypass_an_installed_session(
     )
     set_sandbox_provider(PoisonProvider())
     try:
-        resolved = await ensure_sandbox_initialized_async(runtime)
+        with _declared(session) as bridge:
+            resolved = await ensure_sandbox_initialized_async(runtime)
     finally:
         reset_sandbox_provider()
 
@@ -688,7 +718,6 @@ async def test_public_tool_does_not_convert_authority_loss_to_model_text(
         run_current=False,
     )
     context: dict[str, object] = {"thread_id": "thread-1"}
-    install_accepted_sandbox_session(context, session)
 
     async def authorize(**kwargs):
         del kwargs
@@ -707,9 +736,12 @@ async def test_public_tool_does_not_convert_authority_loss_to_model_text(
         store=None,
     )
 
-    with pytest.raises(
-        AcceptedSandboxAuthorityLostError,
-        match="accepted_sandbox_run_fence_lost",
+    with (
+        _declared(session),
+        pytest.raises(
+            AcceptedSandboxAuthorityLostError,
+            match="accepted_sandbox_run_fence_lost",
+        ),
     ):
         await bash_tool.coroutine(runtime, "echo forbidden", "authority test")
 
@@ -726,8 +758,6 @@ async def test_tool_output_externalization_resolves_the_gated_facade(
     )
 
     session, raw_sandbox, _materializer, _authority_calls = _session()
-    context: dict[str, object] = {}
-    bridge = install_accepted_sandbox_session(context, session)
 
     def forbidden_provider():
         raise AssertionError("externalization must not look up the raw provider")
@@ -737,11 +767,12 @@ async def test_tool_output_externalization_resolves_the_gated_facade(
         forbidden_provider,
     )
     runtime = SimpleNamespace(
-        context=context,
+        context={},
         state={"sandbox": {"sandbox_id": raw_sandbox.id}},
     )
 
-    assert _resolve_sandbox(SimpleNamespace(runtime=runtime)) is bridge.sandbox
+    with _declared(session) as bridge:
+        assert _resolve_sandbox(SimpleNamespace(runtime=runtime)) is bridge.sandbox
 
 
 @pytest.mark.asyncio
@@ -753,8 +784,6 @@ async def test_tool_output_externalization_denies_uninitialized_session_state(
     )
 
     session, raw_sandbox, _materializer, _authority_calls = _session()
-    context: dict[str, object] = {}
-    install_accepted_sandbox_session(context, session)
     provider_calls = 0
 
     def forbidden_provider():
@@ -766,9 +795,10 @@ async def test_tool_output_externalization_denies_uninitialized_session_state(
         "deerflow.agents.middlewares.tool_output_budget_middleware.get_sandbox_provider",
         forbidden_provider,
     )
-    runtime = SimpleNamespace(context=context, state={})
+    runtime = SimpleNamespace(context={}, state={})
 
-    assert _resolve_sandbox(SimpleNamespace(runtime=runtime)) is None
+    with _declared(session):
+        assert _resolve_sandbox(SimpleNamespace(runtime=runtime)) is None
     assert provider_calls == 0
     assert raw_sandbox.calls == []
 
@@ -784,8 +814,7 @@ async def test_tool_output_externalization_never_reopens_the_raw_provider(
     from deerflow.config.tool_output_config import ToolOutputConfig
 
     session, raw_sandbox, materializer, _authority_calls = _session()
-    context: dict[str, object] = {}
-    bridge = install_accepted_sandbox_session(context, session)
+    bridge = declare_accepted_sandbox_session(session, mount_scope=None)
     provider_calls = 0
 
     def forbidden_provider():
@@ -817,6 +846,7 @@ async def test_tool_output_externalization_never_reopens_the_raw_provider(
         ),
         sandbox=bridge.sandbox,
     )
+    withdraw_accepted_sandbox_session(bridge)
 
     assert result is not None and result[1] == "externalized"
     assert provider_calls == 0
@@ -834,7 +864,6 @@ async def test_sandbox_middleware_uses_session_without_provider_lifecycle(
         "thread_id": "thread-1",
         "user_id": "user-1",
     }
-    bridge = install_accepted_sandbox_session(context, session)
 
     async def authorize(**kwargs):
         del kwargs
@@ -862,9 +891,12 @@ async def test_sandbox_middleware_uses_session_without_provider_lifecycle(
     middleware = SandboxMiddleware(lazy_init=True)
     set_sandbox_provider(PoisonProvider())
     try:
-        update = await middleware.abefore_agent({}, runtime)
-        assert update == {"sandbox": {"sandbox_id": bridge.safe_reference}}
-        assert await middleware.aafter_agent(update, runtime) is None
+        with _declared(session) as bridge:
+            update = await middleware.abefore_agent({}, runtime)
+            assert update == {"sandbox": {"sandbox_id": bridge.safe_reference}}
+            assert await middleware.aafter_agent(update, runtime) is None
+            assert middleware.before_agent(update, runtime) is None
+            assert middleware.after_agent(update, runtime) is None
     finally:
         reset_sandbox_provider()
 
@@ -872,26 +904,26 @@ async def test_sandbox_middleware_uses_session_without_provider_lifecycle(
 
 
 @pytest.mark.asyncio
-async def test_installed_session_is_declared_to_the_session_registry_and_revoked_on_strip() -> None:
-    from deerflow.sandbox.session import (
-        SandboxSessionTerminal,
-        SessionProvider,
-        current_sandbox_session,
-        get_sandbox_session_registry,
-    )
+async def test_declared_session_is_registered_bound_by_its_owner_and_withdrawn() -> None:
+    """Declaring registers the session; binding is the owner's explicit act
+    (the worker binds for a whole run, the executor for one child execution);
+    withdrawing revokes the registration and clears the owner's binding."""
+    from deerflow.sandbox.session import SessionProvider
 
     session, _raw_sandbox, _materializer, _authority_calls = _session()
-    context: dict[str, object] = {"thread_id": "thread-1", "user_id": "user-1"}
     registry = get_sandbox_session_registry()
-    bridge = install_accepted_sandbox_session(context, session)
+    bridge = declare_accepted_sandbox_session(session, mount_scope=("user-1", "thread-1"))
     try:
         declaration = registry.lookup(bridge.safe_reference)
-        assert declaration is not None
+        assert declaration is bridge.declaration
+        assert isinstance(declaration, SandboxSessionDeclaration)
         assert declaration.handle is bridge.sandbox
+        assert declaration.public_ref == bridge.safe_reference
         assert declaration.mount_scope == ("user-1", "thread-1")
+        assert declaration.kind is SandboxSessionKind.ACCEPTED
         assert declaration.terminal is SandboxSessionTerminal.RETIRE
         assert declaration.is_live()
-        assert current_sandbox_session() is declaration
+        assert current_sandbox_session() is None, "declaring must not bind the declarer's context"
 
         class PoisonProvider(SandboxProvider):
             def acquire(self, thread_id=None, *, user_id=None):
@@ -904,50 +936,47 @@ async def test_installed_session_is_declared_to_the_session_registry_and_revoked
                 raise AssertionError("a public ref must not reach the backing provider")
 
         provider = SessionProvider(PoisonProvider(), registry=registry)
+        set_current_sandbox_session(declaration)
         assert provider.acquire("thread-1", user_id="user-1") == bridge.safe_reference
         assert provider.get(bridge.safe_reference) is bridge.sandbox
+        assert declared_sandbox() is bridge.sandbox
     finally:
-        strip_accepted_sandbox_session(context)
+        withdraw_accepted_sandbox_session(bridge)
     assert registry.lookup(bridge.safe_reference) is None
     assert current_sandbox_session() is None
+    assert declared_sandbox() is None
+    withdraw_accepted_sandbox_session(bridge)
 
 
 @pytest.mark.asyncio
-async def test_installed_session_without_a_user_declares_no_mount_scope() -> None:
-    from deerflow.sandbox.session import get_sandbox_session_registry
-
+async def test_a_batch_child_declares_no_mount_scope() -> None:
     session, _raw_sandbox, _materializer, _authority_calls = _session()
-    context: dict[str, object] = {"thread_id": "thread-1"}
-    bridge = install_accepted_sandbox_session(context, session)
+    bridge = declare_accepted_sandbox_session(session, mount_scope=None)
     try:
         declaration = get_sandbox_session_registry().lookup(bridge.safe_reference)
         assert declaration is not None
         assert declaration.mount_scope is None
     finally:
-        strip_accepted_sandbox_session(context)
+        withdraw_accepted_sandbox_session(bridge)
 
 
 @pytest.mark.asyncio
 async def test_closing_the_session_ends_its_declaration() -> None:
-    from deerflow.sandbox.session import get_sandbox_session_registry
-
     session, _raw_sandbox, _materializer, _authority_calls = _session()
-    context: dict[str, object] = {"thread_id": "thread-1", "user_id": "user-1"}
-    bridge = install_accepted_sandbox_session(context, session)
+    bridge = declare_accepted_sandbox_session(session, mount_scope=("user-1", "thread-1"))
     try:
         assert bridge.is_open
         await bridge.close()
         assert not bridge.is_open
         assert get_sandbox_session_registry().lookup(bridge.safe_reference) is None
     finally:
-        strip_accepted_sandbox_session(context)
+        withdraw_accepted_sandbox_session(bridge)
 
 
 @pytest.mark.asyncio
 async def test_close_sync_retires_from_a_worker_thread_and_refuses_the_owner_loop() -> None:
     session, _raw_sandbox, _materializer, _authority_calls = _session()
-    context: dict[str, object] = {"thread_id": "thread-1", "user_id": "user-1"}
-    bridge = install_accepted_sandbox_session(context, session)
+    bridge = declare_accepted_sandbox_session(session, mount_scope=("user-1", "thread-1"))
     try:
         with pytest.raises(AcceptedSandboxAuthorityLostError, match="accepted_sandbox_sync_call_on_owner_loop"):
             bridge.close_sync()
@@ -956,4 +985,107 @@ async def test_close_sync_retires_from_a_worker_thread_and_refuses_the_owner_loo
         assert not bridge.is_open
         await asyncio.to_thread(bridge.close_sync)
     finally:
-        strip_accepted_sandbox_session(context)
+        withdraw_accepted_sandbox_session(bridge)
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_context_value_cannot_supply_a_session(monkeypatch) -> None:
+    """The declaration is the only carrier. A value planted in the runtime
+    context, whatever key it uses, is never read, so tool resolution takes the
+    ordinary provider path and never touches the planted object."""
+    session, raw_sandbox, _materializer, _authority_calls = _session()
+    bridge = AcceptedSandboxSessionBridge(session, owner_loop=asyncio.get_running_loop())
+    context: dict[str, object] = {
+        "thread_id": "thread-1",
+        "user_id": "user-1",
+        "__deerflow_accepted_sandbox_session_v1": bridge,
+        "accepted_sandbox_session": bridge.sandbox,
+    }
+
+    class OrdinaryProvider(SandboxProvider):
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+            self.sandbox = RecordingSandbox()
+
+        def acquire(self, thread_id=None, *, user_id=None):
+            self.calls.append(("acquire", thread_id, user_id))
+            return "ordinary-box"
+
+        async def acquire_async(self, thread_id=None, *, user_id=None):
+            self.calls.append(("acquire_async", thread_id, user_id))
+            return "ordinary-box"
+
+        def get(self, sandbox_id):
+            self.calls.append(("get", sandbox_id))
+            return self.sandbox if sandbox_id == "ordinary-box" else None
+
+        def release(self, sandbox_id):
+            self.calls.append(("release", sandbox_id))
+
+    async def authorize(**kwargs):
+        del kwargs
+
+    monkeypatch.setattr("deerflow.sandbox.tools.authorize_sandbox_execution_async", authorize)
+    runtime = ToolRuntime(
+        state={},
+        context=context,
+        config={"configurable": {}},
+        stream_writer=lambda _: None,
+        tools=[],
+        tool_call_id="call-1",
+        store=None,
+    )
+    provider = OrdinaryProvider()
+    set_sandbox_provider(provider)
+    try:
+        assert current_sandbox_session() is None
+        resolved = await ensure_sandbox_initialized_async(runtime)
+    finally:
+        reset_sandbox_provider()
+
+    assert resolved is provider.sandbox
+    assert resolved is not bridge.sandbox
+    assert ("acquire_async", "thread-1", "user-1") in provider.calls
+    assert raw_sandbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_current_accepted_sandbox_bridge_resolves_only_the_accepted_kind() -> None:
+    """Evidence consumers that need the bridge (the evidence reference, an
+    operation link) find it through the declaration; an ordinary declared
+    handle is not an accepted session and yields nothing."""
+    session, _raw_sandbox, _materializer, _authority_calls = _session()
+
+    assert current_accepted_sandbox_bridge() is None
+    with _declared(session) as bridge:
+        assert current_accepted_sandbox_bridge() is bridge
+        assert current_accepted_sandbox_bridge().execution_evidence_reference == bridge.execution_evidence_reference
+    assert current_accepted_sandbox_bridge() is None
+
+    ordinary = SandboxSessionDeclaration(
+        public_ref="ordinary-declared",
+        mount_scope=None,
+        kind=SandboxSessionKind.ORDINARY,
+        terminal=SandboxSessionTerminal.PARK,
+        handle=RecordingSandbox(),
+        is_live=lambda: True,
+        retire=lambda: None,
+    )
+    with bind_sandbox_session(ordinary):
+        assert current_accepted_sandbox_bridge() is None
+
+
+@pytest.mark.asyncio
+async def test_declare_refuses_a_session_that_is_already_declared() -> None:
+    """One session, one declaration: re-declaring mints the same public ref,
+    and the registry would let the newest win, so the first bridge's handle
+    would silently stop resolving. Refuse instead, until it is withdrawn."""
+    session, _raw_sandbox, _materializer, _authority_calls = _session()
+    bridge = declare_accepted_sandbox_session(session, mount_scope=None)
+    try:
+        with pytest.raises(AcceptedMaterialError, match="accepted_sandbox_session_already_declared"):
+            declare_accepted_sandbox_session(session, mount_scope=("user-1", "thread-1"))
+    finally:
+        withdraw_accepted_sandbox_session(bridge)
+    again = declare_accepted_sandbox_session(session, mount_scope=None)
+    withdraw_accepted_sandbox_session(again)

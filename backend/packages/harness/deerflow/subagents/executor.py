@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from contextlib import nullcontext
 from contextvars import Context, copy_context
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -85,7 +86,7 @@ if TYPE_CHECKING:
     # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
     # `from deerflow.subagents import SubagentExecutor`, which re-enters this
     # still-initializing package. Type-only here keeps the annotation precise.
-    from deerflow.sandbox.accepted_material import AcceptedSandboxSessionBridge
+    from deerflow.sandbox.session import SandboxSessionDeclaration
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
@@ -458,7 +459,7 @@ def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | No
 def _harvest_shell_persistence(
     final_state: Any,
     *,
-    accepted_sandbox_session_bridge: "AcceptedSandboxSessionBridge | None" = None,
+    sandbox_session: "SandboxSessionDeclaration | None" = None,
 ) -> bool | None:
     """Whether the sandbox that produced this state's bash evidence reuses one
     persistent shell session (``Sandbox.persistent_shell_sessions`` — AIO's
@@ -476,8 +477,10 @@ def _harvest_shell_persistence(
     fresh-shell proof. Consumers must fail closed (UNVERIFIED) on ``None``.
     """
     try:
-        if accepted_sandbox_session_bridge is not None:
-            declared = accepted_sandbox_session_bridge.persistent_shell_sessions
+        if sandbox_session is not None:
+            # A declared session's handle carries the producing sandbox's
+            # capability declaration; state holds only its public ref.
+            declared = getattr(sandbox_session.handle, "persistent_shell_sessions", None)
             return None if declared is None else bool(declared)
         from deerflow.sandbox.overwrite import unwrap_sandbox
         from deerflow.sandbox.sandbox_provider import get_sandbox_provider
@@ -501,7 +504,7 @@ def _harvest_shell_persistence(
 def _harvest_bash_executions(
     final_state: Any,
     *,
-    accepted_sandbox_session_bridge: "AcceptedSandboxSessionBridge | None" = None,
+    sandbox_session: "SandboxSessionDeclaration | None" = None,
 ) -> list[dict[str, Any]] | None:
     """Harvest bounded bash command/output evidence from one streamed state.
 
@@ -579,7 +582,7 @@ def _harvest_bash_executions(
         # closed in the acceptance matcher.
         shell_persistent = _harvest_shell_persistence(
             final_state,
-            accepted_sandbox_session_bridge=accepted_sandbox_session_bridge,
+            sandbox_session=sandbox_session,
         )
         for execution in executions:
             execution["shell_persistent"] = shell_persistent
@@ -835,7 +838,7 @@ class SubagentExecutor:
         tool_evidence_execution_task_id: str | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
         execution_admitted_callback: Callable[[], Awaitable[None]] | None = None,
-        accepted_sandbox_session_bridge: "AcceptedSandboxSessionBridge | None" = None,
+        sandbox_session: "SandboxSessionDeclaration | None" = None,
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
     ):
@@ -897,9 +900,10 @@ class SubagentExecutor:
                 process slot is acquired and immediately before model work.
                 Durable batch workers use it to persist ``started`` without
                 treating a queue-capacity rejection as an execution attempt.
-            accepted_sandbox_session_bridge: Parent-owned operation gate for
-                accepted durable sandbox access. The child borrows it and
-                never renews or closes the underlying lease.
+            sandbox_session: The declared sandbox session the child executes
+                under: an in-run subagent borrows its parent's declaration, a
+                durable batch child gets its own. The executor binds it for
+                exactly the child's execution and never retires it.
             acceptance_criteria: Optional lead-supplied completion requirements
                 (RFC #4651 PR3). Criterion values are model-supplied untrusted
                 data, so ``_build_initial_state`` appends them to the task
@@ -1054,19 +1058,12 @@ class SubagentExecutor:
         if execution_admitted_callback is not None and not callable(execution_admitted_callback):
             raise TypeError("execution_admitted_callback must be callable or None")
         self.execution_admitted_callback = execution_admitted_callback
-        if accepted_sandbox_session_bridge is not None:
-            from deerflow.sandbox.accepted_material import (
-                AcceptedSandboxSessionBridge,
-            )
+        if sandbox_session is not None:
+            from deerflow.sandbox.session import SandboxSessionDeclaration
 
-            if not isinstance(
-                accepted_sandbox_session_bridge,
-                AcceptedSandboxSessionBridge,
-            ):
-                raise TypeError(
-                    "accepted_sandbox_session_bridge must be AcceptedSandboxSessionBridge or None",
-                )
-        self.accepted_sandbox_session_bridge = accepted_sandbox_session_bridge
+            if not isinstance(sandbox_session, SandboxSessionDeclaration):
+                raise TypeError("sandbox_session must be SandboxSessionDeclaration or None")
+        self.sandbox_session = sandbox_session
         # Raw lead-supplied criteria; stripping/capping happens at render time
         # in report_contract.render_acceptance_criteria_block.
         self.acceptance_criteria = acceptance_criteria
@@ -1514,7 +1511,7 @@ class SubagentExecutor:
                 trace_id=self.trace_id,
                 status=SubagentStatus.PENDING,
             )
-        with ensure_trace_context(self.deerflow_trace_id):
+        with ensure_trace_context(self.deerflow_trace_id), self._sandbox_session_binding():
             try:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 async with capacity.slot():
@@ -1530,6 +1527,20 @@ class SubagentExecutor:
                     admission_failure=True,
                 )
                 return result
+
+    def _sandbox_session_binding(self):
+        """Bind the handed declaration for exactly this execution.
+
+        A batch child runs on the isolated loop, whose context carries no
+        declaration; an in-run subagent's copied context carries its parent's.
+        Either way the child's tools and middleware resolve the declaration it
+        was handed and nothing else, and the binding ends with the execution.
+        """
+        if self.sandbox_session is None:
+            return nullcontext()
+        from deerflow.sandbox.session import bind_sandbox_session
+
+        return bind_sandbox_session(self.sandbox_session)
 
     async def _aexecute_admitted(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -1617,7 +1628,7 @@ class SubagentExecutor:
                 return None
             return _harvest_bash_executions(
                 final_state,
-                accepted_sandbox_session_bridge=(self.accepted_sandbox_session_bridge),
+                sandbox_session=self.sandbox_session,
             )
 
         try:
@@ -1763,12 +1774,6 @@ class SubagentExecutor:
                 context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = self.resolved_agent_material
             if self.skill_projection_token is not None:
                 context[SKILL_PROJECTION_TOKEN_CONTEXT_KEY] = self.skill_projection_token
-            if self.accepted_sandbox_session_bridge is not None:
-                from deerflow.sandbox.accepted_material import (
-                    ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY,
-                )
-
-                context[ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY] = self.accepted_sandbox_session_bridge
             if self.tool_evidence_binding is not None and self.tool_evidence_sink is not None:
                 install_tool_evidence_context(
                     context,

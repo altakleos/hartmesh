@@ -1049,7 +1049,6 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         DEERFLOW_TRACE_METADATA_KEY,
         "__deerflow_accepted_parent_batch_context_v1",
-        "__deerflow_accepted_sandbox_session_v1",
         "__deerflow_recovery_executor_v1",
     }
 )
@@ -1232,12 +1231,6 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         strip_parent_batch_acceptance_context(configurable)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
-        from deerflow.sandbox.accepted_material import (
-            ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY,
-            strip_accepted_sandbox_session,
-        )
-
-        strip_accepted_sandbox_session(existing_context)
         strip_assembly_evidence_requirement(existing_context)
         from deerflow.runtime.tool_evidence import (
             TOOL_EVIDENCE_CONTEXT_KEY,
@@ -1276,7 +1269,6 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         for internal_key in (
             RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
             PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
-            ACCEPTED_SANDBOX_SESSION_CONTEXT_KEY,
             "accepted_agent_revision_digest",
             "accepted_extension_generation",
             "accepted_extension_manifest_digest",
@@ -2486,7 +2478,11 @@ async def run_agent(
                 AcceptedMaterialRequestV1,
                 AcceptedMaterialRequestV2,
                 AcceptedSandboxSession,
-                install_accepted_sandbox_session,
+                declare_accepted_sandbox_session,
+            )
+            from deerflow.sandbox.session import (
+                sandbox_mount_scope,
+                set_current_sandbox_session,
             )
 
             neutral_tuple = (
@@ -2566,8 +2562,13 @@ async def run_agent(
                     receipt = get_active_tool_receipt()
                     return None if receipt is None else receipt.receipt_id
 
-                accepted_sandbox_session = install_accepted_sandbox_session(
-                    runtime_ctx,
+                # Provisioned before declared, never lazily: the session already
+                # holds its materialized sandbox and lease. Declaring registers
+                # its public ref with the session provider; binding it here makes
+                # it this run's sandbox for every task and thread the run spawns
+                # from now on, in-run subagents included. Nothing is installed in
+                # the runtime context: the declaration is the only carrier.
+                accepted_sandbox_session = declare_accepted_sandbox_session(
                     AcceptedSandboxSession(
                         sandbox=materialization.sandbox,
                         materializer=materialization.materializer,
@@ -2578,7 +2579,12 @@ async def run_agent(
                         before_delegate=before_delegate,
                         tool_receipt_ref_resolver=_active_tool_receipt_ref,
                     ),
+                    mount_scope=sandbox_mount_scope(
+                        runtime_ctx.get("user_id"),
+                        runtime_ctx.get("thread_id"),
+                    ),
                 )
+                set_current_sandbox_session(accepted_sandbox_session.declaration)
                 _install_runtime_context(config, runtime_ctx)
                 accepted_sandbox_lifecycle_count = await _publish_accepted_sandbox_lifecycle(
                     event_appender,
@@ -3920,12 +3926,11 @@ async def run_agent(
                 _publish_accepted_sandbox_lifecycle_during_cleanup(),
                 interrupt_current=True,
             )
-            if runtime_ctx is not None:
-                from deerflow.sandbox.accepted_material import (
-                    strip_accepted_sandbox_session,
-                )
+            from deerflow.sandbox.accepted_material import (
+                withdraw_accepted_sandbox_session,
+            )
 
-                strip_accepted_sandbox_session(runtime_ctx)
+            withdraw_accepted_sandbox_session(accepted_sandbox_session)
         elif materialization is not None:
             try:
                 await _await_terminal_cleanup(materialization.release())
