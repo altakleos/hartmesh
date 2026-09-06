@@ -2,7 +2,7 @@
 """Pin the compose profile's image references to digests before a release tag.
 
 The golden VM image pre-pulls exactly the lines of deploy/compose/images.txt
-(one ``<repository>@sha256:<64 hex>`` per line) and the estate's stated
+(one ``<repository>@sha256:<64 hex>`` per line) and the operator's stated
 property is that a first start pulls nothing. That holds only if the running
 stack references the same strings, so this script keeps three files in
 lockstep:

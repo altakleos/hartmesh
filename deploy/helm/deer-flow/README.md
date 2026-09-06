@@ -889,8 +889,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
 ## Upgrading existing values
 
 **Sandbox volume render guard:** a bare default install is now refused at render
-time instead of creating a crashlooping provisioner. Existing estate values
-must either configure `skills.existingClaim` alongside enabled home persistence,
+time instead of creating a crashlooping provisioner. Existing installations'
+values must either configure `skills.existingClaim` alongside enabled home persistence,
 disable both claim sources, or explicitly set `sandbox.volumeMode: hostpath` for
 the legacy local/hybrid layout before `helm upgrade`.
 

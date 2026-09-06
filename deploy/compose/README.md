@@ -12,14 +12,14 @@ socket to create sandboxes, and a socket that grants root-equivalent control
 of one customer's own guest is a trade the operator accepts, where the same
 socket on a shared cluster would not be.
 
-## What the estate does with this directory
+## What the operator does with this directory
 
 The golden VM image copies this directory to `/opt/hartmesh` (root-owned,
 `0755` directories, every file `0644`, every exec bit stripped) and pre-pulls
 every line of `images.txt` by digest. Each tenant clone gets one data disk
 mounted at `/srv/hartmesh` with `postgres/ redis/ home/ uploads/ artifacts/`
 pre-created as uid/gid 1000, mode `0750`, plus a single `.env` written by the
-estate's onboarding verb. The stack is started with:
+operator's onboarding verb. The stack is started with:
 
 ```bash
 docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env up -d
@@ -30,7 +30,7 @@ Nothing in the bundle relies on being executable: every script is invoked as
 
 ## The `.env` contract
 
-The estate writes exactly these keys; the profile consumes them and needs no
+The operator writes exactly these keys; the profile consumes them and needs no
 other. Documentation values are in `.env.example`, which renders under
 `docker compose config` on its own.
 
@@ -50,13 +50,13 @@ other. Documentation values are in `.env.example`, which renders under
 Provider keys follow verbatim, any subset of the `*_API_KEY` names
 `config.example.yaml` references; nothing guarantees any particular one is
 present. Both datastore passwords are embedded in DSNs as-is, so they must be
-URL-safe (the estate generates them that way).
+URL-safe (the operator generates them that way).
 
 Values pass through Compose's dotenv parser twice (the `--env-file` and the
 Gateway's `env_file` are the same file): a bare `$NAME` or `${NAME}` inside a
 value is interpolated, ` #` after whitespace starts a comment, and surrounding
 quotes are stripped. A secret carrying a `$` would therefore be silently
-rewritten before the Gateway saw it. The estate single-quotes every value it
+rewritten before the Gateway saw it. The operator single-quotes every value it
 does not fix itself (the bao secrets and every provider key), which disables
 interpolation entirely, and refuses a value containing a single quote or a
 newline, which the format cannot carry. The fixed keys are quote-free by
@@ -69,7 +69,7 @@ get explicit `environment:` entries and never see a provider key.
 
 Two directories cross the container boundary:
 
-- `/srv/hartmesh` (`HARTMESH_DATA_DIR`), created by the estate: `postgres/`
+- `/srv/hartmesh` (`HARTMESH_DATA_DIR`), created by the operator: `postgres/`
   is PGDATA, `redis/` holds the AOF, `home/` is the Gateway's home
   (`DEER_FLOW_HOME`) and is mounted into the Gateway **at the same path it has
   on the host**. Every sandbox bind-mount source the Gateway hands the host
@@ -99,7 +99,7 @@ official `postgres:16` and `redis:7-alpine` images run as uid 999, which
 cannot write there. Both services run as `user: "1000:1000"`: the postgres
 entrypoint supports an arbitrary uid through nss_wrapper given a writable data
 directory, and redis needs only a writable `/data`. No root init step chowns
-anything, and no estate-side change is needed.
+anything, and no operator-side change is needed.
 
 ### Gateway user
 
@@ -203,7 +203,7 @@ decision, not a session's.
 
 Restricted modes hard-require **Docker Engine 28 or newer**, checked when the
 backend is constructed with a `RuntimeError`: a too-old daemon is a Gateway
-that will not start, not a sandbox that degrades. The estate asserts no Docker
+that will not start, not a sandbox that degrades. The operator asserts no Docker
 version, so this is the only guard.
 
 The sidecar runs under the daemon's default runtime (runc), not `runsc`, by
@@ -227,8 +227,11 @@ operator accepts for a tenant that chooses `open`:
   host, which no network option closes. Both sandboxes belong to the same
   customer inside one VM, which is why it is that tenant's accepted residual
   and not the profile's, and why it would not be acceptable on a shared
-  cluster. The estate writes no `SANDBOX_EGRESS` today, so no tenant is in
-  this mode; offering it is a per-tenant decision recorded on the estate side;
+  cluster. The operator writes `SANDBOX_EGRESS` for every tenant from a
+  per-tenant field of its own, validated against the same two values before
+  any VM exists, so the profile's refusal of any other value is that
+  operator's second guard and every other consumer's only one; no tenant is
+  in this mode today because there are no tenants yet;
 - nothing in the profile denies `169.254.169.254` or other private ranges;
   the VM's firewall is the only guard.
 
@@ -305,7 +308,7 @@ limit (96 MiB, from the measurement above; the backend's own default is
 2880 + 2 × (1024 + 96) = 5120 MiB, **exactly** the 5.0 GiB line with nothing
 to spare, against 6240 MiB for three. `open` mode carries no proxy and still
 does not fit three (2880 + 3 × 1024 = 5952 MiB > 5120), so the ceiling is 2
-in both modes. A third concurrent sandbox is the 8 GiB VM class: an estate
+in both modes. A third concurrent sandbox is the 8 GiB VM class: an operator
 change, not a profile change. Because the total sits on the line, the next
 increase to any limit in `compose.yaml` has to be paid for by a decrease
 somewhere else in it; `backend/tests/test_compose_profile.py` asserts the
@@ -451,7 +454,7 @@ migration job is needed; do not copy the chart's). `durable_production`, the
 fail-closed one, also self-migrates but hard-requires the
 `EXECUTION_POLICY_HMAC_KEYS` and `EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID`
 credentials at start, which are not in the `.env` contract; adopting it is a
-two-key contract change the estate must make, after which it is a one-line
+two-key contract change the operator must make, after which it is a one-line
 change here. Everything the durable profile would otherwise check is already
 in place: PostgreSQL for every store, `run_events.backend: db`,
 `dedupe_storage: auto`, and an explicit `DEER_FLOW_TENANT_ID`.
@@ -483,7 +486,7 @@ fragment in file order wins, which is why the files are numbered.
 
 A tenant with **no** model key starts, logs `provider keys found: none`, and
 serves a frontend that reports no model configured. That is the correct
-failure for the profile; refusing such a tenant belongs in the estate's
+failure for the profile; refusing such a tenant belongs in the operator's
 onboarding verb.
 
 ### Differences from the chart's rendered `config.yaml`

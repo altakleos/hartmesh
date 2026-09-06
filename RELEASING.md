@@ -157,7 +157,7 @@ distinguishes it from a release.
 
 ## Compose profile pins
 
-`deploy/compose/images.txt` is what the estate's golden VM image pre-pulls:
+`deploy/compose/images.txt` is what the operator's golden VM image pre-pulls:
 one `<repository>@sha256:<64 hex>` per line, no tags, no comments. The
 property it promises, that a tenant's first start pulls nothing, holds only
 when `deploy/compose/compose.yaml` and the `sandbox.image` /
