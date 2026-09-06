@@ -16,7 +16,7 @@ name: hartmesh
 services:
   # ── PostgreSQL 16 ────────────────────────────────────────────────────────
   postgres:
-    image: postgres:16
+    image: postgres@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
     # The golden image pre-creates ${HARTMESH_DATA_DIR}/postgres as 1000:1000
     # mode 0750. The official image runs as uid 999, which cannot write there,
     # so it runs as the directory's owner instead; its entrypoint supports an
@@ -47,7 +47,7 @@ services:
 
   # ── Redis 7 (SSE stream bridge + sandbox ownership) ──────────────────────
   redis:
-    image: redis:7-alpine
+    image: redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     user: "1000:1000"
     # $$ keeps the password out of the rendered command line: the container's
     # shell reads REDIS_PASSWORD from its own environment at start.
@@ -69,7 +69,7 @@ services:
 
   # ── Gateway (FastAPI + embedded agent runtime) ───────────────────────────
   gateway:
-    image: ghcr.io/altakleos/hartmesh-backend:v2.1.0-hartmesh.4
+    image: ghcr.io/altakleos/hartmesh-backend@sha256:bb47b003d8fbbde969ea763748023fbb00467ad7edceb6d053ef99258105badb
     # No `user:` on purpose. The container starts as root only long enough for
     # gateway/entrypoint.sh to read the Docker socket's group, then drops to
     # uid/gid 1000 plus that one supplementary group before any application
@@ -176,7 +176,7 @@ services:
 
   # ── Frontend (Next.js) ───────────────────────────────────────────────────
   frontend:
-    image: ghcr.io/altakleos/hartmesh-frontend:v2.1.0-hartmesh.4
+    image: ghcr.io/altakleos/hartmesh-frontend@sha256:0d07b8cf3a794a9f3e43b30efea1f1da871578d656116510ddf608a67aec3ca2
     user: "1000:1000"
     # Explicit entries only: no env_file, so provider keys never reach it. The
     # frontend's one runtime need is the internal Gateway URL; its browser
@@ -198,7 +198,7 @@ services:
 
   # ── nginx (the only published port) ─────────────────────────────────────
   nginx:
-    image: nginx:alpine
+    image: nginx@sha256:72ba65eb42c10344912a84ff42408db7d34f2feb642204570ab8fc5ffd29f1d3
     user: "101:101"
     # nginx/render.sh renders /tmp/nginx.conf from nginx/nginx.conf (a verbatim
     # copy of docker/nginx/nginx.conf), then execs nginx on it. Invoked through
