@@ -210,7 +210,7 @@ seams added to the backend for this profile:
 | `DEER_FLOW_SANDBOX_CONTAINER_USER` | `1000:1000` | The fork's sandbox image ends in `USER 1000:1000`. |
 | `DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS` | `0` | `--cap-drop=ALL --security-opt no-new-privileges` with no compatibility capabilities: the image is pre-initialised non-root, so it needs neither `FOWNER` nor `DAC_OVERRIDE`. |
 | `DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED` | `0` | Emits `--security-opt seccomp=builtin` explicitly (omitting the option would inherit the daemon default). Under gVisor the host filter applies to the Sentry's own syscalls; the sandbox and its browser were proved to start with it (see below). |
-| `DEER_FLOW_SANDBOX_MEMORY` | `640m` | The design's figure, with `--memory-swap` pinned equal (the guest has no swap, so this is explicitness, not a measurable change). |
+| `DEER_FLOW_SANDBOX_MEMORY` | `768m` | The smallest measured value that holds under gVisor (see below); it supersedes the design's 640 MiB. `--memory-swap` is pinned equal (the guest has no swap, so this is explicitness, not a measurable change). |
 | `DEER_FLOW_SANDBOX_CPUS` | `1` | Two sandboxes plus two proxies at `--cpus 1` sum to the guest's four vCPUs. |
 | `DEER_FLOW_SANDBOX_PIDS_LIMIT` | `384` | The sandbox image idles at 198 processes (Chromium, Jupyter, node, supervisord) and peaked at 232 during a measured bash-plus-browser turn; 384 leaves 1.6x headroom over that peak while still bounding a fork bomb. |
 | `DEER_FLOW_SANDBOX_PROXY_MEMORY` | `96m` | The sidecar's cgroup peaked at 48 MiB (process high-water mark 33 MiB) during the same turn; 96 MiB is twice that peak, with `--memory-swap` equal. |
@@ -233,23 +233,22 @@ a 1 GiB file operation.
 Equal `memswap_limit` is an assertion of intent: with no swap device it
 changes nothing measurable.
 
-Under `allowlist` each concurrent sandbox costs its 640 MiB plus its proxy's
+Under `allowlist` each concurrent sandbox costs its 768 MiB plus its proxy's
 limit (96 MiB, from the measurement above; the backend's own default is
 256 MiB). The concurrent-sandbox ceiling is therefore **2**
 (`sandbox.replicas: 2` in both modes, one budget, one gate, one behaviour):
-3072 + 2 × (640 + 96) = 4544 MiB, against 5280 MiB for three. Three would need
-a proxy under 42 MiB, which is not a realistic Python process, so the smaller
-proxy buys headroom under the 512 MiB floor, not a third slot. `open` mode
-carries no proxy and would fit three (3072 + 3 × 640 = 4992 MiB) if the
-operator ever splits the ceiling by mode. A third concurrent sandbox is the
-8 GiB VM class: an estate change, not a profile change.
+3072 + 2 × (768 + 96) = 4800 MiB, under the 5.0 GiB line with 320 MiB to
+spare, against 5664 MiB for three. `open` mode carries no proxy and still
+does not fit three (3072 + 3 × 768 = 5376 MiB > 5120), so the ceiling is 2 in
+both modes. A third concurrent sandbox is the 8 GiB VM class: an estate
+change, not a profile change.
 
-640 MiB is the design's number, not the backend's default (`2g`), and it is
-tight for the fork's sandbox image: under `runc` the idle container sat at
-about 600 MiB of its 640 MiB cgroup limit with reclaim active
-(`memory.events` `max` counting up) and no OOM kill through the measured
-turn. Every per-sandbox limit is therefore set explicitly; inheriting the
-backend defaults would give a tenant 2 GiB sandboxes and an OOM-killed guest.
+The design's 640 MiB was already tight for the fork's sandbox image under
+`runc`, where the idle container sat at about 600 MiB of its 640 MiB cgroup
+limit with reclaim active (`memory.events` `max` counting up) and no OOM kill
+through the measured turn. Neither figure is the backend's default (`2g`), so
+every per-sandbox limit is set explicitly; inheriting the backend defaults
+would give a tenant 2 GiB sandboxes and an OOM-killed guest.
 
 **Under gVisor the design's 640 MiB does not hold.** The Sentry keeps the
 guest's file cache in its own memory, which the host cannot reclaim, so the
@@ -258,11 +257,11 @@ whole sandbox rather than a slow page cache. Measured with the profile's exact
 flags on `runsc` (systrap): at 640 MiB the sandbox reached its API and a
 working browser but was OOM-killed (`exit 137`, `OOMKilled=true`) during its
 first load round (a shell session plus one package download); at 768 MiB and
-at 1 GiB the same load ran twice with no OOM kill. The value in `compose.yaml`
-stays at the design's 640 MiB because it is the operator's number; a gVisor
-tenant needs it raised to at least 768 MiB, which with two sandboxes and two
-96 MiB proxies is 3072 + 2 × (768 + 96) = 4800 MiB, still under the 5.0 GiB
-ceiling. gVisor start-up is also slower: the API answered after 53 to 59
+at 1 GiB the same load ran twice with no OOM kill. The operator therefore
+chose 768 MiB for `compose.yaml`: the smallest measured value that holds, and
+the largest the budget allows, since 1 GiB with two sandboxes and two proxies
+would be 3072 + 2 × (1024 + 96) = 5312 MiB, over the 5.0 GiB line. gVisor
+start-up is also slower: the API answered after 53 to 59
 seconds and the image's browser supervisor, which restarts Chromium when its
 CDP port is not up within 30 seconds, needed one or two restarts before
 reporting `Chromium ready`; expect 75 to 80 seconds to a working browser.
@@ -448,7 +447,8 @@ Then with `runsc` release-20260817.0 registered on the systrap platform
   change fixes; the standalone reproduction is a plain `docker run --runtime
   runsc` on a user-defined network, where `getent hosts <peer>` fails and
   `--add-host` succeeds.
-- At the profile's own 640 MiB the gVisor sandbox was OOM-killed under load
-  (see "Memory budget"); the figures there are from three standalone runs at
-  640 MiB, 768 MiB and 1 GiB with the profile's other flags unchanged.
+- At the design's 640 MiB, the profile's value at the time, the gVisor sandbox
+  was OOM-killed under load (see "Memory budget"); the figures there are from
+  three standalone runs at 640 MiB, 768 MiB and 1 GiB with the profile's other
+  flags unchanged.
 

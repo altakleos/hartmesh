@@ -29,6 +29,8 @@ COMPOSE = PROFILE / "compose.yaml"
 TEMPLATE = PROFILE / "config.yaml"
 CATALOG = PROFILE / "providers"
 IMAGES = PROFILE / "images.txt"
+RELEASE = "2.1.0+hartmesh.5"
+RELEASE_IMAGE_TAG = "v2.1.0-hartmesh.5"
 CONTRACT_KEYS = {
     "HARTMESH_TENANT",
     "HARTMESH_PUBLIC_HOST",
@@ -131,6 +133,17 @@ def test_memory_limits_sum_to_three_gib_with_equal_swap(compose: dict) -> None:
     assert total == 3072
 
 
+def test_two_sandboxes_with_proxies_fit_the_five_gib_budget(compose: dict) -> None:
+    env = compose["services"]["gateway"]["environment"]
+    sandbox = _mib(env["DEER_FLOW_SANDBOX_MEMORY"])
+    proxy = _mib(env["DEER_FLOW_SANDBOX_PROXY_MEMORY"])
+    services = sum(MEMORY_MIB.values())
+    assert sandbox == 768, "768 MiB is the smallest measured value that holds under gVisor (README: Memory budget)"
+    assert services + 2 * (sandbox + proxy) == 4800
+    assert services + 2 * (sandbox + proxy) <= 5120 < services + 3 * (sandbox + proxy)
+    assert services + 3 * sandbox > 5120, "open mode does not fit a third sandbox either"
+
+
 def test_only_the_gateway_reads_the_env_file_and_the_others_get_explicit_environment(compose: dict) -> None:
     services = compose["services"]
     with_env_file = {name for name, service in services.items() if service.get("env_file")}
@@ -177,7 +190,7 @@ def test_gateway_wiring_follows_the_contract(compose: dict) -> None:
     assert env["DEER_FLOW_SANDBOX_HOST"] == "host.docker.internal"
     assert "host.docker.internal:host-gateway" in gateway["extra_hosts"]
     assert env["DEER_FLOW_SANDBOX_NETWORK"] == "hartmesh_sandbox"
-    assert env["DEER_FLOW_SANDBOX_MEMORY"] == "640m"
+    assert env["DEER_FLOW_SANDBOX_MEMORY"] == "768m"
     assert env["DEER_FLOW_SANDBOX_CPUS"] == "1"
     assert int(env["DEER_FLOW_SANDBOX_PIDS_LIMIT"]) > 0
     assert env["DEER_FLOW_SANDBOX_PROXY_MEMORY"].endswith("m")
@@ -444,7 +457,7 @@ def test_pin_rewrites_every_reference_to_a_digest_and_check_refuses_tag_form(pin
         with pytest.raises(pin_images.PinError, match="tag-form"):
             pin_images.verify(files)
     calls: list[str] = []
-    pinned = pin_images.pin(files, _fake_resolver(calls))
+    pinned = pin_images.pin(files, _fake_resolver(calls), release=RELEASE).references
     assert len(pinned) == 7
     assert all(pin_images.PINNED_REFERENCE.fullmatch(reference) for reference in pinned)
     assert files.images.read_text(encoding="utf-8") == "".join(f"{reference}\n" for reference in pinned)
@@ -452,24 +465,98 @@ def test_pin_rewrites_every_reference_to_a_digest_and_check_refuses_tag_form(pin
     assert pin_images.verify(files) == pinned
     assert (copy / "compose.yaml").read_text(encoding="utf-8").count("#") == COMPOSE.read_text(encoding="utf-8").count("#"), "comments survive the rewrite"
     again = pin_images.pin(files, _fake_resolver(calls_again := []))
-    assert again == pinned and calls_again == []
+    assert again.references == pinned and again.resolutions == () and calls_again == []
     with pytest.raises(pin_images.PinError, match="not a sha256 digest"):
         garbage = tmp_path / "garbage"
         shutil.copytree(PROFILE, garbage)
-        pin_images.pin(pin_images.ProfileFiles.under(garbage), lambda reference: "latest")
+        pin_images.pin(pin_images.ProfileFiles.under(garbage), lambda reference: "latest", release=RELEASE)
 
 
 def test_pin_check_mode_refuses_a_profile_that_disagrees_with_images_txt(pin_images: ModuleType, tmp_path: Path) -> None:
     copy = tmp_path / "compose"
     shutil.copytree(PROFILE, copy)
     files = pin_images.ProfileFiles.under(copy)
-    pin_images.pin(files, _fake_resolver([]))
+    pin_images.pin(files, _fake_resolver([]), release=RELEASE)
     text = files.compose.read_text(encoding="utf-8")
     files.compose.write_text(text.replace("postgres@sha256:", "postgres:16@sha256:", 1), encoding="utf-8")
     with pytest.raises(pin_images.PinError, match="not a line of"):
         pin_images.verify(files)
     result = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "pin_compose_images.py"), "--check", "--profile", str(copy)], capture_output=True, text=True, check=False)
     assert result.returncode == 1 and "pin_compose_images:" in result.stderr
+
+
+def test_release_rewrites_fork_lines_to_the_release_tag_and_leaves_third_party_lines(pin_images: ModuleType, tmp_path: Path) -> None:
+    copy = tmp_path / "compose"
+    shutil.copytree(PROFILE, copy)
+    files = pin_images.ProfileFiles.under(copy)
+    before = pin_images.read_references(files.images)
+    fork_before = [reference for reference in before if pin_images.is_fork_image(pin_images.repository_of(reference))]
+    third_party_before = [reference for reference in before if reference not in fork_before]
+    assert len(fork_before) == 4 and third_party_before == ["postgres:16", "redis:7-alpine", "nginx:alpine"]
+    assert all(reference.endswith(f":{RELEASE_IMAGE_TAG}") is False for reference in fork_before), "the tree carries placeholders, not this release"
+    calls: list[str] = []
+    result = pin_images.pin(files, _fake_resolver(calls), release=RELEASE)
+    assert calls == [f"{pin_images.repository_of(reference)}:{RELEASE_IMAGE_TAG}" for reference in fork_before] + third_party_before
+    assert [resolution.reference for resolution in result.resolutions] == calls
+    for resolution in result.resolutions:
+        assert resolution.pinned == f"{pin_images.repository_of(resolution.reference)}@{_fake_resolver([])(resolution.reference)}"
+    assert result.references == [resolution.pinned for resolution in result.resolutions]
+    assert pin_images.verify(files) == result.references
+    # A leading "v" is tolerated and means the same release.
+    again = pin_images.pin(files, _fake_resolver(calls_again := []), release=f"v{RELEASE}")
+    assert again.references == result.references and calls_again == [f"{pin_images.repository_of(r)}:{RELEASE_IMAGE_TAG}" for r in fork_before]
+
+
+def test_release_repins_fork_lines_already_pinned_to_an_earlier_release(pin_images: ModuleType, tmp_path: Path) -> None:
+    copy = tmp_path / "compose"
+    shutil.copytree(PROFILE, copy)
+    files = pin_images.ProfileFiles.under(copy)
+    earlier = pin_images.pin(files, _fake_resolver([]), release="2.1.0+hartmesh.4").references
+    calls: list[str] = []
+    result = pin_images.pin(files, _fake_resolver(calls), release=RELEASE)
+    assert calls == [f"{pin_images.repository_of(reference)}:{RELEASE_IMAGE_TAG}" for reference in earlier if pin_images.is_fork_image(pin_images.repository_of(reference))]
+    assert result.references != earlier and pin_images.verify(files) == result.references
+    assert [reference for reference in result.references if not pin_images.is_fork_image(pin_images.repository_of(reference))] == [reference for reference in earlier if not pin_images.is_fork_image(pin_images.repository_of(reference))]
+
+
+def test_pin_without_a_release_refuses_tag_form_fork_lines(pin_images: ModuleType, tmp_path: Path) -> None:
+    copy = tmp_path / "compose"
+    shutil.copytree(PROFILE, copy)
+    files = pin_images.ProfileFiles.under(copy)
+    original = {path: path.read_text(encoding="utf-8") for path in (files.images, files.compose, files.config)}
+    calls: list[str] = []
+    with pytest.raises(pin_images.PinError, match="--release"):
+        pin_images.pin(files, _fake_resolver(calls))
+    assert calls == [], "nothing is resolved before the refusal"
+    assert {path: path.read_text(encoding="utf-8") for path in original} == original, "nothing is rewritten before the refusal"
+    result = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "pin_compose_images.py"), "--profile", str(copy)], capture_output=True, text=True, check=False)
+    assert result.returncode == 1 and "--release" in result.stderr
+    for bad in ("2.1.0", "hartmesh.5", "2.1.0-hartmesh.5", "v2.1.0+hartmesh.", "2.1.0+hartmesh.5 "):
+        with pytest.raises(pin_images.PinError, match="release version"):
+            pin_images.pin(files, _fake_resolver([]), release=bad)
+    with pytest.raises(pin_images.PinError, match="tag-form"):
+        pin_images.verify(files)
+    check = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "pin_compose_images.py"), "--check", "--release", RELEASE, "--profile", str(copy)], capture_output=True, text=True, check=False)
+    assert check.returncode != 0, "--check takes no release: it verifies the tree as it is"
+
+
+def test_release_image_tag_spelling_matches_the_shell_helper(pin_images: ModuleType) -> None:
+    for version in (RELEASE, "2.1.0+hartmesh.10", "10.0.1+hartmesh.1"):
+        helper = subprocess.run(["bash", str(REPO_ROOT / "scripts" / "release_tag_spellings.sh"), version], capture_output=True, text=True, check=True)
+        expected = dict(line.split("=", 1) for line in helper.stdout.split())["image_tag"]
+        assert pin_images.release_image_tag(version) == expected
+        assert pin_images.release_image_tag(f"v{version}") == expected
+
+
+def test_fork_images_are_the_components_the_container_workflow_builds(pin_images: ModuleType) -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "container.yaml").read_text(encoding="utf-8"))
+    matrix = next(job for job in workflow["jobs"].values() if "strategy" in job)["strategy"]["matrix"]["include"]
+    assert {entry["component"] for entry in matrix} == set(pin_images.FORK_COMPONENTS)
+    assert pin_images.is_fork_image("ghcr.io/example/fork-backend")
+    assert pin_images.is_fork_image("ghcr.io/example/fork-sandbox-network-proxy")
+    assert not pin_images.is_fork_image("ghcr.io/example/fork-sandbox-base")
+    assert not pin_images.is_fork_image("postgres")
+    assert not pin_images.is_fork_image("docker.io/library/nginx")
 
 
 def test_release_workflows_reference_the_compose_profile() -> None:

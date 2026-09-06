@@ -122,13 +122,18 @@ distinguishes it from a release.
 6. **Pin the compose profile** to the digests the candidate build published,
    then commit the pins (see [Compose profile pins](#compose-profile-pins)):
    ```bash
-   scripts/pin_compose_images.py
+   scripts/pin_compose_images.py --release 2.1.0+hartmesh.1
    scripts/pin_compose_images.py --check
    git add deploy/compose
    git commit -m "release: pin compose profile for v2.1.0+hartmesh.1"
    ```
-   The pin commit changes only `deploy/compose/`, which no image contains, so
-   the candidate images are the release's code.
+   `--release` is what points the four fork lines at this release's candidate
+   images before anything is resolved; without it the script refuses, because
+   the tree's placeholders name the previous release and the tag build would
+   re-tag that release's digests as this one with every check green. Compare
+   the `resolved ... -> sha256:...` lines it prints with the candidate build's
+   digests before committing. The pin commit changes only `deploy/compose/`,
+   which no image contains, so the candidate images are the release's code.
 7. **Tag and push** the pin commit:
    ```bash
    git tag v2.1.0+hartmesh.1
@@ -153,10 +158,18 @@ when `deploy/compose/compose.yaml` and the `sandbox.image` /
 `network.proxy_image` values in `deploy/compose/config.yaml` are the same
 strings. `scripts/pin_compose_images.py` keeps the three files in lockstep:
 
-- With no arguments it resolves every tag-form line of `images.txt` through
-  `crane digest` (or `docker buildx imagetools inspect` when crane is absent),
-  rewrites the matching references in both YAML files, writes `images.txt`
-  from the same strings, and verifies.
+- `--release <version>` (the fork's `X.Y.Z+hartmesh.N`, leading `v`
+  tolerated) first rewrites every fork image line, whatever it said before, to
+  `<repository>:<image tag spelling of the release>` (the same `+` → `-` and
+  leading `v` as `scripts/release_tag_spellings.sh`), then resolves every
+  tag-form line through `crane digest` (or `docker buildx imagetools inspect`
+  when crane is absent), rewrites the matching references in both YAML files,
+  writes `images.txt` from the same strings, verifies, and prints each fork
+  line's resolved reference and digest. The script takes no version otherwise,
+  and the tree's fork lines name the previous release between cuts, so a pin
+  without `--release` would pin that release's images and nothing downstream
+  could tell; it refuses instead while any fork line is tag-form. Third-party
+  lines are resolved as written.
 - `--check` verifies only and exits non-zero while any reference still carries
   a tag or the three files disagree. `release-manifest.yaml` runs it on the
   tagged tree and additionally requires each fork image line to equal the
