@@ -5,11 +5,19 @@ name: Publish Containers
 #     deploy/compose/images.txt pins to a digest are not rebuilt: the pinned
 #     digest is retagged with the release tag (a rebuild would produce a new
 #     digest and break the golden VM image's "first start pulls nothing"
-#     property). A tag-form reference in images.txt fails the release.
+#     property). The retag must not re-encode the manifest: `docker buildx
+#     imagetools create` wraps a single-platform manifest in a new one-child
+#     list and changes the digest (that is how 2.1.0+hartmesh.5 was refused
+#     at the identity freeze), so the step uses `crane tag`, which re-pushes
+#     the same bytes, and asserts the digest before and after. A tag-form
+#     reference in images.txt fails the release.
 #   * A workflow_dispatch with the release version builds the candidate
 #     images from the dispatched ref under that release's tag spelling, so
 #     scripts/pin_compose_images.py can resolve their digests before the tag
-#     exists. See RELEASING.md, "Fork release procedure".
+#     exists. A dispatch never adopts, whatever pins the tree carries: between
+#     cuts it carries the previous release's, and adopting them would ship
+#     that release's code as the next one. See RELEASING.md, "Fork release
+#     procedure".
 on:
   push:
     tags:
@@ -87,29 +95,68 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install crane
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
       - name: Adopt the digest deploy/compose pins for this component
         id: adopt
         env:
           IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
           SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Only a tag push adopts. A candidate build (workflow_dispatch) builds
+          # every component whatever deploy/compose/images.txt carries: between
+          # cuts it carries the previous release's digest pins, and adopting
+          # them would publish that release's images under the next version
+          # with every downstream check green.
+          if [ "$GITHUB_EVENT_NAME" != "push" ]; then
+            echo "adopted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           REPOSITORY="${REGISTRY}/${IMAGE_NAME}"
           PIN="$(grep -E "^${REPOSITORY}@sha256:[0-9a-f]{64}$" deploy/compose/images.txt || true)"
           if [ -z "$PIN" ]; then
-            if [ "$GITHUB_EVENT_NAME" = "push" ] && grep -Eq "^${REPOSITORY}:" deploy/compose/images.txt; then
+            if grep -Eq "^${REPOSITORY}:" deploy/compose/images.txt; then
               echo "::error::deploy/compose/images.txt still references ${REPOSITORY} by tag; run scripts/pin_compose_images.py before tagging the release"
               exit 1
             fi
             echo "adopted=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if ! docker buildx imagetools inspect "$PIN" >/dev/null 2>&1; then
+          printf '%s' "$GH_TOKEN" | crane auth login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
+          if ! crane manifest "$PIN" >/dev/null 2>&1; then
             echo "::error::${PIN} is pinned by deploy/compose/images.txt but is not in the registry; dispatch the candidate build before pinning"
             exit 1
           fi
-          docker buildx imagetools create --tag "${REPOSITORY}:${IMAGE_TAG}" --tag "${REPOSITORY}:sha-${SHORT_SHA}" "$PIN"
-          echo "Adopted ${PIN} as ${REPOSITORY}:${IMAGE_TAG} and ${REPOSITORY}:sha-${SHORT_SHA} without rebuilding" >> "$GITHUB_STEP_SUMMARY"
+          media_type() { crane manifest "$1" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("mediaType", ""))'; }
+          PIN_DIGEST="${PIN##*@}"
+          PIN_MEDIA_TYPE="$(media_type "$PIN")"
+          RELEASE_TAG="${REPOSITORY}:${IMAGE_TAG}"
+          SHA_TAG="${REPOSITORY}:sha-${SHORT_SHA}"
+          # Before: the candidate build under this version is what put the pinned
+          # digest at the release tag. Anything else means the candidate was
+          # rebuilt after the pins were taken, or the pins are another version's.
+          BEFORE="$(crane digest "$RELEASE_TAG" 2>/dev/null || true)"
+          if [ "$BEFORE" != "$PIN_DIGEST" ]; then
+            echo "::error::${RELEASE_TAG} resolves to ${BEFORE:-nothing}, not the pinned ${PIN_DIGEST}; the candidate build under this version must be what pinned it"
+            exit 1
+          fi
+          echo "Adopting ${PIN}: ${RELEASE_TAG} already resolves to the pin (${BEFORE}, ${PIN_MEDIA_TYPE})" | tee -a "$GITHUB_STEP_SUMMARY"
+          # crane tag fetches the manifest by digest and pushes the same bytes
+          # under the new tag, so the digest cannot change.
+          crane tag "$PIN" "$IMAGE_TAG"
+          crane tag "$PIN" "sha-${SHORT_SHA}"
+          # After: both tags resolve to the pin, with the pin's media type.
+          for REF in "$RELEASE_TAG" "$SHA_TAG"; do
+            AFTER="$(crane digest "$REF")"
+            AFTER_MEDIA_TYPE="$(media_type "$REF")"
+            if [ "$AFTER" != "$PIN_DIGEST" ] || [ "$AFTER_MEDIA_TYPE" != "$PIN_MEDIA_TYPE" ]; then
+              echo "::error::${REF} resolves to ${AFTER} (${AFTER_MEDIA_TYPE}) after adoption, not the pinned ${PIN_DIGEST} (${PIN_MEDIA_TYPE})"
+              exit 1
+            fi
+            echo "Adopted ${PIN} as ${REF} without rebuilding: digest ${AFTER} == pin, mediaType ${AFTER_MEDIA_TYPE}" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
           echo "adopted=true" >> "$GITHUB_OUTPUT"
       - name: Extract metadata (tags, labels) for Docker
         if: steps.adopt.outputs.adopted != 'true'

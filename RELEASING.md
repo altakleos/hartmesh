@@ -118,7 +118,9 @@ distinguishes it from a release.
    ```bash
    gh workflow run container.yaml --ref <that branch> -f version=2.1.0+hartmesh.1
    ```
-   Wait for every matrix job to succeed.
+   A dispatch builds every component regardless of the pins the tree carries;
+   it never adopts. Wait for every matrix job to succeed, and confirm all five
+   built (the adopt step's output is `adopted=false` for each).
 6. **Pin the compose profile** to the digests the candidate build published,
    then commit the pins (see [Compose profile pins](#compose-profile-pins)):
    ```bash
@@ -141,7 +143,11 @@ distinguishes it from a release.
    ```
    Pushing the tag triggers the publishing workflows below. The container
    workflow does not rebuild a component the profile pins: it re-tags the
-   pinned digest with the release tag and the tag commit's `sha-` tag, and it
+   pinned digest *unchanged* (`crane tag`, which re-pushes the same manifest
+   bytes) with the release tag and the tag commit's `sha-` tag. Before
+   re-tagging it asserts that the release tag already resolves to the pin,
+   which only the candidate build under this version can have arranged, and
+   afterwards that both tags resolve to the pin with the pin's media type; it
    fails if a pin is still tag-form or names a digest the registry lacks. Wait
    for the chart and all five container jobs to succeed before recording the
    release identity.
@@ -166,19 +172,22 @@ strings. `scripts/pin_compose_images.py` keeps the three files in lockstep:
   when crane is absent), rewrites the matching references in both YAML files,
   writes `images.txt` from the same strings, verifies, and prints each fork
   line's resolved reference and digest. The script takes no version otherwise,
-  and the tree's fork lines name the previous release between cuts, so a pin
-  without `--release` would pin that release's images and nothing downstream
-  could tell; it refuses instead while any fork line is tag-form. Third-party
-  lines are resolved as written.
+  and the tree's fork lines belong to the previous release between cuts, so a
+  pin without `--release` would pin that release's images and nothing
+  downstream could tell; it refuses instead while any fork line is tag-form.
+  Third-party lines are resolved as written.
 - `--check` verifies only and exits non-zero while any reference still carries
   a tag or the three files disagree. `release-manifest.yaml` runs it on the
   tagged tree and additionally requires each fork image line to equal the
   published release digest, so the release asset cross-checks the commit.
 
-Between releases the tree carries the previous release's tag-form references
-as development placeholders; the estate's grammar refuses such a bundle, which
-is intended. Seven lines are pinned: backend, frontend, sandbox, the network
-proxy, `postgres`, `redis`, and `nginx`.
+Between cuts the tree carries the **previous release's digest pins**: the pin
+commit is the last thing a release changes and nothing restores placeholders.
+The candidate build ignores them (a dispatch never adopts, so all five images
+are built), and `--release` rewrites every fork line to the new release before
+resolving, so the previous pins never reach the next release. Seven lines are
+pinned: backend, frontend, sandbox, the network proxy, `postgres`, `redis`,
+and `nginx`.
 
 ## Durable runtime qualification evidence
 
@@ -429,6 +438,7 @@ scripts/bump_version.sh 2.1.0-rc1
 | Version gate fails | Nothing was published. Fix the sources with `scripts/bump_version.sh`, commit, delete and recreate the tag on the fixed commit, then push it again. |
 | A container job fails after the gate | Re-run the failed job on the **same workflow run**. Image tags are mutable, so the missing image can be completed without changing the release identity. |
 | The chart version was published | The chart version is immutable. Never move or re-push that tag; increment the `hartmesh.N` patch-set number and make a new release. |
+| The manifest's compose cross-check fails | The chart version is published. A release tag must resolve to its pin, so fix the workflow by PR and cut the next `N`; never re-point a published release's tags. |
 
 Deleting and recreating a tag is safe only when the version gate failed before
 any artifact was published. If the chart job might have succeeded, inspect the

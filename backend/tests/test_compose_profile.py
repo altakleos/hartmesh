@@ -420,6 +420,12 @@ def test_render_output_is_a_valid_app_config(render_config: ModuleType, monkeypa
 # ── release pinning ──────────────────────────────────────────────────────────
 
 
+def test_the_tree_carries_digest_pins_between_cuts_and_check_accepts_them(pin_images: ModuleType) -> None:
+    references = pin_images.read_references(IMAGES)
+    assert all(pin_images.PINNED_REFERENCE.fullmatch(reference) for reference in references), "the last pin commit left digest pins; a candidate build must ignore them"
+    assert pin_images.verify(pin_images.ProfileFiles.under(PROFILE)) == references
+
+
 def test_images_txt_lists_exactly_the_references_the_profile_uses(pin_images: ModuleType) -> None:
     references = pin_images.read_references(IMAGES)
     used = pin_images.yaml_references(COMPOSE) + pin_images.yaml_references(TEMPLATE)
@@ -449,10 +455,32 @@ def _fake_resolver(calls: list[str]):
     return resolve
 
 
-def test_pin_rewrites_every_reference_to_a_digest_and_check_refuses_tag_form(pin_images: ModuleType, tmp_path: Path) -> None:
+PLACEHOLDER_THIRD_PARTY = {"postgres": "postgres:16", "redis": "redis:7-alpine", "nginx": "nginx:alpine"}
+
+
+def _placeholder_profile(pin_images: ModuleType, tmp_path: Path):
+    """A copy of the profile whose references are tag-form placeholders.
+
+    Between cuts the tree carries the previous release's digest pins, so the
+    tests build the placeholder state themselves instead of assuming it.
+    """
+
     copy = tmp_path / "compose"
     shutil.copytree(PROFILE, copy)
     files = pin_images.ProfileFiles.under(copy)
+    mapping = {}
+    for reference in pin_images.read_references(files.images):
+        repository = pin_images.repository_of(reference)
+        mapping[reference] = f"{repository}:v0.0.0-hartmesh.0" if pin_images.is_fork_image(repository) else PLACEHOLDER_THIRD_PARTY[repository]
+    for path in (files.compose, files.config):
+        pin_images.rewrite_yaml(path, mapping)
+    files.images.write_text("".join(f"{mapping[reference]}\n" for reference in mapping), encoding="utf-8")
+    return files
+
+
+def test_pin_rewrites_every_reference_to_a_digest_and_check_refuses_tag_form(pin_images: ModuleType, tmp_path: Path) -> None:
+    files = _placeholder_profile(pin_images, tmp_path)
+    copy = files.images.parent
     if any(pin_images.PINNED_REFERENCE.fullmatch(reference) is None for reference in pin_images.read_references(files.images)):
         with pytest.raises(pin_images.PinError, match="tag-form"):
             pin_images.verify(files)
@@ -473,9 +501,8 @@ def test_pin_rewrites_every_reference_to_a_digest_and_check_refuses_tag_form(pin
 
 
 def test_pin_check_mode_refuses_a_profile_that_disagrees_with_images_txt(pin_images: ModuleType, tmp_path: Path) -> None:
-    copy = tmp_path / "compose"
-    shutil.copytree(PROFILE, copy)
-    files = pin_images.ProfileFiles.under(copy)
+    files = _placeholder_profile(pin_images, tmp_path)
+    copy = files.images.parent
     pin_images.pin(files, _fake_resolver([]), release=RELEASE)
     text = files.compose.read_text(encoding="utf-8")
     files.compose.write_text(text.replace("postgres@sha256:", "postgres:16@sha256:", 1), encoding="utf-8")
@@ -486,9 +513,7 @@ def test_pin_check_mode_refuses_a_profile_that_disagrees_with_images_txt(pin_ima
 
 
 def test_release_rewrites_fork_lines_to_the_release_tag_and_leaves_third_party_lines(pin_images: ModuleType, tmp_path: Path) -> None:
-    copy = tmp_path / "compose"
-    shutil.copytree(PROFILE, copy)
-    files = pin_images.ProfileFiles.under(copy)
+    files = _placeholder_profile(pin_images, tmp_path)
     before = pin_images.read_references(files.images)
     fork_before = [reference for reference in before if pin_images.is_fork_image(pin_images.repository_of(reference))]
     third_party_before = [reference for reference in before if reference not in fork_before]
@@ -508,9 +533,7 @@ def test_release_rewrites_fork_lines_to_the_release_tag_and_leaves_third_party_l
 
 
 def test_release_repins_fork_lines_already_pinned_to_an_earlier_release(pin_images: ModuleType, tmp_path: Path) -> None:
-    copy = tmp_path / "compose"
-    shutil.copytree(PROFILE, copy)
-    files = pin_images.ProfileFiles.under(copy)
+    files = _placeholder_profile(pin_images, tmp_path)
     earlier = pin_images.pin(files, _fake_resolver([]), release="2.1.0+hartmesh.4").references
     calls: list[str] = []
     result = pin_images.pin(files, _fake_resolver(calls), release=RELEASE)
@@ -520,9 +543,8 @@ def test_release_repins_fork_lines_already_pinned_to_an_earlier_release(pin_imag
 
 
 def test_pin_without_a_release_refuses_tag_form_fork_lines(pin_images: ModuleType, tmp_path: Path) -> None:
-    copy = tmp_path / "compose"
-    shutil.copytree(PROFILE, copy)
-    files = pin_images.ProfileFiles.under(copy)
+    files = _placeholder_profile(pin_images, tmp_path)
+    copy = files.images.parent
     original = {path: path.read_text(encoding="utf-8") for path in (files.images, files.compose, files.config)}
     calls: list[str] = []
     with pytest.raises(pin_images.PinError, match="--release"):
@@ -557,6 +579,43 @@ def test_fork_images_are_the_components_the_container_workflow_builds(pin_images
     assert not pin_images.is_fork_image("ghcr.io/example/fork-sandbox-base")
     assert not pin_images.is_fork_image("postgres")
     assert not pin_images.is_fork_image("docker.io/library/nginx")
+
+
+def _adopt_step() -> tuple[dict, str]:
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "container.yaml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["container"]
+    steps = {step.get("name"): step for step in job["steps"]}
+    return job, steps["Adopt the digest deploy/compose pins for this component"]["run"]
+
+
+def test_adopt_step_retags_with_crane_and_asserts_the_digest_before_and_after() -> None:
+    job, adopt = _adopt_step()
+    assert "imagetools" not in adopt
+    assert 'crane manifest "$PIN" >/dev/null' in adopt
+    assert 'crane tag "$PIN" "$IMAGE_TAG"' in adopt
+    assert 'crane tag "$PIN" "sha-${SHORT_SHA}"' in adopt
+    # Before: the candidate build under this version put the pinned digest at the release tag.
+    before = 'if [ "$BEFORE" != "$PIN_DIGEST" ]; then'
+    assert before in adopt and adopt.index(before) < adopt.index('crane tag "$PIN"')
+    assert "resolves to ${BEFORE:-nothing}, not the pinned ${PIN_DIGEST}" in adopt
+    # After: both new tags resolve to the pin with the pin's media type.
+    after = 'if [ "$AFTER" != "$PIN_DIGEST" ] || [ "$AFTER_MEDIA_TYPE" != "$PIN_MEDIA_TYPE" ]; then'
+    assert after in adopt and adopt.index(after) > adopt.index('crane tag "$PIN" "sha-${SHORT_SHA}"')
+    assert 'for REF in "$RELEASE_TAG" "$SHA_TAG"; do' in adopt
+    assert 'tee -a "$GITHUB_STEP_SUMMARY"' in adopt, "the cut reads the assertion lines back from the log and the summary"
+    crane_setup = [step for step in job["steps"] if str(step.get("uses", "")).startswith("imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b")]
+    assert len(crane_setup) == 1 and job["steps"].index(crane_setup[0]) < job["steps"].index(next(step for step in job["steps"] if step.get("id") == "adopt"))
+    assert 'crane auth login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin' in adopt
+
+
+def test_adopt_step_adopts_only_on_a_tag_push() -> None:
+    _, adopt = _adopt_step()
+    guard = 'if [ "$GITHUB_EVENT_NAME" != "push" ]; then'
+    assert guard in adopt
+    assert adopt.index(guard) < adopt.index('PIN="$(grep'), "a candidate build exits before reading the pins"
+    guarded = adopt[adopt.index(guard) : adopt.index("fi", adopt.index(guard))]
+    assert 'echo "adopted=false" >> "$GITHUB_OUTPUT"' in guarded and "exit 0" in guarded
+    assert "run scripts/pin_compose_images.py before tagging the release" in adopt, "a tag-form fork line still fails a tag push"
 
 
 def test_release_workflows_reference_the_compose_profile() -> None:
