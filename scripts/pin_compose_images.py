@@ -11,11 +11,21 @@ lockstep:
 * ``deploy/compose/compose.yaml``   - every ``image:`` value
 * ``deploy/compose/config.yaml``    - ``sandbox.image`` and ``network.proxy_image``
 
-``pin`` resolves every tag-form line of images.txt to its registry digest,
-rewrites the matching references in the two YAML files to ``repo@sha256:...``,
-writes images.txt from the same strings, and then verifies. ``--check``
-verifies only. Either mode exits non-zero while any reference still carries a
-tag or the three files disagree, so a release cut cannot proceed past it.
+``pin --release X.Y.Z+hartmesh.N`` first rewrites every fork image line (a
+component ``container.yaml`` builds, ``ghcr.io/<owner>/<repo>-<component>``)
+to that release's image tag spelling, whatever the line said before, then
+resolves every tag-form line to its registry digest, rewrites the matching
+references in the two YAML files to ``repo@sha256:...``, writes images.txt
+from the same strings, verifies, and prints each fork resolution so the
+session cutting the release can compare it with the candidate build. Between
+releases the tree carries the previous release's fork tags as placeholders;
+a pin without ``--release`` would resolve those, and the adopt step on the
+tag would re-tag the previous release's code as the new one with every check
+green, so pin mode refuses tag-form fork lines unless ``--release`` names the
+release. Third-party lines (``postgres``, ``redis``, ``nginx``) are resolved
+as written. ``--check`` verifies only. Either mode exits non-zero while any
+reference still carries a tag or the three files disagree, so a release cut
+cannot proceed past it.
 
 Resolution uses ``crane digest`` when crane is installed, otherwise
 ``docker buildx imagetools inspect``; both return the manifest-list digest,
@@ -37,6 +47,11 @@ from pathlib import Path
 PINNED_REFERENCE = re.compile(r"\A(?P<repository>[a-z0-9./_-]+)@sha256:(?P<digest>[0-9a-f]{64})\Z")
 TAGGED_REFERENCE = re.compile(r"\A(?P<repository>[a-z0-9./_-]+):(?P<tag>[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})\Z")
 DIGEST = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
+RELEASE_VERSION = re.compile(r"\Av?(?P<version>[0-9]+\.[0-9]+\.[0-9]+\+hartmesh\.[0-9]+)\Z")
+# The components .github/workflows/container.yaml builds; a fork image is
+# ``ghcr.io/<owner>/<repo>-<component>`` for exactly one of these.
+FORK_COMPONENTS = ("backend", "frontend", "provisioner", "sandbox", "sandbox-network-proxy")
+FORK_REPOSITORY = re.compile(r"\Aghcr\.io/[a-z0-9._-]+/[a-z0-9._-]+-(?:" + "|".join(re.escape(component) for component in FORK_COMPONENTS) + r")\Z")
 _YAML_IMAGE_LINE = re.compile(r"^(?P<prefix>\s*(?:-\s*)?(?:image|proxy_image):\s*)(?P<reference>\S+)(?P<suffix>\s*(?:#.*)?)$")
 
 Resolver = Callable[[str], str]
@@ -44,6 +59,20 @@ Resolver = Callable[[str], str]
 
 class PinError(ValueError):
     """A refusal that must stop the release cut."""
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """One tag-form reference and the pinned reference it resolved to."""
+
+    reference: str
+    pinned: str
+
+
+@dataclass(frozen=True)
+class PinResult:
+    references: list[str]
+    resolutions: tuple[Resolution, ...]
 
 
 @dataclass(frozen=True)
@@ -100,6 +129,21 @@ def repository_of(reference: str) -> str:
     return tagged.group("repository")
 
 
+def is_fork_image(repository: str) -> bool:
+    """True for a repository container.yaml publishes under the release tag."""
+
+    return FORK_REPOSITORY.fullmatch(repository) is not None
+
+
+def release_image_tag(release: str) -> str:
+    """The image tag spelling of a fork release, as scripts/release_tag_spellings.sh prints it."""
+
+    match = RELEASE_VERSION.fullmatch(release)
+    if match is None:
+        raise PinError(f"{release!r} is not a fork release version (X.Y.Z+hartmesh.N, leading v tolerated)")
+    return "v" + match.group("version").replace("+", "-")
+
+
 def verify(files: ProfileFiles) -> list[str]:
     """Return the pinned references when the three files agree, else raise."""
 
@@ -119,23 +163,43 @@ def verify(files: ProfileFiles) -> list[str]:
     return references
 
 
-def pin(files: ProfileFiles, resolve: Resolver) -> list[str]:
-    """Resolve tag-form references, rewrite the profile, write images.txt, verify."""
+def pin(files: ProfileFiles, resolve: Resolver, *, release: str | None = None) -> PinResult:
+    """Resolve tag-form references, rewrite the profile, write images.txt, verify.
+
+    With ``release``, every fork image line is first pointed at that release's
+    image tag, so the digests pinned are the candidate build's and never the
+    placeholders' previous release. Without it, a tag-form fork line is refused.
+    """
 
     references = read_references(files.images)
-    mapping: dict[str, str] = {}
+    image_tag = release_image_tag(release) if release is not None else None
+    targets: dict[str, str] = {}
     for reference in references:
-        if PINNED_REFERENCE.fullmatch(reference) is not None:
+        repository = repository_of(reference)
+        if is_fork_image(repository):
+            if image_tag is not None:
+                targets[reference] = f"{repository}:{image_tag}"
+            elif PINNED_REFERENCE.fullmatch(reference) is None:
+                raise PinError(f"{files.images} carries the tag-form fork image line {reference!r}; pass --release <version> so the pins are that release's candidate build rather than the placeholder's previous release")
+            else:
+                targets[reference] = reference
+        else:
+            targets[reference] = reference
+    mapping: dict[str, str] = {}
+    resolutions: list[Resolution] = []
+    for reference, target in targets.items():
+        if PINNED_REFERENCE.fullmatch(target) is not None:
             continue
-        digest = resolve(reference)
+        digest = resolve(target)
         if DIGEST.fullmatch(digest) is None:
-            raise PinError(f"resolver returned {digest!r} for {reference}, not a sha256 digest")
-        mapping[reference] = f"{repository_of(reference)}@{digest}"
+            raise PinError(f"resolver returned {digest!r} for {target}, not a sha256 digest")
+        mapping[reference] = f"{repository_of(target)}@{digest}"
+        resolutions.append(Resolution(reference=target, pinned=mapping[reference]))
     for path in (files.compose, files.config):
         rewrite_yaml(path, mapping)
     pinned = [mapping.get(reference, reference) for reference in references]
     files.images.write_text("".join(f"{reference}\n" for reference in pinned), encoding="utf-8")
-    return verify(files)
+    return PinResult(references=verify(files), resolutions=tuple(resolutions))
 
 
 def _crane_digest(reference: str) -> str:
@@ -174,10 +238,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--profile", type=Path, default=Path(__file__).resolve().parents[1] / "deploy" / "compose")
     parser.add_argument("--check", action="store_true", help="verify only; refuse any tag-form reference")
+    parser.add_argument("--release", metavar="VERSION", help="the fork release being cut (X.Y.Z+hartmesh.N); required to pin tag-form fork image lines")
     args = parser.parse_args(argv)
+    if args.check and args.release is not None:
+        parser.error("--check verifies the tree as it is and takes no --release")
     files = ProfileFiles.under(args.profile)
     try:
-        references = verify(files) if args.check else pin(files, default_resolver())
+        if args.check:
+            references = verify(files)
+        else:
+            result = pin(files, default_resolver(), release=args.release)
+            references = result.references
+            for resolution in result.resolutions:
+                if is_fork_image(repository_of(resolution.reference)):
+                    print(f"pin_compose_images: resolved {resolution.reference} -> {resolution.pinned.rpartition('@')[2]}")
     except (PinError, OSError) as exc:
         print(f"pin_compose_images: {exc}", file=sys.stderr)
         return 1
