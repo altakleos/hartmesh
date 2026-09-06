@@ -25,8 +25,12 @@ mkdir -p "$DEER_FLOW_HOME" "$DEER_FLOW_HOME/skills"
 # every sandbox is started on this network, so it must exist before the first
 # one; under allowlist it stays unused. Left unlabelled so `compose down`
 # never has to remove a network that live sandboxes are attached to.
+# Inter-container communication is off so a sandbox cannot reach a peer on
+# its bridge address (the peer's published port on the host-gateway address
+# remains; README: "SANDBOX_EGRESS=open"). Options apply at creation only: a
+# network that already exists keeps the ones it was created with.
 if ! docker network inspect "$DEER_FLOW_SANDBOX_NETWORK" >/dev/null 2>&1; then
-  docker network create --driver bridge "$DEER_FLOW_SANDBOX_NETWORK" >/dev/null
+  docker network create --driver bridge -o com.docker.network.bridge.enable_icc=false "$DEER_FLOW_SANDBOX_NETWORK" >/dev/null
 fi
 
 cd /app/backend

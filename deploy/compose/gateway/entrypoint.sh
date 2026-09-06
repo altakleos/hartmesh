@@ -6,6 +6,8 @@
 # then drops to uid/gid 1000 plus that one supplementary group before any
 # application code runs. The .env contract has no key for the socket's group
 # id, and it differs between hosts, so it is read from the socket itself.
+# compose.yaml drops every capability but SETUID and SETGID, the two this
+# drop needs, so the root window can do nothing else.
 set -eu
 
 SOCKET=/var/run/docker.sock
@@ -22,4 +24,8 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 docker_gid="$(stat -c %g "$SOCKET")"
+if [ "$docker_gid" = "0" ]; then
+  echo "entrypoint.sh: $SOCKET is owned by gid 0; refusing to grant the Gateway group root. Run the daemon with a dedicated socket group (docker-ce's default 'docker')" >&2
+  exit 1
+fi
 exec setpriv --reuid=1000 --regid=1000 --groups="$docker_gid" --inh-caps=-all --no-new-privs sh "$RUN"

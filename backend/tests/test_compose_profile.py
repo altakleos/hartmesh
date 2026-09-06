@@ -11,6 +11,7 @@ pinning that makes ``images.txt`` and the profile agree byte for byte.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -133,12 +134,24 @@ def test_memory_limits_sum_to_three_gib_with_equal_swap(compose: dict) -> None:
     assert total == 3072
 
 
+PIDS_LIMIT = {"gateway": 2048, "frontend": 512, "nginx": 256, "postgres": 512, "redis": 128}
+
+
+def test_every_service_bounds_its_processes_and_the_app_tier_its_cpus(compose: dict) -> None:
+    for name, expected in PIDS_LIMIT.items():
+        assert compose["services"][name]["pids_limit"] == expected, name
+    for name in ("gateway", "frontend"):
+        assert compose["services"][name]["cpus"] == 2, f"{name} shares four vCPUs with two sandboxes at --cpus 1"
+    for name in ("nginx", "postgres", "redis"):
+        assert "cpus" not in compose["services"][name], name
+
+
 def test_two_sandboxes_with_proxies_fit_the_five_gib_budget(compose: dict) -> None:
     env = compose["services"]["gateway"]["environment"]
     sandbox = _mib(env["DEER_FLOW_SANDBOX_MEMORY"])
     proxy = _mib(env["DEER_FLOW_SANDBOX_PROXY_MEMORY"])
     services = sum(MEMORY_MIB.values())
-    assert sandbox == 768, "768 MiB is the smallest measured value that holds under gVisor (README: Memory budget)"
+    assert sandbox == 768, "the operator's figure; the provider-driven re-measurement did not hold at it (README: Memory budget)"
     assert services + 2 * (sandbox + proxy) == 4800
     assert services + 2 * (sandbox + proxy) <= 5120 < services + 3 * (sandbox + proxy)
     assert services + 3 * sandbox > 5120, "open mode does not fit a third sandbox either"
@@ -202,7 +215,11 @@ def test_gateway_wiring_follows_the_contract(compose: dict) -> None:
     assert "BETTER_AUTH_SECRET" not in COMPOSE.read_text(encoding="utf-8")
     subnet = compose["networks"]["app"]["ipam"]["config"][0]["subnet"]
     assert env["AUTH_TRUSTED_PROXIES"] == subnet
-    assert compose["services"]["gateway"]["healthcheck"]["test"][-1].count("/health/ready") == 1
+    healthcheck = compose["services"]["gateway"]["healthcheck"]["test"]
+    assert healthcheck[-1].count("/health/ready") == 1
+    assert healthcheck[:6] == ["CMD", "setpriv", "--reuid=1000", "--regid=1000", "--clear-groups", "--no-new-privs"], "docker runs the probe as root; it must drop like the entrypoint"
+    assert compose["services"]["gateway"]["cap_drop"] == ["ALL"]
+    assert compose["services"]["gateway"]["cap_add"] == ["SETUID", "SETGID"], "the root window needs exactly the two capabilities the drop uses"
 
 
 def test_sandbox_network_is_declared_and_joined_by_no_service(compose: dict) -> None:
@@ -210,7 +227,7 @@ def test_sandbox_network_is_declared_and_joined_by_no_service(compose: dict) -> 
     for name, service in compose["services"].items():
         assert service["networks"] == ["app"], name
     run = (PROFILE / "gateway" / "run.sh").read_text(encoding="utf-8")
-    assert 'docker network create --driver bridge "$DEER_FLOW_SANDBOX_NETWORK"' in run
+    assert 'docker network create --driver bridge -o com.docker.network.bridge.enable_icc=false "$DEER_FLOW_SANDBOX_NETWORK"' in run, "under open, peers must not reach each other on the bridge"
     assert 'docker network inspect "$DEER_FLOW_SANDBOX_NETWORK"' in run
 
 
@@ -221,12 +238,47 @@ def test_datastores_run_as_the_data_directory_owner_with_relaxed_durability(comp
     assert postgres["command"] == ["postgres", "-c", "synchronous_commit=off", "-c", "wal_writer_delay=200ms"]
     assert postgres["stop_grace_period"] == "60s"
     assert "--appendfsync everysec" in redis["command"][-1]
-    assert "--maxmemory 200mb --maxmemory-policy allkeys-lru" in redis["command"][-1]
+    assert "--maxmemory 128mb --maxmemory-policy volatile-lru" in redis["command"][-1], "maxmemory is half the cgroup so an AOF rewrite fork fits; only TTL keys are evictable"
     assert "$$REDIS_PASSWORD" in redis["command"][-1]
     assert compose["services"]["gateway"]["depends_on"] == {"postgres": {"condition": "service_healthy"}, "redis": {"condition": "service_healthy"}}
 
 
 # ── the .env contract ────────────────────────────────────────────────────────
+
+
+def _compose_config(env_file: Path) -> subprocess.CompletedProcess[str]:
+    if shutil.which("docker") is None:
+        if os.environ.get("CI"):
+            pytest.fail("docker compose is required in CI to verify the .env value alphabet")
+        pytest.skip("docker is not installed")
+    return subprocess.run(
+        ["docker", "compose", "--project-directory", str(PROFILE), "--env-file", str(env_file), "config", "--format", "json"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def test_single_quoted_env_values_pass_through_compose_verbatim(tmp_path: Path) -> None:
+    """Compose's dotenv parser interpolates `$` and strips ` #` in bare values; single quotes carry them."""
+    lines = (PROFILE / ".env.example").read_text(encoding="utf-8").splitlines()
+    replaced = {"POSTGRES_PASSWORD": "pa$sword#x", "REDIS_PASSWORD": "ab${HOME}cd"}
+    env_file = tmp_path / "tenant.env"
+    env_file.write_text("".join(f"{line.split('=', 1)[0]}='{replaced[line.split('=', 1)[0]]}'\n" if line.split("=", 1)[0] in replaced else f"{line}\n" for line in lines), encoding="utf-8")
+    result = _compose_config(env_file)
+    assert result.returncode == 0, result.stderr
+    assert "variable is not set" not in result.stderr
+    gateway = json.loads(result.stdout)["services"]["gateway"]["environment"]
+    # `config` re-escapes a literal `$` as `$$` so its output stays re-parseable; the value itself is intact
+    assert gateway["DATABASE_URL"] == "postgresql://deerflow:pa$$sword#x@postgres:5432/deerflow"
+    assert gateway["DEER_FLOW_STREAM_BRIDGE_REDIS_URL"] == "redis://:ab$${HOME}cd@redis:6379/0"
+    # control: the same values bare are rewritten, which is the defect the quoting closes
+    env_file.write_text("".join(f"{line.split('=', 1)[0]}={replaced[line.split('=', 1)[0]]}\n" if line.split("=", 1)[0] in replaced else f"{line}\n" for line in lines), encoding="utf-8")
+    control = _compose_config(env_file)
+    assert control.returncode == 0, control.stderr
+    assert "sword" in control.stderr and "variable is not set" in control.stderr
+    assert json.loads(control.stdout)["services"]["gateway"]["environment"]["DATABASE_URL"] == "postgresql://deerflow:pa#x@postgres:5432/deerflow"
 
 
 def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
@@ -260,6 +312,8 @@ def test_gateway_entrypoint_drops_to_uid_1000_with_the_socket_group_and_runs_one
     run = (PROFILE / "gateway" / "run.sh").read_text(encoding="utf-8")
     assert 'docker_gid="$(stat -c %g "$SOCKET")"' in entrypoint
     assert 'setpriv --reuid=1000 --regid=1000 --groups="$docker_gid" --inh-caps=-all --no-new-privs sh "$RUN"' in entrypoint
+    assert 'if [ "$docker_gid" = "0" ]; then' in entrypoint, "a socket owned by gid 0 must be refused, not granted as a supplementary group"
+    assert entrypoint.index('if [ "$docker_gid" = "0" ]') < entrypoint.index("exec setpriv")
     assert "uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1" in run
     assert 'render_config.py" \\' in run and '--output "$DEER_FLOW_CONFIG_PATH"' in run
     assert 'if [ ! -f "$DEER_FLOW_EXTENSIONS_CONFIG_PATH" ]; then' in run
@@ -328,7 +382,7 @@ def test_template_matches_the_example_version_provider_and_local_backend(render_
     assert template["sandbox"]["use"] == provider_line.group(1)
     assert "provisioner_url" not in template["sandbox"]
     assert template["sandbox"]["replicas"] == 2
-    assert template["sandbox"]["image"] == "ghcr.io/altakleos/hartmesh-sandbox:v2.1.0-hartmesh.4" or "@sha256:" in template["sandbox"]["image"]
+    assert template["sandbox"]["image"].startswith("ghcr.io/altakleos/hartmesh-sandbox@sha256:"), "the tree carries digest pins between cuts"
     assert template["sandbox"]["network"]["allow_domains"] == ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com"]
     assert template["sandbox"]["network"]["approval"] == "prompt"
     assert template["skills"]["path"].startswith("/srv/hartmesh/")
@@ -560,6 +614,12 @@ def test_pin_without_a_release_refuses_tag_form_fork_lines(pin_images: ModuleTyp
         pin_images.verify(files)
     check = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "pin_compose_images.py"), "--check", "--release", RELEASE, "--profile", str(copy)], capture_output=True, text=True, check=False)
     assert check.returncode != 0, "--check takes no release: it verifies the tree as it is"
+
+
+def test_pin_script_is_executable_as_releasing_md_invokes_it() -> None:
+    script = REPO_ROOT / "scripts" / "pin_compose_images.py"
+    assert script.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3\n")
+    assert script.stat().st_mode & 0o111, "RELEASING.md runs scripts/pin_compose_images.py directly"
 
 
 def test_release_image_tag_spelling_matches_the_shell_helper(pin_images: ModuleType) -> None:

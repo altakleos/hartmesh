@@ -981,6 +981,14 @@ class LocalContainerBackend(SandboxBackend):
             self._create_internal_network(network_name, sandbox_id)
             self._create_egress_network(egress_network_name, sandbox_id)
             proxy_address = self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token)
+            if proxy_address is None:
+                # Without the hosts entry below, a sandbox whose runtime has its
+                # own network stack (gVisor's runsc) passes readiness through the
+                # proxy's relay and then fails every proxied request; refuse now
+                # so the teardown below reclaims the resource set and the
+                # acquisition retries, instead of handing out a sandbox with no
+                # egress.
+                raise RuntimeError(f"Sandbox network proxy {proxy_name} reported no address on {network_name}; refusing to start {container_name} without a resolvable proxy")
             proxy_url = f"http://{proxy_name}:3128"
             return self._start_container(
                 container_name,
@@ -994,7 +1002,7 @@ class LocalContainerBackend(SandboxBackend):
                 # which a sandbox running under its own network stack (gVisor's
                 # runsc) never sees, so the name is also pinned in /etc/hosts
                 # with the address Docker assigned on the internal network.
-                extra_hosts={proxy_name: proxy_address} if proxy_address else None,
+                extra_hosts={proxy_name: proxy_address},
                 extra_environment={
                     "HTTP_PROXY": proxy_url,
                     "HTTPS_PROXY": proxy_url,

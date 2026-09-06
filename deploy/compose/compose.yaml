@@ -41,6 +41,7 @@ services:
       start_period: 30s
     mem_limit: 768m
     memswap_limit: 768m
+    pids_limit: 512
     stop_grace_period: 60s
     networks: [app]
     restart: unless-stopped
@@ -51,7 +52,11 @@ services:
     user: "1000:1000"
     # $$ keeps the password out of the rendered command line: the container's
     # shell reads REDIS_PASSWORD from its own environment at start.
-    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes --appendfsync everysec --maxmemory 200mb --maxmemory-policy allkeys-lru"]
+    # maxmemory is half the cgroup: an AOF rewrite forks, and parent plus
+    # copy-on-write child must fit under mem_limit or the cgroup OOM-kills
+    # Redis and every SSE stream in flight drops. volatile-lru evicts only keys
+    # that carry a TTL (README: "Memory budget").
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes --appendfsync everysec --maxmemory 128mb --maxmemory-policy volatile-lru"]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is a required .env key}
     volumes:
@@ -64,6 +69,7 @@ services:
       start_period: 10s
     mem_limit: 256m
     memswap_limit: 256m
+    pids_limit: 128
     networks: [app]
     restart: unless-stopped
 
@@ -76,6 +82,10 @@ services:
     # code runs (README: "Gateway user"). uid 1000 matches the sandbox and the
     # data directory, so the shared workspace works in both directions.
     command: ["sh", "/opt/hartmesh/gateway/entrypoint.sh"]
+    # The root window keeps only the two capabilities the drop itself needs;
+    # nothing after it (the docker CLI, uvicorn on 8001) needs any.
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID]
     # The whole tenant .env is passed to the Gateway only: provider keys are
     # consumed by config.yaml `$NAME` references and never reach the frontend
     # or nginx. Explicit `environment:` entries below override .env values.
@@ -161,14 +171,21 @@ services:
         condition: service_healthy
     healthcheck:
       # /health/ready runs the dependency probes behind a 3 s endpoint
-      # deadline; the client timeout stays above that bound.
-      test: ["CMD", "python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5); raise SystemExit(0 if response.status == 200 else 1)"]
+      # deadline; the client timeout stays above that bound. Docker runs the
+      # probe as the container's user, root here, so it performs the same drop
+      # the entrypoint does before any Python runs.
+      test: ["CMD", "setpriv", "--reuid=1000", "--regid=1000", "--clear-groups", "--no-new-privs", "python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5); raise SystemExit(0 if response.status == 200 else 1)"]
       interval: 5s
       timeout: 5s
       retries: 30
       start_period: 30s
     mem_limit: 1536m
     memswap_limit: 1536m
+    # Availability bounds (README: "Process and CPU limits"): the Gateway
+    # spawns MCP servers (npx, uvx) in its own container, and the sandboxes
+    # are the only other bounded processes on the guest.
+    pids_limit: 2048
+    cpus: 2
     # Covers every configured graceful-shutdown phase plus the memory flush.
     stop_grace_period: 60s
     networks: [app]
@@ -193,6 +210,8 @@ services:
           mode: 0o1777
     mem_limit: 384m
     memswap_limit: 384m
+    pids_limit: 512
+    cpus: 2
     networks: [app]
     restart: unless-stopped
 
@@ -231,6 +250,7 @@ services:
         condition: service_healthy
     mem_limit: 128m
     memswap_limit: 128m
+    pids_limit: 256
     networks: [app]
     restart: unless-stopped
 

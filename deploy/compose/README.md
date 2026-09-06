@@ -52,6 +52,16 @@ Provider keys follow verbatim, any subset of the `*_API_KEY` names
 present. Both datastore passwords are embedded in DSNs as-is, so they must be
 URL-safe (the estate generates them that way).
 
+Values pass through Compose's dotenv parser twice (the `--env-file` and the
+Gateway's `env_file` are the same file): a bare `$NAME` or `${NAME}` inside a
+value is interpolated, ` #` after whitespace starts a comment, and surrounding
+quotes are stripped. A secret carrying a `$` would therefore be silently
+rewritten before the Gateway saw it. The estate single-quotes every value it
+does not fix itself (the bao secrets and every provider key), which disables
+interpolation entirely, and refuses a value containing a single quote or a
+newline, which the format cannot carry. The fixed keys are quote-free by
+construction.
+
 Only the Gateway receives the whole `.env` (`env_file`). The frontend and nginx
 get explicit `environment:` entries and never see a provider key.
 
@@ -101,6 +111,15 @@ then `setpriv` drops to uid/gid 1000 plus that one supplementary group with
 container's user and the data directory's owner, so a directory the Gateway
 creates is writable by the sandbox and a file the sandbox writes is readable
 by the Gateway, with no chown in either direction.
+
+The service starts with `cap_drop: [ALL]` and `cap_add: [SETUID, SETGID]`,
+the two capabilities the drop itself needs, so the root window can do nothing
+else; the entrypoint refuses a socket owned by gid 0 rather than grant the
+Gateway group root. Docker runs the healthcheck as the container's user, root
+here, so the probe performs the same `setpriv` drop before its Python runs.
+Proved on the published image: with those two capabilities the drop succeeds,
+the process reports `CapEff 0` and `NoNewPrivs 1`, and the docker CLI reaches
+the daemon from uid 1000.
 
 ## Ports
 
@@ -170,6 +189,18 @@ resolution is the proxy's, so a bare `dig` inside the sandbox failing is by
 design. `web_search` and `web_fetch` run from the Gateway, not the sandbox, so
 the list governs only what the model's own shell and code reach.
 
+Considered for the standing list and left out, each reachable through the
+approval card when a session needs it: `raw.githubusercontent.com` and
+`objects.githubusercontent.com` (raw files and release assets; `github.com`
+already covers `git clone` and `pip install git+https`); `api.github.com`
+(token-bearing calls belong in a per-session grant); `huggingface.co` (model
+weights are gigabytes into a 768 MiB sandbox, a per-session decision);
+`deb.debian.org` and `security.debian.org` (the sandbox runs as uid 1000 and
+cannot `apt install`); `crates.io`, `rubygems.org` and `proxy.golang.org`
+(no toolchain in the image); `registry.yarnpkg.com` (a mirror of the npm
+registry already listed). Widening the standing list is the operator's
+decision, not a session's.
+
 Restricted modes hard-require **Docker Engine 28 or newer**, checked when the
 backend is constructed with a `RuntimeError`: a too-old daemon is a Gateway
 that will not start, not a sandbox that degrades. The estate asserts no Docker
@@ -188,10 +219,16 @@ bridge and away from `app`), egress is direct, there is no proxy, and each
 sandbox publishes its own port on the host-gateway address. Consequences the
 operator accepts for a tenant that chooses `open`:
 
-- a sandbox **can reach a peer sandbox** (shared bridge, and published ports
-  on a host address). Both belong to the same customer inside one VM, which
-  is why it is that tenant's accepted residual and not the profile's, and why
-  it would not be acceptable on a shared cluster;
+- a sandbox **can reach a peer sandbox's published port** on the host-gateway
+  address, and the sandbox API behind it has no authentication. The bridge
+  path is closed: `run.sh` creates `hartmesh_sandbox` with inter-container
+  communication disabled, so peers cannot reach each other on their bridge
+  addresses; the published-port path goes through the daemon's proxy on the
+  host, which no network option closes. Both sandboxes belong to the same
+  customer inside one VM, which is why it is that tenant's accepted residual
+  and not the profile's, and why it would not be acceptable on a shared
+  cluster. The estate writes no `SANDBOX_EGRESS` today, so no tenant is in
+  this mode; offering it is a per-tenant decision recorded on the estate side;
 - nothing in the profile denies `169.254.169.254` or other private ranges;
   the VM's firewall is the only guard.
 
@@ -210,7 +247,7 @@ seams added to the backend for this profile:
 | `DEER_FLOW_SANDBOX_CONTAINER_USER` | `1000:1000` | The fork's sandbox image ends in `USER 1000:1000`. |
 | `DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS` | `0` | `--cap-drop=ALL --security-opt no-new-privileges` with no compatibility capabilities: the image is pre-initialised non-root, so it needs neither `FOWNER` nor `DAC_OVERRIDE`. |
 | `DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED` | `0` | Emits `--security-opt seccomp=builtin` explicitly (omitting the option would inherit the daemon default). Under gVisor the host filter applies to the Sentry's own syscalls; the sandbox and its browser were proved to start with it (see below). |
-| `DEER_FLOW_SANDBOX_MEMORY` | `768m` | The smallest measured value that holds under gVisor (see below); it supersedes the design's 640 MiB. `--memory-swap` is pinned equal (the guest has no swap, so this is explicitness, not a measurable change). |
+| `DEER_FLOW_SANDBOX_MEMORY` | `768m` | The operator's figure, chosen from a standalone `docker run` measurement under gVisor that superseded the design's 640 MiB. The provider-driven re-measurement of 2026-09-06 did **not** hold at this value (see "Memory budget"); the figure stands pending the operator's decision. `--memory-swap` is pinned equal (the guest has no swap, so this is explicitness, not a measurable change). |
 | `DEER_FLOW_SANDBOX_CPUS` | `1` | Two sandboxes plus two proxies at `--cpus 1` sum to the guest's four vCPUs. |
 | `DEER_FLOW_SANDBOX_PIDS_LIMIT` | `384` | The sandbox image idles at 198 processes (Chromium, Jupyter, node, supervisord) and peaked at 232 during a measured bash-plus-browser turn; 384 leaves 1.6x headroom over that peak while still bounding a fork bomb. |
 | `DEER_FLOW_SANDBOX_PROXY_MEMORY` | `96m` | The sidecar's cgroup peaked at 48 MiB (process high-water mark 33 MiB) during the same turn; 96 MiB is twice that peak, with `--memory-swap` equal. |
@@ -227,11 +264,36 @@ a 1 GiB file operation.
 | frontend | 384 MiB |
 | nginx | 128 MiB |
 | postgres | 768 MiB |
-| redis | 256 MiB (`maxmemory 200mb`, `allkeys-lru`) |
+| redis | 256 MiB (`maxmemory 128mb`, `volatile-lru`) |
 | **services** | **3072 MiB** |
 
 Equal `memswap_limit` is an assertion of intent: with no swap device it
 changes nothing measurable.
+
+Redis's `maxmemory` is half its cgroup on purpose: a background AOF rewrite
+forks, and the parent plus the copy-on-write child must fit under the limit,
+or the cgroup OOM-kills Redis (it restarts and replays the AOF, but every SSE
+stream in flight drops). `volatile-lru` evicts only keys that carry a TTL; the
+stream bridge's keys all do, so a key written without one is never evicted
+to make room.
+
+### Process and CPU limits
+
+| Service | `pids_limit` | `cpus` |
+| --- | --- | --- |
+| gateway | 2048 | 2 |
+| frontend | 512 | 2 |
+| nginx | 256 | scheduler |
+| postgres | 512 | scheduler |
+| redis | 128 | scheduler |
+
+Memory is what the budget bounds; these bound availability. Without them a
+runaway MCP server the Gateway spawns in its own container (`npx`, `uvx`) or
+a Next.js fault could take every pid and every core of the four-vCPU guest
+from the sandboxes, which are the only other bounded processes. The Gateway
+and frontend caps of two vCPUs keep the two sandboxes' `--cpus 1` shares
+under contention; nginx and the datastores are small enough to leave to the
+scheduler.
 
 Under `allowlist` each concurrent sandbox costs its 768 MiB plus its proxy's
 limit (96 MiB, from the measurement above; the backend's own default is
@@ -265,6 +327,33 @@ start-up is also slower: the API answered after 53 to 59
 seconds and the image's browser supervisor, which restarts Chromium when its
 CDP port is not up within 30 seconds, needed one or two restarts before
 reporting `Chromium ready`; expect 75 to 80 seconds to a working browser.
+
+**Re-measured through the provider path on 2026-09-06, the 768 MiB figure does
+not hold.** The standalone runs above created the sandbox with a bare `docker
+run`; the re-measurement used the real `create` (per-sandbox networks, proxy
+sidecar, relay, hosts entry) with the `2.1.0+hartmesh.6` images and the
+profile's exact flags, the same two load rounds (a package download through
+the proxy, allowed and denied fetches, a browser screenshot), sampling the
+cgroup every three seconds:
+
+| `--memory` | idle after readiness | outcome |
+| --- | --- | --- |
+| 768 MiB | 762 MiB (at the ceiling) | OOM-killed within 30 s of the first package download, **2 of 2 runs** |
+| 896 MiB | 829 to 839 MiB | survived both rounds once; OOM-killed in the second round once (**1 of 2**) |
+| 1 GiB | 859 MiB | survived both rounds (1 of 1 here, plus the earlier run) |
+
+The Sentry fills whatever limit it is given (`memory.peak` equals the limit at
+every size) and reclaims under pressure (`memory.events max` counted 2433
+reclaims in the 896 MiB run that survived, 293 at 1 GiB); below about 1 GiB
+that reclaim loses to a package download often enough to kill the sandbox.
+The only value that held in every provider-driven run is 1 GiB, which the
+budget does not fit at two sandboxes: 3072 + 2 × (1024 + 96) = 5312 MiB,
+192 MiB over the 5.0 GiB line. The choices are the operator's: trim 192 MiB
+from the five services (for example gateway 1536 → 1408 and frontend
+384 → 320, landing exactly on 5120), run one sandbox at 1 GiB, or move the
+class to 8 GiB. Until that decision `compose.yaml` keeps 768 MiB, and a tenant
+on this profile should expect the first heavy turn of a fresh sandbox to be
+OOM-killed and retried on a new one.
 
 `replicas` is a maximum with **LRU eviction**: a third acquisition does not
 fail, it evicts the least-recently-used sandbox, which is what keeps the count
@@ -328,6 +417,28 @@ serves a frontend that reports no model configured. That is the correct
 failure for the profile; refusing such a tenant belongs in the estate's
 onboarding verb.
 
+### Differences from the chart's rendered `config.yaml`
+
+The same render with three keys present (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`TAVILY_API_KEY`), compared key by key with `helm template` of the chart's
+config ConfigMap under the chart README's recommended values, at
+`2.1.0+hartmesh.6`. Identical: `checkpointer`, `config_version`, `database`,
+`dedupe_storage`, `deployment` (profile, readiness and shutdown budgets),
+`log_level`, `memory`, `stream_bridge`, `tool_groups`, `tool_plane`,
+`verification`. Every difference and its reason:
+
+| Key | Chart | Profile | Why |
+| --- | --- | --- | --- |
+| `models` | `[]` | the catalog entries for the keys present | the chart leaves models to the operator's values; the profile renders them from the tenant's keys |
+| `tools[web_search]` | DuckDuckGo | DuckDuckGo without a search key, the keyed provider when one is present (Tavily here) | same ten tools; only the search backend follows the tenant |
+| `sandbox.image` | upstream `latest` | the fork's digest pin | release pinning |
+| `sandbox.replicas` | 3 | 2 | the memory budget |
+| `sandbox.idle_timeout` | absent | 1800 | recorded above |
+| `sandbox.network` | absent | `allowlist` block | the chart's sandboxes are fenced by CiliumNetworkPolicy; the VM has no such fence, so the backend's own mode is the fence |
+| `sandbox.provisioner_url`, `provisioner_service_account_token_file`, `accepted_skill_projection_profile` | set | absent | the Kubernetes provisioner path; the local Docker backend has no provisioner and mounts skills directly |
+| `skills` | absent (PVC mounts) | `path` under `home/`, `container_path: /mnt/skills` | the local backend's skills mount |
+| `run_events.backend` | upstream default (`memory`) | `db` | run events survive a Gateway restart on a single-Gateway VM |
+
 ## Applying a `.env` re-render
 
 Rotating a provider key is a re-render of `.env` followed by the same `up -d`.
@@ -348,12 +459,15 @@ with `json-file` on the root disk.
 At release the `image:` references in `compose.yaml`, `sandbox.image` and
 `network.proxy_image` in `config.yaml`, and the lines of `images.txt` are the
 same digest-pinned strings, written by `scripts/pin_compose_images.py` before
-the tag (see `RELEASING.md`, "Compose profile pins"). Between releases the tree
-carries the previous release's tag-form references as development
-placeholders; the estate's grammar refuses such a bundle by design. Seven
-images are pinned: gateway, frontend, sandbox, the network proxy (built under
-the fork's own name, `<repo>-sandbox-network-proxy`), `postgres`, `redis` and
-`nginx`.
+the tag (see `RELEASING.md`, "Compose profile pins"). Between cuts the tree
+carries the **previous release's digest pins**: the pin commit is the last
+thing a release changes and nothing restores placeholders, so a bundle built
+from `main` is grammatical and boots the previous release's images. A cut
+re-points every fork line with `--release`; a third-party image is bumped by
+putting its new tag form in place of the old digest string in all three files
+and running the pin script. Seven images are pinned: gateway, frontend,
+sandbox, the network proxy (built under the fork's own name,
+`<repo>-sandbox-network-proxy`), `postgres`, `redis` and `nginx`.
 
 ## Not here
 
@@ -451,4 +565,25 @@ Then with `runsc` release-20260817.0 registered on the systrap platform
   was OOM-killed under load (see "Memory budget"); the figures there are from
   three standalone runs at 640 MiB, 768 MiB and 1 GiB with the profile's other
   flags unchanged.
+
+Then on 2026-09-06, through the provider path with the `2.1.0+hartmesh.6`
+sandbox and proxy images and the backend that refuses a proxy without an
+address (`runsc` release-20260817.0, systrap, Docker Engine 28.4.0):
+
+- `create` → readiness in 53 to 59 s at every size; `docker inspect`:
+  `Runtime=runsc`, `Memory=MemorySwap` at the requested size, `NanoCpus=1`,
+  `PidsLimit=384`, `User=1000:1000`, `SecurityOpt=[no-new-privileges,
+  seccomp=builtin]`, `CapDrop=[ALL]`, no `CapAdd`, `ExtraHosts=[<proxy
+  name>:<internal address>]`, no published port; inside, `uname -r` is
+  `4.19.0-gvisor` and `id` is `uid=1000(gem)`.
+- Each load round: `pip download requests` through the proxy (five files),
+  `https://pypi.org/simple/` `200`, `https://example.com/` refused with `403
+  from proxy after CONNECT`, `http://169.254.169.254/` refused as an IP
+  literal, `GET /v1/browser/info` `200` and `/v1/browser/screenshot` a 41 KiB
+  PNG. The proxy: `runc`, 96 MiB, uid 65532, read-only, published on
+  `172.17.0.1`. The workspace round-trips. After `destroy`, no container and
+  no per-sandbox network remained, at every size, including the OOM-killed
+  runs.
+- The memory outcome per size is the table under "Memory budget": 768 MiB
+  OOM-killed in both runs, 896 MiB in one of two, 1 GiB in neither.
 
