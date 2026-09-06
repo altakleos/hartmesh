@@ -58,7 +58,8 @@ def test_release_builds_and_attests_five_version_gated_images() -> None:
     # The tag build adopts a digest already pinned by the profile instead of
     # rebuilding it, and refuses a tag-form pin outright.
     assert "deploy/compose/images.txt" in workflow
-    assert "docker buildx imagetools create --tag" in workflow
+    assert "docker buildx imagetools" not in workflow, "the retag must re-push the pinned manifest bytes, never re-encode them"
+    assert 'crane tag "$PIN" "$IMAGE_TAG"' in workflow
     assert "run scripts/pin_compose_images.py before tagging the release" in workflow
     assert workflow.count("if: steps.adopt.outputs.adopted != 'true'") == 3
     assert "value=latest" not in workflow
