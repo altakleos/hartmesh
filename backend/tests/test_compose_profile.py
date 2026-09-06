@@ -45,7 +45,7 @@ CONTRACT_KEYS = {
     "AUTH_JWT_SECRET",
 }
 SERVICES = {"gateway", "frontend", "nginx", "postgres", "redis"}
-MEMORY_MIB = {"gateway": 1536, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256}
+MEMORY_MIB = {"gateway": 1344, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256}
 NGINX_VARIABLES = {
     "$forwarded_proto",
     "$remote_addr",
@@ -124,14 +124,14 @@ def test_only_nginx_publishes_a_port_and_the_contract_carries_the_bind(compose: 
     assert compose["services"]["nginx"].get("user") == "101:101"
 
 
-def test_memory_limits_sum_to_three_gib_with_equal_swap(compose: dict) -> None:
+def test_memory_limits_sum_to_2880_mib_with_equal_swap(compose: dict) -> None:
     total = 0
     for name, expected in MEMORY_MIB.items():
         service = compose["services"][name]
         assert _mib(service["mem_limit"]) == expected, name
         assert service["memswap_limit"] == service["mem_limit"], name
         total += expected
-    assert total == 3072
+    assert total == 2880, "3072 less the 192 MiB two 1 GiB sandboxes cost over 768 MiB (README: Memory budget)"
 
 
 PIDS_LIMIT = {"gateway": 2048, "frontend": 512, "nginx": 256, "postgres": 512, "redis": 128}
@@ -151,10 +151,10 @@ def test_two_sandboxes_with_proxies_fit_the_five_gib_budget(compose: dict) -> No
     sandbox = _mib(env["DEER_FLOW_SANDBOX_MEMORY"])
     proxy = _mib(env["DEER_FLOW_SANDBOX_PROXY_MEMORY"])
     services = sum(MEMORY_MIB.values())
-    assert sandbox == 768, "the operator's figure; the provider-driven re-measurement did not hold at it (README: Memory budget)"
-    assert services + 2 * (sandbox + proxy) == 4800
-    assert services + 2 * (sandbox + proxy) <= 5120 < services + 3 * (sandbox + proxy)
-    assert services + 3 * sandbox > 5120, "open mode does not fit a third sandbox either"
+    assert sandbox == 1024, "the only value that held in every provider-driven gVisor run (README: Memory budget)"
+    assert services + 2 * (sandbox + proxy) == 5120, "exactly on the 5.0 GiB line: raising any limit in compose.yaml must be paid for by lowering another"
+    assert 5120 < services + 3 * (sandbox + proxy)
+    assert services + 2 * sandbox <= 5120 < services + 3 * sandbox, "open mode carries no proxy, fits two and not three"
 
 
 def test_only_the_gateway_reads_the_env_file_and_the_others_get_explicit_environment(compose: dict) -> None:
@@ -203,7 +203,7 @@ def test_gateway_wiring_follows_the_contract(compose: dict) -> None:
     assert env["DEER_FLOW_SANDBOX_HOST"] == "host.docker.internal"
     assert "host.docker.internal:host-gateway" in gateway["extra_hosts"]
     assert env["DEER_FLOW_SANDBOX_NETWORK"] == "hartmesh_sandbox"
-    assert env["DEER_FLOW_SANDBOX_MEMORY"] == "768m"
+    assert env["DEER_FLOW_SANDBOX_MEMORY"] == "1024m"
     assert env["DEER_FLOW_SANDBOX_CPUS"] == "1"
     assert int(env["DEER_FLOW_SANDBOX_PIDS_LIMIT"]) > 0
     assert env["DEER_FLOW_SANDBOX_PROXY_MEMORY"].endswith("m")
