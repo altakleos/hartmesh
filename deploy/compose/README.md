@@ -194,7 +194,7 @@ approval card when a session needs it: `raw.githubusercontent.com` and
 `objects.githubusercontent.com` (raw files and release assets; `github.com`
 already covers `git clone` and `pip install git+https`); `api.github.com`
 (token-bearing calls belong in a per-session grant); `huggingface.co` (model
-weights are gigabytes into a 768 MiB sandbox, a per-session decision);
+weights are gigabytes into a 1 GiB sandbox, a per-session decision);
 `deb.debian.org` and `security.debian.org` (the sandbox runs as uid 1000 and
 cannot `apt install`); `crates.io`, `rubygems.org` and `proxy.golang.org`
 (no toolchain in the image); `registry.yarnpkg.com` (a mirror of the npm
@@ -247,7 +247,7 @@ seams added to the backend for this profile:
 | `DEER_FLOW_SANDBOX_CONTAINER_USER` | `1000:1000` | The fork's sandbox image ends in `USER 1000:1000`. |
 | `DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS` | `0` | `--cap-drop=ALL --security-opt no-new-privileges` with no compatibility capabilities: the image is pre-initialised non-root, so it needs neither `FOWNER` nor `DAC_OVERRIDE`. |
 | `DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED` | `0` | Emits `--security-opt seccomp=builtin` explicitly (omitting the option would inherit the daemon default). Under gVisor the host filter applies to the Sentry's own syscalls; the sandbox and its browser were proved to start with it (see below). |
-| `DEER_FLOW_SANDBOX_MEMORY` | `768m` | The operator's figure, chosen from a standalone `docker run` measurement under gVisor that superseded the design's 640 MiB. The provider-driven re-measurement of 2026-09-06 did **not** hold at this value (see "Memory budget"); the figure stands pending the operator's decision. `--memory-swap` is pinned equal (the guest has no swap, so this is explicitness, not a measurable change). |
+| `DEER_FLOW_SANDBOX_MEMORY` | `1024m` | The only value that held in every provider-driven run under gVisor (see "Memory budget"): the design's 640 MiB and the standalone-measured 768 MiB were both OOM-killed through the real `create` path. The 192 MiB two such sandboxes cost over 768 MiB is paid for by the Gateway's limit. `--memory-swap` is pinned equal (the guest has no swap, so this is explicitness, not a measurable change). |
 | `DEER_FLOW_SANDBOX_CPUS` | `1` | Two sandboxes plus two proxies at `--cpus 1` sum to the guest's four vCPUs. |
 | `DEER_FLOW_SANDBOX_PIDS_LIMIT` | `384` | The sandbox image idles at 198 processes (Chromium, Jupyter, node, supervisord) and peaked at 232 during a measured bash-plus-browser turn; 384 leaves 1.6x headroom over that peak while still bounding a fork bomb. |
 | `DEER_FLOW_SANDBOX_PROXY_MEMORY` | `96m` | The sidecar's cgroup peaked at 48 MiB (process high-water mark 33 MiB) during the same turn; 96 MiB is twice that peak, with `--memory-swap` equal. |
@@ -260,15 +260,18 @@ a 1 GiB file operation.
 
 | Service | `mem_limit` = `memswap_limit` |
 | --- | --- |
-| gateway | 1536 MiB |
+| gateway | 1344 MiB |
 | frontend | 384 MiB |
 | nginx | 128 MiB |
 | postgres | 768 MiB |
 | redis | 256 MiB (`maxmemory 128mb`, `volatile-lru`) |
-| **services** | **3072 MiB** |
+| **services** | **2880 MiB** |
 
 Equal `memswap_limit` is an assertion of intent: with no swap device it
-changes nothing measurable.
+changes nothing measurable. The services were 3072 MiB (exactly 3.0 GiB) with
+the Gateway at 1536 MiB until 2026-09-06; the Gateway gave up 192 MiB so the
+sandbox could go from 768 MiB to 1 GiB without moving the 5.0 GiB line (the
+measurement that chose the Gateway is under "Settling the sandbox figure").
 
 Redis's `maxmemory` is half its cgroup on purpose: a background AOF rewrite
 forks, and the parent plus the copy-on-write child must fit under the limit,
@@ -295,15 +298,18 @@ and frontend caps of two vCPUs keep the two sandboxes' `--cpus 1` shares
 under contention; nginx and the datastores are small enough to leave to the
 scheduler.
 
-Under `allowlist` each concurrent sandbox costs its 768 MiB plus its proxy's
+Under `allowlist` each concurrent sandbox costs its 1 GiB plus its proxy's
 limit (96 MiB, from the measurement above; the backend's own default is
 256 MiB). The concurrent-sandbox ceiling is therefore **2**
 (`sandbox.replicas: 2` in both modes, one budget, one gate, one behaviour):
-3072 + 2 × (768 + 96) = 4800 MiB, under the 5.0 GiB line with 320 MiB to
-spare, against 5664 MiB for three. `open` mode carries no proxy and still
-does not fit three (3072 + 3 × 768 = 5376 MiB > 5120), so the ceiling is 2 in
-both modes. A third concurrent sandbox is the 8 GiB VM class: an estate
-change, not a profile change.
+2880 + 2 × (1024 + 96) = 5120 MiB, **exactly** the 5.0 GiB line with nothing
+to spare, against 6240 MiB for three. `open` mode carries no proxy and still
+does not fit three (2880 + 3 × 1024 = 5952 MiB > 5120), so the ceiling is 2
+in both modes. A third concurrent sandbox is the 8 GiB VM class: an estate
+change, not a profile change. Because the total sits on the line, the next
+increase to any limit in `compose.yaml` has to be paid for by a decrease
+somewhere else in it; `backend/tests/test_compose_profile.py` asserts the
+equality, not just the bound.
 
 The design's 640 MiB was already tight for the fork's sandbox image under
 `runc`, where the idle container sat at about 600 MiB of its 640 MiB cgroup
@@ -340,7 +346,7 @@ cgroup every three seconds:
 | --- | --- | --- |
 | 768 MiB | 762 MiB (at the ceiling) | OOM-killed within 30 s of the first package download, **2 of 2 runs** |
 | 896 MiB | 829 to 839 MiB | survived both rounds once; OOM-killed in the second round once (**1 of 2**) |
-| 1 GiB | 859 MiB | survived both rounds (1 of 1 here, plus the earlier run) |
+| 1 GiB | 859 MiB | survived both rounds (1 of 1 here, plus the earlier run; then 20 of 20 created by the Gateway itself under "Settling the sandbox figure") |
 
 The Sentry fills whatever limit it is given (`memory.peak` equals the limit at
 every size) and reclaims under pressure (`memory.events max` counted 2433
@@ -348,12 +354,75 @@ reclaims in the 896 MiB run that survived, 293 at 1 GiB); below about 1 GiB
 that reclaim loses to a package download often enough to kill the sandbox.
 The only value that held in every provider-driven run is 1 GiB, which the
 budget does not fit at two sandboxes: 3072 + 2 × (1024 + 96) = 5312 MiB,
-192 MiB over the 5.0 GiB line. The choices are the operator's: trim 192 MiB
-from the five services (for example gateway 1536 → 1408 and frontend
-384 → 320, landing exactly on 5120), run one sandbox at 1 GiB, or move the
-class to 8 GiB. Until that decision `compose.yaml` keeps 768 MiB, and a tenant
-on this profile should expect the first heavy turn of a fresh sandbox to be
-OOM-killed and retried on a new one.
+192 MiB over the 5.0 GiB line. The choices were the operator's: trim 192 MiB
+from the five services, run one sandbox at 1 GiB, or move the class to
+8 GiB. The operator chose the trim, keeping the ceiling at 2 and the class at
+6 GiB; which service pays is settled by the measurement that follows.
+
+### Settling the sandbox figure (2026-09-06, P-s)
+
+`compose.yaml` now says 1 GiB for the sandbox and **1344 MiB for the Gateway**
+(1536 less the 192 MiB). Which limit gave up the memory was decided by
+measuring the trimmed services the way the sandbox should have been measured
+the first time: the whole profile running under Compose on a host with
+`runsc` (release-20260817.0, systrap; Docker Engine 28.4.0, Compose v2.39.4),
+the `2.1.0+hartmesh.6` images, a tenant `.env` and data disk laid out as the
+golden image does, and agent turns driven through nginx exactly as a browser
+drives them. The model was a stub OpenAI-compatible server reached through
+`OPENAI_BASE_URL` in the tenant `.env` (a provider variable the Gateway
+already passes through; nothing in the profile changed for it), scripted so
+that every turn makes two `bash` calls in the sandbox (a `pip download`
+through the proxy, then a CPU-bound Python one-liner) and a `present_files`
+call before its answer, so each run passes the fork's delivery verification.
+Each load run was 3 or 4 rounds of 2 concurrent turns on fresh threads (with
+`replicas: 2` every round after the first evicts both sandboxes and creates
+two more), two 16 MiB uploads between rounds, and 12 or 24 web workers
+fetching the frontend's pages and the Gateway's thread search and message
+endpoints without pause. Every service cgroup was sampled every three
+seconds; the figures below are `memory.peak`, and "reclaims" is the `max`
+counter of `memory.events`.
+
+| trim tried | service | idle | peak | reclaims / OOM kills | outcome |
+| --- | --- | --- | --- | --- | --- |
+| gateway 1408, frontend 320 (the aside above) | gateway | 509 MiB | 532 MiB | 0 / 0 | held, 2.6× headroom |
+| | frontend | 202 MiB | 272 MiB | 0 / 0 | held, but 1.18× headroom: **put back** |
+| gateway 1344, frontend 384, run 1 (fresh containers, 3 rounds, 12 workers) | gateway | 256 MiB at start | 416 MiB | 0 / 0 | held |
+| | frontend | 85 MiB at start | 156 MiB | 0 / 0 | held |
+| gateway 1344, frontend 384, run 2 (same containers warm, 4 rounds, 24 workers) | gateway | | 586 MiB | 0 / 0 | held, 2.3× headroom |
+| | frontend | | 178 MiB | 0 / 0 | held, 2.2× headroom |
+| | nginx | 11 MiB | 19 MiB | 0 / 0 | untouched |
+| | postgres | 195 MiB | 257 MiB | 0 / 0 | untouched |
+| | redis | 34 MiB | 39 MiB | 0 / 0 | untouched |
+
+The frontend trim was rejected by its own measurement, not by the arithmetic:
+under 12 concurrent page loads its cgroup reached 272 MiB, and Node 22 in the
+image sizes its default V8 heap limit at 259 MiB whether the cgroup is 320 or
+384 MiB, so a 320 MiB limit would leave about 60 MiB for everything the
+process holds outside that heap. At 384 MiB the same load peaked at 178 MiB.
+The Gateway carries the whole 192 MiB because it is the only service that
+still has more than twice its measured peak after the trim: 586 MiB at the
+end of the second, heavier run (14 of 14 turns succeeded, 14 uploads, 11.5
+thousand page loads, 23 thousand API reads; one upload during the final
+eviction answered `504` from nginx and the upload after it succeeded, a
+latency observation, not a memory one). Its earlier 1536 MiB was headroom for MCP
+servers the Gateway spawns in its own container (`npx`, `uvx`); none is
+configured by default, and 758 MiB of spare remains for those a tenant adds.
+The datastores were not touched: the brief's own reasoning, that a Redis or
+PostgreSQL OOM loses work in flight and drags derived figures with it, holds,
+and neither was near its limit. The proxy sidecar keeps 96 MiB: one of the 20
+sidecars in these runs peaked at 57 MiB, above the 48 MiB the earlier turn
+measured, so 96 is now 1.7× rather than 2×.
+
+The sandbox figure is confirmed from the Gateway's side as well: the same runs
+created 20 sandboxes at 1 GiB through the real acquisition path (`docker
+inspect`: `Runtime=runsc`, `Memory=MemorySwap=1 GiB`, `NanoCpus=1`,
+`PidsLimit=384`, `User=1000:1000`, `CapDrop=[ALL]`), each ran the package
+download and the Python step, and **20 of 20 survived**: `memory.peak` between
+907 MiB and 1024 MiB, reclaims from 0 to 9134, no OOM kill in any of them
+(`memory.events` `oom_kill 0`). The allowlist proxy also refused one
+`CONNECT redirector.gvt1.com:443` per sandbox, Chromium's component updater
+inside the image reaching for Google, recorded on each run as an
+`egress.blocked` diagnostic; that is the standing list doing its job.
 
 `replicas` is a maximum with **LRU eviction**: a third acquisition does not
 fail, it evicts the least-recently-used sandbox, which is what keeps the count
@@ -586,4 +655,28 @@ address (`runsc` release-20260817.0, systrap, Docker Engine 28.4.0):
   runs.
 - The memory outcome per size is the table under "Memory budget": 768 MiB
   OOM-killed in both runs, 896 MiB in one of two, 1 GiB in neither.
+
+Then on 2026-09-06 for the trim (P-s), the profile itself under Compose on the
+same host (`runsc` release-20260817.0, Docker Engine 28.4.0, Compose v2.39.4,
+the `2.1.0+hartmesh.6` images), a scratch copy of this directory with only
+`skills.path` pointed at the scratch data disk (the template fixes it at
+`/srv/hartmesh`, which this host does not have), the data disk laid out as the
+golden image does and the tenant `.env` on it:
+
+- `up -d --wait`: all five services healthy; `docker inspect` of the Gateway
+  `Memory=MemorySwap=1344 MiB`, of the frontend `384 MiB`, and of every
+  sandbox the Gateway created `Runtime=runsc`, `Memory=MemorySwap=1 GiB`,
+  `NanoCpus=1`, `PidsLimit=384`, `User=1000:1000`, `CapDrop=[ALL]`,
+  `SecurityOpt=[no-new-privileges, seccomp=builtin]`.
+- Three load runs through nginx (`/api/v1/auth/initialize`, then per turn
+  `POST /api/threads` and `POST /api/threads/<id>/runs/stream` read to
+  `event: end`, exactly the frontend's calls): 20 turns in all, 14 of 14 at
+  the shipped limits with `status=success`, each having made two `bash` calls
+  in its sandbox (`pip download requests` through the proxy: five wheels
+  saved) and one `present_files` call; 20 uploads of 16 MiB (one `504` from
+  nginx during the last eviction, the next upload succeeded); 19.6 thousand
+  frontend page loads and 39 thousand Gateway reads across the runs. The per-service `memory.peak` and `memory.events` figures
+  are the table under "Settling the sandbox figure"; no service and no sandbox
+  recorded an OOM kill.
+- After each Gateway recreate, no sandbox or per-sandbox network remained.
 

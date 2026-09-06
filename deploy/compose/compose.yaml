@@ -136,9 +136,11 @@ services:
       # sidecar deliberately keeps the daemon default (README: "Network model").
       DEER_FLOW_SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:?SANDBOX_RUNTIME is a required .env key}
       # Per-sandbox limits from the memory budget (README: "Memory budget").
-      # 768 MiB is the measured figure that holds under gVisor and supersedes
-      # the design's 640 MiB, which was OOM-killed under load (README).
-      DEER_FLOW_SANDBOX_MEMORY: 768m
+      # 1 GiB is the only value that held in every provider-driven run under
+      # gVisor; the design's 640 MiB and the standalone-measured 768 MiB were
+      # both OOM-killed through the real create path (README). Paid for by
+      # the Gateway's limit below.
+      DEER_FLOW_SANDBOX_MEMORY: 1024m
       DEER_FLOW_SANDBOX_CPUS: "1"
       DEER_FLOW_SANDBOX_PIDS_LIMIT: "384"
       DEER_FLOW_SANDBOX_PROXY_MEMORY: 96m
@@ -179,8 +181,12 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
-    mem_limit: 1536m
-    memswap_limit: 1536m
+    # 1536 MiB less the 192 MiB that two 1 GiB sandboxes cost over the
+    # 768 MiB figure they replaced, so the in-VM total stays on the 5.0 GiB
+    # line; the Gateway peaked at 586 MiB under tenant load (README: "Memory
+    # budget").
+    mem_limit: 1344m
+    memswap_limit: 1344m
     # Availability bounds (README: "Process and CPU limits"): the Gateway
     # spawns MCP servers (npx, uvx) in its own container, and the sandboxes
     # are the only other bounded processes on the guest.
