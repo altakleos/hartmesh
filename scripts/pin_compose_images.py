@@ -18,12 +18,15 @@ resolves every tag-form line to its registry digest, rewrites the matching
 references in the two YAML files to ``repo@sha256:...``, writes images.txt
 from the same strings, verifies, and prints each fork resolution so the
 session cutting the release can compare it with the candidate build. Between
-releases the tree carries the previous release's fork tags as placeholders;
-a pin without ``--release`` would resolve those, and the adopt step on the
-tag would re-tag the previous release's code as the new one with every check
-green, so pin mode refuses tag-form fork lines unless ``--release`` names the
-release. Third-party lines (``postgres``, ``redis``, ``nginx``) are resolved
-as written. ``--check`` verifies only. Either mode exits non-zero while any
+cuts the tree carries the previous release's digest pins (the pin commit is
+the last thing a release changes), so ``--release`` is what moves every fork
+line to the new release before anything is resolved. A tag-form fork line
+without ``--release`` is refused: resolving it would pin whatever the tag
+names today and the adopt step on the tag would re-tag that as the new
+release with every check green. Third-party lines (``postgres``, ``redis``,
+``nginx``) are resolved as written; to bump one, put the new tag form in all
+three files in place of the old digest string and run pin. ``--check``
+verifies only. Either mode exits non-zero while any
 reference still carries a tag or the three files disagree, so a release cut
 cannot proceed past it.
 

@@ -187,7 +187,10 @@ The candidate build ignores them (a dispatch never adopts, so all five images
 are built), and `--release` rewrites every fork line to the new release before
 resolving, so the previous pins never reach the next release. Seven lines are
 pinned: backend, frontend, sandbox, the network proxy, `postgres`, `redis`,
-and `nginx`.
+and `nginx`. To bump a third-party image, replace its digest string with the
+new tag form (`postgres:16`) in all three files and run
+`scripts/pin_compose_images.py` (no `--release`); the script resolves it and
+rewrites the three files in lockstep.
 
 ## Durable runtime qualification evidence
 

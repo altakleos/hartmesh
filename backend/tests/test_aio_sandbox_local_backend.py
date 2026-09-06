@@ -546,7 +546,7 @@ def test_start_network_proxy_returns_its_internal_network_address(monkeypatch):
     assert commands[-1][:2] == ["docker", "inspect"] and commands[-1][-1] == "proxy-name"
 
 
-def test_container_network_address_tolerates_inspect_failures(monkeypatch):
+def test_container_network_address_reports_inspect_failures_as_none(monkeypatch):
     backend = LocalContainerBackend(
         image="sandbox:latest",
         base_port=8080,
@@ -558,6 +558,31 @@ def test_container_network_address_tolerates_inspect_failures(monkeypatch):
     assert backend._container_network_address("proxy-name", "network-name") is None
     monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="", stderr="No such object", returncode=1))
     assert backend._container_network_address("proxy-name", "network-name") is None
+
+
+def test_restricted_start_refuses_a_proxy_without_an_address_and_tears_down(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    backend._network_mode = "allowlist"
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "missing")
+    monkeypatch.setattr(backend, "_create_internal_network", lambda _name, _sandbox_id: None)
+    monkeypatch.setattr(backend, "_create_egress_network", lambda _name, _sandbox_id: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
+    started: list[str] = []
+    monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: started.append("started") or "container-id")
+    cleaned: list[str] = []
+    monkeypatch.setattr(backend, "_cleanup_restricted_resources", lambda sandbox_id: cleaned.append(sandbox_id))
+
+    with pytest.raises(RuntimeError, match="reported no address .* without a resolvable proxy"):
+        backend._start_restricted_sandbox("id", "sandbox-id", 18080, None, config_mount_exclusion_root=None, relay_token="test-relay-token")
+
+    assert started == [], "a sandbox must never start without its proxy pinned in /etc/hosts"
+    assert cleaned == ["id"]
 
 
 def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
@@ -572,7 +597,7 @@ def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "missing")
     monkeypatch.setattr(backend, "_create_internal_network", lambda _name, _sandbox_id: None)
     monkeypatch.setattr(backend, "_create_egress_network", lambda _name, _sandbox_id: None)
-    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
     captured: dict[str, object] = {}
 
     def fake_start(*_args, **kwargs):
