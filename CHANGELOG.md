@@ -5,6 +5,11 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.6] — 2026-09-06
+
+- fix: adopt step preserves the pinned digest and never adopts on a dispatch (R-10 fix-up) (#59)
+- release: supersedes 2.1.0+hartmesh.5, whose image tags were re-encoded by the adopt step and which received no release manifest
+
 ## [2.1.0+hartmesh.5] — 2026-09-06
 
 - feat: tenant VM compose profile (P-r) (#56)
@@ -1686,6 +1691,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 - **ci:** Consolidate PR/issue labeling and fix the reviewing-job crash and
   label thrash. ([#3455])
 
+[2.1.0+hartmesh.6]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.6
 [2.1.0+hartmesh.5]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.5
 [2.1.0+hartmesh.4]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.4
 [2.1.0+hartmesh.3]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.3
