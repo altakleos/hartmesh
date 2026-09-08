@@ -16,6 +16,7 @@ login.
 import asyncio
 import base64
 import hashlib
+import secrets
 
 import bcrypt
 
@@ -79,3 +80,31 @@ async def verify_password_async(plain_password: str, hashed_password: str) -> bo
     blocking the event loop during password verification.
     """
     return await asyncio.to_thread(verify_password, plain_password, hashed_password)
+
+
+#: A real hash of an unguessable value, computed once per process. Verifying
+#: against it costs what verifying a real user's password costs, and can never
+#: succeed.
+_TIMING_EQUALIZER_HASH: str | None = None
+
+
+def _timing_equalizer_hash() -> str:
+    global _TIMING_EQUALIZER_HASH
+    if _TIMING_EQUALIZER_HASH is None:
+        _TIMING_EQUALIZER_HASH = hash_password(secrets.token_urlsafe(32))
+    return _TIMING_EQUALIZER_HASH
+
+
+async def equalize_password_timing() -> None:
+    """Spend one password verification without having a password to check.
+
+    The login path must answer in the same time whether the account exists,
+    does not exist, or is locked out. Returning early on any of those makes
+    response time an account-enumeration oracle: bcrypt is deliberately slow,
+    so "no user row" is tens of milliseconds faster than "wrong password" and
+    the difference is trivially measurable over a WAN.
+
+    This is an equal-cost stand-in, not a constant-time guarantee: the work
+    factor is the same, the scheduler is not.
+    """
+    await verify_password_async(secrets.token_urlsafe(16), _timing_equalizer_hash())

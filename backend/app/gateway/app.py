@@ -726,7 +726,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             flush_memory=(memory_manager.shutdown_flush if memory_manager is not None else lambda _timeout: not memory_enabled),
             close_memory=(getattr(memory_manager, "close", lambda: None) if memory_manager is not None else lambda: None),
             close_browser=close_browser,
-            close_oidc=auth.close_oidc_service,
+            close_oidc=auth.close_auth_clients,
             stop_retrieval=stop_retrieval,
             close_runtime=close_runtime,
         )

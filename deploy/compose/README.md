@@ -144,8 +144,11 @@ Two compose networks:
   are reachable only here and are never published. The pinned subnet is also
   `AUTH_TRUSTED_PROXIES` on the Gateway, whose login path honours `X-Real-IP`
   only from a TCP peer in that list and ignores `X-Forwarded-For` entirely;
-  without it every login attempt would carry nginx's container address and
-  the per-IP lockout would be shared by the whole tenant.
+  without it every login attempt would carry nginx's container address, and
+  the spray guard would then see the whole world as one source. It no longer
+  decides whether the tenant can log in: the lockout is keyed on the account
+  (§ "Login lockout"), so one office behind one address cannot lock itself
+  out.
 - `sandbox` (`hartmesh_sandbox`): joined by **no** compose service. Compose
   only creates networks a service uses, so `gateway/run.sh` creates it
   idempotently before the first sandbox can exist, unlabelled so `compose
@@ -460,9 +463,9 @@ in place: PostgreSQL for every store, `run_events.backend: db`,
 `dedupe_storage: auto`, and an explicit `DEER_FLOW_TENANT_ID`.
 
 The Gateway runs exactly one worker. `DEER_FLOW_INTERNAL_AUTH_TOKEN` is
-generated per process when unset and the login lockout counter is per worker,
-so a single worker is what keeps both coherent without a second configuration
-key.
+generated per process when unset, so a single worker is what keeps it coherent
+without a second configuration key. The login lockout no longer depends on
+that: its counters are in Redis (§ "Login lockout").
 
 ## Models and tools
 
@@ -489,6 +492,37 @@ serves a frontend that reports no model configured. That is the correct
 failure for the profile; refusing such a tenant belongs in the operator's
 onboarding verb.
 
+### Login lockout
+
+The rendered `config.yaml` sets `auth.local.lockout_store: redis`; every other
+login-throttle value is the Gateway default. Two facts about this profile make
+that the right setting and the defaults the right numbers.
+
+**One tenant is one company.** Five to twenty staff, all behind one office NAT
+address. A lockout keyed on the client address therefore locks the company, not
+the guesser: five failures by anyone lock everyone, remote staff included, and
+five failures in a five-minute window is a median Monday morning with a tool
+nobody's password manager has learned yet. The lock is keyed on the **account**
+instead — five failures against one email address lock that address for five
+minutes, from any address — so the tenant's shared egress address is irrelevant
+to it. A much looser per-source guard (50 distinct accounts or 300 failures in
+15 minutes) still catches spraying; a twenty-person office cannot reach either
+number, because it does not have fifty accounts.
+
+**Clearing a lock must not be an outage.** The stack is one replica with a
+recreate-style rollout, so restarting the Gateway to drop an in-process counter
+interrupts everyone still working. Redis is already running here for the stream
+bridge, so the counters live there and an administrator clears one account with
+`POST /api/v1/auth/lockouts/clear` (admin role, interactive session, not a PAT);
+`GET /api/v1/auth/lockouts` lists what is currently locked. A Redis outage fails
+the login path closed with a 503 — on this profile Redis is already load-bearing
+for every SSE stream, so it is not a state the tenant is working in anyway.
+
+A locked account returns exactly what a wrong password returns, including the
+cost of one password verification, so the lockout cannot be used to discover
+which addresses have accounts. Only the source guard answers 429, and it says
+nothing about any account.
+
 ### Differences from the chart's rendered `config.yaml`
 
 The same render with three keys present (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
@@ -510,6 +544,7 @@ config ConfigMap under the chart README's recommended values, at
 | `sandbox.provisioner_url`, `provisioner_service_account_token_file`, `accepted_skill_projection_profile` | set | absent | the Kubernetes provisioner path; the local Docker backend has no provisioner and mounts skills directly |
 | `skills` | absent (PVC mounts) | `path` under `home/`, `container_path: /mnt/skills` | the local backend's skills mount |
 | `run_events.backend` | upstream default (`memory`) | `db` | run events survive a Gateway restart on a single-Gateway VM |
+| `auth.local.lockout_store` | absent (`memory`) | `redis` | § "Login lockout": one replica with a recreate rollout, so clearing a lockout must not need a restart |
 
 ## Applying a `.env` re-render
 

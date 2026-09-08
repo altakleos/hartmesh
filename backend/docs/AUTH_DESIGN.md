@@ -125,7 +125,19 @@ enum UserScope:
 - 成功后签发 JWT，放入 `access_token` HttpOnly cookie。
 - 响应体只返回 `expires_in` 和 `needs_setup`，不返回 token。
 
-登录失败会按客户端 IP 计数。IP 解析只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。阈值与锁定时长可通过 `auth.local.max_login_attempts`（默认 5）和 `auth.local.lockout_seconds`（默认 300 秒）配置，按次实时读取，改配置后下一次登录即生效，无需重启 Gateway（`max_login_attempts` 最小为 2：单次失败不得锁定 IP。时长热改按方向生效：下调可提前释放进行中的锁定、收紧阈值会保留已计数的失败；上调只延长仍在锁定期内的锁定，不会复活已服满原时长的锁定）。
+登录失败**按账号计数**，不按客户端 IP。对同一个邮箱地址连续失败 `auth.local.account_max_attempts` 次（默认 5），该账号被锁定 `auth.local.account_lockout_seconds` 秒（默认 300），与请求来自哪个地址无关。此前按 IP 计数会让整个公司被锁在自己的部署之外：一间办公室的全部员工共用一个出口地址；未设置 `AUTH_TRUSTED_PROXIES` 时，所有人共用的更是反向代理的容器地址。
+
+另有一道**宽松得多的来源防护**，用于账号喷洒（per-account 锁定看不到这种攻击）：一个来源地址在 `source_window_seconds`（默认 900 秒）内，最多对 `source_max_distinct_accounts`（默认 50）个不同账号失败、共计 `source_max_failures`（默认 300）次，超过任一上限即锁定该地址 `source_lockout_seconds` 秒。默认值高于任何中小企业的员工人数，正常办公室永远碰不到。地址解析仍只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。
+
+被锁定的账号返回的响应与密码错误、账号不存在**完全一致**（401 `invalid_credentials`），并同样消耗一次口令校验，因此锁定不会成为账号枚举信道；只有来源防护返回 429。
+
+计数器位置由 `auth.local.lockout_store` 决定：`memory`（默认，进程内）或 `redis`（跨 worker/副本共享，键按租户命名空间隔离）。存储不可用时登录路径**失败关闭**（503），而不是放行。
+
+`max_login_attempts` / `lockout_seconds` 是上述两个 account 键的**废弃别名**：已设置的数值继续生效，但含义已从"每个客户端地址"变为"每个账号"，配置加载时会打印警告。
+
+以上均为每次登录实时读取，改配置后下一次登录即生效，无需重启 Gateway（最小值 2：单次失败不得锁定账号。时长热改按方向生效：下调可提前释放进行中的锁定、收紧阈值会保留已计数的失败；上调只延长仍在锁定期内的锁定，不会复活已服满原时长的锁定）。
+
+管理员（会话认证，非 PAT）可通过 `GET /api/v1/auth/lockouts` 查看当前被锁定的账号与来源地址，并用 `POST /api/v1/auth/lockouts/clear`（`{"account": ...}` 或 `{"source": ...}`）解除，无需重启 Gateway。
 
 ### 注册
 

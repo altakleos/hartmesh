@@ -301,10 +301,10 @@ curl -s -X POST $BASE/api/v1/auth/register \
 
 ### 3.1 暴力破解防护
 
-#### TC-ATK-01: IP 限速
+#### TC-ATK-01: 账号锁定
 
 ```bash
-# 连续 6 次错误密码
+# 对同一个账号连续 6 次错误密码
 for i in $(seq 1 6); do
   echo "Attempt $i:"
   curl -s -X POST $BASE/api/v1/auth/login/local \
@@ -312,9 +312,9 @@ for i in $(seq 1 6); do
 done
 ```
 
-**预期：** 前 5 次返回 401，第 6 次返回 429 `"Too many login attempts. Try again later."`
+**预期：** 6 次全部返回 401 `{"code": "invalid_credentials"}`。第 5 次失败后该**账号**被锁定，但锁定与密码错误的响应完全一致——两者不可区分是刻意设计，否则锁定会变成账号枚举信道。
 
-#### TC-ATK-02: 限速后正确密码也被拒
+#### TC-ATK-02: 锁定后正确密码也被拒
 
 ```bash
 # 紧接上一步
@@ -322,7 +322,41 @@ curl -s -X POST $BASE/api/v1/auth/login/local \
   -d "username=admin@example.com&password=正确密码" -w " HTTP %{http_code}\n"
 ```
 
-**预期：** 429（锁定 5 分钟）
+**预期：** 401（锁定 5 分钟），与密码错误同样的响应体。
+
+#### TC-ATK-02b: 同一来源的其他账号不受影响
+
+```bash
+# 同一台机器、同一个出口地址，另一个账号用正确密码
+curl -s -X POST $BASE/api/v1/auth/login/local \
+  -d "username=colleague@example.com&password=正确密码" -w " HTTP %{http_code}\n"
+```
+
+**预期：** 200。这是本控制的关键：锁定跟着账号走，一间办公室共用一个出口地址的同事不会被彼此锁在门外。
+
+#### TC-ATK-02c: 管理员解锁（无需重启）
+
+```bash
+# 以管理员会话（cookie）调用
+curl -s -b admin_cookies.txt $BASE/api/v1/auth/lockouts
+curl -s -b admin_cookies.txt -X POST $BASE/api/v1/auth/lockouts/clear \
+  -H 'Content-Type: application/json' \
+  -d '{"account": "admin@example.com"}' -w " HTTP %{http_code}\n"
+```
+
+**预期：** 列表包含该账号；清除后返回 `{"cleared": true, ...}`，该账号随即可用正确密码登录。普通用户调用两者均返回 403。
+
+#### TC-ATK-02d: 来源喷洒防护
+
+```bash
+# 同一来源对大量不同账号各失败一次（默认 15 分钟内 50 个不同账号）
+for i in $(seq 1 51); do
+  curl -s -o /dev/null -X POST $BASE/api/v1/auth/login/local \
+    -d "username=user$i@example.com&password=wrong"
+done
+```
+
+**预期：** 达到上限后该来源地址返回 429 `"Too many login attempts. Try again later."`（来源防护与账号无关，因此可以直说）。
 
 #### TC-ATK-03: 成功登录清除限速
 
@@ -1466,12 +1500,13 @@ curl -s -w "%{http_code}" -o /dev/null $BASE/api/v1/auth/me -b docker_cookies.tx
 - 有 `AUTH_JWT_SECRET` → 200（session 保持）
 - 无 `AUTH_JWT_SECRET` → 401（每次启动生成新临时密钥，旧 JWT 签名失效）
 
-#### TC-DOCKER-03: 多 Worker 下 Rate Limiter 独立
+#### TC-DOCKER-03: 多 Worker 下锁定计数器独立
 
 ```bash
 # docker-compose.yaml 中 gateway 默认 4 workers
-# 每个 worker 有独立的 _login_attempts dict
-# 限速可能不精确（请求分散到不同 worker），但不会完全失效
+# 默认 auth.local.lockout_store: memory 时，每个 worker 有独立的计数器，
+# 因此同一账号实际可尝试约 N 倍次数，且管理员解锁只作用于处理该请求的
+# worker。设置 lockout_store: redis 可同时消除这两点。
 
 for i in $(seq 1 20); do
   echo -n "attempt $i: "
