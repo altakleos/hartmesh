@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 55
+config_version: 56
 
 # ============================================================================
 # Logging
@@ -2994,19 +2994,47 @@ authorization:
 # auth:
 #   local:
 #     allow_registration: false
-#     # Login throttling per client IP (in-process, per worker). Raise
-#     # max_login_attempts when many users share one egress IP (corporate
-#     # proxy / NAT) so shared-IP lockouts don't block the whole office;
-#     # lower it for a stricter posture (minimum 2 — one failed attempt must
-#     # never lock an IP, or a single typo would block the shared egress).
-#     # Defaults preserve the historical hardcoded policy (5 failures /
-#     # 5 minutes). Live-read per login, so a config reload applies without
-#     # a Gateway restart: lowering lockout_seconds releases an active lock
-#     # early and tightening max_login_attempts keeps already-counted
-#     # failures; a raised lockout_seconds extends a still-active lock but
-#     # never resurrects one that already expired.
-#     # max_login_attempts: 5
-#     # lockout_seconds: 300
+#     # Login throttling. The lock that matters is keyed on the ACCOUNT:
+#     # five failures against one email address lock that address for five
+#     # minutes, whatever address the attempts came from. Keying it on the
+#     # client address (as earlier releases did) locked a whole company
+#     # out of its own deployment, because everyone in one
+#     # office shares one egress address — and with no AUTH_TRUSTED_PROXIES
+#     # set, everyone shared the reverse proxy's address instead.
+#     # Minimum 2: one failed attempt must never lock an account.
+#     # account_max_attempts: 5
+#     # account_lockout_seconds: 300
+#     #
+#     # max_login_attempts / lockout_seconds are the DEPRECATED names of
+#     # those two. A value you already set is still applied, but it now
+#     # limits failures per account rather than per client address, and the
+#     # Gateway logs a warning naming the replacement. If you raised
+#     # max_login_attempts to survive a shared office address, lower it: the
+#     # problem it worked around no longer exists.
+#     #
+#     # A much looser second guard still catches untargeted spraying across
+#     # many accounts from one address, which the per-account lock cannot
+#     # see. The defaults take more accounts than a small or medium business
+#     # has staff, so a whole office typing badly never reaches them.
+#     # source_window_seconds: 900
+#     # source_max_distinct_accounts: 50
+#     # source_max_failures: 300
+#     # source_lockout_seconds: 900
+#     #
+#     # Where the counters live. `memory` is per Gateway process: fine for a
+#     # single-worker single-replica install, but the counters die with the
+#     # process, so an administrator cannot clear a lockout without a
+#     # restart. `redis` shares them across workers and replicas and lets
+#     # POST /api/v1/auth/lockouts/clear outlive a rollout. A Redis outage
+#     # fails the login path closed (503) rather than opening it.
+#     # lockout_store: memory
+#     # lockout_store_redis_url: redis://localhost:6379/0
+#
+#     # All of the above is read live per login, so a config reload applies
+#     # without a Gateway restart: lowering account_lockout_seconds releases
+#     # an active lock early and tightening account_max_attempts keeps
+#     # already-counted failures; a raised duration extends a still-active
+#     # lock but never resurrects one that already expired.
 #
 #   oidc:
 #     enabled: true

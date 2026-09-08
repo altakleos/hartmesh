@@ -386,6 +386,7 @@ def test_template_matches_the_example_version_provider_and_local_backend(render_
     assert template["sandbox"]["network"]["allow_domains"] == ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com"]
     assert template["sandbox"]["network"]["approval"] == "prompt"
     assert template["skills"]["path"].startswith("/srv/hartmesh/")
+    assert template["auth"]["local"]["lockout_store"] == "redis", "the login lockout must survive a restart so an admin unlock is not an outage (README: Login lockout)"
     assert template["deployment"]["profile"] == "local_development"
     assert template["run_events"]["backend"] == "db"
     assert template["database"]["postgres_url"] == "$DATABASE_URL"

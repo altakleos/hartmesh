@@ -20,6 +20,14 @@ from app.gateway.auth import (
 )
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+from app.gateway.auth.login_throttle import (
+    LoginThrottleUnavailable,
+    ThrottlePolicy,
+    close_login_throttle_store,
+    get_login_throttle_store,
+    normalize_account,
+    views_as_payload,
+)
 from app.gateway.auth.oidc import OIDCError, OIDCService
 from app.gateway.auth.oidc_state import (
     OIDCStatePayload,
@@ -31,17 +39,20 @@ from app.gateway.auth.oidc_state import (
     get_state_cookie,
     set_state_cookie,
 )
+from app.gateway.auth.password import equalize_password_timing
 from app.gateway.auth.pat import PAT_MAX_NAME_LENGTH
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
 from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
-from app.gateway.deps import get_current_user_from_request, get_local_provider
+from app.gateway.deps import get_current_user_from_request, get_local_provider, require_admin_user
 from deerflow.config.auth_config import OIDCProviderConfig
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+
+_LOCKOUT_ADMIN_DETAIL = "Admin role required to manage login lockouts"
 
 
 # ── Request/Response Models ──────────────────────────────────────────────
@@ -159,52 +170,36 @@ def _set_session_cookie(response: Response, token: str, request: Request, *, rem
     set_session_cookie(response, request, token, remember_me=remember_me)
 
 
-# ── Rate Limiting ────────────────────────────────────────────────────────
-# In-process dict — not shared across workers.
+# ── Login throttling ─────────────────────────────────────────────────────
+# Two limits, and the important one is keyed on the **account**:
 #
-# **Limitation**: with multi-worker deployments (e.g., gunicorn -w N), each
-# worker maintains its own lockout table, so an attacker effectively gets
-# N × max_login_attempts guesses before being locked out everywhere. For
-# production multi-worker setups, replace this with a shared store (Redis,
-# database-backed counter) to enforce a true per-IP limit.
+#   * ``auth.local.account_max_attempts`` failures against one submitted email
+#     address lock that address for ``auth.local.account_lockout_seconds``.
+#     Keying this on the client address (as it was until this change) locked a
+#     whole company out of its own deployment: every member of a five-to-twenty
+#     person office shares one NAT address, and with no ``AUTH_TRUSTED_PROXIES``
+#     set they shared the reverse proxy's container address instead, remote
+#     staff included. The account is what an attacker guesses; the building is
+#     not.
+#   * A much looser per-source guard still catches untargeted spraying across
+#     many accounts from one address, which the per-account limit cannot see.
 #
-# The policy values are operator-configurable via auth.local.max_login_attempts /
-# auth.local.lockout_seconds (read live per call, matching _local_registration_enabled,
-# so a config reload applies to the next login without a Gateway restart). The
-# no-config.yaml fallback is the LocalAuthConfig model defaults — a single source
-# of truth, not a second copy of the numbers.
-
-# ip → (fail_count, locked_at, locked_duration). The stored duration always
-# matches the policy the lock was last evaluated under (its creation counts
-# as an evaluation, and every check that leaves the lock active commits the
-# then-current duration, decreases included): a lowered lockout_seconds
-# releases an active lock early, a raised one extends it — and a sentence
-# that already served the last-evaluated duration is never resurrected.
-_login_attempts: dict[str, tuple[int, float, float]] = {}
+# Both live in ``app.gateway.auth.login_throttle``; the store is per process by
+# default and shared through Redis when ``auth.local.lockout_store: redis``,
+# which is what lets an administrator's unlock outlive a rollout. A store
+# outage fails this path closed (503).
+#
+# Policy is read live per login (matching ``_local_registration_enabled``), so
+# a config reload applies to the next attempt without a Gateway restart, and
+# resolution runs off the event loop because ``get_app_config`` re-hashes
+# config.yaml on every call and this endpoint is unauthenticated.
 
 
-def _login_throttle_policy() -> tuple[int, float]:
-    """(max_login_attempts, lockout_seconds) from auth.local config, read live.
-
-    Only ``FileNotFoundError`` falls back to the model defaults, matching
-    ``_local_registration_enabled``: ``config.yaml`` is absent in bare-app
-    contexts that never load it (tests build the gateway without one), and the
-    throttle must keep its pre-config-era behavior there. A malformed config
-    propagates instead — like every other config consumer, and so an operator
-    who tightened the policy never silently gets the more permissive defaults.
-
-    Callers on request paths resolve this at most once per helper invocation;
-    ``get_app_config`` re-hashes the config file on every call, and the login
-    endpoint is unauthenticated.
-    """
-    from deerflow.config.app_config import get_app_config
-    from deerflow.config.auth_config import LocalAuthConfig
-
-    try:
-        local = get_app_config().auth.local
-    except FileNotFoundError:
-        local = LocalAuthConfig()
-    return local.max_login_attempts, local.lockout_seconds
+# The client address is still resolved, for the per-source spray guard only.
+# ``AUTH_TRUSTED_PROXIES`` keeps its exact meaning and remains worth setting:
+# without it every request carries the reverse proxy's address, and the spray
+# guard then sees one source for the whole world. It no longer decides whether
+# a company can log in, because the lock that matters is keyed on the account.
 
 
 def _trusted_proxies() -> list:
@@ -268,132 +263,73 @@ def _get_client_ip(request: Request) -> str:
     return peer_host or "unknown"
 
 
-async def _check_rate_limit(ip: str) -> None:
-    """Raise 429 if the IP is currently locked out.
+def _login_local_config():
+    """The live ``auth.local`` config, or the model defaults without a file.
 
-    The record lookup comes before policy resolution on purpose: a clean IP
-    (no failed attempts recorded — the overwhelming majority of logins) must
-    not pay a config read, and ``get_app_config`` re-hashes config.yaml on
-    every call while this endpoint is unauthenticated. When a record exists
-    the policy is resolved off the event loop via ``asyncio.to_thread``:
-    every request from a recorded IP — including an already-locked attacker
-    flooding the endpoint — pays that read on the way to its answer, and the
-    stat + hash must not block the loop.
+    Only ``FileNotFoundError`` falls back: ``config.yaml`` is absent in
+    bare-app contexts that never load one (tests build the Gateway without it),
+    and the throttle must keep working there. A malformed config propagates,
+    like every other config consumer, so an operator who tightened the policy
+    never silently gets the more permissive defaults.
     """
-    record = _login_attempts.get(ip)
-    if record is None:
-        return
-    max_attempts, lockout_seconds = await asyncio.to_thread(_login_throttle_policy)
-    # The await above is a yield point: while this coroutine was suspended,
-    # another request for the same IP may have deleted or replaced the record
-    # (the pre-async version was atomic on the loop). The pre-read served only
-    # as the cheap clean-IP skip; decide on a fresh snapshot from here on —
-    # everything below is synchronous, and every mutation is guarded by
-    # re-comparing against that snapshot so a record replaced mid-flight
-    # (e.g. a successful login followed by a new failure) is never clobbered.
-    record = _login_attempts.get(ip)
-    if record is None:
-        return
-    fail_count, locked_at, locked_duration = record
-    if fail_count < max_attempts:
-        return
-    if locked_at == 0.0:
-        # Over the *current* threshold but the lock never started under the
-        # threshold these failures accumulated under (the operator tightened
-        # max_login_attempts mid-count). Keep the record: the next failure
-        # starts the lock and a successful login clears it — deleting here
-        # would hand the IP a fresh budget under a stricter policy.
-        return
-    now = time.time()
-    if now >= locked_at + locked_duration:
-        # The lock served the full sentence of the duration in force when it
-        # started — a later duration increase must not resurrect it.
-        if _login_attempts.get(ip) == record:
-            del _login_attempts[ip]
-        return
-    if now < locked_at + lockout_seconds:
-        # Still locked. The sentence now follows the current duration, and
-        # that evaluation is committed — including decreases — so the stored
-        # sentence always matches the policy the lock was last evaluated
-        # under; a later raise can never resurrect time the lock already
-        # served under a shorter policy.
-        if lockout_seconds != locked_duration and _login_attempts.get(ip) == record:
-            _login_attempts[ip] = (fail_count, locked_at, lockout_seconds)
-        raise HTTPException(
-            status_code=429,
-            detail="Too many login attempts. Try again later.",
-        )
-    # Original sentence still running, but the current (lowered) duration has
-    # already elapsed — release early.
-    if _login_attempts.get(ip) == record:
-        del _login_attempts[ip]
+    from deerflow.config.app_config import get_app_config
+    from deerflow.config.auth_config import LocalAuthConfig
 
-
-_MAX_TRACKED_IPS = 10000
-
-
-def _record_failure_under_policy(ip: str, max_attempts: int, lockout_seconds: float) -> None:
-    """Apply one failed login to the counter under an explicit policy."""
-    # Evict expired lockouts when dict grows too large. Expiry is a property
-    # of each record's own committed sentence — `t > 0 and now >= t + d` —
-    # independent of the live threshold: a record locked under an old, lower
-    # threshold must still be swept once its sentence is served, even if the
-    # current max has moved past its count. Gating on the current threshold
-    # here would retain expired records while the capacity fallback below
-    # evicts live counters (they sort first), granting active offenders
-    # fresh budgets.
-    if len(_login_attempts) >= _MAX_TRACKED_IPS:
-        now = time.time()
-        expired = [k for k, (c, t, d) in _login_attempts.items() if t > 0.0 and now >= t + d]
-        for k in expired:
-            del _login_attempts[k]
-        # If still too large, evict cheapest-to-lose half ordered by each
-        # record's own expiry: never-locked counters (t + d == 0.0) first,
-        # then locked records whose committed sentence expires earliest.
-        if len(_login_attempts) >= _MAX_TRACKED_IPS:
-            by_time = sorted(_login_attempts.items(), key=lambda kv: kv[1][1] + kv[1][2])
-            for k, _ in by_time[: len(by_time) // 2]:
-                del _login_attempts[k]
-
-    record = _login_attempts.get(ip)
-    if record is None:
-        _login_attempts[ip] = (1, 0.0, 0.0)
-    else:
-        new_count = record[0] + 1
-        if new_count >= max_attempts:
-            _login_attempts[ip] = (new_count, time.time(), lockout_seconds)
-        else:
-            _login_attempts[ip] = (new_count, 0.0, 0.0)
-
-
-async def _record_login_failure(ip: str) -> None:
-    """Record a failed login attempt for the given IP.
-
-    Policy resolution runs off the event loop (see ``_check_rate_limit``):
-    this is the first config read for a previously clean IP, and the login
-    endpoint is unauthenticated.
-    """
     try:
-        max_attempts, lockout_seconds = await asyncio.to_thread(_login_throttle_policy)
-    except Exception:
-        # A malformed config keeps failing loudly, but dropping the failure
-        # here would leave the IP clean — and a clean IP skips the config
-        # read in _check_rate_limit, so every subsequent wrong password would
-        # reach authenticate() again: unlimited password verification for as
-        # long as the file stays broken. Count under the model defaults so
-        # the throttle fails closed (the next check reads the broken config
-        # before authenticate), then re-raise.
-        from deerflow.config.auth_config import LocalAuthConfig
-
-        fallback = LocalAuthConfig()
-        _record_failure_under_policy(ip, fallback.max_login_attempts, fallback.lockout_seconds)
-        raise
-    _record_failure_under_policy(ip, max_attempts, lockout_seconds)
+        return get_app_config().auth.local
+    except FileNotFoundError:
+        return LocalAuthConfig()
 
 
-def _record_login_success(ip: str) -> None:
-    """Clear failure counter for the given IP on successful login."""
-    _login_attempts.pop(ip, None)
+def _login_throttle_policy() -> ThrottlePolicy:
+    """Resolve the live throttle policy (blocking; call via ``to_thread``)."""
+    return ThrottlePolicy.from_local_config(_login_local_config())
+
+
+def _throttle_store(request: Request):
+    """The process-wide throttle store, keyed to the live configuration."""
+    return get_login_throttle_store(
+        _login_local_config(),
+        tenant_namespace=getattr(request.app.state, "redis_tenant_namespace", None),
+    )
+
+
+async def _resolve_throttle(request: Request) -> tuple[ThrottlePolicy, object]:
+    """Resolve policy and store together, off the event loop."""
+    return await asyncio.to_thread(lambda: (_login_throttle_policy(), _throttle_store(request)))
+
+
+_STORE_UNAVAILABLE_DETAIL = "Login is temporarily unavailable. Try again shortly."
+
+
+def _store_unavailable() -> HTTPException:
+    """Fail closed: no counter, no login.
+
+    Failing open would hand an attacker unlimited guesses during exactly the
+    window nobody is watching. The response says nothing about any account, so
+    it leaks nothing an unauthenticated caller could enumerate with.
+    """
+    return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=_STORE_UNAVAILABLE_DETAIL)
+
+
+def _source_locked_error() -> HTTPException:
+    """The per-source spray guard tripped. Not account-specific, so it may say so."""
+    return HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+
+
+def _invalid_credentials_error() -> HTTPException:
+    """One response for a wrong password, an unknown account and a locked one.
+
+    A locked account must be indistinguishable from an account that does not
+    exist, or the lockout becomes an account-enumeration oracle: an attacker
+    would learn which addresses are real by watching which ones lock. The
+    caller pairs this with an equal-cost password verification so the timing
+    matches too.
+    """
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Incorrect email or password").model_dump(),
+    )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
@@ -408,18 +344,63 @@ async def login_local(
 ):
     """Local email/password login."""
     client_ip = _get_client_ip(request)
-    await _check_rate_limit(client_ip)
+    account = normalize_account(form_data.username)
+    policy, store = await _resolve_throttle(request)
+
+    try:
+        if await store.source_locked(client_ip, policy):
+            raise _source_locked_error()
+        account_locked = await store.account_locked(account, policy)
+    except LoginThrottleUnavailable:
+        raise _store_unavailable() from None
+
+    if account_locked:
+        # Do not verify the password: that is what the lock is for. Burn one
+        # equivalent verification anyway so a locked account cannot be told
+        # from an unknown one by response time, then answer exactly as a wrong
+        # password does. The attempt still counts against the source guard —
+        # hammering a locked account is volume from that address.
+        await equalize_password_timing()
+        try:
+            await store.record_source_failure(client_ip, account, policy)
+        except LoginThrottleUnavailable:
+            raise _store_unavailable() from None
+        raise _invalid_credentials_error()
 
     user = await get_local_provider().authenticate({"email": form_data.username, "password": form_data.password})
 
     if user is None:
-        await _record_login_failure(client_ip)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Incorrect email or password").model_dump(),
-        )
+        try:
+            locked_now = await store.record_account_failure(account, policy)
+            source_locked_now = await store.record_source_failure(client_ip, account, policy)
+        except LoginThrottleUnavailable:
+            raise _store_unavailable() from None
+        if locked_now:
+            logger.warning(
+                "Login lockout: account %s locked after %d failed attempts for %.0fs (last source %s)",
+                account,
+                policy.account_max_attempts,
+                policy.account_lockout_seconds,
+                client_ip,
+            )
+        if source_locked_now:
+            logger.warning(
+                "Login lockout: source %s locked for %.0fs after spraying within %.0fs (limits: %d accounts, %d failures)",
+                client_ip,
+                policy.source_lockout_seconds,
+                policy.source_window_seconds,
+                policy.source_max_distinct_accounts,
+                policy.source_max_failures,
+            )
+        raise _invalid_credentials_error()
 
-    _record_login_success(client_ip)
+    try:
+        await store.clear_account(account)
+    except LoginThrottleUnavailable:
+        # The credentials were correct and the session is about to be issued;
+        # a store that failed on the way out must not turn a good login into an
+        # error. The counter expires on its own.
+        logger.warning("Could not clear the login failure counter for %s: throttle store unavailable", account)
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request, remember_me=remember_me)
 
@@ -776,6 +757,74 @@ _SETUP_STATUS_INFLIGHT: dict[str, asyncio.Task[dict]] = {}
 _SETUP_STATUS_INFLIGHT_GUARD = asyncio.Lock()
 
 
+class LockoutClearRequest(BaseModel):
+    """Which lockout an administrator is clearing.
+
+    Exactly one of the two: an account address, or a client address. The
+    account travels in the body rather than the path because an email in a URL
+    path is a percent-encoding trap for whoever writes the support runbook.
+    """
+
+    account: str | None = Field(default=None, max_length=320)
+    source: str | None = Field(default=None, max_length=64)
+
+    @field_validator("account", "source")
+    @classmethod
+    def _strip(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class LockoutClearResponse(BaseModel):
+    cleared: bool
+    kind: str
+    label: str
+
+
+@router.get("/lockouts", dependencies=[Depends(require_session_source)])
+async def list_lockouts(request: Request):
+    """List the accounts and sources currently locked out of local login.
+
+    Admin-only, and session-only: a leaked automation token must not be able to
+    read who is locked or clear a lock. This is the half of the control that
+    turns a customer outage into a support answer — before it, a locked-out
+    office had no self-service way out and no signal an administrator could
+    look at, because the counter was a dict inside one process.
+    """
+    await require_admin_user(request, detail=_LOCKOUT_ADMIN_DETAIL)
+    policy, store = await _resolve_throttle(request)
+    try:
+        views = await store.lockouts(policy)
+    except LoginThrottleUnavailable:
+        raise _store_unavailable() from None
+    return {"lockouts": views_as_payload(views)}
+
+
+@router.post("/lockouts/clear", response_model=LockoutClearResponse, dependencies=[Depends(require_session_source)])
+async def clear_lockout(request: Request, body: LockoutClearRequest):
+    """Clear one account's or one source's lockout without a restart."""
+    await require_admin_user(request, detail=_LOCKOUT_ADMIN_DETAIL)
+    if (body.account is None) == (body.source is None):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provide exactly one of account or source")
+    policy, store = await _resolve_throttle(request)
+    del policy
+    try:
+        if body.account is not None:
+            account = normalize_account(body.account)
+            cleared = await store.clear_account(account)
+            kind, label = "account", account
+        else:
+            cleared = await store.clear_source(body.source or "")
+            kind, label = "source", body.source or ""
+    except LoginThrottleUnavailable:
+        raise _store_unavailable() from None
+    admin = getattr(request.state, "user", None)
+    logger.info("Login lockout cleared: %s %s (existed=%s) by %s", kind, label, cleared, getattr(admin, "email", "admin"))
+    return LockoutClearResponse(cleared=cleared, kind=kind, label=label)
+
+
 @router.get("/setup-status")
 async def setup_status(request: Request):
     """Check if an admin account exists. Returns needs_setup=True when no admin exists."""
@@ -883,6 +932,18 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
 # ── OIDC / SSO Endpoints ────────────────────────────────────────────────
 
 _OIDC_PROVIDER_KEY_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+async def close_auth_clients() -> None:
+    """Close every client this router owns, at Gateway shutdown.
+
+    The OIDC service and the login throttle store both hold connections; the
+    shutdown coordinator has one auth-layer hook, so it closes both.
+    """
+    try:
+        await close_oidc_service()
+    finally:
+        await close_login_throttle_store()
 
 
 def _get_oidc_service() -> OIDCService:

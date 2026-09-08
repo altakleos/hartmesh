@@ -17,10 +17,24 @@
 # Everything else is copied through unchanged. Paths are literal because this
 # file cannot interpolate them: HARTMESH_DATA_DIR is therefore fixed at
 # /srv/hartmesh by this file (README: "Mount points").
-config_version: 55
+config_version: 56
 log_level: info
 
 models: []
+
+# ── Local login throttling ──────────────────────────────────────────────────
+# The lockout is keyed on the account, not the client address: one tenant is
+# one company, five to twenty staff behind one office NAT address, so an
+# address-keyed lock made five failures by anyone lock out everyone (README:
+# "The .env contract", AUTH_TRUSTED_PROXIES). The counters live in Redis, which
+# this profile already runs, so an administrator can clear a lockout through
+# POST /api/v1/auth/lockouts/clear without restarting the Gateway — a restart
+# here is a visible interruption for everyone still working, because the stack
+# is one replica with a recreate rollout. A Redis outage fails login closed;
+# on this profile Redis is already load-bearing for streaming.
+auth:
+  local:
+    lockout_store: redis
 
 # ── Sandbox: the Gateway's local Docker backend (no provisioner_url) ────────
 sandbox:

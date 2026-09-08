@@ -3,7 +3,7 @@
 import logging
 
 from app.gateway.auth.models import User
-from app.gateway.auth.password import hash_password_async, needs_rehash, verify_password_async
+from app.gateway.auth.password import equalize_password_timing, hash_password_async, needs_rehash, verify_password_async
 from app.gateway.auth.providers import AuthProvider
 from app.gateway.auth.repositories.base import UserRepository
 
@@ -38,10 +38,15 @@ class LocalAuthProvider(AuthProvider):
 
         user = await self._repo.get_user_by_email(email)
         if user is None:
+            # Spend the verification this lookup skipped: an unknown address
+            # must not answer faster than a wrong password, or response time
+            # enumerates which addresses have accounts.
+            await equalize_password_timing()
             return None
 
         if user.password_hash is None:
-            # OAuth user without local password
+            # OAuth user without local password — same reasoning.
+            await equalize_password_timing()
             return None
 
         if not await verify_password_async(password, user.password_hash):
