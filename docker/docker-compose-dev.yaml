@@ -265,8 +265,21 @@ volumes:
   redis-data:
 
 networks:
+  # Pinned so the dev stack gets a stable range instead of whatever Docker's
+  # default pool hands out. It has to be pinned *somewhere the host does not
+  # route*: a bridge is a connected route, so every address in this range stops
+  # being reachable through the machine's real default gateway. This one shipped
+  # as 192.168.200.0/24 until 2026-09-09, which is a live range on the network
+  # the operator these tenants are built for runs, so `make docker-start` there
+  # quietly took over the route to it. The default below also stays clear of Docker's own
+  # pools (so it never collides with a sandbox network) and of the tenant VM
+  # profile's 10.201.26.0/24 (so one machine can run both).
+  #
+  # No private range is free everywhere. DEER_FLOW_DEV_SUBNET overrides it from
+  # your shell or docker/.env; CONTRIBUTING.md ("Development network") has the
+  # collision checks and how to move an existing stack onto a new range.
   deer-flow-dev:
     driver: bridge
     ipam:
       config:
-        - subnet: 192.168.200.0/24
+        - subnet: ${DEER_FLOW_DEV_SUBNET:-10.201.27.0/24}
