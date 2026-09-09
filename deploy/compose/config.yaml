@@ -53,7 +53,7 @@ auth:
 # ── Sandbox: the Gateway's local Docker backend (no provisioner_url) ────────
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
-  image: ghcr.io/altakleos/hartmesh-sandbox@sha256:f5d5b4e45d69ab7657b95043f43d5ac8d0a496f4df8eb22b61a2c304f358cec1
+  image: ghcr.io/altakleos/hartmesh-sandbox@sha256:d9af7a5999a04c72129693dbce92962a5dde058e8a88a687f9c7e869f9c3b92a
   port: 8080
   # Concurrent-sandbox ceiling from the memory budget (README: "Memory
   # budget"). This is a maximum with LRU eviction: a third acquisition evicts
@@ -78,7 +78,7 @@ sandbox:
       - files.pythonhosted.org
       - registry.npmjs.org
       - github.com
-    proxy_image: ghcr.io/altakleos/hartmesh-sandbox-network-proxy@sha256:2c62343b813fd8f1b8f8f6be4313df9b381e9e422b9704a4c5c16ac4059d17bb
+    proxy_image: ghcr.io/altakleos/hartmesh-sandbox-network-proxy@sha256:f303def58ec4c0f50cf949ab611817bf4d14b8de091d53cca2eb898a0afc5c93
 
 skills:
   # Operator-managed skill library on the tenant data disk (created empty by
