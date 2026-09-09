@@ -24,13 +24,13 @@ import importlib.util
 import os
 import statistics
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from starlette.requests import Request
@@ -833,13 +833,21 @@ OTHER_IP = "198.51.100.77"
 
 @pytest.fixture(scope="module")
 def profile_local_auth() -> LocalAuthConfig:
-    """``auth.local`` as the tenant Gateway renders and then loads it.
+    """``auth.local`` as the tenant Gateway renders it, through the real steps.
 
     The template is not a config file: ``gateway/run.sh`` renders it through
     ``render_config.py`` at every start and points DEER_FLOW_CONFIG_PATH at the
-    result. Going through both steps is the point -- a value dropped from the
+    result. Going through the renderer is the point -- a value dropped from the
     template, or a renderer that stopped copying ``auth:`` through, would leave
     a hand-written policy fixture passing and the tenant on the generic default.
+
+    Only ``auth.local`` is built, with the model the Gateway builds it with.
+    ``AppConfig.from_file`` is deliberately *not* used: it applies the whole
+    file to process-wide singletons (checkpointer, stream bridge, memory, ...)
+    that no ``reset_app_config()`` puts back, so loading a profile that selects
+    PostgreSQL would leave a postgres checkpointer behind for whatever test
+    runs next in this process. ``deploy/compose`` owns that end of the contract
+    in ``tests/test_compose_profile.py``; this file needs the policy.
     """
     spec = importlib.util.spec_from_file_location("hartmesh_render_config_throttle_test", PROFILE / "gateway" / "render_config.py")
     assert spec is not None and spec.loader is not None
@@ -849,23 +857,9 @@ def profile_local_auth() -> LocalAuthConfig:
         spec.loader.exec_module(module)
         environ = {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0"}
         rendered, _ = module.render_text((PROFILE / "config.yaml").read_text(encoding="utf-8"), module.load_catalog(PROFILE / "providers"), environ)
-        # AppConfig resolves the template's `$NAME` DSN references from the
-        # process environment, the way the Gateway's own start does.
-        previous = {name: os.environ.get(name) for name in environ}
-        os.environ.update(environ)
-        try:
-            with tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / "config.yaml"
-                path.write_text(rendered, encoding="utf-8")
-                return AppConfig.from_file(str(path)).auth.local
-        finally:
-            for name, value in previous.items():
-                if value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = value
     finally:
         sys.modules.pop(spec.name, None)
+    return LocalAuthConfig(**(yaml.safe_load(rendered)["auth"]["local"]))
 
 
 @pytest.fixture

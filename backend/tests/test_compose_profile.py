@@ -99,6 +99,29 @@ def compose() -> dict:
     return yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
 
 
+@pytest.fixture(autouse=True)
+def _restore_config_singletons() -> Iterator[None]:
+    """Undo the process-wide state ``AppConfig.from_file`` leaves behind.
+
+    Loading a file applies it to singletons that ``reset_app_config()`` does
+    not put back (``_apply_singleton_configs``). Two tests here load the tenant
+    profile, which selects PostgreSQL, so without this the next test *in the
+    same process* -- in this file or any other the shard happens to schedule
+    after it -- builds a postgres checkpointer and fails resolving the host.
+    Only the checkpointer singleton is restored: it is the one with reach
+    outside this module. The leak itself belongs to ``from_file``, not here.
+    """
+    from deerflow.config.app_config import reset_app_config
+    from deerflow.config.checkpointer_config import get_checkpointer_config, set_checkpointer_config
+
+    previous = get_checkpointer_config()
+    try:
+        yield
+    finally:
+        set_checkpointer_config(previous)
+        reset_app_config()
+
+
 def _mib(value: str) -> int:
     assert value.endswith("m"), value
     return int(value[:-1])
