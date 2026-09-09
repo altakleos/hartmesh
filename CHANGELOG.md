@@ -5,6 +5,17 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.8] — 2026-09-09
+
+- hartmesh#62 — clarify the tenant Compose profile's consumer and egress documentation.
+- hartmesh#63 — key login lockouts by account and provide an administrative unlock path.
+- hartmesh#64 — move the tenant application bridge away from the operator's pod network.
+- hartmesh#65 — move the development bridge away from the operator's routed network.
+- hartmesh#66 — size the tenant profile's source-volume guard for an office retry budget.
+- hartmesh#67 — let operators supply the tenant's model list independently of provider keys.
+
+[2.1.0+hartmesh.8]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.8
+
 ## [2.1.0+hartmesh.7] — 2026-09-06
 
 - fix: close the #56–#59 review findings in the compose profile and the local backend (#60)
