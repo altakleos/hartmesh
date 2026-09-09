@@ -65,17 +65,19 @@ construction.
 Only the Gateway receives the whole `.env` (`env_file`). The frontend and nginx
 get explicit `environment:` entries and never see a provider key.
 
-### Two optional keys
+### Optional keys
 
 | Key | Consumed by |
 | --- | --- |
 | `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
+| `HARTMESH_SANDBOX_RESOLV_CONF` | The Docker host's upstream DNS file, default `/run/systemd/resolve/resolv.conf` on the Debian tenant VM. The Gateway receives a read-only view; open-mode runsc sandboxes bind the validated file at `/etc/resolv.conf`. On hosts without systemd-resolved, select an existing resolver file containing reachable upstream IP addresses. A loopback stub file is refused (§ "DNS under gVisor"). |
 
-Neither is in `.env.example`: the fixed keys are what onboarding writes for
-every tenant, and these two are escape hatches for a guest, or a tenant, the
-shipped defaults do not suit. An existing `.env` that carries neither renders
-and behaves exactly as it did before they existed.
+These are absent from `.env.example`: the fixed keys are what onboarding
+writes for every tenant. Optional keys adapt the profile when its defaults
+do not suit the host or tenant. The resolver source must exist even when
+allowlist mode is selected; Compose refuses a missing file instead of
+creating an empty directory in its place.
 
 They reach the stack by different routes, on purpose. Both `HARTMESH_APP_SUBNET`
 uses are the same `${HARTMESH_APP_SUBNET:-...}` reference, so an override
@@ -84,6 +86,8 @@ cannot move the network without moving the Gateway's trust with it.
 the Gateway through `env_file` and is read inside the container, so leaving it
 unset is simply an unset variable rather than a hole in the rendered Compose
 document.
+The resolver source and its Gateway environment value share the same
+interpolation, so validation reads the file Docker will bind into the sandbox.
 
 ## Mount points
 
@@ -186,6 +190,30 @@ Two compose networks:
   only creates networks a service uses, so `gateway/run.sh` creates it
   idempotently before the first sandbox can exist, unlabelled so `compose
   down` never has to remove a network live sandboxes are attached to.
+
+### DNS under gVisor
+
+Docker places its custom-bridge DNS service on loopback. gVisor's isolated
+netstack cannot reach that host loopback service, so an open sandbox can
+pass API readiness and still fail every public hostname lookup. See
+[Docker DNS services](https://docs.docker.com/engine/network/#dns-services)
+and [gVisor's explanation](https://gvisor.dev/docs/user_guide/faq/#my-container-cannot-resolve-another-containers-name-when-using-docker-user-defined-bridge).
+
+For `SANDBOX_EGRESS=open` with runtime `runsc`, the profile validates a
+read-only view of the VM's upstream resolver file and adds it to the
+sandbox's configured mounts. The default is systemd-resolved's uplink file,
+`/run/systemd/resolve/resolv.conf`; `/etc/resolv.conf` on the Debian VM points
+to the loopback stub and is unsuitable. Missing files, missing nameservers,
+invalid or loopback/link-local/multicast nameservers and conflicting resolver
+mounts refuse the render before a new sandbox can be created. This is a
+configuration check; the generation gate must still prove DNS reachability.
+
+The bridge, disabled peer communication and runsc's `--network=sandbox`
+remain in force. This gives public DNS through the VM's configured upstreams;
+it does not provide Docker container-name discovery. Allowlist sandboxes
+continue using their policy proxy and its pinned hosts entry. Recreate the
+Gateway and its owned sandboxes after changing the host resolver: a running
+bind mount can retain the old file when the host replaces it atomically.
 
 ### Choosing the `app` subnet
 
@@ -1272,4 +1300,3 @@ fictitious, so nothing here can pass by having been added to the bundle.
   thinking or vision behaviour, need an authorized key on a real endpoint and
   remain unqualified. `runsc` and sandbox behaviour were not exercised: no
   sandbox is created by a model-configuration change.
-

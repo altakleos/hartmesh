@@ -38,6 +38,7 @@ validates an edit while the Gateway is still serving the previous one.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 import re
 import sys
@@ -50,6 +51,8 @@ from typing import Any
 import yaml
 
 EGRESS_ENV = "SANDBOX_EGRESS"
+HOST_RESOLVER_VIEW = Path("/run/hartmesh-host-resolv.conf")
+HOST_RESOLVER_DEFAULT = "/run/systemd/resolve/resolv.conf"
 EGRESS_MODES = ("allowlist", "open")
 MODELS_ENV = "HARTMESH_MODELS_FILE"
 OPERATOR_DIRECTORY = "<HARTMESH_DATA_DIR>/operator"
@@ -208,6 +211,40 @@ def select_egress(environ: Mapping[str, str]) -> str:
     return mode
 
 
+def open_runsc_resolver_mount(environ: Mapping[str, str]) -> dict[str, object]:
+    """Validate the host resolver view before handing its source to Docker.
+
+    Docker's custom-bridge DNS is on host loopback, outside runsc's netstack.
+    This profile supplies the VM's upstream resolver file as a read-only bind.
+    The Gateway sees that exact source at HOST_RESOLVER_VIEW; the sandbox bind
+    source is interpreted by the VM's Docker daemon, not by the Gateway.
+    """
+    source = environ.get("HARTMESH_SANDBOX_RESOLV_CONF", "").strip() or HOST_RESOLVER_DEFAULT
+    if not Path(source).is_absolute() or ".." in Path(source).parts or any(c in source for c in ("\0", "\n", ",")):
+        raise RenderError("sandbox resolver source must be an absolute Docker host file path")
+    try:
+        contents = HOST_RESOLVER_VIEW.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RenderError("sandbox resolver file is absent or unreadable at the Gateway's read-only host mount") from exc
+    nameservers = 0
+    for line in contents.splitlines():
+        fields = re.split(r"[#;]", line, maxsplit=1)[0].split()
+        if not fields or fields[0] != "nameserver":
+            continue
+        if len(fields) != 2:
+            raise RenderError("sandbox resolver has a malformed nameserver line")
+        try:
+            address = ipaddress.ip_address(fields[1])
+        except ValueError as exc:
+            raise RenderError("sandbox resolver nameservers must be IP addresses") from exc
+        if address.is_loopback or address.is_unspecified or address.is_link_local or address.is_multicast or address.is_reserved:
+            raise RenderError("sandbox resolver needs upstream nameservers reachable outside loopback")
+        nameservers += 1
+    if not nameservers:
+        raise RenderError("sandbox resolver declares no upstream nameserver")
+    return {"host_path": source, "container_path": "/etc/resolv.conf", "read_only": True}
+
+
 def render(
     template: Mapping[str, Any],
     fragments: tuple[Fragment, ...],
@@ -257,6 +294,11 @@ def render(
         raise RenderError("template `sandbox.network.mode` must be allowlist; SANDBOX_EGRESS selects open at render time")
     mode = select_egress(environ)
     sandbox["network"] = {"mode": "open"} if mode == "open" else network
+    if mode == "open" and environ.get("DEER_FLOW_SANDBOX_RUNTIME") == "runsc":
+        mounts = list(sandbox.get("mounts") or [])
+        if any(mount.get("container_path") == "/etc/resolv.conf" for mount in mounts):
+            raise RenderError("the profile owns the open-runsc resolver mount; remove the conflicting template mount")
+        sandbox["mounts"] = [*mounts, open_runsc_resolver_mount(environ)]
     document["sandbox"] = sandbox
 
     referenced: set[str] = set()
