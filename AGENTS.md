@@ -43,6 +43,11 @@ Gateway binds `0.0.0.0:8001` on purpose, both container-internal: the published
 nginx port is the entire external surface and `8001` stays unpublished. Any new
 published port needs an explicit bind address;
 `backend/tests/test_compose_default_bind_host.py` pins this for every service.
+The tenant VM profile also pins its `app` bridge subnet, because a bridge is a
+connected route inside the guest: `deploy/compose/compose.yaml` interpolates
+`${HARTMESH_APP_SUBNET:-...}` into both the IPAM config and the Gateway's
+`AUTH_TRUSTED_PROXIES`, and moving one without the other silently drops nginx's
+forwarded client address.
 
 `durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
 AIO/RWX artifact, not arbitrary scaling, IM HA, cross-region operation, or

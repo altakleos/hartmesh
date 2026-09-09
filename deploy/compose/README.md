@@ -65,6 +65,18 @@ construction.
 Only the Gateway receives the whole `.env` (`env_file`). The frontend and nginx
 get explicit `environment:` entries and never see a provider key.
 
+### One optional key
+
+| Key | Consumed by |
+| --- | --- |
+| `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
+
+It is deliberately not in `.env.example`: the fixed keys are what onboarding
+writes for every tenant, and this one is an escape hatch for a guest whose
+surroundings the shipped default does not suit. Because both uses are the same
+`${HARTMESH_APP_SUBNET:-...}` reference, an override cannot move the network
+without moving the Gateway's trust with it.
+
 ## Mount points
 
 Two directories cross the container boundary:
@@ -140,19 +152,92 @@ shows more listeners than nginx while sandboxes run, all on the bridge address.
 
 Two compose networks:
 
-- `app` (`172.30.10.0/24`, pinned): the five services. PostgreSQL and Redis
-  are reachable only here and are never published. The pinned subnet is also
-  `AUTH_TRUSTED_PROXIES` on the Gateway, whose login path honours `X-Real-IP`
-  only from a TCP peer in that list and ignores `X-Forwarded-For` entirely;
-  without it every login attempt would carry nginx's container address, and
-  the spray guard would then see the whole world as one source. It no longer
-  decides whether the tenant can log in: the lockout is keyed on the account
-  (§ "Login lockout"), so one office behind one address cannot lock itself
-  out.
+- `app` (`${HARTMESH_APP_SUBNET:-10.201.26.0/24}`, pinned): the five services.
+  PostgreSQL and Redis are reachable only here and are never published. The
+  pinned subnet is also `AUTH_TRUSTED_PROXIES` on the Gateway, whose login path
+  honours `X-Real-IP` only from a TCP peer in that list and ignores
+  `X-Forwarded-For` entirely; without it every login attempt would carry
+  nginx's container address, and the spray guard would then see the whole world
+  as one source. It no longer decides whether the tenant can log in: the
+  lockout is keyed on the account (§ "Login lockout"), so one office behind one
+  address cannot lock itself out. Both places are the same interpolation, so
+  the network and the Gateway's trust of it move together or not at all --
+  including under an override, which is what makes the override safe to offer.
 - `sandbox` (`hartmesh_sandbox`): joined by **no** compose service. Compose
   only creates networks a service uses, so `gateway/run.sh` creates it
   idempotently before the first sandbox can exist, unlabelled so `compose
   down` never has to remove a network live sandboxes are attached to.
+
+### Choosing the `app` subnet
+
+A bridge is a **connected route inside the guest**. Every address in `app`'s
+range stops being reachable through the VM's real default gateway, because the
+kernel prefers the on-link route. The range therefore has to clear everything
+the guest must still reach, and that is a property of the surroundings, not of
+this profile.
+
+The profile shipped `172.30.10.0/24` until 2026-09-09. On the operator whose
+tenants run this profile, kosmos allocates pod addresses from `172.30.0.0/16`
+and service addresses from `172.31.0.0/16`, and on that date a production
+control-plane node's assigned pod subnet was exactly `172.30.10.0/24`. Public
+ingress to the tenant kept working throughout, which proves nothing: the
+Kubernetes worker source-NATs the request onto its own `10.17.72.0/24` leg, so
+the reply never needed the tenant's view of `172.30.10.0/24` to be correct.
+The overlap was real regardless, and would have surfaced the first time
+anything in the guest addressed a pod directly.
+
+The default is now `10.201.26.0/24`, chosen to clear:
+
+| Range | What it is |
+| --- | --- |
+| `172.30.0.0/16`, `172.31.0.0/16` | kosmos pods and services |
+| `10.17.0.0/16`, `10.18.10.0/24`, `10.199.199.248/29` | the operator's own networks |
+| `172.16.220.0/22`, `172.16.224.0/24` | the operator's own networks |
+| `192.168.1.0/24`, `192.168.200.0/24` | the operator's own networks |
+| `100.64.0.0/10` | carrier-grade NAT, also the overlay range |
+| `172.17.0.0/16` | the `docker0` bridge inside the guest |
+| `172.17.0.0/12` in `/16`s, `192.168.0.0/16` in `/20`s | Docker's built-in default address pools |
+
+The last row matters twice over. Every network the profile does **not** pin is
+allocated from those pools: the per-sandbox internal and egress bridges under
+`allowlist`, and `hartmesh_sandbox` under `open`. Keeping `app` outside them
+means it can never collide with a sandbox network, and never costs the daemon a
+whole `/16` of pool it would otherwise skip as overlapping.
+
+But it also means the pools themselves still reach `172.30.0.0/16` and
+`172.31.0.0/16`, on a guest that has allocated enough networks to get there.
+The profile cannot pin those subnets -- the backend and the daemon allocate
+them -- so this is the golden image's job, in `/etc/docker/daemon.json`:
+
+```json
+{ "default-address-pool": [ { "base": "10.202.0.0/16", "size": 24 } ] }
+```
+
+with a `base` chosen the same way as `app`'s. `backend/tests/test_compose_profile.py`
+pins the shipped default against every range in the table above; nothing in the
+profile can check the daemon's pools, so that setting is verified by looking.
+
+**No private range is universally free.** Before onboarding a tenant, check the
+guest's own view rather than trusting this default:
+
+```bash
+# 1. Everything the guest already routes. An `app` range that appears here,
+#    or inside one of these prefixes, is the defect this section describes.
+ip -4 route show
+ip -4 route get 10.201.26.1        # must say "via <default gateway>", not "dev br-*"
+
+# 2. Everything Docker has already allocated on this guest.
+docker network inspect -f '{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}' $(docker network ls -q)
+
+# 3. Whether the guest narrows the pool everything unpinned comes from.
+#    `null` means it does not, and the built-in defaults in the table apply.
+docker info --format '{{json .DefaultAddressPools}}'
+```
+
+If `app`'s range collides, put a free one in that tenant's `.env` as
+`HARTMESH_APP_SUBNET=` and follow § "Moving the `app` subnet on a running
+tenant". A `/24` is the shape the profile assumes; five services and the bridge
+address need six.
 
 ### `SANDBOX_EGRESS=allowlist` (the default)
 
@@ -546,6 +631,85 @@ config ConfigMap under the chart README's recommended values, at
 | `run_events.backend` | upstream default (`memory`) | `db` | run events survive a Gateway restart on a single-Gateway VM |
 | `auth.local.lockout_store` | absent (`memory`) | `redis` | § "Login lockout": one replica with a recreate rollout, so clearing a lockout must not need a restart |
 
+## Moving the `app` subnet on a running tenant
+
+A tenant already running carries a `hartmesh_app` network the daemon created
+from the bundle it started with. **Editing the profile does not move it.**
+The bridge, its subnet and its route belong to the daemon, not to the file; the
+file is only what the next `docker network create` reads.
+
+Nor is an in-place `up -d` enough. On Compose v2.39.4 / Engine 28.4.0 it
+recreated the network with the new subnet **and left the stack broken**:
+Compose reattached the containers it merely restarted without their compose
+service aliases, so `postgres` and `redis` stopped resolving inside the guest's
+network (`gateway`, which Compose did recreate, still did), the Gateway
+crash-looped on `socket.gaierror` from `asyncpg`, nginx exited, and the command
+returned `dependency failed to start`. The stack does not recover on its own.
+
+The move is therefore a **short full-stack outage**, on the order of a minute:
+every service sits on the one network, so there is no rolling variant.
+
+```bash
+cd /opt/hartmesh
+ENV=/srv/hartmesh/.env
+
+# 0. Record what you are changing away from.
+docker network inspect hartmesh_app --format '{{(index .IPAM.Config 0).Subnet}}'
+ip -4 route show | grep br-
+
+# 1. Stop the stack and let the daemon drop the old bridge. `down` removes the
+#    containers and the networks Compose created -- nothing else. The profile
+#    declares no named volumes, so there is no volume for it to touch even in
+#    principle; PostgreSQL, Redis and home/ are bind mounts on the data disk
+#    and are not part of what `down` removes. Never `down -v`, and never
+#    `docker network prune`: the sandbox networks are not Compose's, and a
+#    prune would take live ones with it.
+docker compose --project-directory /opt/hartmesh --env-file "$ENV" down
+
+# 2. Bring it back up on the new bundle.
+docker compose --project-directory /opt/hartmesh --env-file "$ENV" up -d --wait
+
+# 3. Verify. The first two must agree -- that is the whole point of the single
+#    interpolation -- and the third must show the route on the new bridge.
+docker network inspect hartmesh_app --format '{{(index .IPAM.Config 0).Subnet}}'
+docker inspect hartmesh-gateway-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep AUTH_TRUSTED_PROXIES
+ip -4 route show | grep 10.201.26
+docker compose --project-directory /opt/hartmesh --env-file "$ENV" ps
+```
+
+Then two functional checks. A real login through nginx must return `200`. And
+the trust must actually have taken, which the account lockout says out loud:
+fail a throwaway account past `auth.local.account_max_attempts` through nginx
+and read the line the Gateway logs.
+
+```bash
+docker compose --project-directory /opt/hartmesh --env-file "$ENV" logs gateway | grep 'Login lockout'
+# ... Login lockout: account <email> locked after 5 failed attempts for 300s (last source <client>)
+```
+
+`last source` must name the client address the front door forwarded. If it
+names nginx's own address on the app network, the Gateway is counting the proxy
+rather than the client -- that is what a subnet and an `AUTH_TRUSTED_PROXIES`
+that disagree look like from outside, and it collapses the per-source spray
+guard onto one address for the whole world. Clear the lockout afterwards with
+`POST /api/v1/auth/lockouts/clear` (§ "Login lockout").
+
+**Rollback** is the same two commands with the old value restored, and needs no
+edit to the bundle: append `HARTMESH_APP_SUBNET=<the old subnet>` to the
+tenant's `.env` and run `down` then `up -d --wait`. Because the network and the
+Gateway's trust are the same interpolation, one line moves both back together.
+
+**Active sandboxes.** No sandbox is ever on `app`, so none can hold
+`hartmesh_app` open or be stranded by its removal, and `down` removes only
+`hartmesh_app`: `hartmesh_sandbox` is unlabelled and survives, along with
+anything attached to it (verified with a stand-in container across a `down`).
+What does depend on the sandboxes is the Gateway's own shutdown: it releases
+them during its 60 s `stop_grace_period`, which `down` honours. A `down -t 0`,
+or a guest that loses power mid-move, leaves sandbox containers and per-sandbox
+networks with no owner; remove those by name afterwards
+(`deer-flow-sandbox-*`, `deer-flow-netproxy-*`) rather than with a prune. Do
+the move when the tenant is idle: any turn in flight dies with the stack.
+
 ## Applying a `.env` re-render
 
 Rotating a provider key is a re-render of `.env` followed by the same `up -d`.
@@ -717,4 +881,68 @@ golden image does and the tenant `.env` on it:
   are the table under "Settling the sandbox figure"; no service and no sandbox
   recorded an OOM kill.
 - After each Gateway recreate, no sandbox or per-sandbox network remained.
+
+Then on 2026-09-09 for the network move (P-v), on the same host (Docker Engine
+28.4.0, Compose v2.39.4) with a disposable stack: a scratch copy of this
+directory, a scratch data disk laid out as the golden image does, fixture
+`.env` values, no provider key, `SANDBOX_RUNTIME=runc`, and nginx published on
+`127.0.0.1:20260`. Two deliberate deviations, both noted where they matter: the
+stand-in "old" subnet was `10.203.10.0/24`, not `172.30.10.0/24`, because this
+development host is itself inside the operator's `10.17.0.0/16` and pinning a
+bridge on a live pod range to prove a point is the defect, not a test of it;
+and `HARTMESH_TRUSTED_PROXIES` was widened to `10.0.0.0/8` so the host could
+act as the front-door proxy and forge distinct client addresses.
+
+- The mechanism, on this host: `ip -4 route get 203.0.113.5` answers `via
+  10.17.100.1 dev eth0`; with a bridge pinned on `203.0.113.0/24` it answers
+  `dev br-e4b410c39c00 src 203.0.113.1`; with the bridge removed it answers
+  `via 10.17.100.1` again. A pinned bridge replaces the route to its whole
+  range, which is what `172.30.10.0/24` was doing to kosmos pod addresses.
+- Trust follows the network, observed through the running stack. The images
+  pinned here are `2.1.0+hartmesh.6`, which predate the account-keyed lockout,
+  so the probe below exercises that release's per-address counter rather than
+  the account lockout the § "Moving the `app` subnet" check describes. It
+  answers the same question -- which address the Gateway resolves for a request
+  arriving through nginx -- and answers it more sharply, because the older
+  counter locks per address. Six failed
+  logins through nginx forwarding `198.51.100.10` answer `401 401 401 401 401
+  429`, and `198.51.100.11` and `.12` are still served `401` -- each forwarded
+  client address is counted on its own. The negative control, the same stack
+  with `AUTH_TRUSTED_PROXIES` pointed at `192.0.2.0/24` instead of the app
+  network: `.20` locks at the sixth attempt exactly as before, and then `.21`
+  and `.22` are refused `429` without a single attempt of their own. That is
+  the whole guard collapsed onto nginx's own address, and it is what changing
+  IPAM alone would have shipped.
+- An in-place `up -d` onto the new bundle is not the procedure. It did recreate
+  the network on the new subnet, and it left the stack broken: `getent hosts
+  postgres` and `redis` failed from inside `hartmesh_app` while `gateway`
+  resolved, the Gateway crash-looped on `socket.gaierror` out of `asyncpg`,
+  nginx exited `0`, and the command returned `dependency failed to start:
+  container hartmesh-gateway-1 is unhealthy`. It did not recover on its own.
+- `down` then `up -d --wait` is. After it: `hartmesh_app` is `10.201.26.0/24`,
+  nginx holds `10.201.26.6`, the Gateway's `AUTH_TRUSTED_PROXIES` is
+  `10.201.26.0/24`, the guest routes `10.201.26.0/24 dev br-60c3849500a6`, all
+  five services are healthy and `ps` shows one published port. The seeded
+  PostgreSQL row, the `users` row, the Redis key and the `home/` file all read
+  back unchanged; a real login through nginx answers `200`; and the probe
+  behaves as it did before the move (`.30` locks, `.31` served).
+- `down` removed `hartmesh_app` and nothing else: `hartmesh_sandbox` and a
+  stand-in container attached to it both survived it, and `down` did not
+  complain about either. No live sandbox existed during this run, so the
+  Gateway's release of real sandboxes during its 60 s grace period is the
+  earlier proof above, not this one.
+- Rollback: appending `HARTMESH_APP_SUBNET=10.203.10.0/24` to the tenant `.env`
+  and repeating `down` / `up -d --wait` put the network, the route and the
+  Gateway's trust all back on the old subnet together, with the data markers
+  still intact. The bundle was not edited.
+- The pool arithmetic, on the same host: with `172.22.5.0/24` pinned on a
+  scratch network, two unpinned `docker network create` calls were allocated
+  `172.21.0.0/16` and then `172.23.0.0/16` -- the daemon skips a whole `/16` it
+  cannot use, which is the cost of pinning `app` inside the pool and the reason
+  the default sits outside it. `docker info --format '{{json
+  .DefaultAddressPools}}'` answered `null` here, which is what an unnarrowed
+  daemon looks like.
+- Not covered here: `runsc`, a real provider-driven sandbox across the move,
+  and the daemon-level `default-address-pool` setting, which is the golden
+  image's and cannot be checked from inside this profile.
 

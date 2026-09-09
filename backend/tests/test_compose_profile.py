@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Iterator
+from ipaddress import ip_network
 from pathlib import Path
 from types import ModuleType
 
@@ -45,6 +46,30 @@ CONTRACT_KEYS = {
     "AUTH_JWT_SECRET",
 }
 SERVICES = {"gateway", "frontend", "nginx", "postgres", "redis"}
+OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET"}
+# The app bridge installs a connected route inside every tenant guest, so any
+# address range the guest must still reach through its real default gateway is
+# an exclusion for it. These are the operator's own networks as
+# recorded on 2026-09-08 -- the two kosmos /16s (pods, services) are the ones
+# the shipped 172.30.10.0/24 sat inside.
+EXTERNAL_RANGES = (
+    "10.17.0.0/16",
+    "10.18.10.0/24",
+    "10.199.199.248/29",
+    "100.64.0.0/10",
+    "172.16.220.0/22",
+    "172.16.224.0/24",
+    "172.30.0.0/16",
+    "172.31.0.0/16",
+    "192.168.1.0/24",
+    "192.168.200.0/24",
+)
+# Docker's own defaults: the `docker0` bridge, and the two address pools every
+# network the profile does not pin is allocated from -- the per-sandbox bridges
+# under `allowlist` and `hartmesh_sandbox` under `open`. Staying outside them
+# keeps `app` from colliding with a sandbox network and from spending a whole
+# /16 of the pool.
+DOCKER_DEFAULT_POOLS = ("172.17.0.0/16", "172.16.0.0/12", "192.168.0.0/16")
 MEMORY_MIB = {"gateway": 1344, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256}
 NGINX_VARIABLES = {
     "$forwarded_proto",
@@ -61,6 +86,7 @@ NGINX_VARIABLES = {
 }
 _BARE_VARIABLE = re.compile(r"\$[a-z_]+")
 _ENV_REFERENCE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)")
+_APP_SUBNET = re.compile(r"\$\{HARTMESH_APP_SUBNET:-([^}]+)\}")
 
 
 def _load_module(name: str, path: Path) -> ModuleType:
@@ -231,6 +257,67 @@ def test_sandbox_network_is_declared_and_joined_by_no_service(compose: dict) -> 
     assert 'docker network inspect "$DEER_FLOW_SANDBOX_NETWORK"' in run
 
 
+# ── the app bridge's address space ───────────────────────────────────────────
+
+
+def _app_subnet_defaults() -> list[str]:
+    return _APP_SUBNET.findall(COMPOSE.read_text(encoding="utf-8"))
+
+
+def test_the_app_subnet_default_clears_every_recorded_external_range() -> None:
+    """The defect this pins: until 2026-09-08 the app bridge was 172.30.10.0/24,
+    which is inside the operator's kosmos pod range, and a bridge is a
+    connected route in the guest. A public GET still working does not disprove
+    the overlap -- the Kubernetes worker was SNAT'ing the request onto another
+    leg -- so the check has to be on the address space, not on reachability."""
+    defaults = set(_app_subnet_defaults())
+    assert len(defaults) == 1, defaults
+    subnet = ip_network(defaults.pop())
+    assert subnet.version == 4 and subnet.is_private
+    assert subnet.num_addresses >= 16, "the five services plus the bridge address must fit"
+    for entry in EXTERNAL_RANGES:
+        assert not subnet.overlaps(ip_network(entry)), f"the app bridge would swallow the route to {entry}"
+    for entry in DOCKER_DEFAULT_POOLS:
+        assert not subnet.overlaps(ip_network(entry)), f"pinning inside {entry} collides with, or spends, the pool the sandbox networks draw from"
+
+
+def test_gateway_trust_and_the_app_network_are_the_same_string(compose: dict) -> None:
+    """Moving IPAM alone would leave the Gateway trusting an address nginx no
+    longer has: X-Real-IP would be ignored and the per-source spray guard would
+    collapse onto the proxy's own address for the whole world. One override with
+    one default at both sites makes that divergence unrepresentable, including
+    when an operator sets the override."""
+    references = _app_subnet_defaults()
+    assert len(references) == 2 and len(set(references)) == 1, references
+    subnet = compose["networks"]["app"]["ipam"]["config"][0]["subnet"]
+    assert subnet == "${HARTMESH_APP_SUBNET:-" + references[0] + "}"
+    assert compose["services"]["gateway"]["environment"]["AUTH_TRUSTED_PROXIES"] == subnet
+    # The operator-facing key is nginx's trust of the front door and is untouched.
+    assert compose["services"]["nginx"]["environment"]["HARTMESH_TRUSTED_PROXIES"] == "${HARTMESH_TRUSTED_PROXIES:?HARTMESH_TRUSTED_PROXIES is a required .env key}"
+
+
+def test_the_login_path_honours_a_forwarded_address_only_from_the_app_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of that contract, on the Gateway's side: the shipped
+    subnet is what makes nginx's X-Real-IP count, and a peer outside it cannot
+    forge one."""
+    from starlette.requests import Request
+
+    from app.gateway.routers.auth import _get_client_ip
+
+    subnet = ip_network(_app_subnet_defaults()[0])
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", str(subnet))
+    hosts = list(subnet.hosts())
+    proxy, outsider, client = str(hosts[1]), "203.0.113.7", "198.51.100.44"
+
+    def _request(peer: str) -> Request:
+        return Request({"type": "http", "method": "POST", "path": "/api/v1/auth/login/local", "headers": [(b"x-real-ip", client.encode())], "query_string": b"", "client": (peer, 51000), "server": ("testserver", 80)})
+
+    assert _get_client_ip(_request(proxy)) == client, "nginx sits on the app network; its forwarded address is the one the spray guard counts"
+    assert _get_client_ip(_request(outsider)) == outsider, "a peer off the app network cannot name its own source"
+    # And the old subnet is no longer trusted, which is what makes the move real.
+    assert _get_client_ip(_request("172.30.10.5")) == "172.30.10.5"
+
+
 def test_datastores_run_as_the_data_directory_owner_with_relaxed_durability(compose: dict) -> None:
     postgres = compose["services"]["postgres"]
     redis = compose["services"]["redis"]
@@ -296,10 +383,39 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
     assert ".env" in (PROFILE / ".gitignore").read_text(encoding="utf-8").split()
 
 
+def test_compose_renders_one_subnet_into_both_places_with_and_without_the_override(tmp_path: Path) -> None:
+    """The same three properties through the real renderer, on the
+    documentation values: an existing contract file that never heard of the
+    override still renders and gets the shipped default, an override moves the
+    network and the Gateway's trust together, and neither render publishes
+    anything but nginx."""
+    default = _app_subnet_defaults()[0]
+    override = "10.90.7.0/24"
+    example = (PROFILE / ".env.example").read_text(encoding="utf-8")
+    cases = {default: example, override: f"{example}HARTMESH_APP_SUBNET={override}\n"}
+    for expected, body in cases.items():
+        env_file = tmp_path / f"{expected.replace('/', '_')}.env"
+        env_file.write_text(body, encoding="utf-8")
+        result = _compose_config(env_file)
+        assert result.returncode == 0, result.stderr
+        assert "variable is not set" not in result.stderr
+        rendered = json.loads(result.stdout)
+        assert rendered["networks"]["app"]["ipam"]["config"][0]["subnet"] == expected
+        assert rendered["services"]["gateway"]["environment"]["AUTH_TRUSTED_PROXIES"] == expected
+        assert {name for name, service in rendered["services"].items() if service.get("ports")} == {"nginx"}
+        assert {name for name, service in rendered["services"].items() if list(service["networks"]) == ["app"]} == SERVICES
+
+
 def test_profile_consumes_no_key_outside_the_contract() -> None:
-    referenced = set(_ENV_REFERENCE.findall(COMPOSE.read_text(encoding="utf-8")))
-    assert referenced <= CONTRACT_KEYS, referenced - CONTRACT_KEYS
+    source = COMPOSE.read_text(encoding="utf-8")
+    referenced = set(_ENV_REFERENCE.findall(source))
+    assert referenced <= CONTRACT_KEYS | OPTIONAL_KEYS, referenced - CONTRACT_KEYS - OPTIONAL_KEYS
     assert referenced >= CONTRACT_KEYS - {"SANDBOX_EGRESS"}, "every fixed key but SANDBOX_EGRESS is interpolated by compose.yaml"
+    for key in OPTIONAL_KEYS:
+        # An optional key is one an existing tenant .env does not carry, so every
+        # reference to it must supply the shipped default itself.
+        occurrences = source.count("${" + key)
+        assert occurrences and occurrences == len(re.findall(r"\$\{" + key + r":-[^}\s]+\}", source)), f"{key} must be referenced only as ${{{key}:-<default>}} so an existing .env still renders"
     contract_like = re.compile(r"\b(HARTMESH_[A-Z_]+|SANDBOX_[A-Z_]+|POSTGRES_PASSWORD|REDIS_PASSWORD|AUTH_JWT_SECRET)\b")
     seams = {"HARTMESH_RENDER_ONLY", "HARTMESH_NGINX_SOURCE", "HARTMESH_NGINX_TARGET"}
     for path in (PROFILE / "gateway" / "run.sh", PROFILE / "gateway" / "entrypoint.sh", PROFILE / "gateway" / "render_config.py", PROFILE / "nginx" / "render.sh"):

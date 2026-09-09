@@ -122,8 +122,11 @@ services:
       DEER_FLOW_STREAM_BRIDGE_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       # The login path honours X-Real-IP only from a TCP peer in this list;
       # nginx is the peer, so this is the pinned `app` subnet, not the operator's
-      # front-door proxies (those are HARTMESH_TRUSTED_PROXIES, for nginx).
-      AUTH_TRUSTED_PROXIES: 172.30.10.0/24
+      # front-door proxies (those are HARTMESH_TRUSTED_PROXIES, for nginx). The
+      # same reference as the network below, character for character: whatever
+      # moves the bridge must move this with it, or nginx's forwarded client
+      # address is silently ignored and the spray guard sees one source.
+      AUTH_TRUSTED_PROXIES: ${HARTMESH_APP_SUBNET:-10.201.26.0/24}
       # ── Local Docker sandbox backend ──────────────────────────────────────
       # host.docker.internal resolves to the daemon's host-gateway address,
       # which is where each sandbox-side port is published (README: "Ports").
@@ -261,12 +264,20 @@ services:
     restart: unless-stopped
 
 networks:
-  # The five services. Pinned so AUTH_TRUSTED_PROXIES above is stable.
+  # The five services. Pinned so AUTH_TRUSTED_PROXIES above is stable, and
+  # pinned *here* rather than left to Docker because a bridge is a connected
+  # route inside the guest: every address in this range stops being reachable
+  # through the VM's real default gateway. The default therefore has to clear
+  # the operator's own networks and Docker's default address pools (README:
+  # "Network model", which also gives the two commands an operator runs to
+  # check its own). HARTMESH_APP_SUBNET is the escape hatch when it does not,
+  # and is optional: an existing tenant .env that never heard of it renders
+  # exactly as before.
   app:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.30.10.0/24
+        - subnet: ${HARTMESH_APP_SUBNET:-10.201.26.0/24}
   # Joined by no service on purpose. Under SANDBOX_EGRESS=open the Gateway
   # starts every sandbox on it (DEER_FLOW_SANDBOX_NETWORK), which keeps
   # sandboxes off the daemon's default bridge and away from `app`. Under
