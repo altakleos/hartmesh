@@ -21,6 +21,18 @@ in file order winning, so keyless defaults survive when no key is present.
 absent) keeps the template block, ``open`` reduces it to ``mode: open``, any
 other value refuses to render. The rendered document is checked so that no
 ``$NAME`` reference remains for a variable that is absent or empty.
+
+``HARTMESH_MODELS_FILE`` is optional. Absent (or empty), everything above is
+the whole story. Set, it names a YAML file on the tenant's own data disk --
+mounted read-only at ``<HARTMESH_DATA_DIR>/operator`` -- carrying ``models:``
+and nothing else, and that list becomes the whole rendered ``models:``
+section: fragment models are no longer appended, whichever provider keys the
+tenant carries. The file is validated before anything is written (documented
+shape, ``name``/``use``/``model``, an installed ``BaseChatModel`` class,
+unique names, resolvable ``$NAME`` references), and because the output is
+replaced atomically a refusal leaves the last valid rendered file in place.
+``--check`` runs the whole render and writes nothing, which is how an operator
+validates an edit while the Gateway is still serving the previous one.
 """
 
 from __future__ import annotations
@@ -39,6 +51,8 @@ import yaml
 
 EGRESS_ENV = "SANDBOX_EGRESS"
 EGRESS_MODES = ("allowlist", "open")
+MODELS_ENV = "HARTMESH_MODELS_FILE"
+OPERATOR_DIRECTORY = "<HARTMESH_DATA_DIR>/operator"
 _VARIABLE = re.compile(r"\A\$([A-Za-z_][A-Za-z0-9_]*)\Z")
 
 
@@ -95,6 +109,78 @@ def load_catalog(root: Path) -> tuple[Fragment, ...]:
     return tuple(load_fragment(path, root=root) for path in paths)
 
 
+def _resolve_chat_model_class(use: str) -> None:
+    """Refuse a client class this release cannot construct.
+
+    Deliberately not applied to the bundled catalog: those fragments ship with
+    the release, and importing every one of them at start would turn a provider
+    package the image happens not to carry into a new start requirement for
+    tenants who never selected that model. The operator file is where a typo or
+    a class from a package this release does not install can appear, and where
+    the alternative to refusing is a model that only fails on first use.
+
+    Imported lazily, so a tenant without an operator file pays nothing.
+    """
+
+    from langchain.chat_models import BaseChatModel
+
+    from deerflow.reflection.resolvers import resolve_class
+
+    resolve_class(use, BaseChatModel)
+
+
+def _operator_model(entry: Mapping[str, Any], source: str) -> Mapping[str, Any]:
+    name = entry["name"]
+    for field in ("use", "model"):
+        if not isinstance(entry.get(field), str) or not entry[field].strip():
+            raise RenderError(f"operator model file {source}: model {name!r} must declare `{field}` as a non-empty string")
+    try:
+        _resolve_chat_model_class(entry["use"])
+    except (ImportError, ValueError) as exc:
+        raise RenderError(f"operator model file {source}: model {name!r} names a client class this release cannot use: {exc}") from exc
+    return entry
+
+
+def load_operator_models(environ: Mapping[str, str]) -> tuple[Mapping[str, Any], ...] | None:
+    """Return the operator's authoritative model list, or None when unset.
+
+    ``None`` (the key absent or empty) and ``()`` (an explicit ``models: []``)
+    are different answers: the first keeps the bundled catalog, the second is a
+    tenant the operator configured no models for. Every other outcome -- a path
+    that does not exist, a file that does not parse, a document carrying
+    anything but ``models:`` -- is a refusal, never a quiet fall back to the
+    bundled defaults the operator was overriding.
+    """
+
+    raw = environ.get(MODELS_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        text = Path(raw).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RenderError(
+            f"{MODELS_ENV} names {raw}, which cannot be read ({exc.strerror}). The file must be readable by uid 1000 under {OPERATOR_DIRECTORY}, which the profile mounts read-only; unset {MODELS_ENV} for the bundled catalog"
+        ) from exc
+    try:
+        loaded = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise RenderError(f"operator model file {raw} is not valid YAML: {exc}") from exc
+    if loaded is None:
+        raise RenderError(f"operator model file {raw} is empty. Write `models: []` to configure no models, or unset {MODELS_ENV} to use the bundled catalog")
+    document = _mapping(loaded, f"operator model file {raw}")
+    unknown = sorted(set(document) - {"models"})
+    if unknown:
+        raise RenderError(f"operator model file {raw} has unknown keys: {unknown}. It declares `models:` and nothing else; every other setting stays with the profile")
+    if document.get("models") is None:
+        # `models:` with nothing after it is YAML null, which is neither of the
+        # two documented answers; an operator who means "no models" writes the
+        # empty list, and one mid-edit gets told so rather than silently
+        # emptying the tenant's model list.
+        raise RenderError(f"operator model file {raw} declares no `models:` list. Write `models: []` to configure no models")
+    entries = _entries(document["models"], f"operator model file {raw} models")
+    return tuple(_operator_model(entry, raw) for entry in entries)
+
+
 def _present(environ: Mapping[str, str], name: str) -> bool:
     return bool(environ.get(name, "").strip())
 
@@ -138,12 +224,18 @@ def render(
 
     included = tuple(fragment for fragment in fragments if _present(environ, fragment.env))
 
+    operator_models = load_operator_models(environ)
     models = list(template_models)
-    for fragment in included:
-        models.extend(dict(model) for model in fragment.models)
+    if operator_models is None:
+        for fragment in included:
+            models.extend(dict(model) for model in fragment.models)
+    else:
+        # Authoritative: a present provider key buys tools, never models.
+        models.extend(dict(model) for model in operator_models)
     names = [model.get("name") for model in models]
-    if len(names) != len(set(names)):
-        raise RenderError("rendered models carry a duplicate name")
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise RenderError(f"rendered models carry a duplicate name: {duplicates}")
     document["models"] = models
 
     tools: dict[str, Mapping[str, Any]] = {str(tool["name"]): dict(tool) for tool in template_tools}
@@ -188,22 +280,30 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--template", type=Path, required=True)
     parser.add_argument("--catalog", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--check", action="store_true", help="validate and write nothing")
     args = parser.parse_args(argv)
+    if args.output is None and not args.check:
+        parser.error("--output is required unless --check is given")
     try:
         fragments = load_catalog(args.catalog)
         rendered, included = render_text(args.template.read_text(encoding="utf-8"), fragments, os.environ)
     except (RenderError, OSError, yaml.YAMLError) as exc:
         print(f"render_config: refusing to render: {exc}", file=sys.stderr)
         return 1
+    providers = ", ".join(sorted({fragment.env for fragment in included})) or "none"
+    source = f"operator file {os.environ[MODELS_ENV].strip()}" if os.environ.get(MODELS_ENV, "").strip() else "bundled catalog"
+    summary = f"models from {source}; egress={select_egress(os.environ)}; provider keys found: {providers}"
+    if args.check:
+        print(f"render_config: {args.template} renders ({summary})")
+        return 0
     args.output.parent.mkdir(parents=True, exist_ok=True)
     handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=args.output.parent, prefix=".config.yaml.", delete=False)
     with handle:
         handle.write(rendered)
     os.chmod(handle.name, 0o640)
     os.replace(handle.name, args.output)
-    providers = ", ".join(sorted({fragment.env for fragment in included})) or "none"
-    print(f"render_config: wrote {args.output} (egress={select_egress(os.environ)}; provider keys found: {providers})")
+    print(f"render_config: wrote {args.output} ({summary})")
     return 0
 
 

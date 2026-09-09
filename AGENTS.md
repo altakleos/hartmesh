@@ -48,7 +48,10 @@ still route, because a bridge is a connected route: `docker-compose-dev.yaml`
 (`${DEER_FLOW_DEV_SUBNET:-...}`) and the tenant VM profile, which interpolates
 `${HARTMESH_APP_SUBNET:-...}` into both the IPAM config and the Gateway's
 `AUTH_TRUSTED_PROXIES` — moving one without the other silently drops nginx's
-forwarded client address.
+forwarded client address. That profile's `models:` comes from `providers/`
+unless the optional `HARTMESH_MODELS_FILE` names an operator file on the tenant
+data disk: that list is then authoritative (a provider key adds tools, never
+models) and a bad one refuses to render instead of falling back.
 
 `durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
 AIO/RWX artifact, not arbitrary scaling, IM HA, cross-region operation, or
