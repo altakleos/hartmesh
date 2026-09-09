@@ -53,7 +53,7 @@ CONTRACT_KEYS = {
 SERVICES = {"gateway", "frontend", "nginx", "postgres", "redis"}
 # Optional keys compose.yaml itself interpolates; each must carry its own
 # default so an existing tenant .env that never heard of it still renders.
-OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET"}
+OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
 # Optional keys compose.yaml never interpolates: they reach the Gateway
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
@@ -116,6 +116,74 @@ def _mib(value: str) -> int:
 
 def _base_environ() -> dict[str, str]:
     return {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0"}
+
+
+def _open_runsc_environ() -> dict[str, str]:
+    return {**_base_environ(), "SANDBOX_EGRESS": "open", "DEER_FLOW_SANDBOX_RUNTIME": "runsc", "HARTMESH_SANDBOX_RESOLV_CONF": "/run/systemd/resolve/resolv.conf"}
+
+
+def test_open_runsc_uses_the_validated_host_resolver_read_only(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    resolver = tmp_path / "resolv.conf"
+    resolver.write_text("nameserver 10.17.72.1\nsearch corp.example\n")
+    monkeypatch.setattr(render_config, "HOST_RESOLVER_VIEW", resolver, raising=False)
+    template = yaml.safe_load(TEMPLATE.read_text())
+    original = {"host_path": "/srv/example", "container_path": "/mnt/example", "read_only": True}
+    template["sandbox"]["mounts"] = [original]
+    rendered, _ = render_config.render(template, (), _open_runsc_environ())
+    assert rendered["sandbox"]["mounts"] == [
+        original,
+        {
+            "host_path": "/run/systemd/resolve/resolv.conf",
+            "container_path": "/etc/resolv.conf",
+            "read_only": True,
+        },
+    ]
+    assert template["sandbox"]["mounts"] == [original], "rendering must not mutate the template"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "",
+        "nameserver\n",
+        "nameserver not-an-address\n",
+        "nameserver 127.0.0.53\n",
+        "nameserver 0.0.0.0\n",
+        "nameserver 169.254.1.1\n",
+        "nameserver 224.0.0.1\n",
+        "nameserver 255.255.255.255\n",
+        "nameserver ::1\n",
+        "nameserver fe80::1\n",
+        "nameserver 10.17.72.1\nnameserver 127.0.0.11\n",
+    ],
+)
+def test_open_runsc_refuses_unusable_resolvers(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contents: str) -> None:
+    resolver = tmp_path / "resolv.conf"
+    resolver.write_text(contents)
+    monkeypatch.setattr(render_config, "HOST_RESOLVER_VIEW", resolver, raising=False)
+    with pytest.raises(render_config.RenderError, match="resolver"):
+        render_config.render_text(TEMPLATE.read_text(), (), _open_runsc_environ())
+
+
+def test_open_runsc_refuses_missing_resolver_or_conflicting_mount(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    resolver = tmp_path / "resolv.conf"
+    monkeypatch.setattr(render_config, "HOST_RESOLVER_VIEW", resolver, raising=False)
+    with pytest.raises(render_config.RenderError, match="resolver"):
+        render_config.render_text(TEMPLATE.read_text(), (), _open_runsc_environ())
+    resolver.write_text("nameserver 10.17.72.1\n")
+    template = yaml.safe_load(TEMPLATE.read_text())
+    template["sandbox"]["mounts"] = [{"host_path": "/another", "container_path": "/etc/resolv.conf", "read_only": False}]
+    with pytest.raises(render_config.RenderError, match="resolver"):
+        render_config.render(template, (), _open_runsc_environ())
+    with pytest.raises(render_config.RenderError, match="resolver"):
+        render_config.render_text(TEMPLATE.read_text(), (), {**_open_runsc_environ(), "HARTMESH_SANDBOX_RESOLV_CONF": "relative/file"})
+
+
+@pytest.mark.parametrize("mode,runtime", [("allowlist", "runsc"), ("open", "runc")])
+def test_resolver_override_is_only_for_open_runsc(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, runtime: str) -> None:
+    monkeypatch.setattr(render_config, "HOST_RESOLVER_VIEW", tmp_path / "absent", raising=False)
+    rendered, _ = render_config.render_text(TEMPLATE.read_text(), (), {**_base_environ(), "SANDBOX_EGRESS": mode, "DEER_FLOW_SANDBOX_RUNTIME": runtime})
+    assert not any(m["container_path"] == "/etc/resolv.conf" for m in yaml.safe_load(rendered)["sandbox"].get("mounts", []))
 
 
 # ── compose.yaml ─────────────────────────────────────────────────────────────
@@ -188,6 +256,11 @@ def test_bind_mounts_stay_under_the_data_directory_or_the_read_only_bundle(compo
     for name, service in compose["services"].items():
         for volume in service.get("volumes", []):
             if isinstance(volume, dict):
+                if volume.get("target") == "/run/hartmesh-host-resolv.conf":
+                    assert name == "gateway"
+                    assert volume == {"type": "bind", "source": "${HARTMESH_SANDBOX_RESOLV_CONF:-/run/systemd/resolve/resolv.conf}", "target": "/run/hartmesh-host-resolv.conf", "read_only": True, "bind": {"create_host_path": False}}
+                    assert service["environment"]["HARTMESH_SANDBOX_RESOLV_CONF"] == volume["source"]
+                    continue
                 assert volume["type"] == "tmpfs", (name, volume)
                 continue
             source, _, rest = volume.partition(":")
@@ -408,7 +481,7 @@ def test_profile_consumes_no_key_outside_the_contract() -> None:
     seams = {"HARTMESH_RENDER_ONLY", "HARTMESH_NGINX_SOURCE", "HARTMESH_NGINX_TARGET"}
     for path in (PROFILE / "gateway" / "run.sh", PROFILE / "gateway" / "entrypoint.sh", PROFILE / "gateway" / "render_config.py", PROFILE / "nginx" / "render.sh"):
         names = set(contract_like.findall(path.read_text(encoding="utf-8"))) - seams
-        assert names <= CONTRACT_KEYS | PASSTHROUGH_KEYS, (path.name, names - CONTRACT_KEYS - PASSTHROUGH_KEYS)
+        assert names <= CONTRACT_KEYS | OPTIONAL_KEYS | PASSTHROUGH_KEYS, (path.name, names - CONTRACT_KEYS - OPTIONAL_KEYS - PASSTHROUGH_KEYS)
 
 
 def test_gateway_entrypoint_drops_to_uid_1000_with_the_socket_group_and_runs_one_worker() -> None:

@@ -138,6 +138,9 @@ services:
       # OCI runtime for sandbox containers (runsc on the VM). The network-policy
       # sidecar deliberately keeps the daemon default (README: "Network model").
       DEER_FLOW_SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:?SANDBOX_RUNTIME is a required .env key}
+      # The host path and the read-only view below name the same resolver file.
+      # Only open+runsc sandboxes bind it; allowlist uses its policy proxy.
+      HARTMESH_SANDBOX_RESOLV_CONF: ${HARTMESH_SANDBOX_RESOLV_CONF:-/run/systemd/resolve/resolv.conf}
       # Per-sandbox limits from the memory budget (README: "Memory budget").
       # 1 GiB is the only value that held in every provider-driven run under
       # gVisor; the design's 640 MiB and the standalone-measured 768 MiB were
@@ -175,6 +178,12 @@ services:
       - ./config.yaml:/opt/hartmesh/config.yaml:ro
       - ./providers:/opt/hartmesh/providers:ro
       - ./extensions_config.json:/opt/hartmesh/extensions_config.json:ro
+      - type: bind
+        source: ${HARTMESH_SANDBOX_RESOLV_CONF:-/run/systemd/resolve/resolv.conf}
+        target: /run/hartmesh-host-resolv.conf
+        read_only: true
+        bind:
+          create_host_path: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
