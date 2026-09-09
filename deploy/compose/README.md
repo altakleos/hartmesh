@@ -579,9 +579,10 @@ onboarding verb.
 
 ### Login lockout
 
-The rendered `config.yaml` sets `auth.local.lockout_store: redis`; every other
-login-throttle value is the Gateway default. Two facts about this profile make
-that the right setting and the defaults the right numbers.
+The rendered `config.yaml` departs from the Gateway defaults in exactly two
+places: `auth.local.lockout_store: redis` and
+`auth.local.source_max_failures: 600`. Three facts about this profile explain
+both, and the rest of the numbers being left alone.
 
 **One tenant is one company.** Five to twenty staff, all behind one office NAT
 address. A lockout keyed on the client address therefore locks the company, not
@@ -590,18 +591,51 @@ five failures in a five-minute window is a median Monday morning with a tool
 nobody's password manager has learned yet. The lock is keyed on the **account**
 instead — five failures against one email address lock that address for five
 minutes, from any address — so the tenant's shared egress address is irrelevant
-to it. A much looser per-source guard (50 distinct accounts or 300 failures in
-15 minutes) still catches spraying; a twenty-person office cannot reach either
-number, because it does not have fifty accounts.
+to it. A much looser per-source guard still catches spraying: 50 distinct
+accounts, or `source_max_failures` in total, within a 15-minute window.
+
+**The office's own retry budget reaches the generic volume limit exactly.**
+The account lock is silent by design — a locked account answers exactly what a
+wrong password answers, so nothing tells a person to stop retrying. Allow
+twenty staff five wrong attempts each to reach their own lock, then ten further
+retries each during it, and the arithmetic is 20 × 15 = **300 failures**, which
+is the standalone default for `source_max_failures` to the failure. One such
+morning would land on the limit and lock the office's shared address for 15
+minutes — the whole failure this profile's account-keyed lock exists to avoid,
+re-entering by the other door. The profile therefore sets **600**: that
+allowance doubled, leaving 299 further failures before the limit trips. These
+are design allowances, not measured customer behaviour.
+
+The tradeoff is real and is not hidden here. This source may now cause twice as
+many counted failures before the volume block, and every one of them still
+costs the Gateway one password-equivalent verification. Neither this limit nor
+the 50-account guard makes an office immune to a malicious user who shares its
+address — the account lock is what bounds guessing at any one account, and the
+source guard only bounds volume and breadth. Submitted addresses are what the
+50-account guard counts, so mistyped ones count as distinct accounts too. A
+legitimate office **can** reach either threshold; 600 is headroom, not a
+promise.
+
+The window these counts live in is **fixed, not sliding**: it opens on that
+address's first counted failure and closes 900 seconds later, after which the
+next failure opens a new one. Nothing decays inside an open window (in Redis
+the counter simply carries that TTL from its first increment). And raising
+`source_max_failures` does not release an address that is already locked —
+unlike the per-account lock, which is re-derived against the live threshold on
+every check, a source lock is a written sentence. It runs out after
+`source_lockout_seconds`, or an administrator clears it.
 
 **Clearing a lock must not be an outage.** The stack is one replica with a
 recreate-style rollout, so restarting the Gateway to drop an in-process counter
 interrupts everyone still working. Redis is already running here for the stream
 bridge, so the counters live there and an administrator clears one account with
 `POST /api/v1/auth/lockouts/clear` (admin role, interactive session, not a PAT);
-`GET /api/v1/auth/lockouts` lists what is currently locked. A Redis outage fails
-the login path closed with a 503 — on this profile Redis is already load-bearing
-for every SSE stream, so it is not a state the tenant is working in anyway.
+`GET /api/v1/auth/lockouts` lists what is currently locked. The two clears are
+separate on purpose: clearing the office's **source** lock releases the address
+and nothing else, so every account that locked itself behind it stays locked
+until it is cleared or expires. A Redis outage fails the login path closed with
+a 503 — on this profile Redis is already load-bearing for every SSE stream, so
+it is not a state the tenant is working in anyway.
 
 A locked account returns exactly what a wrong password returns, including the
 cost of one password verification, so the lockout cannot be used to discover
@@ -630,6 +664,7 @@ config ConfigMap under the chart README's recommended values, at
 | `skills` | absent (PVC mounts) | `path` under `home/`, `container_path: /mnt/skills` | the local backend's skills mount |
 | `run_events.backend` | upstream default (`memory`) | `db` | run events survive a Gateway restart on a single-Gateway VM |
 | `auth.local.lockout_store` | absent (`memory`) | `redis` | § "Login lockout": one replica with a recreate rollout, so clearing a lockout must not need a restart |
+| `auth.local.source_max_failures` | absent (`300`) | `600` | § "Login lockout": twenty staff reaching their own account lock and retrying past it is 300 failures exactly, so the generic limit leaves the office no margin |
 
 ## Moving the `app` subnet on a running tenant
 

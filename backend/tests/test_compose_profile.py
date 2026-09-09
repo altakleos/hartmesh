@@ -566,6 +566,41 @@ def test_render_output_is_a_valid_app_config(render_config: ModuleType, monkeypa
     assert config.run_events.backend == "db"
 
 
+def test_rendered_profile_carries_the_office_retry_budget(render_config: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The login-throttle policy as the tenant Gateway actually consumes it.
+
+    Asserted on the rendered file rather than on a hand-built LocalAuthConfig,
+    because what ships is this template plus the renderer: a value dropped from
+    the template, or a renderer that stops copying `auth:` through, would leave
+    a policy fixture passing and the tenant on the generic default.
+
+    The profile raises only the total-volume limit. The standalone default of
+    300 is exactly the design allowance for this deployment shape -- twenty
+    staff, five wrong attempts each, then ten further retries each while their
+    account is locked -- so a single bad morning would sit *on* the limit with
+    nothing left. 600 is that allowance doubled: 299 further failures before the
+    limit trips. Every other control is the standalone default, deliberately.
+    """
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.auth_config import LocalAuthConfig
+
+    monkeypatch.setenv("DATABASE_URL", _base_environ()["DATABASE_URL"])
+    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", _base_environ()["DEER_FLOW_STREAM_BRIDGE_REDIS_URL"])
+    rendered, _ = render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), _base_environ())
+    path = tmp_path / "config.yaml"
+    path.write_text(rendered, encoding="utf-8")
+    local = AppConfig.from_file(str(path)).auth.local
+
+    standalone = LocalAuthConfig()
+    assert local.source_max_failures == 600
+    assert local.source_max_failures == 2 * standalone.source_max_failures, "the profile doubles the generic volume limit and changes nothing else"
+    assert local.lockout_store == "redis", "the profile's one other departure (README: 'Login lockout')"
+    for field in ("source_max_distinct_accounts", "source_window_seconds", "source_lockout_seconds"):
+        assert getattr(local, field) == getattr(standalone, field), field
+    assert local.effective_account_max_attempts == standalone.effective_account_max_attempts == 5
+    assert local.effective_account_lockout_seconds == standalone.effective_account_lockout_seconds == 300.0
+
+
 # ── release pinning ──────────────────────────────────────────────────────────
 
 
