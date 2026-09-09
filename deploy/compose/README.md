@@ -65,17 +65,25 @@ construction.
 Only the Gateway receives the whole `.env` (`env_file`). The frontend and nginx
 get explicit `environment:` entries and never see a provider key.
 
-### One optional key
+### Two optional keys
 
 | Key | Consumed by |
 | --- | --- |
 | `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
+| `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
 
-It is deliberately not in `.env.example`: the fixed keys are what onboarding
-writes for every tenant, and this one is an escape hatch for a guest whose
-surroundings the shipped default does not suit. Because both uses are the same
-`${HARTMESH_APP_SUBNET:-...}` reference, an override cannot move the network
-without moving the Gateway's trust with it.
+Neither is in `.env.example`: the fixed keys are what onboarding writes for
+every tenant, and these two are escape hatches for a guest, or a tenant, the
+shipped defaults do not suit. An existing `.env` that carries neither renders
+and behaves exactly as it did before they existed.
+
+They reach the stack by different routes, on purpose. Both `HARTMESH_APP_SUBNET`
+uses are the same `${HARTMESH_APP_SUBNET:-...}` reference, so an override
+cannot move the network without moving the Gateway's trust with it.
+`HARTMESH_MODELS_FILE` is not interpolated by `compose.yaml` at all: it reaches
+the Gateway through `env_file` and is read inside the container, so leaving it
+unset is simply an unset variable rather than a hole in the rendered Compose
+document.
 
 ## Mount points
 
@@ -94,6 +102,17 @@ Two directories cross the container boundary:
   uploads and artifacts under `home/threads/<thread>/user-data/`, so the
   pre-created `uploads/` and `artifacts/` directories are unused by this
   profile and stay empty.
+- `/srv/hartmesh/operator`, mounted **read-only** into the Gateway at the same
+  path: operator-owned deployment material that is not release content. Today
+  that is the one optional model file `HARTMESH_MODELS_FILE` names
+  (§ "Operator-managed models"). It sits beside `home/` rather than inside it
+  on purpose -- `home/` is `DEER_FLOW_HOME`, whose `threads/` and `skills/`
+  subtrees are what sandboxes bind-mount -- so nothing a chat user or an agent
+  can write chooses a model client class or a provider endpoint, and the
+  Gateway itself has no write path to it either. An existing tenant's data disk
+  has no such directory; create it with
+  `install -d -o 1000 -g 1000 -m 0750 /srv/hartmesh/operator`, or let Docker
+  create it (root-owned, `0755`) on the next `up`.
 - `/opt/hartmesh`, this directory, mounted read-only into the Gateway
   (`gateway/`, `config.yaml`, `providers/`, `extensions_config.json`) and into
   nginx (`nginx/`). Two files the Gateway needs writable are seeded into
@@ -577,6 +596,205 @@ serves a frontend that reports no model configured. That is the correct
 failure for the profile; refusing such a tenant belongs in the operator's
 onboarding verb.
 
+### Operator-managed models
+
+The catalog above is release content: it is mounted read-only from the bundle,
+and adding a model to it means editing fork source and cutting a release. That
+is the wrong shape for a decision that belongs to whoever runs the tenant --
+which model a provider has just published, which of them this customer is
+allowed to use, what they now cost.
+
+So one optional `.env` key, `HARTMESH_MODELS_FILE`, may name a YAML file on the
+tenant's own data disk. When it does, that file's `models:` list is the whole
+rendered `models:` section, and the bundled catalog contributes none. Nothing
+else about the profile changes: tool providers are still selected by key the
+way they always were, and every other setting still comes from the template.
+
+```bash
+install -d -o 1000 -g 1000 -m 0750 /srv/hartmesh/operator
+$EDITOR /srv/hartmesh/operator/models.yaml
+```
+
+```yaml
+# /srv/hartmesh/operator/models.yaml -- operator-owned, not release content.
+models:
+  - name: novita-kimi-k2                     # stable identity; threads keep it
+    display_name: Kimi K2
+    description: Long-context general model
+    use: langchain_openai:ChatOpenAI         # a client class this release installs
+    model: moonshotai/kimi-k2-instruct       # the provider's own id
+    base_url: https://api.novita.ai/openai   # the provider's endpoint
+    api_key: $NOVITA_API_KEY                 # a reference, never a value
+    context_window: 131072
+    max_tokens: 8192
+    pricing:                                 # read only by the cost display
+      currency: USD
+      input_per_million: 0.57
+      output_per_million: 2.30
+  - name: claude-sonnet-4
+    display_name: Claude Sonnet 4
+    use: langchain_anthropic:ChatAnthropic
+    model: claude-sonnet-4-20250514
+    api_key: $ANTHROPIC_API_KEY
+    context_window: 200000
+    max_tokens: 8192
+    supports_thinking: true
+    thinking: { type: enabled, budget_tokens: 2048 }
+```
+
+Then, in `/srv/hartmesh/.env`:
+
+```
+HARTMESH_MODELS_FILE=/srv/hartmesh/operator/models.yaml
+```
+
+The first entry is the tenant's default model. Several providers and several
+models may share one credential, and a credential is always written as the
+`$NAME` reference the Gateway expands itself -- exactly as the bundled
+fragments do -- so no secret is in this file, in the rendered `config.yaml`, in
+a refusal, in a log line or in `GET /api/models`. `$NAME` must name a variable
+the tenant `.env` actually carries; nothing else is required to be a key the
+bundled catalog knows about.
+
+**What a model entry may contain** is the Gateway's own `models[*]` schema,
+unchanged and undocumented here on purpose: `config.example.yaml` at the repo
+root is the worked reference, and `ModelConfig`
+(`backend/packages/harness/deerflow/config/model_config.py`) is the contract.
+`name`, `use` and `model` are required; `display_name`, `description`,
+`context_window`, `supports_thinking` / `thinking` /
+`when_thinking_enabled` / `when_thinking_disabled`, `supports_vision`,
+`supports_reasoning_effort`, `use_responses_api`, `output_version`,
+`stream_chunk_timeout` and `pricing` are understood; anything else is passed to
+the client constructor, which is how endpoints (`base_url`) and ordinary
+request settings (`temperature`, `max_tokens`, `extra_body`, …) are set.
+
+**The four answers.** These are distinct, and the render says which it took in
+the Gateway's first log line (`models from bundled catalog` /
+`models from operator file /srv/hartmesh/operator/models.yaml`):
+
+| The key is | The file | Result |
+| --- | --- | --- |
+| unset or empty | -- | The bundled catalog, by provider key. Unchanged behaviour. |
+| set | `models:` with a list | Exactly that list, in that order, whatever keys the tenant carries. |
+| set | `models: []` | This tenant has no models, key or no key. A deliberate choice, not an absent source. |
+| set | empty, unreadable, missing, or not the shape below | The Gateway refuses to start. It never falls back to the bundled catalog. |
+
+An empty file is a refusal precisely because it is ambiguous: an operator who
+means "no models" writes `models: []`, and one whose editor truncated the file
+gets told so. `models:` with nothing after it is YAML null and is refused the
+same way.
+
+**What is refused**, each naming the cause and never a secret value: a path
+that does not exist or that uid 1000 cannot read; a document that is not a
+mapping; any top-level key but `models:` (this is a model list, not a second
+copy of `config.yaml` -- `auth:`, `sandbox:`, `database:` and the rest stay
+with the profile and cannot be reached from here); an entry without a string
+`name`, `use` or `model`; a `use` that this release cannot import or that is
+not a `BaseChatModel`; two entries with the same `name`; a `$NAME` the tenant
+`.env` does not carry.
+
+**Who can change it.** Only whoever has write access to the tenant's data
+disk -- the operator, root on the guest. The Gateway mounts the directory
+read-only and exposes no route that writes it: `GET /api/models` is read-only
+and this profile mounts no configuration-writing endpoint, so a tenant
+administrator signed into the application cannot add a model and neither can an
+agent, whose reach is `home/` and the sandbox. Whatever is edited into the
+rendered `home/config.yaml` by hand is discarded at the next start, as it
+always was -- that file is generated output, not a source.
+
+The client-class check is the operator file's alone -- the bundled catalog is
+not import-checked, so no provider package the image happens not to carry
+becomes a new start requirement for a tenant who never selected that model. It
+is a check that the class exists and is a chat model, not that the provider
+will accept the id: a syntactically valid `model` the provider rejects is a
+provider error on the first message, visible as itself, with no substitution
+of some other model.
+
+**Applying a change.** The render happens once, at Gateway start; there is no
+hot reload. Validate first, while the Gateway is still serving the previous
+list:
+
+```bash
+docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
+  exec --user 1000 gateway sh -c 'cd /app/backend && PYTHONPATH=. uv run --no-sync \
+  python /opt/hartmesh/gateway/render_config.py --template /opt/hartmesh/config.yaml \
+  --catalog /opt/hartmesh/providers --check'
+```
+
+`--check` runs the whole render, including every refusal above, and writes
+nothing. `--user 1000` is not optional: the Gateway container drops every
+capability, so its root has no `CAP_DAC_OVERRIDE` and cannot read the
+uid-1000-owned data directory the render reads and writes. The check sees the
+*running* container's environment, so the first time the key is turned on --
+before the restart that gives the container the new `.env` -- pass it
+explicitly with `exec --user 1000 -e HARTMESH_MODELS_FILE=/srv/hartmesh/operator/models.yaml ...`.
+
+Then restart the one service. Which command depends on what changed, and the
+difference matters:
+
+```bash
+# the file changed, .env did not -- Compose sees no configuration change, so
+# `up -d` would do nothing at all and report the container as already running
+docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env restart gateway
+
+# .env changed (turning the key on, off, or moving it) -- the container's
+# environment must be replaced, which is a recreate
+docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env up -d gateway
+
+docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env logs gateway | grep render_config
+curl -s localhost:2026/api/models | jq '.models[].name'
+```
+
+Restarting the Gateway is a visible interruption: it is one replica, so
+in-flight streams end and users reconnect. Nothing else is touched --
+PostgreSQL, Redis, `home/` and running sandboxes are not part of this.
+
+If a change is applied anyway and turns out to be invalid, the previous
+rendered `home/config.yaml` is still intact: `render_config.py` writes to a
+temporary file and renames it into place, so a refusal never truncates what
+last worked. What does happen is that the Gateway exits, and `restart:
+unless-stopped` retries it; `docker compose ps` shows it restarting and
+`logs gateway` shows one line beginning `render_config: refusing to render:`.
+
+**Rolling back** is the same restart with the previous input: restore the
+previous `models.yaml` (keep a copy before editing), or comment
+`HARTMESH_MODELS_FILE` out of `.env` to return to the bundled catalog.
+
+**What survives.** Both inputs live on the tenant's data disk, which is what a
+release replacement keeps: `docker compose down`, swap `/opt/hartmesh` for the
+new bundle, `up -d`, and the same `.env` and the same `models.yaml` render the
+same list against the new release's template and catalog. Container recreation
+is the same story -- the file is a bind mount, not image content.
+
+**Prices are configuration too.** `pricing` is read by the console's cost
+display (`currency`, `input_per_million`, `output_per_million`, optional
+`input_cache_hit_per_million`) and by nothing else: the model factory excludes
+it from what it hands the client, so it never reaches an outbound request. The
+profile makes no price lookups -- there is no price feed here, at boot or ever;
+the numbers are whatever the operator wrote. They are an **estimate**, computed
+at display time from recorded token counts and today's configured prices, so
+repricing a model changes the figure shown for runs that already happened.
+Nothing here is a billing ledger, and it should not be read as one. One
+currency per tenant: if two priced models disagree, the console logs that and
+shows no cost at all. A model with no `pricing` simply has no estimate.
+
+**Identities are yours to keep.** `name` is the identity threads, agents and
+subagent references store. Removing or renaming a model does not remap anything
+onto a survivor -- a thread that asks for a name the file no longer carries
+gets an error naming it. Rename only when you are ready to update the
+references too; to retire a model, prefer leaving the entry in place until the
+threads that used it are done with it.
+
+**Where the boundary is.** A new model id, a compatible provider endpoint, a
+supported request parameter, a capability flag and a price are all
+configuration: this file, a restart, done. A provider that speaks a wire
+protocol none of the installed clients implement, one that needs an SDK this
+release does not ship, or a feature the client class does not expose, is a
+software change -- an adapter or a release -- and no amount of configuration
+substitutes for it. Accepting an entry here means the shape is valid and the
+client class exists, not that the provider will honour the id or the setting;
+that answer comes from the provider, on the first message.
+
 ### Login lockout
 
 The rendered `config.yaml` departs from the Gateway defaults in exactly two
@@ -654,7 +872,7 @@ config ConfigMap under the chart README's recommended values, at
 
 | Key | Chart | Profile | Why |
 | --- | --- | --- | --- |
-| `models` | `[]` | the catalog entries for the keys present | the chart leaves models to the operator's values; the profile renders them from the tenant's keys |
+| `models` | `[]` | the catalog entries for the keys present, or the operator's own list when `HARTMESH_MODELS_FILE` is set | the chart leaves models to the operator's values; the profile renders them from the tenant's keys, or from the file § "Operator-managed models" describes |
 | `tools[web_search]` | DuckDuckGo | DuckDuckGo without a search key, the keyed provider when one is present (Tavily here) | same ten tools; only the search backend follows the tenant |
 | `sandbox.image` | upstream `latest` | the fork's digest pin | release pinning |
 | `sandbox.replicas` | 3 | 2 | the memory budget |
@@ -748,7 +966,10 @@ the move when the tenant is idle: any turn in flight dies with the stack.
 ## Applying a `.env` re-render
 
 Rotating a provider key is a re-render of `.env` followed by the same `up -d`.
-Compose recreates only the services whose configuration changed: the Gateway
+Setting or unsetting `HARTMESH_MODELS_FILE` is the same operation (the file it
+names is not `.env` and needs only the Gateway restart § "Operator-managed
+models" describes). Compose recreates only the services whose configuration
+changed: the Gateway
 (which re-renders `config.yaml` on start), never PostgreSQL unless its
 password changed, and it must not: `POSTGRES_PASSWORD` is used by `initdb`
 once and authenticates every later connection.
@@ -980,4 +1201,75 @@ act as the front-door proxy and forge distinct client addresses.
 - Not covered here: `runsc`, a real provider-driven sandbox across the move,
   and the daemon-level `default-address-pool` setting, which is the golden
   image's and cannot be checked from inside this profile.
+
+Operator-managed models (2026-09-09, P-y), on the same host and engine, with a
+disposable `/srv/hartmesh` laid out as the golden image lays it out, the bundle
+copied to a scratch directory with every exec bit stripped, `SANDBOX_RUNTIME`
+set to `runc`, and fixture provider keys (`fixture-openai-key-not-real`,
+`fixture-acme-key-not-real`). No provider was ever contacted with an intent to
+succeed. The two model identities used, `acme-lightning-1` /
+`acme/lightning-1-2099` and `acme-anvil-9` / `acme-anvil-9-20991231`, are
+fictitious, so nothing here can pass by having been added to the bundle.
+
+- Baseline, no `HARTMESH_MODELS_FILE`, `OPENAI_API_KEY` present: five services
+  healthy, `render_config: wrote /srv/hartmesh/home/config.yaml (models from
+  bundled catalog; egress=allowlist; provider keys found: OPENAI_API_KEY)`, and
+  `GET /api/models` answers `gpt-4`, `gpt-5-responses`. Inside the Gateway,
+  `/srv/hartmesh/operator` is mounted and `touch` there answers `Read-only file
+  system`.
+- With the key set and a two-model file, the same `OPENAI_API_KEY` still
+  present: the log line becomes `models from operator file
+  /srv/hartmesh/operator/models.yaml` and `/api/models` answers exactly
+  `acme-lightning-1`, `acme-anvil-9`. `gpt-4` is gone -- a provider key buys
+  tools, not models. The rendered `config.yaml` carries `api_key:
+  $ACME_API_KEY` verbatim and no fixture value appears anywhere in it.
+- One edit doing all three things -- `max_tokens` 4096 to 16384, output price
+  5.00 to 4.00, a new `acme-vision-3`, `acme-anvil-9` removed -- then
+  `restart gateway`: `/api/models` answers `acme-lightning-1`,
+  `acme-vision-3`, and the rendered file carries `max_tokens: 16384`,
+  `output_per_million: 4.0` and `supports_vision: true`. `up -d gateway` alone
+  did **not** apply it: Compose saw no configuration change and left the
+  container running, which is why the procedure above names `restart`.
+- `--check` refused each of these with one line naming the cause and no value:
+  a duplicate `name`; a top-level `auth:` key; `$NOVITA_API_KEY` when the
+  tenant carries no such variable; an empty file; `models:` with nothing after
+  it; `langchain_nonesuch:ChatNonesuch`; and a `chmod 0000` file
+  (`Permission denied`). It wrote nothing -- the rendered `config.yaml` kept
+  its checksum through all seven.
+- Applying an invalid file anyway: the Gateway exits and `restart:
+  unless-stopped` retries it, `logs gateway` repeats `render_config: refusing
+  to render: rendered models carry a duplicate name: ['acme-lightning-1']`, and
+  `/srv/hartmesh/home/config.yaml` is byte-identical to before the attempt with
+  no `.config.yaml.*` temporary left beside it. Restoring the previous file and
+  restarting brought the list back.
+- Persistence, twice. `down` then `up -d --wait` on the same bundle: the list is
+  still `acme-lightning-1`, `acme-vision-3`. Then a *replaced* bundle -- a copy
+  whose `providers/models/10-openai.yaml` carries an extra `gpt-6-imaginary`,
+  standing in for a later release -- `down`, `up -d --wait` from the new
+  directory: the tenant's list is unchanged and the new bundled model does not
+  appear. The `.env` and the model file were never inside the bundle. The
+  bundle-A tree hashed the same before the first edit and after the last
+  (`cc6f7099e3a8be5000f6a630997ded4b0636720475c3bd984d700746c6aa0758`).
+- Both client families, built from the effective config inside the running
+  Gateway: `ChatOpenAI acme/lightning-1-2099 https://api.acme.invalid/openai`
+  and `ChatAnthropic acme-anvil-9-20991231 https://api.acme.invalid/anthropic`
+  with `{'type': 'enabled', 'budget_tokens': 2048}`; neither client's dump
+  carries `pricing` or `context_window`. The console's map reads the operator's
+  prices back (`USD 1.25 4.0`, 1M in + 1M out = `5.25`). One bounded call to
+  `acme-lightning-1` answers `APIConnectionError: Connection error.` -- the
+  configured endpoint, reached and failed at, with no substitution. Asking for
+  the removed `acme-anvil-9` answers `ValueError: Model acme-anvil-9 not found
+  in config`.
+- Rollback by unsetting: commenting `HARTMESH_MODELS_FILE` out of `.env` and
+  `up -d gateway` returns the log line to `models from bundled catalog` and the
+  list to `gpt-4`, `gpt-5-responses`, `gpt-6-imaginary` -- the replaced
+  bundle's catalog, which had been there and unused throughout.
+- Not covered here: any real provider. Every id above is fictitious and every
+  key a fixture, so nothing in this run says a real provider will accept a
+  configured id, a parameter or an endpoint -- that answer arrives on the first
+  message, as the `APIConnectionError` line stands in for. A streamed
+  completion and a tool-call round trip against a live model, and any advertised
+  thinking or vision behaviour, need an authorized key on a real endpoint and
+  remain unqualified. `runsc` and sandbox behaviour were not exercised: no
+  sandbox is created by a model-configuration change.
 

@@ -26,6 +26,10 @@ import pytest
 import yaml
 from _compose_network_ranges import DOCKER_DEFAULT_POOLS, EXTERNAL_RANGES
 
+# Two tests here load the tenant profile with ``AppConfig.from_file``, which
+# writes process-wide singletons ``reset_app_config()`` does not restore.
+from _config_singleton_guard import restore_config_singletons  # noqa: F401 -- autouse fixture
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPO_ROOT / "deploy" / "compose"
 COMPOSE = PROFILE / "compose.yaml"
@@ -47,7 +51,13 @@ CONTRACT_KEYS = {
     "AUTH_JWT_SECRET",
 }
 SERVICES = {"gateway", "frontend", "nginx", "postgres", "redis"}
+# Optional keys compose.yaml itself interpolates; each must carry its own
+# default so an existing tenant .env that never heard of it still renders.
 OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET"}
+# Optional keys compose.yaml never interpolates: they reach the Gateway
+# through the tenant .env (`env_file`) and are read by the profile's own
+# scripts. See tests/test_compose_operator_models.py.
+PASSTHROUGH_KEYS = {"HARTMESH_MODELS_FILE"}
 MEMORY_MIB = {"gateway": 1344, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256}
 NGINX_VARIABLES = {
     "$forwarded_proto",
@@ -97,29 +107,6 @@ def pin_images() -> Iterator[ModuleType]:
 @pytest.fixture(scope="module")
 def compose() -> dict:
     return yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
-
-
-@pytest.fixture(autouse=True)
-def _restore_config_singletons() -> Iterator[None]:
-    """Undo the process-wide state ``AppConfig.from_file`` leaves behind.
-
-    Loading a file applies it to singletons that ``reset_app_config()`` does
-    not put back (``_apply_singleton_configs``). Two tests here load the tenant
-    profile, which selects PostgreSQL, so without this the next test *in the
-    same process* -- in this file or any other the shard happens to schedule
-    after it -- builds a postgres checkpointer and fails resolving the host.
-    Only the checkpointer singleton is restored: it is the one with reach
-    outside this module. The leak itself belongs to ``from_file``, not here.
-    """
-    from deerflow.config.app_config import reset_app_config
-    from deerflow.config.checkpointer_config import get_checkpointer_config, set_checkpointer_config
-
-    previous = get_checkpointer_config()
-    try:
-        yield
-    finally:
-        set_checkpointer_config(previous)
-        reset_app_config()
 
 
 def _mib(value: str) -> int:
@@ -421,7 +408,7 @@ def test_profile_consumes_no_key_outside_the_contract() -> None:
     seams = {"HARTMESH_RENDER_ONLY", "HARTMESH_NGINX_SOURCE", "HARTMESH_NGINX_TARGET"}
     for path in (PROFILE / "gateway" / "run.sh", PROFILE / "gateway" / "entrypoint.sh", PROFILE / "gateway" / "render_config.py", PROFILE / "nginx" / "render.sh"):
         names = set(contract_like.findall(path.read_text(encoding="utf-8"))) - seams
-        assert names <= CONTRACT_KEYS, (path.name, names - CONTRACT_KEYS)
+        assert names <= CONTRACT_KEYS | PASSTHROUGH_KEYS, (path.name, names - CONTRACT_KEYS - PASSTHROUGH_KEYS)
 
 
 def test_gateway_entrypoint_drops_to_uid_1000_with_the_socket_group_and_runs_one_worker() -> None:

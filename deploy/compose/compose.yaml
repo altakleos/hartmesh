@@ -162,6 +162,14 @@ services:
       # else. Root-equivalent on this guest; see README.
       - /var/run/docker.sock:/var/run/docker.sock
       - ${HARTMESH_DATA_DIR}/home:${HARTMESH_DATA_DIR}/home
+      # Operator-owned deployment material on the tenant's data disk, read-only
+      # and deliberately outside home/: sandboxes bind-mount from there, and
+      # nothing an agent or a chat user can reach may choose model clients or
+      # endpoints. Currently one optional file, the model list the tenant .env
+      # points at (README: "Operator-managed models"). Mounted at the path it
+      # has on the host so that value is a real host path either side of the
+      # boundary. Docker creates the directory if the operator has not.
+      - ${HARTMESH_DATA_DIR}/operator:${HARTMESH_DATA_DIR}/operator:ro
       # The shipped profile stays read-only; rendered files go to the data dir.
       - ./gateway:/opt/hartmesh/gateway:ro
       - ./config.yaml:/opt/hartmesh/config.yaml:ro
