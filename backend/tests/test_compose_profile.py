@@ -24,6 +24,7 @@ from types import ModuleType
 
 import pytest
 import yaml
+from _compose_network_ranges import DOCKER_DEFAULT_POOLS, EXTERNAL_RANGES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPO_ROOT / "deploy" / "compose"
@@ -47,29 +48,6 @@ CONTRACT_KEYS = {
 }
 SERVICES = {"gateway", "frontend", "nginx", "postgres", "redis"}
 OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET"}
-# The app bridge installs a connected route inside every tenant guest, so any
-# address range the guest must still reach through its real default gateway is
-# an exclusion for it. These are the operator's own networks as
-# recorded on 2026-09-08 -- the two kosmos /16s (pods, services) are the ones
-# the shipped 172.30.10.0/24 sat inside.
-EXTERNAL_RANGES = (
-    "10.17.0.0/16",
-    "10.18.10.0/24",
-    "10.199.199.248/29",
-    "100.64.0.0/10",
-    "172.16.220.0/22",
-    "172.16.224.0/24",
-    "172.30.0.0/16",
-    "172.31.0.0/16",
-    "192.168.1.0/24",
-    "192.168.200.0/24",
-)
-# Docker's own defaults: the `docker0` bridge, and the two address pools every
-# network the profile does not pin is allocated from -- the per-sandbox bridges
-# under `allowlist` and `hartmesh_sandbox` under `open`. Staying outside them
-# keeps `app` from colliding with a sandbox network and from spending a whole
-# /16 of the pool.
-DOCKER_DEFAULT_POOLS = ("172.17.0.0/16", "172.16.0.0/12", "192.168.0.0/16")
 MEMORY_MIB = {"gateway": 1344, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256}
 NGINX_VARIABLES = {
     "$forwarded_proto",
