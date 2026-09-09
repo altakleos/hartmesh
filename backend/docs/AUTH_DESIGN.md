@@ -127,7 +127,13 @@ enum UserScope:
 
 登录失败**按账号计数**，不按客户端 IP。对同一个邮箱地址连续失败 `auth.local.account_max_attempts` 次（默认 5），该账号被锁定 `auth.local.account_lockout_seconds` 秒（默认 300），与请求来自哪个地址无关。此前按 IP 计数会让整个公司被锁在自己的部署之外：一间办公室的全部员工共用一个出口地址；未设置 `AUTH_TRUSTED_PROXIES` 时，所有人共用的更是反向代理的容器地址。
 
-另有一道**宽松得多的来源防护**，用于账号喷洒（per-account 锁定看不到这种攻击）：一个来源地址在 `source_window_seconds`（默认 900 秒）内，最多对 `source_max_distinct_accounts`（默认 50）个不同账号失败、共计 `source_max_failures`（默认 300）次，超过任一上限即锁定该地址 `source_lockout_seconds` 秒。默认值高于任何中小企业的员工人数，正常办公室永远碰不到。地址解析仍只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。
+另有一道**宽松得多的来源防护**，用于账号喷洒（per-account 锁定看不到这种攻击）：一个来源地址在 `source_window_seconds`（默认 900 秒）内，最多对 `source_max_distinct_accounts`（默认 50）个不同账号失败、共计 `source_max_failures`（默认 300）次，超过任一上限即锁定该地址 `source_lockout_seconds` 秒。地址解析仍只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。
+
+该窗口是**固定窗口，不是滑动窗口**：从该地址的第一次计入失败开始，`source_window_seconds` 秒后关闭，下一次失败重新开一个；窗口内的计数不会衰减（redis 后端即在第一次 INCR 时给计数器设置该 TTL）。
+
+两个默认值都高于一间小型办公室的预期用量，但都**不是**「正常办公室永远碰不到」的保证：对已锁定账号的重试同样计入总量（锁定账号的响应与密码错误完全一致，没有任何提示让人停手），拼错的邮箱也各算一个不同账号。已知规模的部署应据此调整总量上限——N 名员工各自触发账号锁定后再重试，代价是 N x（`account_max_attempts` + 重试次数）；租户 Compose 配置就是这样设定的（见 `deploy/compose/config.yaml`）。任何一道上限都不能让一个与恶意用户共用出口地址的办公室免受影响。
+
+调高上限**不会**解锁已经被锁定的地址：与按账号的锁定（每次检查都按当前阈值重新判定）不同，来源锁定是一份已写下的判决，只能等 `source_lockout_seconds` 到期或由管理员清除。
 
 被锁定的账号返回的响应与密码错误、账号不存在**完全一致**（401 `invalid_credentials`），并同样消耗一次口令校验，因此锁定不会成为账号枚举信道；只有来源防护返回 429。
 

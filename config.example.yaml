@@ -3014,8 +3014,22 @@ authorization:
 #     #
 #     # A much looser second guard still catches untargeted spraying across
 #     # many accounts from one address, which the per-account lock cannot
-#     # see. The defaults take more accounts than a small or medium business
-#     # has staff, so a whole office typing badly never reaches them.
+#     # see. The window is fixed, not sliding: it opens on that address's
+#     # first counted failure and closes source_window_seconds later, and
+#     # nothing decays inside it.
+#     #
+#     # The defaults sit above what one small office is expected to produce,
+#     # but neither is a promise it cannot get there. Retries against an
+#     # already-locked account still count towards source_max_failures --
+#     # a locked account answers exactly as a wrong password does, so nobody
+#     # is told to stop -- and mistyped addresses count as distinct accounts.
+#     # If you know the shape behind an address, size the volume limit
+#     # against it: N staff who each reach their own account lock and then
+#     # retry cost N x (account_max_attempts + retries).
+#     #
+#     # Raising either limit does not release an address that is already
+#     # locked; that lock runs out, or an administrator clears it with
+#     # POST /api/v1/auth/lockouts/clear.
 #     # source_window_seconds: 900
 #     # source_max_distinct_accounts: 50
 #     # source_max_failures: 300

@@ -13,10 +13,27 @@ Two limits, deliberately very different in size:
 * **Per source** — a much looser guard against untargeted spraying, which the
   per-account limit cannot see: one address may fail against at most
   ``source_max_distinct_accounts`` distinct accounts, and make at most
-  ``source_max_failures`` failures in total, within a rolling
-  ``source_window_seconds``. Tripping either locks the address for
-  ``source_lockout_seconds``. The defaults take more accounts than a small or
-  medium business has staff, so a whole office typing badly never reaches them.
+  ``source_max_failures`` failures in total, within ``source_window_seconds``.
+  Tripping either locks the address for ``source_lockout_seconds``.
+
+  The window is **fixed, not sliding**: it opens on that address's first
+  counted failure and closes ``source_window_seconds`` later, after which the
+  next failure opens a new one. Nothing decays inside an open window, and the
+  redis backend expresses exactly this by carrying a TTL on the counter from
+  its first increment.
+
+  Both defaults sit above what one small office is expected to produce, but
+  neither is a promise it cannot get there: retries against an already-locked
+  account still count (nothing in the response tells a person to stop), and
+  mistyped addresses count as distinct accounts. Deployments that know their
+  shape should size ``source_max_failures`` against it — the tenant Compose
+  profile does, in ``deploy/compose/config.yaml``. Neither limit makes an
+  address immune to a malicious user who shares it.
+
+  Raising a limit does **not** release an address already locked: unlike the
+  per-account lock, which is re-derived against the live threshold on every
+  check, the source lock is a written sentence that runs out on
+  ``source_lockout_seconds`` or is cleared by an administrator.
 
 Both counters live behind :class:`LoginThrottleStore`. The memory backend is
 per process (the historical behaviour, and the safe default for a single-user

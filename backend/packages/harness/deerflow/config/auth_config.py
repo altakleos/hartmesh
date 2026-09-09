@@ -126,22 +126,39 @@ class LocalAuthConfig(BaseModel):
         default=900.0,
         gt=0,
         allow_inf_nan=False,
-        description="Rolling window over which one client address's failed logins are counted for the spray guard.",
+        description=(
+            "Window over which one client address's failed logins are counted for the spray "
+            "guard. It is a fixed window, not a sliding one: it opens on that address's first "
+            "counted failure and closes source_window_seconds later, after which the next "
+            "failure opens a new one. (In the redis backend the counter simply carries this "
+            "TTL from its first increment.) Counts are not decayed inside an open window."
+        ),
     )
     source_max_distinct_accounts: int = Field(
         default=50,
         ge=2,
         description=(
             "Distinct accounts one client address may fail against within source_window_seconds "
-            "before that address is locked out. Sized so a whole office never reaches it: it "
-            "takes more accounts than a small or medium business has staff. This is the guard "
-            "against untargeted spraying, which the per-account lock cannot see."
+            "before that address is locked out. This is the guard against untargeted spraying, "
+            "which the per-account lock cannot see. The default is above the staff count of a "
+            "small or medium business, but it counts *submitted* addresses, so mistyped ones "
+            "count as distinct too -- it is a headroom figure, not a promise that a legitimate "
+            "office can never reach it."
         ),
     )
     source_max_failures: int = Field(
         default=300,
         ge=2,
-        description=("Total failed logins one client address may make within source_window_seconds before that address is locked out. Bounds sheer volume from one source, including repeated attempts against an already-locked account."),
+        description=(
+            "Total failed logins one client address may make within source_window_seconds before "
+            "that address is locked out. Bounds sheer volume from one source, including repeated "
+            "attempts against an already-locked account -- which a person has no cue to stop "
+            "making, because a locked account answers exactly as a wrong password does. Size it "
+            "against the shape behind the address: N staff who each reach their own account lock "
+            "and then retry cost N x (account_max_attempts + retries). Raising it after an "
+            "address is already locked does not release it; the lock runs out or an "
+            "administrator clears it."
+        ),
     )
     source_lockout_seconds: float = Field(
         default=900.0,

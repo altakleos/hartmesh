@@ -35,6 +35,20 @@ models: []
 auth:
   local:
     lockout_store: redis
+    # The one number this profile raises. The generic default of 300 total
+    # failures per source window is exactly this deployment's design allowance
+    # and no more: twenty staff, five wrong attempts each to reach their own
+    # account lock, then ten further retries each during it (the response a
+    # locked account gets is the one a wrong password gets, by design, so
+    # nothing tells a person to stop) is 20 x 15 = 300. A single bad morning
+    # would land *on* the limit and lock the office's shared address for
+    # 15 minutes. 600 is that allowance doubled, leaving 299 further failures
+    # before the limit trips. These are design allowances, not measured
+    # behaviour. The tradeoff is explicit in README ("Login lockout"): this
+    # source may now cause twice as many counted failures before the volume
+    # block, and neither this limit nor the 50-account guard makes an office
+    # immune to a malicious user sharing its address.
+    source_max_failures: 600
 
 # ── Sandbox: the Gateway's local Docker backend (no provisioner_url) ────────
 sandbox:

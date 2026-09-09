@@ -12,16 +12,25 @@ had to carry:
 5. With the backing store unavailable the login path fails closed, which is
    what the change claims it does.
 6. Nothing regressed for a single user on default settings.
+
+Section 7 was added later, for the tenant Compose profile's office retry
+budget: the same handler under the policy that profile actually renders.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import os
 import statistics
+import sys
 import time
+import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from starlette.requests import Request
@@ -217,13 +226,19 @@ async def test_volume_from_one_source_trips_the_source_guard_too():
     assert sprayed.value.status_code == 429
 
 
-async def test_a_whole_office_typing_badly_never_reaches_the_source_guard():
-    """Twenty staff, four failures each, on the defaults: no source lock.
+async def test_twenty_staff_four_failures_each_stay_inside_the_generic_defaults():
+    """Twenty staff, four failures each, on the standalone defaults: no lock.
 
     Eighty failures across twenty accounts is a bad Monday morning with a tool
-    nobody's password manager has learned yet. Each account is well inside its
-    own five-failure budget, and the source guard's defaults (50 distinct
-    accounts, 300 failures per 15 minutes) are far above it.
+    nobody's password manager has learned yet. Each account stops one failure
+    short of its own five-failure budget, so nobody ever reaches an account
+    lock, and eighty is well under the generic 300-failure volume limit.
+
+    This is a bound, not a guarantee: it says what *these* eighty failures do,
+    not that an office can never reach either source limit. Let each of the
+    same twenty carry on past their account lock and the arithmetic gets to 300
+    quickly -- see the office retry budget in section 7, which is why the
+    tenant profile raises the volume limit rather than relying on the default.
     """
     _set_config()
     for index in range(20):
@@ -781,3 +796,298 @@ async def test_redis_keys_are_tenant_scoped():
     assert prefixes[0] != prefixes[1]
     assert all(prefix.endswith(":auth:login-throttle:v1") for prefix in prefixes)
     assert login_throttle.redis_key_prefix(None) == login_throttle.UNSCOPED_KEY_PREFIX
+
+
+# ── 7. The tenant Compose profile's office retry budget ───────────────────
+#
+# One tenant is one company: five to twenty staff behind one office NAT
+# address. Section 2's eighty-failure morning is a bound, not a guarantee --
+# the design allowance for this deployment shape is larger, and reaches the
+# generic volume limit exactly:
+#
+#     20 staff x (5 wrong attempts to their own account lock
+#                 + 10 further retries during it)          = 300 failures
+#
+# Retries during an account lock count, and nothing tells a person to stop:
+# a locked account answers exactly as a wrong password does, by design
+# (section 4). So the shape the profile is sized for lands *on* the generic
+# 300 and locks the office's shared address. The profile therefore sets
+# ``source_max_failures: 600`` -- the allowance doubled, leaving 299 further
+# failures before the limit trips.
+#
+# These are design allowances, not measured customer behaviour, and the
+# tradeoff is real: this source may now cause twice as many counted failures
+# before the volume block, and every one of them still costs one
+# password-equivalent verification. Neither this limit nor the 50-account
+# guard makes an office immune to a malicious user sharing its address.
+#
+# The policy below is loaded from the shipped profile rather than written out
+# here, so these scenarios cannot drift away from what a tenant runs.
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PROFILE = REPO_ROOT / "deploy" / "compose"
+STAFF = [f"staff{index}@example.com" for index in range(20)]
+OTHER_IP = "198.51.100.77"
+
+
+@pytest.fixture(scope="module")
+def profile_local_auth() -> LocalAuthConfig:
+    """``auth.local`` as the tenant Gateway renders it, through the real steps.
+
+    The template is not a config file: ``gateway/run.sh`` renders it through
+    ``render_config.py`` at every start and points DEER_FLOW_CONFIG_PATH at the
+    result. Going through the renderer is the point -- a value dropped from the
+    template, or a renderer that stopped copying ``auth:`` through, would leave
+    a hand-written policy fixture passing and the tenant on the generic default.
+
+    Only ``auth.local`` is built, with the model the Gateway builds it with.
+    ``AppConfig.from_file`` is deliberately *not* used: it applies the whole
+    file to process-wide singletons (checkpointer, stream bridge, memory, ...)
+    that no ``reset_app_config()`` puts back, so loading a profile that selects
+    PostgreSQL would leave a postgres checkpointer behind for whatever test
+    runs next in this process. ``deploy/compose`` owns that end of the contract
+    in ``tests/test_compose_profile.py``; this file needs the policy.
+    """
+    spec = importlib.util.spec_from_file_location("hartmesh_render_config_throttle_test", PROFILE / "gateway" / "render_config.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        environ = {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0"}
+        rendered, _ = module.render_text((PROFILE / "config.yaml").read_text(encoding="utf-8"), module.load_catalog(PROFILE / "providers"), environ)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return LocalAuthConfig(**(yaml.safe_load(rendered)["auth"]["local"]))
+
+
+@pytest.fixture
+def office(monkeypatch, profile_local_auth: LocalAuthConfig):
+    """The profile's numbers, twenty real staff accounts, and cheap hashing.
+
+    Two deliberate substitutions, both narrower than they look:
+
+    * ``lockout_store`` is swapped to ``memory``. The profile ships ``redis``,
+      and every number that governs the scenarios below lives in
+      ``ThrottlePolicy``, which does not carry the backend. The redis path is
+      section 5's, and ``test_the_boundary_holds_on_a_real_redis`` replays this
+      section's boundary against a live server.
+    * The bcrypt work factor is lowered. Every login below spends one password
+      verification on purpose (section 4), and at the shipped cost the six
+      hundred in this section are minutes of CPU. The code path is unchanged --
+      a real ``bcrypt.checkpw`` against a real hash, at cost 4. The equal-cost
+      property itself is what section 4 measures, at the shipped factor.
+
+    Returns the profile's own config, unmodified, so assertions read the
+    shipped values rather than the substituted ones.
+    """
+    import bcrypt
+
+    from app.gateway.auth import password as password_module
+
+    cheap = "$dfv2$" + bcrypt.hashpw(password_module._pre_hash_v2("timing-equalizer"), bcrypt.gensalt(rounds=4)).decode("utf-8")
+    monkeypatch.setattr(password_module, "_TIMING_EQUALIZER_HASH", cheap)
+
+    accounts = dict.fromkeys(STAFF, PASSWORD)
+    accounts[BOB] = PASSWORD
+    monkeypatch.setattr(auth_router, "get_local_provider", lambda: _Provider(accounts))
+    set_app_config(AppConfig(sandbox=SandboxConfig(use="test"), auth=AuthAppConfig(local=profile_local_auth.model_copy(update={"lockout_store": "memory"}))))
+    return profile_local_auth
+
+
+async def _fail(username: str, *, source: str = OFFICE_IP, expect: int = 401) -> None:
+    with pytest.raises(HTTPException) as raised:
+        await _login(username, "wrong", source=source)
+    assert raised.value.status_code == expect, f"{username} from {source}"
+
+
+async def test_the_profile_policy_is_the_one_this_section_reasons_about(office: LocalAuthConfig) -> None:
+    """Guards the arithmetic in the comment above against a config change."""
+    assert office.lockout_store == "redis", "what the profile ships; the scenarios below run it on memory"
+    assert office.source_max_failures == 600
+    assert office.source_max_distinct_accounts == 50
+    assert (office.source_window_seconds, office.source_lockout_seconds) == (900.0, 900.0)
+    assert office.effective_account_max_attempts == 5
+    assert office.effective_account_lockout_seconds == 300.0
+    assert 20 * (office.effective_account_max_attempts + 10) == 300
+    assert office.source_max_failures == 2 * 300
+
+
+async def test_the_designed_bad_morning_costs_three_hundred_and_leaves_the_office_working(office, _isolated_throttle):
+    """The whole allowance, through the real handler, and an observer after it.
+
+    Twenty staff, fifteen failures each: five to reach their own account lock
+    and ten more against it, because nothing in the response says to stop.
+    """
+    for email in STAFF:
+        for _ in range(15):
+            await _fail(email)
+
+    policy = ThrottlePolicy.from_local_config(office)
+    _, failures, accounts = _isolated_throttle._source_windows[login_throttle.source_key(OFFICE_IP)]
+    assert (failures, len(accounts)) == (300, 20)
+    assert await _isolated_throttle.source_locked(OFFICE_IP, policy) is False, "300 is the allowance, not the limit"
+    for email in STAFF:
+        assert await _isolated_throttle.account_locked(email, policy) is True
+
+    # The observer: an account that did not spend any of the budget, from the
+    # same address. Under the generic 300 this login would be a 429.
+    assert (await _login(BOB, PASSWORD)).expires_in > 0
+
+
+async def test_a_staff_account_unlocks_on_time_while_the_source_window_is_still_live(office, _isolated_throttle, monkeypatch):
+    """The account lock is 300s; the source window is 900s. Half way through
+    the window, the staff member is served -- the source is not locked, and its
+    window is not reset by the passage of time either."""
+    for email in STAFF:
+        for _ in range(15):
+            await _fail(email)
+    locked_at = time.time()
+    monkeypatch.setattr(login_throttle.time, "time", lambda: locked_at + 301.0)
+
+    assert (await _login(STAFF[0], PASSWORD)).expires_in > 0
+    started, failures, _ = _isolated_throttle._source_windows[login_throttle.source_key(OFFICE_IP)]
+    assert failures == 300, "the source window is anchored at its first failure, not rolled forward"
+    assert locked_at + 301.0 - started < office.source_window_seconds
+
+
+async def test_the_source_locks_at_the_six_hundredth_failure_and_another_source_does_not(office, _isolated_throttle):
+    """The boundary, just below and at, with retries against a locked account.
+
+    All six hundred are aimed at one already-locked account: the distinct-
+    account guard never fires, so this isolates the volume limit.
+    """
+    for _ in range(599):
+        await _fail(STAFF[0])
+    assert (await _login(BOB, PASSWORD)).expires_in > 0, "599 failures: the source is not locked yet"
+
+    await _fail(STAFF[0])
+    _, failures, _ = _isolated_throttle._source_windows[login_throttle.source_key(OFFICE_IP)]
+    assert failures == 600
+    await _fail(BOB, expect=429)
+    with pytest.raises(HTTPException) as refused:
+        await _login(BOB, PASSWORD, source=OFFICE_IP)
+    assert refused.value.status_code == 429, "a correct password from the locked source is refused too"
+
+    # A different address is unaffected: the lock is on the source, not global.
+    assert (await _login(BOB, PASSWORD, source=OTHER_IP)).expires_in > 0
+
+
+async def test_fifty_distinct_accounts_still_trip_the_separate_guard_under_the_raised_limit(office):
+    """Raising the volume limit does not touch the spraying guard. Fifty
+    failures is nowhere near 600, and the address locks anyway.
+
+    Submitted addresses are what count, so mistyped ones count too: the guard
+    does not know which of the fifty exist.
+    """
+    for index in range(50):
+        await _fail(f"typo{index}@example.com")
+    with pytest.raises(HTTPException) as sprayed:
+        await _login(BOB, PASSWORD)
+    assert sprayed.value.status_code == 429
+
+
+async def test_account_locks_stay_account_scoped_and_the_two_clears_stay_separate(office, _isolated_throttle):
+    """Clearing the source must not silently unlock every account behind it."""
+    for _ in range(5):
+        await _fail(STAFF[0])
+    # The account lock follows the account, not the address it was earned from.
+    with pytest.raises(HTTPException) as elsewhere:
+        await _login(STAFF[0], PASSWORD, source=OTHER_IP)
+    assert elsewhere.value.status_code == 401
+
+    for index in range(1, 50):
+        await _fail(STAFF[index % len(STAFF)] if index < len(STAFF) else f"typo{index}@example.com")
+    await _fail(BOB, expect=429)
+
+    client = _admin_app(_isolated_throttle, role="admin")
+    assert client.post("/api/v1/auth/lockouts/clear", json={"source": OFFICE_IP}).status_code == 200
+    with pytest.raises(HTTPException) as still_locked:
+        await _login(STAFF[0], PASSWORD)
+    assert still_locked.value.status_code == 401, "the source clear released the address, not the accounts behind it"
+
+    assert client.post("/api/v1/auth/lockouts/clear", json={"account": STAFF[0]}).status_code == 200
+    assert (await _login(STAFF[0], PASSWORD)).expires_in > 0
+
+
+async def test_raising_the_volume_limit_does_not_release_a_source_already_locked(office, _isolated_throttle, monkeypatch):
+    """A source lock is a written sentence, not a re-derived verdict.
+
+    Accounts behave differently on purpose (see
+    ``test_raising_the_threshold_unlocks_without_a_restart``): the account lock
+    is re-evaluated against the live threshold, the source lock is not. Raising
+    ``source_max_failures`` after the fact is not an unlock -- expiry and the
+    admin clear are.
+    """
+    _set_config(source_max_failures=3, source_max_distinct_accounts=1000)
+    for _ in range(3):
+        await _fail(STAFF[0])
+    await _fail(BOB, expect=429)
+
+    _set_config(source_max_failures=600, source_max_distinct_accounts=1000)
+    await _fail(BOB, expect=429)
+
+    locked_at = time.time()
+    monkeypatch.setattr(login_throttle.time, "time", lambda: locked_at + 901.0)
+    assert (await _login(BOB, PASSWORD)).expires_in > 0, "the 900s source lock expires on its own"
+
+
+@pytest.mark.integration
+async def test_the_boundary_holds_on_a_real_redis(office, monkeypatch):
+    """The same boundary against a live Redis, not the fake client.
+
+    Skipped when no Redis answers; ``DEER_FLOW_TEST_REDIS_URL`` selects one.
+    This exercises the real INCR/EXPIRE/SADD window the tenant runs on,
+    including that the window key is created with its TTL on the first failure.
+    """
+    redis_url = os.environ.get("DEER_FLOW_TEST_REDIS_URL", "redis://localhost:6379/15")
+    redis_asyncio = pytest.importorskip("redis.asyncio")
+    probe = redis_asyncio.Redis.from_url(redis_url, socket_connect_timeout=0.5)
+    try:
+        await probe.ping()
+    except Exception:  # noqa: BLE001 - any connection failure means "no Redis here"
+        pytest.skip(f"Redis not reachable at {redis_url}")
+    finally:
+        await probe.aclose()
+
+    # Selected the way the profile selects it -- `lockout_store: redis`, which
+    # is what it ships -- rather than by installing a store the router might
+    # not have chosen. Only the URL is test-local; the key prefix comes from a
+    # throwaway tenant namespace, which is both how a real Gateway derives it
+    # and what keeps one run's keys off every other tenant on this server.
+    from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
+
+    local = office.model_copy(update={"lockout_store_redis_url": redis_url})
+    set_app_config(AppConfig(sandbox=SandboxConfig(use="test"), auth=AuthAppConfig(local=local)))
+    namespace = TenantIdentityV1.from_canonical_id(f"px-{uuid.uuid4().hex[:12]}").namespace(TenantSubsystem.REDIS)
+    monkeypatch.setattr(_BareApp._State, "redis_tenant_namespace", namespace)
+    prefix = login_throttle.redis_key_prefix(namespace)
+    assert prefix != login_throttle.UNSCOPED_KEY_PREFIX
+    store = RedisLoginThrottleStore(redis_url, key_prefix=prefix)
+    login_throttle.set_login_throttle_store(store, signature=("redis", login_throttle.resolve_redis_url(local), prefix))
+    assert login_throttle.get_login_throttle_store(local, tenant_namespace=namespace) is store, "the router must reach this store, not rebuild a memory one"
+    policy = ThrottlePolicy.from_local_config(office)
+    try:
+        for _ in range(599):
+            await _fail(STAFF[0])
+        assert await store.source_locked(OFFICE_IP, policy) is False
+        assert (await _login(BOB, PASSWORD)).expires_in > 0
+
+        await _fail(STAFF[0])
+        assert await store.source_locked(OFFICE_IP, policy) is True
+        with pytest.raises(HTTPException) as refused:
+            await _login(BOB, PASSWORD)
+        assert refused.value.status_code == 429
+
+        assert await store.account_locked(STAFF[0], policy) is True
+        assert await store.account_locked(STAFF[1], policy) is False, "the volume lock is on the source only"
+        assert await store.clear_source(OFFICE_IP) is True
+        assert await store.account_locked(STAFF[0], policy) is True, "clearing the source leaves the account locked"
+    finally:
+        client = redis_asyncio.Redis.from_url(redis_url)
+        keys = [key async for key in client.scan_iter(f"{prefix}*")]
+        if keys:
+            await client.delete(*keys)
+        await client.aclose()
+        await store.close()
