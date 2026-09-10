@@ -5,6 +5,14 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.10] — 2026-09-10
+
+- hartmesh#69 — validate every rendered model with the Gateway schema while preserving unrelated configuration state.
+- hartmesh#70 — prevent operator-controlled model values and keys from appearing in renderer refusal diagnostics.
+- hartmesh#71 — build refusal locations from trusted structure so operator-controlled keys cannot forge or leak through paths.
+
+[2.1.0+hartmesh.10]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.10
+
 ## [2.1.0+hartmesh.9] — 2026-09-09
 
 - hartmesh#68 — restore public DNS for open-mode gVisor sandboxes using the VM's validated read-only upstream resolver.
