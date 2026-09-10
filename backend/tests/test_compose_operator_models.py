@@ -778,3 +778,66 @@ def test_no_refusal_anywhere_repeats_a_value_the_operator_supplied(render_config
             continue
         assert placement in MUST_REFUSE, placement
         assert SENTINEL not in printed.out + printed.err, placement
+
+
+# ── 11. a location is structure, never an operator's key ─────────────────────
+
+# Every one of these puts the sentinel in a *mapping key*. A key reaches a
+# diagnostic through a different door than a value -- a path built by string
+# concatenation, or a pydantic `loc` -- and the contract is the same for both.
+KEY_PLACEMENTS = {
+    # A nested list under an operator-typed key: the generated `[0]` is safe on
+    # its own, but it is only meaningful together with the key above it.
+    "list under an operator key": {f"{SENTINEL}_options": [{"Authorization": "fixture-literal"}]},
+    # A key that carries a bracket is indistinguishable from a generated index
+    # once the path is a string.
+    "bracket inside a key": {f"{SENTINEL}]_key": "fixture-literal"},
+    # Deeper: mapping inside list inside mapping, all under operator keys.
+    "mapping inside a list inside a mapping": {f"{SENTINEL}_a": {f"{SENTINEL}_b": [{"api_key": "fixture-literal"}]}},
+    # A credential-shaped key at the top of the entry, the simplest shape.
+    "credential-shaped key": {f"{SENTINEL}_token": "fixture-literal"},
+    # Dots are the path separator; a key full of them must not forge a path.
+    "dots inside a key": {f"{SENTINEL}.forged[9].api_key": "fixture-literal"},
+}
+
+
+@pytest.mark.parametrize("placement", sorted(KEY_PLACEMENTS))
+def test_a_credential_location_names_the_entry_and_no_operator_key(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], placement: str) -> None:
+    printed = _render_both_ways(render_config, tmp_path, monkeypatch, capsys, _operator_document({**ACME_CHAT, **KEY_PLACEMENTS[placement]}))
+    assert SENTINEL not in printed, placement
+    assert "models[0]: 1" in printed, "the entry and a count, which is what the operator needs to look inside it"
+
+
+def test_a_non_string_key_is_rejected_without_printing_it(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`!!binary` keys reach pydantic, whose `invalid_key` error carries the
+    rejected key in its `loc`. The schema validator is not a trusted source of
+    location text any more than a string path is."""
+    document = yaml.safe_dump({"models": [{**ACME_CHAT, SENTINEL.encode(): "fixture-value"}]}, sort_keys=False, allow_unicode=True)
+    assert "!!binary" in document, "the fixture must actually carry a non-string key"
+    printed = _render_both_ways(render_config, tmp_path, monkeypatch, capsys, document)
+    assert SENTINEL not in printed
+    assert "invalid_key" in printed, "the rule that was broken"
+    assert "models[0]" in printed
+
+
+def test_a_schema_error_on_a_declared_field_still_names_that_field(render_config: ModuleType, catalog: tuple, tmp_path: Path) -> None:
+    """Dropping every location would be safe and useless. The schema's own
+    field names are its vocabulary, not operator content, so they stay."""
+    path = _write_models(tmp_path, _operator_document({**ACME_CHAT, "context_window": 0}))
+    with pytest.raises(render_config.RenderError, match="context_window") as error:
+        _render(render_config, catalog, _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(path)}))
+    assert "greater_than" in str(error.value)
+
+
+def test_a_credential_free_entry_with_unusual_keys_still_renders(render_config: ModuleType, catalog: tuple, tmp_path: Path) -> None:
+    """Rejecting odd keys or nested lists to make the message easy would change
+    what the interface accepts. Generic provider options keep working."""
+    exotic = {
+        **ACME_CHAT,
+        "vendor.options[0]": {"nested": [{"depth": 2}]},
+        "unicode_ключ": "value",
+        "extra_body": {"routing": [{"weight": 1}, {"weight": 2}]},
+    }
+    document = _render(render_config, catalog, _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(_write_models(tmp_path, _operator_document(exotic)))}))
+    assert document["models"][0]["vendor.options[0]"] == {"nested": [{"depth": 2}]}
+    assert document["models"][0]["extra_body"]["routing"][1]["weight"] == 2

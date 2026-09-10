@@ -187,19 +187,35 @@ def _positions(places: list[tuple[str, int]]) -> str:
     return "; ".join(f"{source} {', '.join(f'models[{index}]' for index in indexes)}" for source, indexes in by_source.items())
 
 
-def _anchor(path: str) -> str:
-    """The structural part of a path: everything up to its last list index.
+def _safe_location(path: tuple[object, ...]) -> str:
+    """The structural head of a path, with operator-typed keys left out.
 
-    ``models[0].default_headers.Authorization`` anchors on ``models[0]``. A key
-    name is operator-typed content like any value, so a diagnostic points at
-    the entry and leaves the operator to look inside it.
+    A path is kept as components rather than as text, because text cannot tell
+    a generated index from a bracket someone typed, nor a schema field from a
+    key someone pasted. Only two kinds of component are safe to print: a list
+    index, which this renderer generated, and the document's own top-level key,
+    which comes from the template. Everything from the first operator-typed key
+    onwards is dropped -- including any index below it, which means nothing
+    without the key above it.
+
+    ``("models", 0, "api_key")`` and ``("models", 0, "x_options", 0, "token")``
+    both locate ``models[0]``, and the operator looks inside that entry.
     """
 
-    closed = path.rfind("]")
-    return path[: closed + 1] if closed != -1 else "the document root"
+    rendered: list[str] = []
+    for component in path:
+        if isinstance(component, int):
+            rendered.append(f"[{component}]")
+        elif not rendered:
+            # The top level of the rendered document is the template's, and the
+            # operator file cannot add a key to it (`load_operator_models`).
+            rendered.append(str(component))
+        else:
+            break
+    return "".join(rendered) or "the document root"
 
 
-def _credential_problems(value: object, path: str, problems: list[str]) -> None:
+def _credential_problems(value: object, path: tuple[object, ...], problems: list[str]) -> None:
     """Collect the paths of credential fields that are not ``$NAME`` references.
 
     Only paths are collected. The contract this profile documents is that a
@@ -212,23 +228,44 @@ def _credential_problems(value: object, path: str, problems: list[str]) -> None:
 
     if isinstance(value, Mapping):
         for key, item in value.items():
-            child = f"{path}.{key}" if path else str(key)
+            child = (*path, key)
             if _is_credential_field(str(key)):
                 # An absent credential is the documented way to configure a
                 # client that needs none; null is the same statement in YAML.
                 if item is not None and not (isinstance(item, str) and _VARIABLE.fullmatch(item)):
-                    problems.append(_anchor(child))
+                    problems.append(_safe_location(child))
                 continue
             _credential_problems(item, child, problems)
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            _credential_problems(item, f"{path}[{index}]", problems)
+            _credential_problems(item, (*path, index), problems)
 
 
-def _schema_problem(error: Mapping[str, Any]) -> str:
+def _schema_location(loc: tuple[object, ...], declared: frozenset[str]) -> str:
+    """A pydantic ``loc`` with only the schema's own vocabulary printed.
+
+    ``loc`` is not a trusted source of text: an ``invalid_key`` error carries
+    the rejected key itself, and that key is operator-typed content. A field the
+    schema declares is the schema's word, not the operator's, so it stays;
+    anything else becomes ``(key)`` and ends the location.
+    """
+
+    rendered: list[str] = []
+    for component in loc:
+        if isinstance(component, int):
+            rendered.append(f"[{component}]")
+        elif isinstance(component, str) and component in declared:
+            rendered.append(f".{component}" if rendered else component)
+        else:
+            rendered.append(".(key)" if rendered else "(key)")
+            break
+    return "".join(rendered) or "(entry)"
+
+
+def _schema_problem(error: Mapping[str, Any], declared: frozenset[str]) -> str:
     """One pydantic error as location plus rule, with the input left behind."""
 
-    location = ".".join(str(part) for part in error.get("loc") or ()) or "(entry)"
+    location = _schema_location(tuple(error.get("loc") or ()), declared)
     detail = str(error.get("msg") or "").strip()
     rejected = error.get("input")
     # Pydantic's own messages are generated from the rule and carry no input,
@@ -255,10 +292,11 @@ def _validate_model_schema(entry: Mapping[str, Any], where: str) -> None:
 
     from deerflow.config.model_config import ModelConfig
 
+    declared = frozenset(ModelConfig.model_fields)
     try:
         ModelConfig.model_validate(dict(entry))
     except ValidationError as exc:
-        problems = sorted({_schema_problem(error) for error in exc.errors()})
+        problems = sorted({_schema_problem(error, declared) for error in exc.errors()})
         raise RenderError(f"{where} is not a model the Gateway will load: {'; '.join(problems)}") from None
     except (TypeError, ValueError):
         raise RenderError(f"{where} is not a model the Gateway will load: the entry is not a mapping of fields") from None
@@ -454,7 +492,7 @@ def render(
     document["sandbox"] = sandbox
 
     problems: list[str] = []
-    _credential_problems(document, "", problems)
+    _credential_problems(document, (), problems)
     if problems:
         counted = ", ".join(f"{anchor}: {problems.count(anchor)}" for anchor in sorted(set(problems)))
         raise RenderError(
