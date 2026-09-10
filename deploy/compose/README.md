@@ -755,15 +755,25 @@ or the settings -- see the boundary below.
 
 **What a refusal says.** The source, the entry's **position** (`models[0]`),
 the field, and the rule that was broken (`context_window: greater_than`). It
-does not say what the value was. Field contents are the one thing a diagnostic
-must not repeat: an operator's paste or a stray bracket can put a credential in
-any field, and a refusal is written to the journal, where it is kept and
-shipped. So, uniformly:
+does not say what the value was, and it does not say what the *key* was
+either: a paste lands in a mapping key as readily as in a value, and a refusal
+is written to the journal, where it is kept and shipped. So, uniformly:
 
+- **A location is structure, never text.** Locations are built from path
+  components -- a top-level key of the template, then list indices this
+  renderer generated -- and stop at the first operator-typed key. So
+  `models[0].api_key` and a credential nested three levels down under keys the
+  operator invented both locate `models[0]`, a bracket typed into a key cannot
+  be mistaken for an index, and an index below an operator key is dropped with
+  it, because it means nothing without the key above it.
 - A **YAML syntax error** reports where the parser stopped and withholds the
   parser's own message, which quotes the source line.
 - A **schema rejection** reports the field and the rule, and drops any message
-  that quotes what it rejected.
+  that quotes what it rejected. Only field names the schema itself declares are
+  printed -- they are its vocabulary, not the operator's. Anything else, such
+  as the rejected key an `invalid_key` error carries, prints as `(key)`:
+  `models[0] is not a model the Gateway will load: (key): invalid_key (Keys
+  should be strings)`.
 - A **client-class refusal** reports the field and the *category* of failure --
   not a path, not a class name, and never the resolver's own message, which
   quotes the value it was handed: `models[0] field `use` names a module this
@@ -1447,3 +1457,39 @@ resolver's exception, which quotes the supplied `use`. Reproduced with the same
 - Evidence here is CLI-only. This was a message-only repair with no change to
   what is accepted, so no Gateway drill was repeated; the live evidence in the
   block above still stands for the paths it covers.
+
+Diagnostics, part three (2026-09-10, P-y third follow-up). The suites passed
+again -- 142 in one process -- and the review found the remaining hole: a
+*location* could still repeat an operator-typed mapping key. Two ways in. The
+credential path was assembled as text and then sliced at its last `]`, so a
+nested list under an invented key kept that key
+(`models[0].FAKE-..._options[0]`), and a `]` typed into a key was
+indistinguishable from a generated index (`models[0].FAKE-...]`). And a
+pydantic `loc` was treated as trusted text, although an `invalid_key` error
+carries the rejected key itself -- reachable with a `!!binary` key, which
+printed `b'FAKE-...': invalid_key`.
+
+- Locations are now built from path components, not from text: a top-level key
+  of the template, then indices this renderer generated, stopping at the first
+  operator-typed key. An index below such a key goes with it, because it means
+  nothing without the key above it. Schema locations print only field names
+  `ModelConfig` declares; anything else, including an `invalid_key`'s rejected
+  key, prints as `(key)`.
+- All three counterexamples, both CLI modes, over a rendered baseline: each
+  exits 1 from `--check` and `--output`, the baseline keeps its checksum
+  (`934aa4...`), `home/` holds only `config.yaml`, and no stdout or stderr
+  contains the sentinel. Cases 1 and 2 answer `Offending fields by entry:
+  models[0]: 1`; case 3 answers `models[0] is not a model the Gateway will
+  load: (key): invalid_key (Keys should be strings)`. Restoring the baseline
+  renders and returns the file to `934aa4...`.
+- Nothing about what is accepted changed, which the tests pin: an entry
+  carrying `vendor.options[0]`, a Unicode key and a nested
+  `extra_body.routing` list still renders with all of it intact. Rejecting odd
+  keys or nested lists to make a message easy would have been an interface
+  change, not a diagnostic repair.
+- Coverage for the shapes: a list under an operator key, a bracket inside a
+  key, a mapping inside a list inside a mapping, a credential-shaped key, a key
+  full of dots that tries to forge a path, and a non-string key -- each through
+  both CLI modes.
+- CLI-only again, for the same reason: no change to acceptance, so the Gateway
+  drill was not repeated.
