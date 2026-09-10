@@ -27,12 +27,20 @@ the whole story. Set, it names a YAML file on the tenant's own data disk --
 mounted read-only at ``<HARTMESH_DATA_DIR>/operator`` -- carrying ``models:``
 and nothing else, and that list becomes the whole rendered ``models:``
 section: fragment models are no longer appended, whichever provider keys the
-tenant carries. The file is validated before anything is written (documented
-shape, ``name``/``use``/``model``, an installed ``BaseChatModel`` class,
-unique names, resolvable ``$NAME`` references), and because the output is
-replaced atomically a refusal leaves the last valid rendered file in place.
-``--check`` runs the whole render and writes nothing, which is how an operator
-validates an edit while the Gateway is still serving the previous one.
+tenant carries.
+
+Everything is validated before anything is written: the documented shape, the
+Gateway's own ``ModelConfig`` on every rendered entry (its schema, not a second
+copy of it, so what renders is what loads), an installed ``BaseChatModel``
+class for operator entries, unique names, and credential fields that are
+whole-string ``$NAME`` references the environment actually carries. Because the
+output is replaced atomically, a refusal leaves the last valid rendered file in
+place. ``--check`` runs the same render and writes nothing, which is how an
+operator validates an edit while the Gateway still serves the previous one.
+
+Diagnostics name the source, the entry's position, the field and the rule --
+never a value, a source line or an environment content. An operator's paste or
+a stray bracket can put a credential in any field, and a refusal is journalled.
 """
 
 from __future__ import annotations
@@ -56,6 +64,11 @@ HOST_RESOLVER_DEFAULT = "/run/systemd/resolve/resolv.conf"
 EGRESS_MODES = ("allowlist", "open")
 MODELS_ENV = "HARTMESH_MODELS_FILE"
 OPERATOR_DIRECTORY = "<HARTMESH_DATA_DIR>/operator"
+# A field is credential-bearing when its name's last `_`/`-` segment is one of
+# these. Suffix matching on segments, not substrings, is what keeps `max_tokens`
+# and `budget_tokens` out of it while catching `api_key`, `gemini_api_key`,
+# `azure_ad_token` and a bare `Authorization` header.
+CREDENTIAL_SEGMENTS = frozenset({"key", "apikey", "token", "secret", "password", "credential", "credentials", "authorization"})
 _VARIABLE = re.compile(r"\A\$([A-Za-z_][A-Za-z0-9_]*)\Z")
 
 
@@ -132,16 +145,73 @@ def _resolve_chat_model_class(use: str) -> None:
     resolve_class(use, BaseChatModel)
 
 
-def _operator_model(entry: Mapping[str, Any], source: str) -> Mapping[str, Any]:
-    name = entry["name"]
-    for field in ("use", "model"):
-        if not isinstance(entry.get(field), str) or not entry[field].strip():
-            raise RenderError(f"operator model file {source}: model {name!r} must declare `{field}` as a non-empty string")
+def _is_credential_field(name: str) -> bool:
+    return name.replace("-", "_").rsplit("_", 1)[-1].lower() in CREDENTIAL_SEGMENTS
+
+
+def _credential_problems(value: object, path: str, problems: list[str]) -> None:
+    """Collect the paths of credential fields that are not ``$NAME`` references.
+
+    Only paths are collected. The contract this profile documents is that a
+    secret exists in the tenant environment and nowhere else -- not in an
+    operator file, not in the generated config.yaml, not in a refusal and not
+    in the journal -- so a value that breaks the rule must not travel in the
+    diagnostic that reports it either. A credential field is never descended
+    into, for the same reason.
+    """
+
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            child = f"{path}.{key}" if path else str(key)
+            if _is_credential_field(str(key)):
+                # An absent credential is the documented way to configure a
+                # client that needs none; null is the same statement in YAML.
+                if item is not None and not (isinstance(item, str) and _VARIABLE.fullmatch(item)):
+                    problems.append(child)
+                continue
+            _credential_problems(item, child, problems)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _credential_problems(item, f"{path}[{index}]", problems)
+
+
+def _schema_problem(error: Mapping[str, Any]) -> str:
+    """One pydantic error as location plus rule, with the input left behind."""
+
+    location = ".".join(str(part) for part in error.get("loc") or ()) or "(entry)"
+    detail = str(error.get("msg") or "").strip()
+    rejected = error.get("input")
+    # Pydantic's own messages are generated from the rule and carry no input,
+    # but a custom validator's message is an exception string. Rather than
+    # guess which is which, drop any message that quotes what it rejected.
+    for form in (rejected if isinstance(rejected, str) else None, repr(rejected)):
+        if form and len(form) > 1 and form in detail:
+            detail = ""
+    category = str(error.get("type") or "invalid")
+    return f"{location}: {category}" + (f" ({detail})" if detail else "")
+
+
+def _validate_model_schema(entry: Mapping[str, Any], where: str) -> None:
+    """Refuse a model the Gateway's own ``ModelConfig`` would reject.
+
+    Reuses the backend's schema rather than restating it, because a second
+    copy would drift and the whole point is that what renders is what loads.
+    Deliberately not ``AppConfig.from_file``: that applies a dozen unrelated
+    process-wide singletons (see tests/_config_singleton_guard.py), which a
+    validation step has no business doing.
+    """
+
+    from pydantic import ValidationError
+
+    from deerflow.config.model_config import ModelConfig
+
     try:
-        _resolve_chat_model_class(entry["use"])
-    except (ImportError, ValueError) as exc:
-        raise RenderError(f"operator model file {source}: model {name!r} names a client class this release cannot use: {exc}") from exc
-    return entry
+        ModelConfig.model_validate(dict(entry))
+    except ValidationError as exc:
+        problems = sorted({_schema_problem(error) for error in exc.errors()})
+        raise RenderError(f"{where} is not a model the Gateway will load: {'; '.join(problems)}") from None
+    except (TypeError, ValueError):
+        raise RenderError(f"{where} is not a model the Gateway will load: the entry is not a mapping of fields") from None
 
 
 def load_operator_models(environ: Mapping[str, str]) -> tuple[Mapping[str, Any], ...] | None:
@@ -167,7 +237,20 @@ def load_operator_models(environ: Mapping[str, str]) -> tuple[Mapping[str, Any],
     try:
         loaded = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise RenderError(f"operator model file {raw} is not valid YAML: {exc}") from exc
+        # The parser's message quotes the line it choked on, which is exactly
+        # the line an operator may have just pasted a credential into. Report
+        # where it is, not what it says, and break the exception chain so no
+        # traceback can put the excerpt back.
+        started = getattr(exc, "context_mark", None)
+        stopped = getattr(exc, "problem_mark", None)
+        # The context mark is where the construct the parser could not finish
+        # began, which is the line the operator has to look at; the problem
+        # mark is often just the end of the file.
+        where = started or stopped
+        position = f" at line {where.line + 1}, column {where.column + 1}" if where is not None else ""
+        if started is not None and stopped is not None and stopped.line != started.line:
+            position += f" (the parser gave up at line {stopped.line + 1})"
+        raise RenderError(f"operator model file {raw} is not valid YAML{position}; the parser's message is withheld because it quotes the source") from None
     if loaded is None:
         raise RenderError(f"operator model file {raw} is empty. Write `models: []` to configure no models, or unset {MODELS_ENV} to use the bundled catalog")
     document = _mapping(loaded, f"operator model file {raw}")
@@ -180,8 +263,7 @@ def load_operator_models(environ: Mapping[str, str]) -> tuple[Mapping[str, Any],
         # empty list, and one mid-edit gets told so rather than silently
         # emptying the tenant's model list.
         raise RenderError(f"operator model file {raw} declares no `models:` list. Write `models: []` to configure no models")
-    entries = _entries(document["models"], f"operator model file {raw} models")
-    return tuple(_operator_model(entry, raw) for entry in entries)
+    return _entries(document["models"], f"operator model file {raw} models")
 
 
 def _present(environ: Mapping[str, str], name: str) -> bool:
@@ -262,13 +344,25 @@ def render(
     included = tuple(fragment for fragment in fragments if _present(environ, fragment.env))
 
     operator_models = load_operator_models(environ)
-    models = list(template_models)
+    # (entry, where, is the client class this deployment's to get wrong)
+    sourced: list[tuple[dict[str, Any], str, bool]] = [(dict(model), f"template models[{index}]", False) for index, model in enumerate(template_models)]
     if operator_models is None:
         for fragment in included:
-            models.extend(dict(model) for model in fragment.models)
+            sourced.extend((dict(model), f"catalog fragment {fragment.source} models[{index}]", False) for index, model in enumerate(fragment.models))
     else:
         # Authoritative: a present provider key buys tools, never models.
-        models.extend(dict(model) for model in operator_models)
+        operator_source = environ.get(MODELS_ENV, "").strip()
+        sourced.extend((dict(model), f"operator model file {operator_source} models[{index}]", True) for index, model in enumerate(operator_models))
+
+    for entry, where, check_client in sourced:
+        _validate_model_schema(entry, where)
+        if check_client:
+            try:
+                _resolve_chat_model_class(str(entry["use"]))
+            except (ImportError, ValueError) as exc:
+                raise RenderError(f"{where} names a client class this release cannot use: {exc}") from None
+
+    models = [entry for entry, _, _ in sourced]
     names = [model.get("name") for model in models]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -300,6 +394,11 @@ def render(
             raise RenderError("the profile owns the open-runsc resolver mount; remove the conflicting template mount")
         sandbox["mounts"] = [*mounts, open_runsc_resolver_mount(environ)]
     document["sandbox"] = sandbox
+
+    problems: list[str] = []
+    _credential_problems(document, "", problems)
+    if problems:
+        raise RenderError(f"credential fields must be environment references of the whole-string form $NAME, which the Gateway expands at start; a literal would be written into the generated config.yaml instead: {sorted(problems)}")
 
     referenced: set[str] = set()
     _references(document, referenced)

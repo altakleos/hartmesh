@@ -308,7 +308,7 @@ def test_a_client_class_the_release_does_not_install_refuses(render_config: Modu
     }
     for use, expected in cases.items():
         path = _write_models(tmp_path, _operator_document({**ACME_CHAT, "use": use}))
-        with pytest.raises(render_config.RenderError, match="acme-lightning-1") as error:
+        with pytest.raises(render_config.RenderError, match=r"models\[0\]") as error:
             _render(render_config, catalog, _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(path)}))
         assert expected in str(error.value), use
 
@@ -482,3 +482,173 @@ def test_three_operator_edits_change_the_render_and_nothing_in_the_bundle(render
     assert [model["name"] for model in _render(render_config, catalog, environ)["models"]] == ["acme-anvil-9"]
 
     assert _bundle_digest() == before, "operator input alone; the bundle is release material"
+
+
+# ── 8. the Gateway's own model schema ────────────────────────────────────────
+
+# A credential that never was. It exists to be looked for: every refusal below
+# is searched for this string, so a diagnostic that quotes what it rejected
+# fails the test rather than the operator.
+SENTINEL = "FAKE-CREDENTIAL-SENTINEL-NOT-A-KEY"
+
+# Each is a well-formed YAML document the *renderer* used to accept and the
+# *backend* rejects, so it rendered a config.yaml the Gateway could not load.
+SCHEMA_COUNTEREXAMPLES = {
+    "zero context window": {**ACME_CHAT, "context_window": 0},
+    "empty identity": {**ACME_CHAT, "name": ""},
+    "capability flag that is not a boolean": {**ACME_CHAT, "supports_vision": "banana"},
+}
+
+
+def _cli(render_config: ModuleType, *extra: str) -> list[str]:
+    return ["--template", str(TEMPLATE), "--catalog", str(CATALOG), *extra]
+
+
+@pytest.mark.parametrize("label", sorted(SCHEMA_COUNTEREXAMPLES))
+def test_a_model_the_gateway_would_reject_never_reaches_the_rendered_file(render_config: ModuleType, catalog: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], label: str) -> None:
+    """Both CLI modes refuse, and the last valid output survives the attempt.
+
+    Atomic replacement only protects the previous file from a *failed* write;
+    it is no protection at all when validation wrongly reports success. So the
+    render enforces the backend's own model schema before it writes anything.
+    """
+    output = tmp_path / "home" / "config.yaml"
+    good = tmp_path / "models.yaml"
+    good.write_text(_operator_document(ACME_CHAT), encoding="utf-8")
+    for name, value in _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(good)}).items():
+        monkeypatch.setenv(name, value)
+    assert render_config.main(_cli(render_config, "--output", str(output))) == 0
+    valid = output.read_bytes()
+
+    good.write_text(_operator_document(SCHEMA_COUNTEREXAMPLES[label]), encoding="utf-8")
+    capsys.readouterr()
+
+    assert render_config.main(_cli(render_config, "--check")) == 1, label
+    assert output.read_bytes() == valid
+    assert render_config.main(_cli(render_config, "--output", str(output))) == 1, label
+    assert output.read_bytes() == valid, "the last valid rendered file is what the Gateway still loads"
+    assert list(output.parent.iterdir()) == [output], "no half-written temporary file is left behind"
+
+    captured = capsys.readouterr()
+    assert "refusing to render" in captured.err
+    assert "models[0]" in captured.err, "the refusal locates the entry by position"
+    assert "banana" not in captured.err, "a diagnostic never quotes the value it rejected"
+
+    good.write_text(_operator_document(ACME_CHAT, ACME_REASONER), encoding="utf-8")
+    assert render_config.main(_cli(render_config, "--check")) == 0
+    assert render_config.main(_cli(render_config, "--output", str(output))) == 0
+    assert output.read_bytes() != valid
+    assert "acme-anvil-9" in output.read_text(encoding="utf-8")
+
+
+def test_the_schema_refusal_names_the_field_and_the_rule_not_the_input(render_config: ModuleType, catalog: tuple, tmp_path: Path) -> None:
+    path = _write_models(tmp_path, _operator_document({**ACME_CHAT, "context_window": 0}))
+    with pytest.raises(render_config.RenderError) as error:
+        _render(render_config, catalog, _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(path)}))
+    message = str(error.value)
+    assert "models[0]" in message and "context_window" in message
+    assert "greater_than" in message, "the error category, so the operator knows which rule was broken"
+    assert "acme-lightning-1" not in message, "identify the entry by position; its content is not the diagnostic's business"
+
+
+def test_every_bundled_model_satisfies_the_same_schema(render_config: ModuleType, catalog: tuple) -> None:
+    """The check is the whole rendered list's, not the operator file's alone:
+    a fragment that drifts out of the schema is a release defect, and this is
+    where it surfaces."""
+    every_key = {fragment.env: "secret" for fragment in catalog}
+    document = _render(render_config, catalog, _base_environ(**every_key))
+    assert len(document["models"]) > 10
+
+
+# ── 9. credentials stay references, and diagnostics stay quiet ───────────────
+
+
+def test_a_literal_credential_is_refused_and_never_echoed(render_config: ModuleType, catalog: tuple, tmp_path: Path) -> None:
+    """The rendered config.yaml is a file on the tenant's disk that the Gateway
+    reads at every start. A credential written into it as a literal is a secret
+    at rest that the documented contract says is not there."""
+    path = _write_models(tmp_path, _operator_document({**ACME_CHAT, "api_key": SENTINEL}))
+    with pytest.raises(render_config.RenderError) as error:
+        _render(render_config, catalog, _base_environ(**{MODELS_ENV: str(path)}))
+    message = str(error.value)
+    assert SENTINEL not in message
+    assert "models[0].api_key" in message and "$NAME" in message
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["api_key", "openai_api_key", "azure_ad_token", "some_secret", "admin_password", "service_credential"],
+)
+def test_the_rule_covers_every_credential_shaped_field_wherever_it_sits(render_config: ModuleType, catalog: tuple, tmp_path: Path, field: str) -> None:
+    nested = {**ACME_CHAT, "default_headers": {"Authorization": SENTINEL}} if field == "api_key" else {**ACME_CHAT, field: SENTINEL}
+    path = _write_models(tmp_path, _operator_document(nested))
+    with pytest.raises(render_config.RenderError) as error:
+        _render(render_config, catalog, _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(path)}))
+    assert SENTINEL not in str(error.value)
+
+
+def test_ordinary_fields_that_merely_read_like_credentials_are_left_alone(render_config: ModuleType, catalog: tuple, tmp_path: Path) -> None:
+    """`max_tokens` is not a token. A rule that cannot tell the difference
+    would refuse most of the bundled catalog."""
+    path = _write_models(tmp_path, _operator_document({**ACME_CHAT, "max_tokens": 4096, "thinking": {"type": "enabled", "budget_tokens": 2048}}))
+    document = _render(render_config, catalog, _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(path)}))
+    assert document["models"][0]["max_tokens"] == 4096
+
+
+def test_a_model_needing_no_credential_at_all_still_renders(render_config: ModuleType, catalog: tuple, tmp_path: Path) -> None:
+    """Not every endpoint takes a key; the rule is about the form of a
+    credential that *is* configured, not about requiring one."""
+    keyless = {key: value for key, value in ACME_CHAT.items() if key != "api_key"}
+    document = _render(render_config, catalog, _base_environ(**{MODELS_ENV: str(_write_models(tmp_path, _operator_document(keyless)))}))
+    assert [model["name"] for model in document["models"]] == ["acme-lightning-1"]
+    assert "api_key" not in document["models"][0]
+
+
+@pytest.mark.parametrize("value", ["${ACME_API_KEY}", "$ACME_API_KEY-suffix", "prefix-$ACME_API_KEY", "$", "$1KEY"])
+def test_a_reference_the_gateway_would_not_expand_is_refused(render_config: ModuleType, catalog: tuple, tmp_path: Path, value: str) -> None:
+    """`$NAME` expansion is whole-string. Anything else is a literal that would
+    be handed to the provider verbatim."""
+    path = _write_models(tmp_path, _operator_document({**ACME_CHAT, "api_key": value}))
+    with pytest.raises(render_config.RenderError, match=r"\$NAME") as error:
+        _render(render_config, catalog, _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(path)}))
+    assert "models[0].api_key" in str(error.value)
+    if len(value) > 2:  # "$" alone is a substring of the "$NAME" the message names
+        assert value not in str(error.value)
+
+
+def test_an_unresolved_reference_names_the_variable_and_not_its_value(render_config: ModuleType, catalog: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _write_models(tmp_path, _operator_document({**ACME_CHAT, "api_key": "$ABSENT_PROVIDER_KEY"}))
+    with pytest.raises(render_config.RenderError, match="ABSENT_PROVIDER_KEY"):
+        _render(render_config, catalog, _base_environ(ACME_API_KEY=SENTINEL, **{MODELS_ENV: str(path)}))
+
+
+def test_malformed_yaml_reports_a_position_and_no_source_text(render_config: ModuleType, catalog: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A parser exception quotes the line it choked on. When that line is the
+    one the operator just pasted a credential into, the exception is the leak."""
+    path = _write_models(tmp_path, f"models:\n  - name: fixture-model\n    api_key: [{SENTINEL}\n")
+    with pytest.raises(render_config.RenderError) as error:
+        _render(render_config, catalog, _base_environ(**{MODELS_ENV: str(path)}))
+    message = str(error.value)
+    assert SENTINEL not in message
+    assert "line 3" in message and "not valid YAML" in message
+
+    for name, value in _base_environ(**{MODELS_ENV: str(path)}).items():
+        monkeypatch.setenv(name, value)
+    capsys.readouterr()
+    assert render_config.main(_cli(render_config, "--check")) == 1
+    captured = capsys.readouterr()
+    assert SENTINEL not in captured.err + captured.out
+
+
+def test_a_schema_error_beside_a_credential_leaks_neither(render_config: ModuleType, catalog: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Fixing one defect must not expose the other: the entry is wrong twice
+    over, and whichever refusal comes first has to be quiet about both."""
+    entry = {**ACME_CHAT, "api_key": SENTINEL, "context_window": 0, "supports_vision": SENTINEL}
+    path = _write_models(tmp_path, _operator_document(entry))
+    for name, value in _base_environ(ACME_API_KEY=SENTINEL, **{MODELS_ENV: str(path)}).items():
+        monkeypatch.setenv(name, value)
+    capsys.readouterr()
+    assert render_config.main(_cli(render_config, "--check")) == 1
+    captured = capsys.readouterr()
+    assert SENTINEL not in captured.err + captured.out
+    assert "refusing to render" in captured.err
