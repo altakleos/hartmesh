@@ -268,8 +268,8 @@ def test_a_source_that_is_not_the_documented_shape_refuses(render_config: Module
     cases = {
         "- name: x\n": "mapping",
         "models: {}\n": "list",
-        "models:\n  - name: x\n    use: langchain_openai:ChatOpenAI\n    model: x\nsandbox:\n  image: evil\n": "unknown keys",
-        "models:\n  - name: x\n    use: langchain_openai:ChatOpenAI\n    model: x\nauth:\n  local:\n    source_max_failures: 1\n": "unknown keys",
+        "models:\n  - name: x\n    use: langchain_openai:ChatOpenAI\n    model: x\nsandbox:\n  image: evil\n": "other than `models:`",
+        "models:\n  - name: x\n    use: langchain_openai:ChatOpenAI\n    model: x\nauth:\n  local:\n    source_max_failures: 1\n": "other than `models:`",
         "models:\n  - use: langchain_openai:ChatOpenAI\n    model: x\n": "named entries",
         "models:\n  - name: x\n    model: x\n": "use",
         "models:\n  - name: x\n    use: langchain_openai:ChatOpenAI\n": "model",
@@ -282,11 +282,12 @@ def test_a_source_that_is_not_the_documented_shape_refuses(render_config: Module
         assert expected in str(error.value), body
 
 
-def test_a_duplicate_identity_refuses_and_names_it(render_config: ModuleType, catalog: tuple, tmp_path: Path) -> None:
+def test_a_duplicate_identity_refuses_by_position(render_config: ModuleType, catalog: tuple, tmp_path: Path) -> None:
     twin = {**ACME_REASONER, "name": ACME_CHAT["name"]}
     path = _write_models(tmp_path, _operator_document(ACME_CHAT, twin))
-    with pytest.raises(render_config.RenderError, match="acme-lightning-1"):
+    with pytest.raises(render_config.RenderError, match=r"models\[0\], models\[1\]") as error:
         _render(render_config, catalog, _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(path)}))
+    assert "acme-lightning-1" not in str(error.value), "the shared name is a field the operator typed"
 
 
 def test_an_unresolved_credential_reference_refuses_and_prints_no_value(render_config: ModuleType, catalog: tuple, tmp_path: Path) -> None:
@@ -297,20 +298,6 @@ def test_an_unresolved_credential_reference_refuses_and_prints_no_value(render_c
     # The reference itself is what is written; the Gateway expands it.
     document = _render(render_config, catalog, _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(path)}))
     assert document["models"][0]["api_key"] == "$ACME_API_KEY"
-
-
-def test_a_client_class_the_release_does_not_install_refuses(render_config: ModuleType, catalog: tuple, tmp_path: Path) -> None:
-    cases = {
-        "langchain_nonesuch:ChatNonesuch": "langchain_nonesuch",
-        "langchain_openai:ChatNonesuch": "ChatNonesuch",
-        "langchain_openai": "langchain_openai",
-        "deerflow.config.model_config:ModelConfig": "BaseChatModel",
-    }
-    for use, expected in cases.items():
-        path = _write_models(tmp_path, _operator_document({**ACME_CHAT, "use": use}))
-        with pytest.raises(render_config.RenderError, match=r"models\[0\]") as error:
-            _render(render_config, catalog, _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(path)}))
-        assert expected in str(error.value), use
 
 
 def test_the_bundled_catalogue_is_never_client_checked(render_config: ModuleType, catalog: tuple) -> None:
@@ -572,7 +559,7 @@ def test_a_literal_credential_is_refused_and_never_echoed(render_config: ModuleT
         _render(render_config, catalog, _base_environ(**{MODELS_ENV: str(path)}))
     message = str(error.value)
     assert SENTINEL not in message
-    assert "models[0].api_key" in message and "$NAME" in message
+    assert "models[0]: 1" in message and "$NAME" in message, "the entry, not the field name the operator typed"
 
 
 @pytest.mark.parametrize(
@@ -611,7 +598,7 @@ def test_a_reference_the_gateway_would_not_expand_is_refused(render_config: Modu
     path = _write_models(tmp_path, _operator_document({**ACME_CHAT, "api_key": value}))
     with pytest.raises(render_config.RenderError, match=r"\$NAME") as error:
         _render(render_config, catalog, _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(path)}))
-    assert "models[0].api_key" in str(error.value)
+    assert "models[0]: 1" in str(error.value)
     if len(value) > 2:  # "$" alone is a substring of the "$NAME" the message names
         assert value not in str(error.value)
 
@@ -652,3 +639,142 @@ def test_a_schema_error_beside_a_credential_leaks_neither(render_config: ModuleT
     captured = capsys.readouterr()
     assert SENTINEL not in captured.err + captured.out
     assert "refusing to render" in captured.err
+
+
+# ── 10. a refusal never repeats what the operator typed ──────────────────────
+
+
+def _render_both_ways(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], body: str) -> str:
+    """Run a bad file through both CLI modes over a good rendered output.
+
+    Returns everything the two invocations printed. Asserts the shared
+    guarantees along the way: both refuse, the file the Gateway currently
+    loads is untouched, and nothing is left half-written beside it.
+    """
+    output = tmp_path / "home" / "config.yaml"
+    source = tmp_path / "models.yaml"
+    source.write_text(_operator_document(ACME_CHAT), encoding="utf-8")
+    for name, value in _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(source)}).items():
+        monkeypatch.setenv(name, value)
+    assert render_config.main(_cli(render_config, "--output", str(output))) == 0
+    valid = output.read_bytes()
+
+    source.write_text(body, encoding="utf-8")
+    capsys.readouterr()
+    assert render_config.main(_cli(render_config, "--check")) == 1
+    assert render_config.main(_cli(render_config, "--output", str(output))) == 1
+    assert output.read_bytes() == valid
+    assert list(output.parent.iterdir()) == [output]
+    printed = capsys.readouterr()
+    assert printed.err.count("refusing to render") == 2
+    return printed.out + printed.err
+
+
+def test_a_duplicate_name_refuses_by_position_without_repeating_the_name(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A name is a field an operator types, so a paste can put a credential in
+    it. The refusal says which entries collide, not what they are called."""
+    twins = _operator_document({**ACME_CHAT, "name": SENTINEL}, {**ACME_REASONER, "name": SENTINEL})
+    printed = _render_both_ways(render_config, tmp_path, monkeypatch, capsys, twins)
+    assert SENTINEL not in printed
+    assert "models[0]" in printed and "models[1]" in printed
+
+    source = tmp_path / "models.yaml"
+    source.write_text(_operator_document(ACME_CHAT, ACME_REASONER), encoding="utf-8")
+    assert render_config.main(_cli(render_config, "--check")) == 0
+
+
+CLIENT_REFUSALS = {
+    # use value                                      -> a phrase naming the cause
+    f"langchain_openai:{SENTINEL}": "defines no such attribute",
+    f"langchain_{SENTINEL}:ChatOpenAI": "does not install",
+    f"{SENTINEL}": "module.path:ClassName",
+    f":{SENTINEL}": "module.path:ClassName",
+    f"langchain_openai:{SENTINEL}:extra": "does not install",
+    "deerflow.config.model_config:ModelConfig": "chat model client",
+}
+
+
+@pytest.mark.parametrize("use", sorted(CLIENT_REFUSALS))
+def test_a_client_class_refusal_names_the_field_and_the_cause_only(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], use: str) -> None:
+    """The resolver's own message quotes the path it was handed. Every way of
+    getting the path wrong -- a missing package, a missing attribute, a value
+    that is not a path at all -- has to route around that."""
+    printed = _render_both_ways(render_config, tmp_path, monkeypatch, capsys, _operator_document({**ACME_CHAT, "use": use}))
+    assert SENTINEL not in printed
+    assert "models[0]" in printed and "`use`" in printed
+    assert CLIENT_REFUSALS[use] in printed
+
+
+def test_unknown_top_level_keys_are_counted_not_echoed(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A stray paste lands at the top level as readily as inside an entry."""
+    printed = _render_both_ways(render_config, tmp_path, monkeypatch, capsys, f"models: []\n{SENTINEL}: 1\n")
+    assert SENTINEL not in printed
+    assert "1 top-level key" in printed
+
+
+# Every string an operator can put in the file, each carrying the sentinel.
+# Some are legitimate (a provider id, an endpoint) and render; the property is
+# not that they are all refused, it is that a refusal never quotes them.
+SENTINEL_PLACEMENTS = {
+    "name": _operator_document({**ACME_CHAT, "name": SENTINEL}),
+    "duplicate names": _operator_document({**ACME_CHAT, "name": SENTINEL}, {**ACME_REASONER, "name": SENTINEL}),
+    "use": _operator_document({**ACME_CHAT, "use": SENTINEL}),
+    "model": _operator_document({**ACME_CHAT, "model": SENTINEL}),
+    "base_url": _operator_document({**ACME_CHAT, "base_url": SENTINEL}),
+    "api_key literal": _operator_document({**ACME_CHAT, "api_key": SENTINEL}),
+    "api_key reference": _operator_document({**ACME_CHAT, "api_key": f"${SENTINEL}"}),
+    "nested header": _operator_document({**ACME_CHAT, "default_headers": {"Authorization": SENTINEL}}),
+    # The sentinel's own last segment is `KEY`, so as a *field name* it is
+    # credential-shaped and refused for its form -- which is the rule working.
+    "credential-shaped unknown field": _operator_document({**ACME_CHAT, SENTINEL: 1}),
+    "plain unknown field": _operator_document({**ACME_CHAT, "vendor_note": SENTINEL}),
+    "unknown top-level key": f"models: []\n{SENTINEL}: 1\n",
+    "capability flag": _operator_document({**ACME_CHAT, "supports_vision": SENTINEL}),
+    "context window": _operator_document({**ACME_CHAT, "context_window": SENTINEL}),
+    "pricing": _operator_document({**ACME_CHAT, "pricing": {"currency": SENTINEL}}),
+    "malformed yaml": f"models:\n  - name: fixture\n    api_key: [{SENTINEL}\n",
+    "not a mapping": f"- {SENTINEL}\n",
+    "entry without a name": f"models:\n  - use: {SENTINEL}\n",
+    "models is not a list": f"models: {SENTINEL}\n",
+}
+
+
+# The placements a correct renderer must refuse. The rest are legitimate
+# content that ends up in the rendered file, which is the point of the file.
+MUST_REFUSE = {
+    "duplicate names",
+    "use",
+    "api_key literal",
+    "api_key reference",
+    "nested header",
+    "credential-shaped unknown field",
+    "unknown top-level key",
+    "capability flag",
+    "context window",
+    "malformed yaml",
+    "not a mapping",
+    "entry without a name",
+    "models is not a list",
+}
+
+
+@pytest.mark.parametrize("placement", sorted(SENTINEL_PLACEMENTS))
+def test_no_refusal_anywhere_repeats_a_value_the_operator_supplied(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], placement: str) -> None:
+    """The contract in one test: a refusal is written to the journal, kept and
+    shipped, so whatever the operator typed must not travel in it."""
+    output = tmp_path / "home" / "config.yaml"
+    source = _write_models(tmp_path, SENTINEL_PLACEMENTS[placement])
+    for name, value in _base_environ(ACME_API_KEY="secret", **{MODELS_ENV: str(source)}).items():
+        monkeypatch.setenv(name, value)
+    capsys.readouterr()
+    for argv in (_cli(render_config, "--check"), _cli(render_config, "--output", str(output))):
+        code = render_config.main(argv)
+        printed = capsys.readouterr()
+        if code == 0:
+            # An identity, a provider id, an endpoint or a note is not a
+            # credential; it belongs in the rendered file, which is where it
+            # went. Only a refusal is under test here.
+            assert placement not in MUST_REFUSE, placement
+            continue
+        assert placement in MUST_REFUSE, placement
+        assert SENTINEL not in printed.out + printed.err, placement

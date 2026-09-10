@@ -53,6 +53,7 @@ import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +126,34 @@ def load_catalog(root: Path) -> tuple[Fragment, ...]:
     return tuple(load_fragment(path, root=root) for path in paths)
 
 
+def _client_problem(use: str) -> str | None:
+    """Return why ``use`` cannot name a client class, or None if it can.
+
+    The resolver's own exceptions quote the path they were handed, and that
+    path is a field an operator typed -- a paste can put a credential in it as
+    easily as in ``api_key``. So the cause is classified here, from the shape
+    of the failure rather than from its message, and the message is discarded.
+    """
+
+    module_path, separator, attribute = use.rpartition(":")
+    if not separator or not module_path.strip() or not attribute.strip():
+        return "must name a class as `module.path:ClassName`"
+    try:
+        import_module(module_path)
+    except ModuleNotFoundError:
+        return "names a module this release does not install"
+    except Exception:  # noqa: BLE001 - an import can raise anything, and none of it may be printed
+        return "names a module that failed to import"
+    try:
+        _resolve_chat_model_class(use)
+    except Exception:  # noqa: BLE001 - same reason: the message quotes the path
+        module = sys.modules.get(module_path)
+        if module is not None and not hasattr(module, attribute):
+            return "names a module that defines no such attribute"
+        return "does not name a chat model client (it must be a BaseChatModel subclass)"
+    return None
+
+
 def _resolve_chat_model_class(use: str) -> None:
     """Refuse a client class this release cannot construct.
 
@@ -149,6 +178,27 @@ def _is_credential_field(name: str) -> bool:
     return name.replace("-", "_").rsplit("_", 1)[-1].lower() in CREDENTIAL_SEGMENTS
 
 
+def _positions(places: list[tuple[str, int]]) -> str:
+    """Name colliding entries by file and position, one file at a time."""
+
+    by_source: dict[str, list[int]] = {}
+    for source, index in places:
+        by_source.setdefault(source, []).append(index)
+    return "; ".join(f"{source} {', '.join(f'models[{index}]' for index in indexes)}" for source, indexes in by_source.items())
+
+
+def _anchor(path: str) -> str:
+    """The structural part of a path: everything up to its last list index.
+
+    ``models[0].default_headers.Authorization`` anchors on ``models[0]``. A key
+    name is operator-typed content like any value, so a diagnostic points at
+    the entry and leaves the operator to look inside it.
+    """
+
+    closed = path.rfind("]")
+    return path[: closed + 1] if closed != -1 else "the document root"
+
+
 def _credential_problems(value: object, path: str, problems: list[str]) -> None:
     """Collect the paths of credential fields that are not ``$NAME`` references.
 
@@ -167,7 +217,7 @@ def _credential_problems(value: object, path: str, problems: list[str]) -> None:
                 # An absent credential is the documented way to configure a
                 # client that needs none; null is the same statement in YAML.
                 if item is not None and not (isinstance(item, str) and _VARIABLE.fullmatch(item)):
-                    problems.append(child)
+                    problems.append(_anchor(child))
                 continue
             _credential_problems(item, child, problems)
     elif isinstance(value, list):
@@ -254,9 +304,11 @@ def load_operator_models(environ: Mapping[str, str]) -> tuple[Mapping[str, Any],
     if loaded is None:
         raise RenderError(f"operator model file {raw} is empty. Write `models: []` to configure no models, or unset {MODELS_ENV} to use the bundled catalog")
     document = _mapping(loaded, f"operator model file {raw}")
-    unknown = sorted(set(document) - {"models"})
+    unknown = set(document) - {"models"}
     if unknown:
-        raise RenderError(f"operator model file {raw} has unknown keys: {unknown}. It declares `models:` and nothing else; every other setting stays with the profile")
+        # Counted rather than named: a key is as much operator-typed content as
+        # a value, and a stray paste lands at the top level readily enough.
+        raise RenderError(f"operator model file {raw} declares {len(unknown)} top-level key(s) other than `models:`. It is a model list, not a second copy of config.yaml; every other setting stays with the profile")
     if document.get("models") is None:
         # `models:` with nothing after it is YAML null, which is neither of the
         # two documented answers; an operator who means "no models" writes the
@@ -344,30 +396,36 @@ def render(
     included = tuple(fragment for fragment in fragments if _present(environ, fragment.env))
 
     operator_models = load_operator_models(environ)
-    # (entry, where, is the client class this deployment's to get wrong)
-    sourced: list[tuple[dict[str, Any], str, bool]] = [(dict(model), f"template models[{index}]", False) for index, model in enumerate(template_models)]
+    # (entry, the file it came from, its position in that file, whether the
+    # client class is this deployment's to get wrong rather than the release's)
+    sourced: list[tuple[dict[str, Any], str, int, bool]] = [(dict(model), "template", index, False) for index, model in enumerate(template_models)]
     if operator_models is None:
         for fragment in included:
-            sourced.extend((dict(model), f"catalog fragment {fragment.source} models[{index}]", False) for index, model in enumerate(fragment.models))
+            sourced.extend((dict(model), f"catalog fragment {fragment.source}", index, False) for index, model in enumerate(fragment.models))
     else:
         # Authoritative: a present provider key buys tools, never models.
-        operator_source = environ.get(MODELS_ENV, "").strip()
-        sourced.extend((dict(model), f"operator model file {operator_source} models[{index}]", True) for index, model in enumerate(operator_models))
+        operator_source = f"operator model file {environ.get(MODELS_ENV, '').strip()}"
+        sourced.extend((dict(model), operator_source, index, True) for index, model in enumerate(operator_models))
 
-    for entry, where, check_client in sourced:
+    for entry, source, index, check_client in sourced:
+        where = f"{source} models[{index}]"
         _validate_model_schema(entry, where)
         if check_client:
-            try:
-                _resolve_chat_model_class(str(entry["use"]))
-            except (ImportError, ValueError) as exc:
-                raise RenderError(f"{where} names a client class this release cannot use: {exc}") from None
+            problem = _client_problem(str(entry["use"]))
+            if problem is not None:
+                raise RenderError(f"{where} field `use` {problem}")
 
-    models = [entry for entry, _, _ in sourced]
-    names = [model.get("name") for model in models]
-    duplicates = sorted({name for name in names if names.count(name) > 1})
-    if duplicates:
-        raise RenderError(f"rendered models carry a duplicate name: {duplicates}")
-    document["models"] = models
+    collisions: dict[str, list[tuple[str, int]]] = {}
+    for entry, source, index, _ in sourced:
+        collisions.setdefault(str(entry.get("name")), []).append((source, index))
+    shared = sorted(places for places in collisions.values() if len(places) > 1)
+    if shared:
+        # By position, never by the name itself: `name` is a field an operator
+        # types, and what these entries have in common is precisely its value.
+        groups = "; ".join(_positions(places) for places in shared)
+        raise RenderError(f"rendered models must carry distinct names, and these entries share one: {groups}")
+
+    document["models"] = [entry for entry, _, _, _ in sourced]
 
     tools: dict[str, Mapping[str, Any]] = {str(tool["name"]): dict(tool) for tool in template_tools}
     replaced: set[str] = set()
@@ -398,7 +456,10 @@ def render(
     problems: list[str] = []
     _credential_problems(document, "", problems)
     if problems:
-        raise RenderError(f"credential fields must be environment references of the whole-string form $NAME, which the Gateway expands at start; a literal would be written into the generated config.yaml instead: {sorted(problems)}")
+        counted = ", ".join(f"{anchor}: {problems.count(anchor)}" for anchor in sorted(set(problems)))
+        raise RenderError(
+            f"credential fields must be environment references of the whole-string form $NAME, which the Gateway expands at start; a literal would be written into the generated config.yaml instead. Offending fields by entry: {counted}"
+        )
 
     referenced: set[str] = set()
     _references(document, referenced)
