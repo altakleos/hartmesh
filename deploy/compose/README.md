@@ -677,12 +677,33 @@ HARTMESH_MODELS_FILE=/srv/hartmesh/operator/models.yaml
 ```
 
 The first entry is the tenant's default model. Several providers and several
-models may share one credential, and a credential is always written as the
-`$NAME` reference the Gateway expands itself -- exactly as the bundled
-fragments do -- so no secret is in this file, in the rendered `config.yaml`, in
-a refusal, in a log line or in `GET /api/models`. `$NAME` must name a variable
-the tenant `.env` actually carries; nothing else is required to be a key the
+models may share one credential, and nothing requires a `$NAME` to be a key the
 bundled catalog knows about.
+
+**Credential references.** A credential is written as the reference the Gateway
+expands itself, exactly as the bundled fragments do, and the render enforces
+it rather than trusting it:
+
+- The only accepted form is a **whole-string** `$NAME`: `api_key: $NOVITA_API_KEY`.
+  `${NOVITA_API_KEY}`, `$NOVITA_API_KEY-v2` and `sk-...` are all literals, and
+  a literal is refused. The Gateway's own expansion is whole-string too, so a
+  form it would not expand is one that would reach the provider verbatim.
+- `NAME` must be a variable the tenant `.env` actually carries. An unset one is
+  refused by name -- never by value.
+- A field is treated as credential-bearing when the last `_`/`-` segment of its
+  name is `key`, `apikey`, `token`, `secret`, `password`, `credential`,
+  `credentials` or `authorization`. That catches `api_key`, `gemini_api_key`,
+  `azure_ad_token` and an `Authorization` header nested in `default_headers`,
+  and leaves `max_tokens` and `budget_tokens` alone.
+- **Omitting one is fine.** A client that needs no credential simply carries no
+  such field; the rule is about the form of a credential that is configured,
+  not about requiring one. A provider that wants a placeholder (some local
+  OpenAI-compatible servers want a literal `EMPTY`) gets one through a variable
+  in `.env` like any other value.
+
+So no secret is in this file, in the rendered `config.yaml`, in a refusal, in a
+log line or in `GET /api/models` -- and the render refuses instead of writing
+one there.
 
 **What a model entry may contain** is the Gateway's own `models[*]` schema,
 unchanged and undocumented here on purpose: `config.example.yaml` at the repo
@@ -705,21 +726,44 @@ the Gateway's first log line (`models from bundled catalog` /
 | unset or empty | -- | The bundled catalog, by provider key. Unchanged behaviour. |
 | set | `models:` with a list | Exactly that list, in that order, whatever keys the tenant carries. |
 | set | `models: []` | This tenant has no models, key or no key. A deliberate choice, not an absent source. |
-| set | empty, unreadable, missing, or not the shape below | The Gateway refuses to start. It never falls back to the bundled catalog. |
+| set | empty, unreadable, missing, or refused below | The Gateway refuses to start. It never falls back to the bundled catalog. |
 
 An empty file is a refusal precisely because it is ambiguous: an operator who
 means "no models" writes `models: []`, and one whose editor truncated the file
 gets told so. `models:` with nothing after it is YAML null and is refused the
 same way.
 
-**What is refused**, each naming the cause and never a secret value: a path
-that does not exist or that uid 1000 cannot read; a document that is not a
-mapping; any top-level key but `models:` (this is a model list, not a second
-copy of `config.yaml` -- `auth:`, `sandbox:`, `database:` and the rest stay
-with the profile and cannot be reached from here); an entry without a string
-`name`, `use` or `model`; a `use` that this release cannot import or that is
-not a `BaseChatModel`; two entries with the same `name`; a `$NAME` the tenant
-`.env` does not carry.
+**What is refused:** a path that does not exist or that uid 1000 cannot read;
+a document that is not a mapping; any top-level key but `models:` (this is a
+model list, not a second copy of `config.yaml` -- `auth:`, `sandbox:`,
+`database:` and the rest stay with the profile and cannot be reached from
+here); **any entry the Gateway's own `ModelConfig` would reject**, which is
+where a missing `name`/`use`/`model`, a `context_window: 0`, a
+`supports_vision: banana` and every other schema rule land; a `use` this
+release cannot import or that is not a `BaseChatModel`; two entries with the
+same `name`; a credential field that is not a `$NAME` reference; a `$NAME` the
+tenant `.env` does not carry.
+
+The schema check is the backend's own `ModelConfig`, called on each rendered
+entry -- not a second schema kept in the profile, which would drift from it.
+It runs on the bundled catalog as well as the operator file, so a fragment that
+ever drifts out of the schema is caught here rather than at Gateway load. It is
+deliberately **not** a full `AppConfig.from_file`: that applies a dozen
+unrelated process-wide singletons, and validating a model list has no business
+doing that. What it cannot tell you is whether the provider will accept the id
+or the settings -- see the boundary below.
+
+**What a refusal says.** The source, the entry's **position** (`models[0]`),
+the field path, and the rule that was broken (`context_window: greater_than`).
+It does not say what the value was. Field contents are the one thing a
+diagnostic must not repeat: an operator's paste or a stray bracket can put a
+credential in any field, and a refusal is written to the journal, where it is
+kept and shipped. So a YAML syntax error reports the position the parser
+stopped at and withholds the parser's own message, which quotes the source
+line; a schema rejection reports the rule and drops any message that quotes
+what it rejected; and entries are named by index rather than by their `name`,
+so nothing an operator typed is echoed back. `--check` obeys the same policy as
+the start-time render, because it is the same code path.
 
 **Who can change it.** Only whoever has write access to the tenant's data
 disk -- the operator, root on the guest. The Gateway mounts the directory
@@ -730,13 +774,13 @@ agent, whose reach is `home/` and the sandbox. Whatever is edited into the
 rendered `home/config.yaml` by hand is discarded at the next start, as it
 always was -- that file is generated output, not a source.
 
-The client-class check is the operator file's alone -- the bundled catalog is
-not import-checked, so no provider package the image happens not to carry
-becomes a new start requirement for a tenant who never selected that model. It
-is a check that the class exists and is a chat model, not that the provider
-will accept the id: a syntactically valid `model` the provider rejects is a
-provider error on the first message, visible as itself, with no substitution
-of some other model.
+The **client-class** check, unlike the schema check, is the operator file's
+alone: import-checking the bundled catalog would turn a provider package the
+image happens not to carry into a new start requirement for a tenant who never
+selected that model. It is a check that the class exists and is a chat model,
+not that the provider will accept the id: a syntactically valid `model` the
+provider rejects is a provider error on the first message, visible as itself,
+with no substitution of some other model.
 
 **Applying a change.** The render happens once, at Gateway start; there is no
 hot reload. Validate first, while the Gateway is still serving the previous
@@ -1300,3 +1344,50 @@ fictitious, so nothing here can pass by having been added to the bundle.
   thinking or vision behaviour, need an authorized key on a real endpoint and
   remain unqualified. `runsc` and sandbox behaviour were not exercised: no
   sandbox is created by a model-configuration change.
+
+Validation and diagnostics (2026-09-10, P-y follow-up), same host, the profile
+at `v2.1.0+hartmesh.9`. Two defects the consuming deployment reproduced: the
+render accepted models the backend rejects, and a credential could reach the
+generated file or a refusal. The fake credential below is the string
+`FAKE-CREDENTIAL-SENTINEL-NOT-A-KEY`, which exists only to be searched for.
+
+- Offline, through both CLI modes. A valid fixture rendered and its bytes
+  recorded; then `context_window: 0`, an empty `name`, and
+  `supports_vision: banana` each in turn. Every one exits 1 from `--check`
+  *and* from the ordinary `--output` invocation, naming the entry by position
+  and the rule that was broken -- `models[0] is not a model the Gateway will
+  load: context_window: greater_than (Input should be greater than 0)`. The
+  previously rendered file kept its checksum through all six invocations, and
+  `home/` held nothing but `config.yaml`. A corrected file then rendered.
+- Credentials. A literal `api_key` is refused (`credential fields must be
+  environment references of the whole-string form $NAME ...
+  ['models[0].api_key']`), as is `${NAME}`, `$NAME-suffix` and a bare `$`. An
+  unset reference is refused by variable name. None of the refusals contains
+  the sentinel. `Authorization` nested in `default_headers` is covered by the
+  same rule; `max_tokens` and `budget_tokens` are not.
+- Malformed YAML holding the sentinel -- `api_key: [FAKE-CREDENTIAL-...` --
+  answers `is not valid YAML at line 3, column 14 (the parser gave up at line
+  4); the parser's message is withheld because it quotes the source`. The
+  sentinel appears in neither stdout nor stderr.
+- Live, on a disposable stack at the pinned images. Baseline: healthy, one
+  operator model, rendered checksum `0b70eb...`. A valid-to-invalid update
+  (`context_window: 0` *and* a literal credential) through the documented
+  preflight: `exec --user 1000 ... --check` exits 1 with the schema refusal.
+  Applied anyway, the Gateway restart-loops, repeating that line once per
+  attempt; the rendered `config.yaml` still hashes `0b70eb...`, no
+  `.config.yaml.*` sits beside it, and `logs gateway` contains no sentinel.
+  Fixing only the schema error surfaces the credential refusal next -- the
+  first fix cannot reintroduce the second defect -- with the checksum still
+  unchanged. Correcting both restores a healthy Gateway, `GET /api/models`
+  answers `acme-lightning-1`, `acme-anvil-9`, and the generated file contains
+  no credential value.
+- Re-checked live afterwards: both installed client families build from the
+  effective config (`ChatOpenAI acme/lightning-1-2099
+  https://api.acme.invalid/openai max_tokens=4096`, `ChatAnthropic
+  acme-anvil-9-20991231 ... {'type': 'enabled', 'budget_tokens': 2048}`),
+  neither client's dump carries `pricing` or `context_window`, the console's
+  map reads `USD 1.25 5.0`, and the client's key is the value the Gateway
+  expanded from the environment -- the reference contract working end to end
+  while the literal never touches disk.
+- Not covered here: the same real-provider gaps as above. This follow-up needed
+  no provider call, and makes no new claim about one.
