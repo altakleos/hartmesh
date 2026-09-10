@@ -754,16 +754,35 @@ doing that. What it cannot tell you is whether the provider will accept the id
 or the settings -- see the boundary below.
 
 **What a refusal says.** The source, the entry's **position** (`models[0]`),
-the field path, and the rule that was broken (`context_window: greater_than`).
-It does not say what the value was. Field contents are the one thing a
-diagnostic must not repeat: an operator's paste or a stray bracket can put a
-credential in any field, and a refusal is written to the journal, where it is
-kept and shipped. So a YAML syntax error reports the position the parser
-stopped at and withholds the parser's own message, which quotes the source
-line; a schema rejection reports the rule and drops any message that quotes
-what it rejected; and entries are named by index rather than by their `name`,
-so nothing an operator typed is echoed back. `--check` obeys the same policy as
-the start-time render, because it is the same code path.
+the field, and the rule that was broken (`context_window: greater_than`). It
+does not say what the value was. Field contents are the one thing a diagnostic
+must not repeat: an operator's paste or a stray bracket can put a credential in
+any field, and a refusal is written to the journal, where it is kept and
+shipped. So, uniformly:
+
+- A **YAML syntax error** reports where the parser stopped and withholds the
+  parser's own message, which quotes the source line.
+- A **schema rejection** reports the field and the rule, and drops any message
+  that quotes what it rejected.
+- A **client-class refusal** reports the field and the *category* of failure --
+  not a path, not a class name, and never the resolver's own message, which
+  quotes the value it was handed: `models[0] field `use` names a module this
+  release does not install`. The categories are a malformed path, a module the
+  release does not install, a module that failed to import, a module with no
+  such attribute, and an attribute that is not a `BaseChatModel` subclass.
+- A **duplicate name** reports the colliding positions, never the shared name:
+  `these entries share one: operator model file … models[0], models[1]`.
+- A **credential-form refusal** counts the offending fields per entry
+  (`models[0]: 1`) rather than naming them, because a field *name* is
+  operator-typed content as much as a value is. Likewise, top-level keys other
+  than `models:` are counted, not listed.
+- **Entries are named by index**, never by their `name`.
+
+Nothing an operator typed is echoed back, and the exception chain is broken at
+each of these so no traceback can restore it. `--check` obeys the same policy
+as the start-time render, because it is the same code path. The one operator
+value that is deliberately printed is the *path* of the model file itself: it
+is the locator, and the successful-render log line prints it too.
 
 **Who can change it.** Only whoever has write access to the tenant's data
 disk -- the operator, root on the guest. The Gateway mounts the directory
@@ -1361,7 +1380,8 @@ generated file or a refusal. The fake credential below is the string
   `home/` held nothing but `config.yaml`. A corrected file then rendered.
 - Credentials. A literal `api_key` is refused (`credential fields must be
   environment references of the whole-string form $NAME ...
-  ['models[0].api_key']`), as is `${NAME}`, `$NAME-suffix` and a bare `$`. An
+  ['models[0].api_key']` -- the wording at that commit; it now counts fields
+  per entry instead), as is `${NAME}`, `$NAME-suffix` and a bare `$`. An
   unset reference is refused by variable name. None of the refusals contains
   the sentinel. `Authorization` nested in `default_headers` is covered by the
   same rule; `max_tokens` and `budget_tokens` are not.
@@ -1391,3 +1411,39 @@ generated file or a refusal. The fake credential below is the string
   while the literal never touches disk.
 - Not covered here: the same real-provider gaps as above. This follow-up needed
   no provider call, and makes no new claim about one.
+
+Diagnostics, part two (2026-09-10, P-y second follow-up). The consuming
+deployment reran the three suites in one process -- 117 passed -- and found two
+refusal branches still repeating what the operator typed: the duplicate-name
+message printed the shared `name`, and the client-class message printed the
+resolver's exception, which quotes the supplied `use`. Reproduced with the same
+`FAKE-CREDENTIAL-SENTINEL-NOT-A-KEY` string, offline, no provider call.
+
+- Both branches, both CLI modes, over a rendered baseline: two entries sharing
+  a sentinel `name` now answer `rendered models must carry distinct names, and
+  these entries share one: operator model file … models[0], models[1]`, and
+  `use: langchain_openai:FAKE-...` answers `models[0] field `use` names a
+  module that defines no such attribute`. Neither repeats the sentinel; both
+  exit 1 from `--check` and from `--output`; the baseline bytes are unchanged
+  and `home/` holds only `config.yaml`. A corrected file then renders.
+- Every other way to get `use` wrong routes around the resolver's message too:
+  a value with no colon and one that is only a colon answer `must name a class
+  as `module.path:ClassName``; `langchain_FAKE-...:ChatOpenAI` answers `names a
+  module this release does not install`; a real class that is not a chat model
+  answers `does not name a chat model client`. None quotes the value.
+- A third branch found in the same review: unknown top-level keys were listed
+  by name, so a paste at the top level was echoed. They are counted now.
+  Credential-form refusals count offending fields per entry (`models[0]: 1`)
+  instead of naming the field, for the same reason.
+- The contract is now a test rather than a claim: seventeen placements of the
+  sentinel -- `name`, a duplicate `name`, `use`, `model`, `base_url`, a literal
+  and a referenced `api_key`, a nested `Authorization`, a credential-shaped and
+  a plain unknown field, an unknown top-level key, a capability flag, a context
+  window, a pricing field, malformed YAML, a non-mapping document, an entry
+  with no name, and a non-list `models:` -- are each run through both CLI
+  modes. Thirteen must refuse and none of those refusals contains the sentinel;
+  the four that are legitimate content (an identity, a provider id, an
+  endpoint, a note) render, which is where that content belongs.
+- Evidence here is CLI-only. This was a message-only repair with no change to
+  what is accepted, so no Gateway drill was repeated; the live evidence in the
+  block above still stands for the paths it covers.
