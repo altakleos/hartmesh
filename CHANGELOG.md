@@ -5,6 +5,12 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.11] — 2026-09-13
+
+- hartmesh#72 — make the local sandbox readiness deadline a validated effective setting used by both the synchronous and asynchronous acquisition paths, give the Compose tenant profile a 120-second initial candidate with the bounded `SANDBOX_READY_TIMEOUT` override (whole seconds, 60 through 600), enforce it against real monotonic deadlines rather than an approximate polling duration, and own and mark a new sandbox before waiting so neither reconciliation nor a peer can adopt it during the longer startup window. 120 seconds is an initial candidate, not a qualified fleet-wide bound.
+
+[2.1.0+hartmesh.11]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.11
+
 ## [2.1.0+hartmesh.10] — 2026-09-10
 
 - hartmesh#69 — validate every rendered model with the Gateway schema while preserving unrelated configuration state.
