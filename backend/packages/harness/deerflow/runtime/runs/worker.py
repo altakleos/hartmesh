@@ -99,9 +99,10 @@ from deerflow.runtime.stream_modes import (
     to_langgraph_stream_modes,
 )
 from deerflow.runtime.tenant_identity import TENANT_REFERENCE_CONTEXT_KEY
+from deerflow.runtime.turn_phases import TurnPhase, TurnPhaseCallbackHandler, current_turn_phases
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id, resolve_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import (
@@ -1563,6 +1564,57 @@ async def run_agent(
     interrupt_before: list[str] | Literal["*"] | None = None,
     interrupt_after: list[str] | Literal["*"] | None = None,
 ) -> None:
+    """Execute an agent in the background, publishing events to *bridge*.
+
+    This wrapper exists only to measure the turn. It opens the phase journal
+    before any run work so admission and assembly are inside the same monotonic
+    window as the model call, registers it under the run id so the SSE consumer
+    -- which runs in the Gateway request task, not this one -- can mark the
+    first outgoing assistant text, and emits it once when the run is over.
+    """
+
+    from deerflow.runtime.turn_phases import TurnPhase, turn_phases
+
+    with turn_phases(correlation_id=resolve_trace_id(), run_id=record.run_id) as journal:
+        journal.mark(TurnPhase.ADMISSION)
+        # Submit-to-first-rendered-text belongs to the browser: it includes
+        # ingress, transfer and render, none of which a server timestamp can
+        # stand in for. Recorded as a limitation rather than approximated.
+        journal.unobservable("browser_first_text", "requires a browser measurement through public ingress")
+        try:
+            await _run_agent(
+                bridge,
+                run_manager,
+                record,
+                ctx=ctx,
+                agent_factory=agent_factory,
+                graph_input=graph_input,
+                config=config,
+                stream_modes=stream_modes,
+                stream_subgraphs=stream_subgraphs,
+                interrupt_before=interrupt_before,
+                interrupt_after=interrupt_after,
+            )
+        finally:
+            journal.mark(TurnPhase.TERMINAL)
+            journal.set_outcome(str(getattr(record, "status", "unknown")))
+            journal.emit()
+
+
+async def _run_agent(
+    bridge: StreamBridge,
+    run_manager: RunManager,
+    record: RunRecord,
+    *,
+    ctx: RunContext,
+    agent_factory: Any,
+    graph_input: dict,
+    config: dict,
+    stream_modes: list[str] | None = None,
+    stream_subgraphs: bool = False,
+    interrupt_before: list[str] | Literal["*"] | None = None,
+    interrupt_after: list[str] | Literal["*"] | None = None,
+) -> None:
     """Execute an agent in the background, publishing events to *bridge*."""
 
     # Unpack infrastructure dependencies from RunContext.
@@ -2046,6 +2098,14 @@ async def run_agent(
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
 
+        # Model-side phases ride the same callback seam, on the turn journal's
+        # monotonic clock, so the model request and the provider's first text
+        # are comparable with the sandbox phases rather than with a wall clock.
+        _turn_phases = current_turn_phases()
+        if _turn_phases is not None:
+            _turn_phases.mark(TurnPhase.ASSEMBLY)
+            config.setdefault("callbacks", []).append(TurnPhaseCallbackHandler(_turn_phases))
+
         # Inject Langfuse trace-attribute metadata so the langchain CallbackHandler
         # can lift session_id / user_id / trace_name / tags onto the root trace.
         # Shared helper with ``DeerFlowClient.stream`` so both entry points stay
@@ -2461,6 +2521,22 @@ async def run_agent(
                     config["context"]["max_total_subagents"] = accepted_constraints.max_total_subagents
                     config["context"][SUBAGENT_RESERVATION_CONTEXT_KEY] = runtime_ctx[SUBAGENT_RESERVATION_CONTEXT_KEY]
             initial_runnable_config = RunnableConfig(**config)
+
+        # What this turn is, for the phase journal: the session Kind and the
+        # verified snapshot facts the guard below decides on. Presence and
+        # package count are recorded as separate fields on purpose -- zero
+        # packages alone does not establish a deferrable state, and the guard
+        # is ``skill_snapshot is not None``, not the count. Evidence for a
+        # later optimization, never a reason to reorder execution here.
+        _turn_phases = current_turn_phases()
+        if _turn_phases is not None:
+            _pinned_snapshot = None if pinned_material_for_cleanup is None else pinned_material_for_cleanup.skill_snapshot
+            _turn_phases.set_session_kind("accepted" if accepted is not None else "ordinary")
+            _turn_phases.set_snapshot_facts(
+                present=_pinned_snapshot is not None,
+                package_count=None if _pinned_snapshot is None else len(getattr(_pinned_snapshot, "skills", ()) or ()),
+                mandatory_materialization=accepted is not None and _pinned_snapshot is not None,
+            )
 
         if accepted is not None and pinned_material_for_cleanup is not None and pinned_material_for_cleanup.skill_snapshot is not None:
             from deerflow.runtime.kubernetes_qualification import (

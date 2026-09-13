@@ -15,11 +15,16 @@ from uuid import uuid4
 _SAFE_LABEL = re.compile(r"[^A-Za-z0-9_.:/@-]", re.ASCII)
 
 
-def _bounded_label(value: object, *, fallback: str, limit: int = 160) -> str:
+def bounded_label(value: object, *, fallback: str, limit: int = 160) -> str:
+    """Reduce *value* to a short label safe to log and to use as a key."""
     if not isinstance(value, str):
         return fallback
     sanitized = _SAFE_LABEL.sub("_", value)
     return (sanitized or fallback)[:limit]
+
+
+# Historical spelling, kept because this module's own call sites use it.
+_bounded_label = bounded_label
 
 
 @dataclass(frozen=True, slots=True)

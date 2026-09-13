@@ -121,6 +121,52 @@ to the provider's own id, which the declaration carries as `provider_ref`, for
 the declaring execution only; a stranger's call resolves to no events and no
 decision, and the provider id never appears in state, logs, or evidence.
 
+### Park means reuse
+
+Park is only worth its name if the next turn actually takes the container
+back. The ordinary acquisition path has always done so at its warm-pool layer;
+the accepted-skills projection path (an ordinary Kind: park terminal, thread
+resource key) did not. It checked active tracking, found nothing -- release had
+moved the entry to the warm pool -- and fell through to create, whose replica
+enforcement evicts the oldest warm entry before the backend can observe that
+the target already exists. On the released Compose profile that meant a
+compatible follow-up turn stopped an unrelated thread's container and its relay
+(about twenty seconds) and then rediscovered or rebuilt its own.
+
+The repair is a reclaim step between the active check and create,
+`AioSandboxProvider._reclaim_accepted_warm_sandbox`, and it hands a parked
+container back only when every one of these holds:
+
+| Fact | Where it is proved |
+| --- | --- |
+| The id is one *this process* provisioned as an accepted-only projection | `_accepted_only_sandbox_ids`, under the provider lock |
+| The create-time inputs still match: mount set, lark provisioning flags, config-mount exclusion root, backend class, skills root, and -- for the remote backend, which bakes them into the Pod -- binding identity, execution claim and egress allowance digest | `_accepted_reuse_fingerprint`, recorded at create and compared at reclaim; a digest of inputs this process computed, never of provider text |
+| Same tenant and thread or attempt identity | `_assert_warm_identity_available_locked` |
+| Not reserved for local teardown | `_being_torn_down_locally`, checked before and after the ownership round trip |
+| Alive according to the backend | `_check_tracked_sandbox_alive` |
+| Ownership published before the warm-to-active transition | `_publish_ownership`; a peer's `del:` refuses |
+
+Anything the fingerprint does not cover is either identical by construction
+or re-established after reuse: `bind_accepted_skill_snapshot` re-projects the
+bound snapshot on every acquisition and still refuses a remote receipt that
+does not match, which is the same contract the already-active branch relied
+on. A deterministic name or an `-accepted` suffix alone proves nothing and is
+never consulted as evidence.
+
+Three properties keep the repair from becoming a different defect. Refusing to
+reuse is never a reason to destroy: every mismatch falls through to create and
+leaves the parked entry where it was. Eviction never targets the id it is
+making room for (`_evict_oldest_warm(exclude=...)`), which would buy a cold
+start with a teardown. And a genuinely new third resource at capacity still
+evicts an unrelated warm entry and waits for it -- that is real work, and
+hiding it behind an overlapping unbudgeted container is the separately tracked
+capacity defect, not this repair.
+
+The retire terminal is untouched. A declared accepted session never reaches
+the warm pool, and reconciliation destroys a cross-process accepted orphan
+rather than adopting it, so every accepted entry the reclaim can find was
+parked by this process, for this identity, under this Kind.
+
 ### Execution leases beside sessions
 
 Upstream's execution leases (`sandbox/lease.py`) sit beside the session

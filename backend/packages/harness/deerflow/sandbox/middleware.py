@@ -20,6 +20,13 @@ from deerflow.authz.sandbox_authz import (
     safe_app_config,
     safe_app_config_async,
 )
+from deerflow.runtime.turn_phases import (
+    AcquisitionSource,
+    TurnPhase,
+    phase_span,
+    record_acquire_reason,
+    record_acquisition_source,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
 from deerflow.sandbox.accepted_projection import (
@@ -518,7 +525,16 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
         if self._lazy_init and not has_accepted_binding and projection is None:
+            record_acquire_reason("lazy_deferred")
             return await super().abefore_agent(state, runtime)
+
+        # Why this turn acquires before the model call rather than on first tool
+        # use. Evidence for a later optimization, not a licence to change the
+        # order now: an accepted binding deliberately bypasses lazy
+        # initialization, and flipping that guard is explicitly out of scope.
+        record_acquire_reason(
+            "accepted_binding" if has_accepted_binding else ("skill_projection" if projection is not None else "eager_configured"),
+        )
 
         existing_sandbox_id = self._read_sandbox_id_from_state(state)
         sandbox_id = existing_sandbox_id
@@ -553,40 +569,44 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             await self._release_sandbox_async(sandbox_id, owner_id=None)
             sandbox_id = None
         acquired = not isinstance(sandbox_id, str) or provider.get(sandbox_id) is None
-        if has_accepted_binding:
-            if acquired:
-                sandbox_id = await provision_runtime_accepted_skill_projection_async(
-                    provider,
-                    runtime,
+        with phase_span(TurnPhase.SANDBOX_ACQUIRE):
+            if has_accepted_binding:
+                if acquired:
+                    sandbox_id = await provision_runtime_accepted_skill_projection_async(
+                        provider,
+                        runtime,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    )
+                else:
+                    record_acquisition_source(AcquisitionSource.ACCEPTED_ACTIVE)
+                    with phase_span(TurnPhase.SANDBOX_BINDING):
+                        await bind_runtime_accepted_skill_projection_async(
+                            provider,
+                            runtime,
+                            sandbox_id=sandbox_id,
+                            user_id=user_id,
+                        )
+                await self._borrow_accepted_sandbox_async(
+                    sandbox_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    owner_id=owner_id,
+                )
+            elif acquired:
+                sandbox_id = await self._acquire_sandbox_async(
+                    thread_id,
+                    user_id=user_id,
+                    owner_id=owner_id,
+                )
+            elif owner_id is not None:
+                record_acquisition_source(AcquisitionSource.IN_PROCESS)
+                await get_sandbox_lease_manager(provider).retain_async(
+                    owner_id,
+                    sandbox_id,
                     thread_id=thread_id,
                     user_id=user_id,
                 )
-            else:
-                await bind_runtime_accepted_skill_projection_async(
-                    provider,
-                    runtime,
-                    sandbox_id=sandbox_id,
-                    user_id=user_id,
-                )
-            await self._borrow_accepted_sandbox_async(
-                sandbox_id,
-                thread_id=thread_id,
-                user_id=user_id,
-                owner_id=owner_id,
-            )
-        elif acquired:
-            sandbox_id = await self._acquire_sandbox_async(
-                thread_id,
-                user_id=user_id,
-                owner_id=owner_id,
-            )
-        elif owner_id is not None:
-            await get_sandbox_lease_manager(provider).retain_async(
-                owner_id,
-                sandbox_id,
-                thread_id=thread_id,
-                user_id=user_id,
-            )
         if projection is not None:
             try:
                 await provider.sync_agent_skills_async(
