@@ -1598,6 +1598,14 @@ async def run_agent(
         finally:
             journal.mark(TurnPhase.TERMINAL)
             journal.set_outcome(str(getattr(record, "status", "unknown")))
+            # The SSE mark is per-process and live-window only: a join stream
+            # on another Gateway replica, or a Last-Event-ID replay after this
+            # point, cannot reach this journal. If the provider produced text
+            # and no consumer here marked it, say so rather than let the
+            # missing phase read as "no visible text".
+            _snapshot = journal.snapshot()
+            if _snapshot.phase_at_ms(TurnPhase.FIRST_PROVIDER_TEXT) is not None and _snapshot.phase_at_ms(TurnPhase.FIRST_STREAM_TEXT) is None:
+                journal.unobservable(TurnPhase.FIRST_STREAM_TEXT, "no SSE consumer in this process marked it before terminal")
             journal.emit()
 
 

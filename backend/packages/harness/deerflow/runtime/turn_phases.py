@@ -40,7 +40,11 @@ A phase that could not be observed is recorded as such with a reason
 (:meth:`TurnPhaseJournal.unobservable`) rather than inferred from a neighbouring
 event. Browser submit-to-first-rendered-text is not observable from here at all:
 it needs a browser measuring through public ingress, and no server timestamp
-substitutes for it.
+substitutes for it. The first outgoing SSE text is observable only by a consumer
+in the same process during the run's live window: a join stream served by
+another Gateway replica, or a ``Last-Event-ID`` replay after the run ended,
+cannot reach the journal, and the run wrapper declares the phase unobservable
+when the provider produced text and no consumer here marked it.
 """
 
 from __future__ import annotations
@@ -555,7 +559,17 @@ class TurnPhaseCallbackHandler:
     def on_llm_start(self, *args: Any, **kwargs: Any) -> None:
         self._journal.mark_once(TurnPhase.MODEL_REQUEST)
 
-    def on_llm_new_token(self, token: Any = "", *args: Any, **kwargs: Any) -> None:
+    def on_llm_new_token(self, token: Any = "", *args: Any, chunk: Any = None, **kwargs: Any) -> None:
+        # When the chunk carries structured content, judge it by the same
+        # block rule as the outgoing frames, so a thinking-only chunk whose
+        # ``token`` string happens to be non-empty does not count as text.
+        content = getattr(getattr(chunk, "message", None), "content", None)
+        if content is None:
+            content = getattr(chunk, "content", None)
+        if isinstance(content, list | tuple):
+            if any(_block_carries_answer_text(block) for block in content):
+                self._journal.mark_once(TurnPhase.FIRST_PROVIDER_TEXT)
+            return
         if isinstance(token, str) and token.strip():
             self._journal.mark_once(TurnPhase.FIRST_PROVIDER_TEXT)
 
@@ -638,3 +652,10 @@ def mark_first_stream_text(run_id: str | None, event: object, data: object) -> N
         return
     if sse_frame_carries_assistant_text(event, data):
         journal.mark_once(TurnPhase.FIRST_STREAM_TEXT)
+
+
+def record_queue_ms(milliseconds: float) -> None:
+    """Add serializer or lock wait time to the bound journal, if any."""
+    journal = _current_journal.get()
+    if journal is not None:
+        journal.add_queue_ms(milliseconds)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -332,3 +333,15 @@ def test_the_callback_handler_ignores_the_hooks_it_does_not_implement():
 
     with pytest.raises(AttributeError):
         handler.not_a_callback
+
+
+def test_the_callback_handler_judges_a_structured_chunk_by_its_blocks():
+    journal = TurnPhaseJournal(correlation_id="trace-chunk")
+    handler = TurnPhaseCallbackHandler(journal)
+    thinking = SimpleNamespace(message=SimpleNamespace(content=[{"type": "thinking", "thinking": "hidden"}]))
+    text = SimpleNamespace(message=SimpleNamespace(content=[{"type": "text", "text": "Hello"}]))
+
+    handler.on_llm_new_token("hidden", chunk=thinking)
+    assert journal.snapshot().phase_at_ms(TurnPhase.FIRST_PROVIDER_TEXT) is None
+    handler.on_llm_new_token("", chunk=text)
+    assert journal.snapshot().phase_at_ms(TurnPhase.FIRST_PROVIDER_TEXT) is not None

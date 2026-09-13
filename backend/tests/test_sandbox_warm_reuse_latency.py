@@ -15,6 +15,8 @@ still has to do.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import importlib
 import threading
 import time
@@ -40,15 +42,33 @@ def _aio_mod():
 class _FakeBackend:
     """A counted container backend: no Docker, no sleeps, exact call records."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, adopt_on_conflict: bool = False) -> None:
         self.created: list[str] = []
         self.destroyed: list[str] = []
+        self.adopted: list[str] = []
         self.alive: dict[str, bool] = {}
+        self.unverifiable: set[str] = set()
+        self.infos: dict[str, object] = {}
+        # ``LocalContainerBackend.create`` answers a Docker name conflict by
+        # discovering and returning the running container; this mirrors it.
+        self.adopt_on_conflict = adopt_on_conflict
 
     def create(self, thread_id, sandbox_id, **_kwargs):
         aio = _aio_mod()
+        if self.adopt_on_conflict and self.alive.get(sandbox_id):
+            self.adopted.append(sandbox_id)
+            return self.infos[sandbox_id]
         self.created.append(sandbox_id)
         self.alive[sandbox_id] = True
+        self.infos[sandbox_id] = aio.SandboxInfo(
+            sandbox_id=sandbox_id,
+            sandbox_url=f"http://sandbox/{sandbox_id}",
+            container_name=f"deer-flow-sandbox-{sandbox_id}",
+        )
+        return self.infos[sandbox_id]
+
+    def _unused_info(self, sandbox_id):
+        aio = _aio_mod()
         return aio.SandboxInfo(
             sandbox_id=sandbox_id,
             sandbox_url=f"http://sandbox/{sandbox_id}",
@@ -60,6 +80,8 @@ class _FakeBackend:
         self.alive[info.sandbox_id] = False
 
     def is_alive(self, info) -> bool:
+        if info.sandbox_id in self.unverifiable:
+            raise RuntimeError("daemon did not answer")
         return self.alive.get(info.sandbox_id, True)
 
     def discover(self, _sandbox_id):
@@ -69,7 +91,7 @@ class _FakeBackend:
         return []
 
 
-def _make_provider(tmp_path, monkeypatch, *, replicas: int = 2) -> tuple[object, _FakeBackend]:
+def _make_provider(tmp_path, monkeypatch, *, replicas: int = 2, adopt_on_conflict: bool = False) -> tuple[object, _FakeBackend]:
     """A provider wired to a fake backend, with no threads and no real config.
 
     ``replicas=2`` matches the consumed profile's two sandbox slots, which is
@@ -105,7 +127,7 @@ def _make_provider(tmp_path, monkeypatch, *, replicas: int = 2) -> tuple[object,
     provider._ownership_config = SandboxOwnershipConfig()
     provider._ownership = MemoryOwnershipStore(owner_id="warm-reuse-worker", ttl_seconds=600)
 
-    backend = _FakeBackend()
+    backend = _FakeBackend(adopt_on_conflict=adopt_on_conflict)
     provider._backend = backend
 
     paths = Paths(base_dir=tmp_path / "state")
@@ -513,5 +535,186 @@ def test_compatible_warm_acquire_is_cheap_against_a_fake_backend(tmp_path, monke
     assert backend.created == [first], "every trial after the first must reuse"
     assert backend.destroyed == []
     ordered = sorted(durations_ms)
+    p50_ms = ordered[int(round(0.50 * (len(ordered) - 1)))]
     p95_ms = ordered[int(round(0.95 * (len(ordered) - 1)))]
-    assert p95_ms < 1000.0, f"in-process warm acquire p95 was {p95_ms:.2f}ms over {trials} trials"
+    print(f"warm-acquire fake-backend sample: trials={trials} failures={failures} p50_ms={p50_ms:.3f} p95_ms={p95_ms:.3f} max_ms={ordered[-1]:.3f}")
+    # An in-process bookkeeping bound only; the one-second target is a property
+    # of the supported profile and is not measured here.
+    assert p95_ms < 1000.0, f"in-process bookkeeping p95 was {p95_ms:.2f}ms over {trials} trials"
+
+
+# ── Panel-review additions ───────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_cancellation_after_a_reclaim_parks_the_container_instead_of_destroying_it(tmp_path, monkeypatch):
+    """A cancelled follow-up must not turn a reclaim into next turn's cold start.
+
+    The cancellation handler used to assume the only thing the accepted path
+    could hand back was a just-created container to roll back. After the
+    repair it can hand back one parked before the call; the caller never
+    received it, so it goes back to the warm pool under the same identity.
+    """
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    first = _acquire_accepted(provider, "thread-cancel")
+    provider.release(first)
+
+    reclaimed = threading.Event()
+    allow_bind = threading.Event()
+
+    def _bind(*_args, **_kwargs):
+        reclaimed.set()
+        assert allow_bind.wait(timeout=5)
+
+    monkeypatch.setattr(provider, "bind_accepted_skill_snapshot", _bind)
+
+    task = asyncio.create_task(
+        provider.provision_accepted_skills_async("thread-cancel", user_id=ACCEPTED_USER, binding=_binding(run_id="run-2")),
+    )
+    assert await asyncio.to_thread(reclaimed.wait, 5)
+    task.cancel("caller went away after the reclaim")
+    allow_bind.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert backend.destroyed == [], "a reclaimed container is parked again, never destroyed"
+    assert first in provider._warm_pool
+    assert first in provider._accepted_reuse_fingerprints
+    again = _acquire_accepted(provider, "thread-cancel", run_id="run-3")
+    assert again == first
+    assert backend.created == [first]
+
+
+@pytest.mark.anyio
+async def test_cancellation_after_a_create_still_rolls_the_container_back(tmp_path, monkeypatch):
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    created = threading.Event()
+    allow_bind = threading.Event()
+
+    def _bind(*_args, **_kwargs):
+        created.set()
+        assert allow_bind.wait(timeout=5)
+
+    monkeypatch.setattr(provider, "bind_accepted_skill_snapshot", _bind)
+
+    with turn_phases(correlation_id="cancel-create") as journal:
+        task = asyncio.create_task(
+            provider.provision_accepted_skills_async("thread-cancel-create", user_id=ACCEPTED_USER, binding=_binding()),
+        )
+        assert await asyncio.to_thread(created.wait, 5)
+        task.cancel("caller went away after the create")
+        allow_bind.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert backend.destroyed == backend.created
+    assert provider._warm_pool == {}
+    assert journal.snapshot().resource_teardowns == 1
+
+
+def test_local_backend_name_conflict_after_a_fingerprint_refusal_adopts_and_destroys_nothing(tmp_path, monkeypatch):
+    """On the local backend a same-id mismatch is repaired by backend discovery.
+
+    The refusal leaves the parked container running under its deterministic
+    name; create cannot make a second one, and the backend's name-conflict
+    handler adopts the running container after its own checks. The turn gets
+    its container back with the create-time mounts, as the ordinary path
+    always has. Nothing is destroyed, and the source label reads ``created``
+    because the provider cannot see adoption at the backend seam.
+    """
+    aio = _aio_mod()
+    provider, backend = _make_provider(tmp_path, monkeypatch, adopt_on_conflict=True)
+
+    first = _acquire_accepted(provider, "thread-drift")
+    provider.release(first)
+    # The one create-time input that can differ for the same id locally.
+    monkeypatch.setattr(aio.AioSandboxProvider, "_lark_integration_active", lambda *_a, **_k: True)
+
+    with turn_phases(correlation_id="drift") as journal:
+        again = _acquire_accepted(provider, "thread-drift", run_id="run-2")
+
+    assert again == first
+    assert backend.adopted == [first]
+    assert backend.created == [first]
+    assert backend.destroyed == []
+    assert first not in provider._warm_pool
+    assert provider._thread_sandboxes[(ACCEPTED_USER, "thread-drift")] == first
+    assert journal.snapshot().acquisition_source is AcquisitionSource.CREATED
+
+
+def test_an_unverifiable_parked_container_is_reused_under_the_existing_unknown_rule(tmp_path, monkeypatch):
+    """Backend health-check failures are unknown, not dead — the warm pool's rule."""
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+
+    first = _acquire_accepted(provider, "thread-unverifiable")
+    provider.release(first)
+    backend.unverifiable.add(first)
+
+    again = _acquire_accepted(provider, "thread-unverifiable", run_id="run-2")
+
+    assert again == first
+    assert backend.created == [first]
+    assert backend.destroyed == []
+
+
+def test_an_eviction_is_a_timed_phase_and_a_lookup_is_too(tmp_path, monkeypatch):
+    provider, _backend = _make_provider(tmp_path, monkeypatch, replicas=2)
+    first = _acquire_accepted(provider, "thread-1")
+    provider.release(first)
+    second = _acquire_accepted(provider, "thread-2")
+    provider.release(second)
+
+    with turn_phases(correlation_id="evict") as evicting:
+        _acquire_accepted(provider, "thread-3")
+    with turn_phases(correlation_id="lookup") as looking:
+        _acquire_accepted(provider, "thread-2", run_id="run-2")
+
+    assert evicting.snapshot().phase_ms(TurnPhase.SANDBOX_EVICTION) is not None
+    assert evicting.snapshot().phase_ms(TurnPhase.SANDBOX_LOOKUP) is not None
+    assert looking.snapshot().phase_ms(TurnPhase.SANDBOX_LOOKUP) is not None
+    assert looking.snapshot().phase_ms(TurnPhase.SANDBOX_EVICTION) is None
+
+
+def test_serializer_wait_is_recorded_as_queue_time(tmp_path, monkeypatch):
+    provider, _backend = _make_provider(tmp_path, monkeypatch)
+    real_hold = provider._acquire_serializer.hold
+
+    @contextlib.contextmanager
+    def _slow_hold(key):
+        time.sleep(0.02)
+        with real_hold(key):
+            yield
+
+    monkeypatch.setattr(provider._acquire_serializer, "hold", _slow_hold)
+
+    with turn_phases(correlation_id="queue") as journal:
+        _acquire_accepted(provider, "thread-queue")
+
+    assert journal.snapshot().queue_ms >= 15.0
+
+
+def test_a_readiness_timeout_counts_as_a_failed_attempt(tmp_path, monkeypatch):
+    aio = _aio_mod()
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    monkeypatch.setattr(aio, "wait_for_sandbox_ready", lambda _url, timeout=60, **_kw: False)
+
+    with turn_phases(correlation_id="unready") as journal, pytest.raises(RuntimeError, match="failed to become ready"):
+        _acquire_accepted(provider, "thread-unready")
+
+    snapshot = journal.snapshot()
+    assert snapshot.failed_attempts == 1
+    assert snapshot.resource_creates == 1
+    assert backend.destroyed == backend.created
+
+
+def test_dropping_a_dead_parked_container_counts_as_a_teardown(tmp_path, monkeypatch):
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    first = _acquire_accepted(provider, "thread-dead-count")
+    provider.release(first)
+    backend.alive[first] = False
+
+    with turn_phases(correlation_id="dead") as journal:
+        _acquire_accepted(provider, "thread-dead-count", run_id="run-2")
+
+    assert journal.snapshot().resource_teardowns == 1
+    assert backend.destroyed == [first]

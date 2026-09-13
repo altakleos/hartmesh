@@ -52,6 +52,8 @@ from deerflow.runtime.turn_phases import (
     phase_span,
     record_acquisition_source,
     record_eviction,
+    record_failed_attempt,
+    record_queue_ms,
     record_resource_create,
     record_resource_teardown,
 )
@@ -1678,15 +1680,16 @@ class AioSandboxProvider(
             # guards every acquire path.
             candidates = [(sandbox_id, entry) for sandbox_id, (entry, _) in sorted(self._warm_pool.items(), key=lambda item: item[1][1]) if sandbox_id != exclude]
 
-        for sandbox_id, entry in candidates:
-            # "Still in the warm pool?" is the reapable check, and it has to run
-            # in the same critical section as the reservation — checking it here
-            # and reserving afterwards is exactly the window a reclaim slips
-            # through. `_destroy_warm_entry` does both under one lock hold.
-            if not self._destroy_warm_entry(sandbox_id, entry, reason="replica_enforcement", still_reapable=lambda sid=sandbox_id: sid in self._warm_pool):
-                continue
-            record_eviction()
-            return sandbox_id
+        with phase_span(TurnPhase.SANDBOX_EVICTION):
+            for sandbox_id, entry in candidates:
+                # "Still in the warm pool?" is the reapable check, and it has to run
+                # in the same critical section as the reservation — checking it here
+                # and reserving afterwards is exactly the window a reclaim slips
+                # through. `_destroy_warm_entry` does both under one lock hold.
+                if not self._destroy_warm_entry(sandbox_id, entry, reason="replica_enforcement", still_reapable=lambda sid=sandbox_id: sid in self._warm_pool):
+                    continue
+                record_eviction()
+                return sandbox_id
 
         return None
 
@@ -2148,6 +2151,7 @@ class AioSandboxProvider(
                     # no caller-side release to race a late refresh.
                     with self._held_teardown_lease(sandbox_id):
                         self._backend.destroy(info)
+                    record_resource_teardown()
                 except Exception as e:
                     logger.warning(f"Error destroying unhealthy sandbox {sandbox_id}: {e}")
             else:
@@ -2305,7 +2309,8 @@ class AioSandboxProvider(
             name=f"aio-accepted-acquire:{binding.run_id}",
         )
         try:
-            return await asyncio.shield(acquire_task)
+            sandbox_id, _origin = await asyncio.shield(acquire_task)
+            return sandbox_id
         except asyncio.CancelledError as cancellation:
             # Executor work cannot be cancelled once it starts. Recover the
             # exact resource identity before propagating cancellation so a
@@ -2316,29 +2321,47 @@ class AioSandboxProvider(
                 except asyncio.CancelledError:
                     continue
             try:
-                sandbox_id = acquire_task.result()
+                sandbox_id, origin = acquire_task.result()
             except Exception:
                 logger.warning(
                     "Accepted sandbox acquisition failed after caller cancellation",
                     exc_info=True,
                 )
             else:
-                destroy_task = asyncio.create_task(
-                    asyncio.to_thread(self.destroy, sandbox_id),
-                    name=f"aio-accepted-cancel-cleanup:{binding.run_id}",
-                )
-                while not destroy_task.done():
-                    try:
-                        await asyncio.shield(destroy_task)
-                    except asyncio.CancelledError:
-                        continue
-                try:
-                    destroy_task.result()
-                except Exception:
-                    logger.error(
-                        "Accepted sandbox cleanup failed after caller cancellation",
-                        exc_info=True,
+                # Undo by origin. Only a container this call created is rolled
+                # back by destroying it. A reclaimed one was parked before the
+                # call and the caller never received it, so nothing else will
+                # ever release it: park it again under the same identity rather
+                # than pay for a teardown and next turn's cold start. An active
+                # one belongs to the holders that made it active and is theirs
+                # to release.
+                if origin == "created":
+                    cleanup = self.destroy
+                elif origin == "reclaimed":
+                    cleanup = self.release
+                else:
+                    cleanup = None
+                    logger.info("Accepted sandbox %s stays active after caller cancellation: held by another owner", sandbox_id)
+                if cleanup is not None:
+                    cleanup_task = asyncio.create_task(
+                        asyncio.to_thread(cleanup, sandbox_id),
+                        name=f"aio-accepted-cancel-cleanup:{binding.run_id}",
                     )
+                    while not cleanup_task.done():
+                        try:
+                            await asyncio.shield(cleanup_task)
+                        except asyncio.CancelledError:
+                            continue
+                    try:
+                        cleanup_task.result()
+                    except Exception:
+                        logger.error(
+                            "Accepted sandbox cleanup failed after caller cancellation",
+                            exc_info=True,
+                        )
+                    else:
+                        if origin == "created":
+                            record_resource_teardown()
             raise cancellation
 
     def _provision_accepted_skills_with_claim(
@@ -2349,8 +2372,8 @@ class AioSandboxProvider(
         execution_claim: AcceptedMaterialExecutionClaimV1 | None,
         resource_scope_ref: str | None,
         egress_allowance: EgressAllowanceV1 | None = None,
-    ) -> str:
-        sandbox_id = self._acquire_accepted_skills_internal(
+    ) -> tuple[str, str]:
+        sandbox_id, origin = self._acquire_accepted_skills_with_origin(
             thread_id,
             user_id=user_id,
             binding=binding,
@@ -2378,7 +2401,7 @@ class AioSandboxProvider(
                     exc_info=True,
                 )
             raise exc
-        return sandbox_id
+        return sandbox_id, origin
 
     @staticmethod
     def _accepted_resource_thread_id(
@@ -2554,6 +2577,34 @@ class AioSandboxProvider(
         resource_scope_ref: str | None = None,
         egress_allowance: EgressAllowanceV1 | None = None,
     ) -> str:
+        sandbox_id, _origin = self._acquire_accepted_skills_with_origin(
+            thread_id,
+            user_id=user_id,
+            binding=binding,
+            execution_claim=execution_claim,
+            resource_scope_ref=resource_scope_ref,
+            egress_allowance=egress_allowance,
+        )
+        return sandbox_id
+
+    def _acquire_accepted_skills_with_origin(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+        execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
+        resource_scope_ref: str | None = None,
+        egress_allowance: EgressAllowanceV1 | None = None,
+    ) -> tuple[str, str]:
+        """Acquire an accepted projection and say how: ``active``, ``reclaimed`` or ``created``.
+
+        The origin is what a cancelled caller needs to undo the acquisition
+        correctly. A created container is rolled back by destroying it; a
+        reclaimed one was parked before this call and goes back to the warm
+        pool; an active one belongs to whichever holders made it active and
+        is left alone.
+        """
         effective_user_id = self._effective_acquire_user_id(user_id)
         try:
             skills_root = get_app_config().skills.container_path.rstrip("/")
@@ -2587,14 +2638,16 @@ class AioSandboxProvider(
             resource_scope_ref,
         )
         key = self._thread_key(identity_thread_id, effective_user_id)
+        queued_at = time.monotonic()
         with self._acquire_serializer.hold(key):
+            record_queue_ms((time.monotonic() - queued_at) * 1000.0)
             with self._lock:
                 existing = self._thread_sandboxes.get(key)
                 accepted_ids = getattr(self, "_accepted_only_sandbox_ids", set())
             if existing is not None:
                 if existing in accepted_ids:
                     record_acquisition_source(AcquisitionSource.ACCEPTED_ACTIVE)
-                    return existing
+                    return existing, "active"
                 raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_isolation_conflict")
             sandbox_id = f"{self._sandbox_id_for_thread(identity_thread_id, effective_user_id)}{ACCEPTED_SANDBOX_ID_SUFFIX}"
             # The projection's terminal is park, so the container this thread
@@ -2603,21 +2656,22 @@ class AioSandboxProvider(
             # warm entry -- possibly this very one -- before the backend can
             # observe that the target already exists, so a compatible follow-up
             # paid for an unrelated teardown and a cold start it never needed.
-            fingerprint = self._accepted_reuse_fingerprint(
-                thread_id,
-                user_id=effective_user_id,
-                binding=binding,
-                execution_claim=execution_claim,
-                egress_allowance=egress_allowance,
-            )
-            reclaimed = self._reclaim_accepted_warm_sandbox(
-                identity_thread_id,
-                sandbox_id,
-                user_id=effective_user_id,
-                fingerprint=fingerprint,
-            )
+            with phase_span(TurnPhase.SANDBOX_LOOKUP):
+                fingerprint = self._accepted_reuse_fingerprint(
+                    thread_id,
+                    user_id=effective_user_id,
+                    binding=binding,
+                    execution_claim=execution_claim,
+                    egress_allowance=egress_allowance,
+                )
+                reclaimed = self._reclaim_accepted_warm_sandbox(
+                    identity_thread_id,
+                    sandbox_id,
+                    user_id=effective_user_id,
+                    fingerprint=fingerprint,
+                )
             if reclaimed is not None:
-                return reclaimed
+                return reclaimed, "reclaimed"
             created = self._create_sandbox(
                 thread_id,
                 sandbox_id,
@@ -2634,7 +2688,7 @@ class AioSandboxProvider(
                     accepted_ids = self._accepted_only_sandbox_ids = set()
                 accepted_ids.add(created)
                 self._record_accepted_reuse_fingerprint_locked(created, fingerprint)
-            return created
+            return created, "created"
 
     def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
         with self._lock:
@@ -3200,16 +3254,20 @@ class AioSandboxProvider(
         record_resource_create()
         self._mark_starting(sandbox_id)
         try:
-            with phase_span(TurnPhase.SANDBOX_CREATE):
-                info = self._backend.create(
-                    thread_id,
-                    sandbox_id,
-                    extra_mounts=extra_mounts or None,
-                    user_id=effective_user_id,
-                    provision_lark_cli_runtime=provision_lark_cli_runtime,
-                    provision_lark_cli_broker=provision_lark_cli_broker,
-                    **create_kwargs,
-                )
+            try:
+                with phase_span(TurnPhase.SANDBOX_CREATE):
+                    info = self._backend.create(
+                        thread_id,
+                        sandbox_id,
+                        extra_mounts=extra_mounts or None,
+                        user_id=effective_user_id,
+                        provision_lark_cli_runtime=provision_lark_cli_runtime,
+                        provision_lark_cli_broker=provision_lark_cli_broker,
+                        **create_kwargs,
+                    )
+            except Exception:
+                record_failed_attempt()
+                raise
             self._own_before_readiness(sandbox_id, info)
 
             # Wait for sandbox to be ready
@@ -3220,6 +3278,7 @@ class AioSandboxProvider(
                 # Ours in the store, but never handed out: tear it down under
                 # the same fences as every other reap, and fail closed if a
                 # peer took it over in the meantime (#4248).
+                record_failed_attempt()
                 self._destroy_unready_sandbox(sandbox_id, info)
                 raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within {budget:g}s at {info.sandbox_url}")
 
@@ -3302,17 +3361,21 @@ class AioSandboxProvider(
         record_resource_create()
         self._mark_starting(sandbox_id)
         try:
-            with phase_span(TurnPhase.SANDBOX_CREATE):
-                info = await asyncio.to_thread(
-                    self._backend.create,
-                    thread_id,
-                    sandbox_id,
-                    extra_mounts=extra_mounts or None,
-                    user_id=effective_user_id,
-                    provision_lark_cli_runtime=provision_lark_cli_runtime,
-                    provision_lark_cli_broker=provision_lark_cli_broker,
-                    **create_kwargs,
-                )
+            try:
+                with phase_span(TurnPhase.SANDBOX_CREATE):
+                    info = await asyncio.to_thread(
+                        self._backend.create,
+                        thread_id,
+                        sandbox_id,
+                        extra_mounts=extra_mounts or None,
+                        user_id=effective_user_id,
+                        provision_lark_cli_runtime=provision_lark_cli_runtime,
+                        provision_lark_cli_broker=provision_lark_cli_broker,
+                        **create_kwargs,
+                    )
+            except Exception:
+                record_failed_attempt()
+                raise
             # Ownership is blocking store IO, offloaded like every other step here.
             await asyncio.to_thread(self._own_before_readiness, sandbox_id, info)
 
@@ -3332,6 +3395,7 @@ class AioSandboxProvider(
                 # Ours in the store, but never handed out: tear it down under
                 # the same fences as every other reap, and fail closed if a
                 # peer took it over in the meantime (#4248).
+                record_failed_attempt()
                 await asyncio.to_thread(self._destroy_unready_sandbox, sandbox_id, info)
                 raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within {budget:g}s at {info.sandbox_url}")
 

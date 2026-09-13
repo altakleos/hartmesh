@@ -100,10 +100,10 @@ async def test_cancelled_bound_acquire_waits_for_created_sandbox_cleanup() -> No
     allow_destroy = threading.Event()
     destroyed: list[str] = []
 
-    def acquire(*_args) -> str:
+    def acquire(*_args) -> tuple[str, str]:
         resource_created.set()
         assert allow_return.wait(timeout=2)
-        return "created-before-cancellation"
+        return "created-before-cancellation", "created"
 
     provider._provision_accepted_skills_with_claim = acquire
 

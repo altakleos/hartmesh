@@ -1,9 +1,15 @@
-"""Turn timing through the real runtime and the real streaming route.
+"""Turn timing through the production SSE consumer and the production run wrapper.
 
-The model here is deterministic and local: no provider call, no API key, a
-controlled delay before its first text and a deliberately slow cleanup after
-it. That is enough to establish ordering and to show what the phases would
-report; it establishes nothing about restricted-runsc performance.
+What is real: ``sse_consumer`` and ``MemoryStreamBridge`` (the frames cross the
+same code the Gateway serves), and ``run_agent`` with ``RunManager`` (the
+journal is opened, registered and finalized by the worker itself). What is
+simulated: the frames are published by hand rather than by a graph, the
+"model" is a stub agent that invokes the callback handler directly rather than
+a LangGraph chat model, and the first-text delay and slow cleanup are
+``asyncio.sleep``. So these prove ordering and classification -- which frames
+stop the first-text clock, that the handler is on the graph the agent
+receives, that admission through terminal share one clock -- and nothing about
+a real model's callback shape, the HTTP route, or restricted-runsc performance.
 """
 
 from __future__ import annotations
@@ -252,3 +258,44 @@ async def test_run_agent_records_the_session_kind_and_snapshot_facts():
     assert snapshot.snapshot_present is False
     assert snapshot.snapshot_package_count is None
     assert snapshot.mandatory_materialization is False
+
+
+@pytest.mark.asyncio
+async def test_first_stream_text_is_declared_unobservable_when_no_consumer_marked_it():
+    """Provider text with no SSE consumer in this process: a limitation, not silence."""
+    from deerflow.runtime.turn_phases import TurnPhaseCallbackHandler
+
+    manager = RunManager(tenant=TENANT)
+    record = await manager.create_or_reject("thread-phase-unmarked")
+    captured: dict[str, object] = {}
+
+    class _Agent:
+        def __init__(self, handlers) -> None:
+            self._handlers = handlers
+
+        async def astream(self, *_args, **_kwargs):
+            for handler in self._handlers:
+                handler.on_chat_model_start({}, [])
+                handler.on_llm_new_token("Hello")
+                handler.on_llm_end(None)
+            captured["journal"] = current_turn_phases()
+            yield {"messages": []}
+
+    def factory(*, config):
+        return _Agent([handler for handler in (config.get("callbacks") or ()) if isinstance(handler, TurnPhaseCallbackHandler)])
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, tenant=TENANT),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    snapshot = captured["journal"].snapshot()
+    assert snapshot.phase_at_ms(TurnPhase.FIRST_PROVIDER_TEXT) is not None
+    assert snapshot.phase_at_ms(TurnPhase.FIRST_STREAM_TEXT) is None
+    assert any(phase == "first_stream_text" for phase, _reason in snapshot.unobservable)
