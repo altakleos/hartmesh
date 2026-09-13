@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import math
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -42,47 +43,93 @@ def sandbox_http_trust_env(sandbox_url: str) -> bool:
     return not (address.is_loopback or address.is_private or address.is_link_local)
 
 
-# The readiness deadline the local-container provider paths (sync and async)
-# enforce before destroying a sandbox that never became ready. Tests that
-# validate the shipped image must use this same budget: a longer one can
-# pass while every real acquisition still fails.
+# The default readiness budget, in seconds, that the local-container provider
+# paths (sync and async) enforce before destroying a sandbox that never became
+# ready. ``sandbox.ready_timeout`` overrides it per deployment: the released
+# Compose profile runs one-CPU gVisor sandboxes whose cold start was measured at
+# 80 to 91 seconds, so a fixed 60 destroyed every one of them. Tests that
+# validate a shipped image must use the deployment's effective budget: a longer
+# one can pass while every real acquisition still fails.
 SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT = 60
+# The largest budget any configuration may ask for. Finite on purpose: the
+# budget is a failure deadline, and a value that cannot elapse is no deadline.
+SANDBOX_READY_TIMEOUT_MAX = 3600
+# One readiness probe; each probe is further clamped to what is left of the
+# budget so no request can outlive the deadline.
+_READY_REQUEST_TIMEOUT = 5.0
+# The clock the sync poller reads. Monotonic, never wall time: an NTP step or a
+# suspended host must neither extend nor shorten the budget. Bound to a name so
+# tests can drive it.
+_monotonic = time.monotonic
+
+
+def normalize_ready_timeout(value: object) -> float:
+    """Return *value* as a readiness budget in seconds, or refuse it.
+
+    Accepts a finite positive ``int`` or ``float`` no larger than
+    ``SANDBOX_READY_TIMEOUT_MAX``. Everything else -- zero, a negative number,
+    ``inf``, ``nan``, a bool, a string, ``None`` -- raises ``ValueError`` so no
+    value can quietly turn the deadline off or into something that is not a
+    number of seconds.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"the sandbox readiness budget must be a number of seconds, not {type(value).__name__}")
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("the sandbox readiness budget must be a finite number of seconds greater than 0")
+    if seconds > SANDBOX_READY_TIMEOUT_MAX:
+        raise ValueError(f"the sandbox readiness budget must not exceed {SANDBOX_READY_TIMEOUT_MAX} seconds")
+    return seconds
 
 
 def wait_for_sandbox_ready(
     sandbox_url: str,
-    timeout: int = 30,
+    timeout: float = 30,
     *,
     headers: Mapping[str, str] | None = None,
 ) -> bool:
-    """Poll sandbox health endpoint until ready or timeout.
+    """Poll the sandbox health endpoint until it answers 200 or the budget ends.
+
+    The budget is a hard deadline on a monotonic clock: every probe and every
+    sleep is clamped to what is left of it, and a 200 that lands after it has
+    passed is not a success -- the caller's next step is to destroy the
+    container, and a sandbox accepted late is one the deadline never bounded.
 
     Args:
         sandbox_url: URL of the sandbox (e.g. http://k3s:30001).
-        timeout: Maximum time to wait in seconds.
+        timeout: The budget in seconds; validated by ``normalize_ready_timeout``.
 
     Returns:
-        True if sandbox is ready, False otherwise.
+        True if the sandbox answered 200 within the budget, False otherwise.
+
+    Raises:
+        ValueError: ``timeout`` is not a finite positive number of seconds.
     """
-    start_time = time.time()
+    budget = normalize_ready_timeout(timeout)
+    deadline = _monotonic() + budget
     with requests.Session() as session:
         session.trust_env = sandbox_http_trust_env(sandbox_url)
         if headers:
             session.headers.update(headers)
-        while time.time() - start_time < timeout:
+        while True:
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                return False
             try:
-                response = session.get(f"{sandbox_url}/v1/sandbox", timeout=5)
-                if response.status_code == 200:
-                    return True
+                response = session.get(f"{sandbox_url}/v1/sandbox", timeout=min(_READY_REQUEST_TIMEOUT, remaining))
             except requests.exceptions.RequestException:
-                pass
-            time.sleep(1)
-    return False
+                response = None
+            if response is not None and response.status_code == 200:
+                return _monotonic() <= deadline
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(1.0, remaining))
 
 
 async def wait_for_sandbox_ready_async(
     sandbox_url: str,
-    timeout: int = 30,
+    timeout: float = 30,
     poll_interval: float = 1.0,
     *,
     headers: Mapping[str, str] | None = None,
@@ -92,12 +139,22 @@ async def wait_for_sandbox_ready_async(
     Use this from async runtime paths so sandbox startup waits do not block the
     event loop. The synchronous ``wait_for_sandbox_ready`` function remains for
     existing synchronous backend/provider call sites.
+
+    Same deadline semantics as the sync poller, on the loop's monotonic clock.
+    httpx timeouts are per phase (connect, read, write, pool), so a reply that
+    drips a byte at a time would never trip them; each probe is therefore also
+    wrapped in ``asyncio.timeout`` for what is left of the budget. Cancelling
+    the awaiting task cancels the in-flight probe and closes the client.
+
+    Raises:
+        ValueError: ``timeout`` is not a finite positive number of seconds.
     """
+    budget = normalize_ready_timeout(timeout)
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
+    deadline = loop.time() + budget
 
     client_kwargs: dict[str, object] = {
-        "timeout": 5,
+        "timeout": _READY_REQUEST_TIMEOUT,
         "trust_env": sandbox_http_trust_env(sandbox_url),
     }
     if headers:
@@ -106,18 +163,18 @@ async def wait_for_sandbox_ready_async(
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
-                break
+                return False
             try:
-                response = await client.get(f"{sandbox_url}/v1/sandbox", timeout=min(5.0, remaining))
-                if response.status_code == 200:
-                    return True
-            except httpx.RequestError:
-                pass
+                async with asyncio.timeout(remaining):
+                    response = await client.get(f"{sandbox_url}/v1/sandbox", timeout=min(_READY_REQUEST_TIMEOUT, remaining))
+            except (httpx.RequestError, TimeoutError):
+                response = None
+            if response is not None and response.status_code == 200:
+                return loop.time() <= deadline
             remaining = deadline - loop.time()
             if remaining <= 0:
-                break
+                return False
             await asyncio.sleep(min(poll_interval, remaining))
-    return False
 
 
 class SandboxBackend(ABC):

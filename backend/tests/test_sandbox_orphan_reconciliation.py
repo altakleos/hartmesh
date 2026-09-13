@@ -440,6 +440,7 @@ def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker
     provider._warm_pool_identity = {}
     provider._unowned_since = {}
     provider._local_teardown = set()
+    provider._starting = set()
     provider._acquire_epoch = {}
     provider._acquire_epoch_counter = 0
     provider._acquire_inflight = {}
@@ -1071,7 +1072,7 @@ def test_load_config_carries_the_stream_bridge_section():
     bridge = StreamBridgeConfig(type="redis", redis_url="redis://bridge:6379/0")
     app_config = MagicMock()
     app_config.stream_bridge = bridge
-    app_config.sandbox = MagicMock(ownership=None, image=None, port=None, container_prefix=None, idle_timeout=600, replicas=3, mounts=[], environment={})
+    app_config.sandbox = MagicMock(ownership=None, image=None, port=None, container_prefix=None, idle_timeout=600, ready_timeout=None, replicas=3, mounts=[], environment={})
 
     with patch.object(aio_mod, "get_app_config", return_value=app_config):
         loaded = provider._load_config()
@@ -1094,7 +1095,7 @@ def test_init_infers_redis_ownership_from_a_redis_stream_bridge():
     app_config = MagicMock()
     app_config.stream_bridge = StreamBridgeConfig(type="redis", redis_url="redis://bridge:6379/0")
     # No sandbox.ownership section at all: the deployment never configured one.
-    app_config.sandbox = MagicMock(ownership=None, image=None, port=None, container_prefix=None, idle_timeout=600, replicas=3, mounts=[], environment={})
+    app_config.sandbox = MagicMock(ownership=None, image=None, port=None, container_prefix=None, idle_timeout=600, ready_timeout=None, replicas=3, mounts=[], environment={})
 
     built: list = []
 
@@ -3055,3 +3056,91 @@ def test_reconcile_destroys_accepted_orphans_instead_of_adopting_them(tmp_path):
     assert "abc12345-accepted" not in provider._sandboxes
     assert "plain123" in provider._warm_pool
     assert provider._ownership.owner("abc12345-accepted") is None
+
+
+# ── P-z: a container is owned for its whole readiness wait ─────────────────
+
+
+def test_peer_reconciliation_defers_a_container_another_instance_is_still_starting():
+    """The create path takes the lease before it waits, so a peer sees an owner
+    for the whole readiness budget -- however that budget compares with the
+    adoption grace (on the released profile they are the same 120 seconds).
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = SandboxInfo(
+        sandbox_id="starting1",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-starting1",
+        created_at=time.time(),
+    )
+    worker_b._backend.list_running.return_value = [info]
+
+    # Instance A's create path, up to and including the start of its wait.
+    worker_a._mark_starting("starting1")
+    worker_a._own_before_readiness("starting1", info)
+    assert shared.owner("starting1") == "worker-a"
+
+    far_past_grace = time.time() + 10 * compute_lease_ttl(worker_b._ownership_config)
+    with patch.object(aio_mod.time, "time", return_value=far_past_grace):
+        worker_b._reconcile_orphans()
+        worker_b._reconcile_orphans()
+    assert "starting1" not in worker_b._warm_pool, "a peer adopted a container another instance was still waiting on"
+    assert shared.owner("starting1") == "worker-a"
+    worker_b._backend.destroy.assert_not_called()
+
+    # A's wait then times out: its fenced destroy runs under its own lease and
+    # releases it, so nothing is left for B to see.
+    worker_a._destroy_unready_sandbox("starting1", info)
+    worker_a._unmark_starting("starting1")
+    worker_a._backend.destroy.assert_called_once_with(info)
+    assert shared.owner("starting1") is None
+    assert worker_a._local_teardown == set() and worker_a._starting == set()
+
+
+def test_a_creator_that_dies_mid_start_still_leaves_an_adoptable_container():
+    """The pre-readiness lease is a lease, not a lock: a creator that crashes
+    during its wait stops renewing, the lease lapses, and after the recovery
+    grace a peer adopts the container exactly as for any other dead owner."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    shared = _make_shared_ownership_store(ttl_seconds=0.05)
+    dead = _make_provider_for_reconciliation(worker_id="worker-dead", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = SandboxInfo(
+        sandbox_id="dying1",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-dying1",
+        created_at=time.time(),
+    )
+    dead._mark_starting("dying1")
+    dead._own_before_readiness("dying1", info)
+    worker_b._backend.list_running.return_value = [info]
+
+    time.sleep(0.1)  # the creator died mid-wait; its lease lapses
+
+    now = time.time()
+    with patch.object(aio_mod.time, "time", return_value=now):
+        worker_b._reconcile_orphans()
+    assert "dying1" not in worker_b._warm_pool, "adopted a lapsed lease without waiting out the recovery grace"
+    with patch.object(aio_mod.time, "time", return_value=now + compute_lease_ttl(worker_b._ownership_config) + 1):
+        worker_b._reconcile_orphans()
+    assert "dying1" in worker_b._warm_pool
+    assert shared.owner("dying1") == "worker-b"
+
+
+def test_renewal_keeps_a_starting_containers_lease_alive_across_the_ttl():
+    """Renewal covers the starting set, so a wait longer than one TTL does not
+    let the pre-readiness lease lapse (the released budget is exactly one TTL)."""
+    shared = _make_shared_ownership_store(ttl_seconds=0.05)
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    info = SandboxInfo(sandbox_id="kept1", sandbox_url="http://localhost:8080", container_name="deer-flow-sandbox-kept1", created_at=time.time())
+    worker_a._mark_starting("kept1")
+    worker_a._own_before_readiness("kept1", info)
+    for _ in range(4):
+        time.sleep(0.03)
+        worker_a._renew_owned_leases()
+    assert shared.owner("kept1") == "worker-a"
+    time.sleep(0.1)
+    assert shared.owner("kept1") is None, "without renewal the lease lapses; the loop above is what kept it"

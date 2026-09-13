@@ -84,6 +84,13 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   seconds beyond a measured 134-second three-way concurrent gVisor start, and
   the liveness default keeps the 40-second refused-connection budget while
   allowing 61 seconds for a wedged listener (three 10-second probes).
+- The local Docker sandbox's cold-start budget is `sandbox.ready_timeout`
+  (default 60 s, validated, never disableable): both acquisition paths wait
+  that long on a monotonic clock, then destroy under the ownership fences. A
+  new container is owned and marked starting *before* the wait, so
+  reconciliation and renewal treat it as this instance's; a cancelled async
+  wait rolls back under the same fences. Live regression for the released
+  Compose limits under runsc: `tests/test_restricted_runsc_readiness_live.py`.
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway
   via `RunManager` + `run_agent()` + `StreamBridge`
   (`packages/harness/deerflow/runtime/`); Nginx exposes it at

@@ -57,7 +57,7 @@ OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
 # Optional keys compose.yaml never interpolates: they reach the Gateway
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
-PASSTHROUGH_KEYS = {"HARTMESH_MODELS_FILE"}
+PASSTHROUGH_KEYS = {"HARTMESH_MODELS_FILE", "SANDBOX_READY_TIMEOUT"}
 MEMORY_MIB = {"gateway": 1344, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256}
 NGINX_VARIABLES = {
     "$forwarded_proto",
@@ -559,6 +559,7 @@ def test_template_matches_the_example_version_provider_and_local_backend(render_
     assert template["sandbox"]["use"] == provider_line.group(1)
     assert "provisioner_url" not in template["sandbox"]
     assert template["sandbox"]["replicas"] == 2
+    assert template["sandbox"]["ready_timeout"] == 120, "the one-CPU gVisor cold start measured 80 to 91 s; the harness default of 60 destroyed every one (README: Sandbox readiness budget)"
     assert template["sandbox"]["image"].startswith("ghcr.io/altakleos/hartmesh-sandbox@sha256:"), "the tree carries digest pins between cuts"
     assert template["sandbox"]["network"]["allow_domains"] == ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com"]
     assert template["sandbox"]["network"]["approval"] == "prompt"
@@ -626,6 +627,55 @@ def test_render_selects_the_network_block_from_sandbox_egress(render_config: Mod
             render_config.render_text(template, fragments, {**_base_environ(), "SANDBOX_EGRESS": bad})
 
 
+def test_render_takes_the_readiness_budget_from_the_template_or_the_optional_key(render_config: ModuleType) -> None:
+    fragments = render_config.load_catalog(CATALOG)
+    template = TEMPLATE.read_text(encoding="utf-8")
+    for environ in (_base_environ(), {**_base_environ(), "SANDBOX_READY_TIMEOUT": ""}, {**_base_environ(), "SANDBOX_READY_TIMEOUT": "   "}):
+        rendered, _ = render_config.render_text(template, fragments, environ)
+        assert yaml.safe_load(rendered)["sandbox"]["ready_timeout"] == 120
+    for raw, expected in (("60", 60), ("90", 90), (" 300 ", 300), ("600", 600)):
+        rendered, _ = render_config.render_text(template, fragments, {**_base_environ(), "SANDBOX_READY_TIMEOUT": raw})
+        assert yaml.safe_load(rendered)["sandbox"]["ready_timeout"] == expected
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "59", "601", "120.5", "1e2", "abc", "inf", "nan", "true", "+120", "0x78", "\u0661\u0662\u0660", "120s", "120 60"])
+def test_render_refuses_a_readiness_budget_that_is_not_a_whole_number_of_seconds_in_range(render_config: ModuleType, bad: str) -> None:
+    """No `.env` value may disable or malform the cold-start deadline; a refusal
+    names the key and the rule, never what was typed."""
+    with pytest.raises(render_config.RenderError, match=r"SANDBOX_READY_TIMEOUT must be a whole number of seconds from 60 to 600") as excinfo:
+        render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), {**_base_environ(), "SANDBOX_READY_TIMEOUT": bad})
+    assert bad.strip() not in str(excinfo.value).replace("60 to 600", "")
+
+
+@pytest.mark.parametrize("bad", [0, 59, 601, "120", 120.5, True, None, "absent"])
+def test_render_refuses_a_template_whose_readiness_budget_is_not_a_whole_number_of_seconds_in_range(render_config: ModuleType, bad: object) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    if bad == "absent":
+        del template["sandbox"]["ready_timeout"]
+    else:
+        template["sandbox"]["ready_timeout"] = bad
+    with pytest.raises(render_config.RenderError, match=r"template `sandbox.ready_timeout` must be a whole number of seconds from 60 to 600"):
+        render_config.render(template, (), _base_environ())
+
+
+def test_check_mode_refuses_a_bad_readiness_budget_and_writes_nothing(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    for name, value in _base_environ().items():
+        monkeypatch.setenv(name, value)
+    output = tmp_path / "home" / "config.yaml"
+    monkeypatch.setenv("SANDBOX_READY_TIMEOUT", "90")
+    assert render_config.main(["--template", str(TEMPLATE), "--catalog", str(CATALOG), "--output", str(output)]) == 0
+    assert "sandbox ready_timeout=90s" in capsys.readouterr().out
+    assert yaml.safe_load(output.read_text(encoding="utf-8"))["sandbox"]["ready_timeout"] == 90
+    before = output.read_bytes()
+    monkeypatch.setenv("SANDBOX_READY_TIMEOUT", "0")
+    assert render_config.main(["--template", str(TEMPLATE), "--catalog", str(CATALOG), "--check"]) == 1
+    assert render_config.main(["--template", str(TEMPLATE), "--catalog", str(CATALOG), "--output", str(output)]) == 1
+    captured = capsys.readouterr()
+    assert "SANDBOX_READY_TIMEOUT must be a whole number of seconds from 60 to 600" in captured.err
+    assert output.read_bytes() == before, "a refused render must leave the last valid file in place"
+    assert sorted(child.name for child in output.parent.iterdir()) == ["config.yaml"], "no temporary output may survive a refusal"
+
+
 def test_render_refuses_a_template_reference_to_an_unset_variable(render_config: ModuleType) -> None:
     with pytest.raises(render_config.RenderError, match="DATABASE_URL"):
         render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), {})
@@ -645,6 +695,7 @@ def test_render_output_is_a_valid_app_config(render_config: ModuleType, monkeypa
     assert [model.name for model in config.models] == ["gpt-4", "gpt-5-responses"]
     assert config.sandbox.use == "deerflow.community.aio_sandbox:AioSandboxProvider"
     assert config.sandbox.replicas == 2
+    assert config.sandbox.ready_timeout == 120
     assert config.sandbox.network.mode == "allowlist"
     assert config.run_events.backend == "db"
 

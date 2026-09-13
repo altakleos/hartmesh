@@ -72,7 +72,7 @@ from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.skills.types import SkillCategory
 
 from .aio_sandbox import AioSandbox
-from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
+from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, SandboxBackend, normalize_ready_timeout, wait_for_sandbox_ready, wait_for_sandbox_ready_async
 from .local_backend import LocalContainerBackend
 from .ownership import (
     OwnershipBackendError,
@@ -100,6 +100,20 @@ DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
 # reusable thread sandbox.
 ACCEPTED_SANDBOX_ID_SUFFIX = "-accepted"
 IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
+
+
+def resolve_ready_timeout(configured: object) -> float:
+    """The readiness budget, in seconds, for ``sandbox.ready_timeout`` = *configured*.
+
+    ``None`` (the key absent) is the default, ``SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT``.
+    Anything else must be a finite positive number no larger than
+    ``SANDBOX_READY_TIMEOUT_MAX``. The config schema already enforces that; the
+    re-check here is what keeps a configuration object built without the schema
+    from disabling the deadline.
+    """
+    if configured is None:
+        return float(SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT)
+    return normalize_ready_timeout(configured)
 
 
 class SandboxBeingDestroyedError(RuntimeError):
@@ -221,6 +235,10 @@ class AioSandboxProvider(
         # our own lease by design — so `del:` says nothing to this process's own
         # threads. See _reserve_local_teardown / _acquire_epoch.
         self._local_teardown: set[str] = set()
+        # Containers this process has started and is still waiting on. The
+        # readiness wait is the one long window in which a running container is
+        # neither tracked nor warm; see _mark_starting.
+        self._starting: set[str] = set()
         self._acquire_epoch: dict[str, int] = {}
         self._acquire_epoch_counter = 0
         self._acquire_inflight: dict[str, int] = {}
@@ -336,6 +354,7 @@ class AioSandboxProvider(
             "port": sandbox_config.port or DEFAULT_PORT,
             "container_prefix": sandbox_config.container_prefix or DEFAULT_CONTAINER_PREFIX,
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
+            "ready_timeout": resolve_ready_timeout(getattr(sandbox_config, "ready_timeout", None)),
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
             "thread_data_mounts": getattr(sandbox_config, "thread_data_mounts", None),
@@ -390,6 +409,16 @@ class AioSandboxProvider(
 
     def sandbox_network_temporary_grant_ttl(self) -> int:
         return int(self._config.get("network", {}).get("temporary_grant_ttl", 300))
+
+    def sandbox_ready_timeout(self) -> float:
+        """The readiness budget, in seconds, every cold start on this provider gets.
+
+        Both acquisition paths (sync and async) wait exactly this long for a new
+        container's ``/v1/sandbox`` and destroy it, under the ownership fences,
+        when the budget runs out. Re-validated on every read so that no
+        configuration object can make it zero, negative or non-finite.
+        """
+        return resolve_ready_timeout(self._config.get("ready_timeout"))
 
     def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
         if not isinstance(self._backend, LocalContainerBackend):
@@ -492,6 +521,35 @@ class AioSandboxProvider(
     #              exactly as it honours a peer's `del:`.
     #   forgetting — a peer legitimately owns it and must win, so the promote is
     #              the thing to detect: compare the acquire epoch we decided on.
+
+    def _mark_starting(self, sandbox_id: str) -> None:
+        """Record that this process is creating *sandbox_id* and waiting on it.
+
+        Between ``backend.create`` and ``_register_created_sandbox`` a container
+        is running, untracked and not warm -- exactly the shape
+        ``_reconcile_orphans`` adopts. That window is the whole readiness
+        budget, and on the released Compose profile it is longer than the
+        ownership recovery grace (one lease TTL), so neither the grace nor the
+        maps can tell "still starting here" from "orphaned". Two marks cover
+        the two halves: this set is the same-process half (the idle checker's
+        reconciliation defers a starting id, and the renewal thread refreshes
+        its lease), and the ``own:`` lease the create path publishes before it
+        starts waiting is the cross-instance half (a peer's reconciliation sees
+        an owner and defers). Set before the container exists so there is no
+        instant at which the container is running and unmarked.
+        """
+        with self._lock:
+            self._starting.add(sandbox_id)
+
+    def _unmark_starting(self, sandbox_id: str) -> None:
+        """Drop the starting mark once the container is tracked or destroyed.
+
+        Ordering matters on the failure path: the mark must outlive the
+        ownership-fenced destroy, or reconciliation could adopt the container in
+        the instant between the readiness timeout and the teardown reservation.
+        """
+        with self._lock:
+            self._starting.discard(sandbox_id)
 
     def _reserve_local_teardown(self, sandbox_id: str, still_reapable: Callable[[], bool]) -> bool:
         """Reserve *sandbox_id* for teardown by this process.
@@ -811,6 +869,18 @@ class AioSandboxProvider(
 
         for info in running:
             age = current_time - info.created_at if info.created_at > 0 else float("inf")
+            with self._lock:
+                starting = info.sandbox_id in self._starting
+            if starting:
+                # This process started it and is waiting for it to become
+                # ready: not an orphan, not replaceable, not adoptable. The
+                # grace below cannot say so on its own (the memory store has
+                # none, and the released profile's budget is one TTL), and the
+                # accepted branch would otherwise stop an accepted sandbox
+                # while its own acquisition is mid-wait.
+                deferred += 1
+                logger.debug("Deferring container %s during reconciliation: this instance is still waiting for it to become ready", info.sandbox_id)
+                continue
             if info.requires_replacement:
                 if self._replace_incompatible_sandbox(info, current_time):
                     replaced += 1
@@ -1403,9 +1473,15 @@ class AioSandboxProvider(
         a lapsed one is re-established (see ``_refresh_ownership``). Conflating
         the two would evict every live sandbox on this instance the first time
         the store lost its state.
+
+        Covers containers still in their readiness wait as well: the create
+        path takes their lease before it starts waiting, and a wait longer than
+        the lease TTL (the released profile's budget is one TTL) would otherwise
+        let that lease lapse mid-start and hand a peer's reconciliation an
+        apparent orphan.
         """
         with self._lock:
-            owned_ids = list(self._sandboxes.keys()) + list(self._warm_pool.keys())
+            owned_ids = list(self._sandboxes.keys()) + list(self._warm_pool.keys()) + list(self._starting)
 
         for sandbox_id in owned_ids:
             # Snapshot before the round trip: by the time `renew()` answers LOST,
@@ -2830,12 +2906,14 @@ class AioSandboxProvider(
         """Tear down a freshly-created container whose readiness check failed.
 
         The container was started by the backend but never reached ready, so it
-        never entered ``_register_created_sandbox`` and the ownership store has
-        no lease for it yet. For the full readiness timeout (60s) it runs
-        unowned, which is exactly the window a peer gateway's startup
-        reconciliation is built to adopt across (#4206). Without a claim, a peer
-        that adopts the not-yet-ready Pod and then has this instance's stop land
-        on it is a cross-instance kill that interrupts an active turn (#4248).
+        never entered ``_register_created_sandbox``. The create path publishes
+        an ``own:`` lease before it starts waiting (see ``_mark_starting``), so
+        for the readiness budget the container is ours in the store; but a peer
+        can still have taken it over in the meantime (a retried turn for the
+        same thread that discovered the container once it answered, #4248), and
+        the registration-failure callers reach here with no lease at all.
+        Without a claim, a stop that lands on a container a peer has handed to a
+        turn is a cross-instance kill (#4206).
 
         Claim the teardown lease first so this reap path is gated by the same
         ownership guard as every other destroy (``_destroy_warm_entry``,
@@ -2938,32 +3016,78 @@ class AioSandboxProvider(
             create_kwargs["accepted_execution_claim"] = accepted_execution_claim
             if egress_allowance is not None:
                 create_kwargs["egress_allowance"] = egress_allowance
-        info = self._backend.create(
-            thread_id,
-            sandbox_id,
-            extra_mounts=extra_mounts or None,
-            user_id=effective_user_id,
-            provision_lark_cli_runtime=provision_lark_cli_runtime,
-            provision_lark_cli_broker=provision_lark_cli_broker,
-            **create_kwargs,
-        )
+        budget = self.sandbox_ready_timeout()
+        self._mark_starting(sandbox_id)
+        try:
+            info = self._backend.create(
+                thread_id,
+                sandbox_id,
+                extra_mounts=extra_mounts or None,
+                user_id=effective_user_id,
+                provision_lark_cli_runtime=provision_lark_cli_runtime,
+                provision_lark_cli_broker=provision_lark_cli_broker,
+                **create_kwargs,
+            )
+            self._own_before_readiness(sandbox_id, info)
 
-        # Wait for sandbox to be ready
-        readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
-        if not wait_for_sandbox_ready(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, **readiness_kwargs):
-            # The container is running but unowned: ownership is published by
-            # ``_register_created_sandbox`` after this gate. Claim the teardown
-            # lease before stopping it so a peer cannot adopt the not-yet-ready
-            # Pod in the meantime (#4248).
+            # Wait for sandbox to be ready
+            readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
+            if not wait_for_sandbox_ready(info.sandbox_url, timeout=budget, **readiness_kwargs):
+                # Ours in the store, but never handed out: tear it down under
+                # the same fences as every other reap, and fail closed if a
+                # peer took it over in the meantime (#4248).
+                self._destroy_unready_sandbox(sandbox_id, info)
+                raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within {budget:g}s at {info.sandbox_url}")
+
+            return self._register_created_sandbox(
+                identity_thread_id or thread_id,
+                sandbox_id,
+                info,
+                user_id=effective_user_id,
+            )
+        finally:
+            self._unmark_starting(sandbox_id)
+
+    def _own_before_readiness(self, sandbox_id: str, info: SandboxInfo) -> None:
+        """Take *sandbox_id*'s lease before waiting for it to become ready.
+
+        Registration takes the lease again once the container answers; taking
+        it here first is what stops a peer's reconciliation from adopting the
+        container mid-start (see ``_mark_starting``). Same fail-closed rule as
+        registration: a container whose ownership could not be published, or
+        whose id a peer is tearing down, is torn down under the fences (which
+        refuse if the store still cannot answer) and the acquisition fails now
+        rather than after a wait that cannot succeed.
+        """
+        try:
+            self._publish_ownership(sandbox_id)
+        except (OwnershipBackendError, SandboxBeingDestroyedError):
+            logger.error("Could not take ownership of new sandbox %s before its readiness wait; attempting ownership-fenced cleanup", sandbox_id)
             self._destroy_unready_sandbox(sandbox_id, info)
-            raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+            raise
 
-        return self._register_created_sandbox(
-            identity_thread_id or thread_id,
-            sandbox_id,
-            info,
-            user_id=effective_user_id,
-        )
+    async def _rollback_unready_after_cancellation(self, sandbox_id: str, info: SandboxInfo) -> None:
+        """Tear down a container whose readiness wait was cancelled.
+
+        The wait itself is cancellation-safe (the probe in flight is cancelled
+        and the client closed), but the container keeps running, owned by this
+        process and tracked nowhere; left alone it would sit unowned for a
+        lease TTL and then be adopted as a warm entry that may never answer. So
+        the same ownership-fenced destroy the timeout path uses runs here, in a
+        worker thread that a second cancellation cannot interrupt: the rollback
+        is drained to completion and the cancellation re-raised by the caller.
+        """
+        rollback = asyncio.ensure_future(asyncio.to_thread(self._destroy_unready_sandbox, sandbox_id, info))
+        while True:
+            try:
+                await asyncio.shield(rollback)
+                return
+            except asyncio.CancelledError:
+                if rollback.done():
+                    return
+            except Exception:
+                logger.warning("Ownership-fenced rollback of cancelled sandbox %s failed", sandbox_id, exc_info=True)
+                return
 
     async def _create_sandbox_async(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Async counterpart to ``_create_sandbox``."""
@@ -2989,34 +3113,45 @@ class AioSandboxProvider(
             create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
         if isinstance(self._backend, RemoteSandboxBackend):
             create_kwargs["skills_container_path"] = self._configured_skills_container_path()
-        info = await asyncio.to_thread(
-            self._backend.create,
-            thread_id,
-            sandbox_id,
-            extra_mounts=extra_mounts or None,
-            user_id=effective_user_id,
-            provision_lark_cli_runtime=provision_lark_cli_runtime,
-            provision_lark_cli_broker=provision_lark_cli_broker,
-            **create_kwargs,
-        )
+        budget = self.sandbox_ready_timeout()
+        self._mark_starting(sandbox_id)
+        try:
+            info = await asyncio.to_thread(
+                self._backend.create,
+                thread_id,
+                sandbox_id,
+                extra_mounts=extra_mounts or None,
+                user_id=effective_user_id,
+                provision_lark_cli_runtime=provision_lark_cli_runtime,
+                provision_lark_cli_broker=provision_lark_cli_broker,
+                **create_kwargs,
+            )
+            # Ownership is blocking store IO, offloaded like every other step here.
+            await asyncio.to_thread(self._own_before_readiness, sandbox_id, info)
 
-        # Wait for sandbox to be ready without blocking the event loop.
-        readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
-        if not await wait_for_sandbox_ready_async(
-            info.sandbox_url,
-            timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT,
-            **readiness_kwargs,
-        ):
-            # The container is running but unowned: ownership is published by
-            # ``_register_created_sandbox`` after this gate. Claim the teardown
-            # lease before stopping it so a peer cannot adopt the not-yet-ready
-            # Pod in the meantime (#4248).
-            await asyncio.to_thread(self._destroy_unready_sandbox, sandbox_id, info)
-            raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+            # Wait for sandbox to be ready without blocking the event loop.
+            readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
+            try:
+                ready = await wait_for_sandbox_ready_async(
+                    info.sandbox_url,
+                    timeout=budget,
+                    **readiness_kwargs,
+                )
+            except asyncio.CancelledError:
+                await self._rollback_unready_after_cancellation(sandbox_id, info)
+                raise
+            if not ready:
+                # Ours in the store, but never handed out: tear it down under
+                # the same fences as every other reap, and fail closed if a
+                # peer took it over in the meantime (#4248).
+                await asyncio.to_thread(self._destroy_unready_sandbox, sandbox_id, info)
+                raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within {budget:g}s at {info.sandbox_url}")
 
-        # Registration publishes ownership (blocking store IO), so it is offloaded
-        # like every other blocking step on this path.
-        return await asyncio.to_thread(self._register_created_sandbox, thread_id, sandbox_id, info, user_id=effective_user_id)
+            # Registration publishes ownership (blocking store IO), so it is offloaded
+            # like every other blocking step on this path.
+            return await asyncio.to_thread(self._register_created_sandbox, thread_id, sandbox_id, info, user_id=effective_user_id)
+        finally:
+            self._unmark_starting(sandbox_id)
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         """Get a sandbox by ID. Updates last activity timestamp.

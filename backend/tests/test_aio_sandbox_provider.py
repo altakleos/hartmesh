@@ -596,6 +596,7 @@ def _make_provider(tmp_path):
         provider._warm_pool_identity = {}
         provider._last_activity = {}
         provider._local_teardown = set()
+        provider._starting = set()
         provider._acquire_epoch = {}
         provider._acquire_epoch_counter = 0
         provider._acquire_inflight = {}
@@ -1755,6 +1756,7 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
     provider._thread_sandboxes = {}
     provider._last_activity = {sandbox_id: 0.0}
     provider._local_teardown = set()
+    provider._starting = set()
     provider._acquire_epoch = {}
     provider._acquire_epoch_counter = 0
     provider._acquire_inflight = {}
@@ -2533,8 +2535,8 @@ def test_create_sandbox_passes_request_headers_to_readiness_only_when_present(tm
     assert provider._create_sandbox("thread-p", "sb-p", user_id="alice") == "sb-p"
 
     assert readiness_calls == [
-        ("http://sb-h", {"timeout": aio_mod.SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, "headers": headers}),
-        ("http://sb-p", {"timeout": aio_mod.SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT}),
+        ("http://sb-h", {"timeout": provider.sandbox_ready_timeout(), "headers": headers}),
+        ("http://sb-p", {"timeout": provider.sandbox_ready_timeout()}),
     ]
 
 
@@ -2560,6 +2562,390 @@ async def test_create_sandbox_async_passes_request_headers_to_readiness_only_whe
     assert await provider._create_sandbox_async("thread-p", "sb-p", user_id="alice") == "sb-p"
 
     assert readiness_calls == [
-        ("http://sb-h", {"timeout": aio_mod.SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, "headers": headers}),
-        ("http://sb-p", {"timeout": aio_mod.SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT}),
+        ("http://sb-h", {"timeout": provider.sandbox_ready_timeout(), "headers": headers}),
+        ("http://sb-p", {"timeout": provider.sandbox_ready_timeout()}),
     ]
+
+
+# --- P-z: the readiness budget is configured, and ownership precedes the wait ---
+
+
+class _TrackedSandbox:
+    """Stand-in for ``AioSandbox`` so registration builds no HTTP client."""
+
+    def __init__(self, **kwargs):
+        self.id = kwargs["id"]
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize(("configured", "expected"), [(None, 60.0), (120, 120.0), (90.5, 90.5)])
+def test_create_sandbox_waits_for_the_effective_budget_and_names_it_on_failure(tmp_path, monkeypatch, configured, expected):
+    """The sync path hands the configured budget to the poller and says how long it waited."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, unready_info = _make_unready_destroy_provider(tmp_path, sandbox_id="budget", base_url="http://budget", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    if configured is not None:
+        provider._config["ready_timeout"] = configured
+    budgets: list[float] = []
+
+    def fake_ready(_url, *, timeout, **_kwargs):
+        budgets.append(timeout)
+        return False
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", fake_ready)
+
+    with pytest.raises(RuntimeError, match=rf"failed to become ready within {expected:g}s"):
+        provider._create_sandbox("thread-budget", "budget", user_id="user-budget")
+
+    assert budgets == [expected]
+    provider._backend.destroy.assert_called_once_with(unready_info)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("configured", "expected"), [(None, 60.0), (120, 120.0)])
+async def test_create_sandbox_async_waits_for_the_effective_budget_and_names_it_on_failure(tmp_path, monkeypatch, configured, expected):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, unready_info = _make_unready_destroy_provider(tmp_path, sandbox_id="budget-async", base_url="http://budget-async", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    if configured is not None:
+        provider._config["ready_timeout"] = configured
+    budgets: list[float] = []
+
+    async def fake_ready(_url, *, timeout, **_kwargs):
+        budgets.append(timeout)
+        return False
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", fake_ready)
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("sync readiness should not be used")))
+
+    with pytest.raises(RuntimeError, match=rf"failed to become ready within {expected:g}s"):
+        await provider._create_sandbox_async("thread-budget", "budget-async", user_id="user-budget")
+
+    assert budgets == [expected]
+    provider._backend.destroy.assert_called_once_with(unready_info)
+
+
+def test_create_sandbox_refuses_to_wait_under_a_budget_that_is_not_a_deadline(tmp_path, monkeypatch):
+    """A zero budget must not become 'no deadline': nothing is created and nothing waits."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, _ = _make_unready_destroy_provider(tmp_path, sandbox_id="no-deadline", base_url="http://no-deadline", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    provider._config["ready_timeout"] = 0
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not wait")))
+
+    with pytest.raises(ValueError, match="readiness budget"):
+        provider._create_sandbox("thread-no-deadline", "no-deadline", user_id="user")
+
+    provider._backend.create.assert_not_called()
+    assert provider._starting == set()
+
+
+def test_create_sandbox_owns_and_marks_the_container_for_the_whole_wait(tmp_path, monkeypatch):
+    """Ownership is published and the starting mark held *before* the poller
+    runs, and both are gone once the container is tracked as active.
+
+    Registration used to be the first time the store heard of the container,
+    so for the whole readiness budget it looked like an orphan. On the released
+    profile that budget is one lease TTL, which is exactly the adoption grace.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="owned-early", base_url="http://owned-early", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    monkeypatch.setattr(aio_mod, "AioSandbox", _TrackedSandbox)
+    observed: dict[str, object] = {}
+
+    def fake_ready(_url, *, timeout, **_kwargs):
+        observed["owner"] = provider._ownership.owner("owned-early")
+        with provider._lock:
+            observed["starting"] = "owned-early" in provider._starting
+        return True
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", fake_ready)
+
+    assert provider._create_sandbox("thread-early", "owned-early", user_id="user-early") == "owned-early"
+
+    assert observed == {"owner": provider._owner_id, "starting": True}
+    assert "owned-early" in provider._sandboxes and "owned-early" not in provider._warm_pool
+    assert provider._starting == set()
+    assert provider._ownership.owner("owned-early") == provider._owner_id
+    provider._backend.destroy.assert_not_called()
+
+
+def test_create_sandbox_marks_the_container_before_the_backend_starts_it(tmp_path, monkeypatch):
+    """The mark must precede ``docker run``: a reconciliation that lists the
+    container in the instant after it exists and before the mark would adopt it."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="early-mark", base_url="http://early-mark", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    seen: list[bool] = []
+
+    def create_spy(*_args, **_kwargs):
+        with provider._lock:
+            seen.append("early-mark" in provider._starting)
+        return info
+
+    provider._backend.create.side_effect = create_spy
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: False)
+
+    with pytest.raises(RuntimeError, match="failed to become ready"):
+        provider._create_sandbox("thread-mark", "early-mark", user_id="user-mark")
+
+    assert seen == [True]
+    assert provider._starting == set()
+
+
+def test_reconciliation_during_the_wait_defers_the_starting_container(tmp_path, monkeypatch):
+    """The idle checker's reconciliation fires while the create path is still
+    polling. It must neither adopt the container (a dead warm entry when the
+    wait then times out, or a double-tracked one when it succeeds) nor block
+    the timeout destroy that follows.
+
+    The memory store is the sharpest case: it has no adoption grace at all.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="starting", base_url="http://starting", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    provider._unowned_since = {}
+    provider._backend.list_running = MagicMock(return_value=[info])
+    adopted_mid_wait: list[bool] = []
+
+    def fake_ready(_url, *, timeout, **_kwargs):
+        provider._reconcile_orphans()
+        adopted_mid_wait.append("starting" in provider._warm_pool)
+        return False
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", fake_ready)
+
+    with pytest.raises(RuntimeError, match="failed to become ready"):
+        provider._create_sandbox("thread-starting", "starting", user_id="user-starting")
+
+    assert adopted_mid_wait == [False], "reconciliation adopted a container this instance was still waiting on"
+    provider._backend.destroy.assert_called_once_with(info)
+    assert "starting" not in provider._warm_pool and "starting" not in provider._sandboxes
+    assert provider._starting == set() and provider._local_teardown == set()
+    assert provider._ownership.owner("starting") is None, "the teardown lease must be released after the stop"
+
+
+def test_reconciliation_still_adopts_a_container_whose_creator_is_gone(tmp_path, monkeypatch):
+    """The mark is per process and per wait: once the create path has left,
+    the same container is an ordinary orphan again (the crash-before-readiness
+    case ``test_reconcile_adopts_unready_container_when_no_teardown_is_in_flight`` pins)."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="left-behind", base_url="http://left-behind", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    provider._unowned_since = {}
+    provider._backend.list_running = MagicMock(return_value=[info])
+    provider._mark_starting("left-behind")
+    provider._reconcile_orphans()
+    assert "left-behind" not in provider._warm_pool
+    provider._unmark_starting("left-behind")
+    provider._reconcile_orphans()
+    assert "left-behind" in provider._warm_pool
+
+
+def test_lease_renewal_covers_a_container_still_in_its_readiness_wait(tmp_path, monkeypatch):
+    """A wait longer than the lease TTL must not let the pre-readiness lease
+    lapse, or a peer's reconciliation sees an orphan mid-start."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="renewing", base_url="http://renewing", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    renewed: list[str] = []
+    real_refresh = provider._refresh_ownership
+
+    def refresh_spy(sandbox_id):
+        renewed.append(sandbox_id)
+        return real_refresh(sandbox_id)
+
+    provider._refresh_ownership = refresh_spy
+
+    def fake_ready(_url, *, timeout, **_kwargs):
+        provider._renew_owned_leases()
+        return False
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", fake_ready)
+
+    with pytest.raises(RuntimeError, match="failed to become ready"):
+        provider._create_sandbox("thread-renew", "renewing", user_id="user-renew")
+
+    assert renewed == ["renewing"]
+    provider._backend.destroy.assert_called_once_with(info)
+
+
+def test_create_sandbox_fails_before_waiting_when_ownership_cannot_be_published(tmp_path, monkeypatch):
+    """Fail closed, and fail early: a wait that cannot end in a registered
+    sandbox is not started, and unknown ownership is not permission to stop."""
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
+
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="store-down", base_url="http://store-down", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    provider._ownership = MagicMock()
+    provider._ownership.take.side_effect = OwnershipBackendError("store down")
+    provider._ownership.claim.side_effect = OwnershipBackendError("store still down")
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not wait for a sandbox it cannot own")))
+
+    with pytest.raises(OwnershipBackendError, match="store down"):
+        provider._create_sandbox("thread-down", "store-down", user_id="user-down")
+
+    provider._backend.create.assert_called_once()
+    provider._backend.destroy.assert_not_called()
+    provider._ownership.claim.assert_called_once_with("store-down", for_destroy=True)
+    assert provider._starting == set()
+    assert "store-down" not in provider._sandboxes and "store-down" not in provider._warm_pool
+
+
+@pytest.mark.anyio
+async def test_create_sandbox_async_fails_before_waiting_when_ownership_cannot_be_published(tmp_path, monkeypatch):
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
+
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="store-down-async", base_url="http://store-down-async", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    provider._ownership = MagicMock()
+    provider._ownership.take.side_effect = OwnershipBackendError("store down")
+    provider._ownership.claim.side_effect = OwnershipBackendError("store still down")
+
+    async def must_not_wait(*_a, **_k):
+        raise AssertionError("must not wait for a sandbox it cannot own")
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", must_not_wait)
+
+    with pytest.raises(OwnershipBackendError, match="store down"):
+        await provider._create_sandbox_async("thread-down", "store-down-async", user_id="user-down")
+
+    provider._backend.destroy.assert_not_called()
+    assert provider._starting == set()
+
+
+def test_create_sandbox_fails_before_waiting_when_a_peer_is_destroying_the_id(tmp_path, monkeypatch):
+    """A lingering ``del:`` marker refuses the pre-readiness take, and the
+    container is left for ownership-fenced reconciliation, exactly as the
+    post-readiness registration already did."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="peer-del", base_url="http://peer-del", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    provider._ownership = MagicMock()
+    provider._ownership.take.return_value = False
+    provider._ownership.claim.return_value = False
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not wait")))
+
+    with pytest.raises(aio_mod.SandboxBeingDestroyedError):
+        provider._create_sandbox("thread-del", "peer-del", user_id="user-del")
+
+    provider._backend.destroy.assert_not_called()
+    assert provider._starting == set()
+
+
+def test_unready_destroy_leaves_the_container_when_the_store_cannot_answer(tmp_path, monkeypatch):
+    """The timeout path on an ownership outage: the container is ours in the
+    store from before the wait, but a claim that raises is 'unknown', not
+    'ours', so the stop is refused and reported."""
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
+
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="claim-down", base_url="http://claim-down", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    real_claim = provider._ownership.claim
+
+    def failing_claim(sandbox_id, *, for_destroy=False):
+        if for_destroy:
+            raise OwnershipBackendError("store down at teardown")
+        return real_claim(sandbox_id, for_destroy=for_destroy)
+
+    provider._ownership.claim = failing_claim
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: False)
+
+    with pytest.raises(RuntimeError, match="failed to become ready"):
+        provider._create_sandbox("thread-claim", "claim-down", user_id="user-claim")
+
+    provider._backend.destroy.assert_not_called()
+    assert provider._starting == set() and provider._local_teardown == set()
+
+
+@pytest.mark.anyio
+async def test_cancelling_the_async_wait_rolls_the_container_back_under_the_fences(tmp_path, monkeypatch):
+    """A cancelled acquisition must not leave a running, untracked container
+    for a lease TTL. The rollback is the same ownership-fenced destroy the
+    timeout path uses; the starting mark outlives it; the cancellation
+    propagates."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="cancelled", base_url="http://cancelled", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    entered = asyncio.Event()
+
+    async def hanging_wait(_url, *, timeout, **_kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", hanging_wait)
+    snapshots: list[tuple[object, bool]] = []
+
+    def destroy_spy(destroyed):
+        snapshots.append((provider._ownership._leases.get(destroyed.sandbox_id), destroyed.sandbox_id in provider._starting))
+
+    provider._backend.destroy.side_effect = destroy_spy
+
+    task = asyncio.ensure_future(provider._create_sandbox_async("thread-cancel", "cancelled", user_id="user-cancel"))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    provider._backend.destroy.assert_called_once_with(info)
+    [(lease, still_marked)] = snapshots
+    assert lease is not None and lease.owner_id == provider._owner_id and lease.destroying is True
+    assert still_marked is True, "the starting mark must outlive the fenced destroy"
+    assert provider._starting == set() and provider._local_teardown == set()
+    assert "cancelled" not in provider._sandboxes and "cancelled" not in provider._warm_pool
+    assert provider._ownership.owner("cancelled") is None
+
+
+@pytest.mark.anyio
+async def test_a_second_cancellation_does_not_interrupt_the_rollback(tmp_path, monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="cancelled-twice", base_url="http://cancelled-twice", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    entered = asyncio.Event()
+
+    async def hanging_wait(_url, *, timeout, **_kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", hanging_wait)
+    destroying = threading.Event()
+    release_destroy = threading.Event()
+
+    def blocking_destroy(_destroyed):
+        destroying.set()
+        assert release_destroy.wait(timeout=5)
+
+    provider._backend.destroy.side_effect = blocking_destroy
+
+    task = asyncio.ensure_future(provider._create_sandbox_async("thread-twice", "cancelled-twice", user_id="user-twice"))
+    await entered.wait()
+    task.cancel()
+    await asyncio.to_thread(destroying.wait, 5)
+    task.cancel()  # again, while the fenced destroy is mid-stop
+    await asyncio.sleep(0.05)
+    assert not task.done(), "the rollback must be drained before the cancellation propagates"
+    release_destroy.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    provider._backend.destroy.assert_called_once_with(info)
+    assert provider._starting == set() and provider._local_teardown == set()
+
+
+@pytest.mark.anyio
+async def test_cancelling_the_async_wait_leaves_a_peer_owned_container_alone(tmp_path, monkeypatch):
+    """Cancellation rollback is fenced like every other reap: if a peer took
+    the container over during the wait (a retried turn that discovered it),
+    the stop is refused."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, info = _make_unready_destroy_provider(tmp_path, sandbox_id="peer-took", base_url="http://peer-took", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    entered = asyncio.Event()
+
+    async def hanging_wait(_url, *, timeout, **_kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", hanging_wait)
+    task = asyncio.ensure_future(provider._create_sandbox_async("thread-peer", "peer-took", user_id="user-peer"))
+    await entered.wait()
+    # A peer takes the lease mid-wait.
+    provider._ownership.claim = lambda _sid, *, for_destroy=False: False
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    provider._backend.destroy.assert_not_called()
+    assert provider._starting == set()
