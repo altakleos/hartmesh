@@ -59,7 +59,9 @@ def test_wait_for_sandbox_ready_applies_headers_once_on_the_session(monkeypatch:
 
     assert readiness.wait_for_sandbox_ready("http://sandbox", timeout=1, headers=HEADERS) is True
     assert sessions[-1].headers == HEADERS
-    assert sessions[-1].calls == [("http://sandbox/v1/sandbox", {"timeout": 5})]
+    [(url, kwargs)] = sessions[-1].calls
+    assert url == "http://sandbox/v1/sandbox"
+    assert 0 < kwargs["timeout"] <= 1, "each probe is clamped to what is left of the one-second budget"
 
     assert readiness.wait_for_sandbox_ready("http://sandbox", timeout=1) is True
     assert sessions[-1].headers == {}

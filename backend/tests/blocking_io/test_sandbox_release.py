@@ -92,6 +92,7 @@ def _make_provider_with_active_sandbox(tmp_path: Path, sandbox_id: str):
     provider._warm_pool_identity = {}
     provider._unowned_since = {}
     provider._local_teardown = set()
+    provider._starting = set()
     provider._acquire_epoch = {}
     provider._acquire_epoch_counter = 0
     provider._acquire_inflight = {}

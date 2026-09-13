@@ -71,6 +71,7 @@ get explicit `environment:` entries and never see a provider key.
 | --- | --- |
 | `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
+| `SANDBOX_READY_TIMEOUT` | The cold-start readiness budget, `sandbox.ready_timeout` in the rendered `config.yaml`: whole seconds from 60 to 600. Absent -- which is what every existing tenant `.env` is -- the template's 120 applies. Anything else (zero, a negative or fractional number, text, a value outside the range) refuses to render and the Gateway does not start, so no value can turn the deadline off (§ "Sandbox readiness budget"). |
 | `HARTMESH_SANDBOX_RESOLV_CONF` | The Docker host's upstream DNS file, default `/run/systemd/resolve/resolv.conf` on the Debian tenant VM. The Gateway receives a read-only view; open-mode runsc sandboxes bind the validated file at `/etc/resolv.conf`. On hosts without systemd-resolved, select an existing resolver file containing reachable upstream IP addresses. A loopback stub file is refused (§ "DNS under gVisor"). |
 
 These are absent from `.env.example`: the fixed keys are what onboarding
@@ -82,10 +83,10 @@ creating an empty directory in its place.
 They reach the stack by different routes, on purpose. Both `HARTMESH_APP_SUBNET`
 uses are the same `${HARTMESH_APP_SUBNET:-...}` reference, so an override
 cannot move the network without moving the Gateway's trust with it.
-`HARTMESH_MODELS_FILE` is not interpolated by `compose.yaml` at all: it reaches
-the Gateway through `env_file` and is read inside the container, so leaving it
-unset is simply an unset variable rather than a hole in the rendered Compose
-document.
+`HARTMESH_MODELS_FILE` and `SANDBOX_READY_TIMEOUT` are not interpolated by
+`compose.yaml` at all: they reach the Gateway through `env_file` and are read
+inside the container by `gateway/render_config.py`, so leaving either unset is
+simply an unset variable rather than a hole in the rendered Compose document.
 The resolver source and its Gateway environment value share the same
 interpolation, so validation reads the file Docker will bind into the sandbox.
 
@@ -389,6 +390,121 @@ seams added to the backend for this profile:
 | `DEER_FLOW_SANDBOX_CPUS` | `1` | Two sandboxes plus two proxies at `--cpus 1` sum to the guest's four vCPUs. |
 | `DEER_FLOW_SANDBOX_PIDS_LIMIT` | `384` | The sandbox image idles at 198 processes (Chromium, Jupyter, node, supervisord) and peaked at 232 during a measured bash-plus-browser turn; 384 leaves 1.6x headroom over that peak while still bounding a fork bomb. |
 | `DEER_FLOW_SANDBOX_PROXY_MEMORY` | `96m` | The sidecar's cgroup peaked at 48 MiB (process high-water mark 33 MiB) during the same turn; 96 MiB is twice that peak, with `--memory-swap` equal. |
+
+### Sandbox readiness budget
+
+A cold start is `docker run` (the two networks, the relay sidecar, then the
+sandbox container) followed by the Gateway polling the new sandbox's
+`/v1/sandbox` through the authenticated relay. The polling has a budget,
+`sandbox.ready_timeout`, and a sandbox that has not answered `200` by the end
+of it is destroyed under the ownership fences and the acquisition fails: the
+turn gets an error, never a hang. Both acquisition paths (the synchronous one
+tools use and the asynchronous one the run middleware uses) enforce the same
+value. The harness default is 60 seconds and, until 2026-09-12, it was a
+constant. This profile sets **120** in `config.yaml`.
+
+**Why.** On the four-vCPU tenant VM class, with the released image
+(`sha256:60c696...`), `runsc` release-20260831.0 (systrap) and Docker 29.8.0,
+the sandbox at the released limits (`--cpus 1`, 1 GiB, 384 pids, uid 1000,
+`--cap-drop=ALL`, no-new-privileges, built-in seccomp) answered `200` after
+80.119 s and 91.139 s, measured from the moment `create` returned with a
+three-second request timeout; changing only the CPU quota to two brought that
+to 33.631 s and 37.324 s. One-CPU runs showed CPU throttling in 98 to 99 % of
+sampled periods and no memory pressure, memory-limit, OOM or OOM-kill event:
+the service simply progresses through its imports and session initialisation
+at one CPU's pace, and the inner nginx serves once it is ready. So at the
+fixed 60 every one-CPU cold start on that class was destroyed at 60 s, by
+design, while a two-CPU sandbox created for the test and returned to one CPU
+at readiness completed a public hello (streamed output, one model call, a
+stored answer) in 46.963 s. Nothing about the model, keys, egress, runtime or
+Gateway configuration was involved. These figures compared CPU quotas on one
+installed runtime; they say nothing about any particular `runsc` release.
+
+**The setting.** `SANDBOX_READY_TIMEOUT` in the tenant `.env` overrides the
+template: whole seconds, 60 to 600 inclusive, absent means 120. The floor is
+the harness default (a smaller budget has never been useful on any host); the
+ceiling keeps one cold start inside a single nginx `proxy_read_timeout` window
+(600 s in the shipped `nginx.conf`) so the front door cannot cut off a turn
+that is still waiting for its sandbox. Any other value, including `0`, refuses
+to render: the Gateway does not start, the last rendered `config.yaml` stays,
+and the refusal names the key and the rule. The backend validates the rendered
+value again (`sandbox.ready_timeout`: finite, greater than 0, at most 3600;
+zero, negative, `.inf`, `.nan`, booleans and text refuse to load). There is no
+value on either side that disables the deadline. `render_config.py --check`
+prints the effective value (`sandbox ready_timeout=...s`).
+
+**What the deadline means.** It runs on a monotonic clock, so a wall-clock
+step or a suspended guest neither extends nor shortens it. Every probe and
+every sleep is clamped to what is left of it; on the asynchronous path each
+probe is additionally bounded as a whole (httpx timeouts are per phase, and a
+reply that dripped a byte at a time would never trip them). A `200` that lands
+after the deadline has passed is not a success: the container is destroyed as
+if it had never answered. A cancelled asynchronous acquisition (the run
+middleware's lease manager shields the acquire from client disconnects and
+drains it, so this is the direct-provider path) tears its container down under
+the same fences before the cancellation propagates.
+
+**Ownership during startup.** The provider used to publish ownership only
+after readiness, so a starting container ran unowned for the whole budget.
+On this profile ownership is in Redis (inferred from the stream bridge), and
+a peer's or this instance's own reconciliation adopts an unowned container
+once it has stayed unowned for one lease TTL: 30 s renewal × 4 = **120 s**,
+the same as the new budget, so a longer wait would have made a starting
+container adoptable mid-start (a dead warm entry when the wait then timed
+out, or a container stopped underneath its own registration). Now the lease
+is taken before the wait starts and renewed during it, and the container is
+marked as starting in-process before `docker run`, so reconciliation defers
+it and the lease renewal thread keeps it. A creator that dies mid-wait stops
+renewing, its lease lapses, and after the grace a peer adopts the container
+exactly as before. Every teardown on the timeout, cancellation and
+registration-failure paths still claims the teardown lease first and fails
+closed when a peer owns the container or the store cannot answer; where the
+fences refuse, the container is left for reconciliation and the refusal is
+logged (`Not destroying unready sandbox ...`), never reported as a clean stop.
+
+**Cleanup allowance.** After the budget the fenced teardown stops the sandbox
+and the sidecar (Docker's 10 s SIGKILL escalation each), removes the sidecar
+and both networks; the documented allowance is **60 s** on top of the budget,
+and the never-ready control in the live regression asserts it. The hard
+bounds behind it are the backend's per-stop timeout (120 s, for a wedged
+daemon) and 15 s per removal.
+
+**Related deadlines, checked.** nginx proxies `/api/*` with 600 s connect,
+send and read timeouts; the chart's provisioner startup probe (200 s) is a
+different backend and unchanged; the adoption probe `discover()` runs on a
+warm container and keeps its 5 s; `idle_timeout`, the tool command timeouts
+and the shutdown phases are unaffected.
+
+**What 120 is and is not.** It is the initial candidate the estate evaluates,
+chosen as roughly a third above the slower of the two observed one-CPU starts.
+One 91-second success on one VM does not establish a fleet-wide bound.
+Acceptance needs repeated cold starts on representative Intel and AMD VM
+hosts, serially and with two sandboxes starting concurrently, each capped at
+one CPU, recording the `create` duration separately from the readiness poll,
+the sample count, every observed latency and the margin against the effective
+deadline; if the margin is inadequate the evidence is what to report, and the
+budget (or the fleet's CPU allocation, a separate capacity decision) is what
+changes. The live regression prints exactly those records:
+
+```sh
+cd backend && PYTHONPATH=. HARTMESH_READINESS_SAMPLES=5 \
+  uv run pytest -m live tests/test_restricted_runsc_readiness_live.py -s -v
+```
+
+It needs a Docker 28+ daemon with a registered `runsc` runtime and skips
+anywhere else (a skip is an unpassed gate, not a pass). It builds the released
+topology from this directory's `config.yaml` and `compose.yaml` (image and
+proxy digests, allowlist, limits, hardening) through the real provider, on
+both acquisition paths and with two concurrent starts; it requires readiness
+within the profile's own budget, resolved by the same function the Gateway
+uses; on failure it prints the inner listener state and the python-server and
+nginx program logs with the relay token redacted; it checks that a missing
+and a wrong relay token are refused; and a never-ready control (the image with
+its service port set to 1, which uid 1000 cannot bind) must fail within the
+budget plus the cleanup allowance with the sandbox, sidecar and both networks
+gone. A warm diagnostic sandbox or a temporary CPU increase satisfies none of
+this. Changing the fleet's CPU allocation, adding a startup burst or slimming
+the image are separate capacity and tool-surface decisions.
 
 ## Memory budget
 
@@ -1493,3 +1609,52 @@ printed `b'FAKE-...': invalid_key`.
   both CLI modes.
 - CLI-only again, for the same reason: no change to acceptance, so the Gateway
   drill was not repeated.
+
+Readiness budget (2026-09-12 and 2026-09-13, P-z). The repair above (a
+configured budget, ownership before the wait, a deadline that is a deadline)
+was proved on this development host, which is **not** a tenant VM: a Proxmox
+host on an Intel Xeon Gold 6138 at 2.0 GHz with 8 vCPUs and 24 GiB visible to
+the daemon, kernel 7.0.12-1-pve, Docker Engine 28.4.0, `runsc`
+release-20260817.0 (systrap). The estate's observation was a four-vCPU KVM
+guest on `runsc` release-20260831.0 and Docker 29.8.0, so the figures below are
+one Intel data point on a faster and differently virtualised machine, not the
+fleet-wide bound the acceptance gate asks for; no AMD host and no VM-class host
+was available here.
+
+- The offline suites: 455 in the provider, reconciliation, readiness, budget and
+  compose files (including 30 new ones), 231 in the neighbouring sandbox
+  suites, 107 in the blocking-I/O gate; ruff clean; agent guidance 0 errors.
+- The live regression (`pytest -m live tests/test_restricted_runsc_readiness_live.py`,
+  one sample): 5 passed in 8 m 45 s. Every sandbox inspected as `Runtime=runsc`,
+  `NanoCpus=1e9`, `Memory=MemorySwap=1 GiB`, `PidsLimit=384`, `User=1000:1000`,
+  `CapDrop=[ALL]`, no `CapAdd`, `no-new-privileges` and `seccomp=builtin`, no
+  published port, on its internal network only; the sidecar on the internal
+  and egress networks, published on `127.0.0.1` only, on the daemon's default
+  runtime. A missing relay token answered 401 or 403, a wrong one likewise,
+  the right one 200. Sync path: `create` 6.4 s, ready after 57.4 s (53
+  probes), margin 62.6 s. Async path: 5.6 s, 49.6 s (46 probes), margin
+  70.4 s. Two concurrent starts: 23.0 s and 25.4 s. Never-ready control
+  (service port 1), sync and async: the acquisition raised `failed to become
+  ready within 120s` after 144.0 s and 142.9 s in total (`create` 4.2 s and
+  4.3 s, the 120 s budget, cleanup 19.9 s and 18.6 s against the 60 s
+  allowance); the diagnostics taken while it ran carried the inner listener
+  table and the python-server and nginx logs and not the relay token; the
+  sandbox, sidecar and both networks were gone afterwards, the fences never
+  refused, no lease or mark remained.
+- Repeated cold starts (`HARTMESH_READINESS_SAMPLES=5`, 3 passed in 19 m 40 s),
+  readiness measured after `create` returned, each at one CPU. Serial, sync:
+  45.3 / 48.0 / 48.3 / 50.2 / 53.4 s (40 to 49 probes, `create` 4.3 to 4.8 s),
+  worst margin 66.6 s. Serial, async: 49.0 / 51.5 / 51.8 / 53.5 / 53.7 s (40
+  to 48 probes), worst margin 66.3 s. Concurrent pairs: 35.3 + 38.3, 29.9 +
+  29.1, 30.7 + 29.6, 32.7 + 30.4, 36.3 + 33.8 s, worst margin 81.7 s. On this
+  host the image was in the page cache from the first sample on; a rebooted
+  guest is colder. The concurrent starts being faster than the serial ones was
+  observed, not explained, and is the opposite of what a shared four-vCPU
+  guest should be expected to show.
+- Not proved here, and the estate's gate: readiness on the tenant VM classes
+  (Intel and AMD, four vCPUs, nested `runsc`) serially and in concurrent
+  pairs, with the margin against 120 s recorded per start; a cold chat and a
+  tool execution through the Gateway; post-reboot acceptance on the drill
+  tenant. The two 80 to 91 s observations that motivated this change give
+  120 s roughly a third of margin on that class; whether that holds across
+  the fleet is what those runs decide.

@@ -64,6 +64,14 @@ sandbox:
   # image under gVisor takes tens of seconds, so idle sandboxes are kept warm
   # for 30 minutes; a third thread still evicts the least recently used one.
   idle_timeout: 1800
+  # Cold-start readiness budget, in seconds: the provider polls a new
+  # sandbox's /v1/sandbox for this long and destroys it when the budget runs
+  # out. At `--cpus 1` under gVisor the released image answered after 80 to
+  # 91 seconds on the tenant VM class, so the harness default of 60 destroyed
+  # every cold start (README: "Sandbox readiness budget"). 120 is the initial
+  # candidate the estate is evaluating, not a qualified fleet-wide bound; the
+  # optional .env key SANDBOX_READY_TIMEOUT overrides it (60 to 600).
+  ready_timeout: 120
   network:
     mode: allowlist
     approval: prompt

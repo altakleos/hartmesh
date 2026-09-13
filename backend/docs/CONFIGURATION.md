@@ -619,7 +619,25 @@ sandbox:
 ```yaml
 sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
+   # ready_timeout: 60                # cold-start readiness budget in seconds (see below)
 ```
+
+`ready_timeout` is the cold-start readiness budget: after `docker run` returns,
+the provider polls the new container's `/v1/sandbox` for this many seconds and,
+if it has not answered `200` by then, destroys the container under the
+ownership fences and fails the acquisition. Both the synchronous and the
+asynchronous acquisition paths use the same value. It is a number of seconds,
+integer or decimal; the default is 60; the supported range is greater than 0
+and at most 3600. Zero, a negative number, `.inf`, `.nan`, a boolean or text
+refuses to load the configuration rather than turning the deadline off: there is
+no value that disables it. The budget runs on a monotonic clock, every probe and
+sleep is clamped to what is left of it, and a `200` that lands after it has
+passed does not count. Raise it on hosts where the image starts slowly: one-CPU
+sandboxes under gVisor were measured at 80 to 91 seconds to readiness, so the
+released Compose profile sets 120 (`deploy/compose/README.md`, "Sandbox
+readiness budget"). Because ownership of a new container is published before
+the wait starts and renewed during it, a long budget does not let another
+Gateway instance's reconciliation adopt a container that is still starting.
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 ```yaml

@@ -51,7 +51,9 @@ still route, because a bridge is a connected route: `docker-compose-dev.yaml`
 forwarded client address. That profile's `models:` comes from `providers/`
 unless the optional `HARTMESH_MODELS_FILE` names an operator file on the tenant
 data disk: that list is then authoritative (a provider key adds tools, never
-models) and a bad one refuses to render instead of falling back.
+models) and a bad one refuses to render instead of falling back. It also sets
+`sandbox.ready_timeout: 120` (one-CPU gVisor cold starts measured 80 to 91 s);
+the optional `SANDBOX_READY_TIMEOUT` overrides it within 60 to 600 or refuses.
 
 `durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
 AIO/RWX artifact, not arbitrary scaling, IM HA, cross-region operation, or

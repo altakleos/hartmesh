@@ -19,7 +19,10 @@ in file order winning, so keyless defaults survive when no key is present.
 
 ``sandbox.network`` is selected by ``SANDBOX_EGRESS``: ``allowlist`` (or
 absent) keeps the template block, ``open`` reduces it to ``mode: open``, any
-other value refuses to render. The rendered document is checked so that no
+other value refuses to render. ``sandbox.ready_timeout`` is the template's
+value unless the optional ``SANDBOX_READY_TIMEOUT`` names a whole number of
+seconds from 60 to 600; anything else refuses to render, so no value can
+disable the cold-start deadline. The rendered document is checked so that no
 ``$NAME`` reference remains for a variable that is absent or empty.
 
 ``HARTMESH_MODELS_FILE`` is optional. Absent (or empty), everything above is
@@ -63,6 +66,13 @@ EGRESS_ENV = "SANDBOX_EGRESS"
 HOST_RESOLVER_VIEW = Path("/run/hartmesh-host-resolv.conf")
 HOST_RESOLVER_DEFAULT = "/run/systemd/resolve/resolv.conf"
 EGRESS_MODES = ("allowlist", "open")
+READY_TIMEOUT_ENV = "SANDBOX_READY_TIMEOUT"
+# Whole seconds, inclusive. The floor is the harness default (a smaller budget
+# has never been useful); the ceiling keeps one cold start inside a single
+# nginx proxy_read_timeout window (600 s) so a waiting turn is not cut off by
+# the front door before the sandbox answers.
+READY_TIMEOUT_RANGE = (60, 600)
+_WHOLE_SECONDS = re.compile(r"\A[0-9]+\Z")
 MODELS_ENV = "HARTMESH_MODELS_FILE"
 OPERATOR_DIRECTORY = "<HARTMESH_DATA_DIR>/operator"
 # A field is credential-bearing when its name's last `_`/`-` segment is one of
@@ -383,6 +393,18 @@ def select_egress(environ: Mapping[str, str]) -> str:
     return mode
 
 
+def select_ready_timeout(environ: Mapping[str, str]) -> int | None:
+    """Return the operator's cold-start readiness budget override, or None when unset."""
+
+    raw = environ.get(READY_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return None
+    low, high = READY_TIMEOUT_RANGE
+    if not _WHOLE_SECONDS.match(raw) or not low <= int(raw) <= high:
+        raise RenderError(f"{READY_TIMEOUT_ENV} must be a whole number of seconds from {low} to {high} (or absent)")
+    return int(raw)
+
+
 def open_runsc_resolver_mount(environ: Mapping[str, str]) -> dict[str, object]:
     """Validate the host resolver view before handing its source to Docker.
 
@@ -484,6 +506,13 @@ def render(
         raise RenderError("template `sandbox.network.mode` must be allowlist; SANDBOX_EGRESS selects open at render time")
     mode = select_egress(environ)
     sandbox["network"] = {"mode": "open"} if mode == "open" else network
+    low, high = READY_TIMEOUT_RANGE
+    budget = sandbox.get("ready_timeout")
+    if isinstance(budget, bool) or not isinstance(budget, int) or not low <= budget <= high:
+        raise RenderError(f"template `sandbox.ready_timeout` must be a whole number of seconds from {low} to {high}")
+    override = select_ready_timeout(environ)
+    if override is not None:
+        sandbox["ready_timeout"] = override
     if mode == "open" and environ.get("DEER_FLOW_SANDBOX_RUNTIME") == "runsc":
         mounts = list(sandbox.get("mounts") or [])
         if any(mount.get("container_path") == "/etc/resolv.conf" for mount in mounts):
@@ -533,7 +562,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     providers = ", ".join(sorted({fragment.env for fragment in included})) or "none"
     source = f"operator file {os.environ[MODELS_ENV].strip()}" if os.environ.get(MODELS_ENV, "").strip() else "bundled catalog"
-    summary = f"models from {source}; egress={select_egress(os.environ)}; provider keys found: {providers}"
+    budget = yaml.safe_load(rendered)["sandbox"]["ready_timeout"]
+    summary = f"models from {source}; egress={select_egress(os.environ)}; provider keys found: {providers}; sandbox ready_timeout={budget}s"
     if args.check:
         print(f"render_config: {args.template} renders ({summary})")
         return 0

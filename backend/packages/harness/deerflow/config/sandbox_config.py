@@ -153,6 +153,12 @@ class SandboxConfig(BaseModel):
             workers when ownership uses Redis; other modes/providers keep
             process-local accounting.
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
+        ready_timeout: Seconds a newly created sandbox may take to answer its
+            readiness probe before the provider destroys it and the acquisition
+            fails. AioSandboxProvider's local Docker backend defaults to 60
+            (SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT); OpenSandboxProvider defaults
+            to 30. A finite number greater than 0 and at most 3600; anything
+            else refuses to load. There is no value that disables the deadline.
         environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
 
     BoxliteProvider specific options:
@@ -172,7 +178,6 @@ class SandboxConfig(BaseModel):
     OpenSandboxProvider specific options:
         api_key, domain, protocol, request_timeout, use_server_proxy: OpenSandbox
             management and execd connection settings.
-        ready_timeout: Create/readiness deadline in seconds (default: 30).
         sandbox_timeout: Remote lifetime in seconds (default: 14400); 0 requires
             explicit provider cleanup.
     """
@@ -219,6 +224,17 @@ class SandboxConfig(BaseModel):
     idle_timeout: int | None = Field(
         default=None,
         description="Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.",
+    )
+    ready_timeout: float | None = Field(
+        default=None,
+        gt=0,
+        le=3600,
+        allow_inf_nan=False,
+        description=(
+            "Seconds a newly created sandbox may take to answer its readiness probe before the provider destroys it and the acquisition fails. "
+            "AioSandboxProvider (local Docker backend) defaults to 60; OpenSandboxProvider defaults to 30. Must be a finite number greater than 0 and at most 3600: "
+            "the deadline cannot be disabled, only sized. Hosts whose sandbox cold start is slow (one-CPU gVisor sandboxes were measured at 80 to 91 seconds) need it raised."
+        ),
     )
     health_check_skip_seconds: float | None = Field(
         default=None,
@@ -373,6 +389,15 @@ class SandboxConfig(BaseModel):
         le=365 * 24 * 60 * 60,
         description="Maximum accepted age of a pinned live qualification artifact.",
     )
+
+    @field_validator("ready_timeout", mode="before")
+    @classmethod
+    def _ready_timeout_is_a_number(cls, value: object) -> object:
+        # pydantic coerces ``true`` to 1.0, which would silently become a
+        # one-second deadline; a boolean is a mistake, not a budget.
+        if isinstance(value, bool):
+            raise ValueError("ready_timeout must be a number of seconds, not a boolean")
+        return value
 
     @model_validator(mode="after")
     def _validate_provisioner_auth(self) -> "SandboxConfig":
