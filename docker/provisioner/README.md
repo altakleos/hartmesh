@@ -96,11 +96,18 @@ uncertain.
 {
   "sandbox_id": "abc-123",
   "sandbox_url": "http://host.docker.internal:32123",
-  "status": "Pending"
+  "status": "Pending",
+  "provenance": "created"
 }
 ```
 
-**Idempotent**: Calling with the same `sandbox_id` returns the existing sandbox info.
+**Idempotent**: Calling with the same `sandbox_id` returns the existing sandbox
+info, with `provenance` set to `rediscovered` instead of `created`. The Gateway
+rolls back only a Pod the provisioner says it started and counts only that as a
+new resource set; a response without the field (an older provisioner image) is
+treated as unknown provenance, never as a fresh creation. Until this image is
+deployed, a newer Gateway cannot reuse remote accepted sandboxes warm and parks
+rather than rolls back a cancelled one; roll both images together.
 
 An accepted (durable) request may carry `egress_allowance`, the Gateway's sealed
 `EgressAllowanceV1` (`version`, `profile`, `dns`, canonical public-CIDR `rules`,

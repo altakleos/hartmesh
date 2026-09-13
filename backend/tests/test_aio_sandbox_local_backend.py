@@ -2457,3 +2457,84 @@ def test_start_container_preinitialized_image_can_drop_startup_caps(monkeypatch)
     assert not [arg for arg in captured_cmd if arg.startswith("--cap-add=")]
     security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
     assert "no-new-privileges" in security_opts
+
+
+# ── Provenance: what ``create`` returned, in the backend's own words ─────
+
+
+def test_open_create_reports_a_fresh_start_as_created(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    info = backend.create(thread_id="thread", sandbox_id="fresh-open")
+
+    assert info.provenance == "created"
+    assert "provenance" not in info.to_dict()
+
+
+def test_open_create_reports_a_name_conflict_adoption_as_rediscovered(monkeypatch):
+    """The ordinary name-conflict return path through the real control flow."""
+    backend = _backend_for_inspect_tests()
+    existing = SandboxInfo(sandbox_id="conflicted", sandbox_url="http://localhost:18081", container_name="sandbox-conflicted")
+
+    def _conflict(*_args, **_kwargs):
+        raise RuntimeError('docker: Error response from daemon: Conflict. The container name "/sandbox-conflicted" is already in use by container "abc".')
+
+    monkeypatch.setattr(backend, "_start_container", _conflict)
+    monkeypatch.setattr(backend, "discover", lambda _sandbox_id: existing)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    info = backend.create(thread_id="thread", sandbox_id="conflicted")
+
+    assert info.sandbox_id == "conflicted"
+    assert info.sandbox_url == existing.sandbox_url
+    assert info.provenance == "rediscovered"
+    assert existing.provenance == "unknown", "discovery's own record is left as it was"
+
+
+def test_open_create_name_conflict_without_an_adoptable_container_still_raises(monkeypatch):
+    backend = _backend_for_inspect_tests()
+
+    def _conflict(*_args, **_kwargs):
+        raise RuntimeError('Conflict. The container name "/sandbox-x" is already in use by container "abc".')
+
+    monkeypatch.setattr(backend, "_start_container", _conflict)
+    monkeypatch.setattr(backend, "discover", lambda _sandbox_id: None)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    with pytest.raises(RuntimeError, match="already in use"):
+        backend.create(thread_id="thread", sandbox_id="x")
+
+
+def test_restricted_create_reports_a_compatible_existing_set_as_rediscovered(monkeypatch):
+    """The ``_ExistingRestrictedSandbox`` return path through the real control flow."""
+    backend = _restricted_backend()
+    existing = SandboxInfo(
+        sandbox_id="restricted-existing",
+        sandbox_url="http://localhost:18082",
+        container_name="sandbox-restricted-existing",
+        request_headers={"X-DeerFlow-Relay-Token": "relay"},
+    )
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "compatible")
+    monkeypatch.setattr(backend, "discover", lambda _sandbox_id: existing)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    info = backend.create(thread_id="thread", sandbox_id="restricted-existing")
+
+    assert info.provenance == "rediscovered"
+    assert info.request_headers == existing.request_headers
+
+
+def test_restricted_create_reports_a_fresh_set_as_created(monkeypatch):
+    backend = _restricted_backend()
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "missing")
+    monkeypatch.setattr(backend, "_create_internal_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_create_egress_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
+    monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    info = backend.create(thread_id="thread", sandbox_id="restricted-fresh")
+
+    assert info.provenance == "created"

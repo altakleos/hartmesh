@@ -582,3 +582,24 @@ def test_provisioner_discover_returns_none_on_request_exception(monkeypatch):
     monkeypatch.setattr(requests, "get", mock_get)
 
     assert backend._provisioner_discover("abc123") is None
+
+
+# ── Provenance: the provisioner's word, and silence ──────────────────────
+
+
+@pytest.mark.parametrize(
+    ("payload_provenance", "expected"),
+    [("created", "created"), ("rediscovered", "rediscovered"), (None, "unknown"), ("started", "unknown")],
+)
+def test_provisioner_create_maps_provenance_and_treats_silence_as_unknown(monkeypatch, payload_provenance, expected):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: True)
+    payload = {"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"}
+    if payload_provenance is not None:
+        payload["provenance"] = payload_provenance
+
+    monkeypatch.setattr(requests, "post", lambda *_args, **_kwargs: _StubResponse(payload=payload))
+
+    info = backend._provisioner_create("thread-1", "abc123")
+
+    assert info.provenance == expected

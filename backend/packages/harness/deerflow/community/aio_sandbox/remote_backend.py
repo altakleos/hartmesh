@@ -37,6 +37,9 @@ from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .backend import SandboxBackend
 from .sandbox_info import (
+    PROVENANCE_CREATED,
+    PROVENANCE_REDISCOVERED,
+    PROVENANCE_UNKNOWN,
     AcceptedSkillMaterialReceipt,
     AcceptedSkillMaterialReceiptV1,
     AcceptedSkillMaterialReceiptV2,
@@ -44,6 +47,23 @@ from .sandbox_info import (
 )
 
 _ACCEPTED_SKILL_PROFILE = "rwx_verified_copy_v2"
+_PROVISIONER_PROVENANCE = {"created": PROVENANCE_CREATED, "rediscovered": PROVENANCE_REDISCOVERED}
+
+
+def _provisioner_provenance(data: dict[str, object]) -> str:
+    """Map the provisioner's ``provenance`` word onto ``SandboxInfo.provenance``.
+
+    ``POST /api/sandboxes`` is idempotent: an existing Pod is returned rather
+    than recreated. A provisioner that says which happened is believed; one
+    that does not (an older image) leaves the provenance unknown, and unknown
+    is never treated as freshly created.
+    """
+    raw = data.get("provenance")
+    if isinstance(raw, str) and raw in _PROVISIONER_PROVENANCE:
+        return _PROVISIONER_PROVENANCE[raw]
+    return PROVENANCE_UNKNOWN
+
+
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 
 logger = logging.getLogger(__name__)
@@ -627,6 +647,7 @@ class RemoteSandboxBackend(SandboxBackend):
                 sandbox_url=data["sandbox_url"],
                 request_headers=({"Authorization": f"Bearer {attempt_capability}"} if attempt_capability is not None else {}),
                 accepted_skill_material=receipt,
+                provenance=_provisioner_provenance(data),
             )
         except requests.RequestException as exc:
             if attempt_capability is not None:

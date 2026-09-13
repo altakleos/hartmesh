@@ -357,3 +357,18 @@ def test_rendered_pvc_backed_sandbox_satisfies_restricted(
         assert "windowsOptions" not in security, container["name"]
         for port in container.get("ports", []):
             assert "hostPort" not in port, container["name"]
+
+
+def test_create_response_declares_whether_the_pod_was_started_or_found(provisioner_module):
+    """``POST /api/sandboxes`` is idempotent; the response must say which happened.
+
+    The Gateway rolls back only a Pod the provisioner says it started and
+    counts only that as a new resource set, so the field is explicit and
+    absent by default (an older provisioner stays "unknown" on the Gateway
+    side rather than "created").
+    """
+    response = provisioner_module.SandboxResponse(sandbox_id="s", sandbox_url="http://s", status="Running")
+    assert response.provenance is None
+    assert provisioner_module.SandboxResponse(sandbox_id="s", sandbox_url="http://s", status="Running", provenance="rediscovered").provenance == "rediscovered"
+    with pytest.raises(ValueError):
+        provisioner_module.SandboxResponse(sandbox_id="s", sandbox_url="http://s", status="Running", provenance="started")

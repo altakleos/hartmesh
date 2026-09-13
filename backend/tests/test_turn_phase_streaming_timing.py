@@ -10,6 +10,10 @@ a LangGraph chat model, and the first-text delay and slow cleanup are
 stop the first-text clock, that the handler is on the graph the agent
 receives, that admission through terminal share one clock -- and nothing about
 a real model's callback shape, the HTTP route, or restricted-runsc performance.
+The real model callback shape, the authenticated HTTP route and incremental
+delivery are covered by ``test_turn_phase_gateway_stream_e2e.py``, including
+through the released nginx config where Docker is available; otherwise that
+layer stays untested.
 """
 
 from __future__ import annotations

@@ -51,11 +51,14 @@ from deerflow.runtime.turn_phases import (
     TurnPhase,
     phase_span,
     record_acquisition_source,
+    record_create_attempt,
+    record_create_result,
     record_eviction,
     record_failed_attempt,
     record_queue_ms,
-    record_resource_create,
     record_resource_teardown,
+    record_teardown_attempt,
+    record_teardown_refusal,
 )
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.accepted_material import (
@@ -95,7 +98,7 @@ from .ownership import (
     resolve_ownership_config,
 )
 from .remote_backend import RemoteSandboxBackend, _normalize_skills_container_path
-from .sandbox_info import AcceptedSkillMaterialReceiptV2, SandboxInfo
+from .sandbox_info import PROVENANCE_CREATED, PROVENANCE_REDISCOVERED, AcceptedSkillMaterialReceiptV2, SandboxInfo
 
 if TYPE_CHECKING:
     from deerflow.runtime.skill_projection import SkillProjectionClear
@@ -559,6 +562,12 @@ class AioSandboxProvider(
         with self._lock:
             self._starting.add(sandbox_id)
 
+    def _forget_create_provenance(self, sandbox_id: str) -> None:
+        with self._lock:
+            carried = getattr(self, "_create_provenance", None)
+            if carried is not None:
+                carried.pop(sandbox_id, None)
+
     def _unmark_starting(self, sandbox_id: str) -> None:
         """Drop the starting mark once the container is tracked or destroyed.
 
@@ -825,14 +834,17 @@ class AioSandboxProvider(
             return False
         if not self._adoptable_after_grace(info.sandbox_id, now):
             return False
+        record_teardown_attempt()
         if not self._reserve_local_teardown(
             info.sandbox_id,
             lambda: info.sandbox_id not in self._sandboxes and info.sandbox_id not in self._sandbox_infos and info.sandbox_id not in self._warm_pool,
         ):
+            record_teardown_refusal()
             return False
 
         try:
             if not self._claim_ownership(info.sandbox_id, for_destroy=True):
+                record_teardown_refusal()
                 return False
             try:
                 with self._held_teardown_lease(info.sandbox_id):
@@ -840,6 +852,7 @@ class AioSandboxProvider(
             except Exception as e:
                 logger.warning("Failed to replace sandbox %s with incompatible provisioning policy: %s", info.sandbox_id, e)
                 return False
+            record_resource_teardown()
             self._unowned_since.pop(info.sandbox_id, None)
             logger.info("Removed orphaned sandbox %s with incompatible provisioning policy", info.sandbox_id)
             return True
@@ -919,7 +932,9 @@ class AioSandboxProvider(
                 # An orphan of that kind is evidence of a crash, never a warm
                 # sandbox: claim it as a teardown and stop it, under the same
                 # held marker an explicit destroy uses.
+                record_teardown_attempt()
                 if not self._claim_ownership(info.sandbox_id, for_destroy=True):
+                    record_teardown_refusal()
                     skipped_live += 1
                     logger.debug("Skipping accepted container %s during reconciliation: owned by another instance", info.sandbox_id)
                     continue
@@ -929,6 +944,7 @@ class AioSandboxProvider(
                 except Exception:
                     logger.warning("Failed to destroy orphaned accepted container %s during reconciliation", info.sandbox_id, exc_info=True)
                     continue
+                record_resource_teardown()
                 self._unowned_since.pop(info.sandbox_id, None)
                 destroyed += 1
                 logger.info(f"Destroyed orphaned accepted container {info.sandbox_id} instead of adopting it (age: {age:.0f}s)")
@@ -2118,6 +2134,8 @@ class AioSandboxProvider(
         # the caches and falls through to discovery, where `take()` still
         # succeeds against our own lease.
         if not self._reserve_local_teardown(sandbox_id, lambda: True):
+            record_teardown_attempt()
+            record_teardown_refusal()
             logger.info(f"Skipped dropping sandbox {sandbox_id}: already being torn down by this instance")
             return
         try:
@@ -2142,6 +2160,7 @@ class AioSandboxProvider(
             # definitive health check, but "definitively dead to us" is not proof
             # it is ours: a peer may have replaced the container behind this id,
             # in which case stopping it is the cross-instance kill again.
+            record_teardown_attempt()
             if self._claim_ownership(sandbox_id, for_destroy=True):
                 try:
                     # Held like the other two stop paths: this one untracks before
@@ -2155,6 +2174,7 @@ class AioSandboxProvider(
                 except Exception as e:
                     logger.warning(f"Error destroying unhealthy sandbox {sandbox_id}: {e}")
             else:
+                record_teardown_refusal()
                 logger.info("Not destroying unhealthy sandbox %s: owned by another instance", sandbox_id)
 
         logger.warning(f"Dropped unhealthy sandbox {sandbox_id}: {reason}")
@@ -2192,12 +2212,15 @@ class AioSandboxProvider(
             ``True`` when the container was stopped and the caller should drop
             its warm-pool entry; ``False`` when it is still running.
         """
+        record_teardown_attempt()
         if not self._reserve_local_teardown(sandbox_id, still_reapable):
+            record_teardown_refusal()
             logger.info("Refusing to destroy warm-pool sandbox %s for %s: reclaimed by this instance", sandbox_id, reason)
             return False
 
         try:
             if not self._claim_ownership(sandbox_id, for_destroy=True):
+                record_teardown_refusal()
                 logger.info("Refusing to destroy warm-pool sandbox %s for %s: owned by another instance", sandbox_id, reason)
                 return False
 
@@ -2233,6 +2256,8 @@ class AioSandboxProvider(
         finally:
             self._finish_local_teardown(sandbox_id)
 
+        # Counted only here, after the backend's destroy returned: an attempt
+        # or a refusal above says nothing about whether the container is gone.
         record_resource_teardown()
         if reason == "idle_timeout":
             logger.info(f"Destroyed idle warm-pool sandbox {sandbox_id}")
@@ -2328,16 +2353,21 @@ class AioSandboxProvider(
                     exc_info=True,
                 )
             else:
-                # Undo by origin. Only a container this call created is rolled
-                # back by destroying it. A reclaimed one was parked before the
-                # call and the caller never received it, so nothing else will
-                # ever release it: park it again under the same identity rather
-                # than pay for a teardown and next turn's cold start. An active
-                # one belongs to the holders that made it active and is theirs
-                # to release.
+                # Undo by origin, and the origin is what happened, not which
+                # method ran. Only a container the backend confirms it started
+                # for this call is rolled back by destroying it. A reclaimed
+                # one was parked before the call, and so was one the backend
+                # *rediscovered* under the deterministic name when create was
+                # attempted; the caller never received either, so nothing else
+                # will ever release them: park them again under the same
+                # identity rather than pay for a teardown and next turn's cold
+                # start. Unknown provenance is not proof of creation and is
+                # parked the same way -- owned, tracked, and reaped by the idle
+                # checker if nothing reclaims it. An active one belongs to the
+                # holders that made it active and is theirs to release.
                 if origin == "created":
                     cleanup = self.destroy
-                elif origin == "reclaimed":
+                elif origin in ("reclaimed", "rediscovered", "unknown"):
                     cleanup = self.release
                 else:
                     cleanup = None
@@ -2359,9 +2389,6 @@ class AioSandboxProvider(
                             "Accepted sandbox cleanup failed after caller cancellation",
                             exc_info=True,
                         )
-                    else:
-                        if origin == "created":
-                            record_resource_teardown()
             raise cancellation
 
     def _provision_accepted_skills_with_claim(
@@ -2597,13 +2624,17 @@ class AioSandboxProvider(
         resource_scope_ref: str | None = None,
         egress_allowance: EgressAllowanceV1 | None = None,
     ) -> tuple[str, str]:
-        """Acquire an accepted projection and say how: ``active``, ``reclaimed`` or ``created``.
+        """Acquire an accepted projection and say how.
 
-        The origin is what a cancelled caller needs to undo the acquisition
-        correctly. A created container is rolled back by destroying it; a
-        reclaimed one was parked before this call and goes back to the warm
-        pool; an active one belongs to whichever holders made it active and
-        is left alone.
+        The origin is one of ``active``, ``reclaimed``, ``created``,
+        ``rediscovered`` or ``unknown``, and it is what a cancelled caller
+        needs to undo the acquisition correctly. Only ``created`` -- the
+        backend's own word that it started the container for this call -- is
+        rolled back by destroying it. ``reclaimed`` and ``rediscovered`` both
+        name a container that existed before this call and go back to the
+        warm pool; ``unknown`` (a backend that did not say) is parked the same
+        way rather than presumed fresh; ``active`` belongs to whichever
+        holders made it active and is left alone.
         """
         effective_user_id = self._effective_acquire_user_id(user_id)
         try:
@@ -2672,23 +2703,111 @@ class AioSandboxProvider(
                 )
             if reclaimed is not None:
                 return reclaimed, "reclaimed"
-            created = self._create_sandbox(
-                thread_id,
-                sandbox_id,
-                user_id=effective_user_id,
-                accepted_skills_only=True,
-                accepted_skill_binding=binding,
-                accepted_execution_claim=execution_claim,
-                identity_thread_id=identity_thread_id,
-                egress_allowance=egress_allowance,
-            )
+            # Our own parked container under this id, refused above because
+            # its create-time inputs no longer match: on a local backend a
+            # create would collide with its name and blindly adopt it with the
+            # old mounts, so it is replaced under the ordinary teardown fences
+            # first. Replacing our own entry frees its slot, which is why this
+            # never has to evict an unrelated warm container to reach create.
+            # The remote backend is left to its provisioner, which validates
+            # an existing Pod against the request itself.
+            if not isinstance(self._backend, RemoteSandboxBackend) and self._parked_accepted_inputs_changed(sandbox_id, fingerprint, key=key):
+                with phase_span(TurnPhase.SANDBOX_EVICTION, detail="accepted_inputs_changed"):
+                    if not self._replace_parked_accepted_sandbox(sandbox_id):
+                        # Refuse, never fall through: create would find the
+                        # container under its name, take the lease over from
+                        # the very peer (or reaper) whose fence just refused
+                        # the stop, and hand the turn a container whose inputs
+                        # are known to differ. The next turn retries once the
+                        # lease or reservation resolves.
+                        record_failed_attempt()
+                        raise AcceptedSkillSandboxBindingError("accepted_sandbox_inputs_changed")
+            try:
+                created = self._create_sandbox(
+                    thread_id,
+                    sandbox_id,
+                    user_id=effective_user_id,
+                    accepted_skills_only=True,
+                    accepted_skill_binding=binding,
+                    accepted_execution_claim=execution_claim,
+                    identity_thread_id=identity_thread_id,
+                    egress_allowance=egress_allowance,
+                )
+            except BaseException:
+                self._forget_create_provenance(sandbox_id)
+                raise
+            provenance = self._take_create_provenance(created)
             with self._lock:
                 accepted_ids = getattr(self, "_accepted_only_sandbox_ids", None)
                 if accepted_ids is None:
                     accepted_ids = self._accepted_only_sandbox_ids = set()
                 accepted_ids.add(created)
-                self._record_accepted_reuse_fingerprint_locked(created, fingerprint)
-            return created, "created"
+                if provenance == PROVENANCE_CREATED:
+                    # Only a container the backend started for this request
+                    # provably has these inputs. A rediscovered one keeps
+                    # whatever this process recorded when it was created (its
+                    # true inputs) or nothing, so a later reclaim compares
+                    # against the truth rather than against this request.
+                    self._record_accepted_reuse_fingerprint_locked(created, fingerprint)
+            if provenance == PROVENANCE_CREATED:
+                return created, "created"
+            if provenance == PROVENANCE_REDISCOVERED:
+                return created, "rediscovered"
+            return created, "unknown"
+
+    def _take_create_provenance(self, sandbox_id: str) -> str:
+        """The provenance the backend reported for this create, or ``unknown``.
+
+        Carried from the create result itself rather than re-read from the
+        active maps, so a lease lost between registration and here cannot
+        turn a confirmed creation into an unknown one.
+        """
+        with self._lock:
+            carried = getattr(self, "_create_provenance", None)
+            if carried is None:
+                return "unknown"
+            return carried.pop(sandbox_id, "unknown")
+
+    def _parked_accepted_inputs_changed(self, sandbox_id: str, fingerprint: str, *, key: tuple[str, str]) -> bool:
+        """Whether our own parked accepted container under this id no longer matches.
+
+        True only for an entry this process parked as an accepted-only
+        projection, for *key*'s identity, whose recorded create-time inputs are
+        absent or differ from *fingerprint*. A parked entry of another identity
+        under a colliding id raises the same collision every other promote path
+        raises; anything else parked under the id is left alone.
+        """
+        with self._lock:
+            if sandbox_id not in self._warm_pool:
+                return False
+            self._assert_warm_identity_available_locked(sandbox_id, key)
+            if sandbox_id not in getattr(self, "_accepted_only_sandbox_ids", set()):
+                return False
+            recorded = getattr(self, "_accepted_reuse_fingerprints", {}).get(sandbox_id)
+        return recorded != fingerprint
+
+    def _replace_parked_accepted_sandbox(self, sandbox_id: str) -> bool:
+        """Stop our own parked accepted container whose create-time inputs changed.
+
+        The same fenced path as replica eviction (``_destroy_warm_entry``):
+        local teardown reservation, cross-instance teardown claim, held lease
+        for the stop, entry popped only once the stop returned. A refusal --
+        reclaimed meanwhile, owned by a peer, store unavailable, stop failed --
+        leaves the container running and returns ``False``, and the caller
+        fails the acquisition closed rather than use a container whose inputs
+        are known to differ.
+        """
+        with self._lock:
+            parked = self._warm_pool.get(sandbox_id)
+        if parked is None:
+            return False
+        entry, _ = parked
+        return self._destroy_warm_entry(
+            sandbox_id,
+            entry,
+            reason="accepted_inputs_changed",
+            still_reapable=lambda: sandbox_id in self._warm_pool,
+        )
 
     def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
         with self._lock:
@@ -3168,10 +3287,12 @@ class AioSandboxProvider(
         adopt/acquire can slip between them (same pairing as
         ``_destroy_warm_entry``).
         """
+        record_teardown_attempt()
         if not self._reserve_local_teardown(
             sandbox_id,
             lambda: sandbox_id not in self._sandboxes and sandbox_id not in self._sandbox_infos and sandbox_id not in self._warm_pool,
         ):
+            record_teardown_refusal()
             logger.warning(
                 "Not destroying unready sandbox %s: adopted or being torn down by this instance",
                 sandbox_id,
@@ -3179,6 +3300,7 @@ class AioSandboxProvider(
             return
         try:
             if not self._claim_ownership(sandbox_id, for_destroy=True):
+                record_teardown_refusal()
                 logger.warning(
                     "Not destroying unready sandbox %s: owned by another instance or ownership unavailable",
                     sandbox_id,
@@ -3187,6 +3309,7 @@ class AioSandboxProvider(
             try:
                 with self._held_teardown_lease(sandbox_id):
                     self._backend.destroy(info)
+                record_resource_teardown()
             except Exception as e:
                 logger.warning(f"Error destroying unready sandbox {sandbox_id}: {e}")
         finally:
@@ -3250,8 +3373,7 @@ class AioSandboxProvider(
             if egress_allowance is not None:
                 create_kwargs["egress_allowance"] = egress_allowance
         budget = self.sandbox_ready_timeout()
-        record_acquisition_source(AcquisitionSource.CREATED)
-        record_resource_create()
+        record_create_attempt()
         self._mark_starting(sandbox_id)
         try:
             try:
@@ -3268,6 +3390,7 @@ class AioSandboxProvider(
             except Exception:
                 record_failed_attempt()
                 raise
+            self._record_create_provenance(info, carry=accepted_skills_only)
             self._own_before_readiness(sandbox_id, info)
 
             # Wait for sandbox to be ready
@@ -3290,6 +3413,40 @@ class AioSandboxProvider(
             )
         finally:
             self._unmark_starting(sandbox_id)
+
+    def _record_create_provenance(self, info: SandboxInfo, *, carry: bool = False) -> None:
+        """Classify one create result by the backend's own word for it.
+
+        With ``carry`` the word is also kept per sandbox id for the accepted
+        path, which needs it after registration to choose its origin and pops
+        it there (or on failure), so the carry never outlives one acquisition. A backend that stays
+        silent is warned about once: its silence disables warm reuse of the
+        containers it creates, and the journal's ``unknown_create_results``
+        is the per-turn signal.
+        """
+        provenance = getattr(info, "provenance", "unknown")
+        if provenance == PROVENANCE_CREATED:
+            record_acquisition_source(AcquisitionSource.CREATED)
+        elif provenance == PROVENANCE_REDISCOVERED:
+            record_acquisition_source(AcquisitionSource.REDISCOVERED)
+        else:
+            record_acquisition_source(AcquisitionSource.UNKNOWN_PROVENANCE)
+            with self._lock:
+                warned = getattr(self, "_warned_unknown_provenance", False)
+                self._warned_unknown_provenance = True
+            if not warned:
+                logger.warning(
+                    "Sandbox backend %s does not report whether create started or found %s; unknown provenance is never treated as creation, so its containers are not reused warm",
+                    type(self._backend).__name__,
+                    info.sandbox_id,
+                )
+        record_create_result(provenance)
+        if carry:
+            with self._lock:
+                carried = getattr(self, "_create_provenance", None)
+                if carried is None:
+                    carried = self._create_provenance = {}
+                carried[info.sandbox_id] = provenance
 
     def _own_before_readiness(self, sandbox_id: str, info: SandboxInfo) -> None:
         """Take *sandbox_id*'s lease before waiting for it to become ready.
@@ -3357,8 +3514,7 @@ class AioSandboxProvider(
         if isinstance(self._backend, RemoteSandboxBackend):
             create_kwargs["skills_container_path"] = self._configured_skills_container_path()
         budget = self.sandbox_ready_timeout()
-        record_acquisition_source(AcquisitionSource.CREATED)
-        record_resource_create()
+        record_create_attempt()
         self._mark_starting(sandbox_id)
         try:
             try:
@@ -3376,6 +3532,7 @@ class AioSandboxProvider(
             except Exception:
                 record_failed_attempt()
                 raise
+            self._record_create_provenance(info)
             # Ownership is blocking store IO, offloaded like every other step here.
             await asyncio.to_thread(self._own_before_readiness, sandbox_id, info)
 
@@ -3646,7 +3803,9 @@ class AioSandboxProvider(
         section that reserves the teardown. ``destroy()`` itself passes a
         constant: an explicit destroy is a decision made now.
         """
+        record_teardown_attempt()
         if not self._reserve_local_teardown(sandbox_id, still_reapable):
+            record_teardown_refusal()
             logger.info("Skipping destroy of sandbox %s: re-acquired by this instance or already being torn down", sandbox_id)
             return
 
@@ -3660,6 +3819,7 @@ class AioSandboxProvider(
         # refused claim: still running, and no longer in any of our maps, so
         # nothing here would ever reap or reclaim it.
         if not self._claim_ownership(sandbox_id, for_destroy=True):
+            record_teardown_refusal()
             logger.warning("Refusing to destroy sandbox %s: owned by another instance", sandbox_id)
             return
 
@@ -3691,6 +3851,7 @@ class AioSandboxProvider(
             # sandbox off it), it is just no longer this method's job to release.
             with self._held_teardown_lease(sandbox_id):
                 self._backend.destroy(info)
+            record_resource_teardown()
             logger.info(f"Destroyed sandbox {sandbox_id}")
         else:
             # No container to stop, so no teardown lease was held: clear the
