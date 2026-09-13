@@ -139,6 +139,10 @@ and payload-free batch lifecycle only when `include_subagent_batches=true`;
 both use independent owner/tenant/parent-scoped cursor pages after parent
 visibility. Parent cancellation cascades to neither MCP tasks nor batches.
 
+### Turn phase timings
+
+`turn_phases.py`: one in-memory journal per run, monotonic offsets, opened by `run_agent`, found by run id from the SSE consumer; first text means visible assistant text; see its docstring.
+
 ### Stream Bridge Heartbeats
 
 Memory and Redis bridges take their default idle heartbeat cadence from the startup-only `stream_bridge.heartbeat_interval_seconds` setting. Keep the default on the bridge instance so SSE, `/wait`, and internal subscribers stay aligned; an explicit `subscribe(..., heartbeat_interval=...)` remains a per-subscription override.

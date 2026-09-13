@@ -121,6 +121,80 @@ to the provider's own id, which the declaration carries as `provider_ref`, for
 the declaring execution only; a stranger's call resolves to no events and no
 decision, and the provider id never appears in state, logs, or evidence.
 
+### Park means reuse
+
+Park is only worth its name if the next turn actually takes the container
+back. The ordinary acquisition path has always done so at its warm-pool layer;
+the accepted-skills projection path (an ordinary Kind: park terminal, thread
+resource key) did not. It checked active tracking, found nothing -- release had
+moved the entry to the warm pool -- and fell through to create, whose replica
+enforcement evicts the oldest warm entry before the backend can observe that
+the target already exists. On the released Compose profile that meant a
+compatible follow-up turn stopped an unrelated thread's container and its relay
+(about twenty seconds) and then rediscovered or rebuilt its own.
+
+The repair is a reclaim step between the active check and create,
+`AioSandboxProvider._reclaim_accepted_warm_sandbox`. It hands a parked
+container back only when every one of these holds; what happens when one
+does not is described after the table:
+
+| Fact | Where it is proved |
+| --- | --- |
+| The id is one *this process* provisioned as an accepted-only projection | `_accepted_only_sandbox_ids`, under the provider lock |
+| The create-time inputs still match: mount set, lark provisioning flags, config-mount exclusion root, backend class, skills root, and -- for the remote backend, which bakes them into the Pod -- binding identity, execution claim and egress allowance digest | `_accepted_reuse_fingerprint`, recorded at create and compared at reclaim; a digest of inputs this process computed, never of provider text |
+| Same tenant and thread or attempt identity | `_assert_warm_identity_available_locked` |
+| Not reserved for local teardown | `_being_torn_down_locally`, checked before and after the ownership round trip |
+| Alive according to the backend | `_check_tracked_sandbox_alive` |
+| Ownership published before the warm-to-active transition | `_publish_ownership`; a peer's `del:` refuses |
+
+Anything the fingerprint does not cover is either identical by construction
+or re-established after reuse: `bind_accepted_skill_snapshot` re-projects the
+bound snapshot on every acquisition and still refuses a remote receipt that
+does not match, which is the same contract the already-active branch relied
+on. A deterministic name or an `-accepted` suffix alone proves nothing and is
+never consulted as evidence.
+
+Three properties keep the repair from becoming a different defect. Refusing to
+reuse is never a reason to destroy: every mismatch falls through to create and
+leaves the parked entry where it was. Eviction never targets the id it is
+making room for (`_evict_oldest_warm(exclude=...)`), which would buy a cold
+start with a teardown. And a genuinely new third resource at capacity still
+evicts an unrelated warm entry and waits for it -- that is real work, and
+hiding it behind an overlapping unbudgeted container is the separately tracked
+capacity defect, not this repair.
+
+What the fingerprint can and cannot fence depends on the backend. On the
+remote backend it is a real fence: the binding identity, execution claim and
+egress allowance digest are baked into the Pod at creation, a mismatch falls
+through to create, and the Pod that is built is a different one. On the local
+container backend, for the same deterministic id, tenant and thread are equal
+by construction, the skills root and projection state are already part of the
+id itself, the backend class and skills root are startup constants, the thread
+and active-view mounts are path-deterministic, and the bound snapshot is
+re-projected on every acquisition -- so the only create-time input that can
+differ is the Lark CLI provisioning state. A mismatch there falls through to
+create, create cannot produce a second container under the deterministic name,
+and the backend's name-conflict handler discovers and adopts the running
+container after its own identity and network-policy checks. The turn therefore
+reuses the container with its create-time mounts, as the ordinary path always
+has, and the Lark change takes effect on the next cold start (idle reap,
+eviction or explicit destroy). The acquisition is labelled `created` in that
+case, because the provider cannot distinguish creation from adoption at the
+backend seam; that is a known limitation of the source label on the local
+backend, pinned by
+`test_local_backend_name_conflict_after_a_fingerprint_refusal_adopts_and_destroys_nothing`.
+
+Cancellation follows the same rule as everything above: the async entry
+records how the id was obtained and undoes only what this call did. A created
+container is destroyed; a reclaimed one is parked again under the same
+identity, because the caller never received it and nothing else would ever
+release it; an already-active one is left to the holders that made it active.
+
+The retire terminal is untouched. A declared accepted session never reaches
+the warm pool, and reconciliation destroys a cross-process accepted orphan
+rather than adopting it, so every accepted entry the reclaim can find was
+parked by this process, for this identity, under this Kind.
+
 ### Execution leases beside sessions
 
 Upstream's execution leases (`sandbox/lease.py`) sit beside the session

@@ -312,7 +312,9 @@ def test_owner_sigkill_dispatch_gap_is_a_selected_fail_closed_window() -> None:
 
 
 def test_dispatch_gap_barrier_is_after_marker_and_before_execution() -> None:
-    source = inspect.getsource(run_worker.run_agent)
+    # ``run_agent`` is the phase-journal wrapper; the dispatch sequence lives
+    # in the implementation it delegates to.
+    source = inspect.getsource(run_worker._run_agent)
 
     marker = source.index("RUN_EXECUTION_STARTED_EVENT.event_type")
     barrier = source.index('"post_dispatch_marker_before_graph"')

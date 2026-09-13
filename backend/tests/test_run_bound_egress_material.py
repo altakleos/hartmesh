@@ -292,9 +292,10 @@ async def test_provider_forwards_the_allowance_to_the_backend(monkeypatch: pytes
 
     monkeypatch.setattr(
         provider,
-        "_acquire_accepted_skills_internal",
-        lambda thread_id, *, user_id, binding, execution_claim=None, resource_scope_ref=None, egress_allowance=None: create_sandbox(
-            thread_id, "sandbox-accepted", user_id=user_id, accepted_skill_binding=binding, accepted_execution_claim=execution_claim, egress_allowance=egress_allowance
+        "_acquire_accepted_skills_with_origin",
+        lambda thread_id, *, user_id, binding, execution_claim=None, resource_scope_ref=None, egress_allowance=None: (
+            create_sandbox(thread_id, "sandbox-accepted", user_id=user_id, accepted_skill_binding=binding, accepted_execution_claim=execution_claim, egress_allowance=egress_allowance),
+            "created",
         ),
     )
     monkeypatch.setattr(provider, "bind_accepted_skill_snapshot", lambda *args, **kwargs: None)

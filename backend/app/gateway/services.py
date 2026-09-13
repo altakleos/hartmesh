@@ -187,6 +187,7 @@ from deerflow.runtime.tenant_identity import (
     TenantIdentityV1,
     tenant_admission_scope,
 )
+from deerflow.runtime.turn_phases import mark_first_stream_text
 from deerflow.runtime.user_context import (
     DEFAULT_USER_ID,
     reset_current_user,
@@ -4213,6 +4214,7 @@ async def sse_consumer(
                 yield format_sse("end", None, event_id=entry.id or None)
                 return
 
+            mark_first_stream_text(record.run_id, entry.event, entry.data)
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
     finally:
