@@ -1123,6 +1123,11 @@ class SandboxResponse(BaseModel):
     # renders; the Gateway refuses a Pod whose attestation is missing or differs.
     egress_allowance_digest: str | None = None
     accepted_skill_material: dict[str, object] | None = None
+    # Whether this response started the Pod (``created``) or found one that
+    # already existed under the deterministic name (``rediscovered``). The
+    # create route is idempotent, and the Gateway must not roll back or count
+    # as new a Pod this call merely returned.
+    provenance: Literal["created", "rediscovered"] | None = None
 
 
 class RenewAcceptedAttemptRequest(BaseModel):
@@ -4101,6 +4106,7 @@ def create_sandbox(req: CreateSandboxRequest):
                 attempt_lease,
                 receipt,
             )
+            existing_accepted.provenance = "rediscovered"
             return existing_accepted
         claim_secret = _create_accepted_secrets(
             sandbox_id,
@@ -4144,9 +4150,13 @@ def create_sandbox(req: CreateSandboxRequest):
                 sandbox_id=sandbox_id,
                 sandbox_url=existing_url,
                 status=_get_pod_phase(sandbox_id),
+                provenance="rediscovered",
             )
 
     # ── Create Pod ───────────────────────────────────────────────────
+    # A 409 AlreadyExists below means another caller's Pod won the name; the
+    # response then returns that Pod, and must say so.
+    pod_started = False
     try:
         if not accepted or create_accepted_pod:
             core_v1.create_namespaced_pod(
@@ -4172,6 +4182,7 @@ def create_sandbox(req: CreateSandboxRequest):
                 ),
             )
             logger.info(f"Created Pod {_pod_name(sandbox_id)}")
+            pod_started = True
         elif accepted:
             try:
                 core_v1.read_namespaced_pod(
@@ -4242,6 +4253,7 @@ def create_sandbox(req: CreateSandboxRequest):
             attempt_lease,
             receipt,
         )
+        accepted_response.provenance = "created" if pod_started else "rediscovered"
         return accepted_response
 
     # ── Create Service ───────────────────────────────────────────────
@@ -4272,6 +4284,7 @@ def create_sandbox(req: CreateSandboxRequest):
         sandbox_id=sandbox_id,
         sandbox_url=sandbox_url,
         status=_get_pod_phase(sandbox_id),
+        provenance="created" if pod_started else "rediscovered",
     )
 
 

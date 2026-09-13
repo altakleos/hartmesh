@@ -7,6 +7,7 @@ Handles container lifecycle, port allocation, and cross-process container discov
 from __future__ import annotations
 
 import csv
+import dataclasses
 import hashlib
 import ipaddress
 import json
@@ -27,7 +28,7 @@ from deerflow.utils.network import get_free_port, release_port
 
 from .backend import SandboxBackend, wait_for_sandbox_ready
 from .network_proxy import RELAY_AUTH_HEADER, RELAY_TOKEN_ENV
-from .sandbox_info import SandboxInfo
+from .sandbox_info import PROVENANCE_CREATED, PROVENANCE_REDISCOVERED, SandboxInfo
 
 logger = logging.getLogger(__name__)
 
@@ -919,7 +920,9 @@ class LocalContainerBackend(SandboxBackend):
                 break
             except _ExistingRestrictedSandbox as exc:
                 release_port(port)
-                return exc.info
+                # Found, not started: the provider must not roll this back as
+                # its own creation, nor count it as a new resource set.
+                return dataclasses.replace(exc.info, provenance=PROVENANCE_REDISCOVERED)
             except RuntimeError as exc:
                 release_port(port)
                 err = str(exc)
@@ -936,7 +939,7 @@ class LocalContainerBackend(SandboxBackend):
                     logger.warning(f"Container name {container_name} already in use, attempting to discover existing sandbox instance")
                     existing = self.discover(sandbox_id)
                     if existing is not None and not existing.requires_replacement:
-                        return existing
+                        return dataclasses.replace(existing, provenance=PROVENANCE_REDISCOVERED)
                 raise
         else:
             raise RuntimeError("Could not start sandbox container: all candidate ports are already allocated by Docker")
@@ -950,6 +953,7 @@ class LocalContainerBackend(SandboxBackend):
             container_name=container_name,
             container_id=container_id,
             request_headers={RELAY_AUTH_HEADER: relay_token} if relay_token is not None else {},
+            provenance=PROVENANCE_CREATED,
         )
 
     def _start_restricted_sandbox(

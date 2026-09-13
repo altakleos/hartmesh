@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import importlib
 import threading
 import time
@@ -40,9 +41,17 @@ def _aio_mod():
 
 
 class _FakeBackend:
-    """A counted container backend: no Docker, no sleeps, exact call records."""
+    """A counted container backend: no Docker, no sleeps, exact call records.
 
-    def __init__(self, *, adopt_on_conflict: bool = False) -> None:
+    It answers ``create`` the way ``LocalContainerBackend`` does: a fresh start
+    is reported as ``created``, and (with ``adopt_on_conflict``) a running
+    container under the deterministic name is returned as ``rediscovered``.
+    The provenance is set as an attribute rather than a constructor argument
+    so this file still collects against a ``SandboxInfo`` that predates it, and
+    the lifecycle tests below then fail on behaviour rather than on import.
+    """
+
+    def __init__(self, *, adopt_on_conflict: bool = False, discoverable: bool = False) -> None:
         self.created: list[str] = []
         self.destroyed: list[str] = []
         self.adopted: list[str] = []
@@ -52,20 +61,22 @@ class _FakeBackend:
         # ``LocalContainerBackend.create`` answers a Docker name conflict by
         # discovering and returning the running container; this mirrors it.
         self.adopt_on_conflict = adopt_on_conflict
+        # Whether ``discover`` answers for running containers, as the local
+        # backend's does; off by default so the older tests keep their shape.
+        self.discoverable = discoverable
 
     def create(self, thread_id, sandbox_id, **_kwargs):
-        aio = _aio_mod()
         if self.adopt_on_conflict and self.alive.get(sandbox_id):
             self.adopted.append(sandbox_id)
-            return self.infos[sandbox_id]
+            found = copy.copy(self.infos[sandbox_id])
+            found.provenance = "rediscovered"
+            return found
         self.created.append(sandbox_id)
         self.alive[sandbox_id] = True
-        self.infos[sandbox_id] = aio.SandboxInfo(
-            sandbox_id=sandbox_id,
-            sandbox_url=f"http://sandbox/{sandbox_id}",
-            container_name=f"deer-flow-sandbox-{sandbox_id}",
-        )
-        return self.infos[sandbox_id]
+        self.infos[sandbox_id] = self._unused_info(sandbox_id)
+        started = copy.copy(self.infos[sandbox_id])
+        started.provenance = "created"
+        return started
 
     def _unused_info(self, sandbox_id):
         aio = _aio_mod()
@@ -84,14 +95,16 @@ class _FakeBackend:
             raise RuntimeError("daemon did not answer")
         return self.alive.get(info.sandbox_id, True)
 
-    def discover(self, _sandbox_id):
+    def discover(self, sandbox_id):
+        if self.discoverable and self.alive.get(sandbox_id):
+            return copy.copy(self.infos[sandbox_id])
         return None
 
     def list_running(self):
         return []
 
 
-def _make_provider(tmp_path, monkeypatch, *, replicas: int = 2, adopt_on_conflict: bool = False) -> tuple[object, _FakeBackend]:
+def _make_provider(tmp_path, monkeypatch, *, replicas: int = 2, adopt_on_conflict: bool = False, discoverable: bool = False) -> tuple[object, _FakeBackend]:
     """A provider wired to a fake backend, with no threads and no real config.
 
     ``replicas=2`` matches the consumed profile's two sandbox slots, which is
@@ -127,7 +140,7 @@ def _make_provider(tmp_path, monkeypatch, *, replicas: int = 2, adopt_on_conflic
     provider._ownership_config = SandboxOwnershipConfig()
     provider._ownership = MemoryOwnershipStore(owner_id="warm-reuse-worker", ttl_seconds=600)
 
-    backend = _FakeBackend(adopt_on_conflict=adopt_on_conflict)
+    backend = _FakeBackend(adopt_on_conflict=adopt_on_conflict, discoverable=discoverable)
     provider._backend = backend
 
     paths = Paths(base_dir=tmp_path / "state")
@@ -612,15 +625,15 @@ async def test_cancellation_after_a_create_still_rolls_the_container_back(tmp_pa
     assert journal.snapshot().resource_teardowns == 1
 
 
-def test_local_backend_name_conflict_after_a_fingerprint_refusal_adopts_and_destroys_nothing(tmp_path, monkeypatch):
-    """On the local backend a same-id mismatch is repaired by backend discovery.
+def test_local_backend_same_id_input_drift_replaces_our_own_parked_container(tmp_path, monkeypatch):
+    """On the local backend a same-id mismatch is repaired by fenced replacement.
 
     The refusal leaves the parked container running under its deterministic
-    name; create cannot make a second one, and the backend's name-conflict
-    handler adopts the running container after its own checks. The turn gets
-    its container back with the create-time mounts, as the ordinary path
-    always has. Nothing is destroyed, and the source label reads ``created``
-    because the provider cannot see adoption at the backend seam.
+    name, and a create would collide with it and blindly adopt the old mounts.
+    So our own parked entry is stopped under the ordinary teardown fences
+    first, then the container is rebuilt with the requested inputs. Nothing
+    is adopted, nothing unrelated is touched, and the source label is
+    ``created`` because the backend really did start one.
     """
     aio = _aio_mod()
     provider, backend = _make_provider(tmp_path, monkeypatch, adopt_on_conflict=True)
@@ -634,9 +647,9 @@ def test_local_backend_name_conflict_after_a_fingerprint_refusal_adopts_and_dest
         again = _acquire_accepted(provider, "thread-drift", run_id="run-2")
 
     assert again == first
-    assert backend.adopted == [first]
-    assert backend.created == [first]
-    assert backend.destroyed == []
+    assert backend.adopted == []
+    assert backend.created == [first, first], "rebuilt with the new inputs"
+    assert backend.destroyed == [first], "our own parked container, and only it"
     assert first not in provider._warm_pool
     assert provider._thread_sandboxes[(ACCEPTED_USER, "thread-drift")] == first
     assert journal.snapshot().acquisition_source is AcquisitionSource.CREATED

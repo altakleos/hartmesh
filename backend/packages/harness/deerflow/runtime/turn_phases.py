@@ -34,6 +34,20 @@ relay headers, provider handles and deployment identities are never recorded --
 only that a phase happened and when. Correlation ids live in the record's own
 fields, never in a metric label.
 
+Counting
+--------
+The unit of every resource counter is one *resource set*: the sandbox
+container together with its network sidecar and networks on the local
+restricted backend, the Pod together with its Service on the remote backend.
+A ``create`` call is an *attempt*; it is counted as a new resource set only
+when the backend says it started one (``SandboxInfo.provenance == "created"``),
+as a *rediscovery* when the backend returned one that already existed, and as
+*unknown* when the backend did not say. A teardown is likewise an attempt until
+the backend's destroy returns; an ownership-fenced refusal is counted as a
+refusal, never as a disappearance. The journal's counters are what this process
+observed through its own calls; the backend's own counters (Docker, the
+provisioner) are the independent record to reconcile them against.
+
 Honesty
 -------
 A phase that could not be observed is recorded as such with a reason
@@ -103,7 +117,15 @@ class AcquisitionSource(StrEnum):
     ACCEPTED_ACTIVE = "accepted_active"
     ACCEPTED_WARM_RECLAIM = "accepted_warm_reclaim"
     DISCOVERED = "discovered"
+    # The backend's ``create`` returned a resource that already existed
+    # instead of starting one. Distinct from ``DISCOVERED`` (found before
+    # create was attempted) because the create attempt was paid for.
+    REDISCOVERED = "rediscovered"
     CREATED = "created"
+    # The backend answered ``create`` without saying whether it started or
+    # found the resource. Not a reuse source and not a creation: unknown
+    # provenance is never reported as either.
+    UNKNOWN_PROVENANCE = "unknown_provenance"
 
     @property
     def reuses_existing_resource(self) -> bool:
@@ -117,6 +139,7 @@ _REUSE_SOURCES = frozenset(
         AcquisitionSource.ACCEPTED_ACTIVE,
         AcquisitionSource.ACCEPTED_WARM_RECLAIM,
         AcquisitionSource.DISCOVERED,
+        AcquisitionSource.REDISCOVERED,
     },
 )
 
@@ -153,8 +176,13 @@ class TurnPhaseSnapshot:
     snapshot_present: bool | None
     snapshot_package_count: int | None
     mandatory_materialization: bool | None
+    create_attempts: int
     resource_creates: int
+    resource_rediscoveries: int
+    unknown_create_results: int
+    teardown_attempts: int
     resource_teardowns: int
+    teardown_refusals: int
     evictions: int
     queue_ms: float
     failed_attempts: int
@@ -178,7 +206,7 @@ class TurnPhaseSnapshot:
 
     def to_wire(self) -> dict[str, object]:
         return {
-            "version": 1,
+            "version": 2,
             "correlation_id": self.correlation_id,
             "run_id": self.run_id,
             "total_ms": round(self.total_ms, 3),
@@ -188,8 +216,13 @@ class TurnPhaseSnapshot:
             "snapshot_present": self.snapshot_present,
             "snapshot_package_count": self.snapshot_package_count,
             "mandatory_materialization": self.mandatory_materialization,
+            "create_attempts": self.create_attempts,
             "resource_creates": self.resource_creates,
+            "resource_rediscoveries": self.resource_rediscoveries,
+            "unknown_create_results": self.unknown_create_results,
+            "teardown_attempts": self.teardown_attempts,
             "resource_teardowns": self.resource_teardowns,
+            "teardown_refusals": self.teardown_refusals,
             "evictions": self.evictions,
             "queue_ms": round(self.queue_ms, 3),
             "failed_attempts": self.failed_attempts,
@@ -212,6 +245,7 @@ class TurnPhaseJournal:
         "_acquire_reason",
         "_acquisition_source",
         "_correlation_id",
+        "_create_attempts",
         "_dropped",
         "_evictions",
         "_failed_attempts",
@@ -221,8 +255,12 @@ class TurnPhaseJournal:
         "_queue_ms",
         "_records",
         "_resource_creates",
+        "_resource_rediscoveries",
         "_resource_teardowns",
         "_run_id",
+        "_teardown_attempts",
+        "_teardown_refusals",
+        "_unknown_create_results",
         "_session_kind",
         "_snapshot_package_count",
         "_snapshot_present",
@@ -243,8 +281,13 @@ class TurnPhaseJournal:
         self._snapshot_present: bool | None = None
         self._snapshot_package_count: int | None = None
         self._mandatory_materialization: bool | None = None
+        self._create_attempts = 0
         self._resource_creates = 0
+        self._resource_rediscoveries = 0
+        self._unknown_create_results = 0
+        self._teardown_attempts = 0
         self._resource_teardowns = 0
+        self._teardown_refusals = 0
         self._evictions = 0
         self._queue_ms = 0.0
         self._failed_attempts = 0
@@ -343,13 +386,40 @@ class TurnPhaseJournal:
             if mandatory_materialization is not None:
                 self._mandatory_materialization = bool(mandatory_materialization)
 
+    def record_create_attempt(self) -> None:
+        """A backend ``create`` call was made. Says nothing about its result."""
+        with self._lock:
+            self._create_attempts += 1
+
     def record_resource_create(self) -> None:
+        """The backend confirmed it started a new resource set."""
         with self._lock:
             self._resource_creates += 1
 
+    def record_resource_rediscovery(self) -> None:
+        """The backend answered ``create`` with a resource set that already existed."""
+        with self._lock:
+            self._resource_rediscoveries += 1
+
+    def record_unknown_create_result(self) -> None:
+        """The backend answered ``create`` without saying which of the two it was."""
+        with self._lock:
+            self._unknown_create_results += 1
+
+    def record_teardown_attempt(self) -> None:
+        """A destroy was decided on. Says nothing about whether the resource is gone."""
+        with self._lock:
+            self._teardown_attempts += 1
+
     def record_resource_teardown(self) -> None:
+        """The backend's destroy returned: the resource set is gone."""
         with self._lock:
             self._resource_teardowns += 1
+
+    def record_teardown_refusal(self) -> None:
+        """A destroy was refused by an ownership or teardown fence; the resource remains."""
+        with self._lock:
+            self._teardown_refusals += 1
 
     def record_eviction(self) -> None:
         with self._lock:
@@ -391,8 +461,13 @@ class TurnPhaseJournal:
                 snapshot_present=self._snapshot_present,
                 snapshot_package_count=self._snapshot_package_count,
                 mandatory_materialization=self._mandatory_materialization,
+                create_attempts=self._create_attempts,
                 resource_creates=self._resource_creates,
+                resource_rediscoveries=self._resource_rediscoveries,
+                unknown_create_results=self._unknown_create_results,
+                teardown_attempts=self._teardown_attempts,
                 resource_teardowns=self._resource_teardowns,
+                teardown_refusals=self._teardown_refusals,
                 evictions=self._evictions,
                 queue_ms=self._queue_ms,
                 failed_attempts=self._failed_attempts,
@@ -485,16 +560,61 @@ def record_acquisition_source(source: AcquisitionSource, *, reason: str | None =
         journal.set_acquisition_source(source, reason=reason)
 
 
+def record_create_attempt() -> None:
+    journal = _current_journal.get()
+    if journal is not None:
+        journal.record_create_attempt()
+
+
 def record_resource_create() -> None:
     journal = _current_journal.get()
     if journal is not None:
         journal.record_resource_create()
 
 
+def record_resource_rediscovery() -> None:
+    journal = _current_journal.get()
+    if journal is not None:
+        journal.record_resource_rediscovery()
+
+
+def record_unknown_create_result() -> None:
+    journal = _current_journal.get()
+    if journal is not None:
+        journal.record_unknown_create_result()
+
+
+def record_create_result(provenance: str) -> None:
+    """Classify one ``create`` result by the backend's own word for it.
+
+    ``created`` counts a new resource set and ``rediscovered`` an existing one;
+    anything else is an unknown result. Unknown is a category of its own so a
+    backend that stays silent can never inflate the create count.
+    """
+    if provenance == "created":
+        record_resource_create()
+    elif provenance == "rediscovered":
+        record_resource_rediscovery()
+    else:
+        record_unknown_create_result()
+
+
+def record_teardown_attempt() -> None:
+    journal = _current_journal.get()
+    if journal is not None:
+        journal.record_teardown_attempt()
+
+
 def record_resource_teardown() -> None:
     journal = _current_journal.get()
     if journal is not None:
         journal.record_resource_teardown()
+
+
+def record_teardown_refusal() -> None:
+    journal = _current_journal.get()
+    if journal is not None:
+        journal.record_teardown_refusal()
 
 
 def record_eviction() -> None:

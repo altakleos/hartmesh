@@ -155,13 +155,123 @@ on. A deterministic name or an `-accepted` suffix alone proves nothing and is
 never consulted as evidence.
 
 Three properties keep the repair from becoming a different defect. Refusing to
-reuse is never a reason to destroy: every mismatch falls through to create and
-leaves the parked entry where it was. Eviction never targets the id it is
-making room for (`_evict_oldest_warm(exclude=...)`), which would buy a cold
-start with a teardown. And a genuinely new third resource at capacity still
-evicts an unrelated warm entry and waits for it -- that is real work, and
-hiding it behind an overlapping unbudgeted container is the separately tracked
-capacity defect, not this repair.
+reuse never destroys anything *unrelated*: a mismatch on someone else's entry
+leaves it where it was. Eviction never targets the id it is making room for
+(`_evict_oldest_warm(exclude=...)`), which would buy a cold start with a
+teardown. And a genuinely new third resource at capacity still evicts an
+unrelated warm entry and waits for it -- that is real work, and hiding it
+behind an overlapping unbudgeted container is the separately tracked capacity
+defect, not this repair.
+
+### Rediscovery is not creation
+
+`create` is an attempt, not a result. `LocalContainerBackend.create` can answer
+with a container that already existed under the deterministic name (the
+restricted "compatible existing set" path and the open-mode name-conflict
+path both discover and return it), and the provisioner's `POST /api/sandboxes`
+is idempotent for an existing Pod. Until this repair the provider labelled
+every such answer `created`, and that label chose destructive cleanup when the
+caller was cancelled and counted a creation that never happened.
+
+The backend now says what it did. `SandboxInfo.provenance` is `created` when
+the backend started the resource in that call, `rediscovered` when it returned
+one that already existed, and `unknown` when it did not say (a backend that
+predates the field, or an older provisioner image: the Gateway maps the
+provisioner's `provenance` word and treats its absence as unknown). Unknown is
+never treated as proof of creation.
+
+What the accepted path does with it:
+
+| Origin | How it came about | On caller cancellation before hand-off | Reuse fingerprint |
+| --- | --- | --- | --- |
+| `active` | already tracked for this identity | left to its holders | unchanged |
+| `reclaimed` | taken back from the warm pool | parked again | unchanged |
+| `created` | backend confirms it started it | destroyed under the fences (the only rollback) | recorded from this request |
+| `rediscovered` | create found an existing resource | parked again, owned and reapable | left as recorded, or absent |
+| `unknown` | backend did not say | parked again, owned and reapable | not recorded |
+
+A rediscovered or unknown container never has the *request's* fingerprint
+written over it: new requested inputs do not prove its mounts or configuration
+changed, so the next reclaim compares against what this process actually knows
+(its true inputs, or nothing) and, on a mismatch, replaces it rather than
+reuse it unverified. Two consequences follow and are deliberate. A
+rediscovered accepted-only container is used once with unverified create-time
+inputs (only `discover`'s mode, network-policy, sidecar and readiness checks,
+as the ordinary path has always done) and is replaced on its next
+acquisition, so a Gateway restart that leaves containers running costs each
+accepted thread one cold start on its *second* turn. And a backend that never
+reports provenance disables warm reuse of the containers it creates: no
+fingerprint is ever recorded, so our own parked entry is replaced on every
+follow-up turn; the provider warns once, and `unknown_create_results` in the
+journal is the per-turn signal. Both in-tree backends report it.
+
+**Version skew.** Until the provisioner image that reports `provenance` is
+deployed, every remote create is `unknown`: remote accepted warm reclaim does
+not happen (each turn is one `create_attempts`, the idempotent existing Pod
+comes back as `UNKNOWN_PROVENANCE`) and a cancelled acquisition parks the Pod
+(owned, reaped by the idle checker) instead of rolling it back. This is
+Kubernetes/Helm only; the consumed Compose profile runs no provisioner. Roll
+the provisioner and Gateway images together, as the chart pins them.
+
+**Replacing our own drifted entry.** When the parked entry under this id is
+one *this process* provisioned as accepted-only and its recorded create-time
+inputs differ from the request (locally that is the Lark provisioning state),
+the container is not silently adopted with the old mounts and no unrelated
+container is stopped to reach a create. It is replaced under the ordinary
+teardown fences (`_replace_parked_accepted_sandbox`, the same path as replica
+eviction: local reservation, cross-instance claim, held lease, entry popped
+only after the stop, and identity-fenced first: a parked entry of another
+identity under a colliding id raises `SandboxIdentityCollisionError` as every
+promote path does). Replacing our own entry frees our own slot, so at
+capacity the unrelated thread's container stays parked. A refused replacement
+(reclaimed meanwhile, peer-owned, store unavailable, failed stop) fails the
+acquisition closed with `accepted_sandbox_inputs_changed`: create would find
+the container under its name, take the lease over from the very peer or
+reaper whose fence just refused the stop, and hand the turn a container whose
+inputs are known to differ. The container stays running under whoever holds
+it and the next turn retries once the lease or reservation resolves; a
+peer-owned entry stays refused until this process's renewal reports it lost
+and drops it, after which it is reached as a foreign rediscovery. On the
+remote backend the provisioner validates an existing Pod against the request
+itself, so no provider-side replacement is attempted.
+
+**A foreign container at capacity.** A container this process does not track
+that create rediscovers is a third tracked set once adopted, so the soft cap
+evicts the oldest unrelated warm entry *before* create exactly as for a new
+container, and that wait is the `sandbox_eviction` phase. Our own parked
+entry never triggers this: it is replaced (its slot freed) or the acquisition
+is refused before create is reached. There is no backend probe, no deferred
+eviction and no overshoot window.
+
+**Counting.** The journal (`deerflow.runtime.turn_phases`) counts resource
+*sets* -- container plus network sidecar and networks locally, Pod plus
+Service remotely -- and distinguishes `create_attempts` from confirmed
+`resource_creates`, `resource_rediscoveries` and `unknown_create_results`,
+and `teardown_attempts` from confirmed `resource_teardowns` and
+ownership-fenced `teardown_refusals`. A teardown is confirmed only when the
+backend's destroy returned; a refusal is never reported as a disappearance.
+The tests reconcile every journal value against the fake backend's own call
+record. Tests: `backend/tests/test_sandbox_rediscovery_provenance.py`,
+`test_sandbox_warm_reuse_latency.py`, `test_aio_sandbox_local_backend.py`
+(provenance through the real local control flow),
+`test_remote_sandbox_backend.py` and `test_provisioner_runtime_hardening.py`.
+
+**Model-to-stream timing, end to end.**
+`backend/tests/test_turn_phase_gateway_stream_e2e.py` runs the real Gateway
+under uvicorn on loopback, registers, creates a thread and drives the
+authenticated `runs/stream` route with a deterministic streaming model loaded
+through the ordinary `models[].use` path, so callback invocation and event
+publication come from real execution. It asserts that the HTTP client sees the
+first answer text well before completion (a buffered body would collapse the
+timestamps), that hidden reasoning is not counted as text, that silent and
+cancelled turns manufacture no text timestamps, and that the journal orders
+model request, first provider text, first outgoing text, completion and
+terminal on one clock with the injected delays between them. Its last test
+drives the released `docker/nginx/nginx.conf` in `nginx:alpine` published on
+`127.0.0.1` only, with a relay container aliased `gateway` forwarding to the
+same Gateway on the Docker bridge's host address, and skips (saying so) without
+Docker. Browser first paint, cross-process delivery and post-terminal replay
+remain unobserved.
 
 What the fingerprint can and cannot fence depends on the backend. On the
 remote backend it is a real fence: the binding identity, execution claim and
@@ -172,21 +282,17 @@ by construction, the skills root and projection state are already part of the
 id itself, the backend class and skills root are startup constants, the thread
 and active-view mounts are path-deterministic, and the bound snapshot is
 re-projected on every acquisition -- so the only create-time input that can
-differ is the Lark CLI provisioning state. A mismatch there falls through to
-create, create cannot produce a second container under the deterministic name,
-and the backend's name-conflict handler discovers and adopts the running
-container after its own identity and network-policy checks. The turn therefore
-reuses the container with its create-time mounts, as the ordinary path always
-has, and the Lark change takes effect on the next cold start (idle reap,
-eviction or explicit destroy). The acquisition is labelled `created` in that
-case, because the provider cannot distinguish creation from adoption at the
-backend seam; that is a known limitation of the source label on the local
-backend, pinned by
-`test_local_backend_name_conflict_after_a_fingerprint_refusal_adopts_and_destroys_nothing`.
+differ is the Lark CLI provisioning state. A mismatch there is repaired by the
+fenced replacement of our own parked entry described above, or refuses the
+acquisition when the fences refuse the stop; the container is never adopted
+with its old mounts. The label of every create result is the backend's own
+provenance, pinned by
+`test_local_backend_same_id_input_drift_replaces_our_own_parked_container`.
 
 Cancellation follows the same rule as everything above: the async entry
-records how the id was obtained and undoes only what this call did. A created
-container is destroyed; a reclaimed one is parked again under the same
+records how the id was obtained and undoes only what this call did. A
+container the backend confirms it started is destroyed; a reclaimed,
+rediscovered or unknown-provenance one is parked again under the same
 identity, because the caller never received it and nothing else would ever
 release it; an already-active one is left to the holders that made it active.
 
