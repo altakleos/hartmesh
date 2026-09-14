@@ -1391,7 +1391,7 @@ async def test_acquire_async_uses_async_readiness_polling(monkeypatch):
     provider._lock = aio_mod.threading.Lock()
     provider._backend = SimpleNamespace(
         create=MagicMock(return_value=aio_mod.SandboxInfo(sandbox_id="sandbox-async", sandbox_url="http://sandbox")),
-        destroy=MagicMock(),
+        destroy=MagicMock(return_value=None),
         discover=MagicMock(return_value=None),
     )
 
@@ -1669,7 +1669,7 @@ def test_create_sandbox_requests_runtime_when_lark_installed(tmp_path, monkeypat
         captured["provision_lark_cli_broker"] = provision_lark_cli_broker
         return aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox")
 
-    provider._backend = SimpleNamespace(create=_create, destroy=MagicMock(), discover=MagicMock(return_value=None))
+    provider._backend = SimpleNamespace(create=_create, destroy=MagicMock(return_value=None), discover=MagicMock(return_value=None))
     monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: True)
     monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_a, **_k: [])
     monkeypatch.setattr(aio_mod.AioSandboxProvider, "_lark_integration_active", staticmethod(lambda user_id=None: True))
@@ -1699,7 +1699,7 @@ def test_create_sandbox_requests_broker_when_active(tmp_path, monkeypatch):
         captured["provision_lark_cli_broker"] = provision_lark_cli_broker
         return aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox")
 
-    provider._backend = SimpleNamespace(create=_create, destroy=MagicMock(), discover=MagicMock(return_value=None))
+    provider._backend = SimpleNamespace(create=_create, destroy=MagicMock(return_value=None), discover=MagicMock(return_value=None))
     monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: True)
     monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_a, **_k: [])
     monkeypatch.setattr(aio_mod.AioSandboxProvider, "_lark_integration_active", staticmethod(lambda user_id=None: True))
@@ -1729,7 +1729,7 @@ def test_create_sandbox_skips_runtime_when_lark_absent(tmp_path, monkeypatch):
         captured["provision_lark_cli_broker"] = provision_lark_cli_broker
         return aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox")
 
-    provider._backend = SimpleNamespace(create=_create, destroy=MagicMock(), discover=MagicMock(return_value=None))
+    provider._backend = SimpleNamespace(create=_create, destroy=MagicMock(return_value=None), discover=MagicMock(return_value=None))
     monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: True)
     monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_a, **_k: [])
     monkeypatch.setattr(aio_mod.AioSandboxProvider, "_lark_integration_active", staticmethod(lambda user_id=None: False))
@@ -1762,7 +1762,7 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
     provider._acquire_inflight = {}
     provider._shutdown_called = False
     provider._idle_checker_thread = None
-    provider._backend = SimpleNamespace(destroy=MagicMock())
+    provider._backend = SimpleNamespace(destroy=MagicMock(return_value=None))
 
     sandbox = MagicMock()
     sandbox.id = sandbox_id
@@ -1959,7 +1959,7 @@ def test_drop_unhealthy_sandbox_skips_recreated_entry(tmp_path):
     new_sandbox = MagicMock()
     provider._sandbox_infos = {"sandbox-toctou": new_info}
     provider._sandboxes = {"sandbox-toctou": new_sandbox}
-    provider._backend = SimpleNamespace(destroy=MagicMock())
+    provider._backend = SimpleNamespace(destroy=MagicMock(return_value=None))
 
     provider._drop_unhealthy_sandbox("sandbox-toctou", "stale health check", expected_info=old_info)
 
@@ -1992,7 +1992,7 @@ def test_acquire_skips_dead_warm_pool_sandbox(tmp_path, monkeypatch):
     provider._config = {"replicas": 3}
     provider._backend = SimpleNamespace(
         is_alive=MagicMock(return_value=False),
-        destroy=MagicMock(),
+        destroy=MagicMock(return_value=None),
         discover=MagicMock(return_value=None),
         create=MagicMock(
             return_value=aio_mod.SandboxInfo(
@@ -2135,7 +2135,7 @@ def test_create_sandbox_evicts_oldest_warm_replica_via_shared_lifecycle(tmp_path
     }
     provider._backend = SimpleNamespace(
         create=MagicMock(return_value=created_info),
-        destroy=MagicMock(),
+        destroy=MagicMock(return_value=None),
     )
     monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_extra_mounts", lambda _self, _thread_id, *, user_id=None: [])
     monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda _url, *, timeout=60: True)
@@ -2175,7 +2175,7 @@ def _make_tenant_isolation_provider(tmp_path, monkeypatch):
 
     provider._backend = SimpleNamespace(
         create=MagicMock(side_effect=_create),
-        destroy=MagicMock(),
+        destroy=MagicMock(return_value=None),
         discover=MagicMock(return_value=None),
         is_alive=MagicMock(return_value=True),
         list_running=MagicMock(return_value=[]),
@@ -2268,7 +2268,7 @@ def _make_unready_destroy_provider(tmp_path, *, sandbox_id, base_url, monkeypatc
     unready_info = aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url=base_url)
     provider._backend = SimpleNamespace(
         create=MagicMock(return_value=unready_info),
-        destroy=MagicMock(),
+        destroy=MagicMock(return_value=None),
     )
     monkeypatch.setattr(
         aio_mod.AioSandboxProvider,
@@ -2480,7 +2480,7 @@ def _headers_provider(tmp_path, aio_mod, monkeypatch, infos: dict):
     provider._lock = aio_mod.threading.Lock()
     provider._backend = SimpleNamespace(
         create=lambda _thread_id, sandbox_id, **_kwargs: infos[sandbox_id],
-        destroy=MagicMock(),
+        destroy=MagicMock(return_value=None),
         discover=MagicMock(return_value=None),
     )
     monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_a, **_k: [])

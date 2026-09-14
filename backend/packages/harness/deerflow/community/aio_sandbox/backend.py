@@ -9,6 +9,7 @@ import math
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from enum import StrEnum
 from urllib.parse import urlparse
 
 import httpx
@@ -177,6 +178,27 @@ async def wait_for_sandbox_ready_async(
             await asyncio.sleep(min(poll_interval, remaining))
 
 
+class DestroyOutcome(StrEnum):
+    """What a backend established about a resource set after trying to destroy it.
+
+    Successful destruction means the owned set is *confirmed absent*, not that
+    commands were attempted or a function returned. A failed command is not
+    absence, and an observation the backend could not make is not absence
+    either; only a positive not-found counts. A backend whose only observation
+    is a remote service's acceptance of the deletion answers ``ABSENT`` on that
+    acceptance and says so in its own docstring.
+    """
+
+    ABSENT = "absent"  # every resource in the set positively established absent
+    PARTIAL = "partial"  # some resources confirmed absent, at least one remains
+    FAILED = "failed"  # nothing confirmed absent; the set is intact or its commands failed
+    UNKNOWN = "unknown"  # the observation was unavailable or ambiguous (timeout, daemon error)
+
+    @property
+    def confirmed_absent(self) -> bool:
+        return self is DestroyOutcome.ABSENT
+
+
 class SandboxBackend(ABC):
     """Abstract base for sandbox provisioning backends.
 
@@ -228,8 +250,15 @@ class SandboxBackend(ABC):
         ...
 
     @abstractmethod
-    def destroy(self, info: SandboxInfo) -> None:
+    def destroy(self, info: SandboxInfo) -> DestroyOutcome | None:
         """Destroy/cleanup a sandbox and release its resources.
+
+        Returns what was *established* about the resource set afterwards, as a
+        :class:`DestroyOutcome`. A backend that returns ``None`` predates the
+        contract and is trusted as it always was: a normal return means gone,
+        an exception means not. Backends that can observe their resources must
+        report rather than assume, because a stop or remove command that fails
+        can still return normally.
 
         Args:
             info: The sandbox metadata to destroy.

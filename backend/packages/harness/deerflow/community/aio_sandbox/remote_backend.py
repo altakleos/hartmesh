@@ -35,7 +35,7 @@ from deerflow.sandbox.accepted_material import AcceptedMaterialExecutionClaimV1
 from deerflow.sandbox.egress import EgressAllowanceV1
 from deerflow.skills.storage import user_should_see_legacy_skills
 
-from .backend import SandboxBackend
+from .backend import DestroyOutcome, SandboxBackend
 from .sandbox_info import (
     PROVENANCE_CREATED,
     PROVENANCE_REDISCOVERED,
@@ -440,8 +440,17 @@ class RemoteSandboxBackend(SandboxBackend):
             **kwargs,
         )
 
-    def destroy(self, info: SandboxInfo) -> None:
-        """Destroy a sandbox Pod + Service via the provisioner."""
+    def destroy(self, info: SandboxInfo) -> DestroyOutcome:
+        """Destroy a sandbox Pod + Service via the provisioner.
+
+        The provisioner's DELETE is the only observation available here. A
+        2xx answer means the provisioner accepted the deletion: it issued the
+        Pod and Service deletes (a 404 on either member is tolerated, a partial
+        cleanup is a 5xx and raises). Kubernetes removes them asynchronously,
+        so this is deletion accepted, trusted as before, not a verified
+        absence. ``UNKNOWN`` is never returned because the request either
+        completes or fails loudly.
+        """
         if info.accepted_skill_material is None:
             self._provisioner_destroy(info.sandbox_id)
         else:
@@ -449,6 +458,7 @@ class RemoteSandboxBackend(SandboxBackend):
                 info.sandbox_id,
                 info.accepted_skill_material,
             )
+        return DestroyOutcome.ABSENT
 
     def is_alive(self, info: SandboxInfo) -> bool:
         """Check whether the sandbox Pod is running."""
