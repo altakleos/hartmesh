@@ -5,6 +5,22 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.12] — 2026-09-14
+
+- hartmesh#73 — reuse a compatible accepted warm sandbox instead of destroying and recreating it, and bound turn-phase timing so the phase a turn reports is the phase it is in. Source evidence only: no warm-acquire percentile, cold-start or browser-timing claim.
+- hartmesh#74 — report creation provenance from the backend, cancel by origin, replace a sandbox whose input configuration drifted, and cover authenticated model-to-HTTP streaming with regressions.
+- hartmesh#75 — make a local destroy mean confirmed absent, keep a set tracked and quarantined until cleanup confirms absence, and account teardown failures separately from refusals (journal wire version 3).
+- hartmesh#76 — arbitrate orphan reconciliation against acquisition, refuse lookups on a quarantined set, retry warm entries by generation identity, and validate identity before an accepted cleanup retry.
+- hartmesh#77 — refuse active lookups once teardown has reserved the set, treat accepted reuse alone as activity, and stop the active-idle pass from retrying a resource it just quarantined in the same tick.
+
+Verified over fake Docker and the in-memory ownership store, with a real
+authenticated Gateway/worker/graph and synthetic inference. Not a Redis or
+distributed-ownership qualification, a fully admitted live chat, a cold-start
+or warm-acquire percentile result, a hard capacity admission change, or a
+tenant rollout qualification.
+
+[2.1.0+hartmesh.12]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.12
+
 ## [2.1.0+hartmesh.11] — 2026-09-13
 
 - hartmesh#72 — make the local sandbox readiness deadline a validated effective setting used by both the synchronous and asynchronous acquisition paths, give the Compose tenant profile a 120-second initial candidate with the bounded `SANDBOX_READY_TIMEOUT` override (whole seconds, 60 through 600), enforce it against real monotonic deadlines rather than an approximate polling duration, and own and mark a new sandbox before waiting so neither reconciliation nor a peer can adopt it during the longer startup window. 120 seconds is an initial candidate, not a qualified fleet-wide bound.
