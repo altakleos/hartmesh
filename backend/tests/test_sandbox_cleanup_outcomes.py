@@ -1389,3 +1389,277 @@ def test_conflicting_known_identity_is_refused_while_the_id_is_active(tmp_path, 
 
     assert _mutations(docker) == []
     assert provider.get(a) is not None and backend.created == [a]
+
+
+# ── Active lookup versus the teardown reservation ───────────────────────
+#
+# The idle checker reserves an active id (`_destroy_tracked`) and then claims
+# ownership before it untracks, so a refused claim can recover. In that
+# interval `get` and the accepted active shortcut used to answer from the
+# active map alone and hand out the very set the reservation is authorized
+# to stop. These tests schedule the lookups deterministically inside that
+# interval through the real idle pass; ownership is the committed memory
+# store, creation/readiness/Docker are the fakes, and the accepted
+# acquisition entry point runs without a real accepted-material binding or
+# durable invocation. The skill-projection coordinator reports nothing busy
+# here, so the predicate's owner term is not exercised; nothing below is a
+# public-route or durable-runtime claim.
+
+
+def _idle_active(provider, thread_id: str = "thread-a") -> str:
+    """An active (not parked) accepted set whose activity is aged so the real idle pass selects it."""
+    a = _acquire_accepted(provider, thread_id)
+    provider._last_activity[a] = 0.0
+    return a
+
+
+def _lookups_inside_claim(provider, monkeypatch, sandbox_id: str, *, refuse_claim: bool = False) -> dict[str, object]:
+    """Run `get` and an accepted re-acquisition once the teardown reservation is held, before the claim."""
+    seen: dict[str, object] = {}
+    real_claim = provider._claim_ownership
+
+    def _claim(sid, *, for_destroy=False):
+        if sid == sandbox_id and for_destroy and "reserved" not in seen:
+            seen["reserved"] = sid in provider._local_teardown
+            seen["get"] = provider.get(sid)
+            try:
+                seen["acquire"] = _acquire_accepted(provider, "thread-a", run_id="run-2")
+            except Exception as exc:  # noqa: BLE001 - the class is asserted by the caller
+                seen["acquire"] = exc
+            seen["activity"] = provider._last_activity.get(sid)
+            if refuse_claim:
+                # Injected refusal, the shape `_claim_ownership` itself takes on
+                # a store error or a peer's lease: the destroy path must recover.
+                return False
+        return real_claim(sid, for_destroy=for_destroy)
+
+    monkeypatch.setattr(provider, "_claim_ownership", _claim)
+    return seen
+
+
+def test_lookups_after_the_idle_teardown_reservation_do_not_hand_out_the_set(tmp_path, monkeypatch):
+    """Teardown wins first: once reserved, `get` and the accepted active reuse refuse; the stop then confirms."""
+    provider, backend, docker = _make(tmp_path, monkeypatch)
+    a = _idle_active(provider)
+    seen = _lookups_inside_claim(provider, monkeypatch, a)
+
+    with turn_phases(correlation_id="idle-race") as journal:
+        provider._cleanup_idle_sandboxes(1.0)
+
+    assert seen["reserved"] is True, "the lookups ran with the reservation held"
+    assert seen["get"] is None, "a lookup after the teardown decision does not get the set"
+    assert isinstance(seen["acquire"], SandboxBeingDestroyedError), seen["acquire"]
+    assert seen["activity"] == 0.0, "refused lookups refreshed no activity"
+    assert docker.present(a) == set(), "the reservation's stop confirmed"
+    assert a not in provider._sandboxes and a not in provider._warm_pool and a not in provider._cleanup_pending
+    assert a not in provider._local_teardown
+    assert provider.get(a) is None
+    assert provider._ownership.owner(a) is None
+    assert _counts(journal.snapshot()) == {"attempts": 1, "teardowns": 1, "refusals": 0, "failures": 0, "creates": 0, "rediscoveries": 0}
+    assert backend.created == [a]
+    # Recovery: the next acquisition builds one fresh generation.
+    with turn_phases(correlation_id="after") as after:
+        assert _acquire_accepted(provider, "thread-a", run_id="run-3") == a
+    assert after.snapshot().acquisition_source is AcquisitionSource.CREATED
+    assert backend.created == [a, a] and len(docker.present(a)) == 4
+    assert provider.get(a) is not None
+
+
+def test_control_activity_before_the_reservation_makes_idle_cleanup_refuse(tmp_path, monkeypatch):
+    """Activity wins first: a `get` and a reuse before the reservation are respected by the predicate."""
+    provider, backend, docker = _make(tmp_path, monkeypatch)
+    a = _idle_active(provider)
+    seen: dict[str, object] = {}
+    real_destroy_tracked = provider._destroy_tracked
+
+    def _destroy_tracked(sandbox_id, *, still_reapable):
+        if sandbox_id == a and "get" not in seen:
+            seen["get"] = provider.get(a)
+            seen["acquire"] = _acquire_accepted(provider, "thread-a", run_id="run-2")
+        return real_destroy_tracked(sandbox_id, still_reapable=still_reapable)
+
+    monkeypatch.setattr(provider, "_destroy_tracked", _destroy_tracked)
+    with turn_phases(correlation_id="idle-control") as journal:
+        provider._cleanup_idle_sandboxes(1.0)
+
+    assert seen["get"] is not None and seen["acquire"] == a
+    assert len(docker.present(a)) == 4
+    assert provider.get(a) is not None and a in provider._sandboxes
+    assert provider._ownership.owner(a) == provider._owner_id
+    assert _counts(journal.snapshot()) == {"attempts": 1, "teardowns": 0, "refusals": 1, "failures": 0, "creates": 0, "rediscoveries": 0}
+    assert _mutations(docker) == []
+
+
+def test_control_accepted_reuse_alone_before_the_reservation_is_activity(tmp_path, monkeypatch):
+    """A reuse that wins before the teardown decision is protected by the predicate on its own, without a `get`."""
+    provider, backend, docker = _make(tmp_path, monkeypatch)
+    a = _idle_active(provider)
+    seen: dict[str, object] = {}
+    real_destroy_tracked = provider._destroy_tracked
+
+    def _destroy_tracked(sandbox_id, *, still_reapable):
+        if sandbox_id == a and "acquire" not in seen:
+            seen["acquire"] = _acquire_accepted(provider, "thread-a", run_id="run-2")
+        return real_destroy_tracked(sandbox_id, still_reapable=still_reapable)
+
+    monkeypatch.setattr(provider, "_destroy_tracked", _destroy_tracked)
+    with turn_phases(correlation_id="idle-reuse-control") as journal:
+        provider._cleanup_idle_sandboxes(1.0)
+
+    assert seen["acquire"] == a
+    assert provider._last_activity[a] > 0.0, "the reuse counted as activity"
+    assert len(docker.present(a)) == 4 and _mutations(docker) == []
+    assert provider.get(a) is not None and a in provider._sandboxes
+    assert _counts(journal.snapshot()) == {"attempts": 1, "teardowns": 0, "refusals": 1, "failures": 0, "creates": 0, "rediscoveries": 0}
+
+
+def test_a_refused_ownership_claim_after_refused_lookups_leaves_the_set_usable(tmp_path, monkeypatch):
+    """The lookups refuse while reserved; the claim then refuses; nothing is stopped and the handle is back."""
+    provider, backend, docker = _make(tmp_path, monkeypatch)
+    a = _idle_active(provider)
+    seen = _lookups_inside_claim(provider, monkeypatch, a, refuse_claim=True)
+
+    with turn_phases(correlation_id="idle-claim-refused") as journal:
+        provider._cleanup_idle_sandboxes(1.0)
+
+    assert seen["get"] is None and isinstance(seen["acquire"], SandboxBeingDestroyedError)
+    assert seen["activity"] == 0.0 and provider._last_activity[a] == 0.0, "nothing refreshed on the refused lookups' behalf"
+    assert len(docker.present(a)) == 4 and _mutations(docker) == []
+    assert a in provider._sandboxes and a not in provider._local_teardown and a not in provider._cleanup_pending
+    assert provider.get(a) is not None, "usable again once the reservation is released"
+    assert _acquire_accepted(provider, "thread-a", run_id="run-3") == a
+    assert provider._ownership.owner(a) == provider._owner_id, "still ours; nothing took ownership on the refused lookup's behalf"
+    assert _counts(journal.snapshot()) == {"attempts": 1, "teardowns": 0, "refusals": 1, "failures": 0, "creates": 0, "rediscoveries": 0}
+
+
+def test_a_partial_idle_cleanup_after_refused_lookups_stays_quarantined(tmp_path, monkeypatch):
+    """The pass that quarantines a set does not retry it: one attempt per trigger on the active-idle path."""
+    provider, backend, docker = _make(tmp_path, monkeypatch)
+    a = _idle_active(provider)
+    _sandbox, proxy, *_ = docker.members(a)
+    docker.faults[f"stop:{proxy}"] = "refuse"
+    docker.faults[f"rm:{proxy}"] = "refuse"
+    seen = _lookups_inside_claim(provider, monkeypatch, a)
+
+    with turn_phases(correlation_id="idle-partial") as journal:
+        provider._cleanup_idle_sandboxes(1.0)
+
+    assert seen["get"] is None and isinstance(seen["acquire"], SandboxBeingDestroyedError)
+    assert seen["activity"] == 0.0
+    assert docker.present(a) == {proxy}
+    assert a in provider._warm_pool and provider._cleanup_pending[a] is DestroyOutcome.PARTIAL
+    assert provider.get(a) is None
+    with pytest.raises(AcceptedSkillSandboxBindingError, match="accepted_sandbox_cleanup_pending"):
+        _acquire_accepted(provider, "thread-a", run_id="run-3")
+    assert _counts(journal.snapshot()) == {"attempts": 1, "teardowns": 0, "refusals": 0, "failures": 1, "creates": 0, "rediscoveries": 0}
+
+    docker.faults.clear()
+    with turn_phases(correlation_id="idle-recovered") as recovered:
+        assert _acquire_accepted(provider, "thread-a", run_id="run-4") == a
+    assert _counts(recovered.snapshot()) == {"attempts": 1, "teardowns": 1, "refusals": 0, "failures": 0, "creates": 1, "rediscoveries": 0}
+    assert len(docker.present(a)) == 4 and a not in provider._cleanup_pending
+
+
+def _claim_gated(provider, monkeypatch, sandbox_id: str, *, gate_thread: threading.Thread | None = None):
+    """Hold the idle pass open inside its teardown claim (reservation held, set still tracked)."""
+    in_claim = threading.Event()
+    allow = threading.Event()
+    real_claim = provider._claim_ownership
+    gated: list[int] = []
+
+    def _claim(sid, *, for_destroy=False):
+        mine = threading.current_thread() is gate_thread if gate_thread is not None else not gated
+        if sid == sandbox_id and for_destroy and mine:
+            gated.append(1)
+            in_claim.set()
+            assert allow.wait(timeout=5)
+        return real_claim(sid, for_destroy=for_destroy)
+
+    monkeypatch.setattr(provider, "_claim_ownership", _claim)
+    return in_claim, allow
+
+
+def test_lookups_during_the_idle_claim_round_trip_are_refused(tmp_path, monkeypatch):
+    """Concurrent form: the idle pass is held inside its claim on its own thread; lookups on this one refuse."""
+    provider, backend, docker = _make(tmp_path, monkeypatch)
+    a = _idle_active(provider)
+    result: dict[str, object] = {}
+
+    def _idle():
+        try:
+            with turn_phases(correlation_id="idle-claim") as journal:
+                provider._cleanup_idle_sandboxes(1.0)
+            result["counts"] = _counts(journal.snapshot())
+        except Exception as exc:  # noqa: BLE001 - surfaced below
+            result["error"] = exc
+
+    worker = threading.Thread(target=_idle, name="idle-checker")
+    in_claim, allow = _claim_gated(provider, monkeypatch, a, gate_thread=worker)
+    worker.start()
+    try:
+        assert in_claim.wait(timeout=5)
+        assert a in provider._local_teardown and a in provider._sandboxes, "reserved, still tracked"
+        started = time.monotonic()
+        with pytest.raises(SandboxBeingDestroyedError):
+            _acquire_accepted(provider, "thread-a", run_id="run-2")
+        assert time.monotonic() - started < 1.0
+        assert provider.get(a) is None
+        assert provider._last_activity[a] == 0.0
+        assert backend.created == [a] and _mutations(docker) == []
+    finally:
+        allow.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive() and "error" not in result, result.get("error")
+    assert docker.present(a) == set() and provider.get(a) is None
+    assert result["counts"] == {"attempts": 1, "teardowns": 1, "refusals": 0, "failures": 0, "creates": 0, "rediscoveries": 0}
+    assert _acquire_accepted(provider, "thread-a", run_id="run-3") == a
+    assert len(docker.present(a)) == 4
+
+
+@pytest.mark.anyio
+async def test_async_accepted_reuse_during_the_idle_claim_round_trip_is_refused(tmp_path, monkeypatch):
+    """The async accepted route (binding stubbed to a no-op) refuses the same window."""
+    provider, backend, docker = _make(tmp_path, monkeypatch)
+    a = _idle_active(provider)
+    monkeypatch.setattr(provider, "bind_accepted_skill_snapshot", lambda *_a, **_k: None)
+    in_claim, allow = _claim_gated(provider, monkeypatch, a)
+    result: dict[str, object] = {}
+
+    def _idle():
+        with turn_phases(correlation_id="async-idle-claim") as journal:
+            provider._cleanup_idle_sandboxes(1.0)
+        result["counts"] = _counts(journal.snapshot())
+
+    idle = asyncio.ensure_future(asyncio.to_thread(_idle))
+    try:
+        assert await asyncio.to_thread(in_claim.wait, 5)
+        assert a in provider._local_teardown and a in provider._sandboxes
+        with pytest.raises(SandboxBeingDestroyedError):
+            await provider.provision_accepted_skills_async("thread-a", user_id=ACCEPTED_USER, binding=_binding(run_id="run-2"))
+        assert provider.get(a) is None
+        assert provider._last_activity[a] == 0.0
+        assert backend.created == [a] and _mutations(docker) == []
+    finally:
+        allow.set()
+        await idle
+    assert docker.present(a) == set()
+    assert result["counts"] == {"attempts": 1, "teardowns": 1, "refusals": 0, "failures": 0, "creates": 0, "rediscoveries": 0}
+    assert await provider.provision_accepted_skills_async("thread-a", user_id=ACCEPTED_USER, binding=_binding(run_id="run-3")) == a
+    assert len(docker.present(a)) == 4
+
+
+def test_reservation_flag_alone_refuses_get_and_accepted_reuse(tmp_path, monkeypatch):
+    """Defense-in-depth at the unit level, not the composed acceptance proof."""
+    provider, backend, docker = _make(tmp_path, monkeypatch)
+    a = _acquire_accepted(provider, "thread-a")
+    before = provider._last_activity[a]
+    provider._local_teardown.add(a)
+
+    assert provider.get(a) is None
+    assert provider._last_activity[a] == before, "a refused lookup does not refresh activity"
+    with pytest.raises(SandboxBeingDestroyedError):
+        _acquire_accepted(provider, "thread-a", run_id="run-2")
+    provider._local_teardown.discard(a)
+    assert provider.get(a) is not None
+    assert _acquire_accepted(provider, "thread-a", run_id="run-3") == a
+    assert _mutations(docker) == [] and backend.created == [a]

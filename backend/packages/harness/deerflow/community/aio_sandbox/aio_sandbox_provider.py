@@ -1733,6 +1733,11 @@ class AioSandboxProvider(
                 return False
             return True
 
+        # One attempt per trigger: a set this pass quarantines is not retried
+        # by the same pass, so only what was pending before it started is.
+        with self._lock:
+            pending_before = list(getattr(self, "_cleanup_pending", {}))
+
         for sandbox_id in active_to_destroy:
             try:
                 logger.info(f"Destroying idle sandbox {sandbox_id}")
@@ -1740,7 +1745,7 @@ class AioSandboxProvider(
             except Exception as e:
                 logger.error(f"Failed to destroy idle sandbox {sandbox_id}: {e}")
 
-        self._retry_all_pending_cleanup()
+        self._retry_all_pending_cleanup(only=pending_before)
         self._reap_expired_warm(idle_timeout)
 
     def _reap_expired_warm(self, idle_timeout: float | None = None) -> None:
@@ -2411,10 +2416,16 @@ class AioSandboxProvider(
             return DestroyOutcome.ABSENT
         return self._cleanup_pending_for(sandbox_id) or DestroyOutcome.UNKNOWN
 
-    def _retry_all_pending_cleanup(self) -> None:
-        """Idle-checker pass over every set whose cleanup did not confirm."""
+    def _retry_all_pending_cleanup(self, *, only: list[str] | None = None) -> None:
+        """Idle-checker pass over every set whose cleanup did not confirm.
+
+        ``only`` restricts the pass to ids that were pending when the caller
+        decided (so a set quarantined moments ago by the same trigger is not
+        attempted twice); ids no longer pending are skipped either way.
+        """
         with self._lock:
-            pending_ids = list(getattr(self, "_cleanup_pending", {}))
+            pending = getattr(self, "_cleanup_pending", {})
+            pending_ids = [sid for sid in (pending if only is None else only) if sid in pending]
         for sandbox_id in pending_ids:
             try:
                 self._retry_pending_cleanup(sandbox_id, reason="cleanup_retry")
@@ -2950,10 +2961,29 @@ class AioSandboxProvider(
                 existing = self._thread_sandboxes.get(key)
                 accepted_ids = getattr(self, "_accepted_only_sandbox_ids", set())
                 existing_pending = existing is not None and existing in getattr(self, "_cleanup_pending", {})
+                existing_reserved = existing is not None and self._being_torn_down_locally(existing)
+                if existing is not None and not existing_pending and not existing_reserved and existing in self._sandboxes:
+                    # A reuse that wins before any teardown decision is
+                    # activity, as it is on the ordinary in-process reuse and
+                    # on `get`: refreshed here, in the same critical section
+                    # that read the reservation, so the idle checker's
+                    # still-idle predicate protects the turn that just began.
+                    self._last_activity[existing] = time.time()
             if existing is not None:
                 if existing_pending:
                     record_failed_attempt()
                     raise AcceptedSkillSandboxBindingError("accepted_sandbox_cleanup_pending")
+                if existing_reserved:
+                    # Teardown won first: a reaper holds the id's reservation
+                    # (idle destroy claims ownership before it untracks, so the
+                    # entry is still here). Decided in the critical section
+                    # that read the reservation; refuse rather than hand out
+                    # the set that decision is authorized to stop. A create
+                    # under the name would be refused by `_mark_starting` for
+                    # the same reason. The next turn retries once the
+                    # reservation ends.
+                    record_failed_attempt()
+                    raise SandboxBeingDestroyedError(existing)
                 if existing in accepted_ids:
                     record_acquisition_source(AcquisitionSource.ACCEPTED_ACTIVE)
                     return existing, "active"
@@ -3866,6 +3896,14 @@ class AioSandboxProvider(
                 # Quarantine is a lifecycle state, not a warm-pool detail: a
                 # set whose cleanup did not confirm is never usable, whichever
                 # map still names it.
+                return None
+            if self._being_torn_down_locally(sandbox_id):
+                # A reaper in this process has reserved the id: the teardown
+                # decision is taken and the entry stays tracked only so a
+                # refused claim can recover. A lookup made after that decision
+                # gets nothing and refreshes nothing; once the reservation is
+                # released the handle answers again if the claim refused. Same
+                # critical section as the answer, so the check is never stale.
                 return None
             sandbox = self._sandboxes.get(sandbox_id)
             if sandbox is not None:
