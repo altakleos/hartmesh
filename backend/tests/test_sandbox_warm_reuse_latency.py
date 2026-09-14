@@ -126,6 +126,7 @@ def _make_provider(tmp_path, monkeypatch, *, replicas: int = 2, adopt_on_conflic
     provider._starting = set()
     provider._accepted_only_sandbox_ids = set()
     provider._accepted_reuse_fingerprints = {}
+    provider._cleanup_pending = {}
     provider._acquire_epoch = {}
     provider._acquire_epoch_counter = 0
     provider._acquire_inflight = {}

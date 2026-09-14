@@ -58,6 +58,7 @@ from deerflow.runtime.turn_phases import (
     record_queue_ms,
     record_resource_teardown,
     record_teardown_attempt,
+    record_teardown_failure,
     record_teardown_refusal,
 )
 from deerflow.runtime.user_context import get_effective_user_id
@@ -86,7 +87,7 @@ from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.skills.types import SkillCategory
 
 from .aio_sandbox import AioSandbox
-from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, SandboxBackend, normalize_ready_timeout, wait_for_sandbox_ready, wait_for_sandbox_ready_async
+from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, DestroyOutcome, SandboxBackend, normalize_ready_timeout, wait_for_sandbox_ready, wait_for_sandbox_ready_async
 from .local_backend import LocalContainerBackend
 from .ownership import (
     OwnershipBackendError,
@@ -131,17 +132,39 @@ def resolve_ready_timeout(configured: object) -> float:
 
 
 class SandboxBeingDestroyedError(RuntimeError):
-    """A peer is tearing this container down, so it must not be handed out.
+    """This container is being torn down, so it must not be handed out.
 
-    Raised on the acquire path when the ownership lease is in its teardown state.
+    Raised on the acquire path when the ownership lease is in its teardown state
+    (a peer's stop), or when this instance's own cleanup of the set did not
+    confirm and its retry under the reacquisition did not confirm either.
     The caller drops the container from tracking and lets the normal
     discover-or-create path provision a fresh one, rather than handing an agent a
     sandbox that is about to stop underneath it.
     """
 
     def __init__(self, sandbox_id: str) -> None:
-        super().__init__(f"sandbox {sandbox_id} is being destroyed by another instance")
+        super().__init__(f"sandbox {sandbox_id} is being destroyed; its cleanup has not confirmed")
         self.sandbox_id = sandbox_id
+
+
+class SandboxCleanupIncompleteError(RuntimeError):
+    """An explicit destroy ran but the resource set is not confirmed absent.
+
+    The set stays tracked, owned and pending cleanup (retried by the idle
+    checker, by eviction and by the next acquisition under its id); it is
+    not a freed slot and is never handed out. Raised so explicit callers --
+    shutdown, the idle checker's active-idle path, cancellation rollback and
+    the stale-entry destroy on reuse -- see the failure rather than a clean
+    return.
+    """
+
+    def __init__(self, sandbox_id: str, outcome: DestroyOutcome, *, cause: Exception | None = None):
+        detail = f"Sandbox {sandbox_id} cleanup incomplete: {outcome}"
+        if cause is not None:
+            detail = f"{detail} ({type(cause).__name__})"
+        super().__init__(detail)
+        self.sandbox_id = sandbox_id
+        self.outcome = outcome
 
 
 class SandboxPolicyReplacementDeferredError(RuntimeError):
@@ -249,6 +272,12 @@ class AioSandboxProvider(
         # our own lease by design — so `del:` says nothing to this process's own
         # threads. See _reserve_local_teardown / _acquire_epoch.
         self._local_teardown: set[str] = set()
+        # Warm entries whose last destroy did not establish the set absent
+        # (failed, partial or unobservable), keyed to that outcome. They stay
+        # in `_warm_pool` -- owned, counted against the replica budget and
+        # renewed -- but are never handed out; every path that would use or
+        # free the slot retries the cleanup first.
+        self._cleanup_pending: dict[str, DestroyOutcome] = {}
         # Containers this process has started and is still waiting on. The
         # readiness wait is the one long window in which a running container is
         # neither tracked nor warm; see _mark_starting.
@@ -846,11 +875,14 @@ class AioSandboxProvider(
             if not self._claim_ownership(info.sandbox_id, for_destroy=True):
                 record_teardown_refusal()
                 return False
-            try:
-                with self._held_teardown_lease(info.sandbox_id):
-                    self._backend.destroy(info)
-            except Exception as e:
-                logger.warning("Failed to replace sandbox %s with incompatible provisioning policy: %s", info.sandbox_id, e)
+            with self._held_teardown_lease(info.sandbox_id):
+                outcome, _error = self._backend_destroy(info)
+            if outcome is not DestroyOutcome.ABSENT:
+                # Reconciliation only re-enumerates sandbox containers; a
+                # sidecar or network left behind would never be seen again, so
+                # the set is tracked here for retry like every other consumer.
+                logger.warning("Failed to replace sandbox %s with incompatible provisioning policy: %s", info.sandbox_id, outcome)
+                self._quarantine_after_failed_destroy(info.sandbox_id, info, outcome, identity=None)
                 return False
             record_resource_teardown()
             self._unowned_since.pop(info.sandbox_id, None)
@@ -938,11 +970,14 @@ class AioSandboxProvider(
                     skipped_live += 1
                     logger.debug("Skipping accepted container %s during reconciliation: owned by another instance", info.sandbox_id)
                     continue
-                try:
-                    with self._held_teardown_lease(info.sandbox_id):
-                        self._backend.destroy(info)
-                except Exception:
-                    logger.warning("Failed to destroy orphaned accepted container %s during reconciliation", info.sandbox_id, exc_info=True)
+                with self._held_teardown_lease(info.sandbox_id):
+                    outcome, _error = self._backend_destroy(info)
+                if outcome is not DestroyOutcome.ABSENT:
+                    # Same as above: what remains is not re-enumerated, so the
+                    # set is quarantined (tracked, pending, never handed out)
+                    # rather than left to a pass that would not find it.
+                    logger.warning("Failed to destroy orphaned accepted container %s during reconciliation: %s", info.sandbox_id, outcome)
+                    self._quarantine_after_failed_destroy(info.sandbox_id, info, outcome, identity=None)
                     continue
                 record_resource_teardown()
                 self._unowned_since.pop(info.sandbox_id, None)
@@ -1575,6 +1610,7 @@ class AioSandboxProvider(
             self._last_activity.pop(sandbox_id, None)
             self._warm_pool.pop(sandbox_id, None)
             self._warm_pool_identity.pop(sandbox_id, None)
+            self._clear_cleanup_pending_locked(sandbox_id)
             self._acquire_epoch.pop(sandbox_id, None)
             for key, mapped_id in list(self._thread_sandboxes.items()):
                 if mapped_id == sandbox_id:
@@ -1655,6 +1691,7 @@ class AioSandboxProvider(
             except Exception as e:
                 logger.error(f"Failed to destroy idle sandbox {sandbox_id}: {e}")
 
+        self._retry_all_pending_cleanup()
         self._reap_expired_warm(idle_timeout)
 
     def _reap_expired_warm(self, idle_timeout: float | None = None) -> None:
@@ -1666,7 +1703,14 @@ class AioSandboxProvider(
         now = time.time()
         expired: list[tuple[str, SandboxInfo]] = []
         with self._lock:
+            pending = getattr(self, "_cleanup_pending", {})
             for sandbox_id, (entry, timestamp) in self._warm_pool.items():
+                # A set pending cleanup keeps its park timestamp; the idle pass
+                # already retried it once (`_retry_all_pending_cleanup`), and one
+                # attempt per trigger is the bound. Reaping it again here would
+                # pay a second timed-out sequence and double-count the failure.
+                if sandbox_id in pending:
+                    continue
                 if now - timestamp > timeout:
                     expired.append((sandbox_id, entry))
 
@@ -1694,7 +1738,10 @@ class AioSandboxProvider(
             # Snapshot oldest-first under the lock; ownership is resolved outside
             # it, since a claim can be a network round trip and the provider lock
             # guards every acquire path.
-            candidates = [(sandbox_id, entry) for sandbox_id, (entry, _) in sorted(self._warm_pool.items(), key=lambda item: item[1][1]) if sandbox_id != exclude]
+            pending = getattr(self, "_cleanup_pending", {})
+            # A set whose cleanup did not confirm is the cheapest slot to free
+            # and must not sit behind healthy entries, so it is retried first.
+            candidates = [(sandbox_id, entry) for sandbox_id, (entry, _) in sorted(self._warm_pool.items(), key=lambda item: (item[0] not in pending, item[1][1])) if sandbox_id != exclude]
 
         with phase_span(TurnPhase.SANDBOX_EVICTION):
             for sandbox_id, entry in candidates:
@@ -1882,6 +1929,17 @@ class AioSandboxProvider(
 
         effective_user_id = self._effective_acquire_user_id(user_id)
         key = self._thread_key(thread_id, effective_user_id)
+        # Identity first, as on every other promote path: a collision is
+        # refused without driving a destroy. Then a set whose cleanup did not
+        # confirm is retried before anything else happens under its id: gone
+        # now means the id is free to create; still not gone means the
+        # acquisition is refused, never a half-removed set.
+        with self._lock:
+            if sandbox_id in self._warm_pool:
+                self._assert_warm_identity_available_locked(sandbox_id, key)
+        retried = self._retry_pending_cleanup(sandbox_id, reason="reacquisition")
+        if retried is not None and retried is not DestroyOutcome.ABSENT:
+            raise SandboxBeingDestroyedError(sandbox_id)
         with self._lock:
             if sandbox_id not in self._warm_pool:
                 return None
@@ -2052,9 +2110,11 @@ class AioSandboxProvider(
                 if key is not None:
                     self._assert_active_identity_available_locked(sandbox_id, key)
                     self._assert_warm_identity_available_locked(sandbox_id, key)
-                # Same exclusivity rule as the discover path.
+                # Same exclusivity rule as the discover path. A confirmed
+                # creation supersedes any pending-cleanup mark under the id.
                 self._warm_pool.pop(sandbox_id, None)
                 self._warm_pool_identity.pop(sandbox_id, None)
+                self._clear_cleanup_pending_locked(sandbox_id)
                 self._sandboxes[sandbox_id] = sandbox
                 self._sandbox_infos[sandbox_id] = info
                 self._active_sandbox_identity[sandbox_id] = key
@@ -2124,6 +2184,7 @@ class AioSandboxProvider(
                 self._warm_pool.pop(sandbox_id, None)
             self._warm_pool_identity.pop(sandbox_id, None)
             self._forget_accepted_reuse_fingerprint_locked(sandbox_id)
+            self._clear_cleanup_pending_locked(sandbox_id)
 
         return sandbox, info, True
 
@@ -2162,17 +2223,19 @@ class AioSandboxProvider(
             # in which case stopping it is the cross-instance kill again.
             record_teardown_attempt()
             if self._claim_ownership(sandbox_id, for_destroy=True):
-                try:
-                    # Held like the other two stop paths: this one untracks before
-                    # claiming, so `_renew_owned_leases` cannot see the id either
-                    # and nothing else would refresh the marker. The heartbeat
-                    # releases the marker on exit (success or failure), so there is
-                    # no caller-side release to race a late refresh.
-                    with self._held_teardown_lease(sandbox_id):
-                        self._backend.destroy(info)
+                # Held like the other two stop paths: this one untracks before
+                # claiming, so `_renew_owned_leases` cannot see the id either
+                # and nothing else would refresh the marker. The heartbeat
+                # releases the marker on exit (success or failure), so there is
+                # no caller-side release to race a late refresh.
+                with self._held_teardown_lease(sandbox_id):
+                    outcome, _error = self._backend_destroy(info)
+                if outcome is DestroyOutcome.ABSENT:
                     record_resource_teardown()
-                except Exception as e:
-                    logger.warning(f"Error destroying unhealthy sandbox {sandbox_id}: {e}")
+                else:
+                    # Dead to us but not gone: keep it tracked for retry rather
+                    # than let a half-removed set read as a freed slot.
+                    self._quarantine_after_failed_destroy(sandbox_id, info, outcome, identity=None)
             else:
                 record_teardown_refusal()
                 logger.info("Not destroying unhealthy sandbox %s: owned by another instance", sandbox_id)
@@ -2182,6 +2245,101 @@ class AioSandboxProvider(
     def _active_count_locked(self) -> int:
         """Return active AIO sandbox count while ``_lock`` is held."""
         return len(self._sandboxes)
+
+    def _backend_destroy(self, info: SandboxInfo) -> tuple[DestroyOutcome, Exception | None]:
+        """Run the backend's destroy and say what it established.
+
+        A backend that reports (``DestroyOutcome``) is believed. One that
+        predates the contract and returns nothing is trusted as it always
+        was: a normal return means absent, an exception means not -- and an
+        exception is classified unknown rather than failed, because a raise
+        says nothing about which members are gone.
+        """
+        try:
+            result = self._backend.destroy(info)
+        except Exception as e:
+            logger.error("Destroy of sandbox %s raised; its resource set is not confirmed absent: %s", info.sandbox_id, type(e).__name__)
+            return DestroyOutcome.UNKNOWN, e
+        if isinstance(result, DestroyOutcome):
+            return result, None
+        if result is None:
+            return DestroyOutcome.ABSENT, None
+        logger.error("Destroy of sandbox %s returned %s instead of a DestroyOutcome; treating the set as not confirmed absent", info.sandbox_id, type(result).__name__)
+        return DestroyOutcome.UNKNOWN, None
+
+    def _cleanup_pending_for(self, sandbox_id: str) -> DestroyOutcome | None:
+        with self._lock:
+            return getattr(self, "_cleanup_pending", {}).get(sandbox_id)
+
+    def _mark_cleanup_pending_locked(self, sandbox_id: str, outcome: DestroyOutcome) -> None:
+        pending = getattr(self, "_cleanup_pending", None)
+        if pending is None:
+            pending = self._cleanup_pending = {}
+        pending[sandbox_id] = outcome
+
+    def _clear_cleanup_pending_locked(self, sandbox_id: str) -> None:
+        pending = getattr(self, "_cleanup_pending", None)
+        if pending is not None:
+            pending.pop(sandbox_id, None)
+
+    def _quarantine_after_failed_destroy(self, sandbox_id: str, info: SandboxInfo, outcome: DestroyOutcome, *, identity: tuple[str, str] | None) -> None:
+        """Keep a set that is not confirmed absent tracked, owned and unusable.
+
+        It goes (back) into the warm pool so it is counted against the replica
+        budget and renewed by the lease thread, and into ``_cleanup_pending``
+        so no reclaim hands it out. Ownership is re-established at once rather
+        than left to the next renewal tick: the teardown marker was released
+        with the stop, and an unowned set past its grace is what a peer's
+        reconciliation adopts. A lease a peer already holds is not taken back.
+        The set stays tracked and pending even then: every caller runs this
+        inside its local teardown reservation, under which
+        ``_forget_lost_sandbox`` deliberately does nothing, and a forced drop
+        here would misread the heartbeat's own join-timeout marker as a peer.
+        Retries refuse against the peer's lease, and the renewal thread drops
+        the handle on its next tick outside any reservation.
+        """
+        record_teardown_failure()
+        with self._lock:
+            if sandbox_id not in self._warm_pool and sandbox_id not in self._sandboxes:
+                self._warm_pool[sandbox_id] = (info, time.time())
+                self._warm_pool_identity[sandbox_id] = identity
+            self._mark_cleanup_pending_locked(sandbox_id, outcome)
+        logger.warning("Sandbox %s resource set is not confirmed absent (%s); kept tracked for cleanup retry, never handed out", sandbox_id, outcome)
+        if not self._refresh_ownership(sandbox_id):
+            logger.warning(
+                "Sandbox %s is owned by another instance after its failed cleanup; kept tracked and pending, retries will refuse and the renewal thread drops the handle",
+                sandbox_id,
+            )
+
+    def _retry_pending_cleanup(self, sandbox_id: str, *, reason: str) -> DestroyOutcome | None:
+        """Retry the cleanup of a pending set; ``None`` when there is nothing pending.
+
+        The retry runs through the same fenced warm destroy as every other
+        reap, so a set a peer has since taken, or one reserved by a reaper in
+        this process, is refused rather than stopped underneath its new owner.
+        """
+        with self._lock:
+            if sandbox_id not in getattr(self, "_cleanup_pending", {}):
+                return None
+            parked = self._warm_pool.get(sandbox_id)
+        if parked is None:
+            with self._lock:
+                self._clear_cleanup_pending_locked(sandbox_id)
+            return None
+        entry, _ = parked
+        if self._destroy_warm_entry(sandbox_id, entry, reason=reason, still_reapable=lambda: sandbox_id in self._warm_pool):
+            return DestroyOutcome.ABSENT
+        return self._cleanup_pending_for(sandbox_id) or DestroyOutcome.UNKNOWN
+
+    def _retry_all_pending_cleanup(self) -> None:
+        """Idle-checker pass over every set whose cleanup did not confirm."""
+        with self._lock:
+            pending_ids = list(getattr(self, "_cleanup_pending", {}))
+        for sandbox_id in pending_ids:
+            try:
+                self._retry_pending_cleanup(sandbox_id, reason="cleanup_retry")
+            except Exception:
+                logger.error("Cleanup retry for sandbox %s raised", sandbox_id, exc_info=True)
 
     def _destroy_warm_entry(self, sandbox_id: str, entry: SandboxInfo, *, reason: str, still_reapable: Callable[[], bool]) -> bool:
         """Destroy a warm-pool sandbox using AIO-specific backend logging.
@@ -2224,20 +2382,26 @@ class AioSandboxProvider(
                 logger.info("Refusing to destroy warm-pool sandbox %s for %s: owned by another instance", sandbox_id, reason)
                 return False
 
-            try:
-                # The marker must outlast the stop, not the TTL it was written with,
-                # and is released by the heartbeat on exit. On a failed stop that
-                # release matters just as much — the container is probably still up,
-                # so a marker left behind would block its thread from re-acquiring it.
-                with self._held_teardown_lease(sandbox_id):
-                    self._backend.destroy(entry)
-            except Exception as e:
+            # The marker must outlast the stop, not the TTL it was written with,
+            # and is released by the heartbeat on exit. On a failed stop that
+            # release matters just as much — the container is probably still up,
+            # so a marker left behind would block its thread from re-acquiring it.
+            with self._held_teardown_lease(sandbox_id):
+                outcome, _error = self._backend_destroy(entry)
+            if outcome is not DestroyOutcome.ABSENT:
+                # Not gone. The entry stays parked (its pop is deferred to the
+                # stop, so nothing to undo) but is now pending cleanup: counted,
+                # owned, retried, never handed out. A refused or failed stop
+                # is a failure, not a disappearance, and is logged by reason.
                 if reason == "idle_timeout":
-                    logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {e}")
+                    logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {outcome}")
                 elif reason == "replica_enforcement":
-                    logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id}: {e}")
+                    logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id}: {outcome}")
                 else:
-                    logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} for {reason}: {e}")
+                    logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} for {reason}: {outcome}")
+                with self._lock:
+                    identity = self._warm_pool_identity.get(sandbox_id)
+                self._quarantine_after_failed_destroy(sandbox_id, entry, outcome, identity=identity)
                 return False
 
             # Remove the entry here, inside the reservation, rather than leaving
@@ -2253,6 +2417,7 @@ class AioSandboxProvider(
                     self._warm_pool.pop(sandbox_id, None)
                     self._warm_pool_identity.pop(sandbox_id, None)
                     self._forget_accepted_reuse_fingerprint_locked(sandbox_id)
+                self._clear_cleanup_pending_locked(sandbox_id)
         finally:
             self._finish_local_teardown(sandbox_id)
 
@@ -2382,6 +2547,12 @@ class AioSandboxProvider(
                             await asyncio.shield(cleanup_task)
                         except asyncio.CancelledError:
                             continue
+                        except Exception:
+                            # The cleanup itself failed (a set not confirmed
+                            # absent raises from an explicit destroy); it is
+                            # reported below from the task, never left to
+                            # escape past the cancellation being re-raised.
+                            break
                     try:
                         cleanup_task.result()
                     except Exception:
@@ -2551,6 +2722,10 @@ class AioSandboxProvider(
         rather than destroying anything: refusing to reuse is never a reason to
         tear a container down.
         """
+        retried = self._retry_pending_cleanup(sandbox_id, reason="reacquisition")
+        if retried is not None and retried is not DestroyOutcome.ABSENT:
+            record_failed_attempt()
+            raise AcceptedSkillSandboxBindingError("accepted_sandbox_cleanup_pending")
         with self._lock:
             if sandbox_id not in self._warm_pool:
                 return None
@@ -3306,12 +3481,14 @@ class AioSandboxProvider(
                     sandbox_id,
                 )
                 return
-            try:
-                with self._held_teardown_lease(sandbox_id):
-                    self._backend.destroy(info)
+            with self._held_teardown_lease(sandbox_id):
+                outcome, _error = self._backend_destroy(info)
+            if outcome is DestroyOutcome.ABSENT:
                 record_resource_teardown()
-            except Exception as e:
-                logger.warning(f"Error destroying unready sandbox {sandbox_id}: {e}")
+            else:
+                # Never handed out, but started by us: a set that did not go
+                # away is still ours to finish, so it is tracked for retry.
+                self._quarantine_after_failed_destroy(sandbox_id, info, outcome, identity=None)
         finally:
             self._finish_local_teardown(sandbox_id)
 
@@ -3831,6 +4008,8 @@ class AioSandboxProvider(
                 sandbox_id,
                 exc_info=True,
             )
+        with self._lock:
+            identity = self._active_sandbox_identity.get(sandbox_id) or self._warm_pool_identity.get(sandbox_id)
         sandbox, info, _ = self._remove_tracked_sandbox(sandbox_id)
 
         if sandbox is not None:
@@ -3850,9 +4029,16 @@ class AioSandboxProvider(
             # the error still propagates out of the `with` (`shutdown()` logs per
             # sandbox off it), it is just no longer this method's job to release.
             with self._held_teardown_lease(sandbox_id):
-                self._backend.destroy(info)
-            record_resource_teardown()
-            logger.info(f"Destroyed sandbox {sandbox_id}")
+                outcome, error = self._backend_destroy(info)
+            if outcome is DestroyOutcome.ABSENT:
+                record_resource_teardown()
+                logger.info(f"Destroyed sandbox {sandbox_id}")
+            else:
+                # Untracked before the stop (so no reclaim could race it); a set
+                # that is not confirmed absent must not stay untracked, or it
+                # would be a freed slot with a container still behind it.
+                self._quarantine_after_failed_destroy(sandbox_id, info, outcome, identity=identity)
+                raise SandboxCleanupIncompleteError(sandbox_id, outcome, cause=error) from error
         else:
             # No container to stop, so no teardown lease was held: clear the
             # marker the claim above wrote, so an untracked id cannot leave a

@@ -103,6 +103,7 @@ def _make_provider_with_active_sandbox(tmp_path: Path, sandbox_id: str):
     provider._renewal_thread = None
     provider._config = {"idle_timeout": 600, "replicas": 3}
     provider._backend = MagicMock()
+    provider._backend.destroy.return_value = None
     provider._owner_id = "worker-blockingio"
     provider._ownership_config = SandboxOwnershipConfig()
     provider._ownership = _BlockingProbeStore(tmp_path / "ownership-probe")

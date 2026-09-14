@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from deerflow.community.aio_sandbox import backend as _backend_mod
 from deerflow.community.aio_sandbox.local_backend import (
     LocalContainerBackend,
     _ContainerInspection,
@@ -2538,3 +2539,148 @@ def test_restricted_create_reports_a_fresh_set_as_created(monkeypatch):
     info = backend.create(thread_id="thread", sandbox_id="restricted-fresh")
 
     assert info.provenance == "created"
+
+
+# ── Destroy reports what is established absent, never what was attempted ─
+
+# Lenient so the file collects on a tree without the contract; the outcome
+# tests then fail on ``None`` coming back rather than on an import.
+DestroyOutcome = getattr(_backend_mod, "DestroyOutcome", None)
+
+
+def _destroy_probe(monkeypatch, backend, *, containers: set[str], networks: set[str], faults: dict[str, str] | None = None):
+    """Inventory-backed subprocess stand-in for one restricted destroy.
+
+    Successful stop/rm/network rm commands remove from the inventory; a
+    ``refuse`` fault leaves the resource and answers non-zero; a ``daemon``
+    fault makes every command fail with the daemon's error and every
+    inspection unanswerable.
+    """
+    faults = faults or {}
+    calls: list[list[str]] = []
+    daemon_down = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        verb = cmd[1]
+        if faults.get("daemon"):
+            if verb == "stop":
+                raise subprocess.CalledProcessError(1, cmd, stderr=daemon_down)
+            return SimpleNamespace(stdout="", stderr=daemon_down, returncode=1)
+        if verb == "inspect":
+            name = cmd[-1]
+            return SimpleNamespace(stdout="id\n", stderr="", returncode=0) if name in containers else SimpleNamespace(stdout="", stderr=f"Error: No such object: {name}", returncode=1)
+        if verb == "network" and cmd[2] == "inspect":
+            name = cmd[3]
+            return (
+                SimpleNamespace(stdout='[{"Driver":"bridge","Internal":true,"Labels":{},"Options":{}}]', stderr="", returncode=0)
+                if name in networks
+                else SimpleNamespace(stdout="", stderr=f"Error: No such network: {name} not found", returncode=1)
+            )
+        if verb == "stop":
+            name = cmd[2]
+            if faults.get(f"stop:{name}") == "refuse":
+                raise subprocess.CalledProcessError(1, cmd, stderr="synthetic Docker daemon refusal")
+            if faults.get(f"stop:{name}") == "timeout":
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+            containers.discard(name)
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if verb == "rm":
+            name = cmd[-1]
+            if faults.get(f"rm:{name}") == "refuse":
+                return SimpleNamespace(stdout="", stderr="synthetic Docker daemon refusal", returncode=1)
+            present = name in containers
+            containers.discard(name)
+            return SimpleNamespace(stdout="", stderr="" if present else f"Error: No such container: {name}", returncode=0 if present else 1)
+        if verb == "network" and cmd[2] == "rm":
+            name = cmd[3]
+            if faults.get(f"network_rm:{name}") == "refuse":
+                return SimpleNamespace(stdout="", stderr="synthetic Docker daemon refusal", returncode=1)
+            present = name in networks
+            networks.discard(name)
+            return SimpleNamespace(stdout="", stderr="" if present else f"Error: No such network: {name} not found", returncode=0 if present else 1)
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    return calls
+
+
+def _restricted_set(backend, sandbox_id: str) -> tuple[set[str], set[str]]:
+    proxy, network = backend._resource_names(sandbox_id)
+    return {f"sandbox-{sandbox_id}", proxy}, {network, backend._egress_network_name(sandbox_id)}
+
+
+def _info(sandbox_id: str) -> SandboxInfo:
+    return SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://localhost:18080", container_name=f"sandbox-{sandbox_id}")
+
+
+def test_restricted_destroy_reports_absent_only_when_every_member_is_gone(monkeypatch):
+    backend = _restricted_backend()
+    containers, networks = _restricted_set(backend, "gone")
+    _destroy_probe(monkeypatch, backend, containers=containers, networks=networks)
+
+    assert backend.destroy(_info("gone")) is DestroyOutcome.ABSENT
+    assert containers == set() and networks == set()
+
+
+def test_restricted_destroy_with_every_command_refused_is_failed_not_absent(monkeypatch):
+    backend = _restricted_backend()
+    containers, networks = _restricted_set(backend, "stuck")
+    proxy, network = backend._resource_names("stuck")
+    faults = {"stop:sandbox-stuck": "refuse", f"stop:{proxy}": "refuse", f"rm:{proxy}": "refuse", f"network_rm:{network}": "refuse", f"network_rm:{backend._egress_network_name('stuck')}": "refuse"}
+    _destroy_probe(monkeypatch, backend, containers=containers, networks=networks, faults=faults)
+
+    assert backend.destroy(_info("stuck")) is DestroyOutcome.FAILED
+    assert len(containers) == 2 and len(networks) == 2, "nothing was removed, and nothing was reported removed"
+
+
+def test_restricted_destroy_with_a_sidecar_left_behind_is_partial(monkeypatch):
+    backend = _restricted_backend()
+    containers, networks = _restricted_set(backend, "half")
+    proxy, _network = backend._resource_names("half")
+    _destroy_probe(monkeypatch, backend, containers=containers, networks=networks, faults={f"stop:{proxy}": "refuse", f"rm:{proxy}": "refuse"})
+
+    assert backend.destroy(_info("half")) is DestroyOutcome.PARTIAL
+    assert containers == {proxy} and networks == set()
+
+
+def test_restricted_destroy_with_the_daemon_down_is_unknown_not_absent(monkeypatch):
+    """Every command fails with the daemon's error and nothing can be observed: unknown, nothing reported removed."""
+    backend = _restricted_backend()
+    containers, networks = _restricted_set(backend, "blind")
+    proxy, _network = backend._resource_names("blind")
+    calls = _destroy_probe(monkeypatch, backend, containers=containers, networks=networks, faults={"daemon": "1"})
+
+    assert backend.destroy(_info("blind")) is DestroyOutcome.UNKNOWN
+    assert ["docker", "stop", "sandbox-blind"] in calls and ["docker", "rm", "-f", proxy] in calls, "the commands were attempted"
+    assert len(containers) == 2 and len(networks) == 2
+
+
+def test_restricted_destroy_stop_timeout_is_unknown_and_still_attempts_the_rest(monkeypatch):
+    backend = _restricted_backend()
+    containers, networks = _restricted_set(backend, "slow")
+    proxy, _network = backend._resource_names("slow")
+    calls = _destroy_probe(monkeypatch, backend, containers=containers, networks=networks, faults={"stop:sandbox-slow": "timeout"})
+
+    assert backend.destroy(_info("slow")) is DestroyOutcome.UNKNOWN
+    assert ["docker", "stop", proxy] in calls, "the sidecar was still stopped"
+    assert "sandbox-slow" in containers
+
+
+def test_restricted_destroy_of_an_already_absent_set_is_absent_and_idempotent(monkeypatch):
+    backend = _restricted_backend()
+    _destroy_probe(monkeypatch, backend, containers=set(), networks=set())
+
+    assert backend.destroy(_info("never")) is DestroyOutcome.ABSENT
+
+
+def test_open_mode_destroy_reports_absent_only_when_the_container_is_gone(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    containers: set[str] = {"sandbox-open"}
+    _destroy_probe(monkeypatch, backend, containers=containers, networks=set())
+    assert backend.destroy(_info("open")) is DestroyOutcome.ABSENT
+
+    containers.add("sandbox-open")
+    _destroy_probe(monkeypatch, backend, containers=containers, networks=set(), faults={"stop:sandbox-open": "refuse"})
+    assert backend.destroy(_info("open")) is DestroyOutcome.FAILED
+    assert containers == {"sandbox-open"}

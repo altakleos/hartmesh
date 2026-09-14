@@ -43,10 +43,14 @@ A ``create`` call is an *attempt*; it is counted as a new resource set only
 when the backend says it started one (``SandboxInfo.provenance == "created"``),
 as a *rediscovery* when the backend returned one that already existed, and as
 *unknown* when the backend did not say. A teardown is likewise an attempt until
-the backend's destroy returns; an ownership-fenced refusal is counted as a
-refusal, never as a disappearance. The journal's counters are what this process
-observed through its own calls; the backend's own counters (Docker, the
-provisioner) are the independent record to reconcile them against.
+the backend establishes the set *absent* (``DestroyOutcome.ABSENT``); an
+ownership-fenced refusal is counted as a refusal, and a stop or remove that
+failed, left part of the set behind or could not be observed is counted as a
+failure -- neither is a disappearance, and a set that takes several retries to
+go is counted absent once, on the retry that confirmed it. The journal's
+counters are what this process observed through its own calls; the backend's
+own counters (Docker, the provisioner) are the independent record to
+reconcile them against.
 
 Honesty
 -------
@@ -183,6 +187,7 @@ class TurnPhaseSnapshot:
     teardown_attempts: int
     resource_teardowns: int
     teardown_refusals: int
+    teardown_failures: int
     evictions: int
     queue_ms: float
     failed_attempts: int
@@ -206,7 +211,7 @@ class TurnPhaseSnapshot:
 
     def to_wire(self) -> dict[str, object]:
         return {
-            "version": 2,
+            "version": 3,
             "correlation_id": self.correlation_id,
             "run_id": self.run_id,
             "total_ms": round(self.total_ms, 3),
@@ -223,6 +228,7 @@ class TurnPhaseSnapshot:
             "teardown_attempts": self.teardown_attempts,
             "resource_teardowns": self.resource_teardowns,
             "teardown_refusals": self.teardown_refusals,
+            "teardown_failures": self.teardown_failures,
             "evictions": self.evictions,
             "queue_ms": round(self.queue_ms, 3),
             "failed_attempts": self.failed_attempts,
@@ -259,6 +265,7 @@ class TurnPhaseJournal:
         "_resource_teardowns",
         "_run_id",
         "_teardown_attempts",
+        "_teardown_failures",
         "_teardown_refusals",
         "_unknown_create_results",
         "_session_kind",
@@ -288,6 +295,7 @@ class TurnPhaseJournal:
         self._teardown_attempts = 0
         self._resource_teardowns = 0
         self._teardown_refusals = 0
+        self._teardown_failures = 0
         self._evictions = 0
         self._queue_ms = 0.0
         self._failed_attempts = 0
@@ -421,6 +429,11 @@ class TurnPhaseJournal:
         with self._lock:
             self._teardown_refusals += 1
 
+    def record_teardown_failure(self) -> None:
+        """A destroy ran but the set is not confirmed absent: failed, partial or unobservable."""
+        with self._lock:
+            self._teardown_failures += 1
+
     def record_eviction(self) -> None:
         with self._lock:
             self._evictions += 1
@@ -468,6 +481,7 @@ class TurnPhaseJournal:
                 teardown_attempts=self._teardown_attempts,
                 resource_teardowns=self._resource_teardowns,
                 teardown_refusals=self._teardown_refusals,
+                teardown_failures=self._teardown_failures,
                 evictions=self._evictions,
                 queue_ms=self._queue_ms,
                 failed_attempts=self._failed_attempts,
@@ -615,6 +629,12 @@ def record_teardown_refusal() -> None:
     journal = _current_journal.get()
     if journal is not None:
         journal.record_teardown_refusal()
+
+
+def record_teardown_failure() -> None:
+    journal = _current_journal.get()
+    if journal is not None:
+        journal.record_teardown_failure()
 
 
 def record_eviction() -> None:

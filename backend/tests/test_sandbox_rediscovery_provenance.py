@@ -584,8 +584,10 @@ def test_the_wire_form_carries_every_counter_separately():
         journal.record_resource_rediscovery()
         journal.record_teardown_attempt()
         journal.record_teardown_refusal()
+        journal.record_teardown_failure()
     wire = journal.snapshot().to_wire()
-    assert wire["version"] == 2
+    assert wire["version"] == 3
+    assert wire["teardown_failures"] == 1
     assert wire["create_attempts"] == 1
     assert wire["resource_creates"] == 0
     assert wire["resource_rediscoveries"] == 1

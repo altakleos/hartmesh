@@ -454,6 +454,10 @@ def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker
         "replicas": 3,
     }
     provider._backend = MagicMock()
+    # A backend that answers nothing is trusted as before; a MagicMock return
+    # would read as "not a DestroyOutcome" and quarantine every stub destroy.
+    provider._backend.destroy.return_value = None
+    provider._cleanup_pending = {}
     provider._owner_id = worker_id
     provider._ownership_config = SandboxOwnershipConfig()
     if store is None:
@@ -1738,10 +1742,18 @@ def test_destroy_releases_the_teardown_marker_when_the_stop_fails():
     worker._sandbox_infos["boom01"] = info
     worker._backend.destroy = MagicMock(side_effect=RuntimeError("docker daemon is unreachable"))
 
-    with pytest.raises(RuntimeError, match="docker daemon is unreachable"):
+    # The message is bounded by construction: the cause's type, never its
+    # text (raw daemon stderr would leak into logs and API answers).
+    with pytest.raises(RuntimeError, match=r"cleanup incomplete: unknown \(RuntimeError\)") as raised:
         worker.destroy("boom01")
+    assert str(raised.value.__cause__) == "docker daemon is unreachable"
 
-    assert shared.owner("boom01") is None, "a failed stop left the id stranded under a teardown marker"
+    # The teardown marker is released, but the set is not confirmed absent, so
+    # this instance keeps responsibility for it: a plain ownership lease (not a
+    # `del:` marker) and a warm entry pending cleanup, never a freed slot.
+    assert shared.owner("boom01") == "worker-a", "a failed stop must not leave the set unowned"
+    assert worker._ownership.claim("boom01") is True, "held as an ordinary lease, not a teardown marker"
+    assert "boom01" in worker._warm_pool and "boom01" in worker._cleanup_pending
     # The container may well still be running, so its thread must be able to take
     # it back rather than wait out the TTL.
     assert worker._ownership.take("boom01") is True
@@ -3056,6 +3068,94 @@ def test_reconcile_destroys_accepted_orphans_instead_of_adopting_them(tmp_path):
     assert "abc12345-accepted" not in provider._sandboxes
     assert "plain123" in provider._warm_pool
     assert provider._ownership.owner("abc12345-accepted") is None
+
+
+def _partial_then_absent_backend(list_running):
+    """A backend whose destroy answers ``PARTIAL`` until told the set is gone."""
+    from deerflow.community.aio_sandbox.backend import DestroyOutcome
+
+    backend = MagicMock()
+    backend.list_running.side_effect = list_running
+    backend.outcome = DestroyOutcome.PARTIAL
+    backend.destroy.side_effect = lambda _info: backend.outcome
+    return backend
+
+
+def test_reconcile_quarantines_an_incompatible_set_whose_replacement_did_not_confirm():
+    """A sidecar or network left behind is never re-enumerated: the set is tracked for retry, not dropped."""
+    from deerflow.community.aio_sandbox.backend import DestroyOutcome
+    from deerflow.runtime.turn_phases import turn_phases
+
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    shared = _make_shared_ownership_store()
+    worker = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = SandboxInfo(
+        sandbox_id="rolling03",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-rolling03",
+        created_at=time.time() - 50,
+        requires_replacement=True,
+    )
+    running = {info.sandbox_id: info}
+    worker._backend = _partial_then_absent_backend(lambda: list(running.values()))
+    now = time.time()
+    later = now + compute_lease_ttl(worker._ownership_config) + 1
+
+    with patch.object(aio_mod.time, "time", return_value=now):
+        worker._reconcile_orphans()
+    with turn_phases(correlation_id="partial") as journal, patch.object(aio_mod.time, "time", return_value=later):
+        worker._reconcile_orphans()
+
+    worker._backend.destroy.assert_called_once_with(info)
+    assert journal.snapshot().teardown_failures == 1
+    assert journal.snapshot().resource_teardowns == 0
+    assert info.sandbox_id in worker._warm_pool and worker._cleanup_pending[info.sandbox_id] is DestroyOutcome.PARTIAL
+    assert shared.owner(info.sandbox_id) == "worker-b", "ownership re-established for the retry"
+
+    worker._backend.outcome = DestroyOutcome.ABSENT
+    with turn_phases(correlation_id="retry") as retried:
+        worker._retry_all_pending_cleanup()
+    assert info.sandbox_id not in worker._warm_pool and info.sandbox_id not in worker._cleanup_pending
+    assert retried.snapshot().resource_teardowns == 1
+    assert retried.snapshot().teardown_failures == 0
+
+
+def test_reconcile_quarantines_an_accepted_orphan_whose_destroy_did_not_confirm():
+    from deerflow.community.aio_sandbox.backend import DestroyOutcome
+    from deerflow.runtime.turn_phases import turn_phases
+
+    shared = _make_shared_ownership_store()
+    worker = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    accepted = SandboxInfo(
+        sandbox_id="abc12345-accepted",
+        sandbox_url="http://localhost:8083",
+        container_name="deer-flow-sandbox-abc12345-accepted",
+        created_at=time.time() - 1200,
+    )
+    running = {accepted.sandbox_id: accepted}
+    worker._backend = _partial_then_absent_backend(lambda: list(running.values()))
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    now = time.time()
+    later = now + compute_lease_ttl(worker._ownership_config) + 1
+
+    # First pass starts the recovery grace (shared store); the second, past it, claims and destroys.
+    with patch.object(aio_mod.time, "time", return_value=now):
+        worker._reconcile_orphans()
+    with turn_phases(correlation_id="partial") as journal, patch.object(aio_mod.time, "time", return_value=later):
+        worker._reconcile_orphans()
+
+    worker._backend.destroy.assert_called_once_with(accepted)
+    assert journal.snapshot().teardown_failures == 1
+    assert journal.snapshot().resource_teardowns == 0
+    assert accepted.sandbox_id in worker._warm_pool and worker._cleanup_pending[accepted.sandbox_id] is DestroyOutcome.PARTIAL
+    assert accepted.sandbox_id not in worker._sandboxes
+    assert shared.owner(accepted.sandbox_id) == "worker-b"
+
+    worker._backend.outcome = DestroyOutcome.ABSENT
+    with turn_phases(correlation_id="retry") as retried:
+        worker._retry_all_pending_cleanup()
+    assert accepted.sandbox_id not in worker._warm_pool and accepted.sandbox_id not in worker._cleanup_pending
+    assert retried.snapshot().resource_teardowns == 1
 
 
 # ── P-z: a container is owned for its whole readiness wait ─────────────────

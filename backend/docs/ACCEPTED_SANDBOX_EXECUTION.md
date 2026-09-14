@@ -243,13 +243,87 @@ entry never triggers this: it is replaced (its slot freed) or the acquisition
 is refused before create is reached. There is no backend probe, no deferred
 eviction and no overshoot window.
 
+### Destroy means absent
+
+A stop or remove command that fails can still return normally: the local
+backend's `docker stop` swallowed `CalledProcessError`, and its sidecar and
+network removals only logged. Until this repair the provider took the return
+as a confirmed teardown, forgot the parked entry, counted the set gone and --
+on the input-drift path -- went on to create, rediscovered the container it
+had just rejected and handed it back active with the old configuration.
+
+`SandboxBackend.destroy` now returns a `DestroyOutcome`, and successful
+destruction means the owned set is *confirmed absent*, not that commands were
+attempted. `LocalContainerBackend.destroy` runs its commands, then inspects
+every member -- the sandbox container, the network sidecar and both networks
+(locally that is the counting unit) -- and answers `absent` only when each is
+positively not found; `partial` when some remain, `failed` when the set is
+intact, `unknown` when a member could not be observed (a daemon that does not
+answer, or a timed-out command whose members are not afterwards all found
+absent; a sandbox stop timeout still attempts the rest of the set, a sidecar
+stop timeout does not). A failed command is never absence, and a not-found
+answer is: a genuinely absent set is cleaned idempotently. The remote backend's
+DELETE is its only observation: a 2xx is the provisioner accepting the
+deletion (Kubernetes removes the Pod and Service asynchronously), answered as
+`absent` and trusted as before, not verified. A backend that predates the
+contract and returns `None` is trusted as before (normal return means gone, an
+exception means not, classified `unknown`); any other non-outcome return is
+`unknown`.
+
+What the provider does with anything but `absent`, on every path that
+consumes the contract (drifted replacement, replica eviction, idle reaping,
+explicit destroy, cancellation rollback, unready rollback, reconciliation):
+
+- The set stays tracked in the warm pool -- counted against the replica
+  budget, renewed by the lease thread, ownership re-established at once (a
+  lease a peer already holds is not taken back; the set stays tracked and
+  pending, retries refuse, and the renewal thread drops the handle on its next
+  tick) -- and is marked pending cleanup (`_cleanup_pending`). It is never
+  handed out: the
+  ordinary reclaim raises `SandboxBeingDestroyedError`, the accepted reclaim
+  refuses with `accepted_sandbox_cleanup_pending`, and a drifted replacement
+  that did not confirm refuses with `accepted_sandbox_inputs_changed` rather
+  than proceed to create, adopt the rejected container or evict an unrelated
+  one to escape the failure.
+- Cleanup is retried under the same fences as every reap -- by the idle
+  checker once per pass (the expiry reaper skips pending sets), by eviction (a
+  pending set is the first candidate; a healthy unrelated set pays only when
+  that retry fails again), and by the next acquisition under its id (a set
+  destroyed on the reuse path with a stale identity is retried by the reaper
+  and eviction only). A retry never stops a set another instance has since
+  taken (the claim refuses), never touches a set reserved by a reaper in this
+  process, and is bounded to one attempt per trigger.
+- Recovery: once the fault clears, the next trigger finishes the cleanup, the
+  set is counted absent exactly once, and the acquisition builds one correctly
+  configured replacement.
+- An explicit `destroy()` raises `SandboxCleanupIncompleteError` after
+  quarantining, so shutdown, the idle checker's active-idle path, cancellation
+  rollback and the stale-entry destroy on reuse see the failure instead of a
+  clean return; cancellation rollback stays one bounded attempt.
+- The journal distinguishes `teardown_refusals` (a fence said no) from
+  `teardown_failures` (the backend ran and the set is not confirmed absent);
+  `resource_teardowns` is incremented once per set, on the retry that
+  confirmed it.
+
+Tests: `backend/tests/test_sandbox_cleanup_outcomes.py` composes the real
+`LocalContainerBackend.destroy` control flow with a fake daemon whose
+inventory is the independent record (each member refused alone, all together,
+partial, timeout, daemon unavailable, genuinely absent, success, retry after
+the fault clears, same-id replacement at two-slot capacity, a sidecar left
+behind, ownership loss during a pending cleanup, reservation races, explicit
+destroy, cancellation rollback, A/B/A untouched);
+`test_aio_sandbox_local_backend.py` pins the outcome classification at the
+backend seam.
+
 **Counting.** The journal (`deerflow.runtime.turn_phases`) counts resource
 *sets* -- container plus network sidecar and networks locally, Pod plus
 Service remotely -- and distinguishes `create_attempts` from confirmed
 `resource_creates`, `resource_rediscoveries` and `unknown_create_results`,
-and `teardown_attempts` from confirmed `resource_teardowns` and
-ownership-fenced `teardown_refusals`. A teardown is confirmed only when the
-backend's destroy returned; a refusal is never reported as a disappearance.
+and `teardown_attempts` from confirmed `resource_teardowns`, ownership-fenced
+`teardown_refusals` and `teardown_failures` (the backend ran and the set is not
+confirmed absent). A teardown is confirmed only when the backend's destroy
+returned `absent`; neither a refusal nor a failure is reported as a
+disappearance.
 The tests reconcile every journal value against the fake backend's own call
 record. Tests: `backend/tests/test_sandbox_rediscovery_provenance.py`,
 `test_sandbox_warm_reuse_latency.py`, `test_aio_sandbox_local_backend.py`

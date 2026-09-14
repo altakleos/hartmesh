@@ -26,7 +26,7 @@ from pathlib import Path
 
 from deerflow.utils.network import get_free_port, release_port
 
-from .backend import SandboxBackend, wait_for_sandbox_ready
+from .backend import DestroyOutcome, SandboxBackend, wait_for_sandbox_ready
 from .network_proxy import RELAY_AUTH_HEADER, RELAY_TOKEN_ENV
 from .sandbox_info import PROVENANCE_CREATED, PROVENANCE_REDISCOVERED, SandboxInfo
 
@@ -1209,29 +1209,108 @@ class LocalContainerBackend(SandboxBackend):
             return None
         return candidate
 
-    def destroy(self, info: SandboxInfo) -> None:
-        """Stop the container and release its port."""
+    def destroy(self, info: SandboxInfo) -> DestroyOutcome:
+        """Stop the resource set, then report what is established to be absent.
+
+        The commands are attempted in order (sandbox stop, sidecar stop and
+        remove, both networks) and none of their results is taken as proof:
+        ``docker stop`` can fail and return, a remove can be refused, and a
+        wedged daemon can time out. What is returned is what an inspection of
+        the set shows afterwards -- one resource set counted once, absent only
+        when every member is positively not found. A member the daemon could
+        not answer for makes the whole result unknown, never absent.
+
+        The host port is released only once the set is absent: while the
+        sidecar or container may still hold it, handing it to a new container
+        would only fail that start.
+        """
         # Prefer container_id, fall back to container_name (both accepted by docker stop).
         # This ensures containers discovered via list_running() (which only has the name)
         # can also be stopped.
         stop_target = info.container_id or info.container_name
+        restricted = self._runtime == "docker" and (self._network_mode != "open" or info.requires_replacement)
+        timed_out = False
         if stop_target:
-            self._stop_container(stop_target)
+            try:
+                self._stop_container(stop_target)
+            except subprocess.TimeoutExpired:
+                # The container's state is unknown; the rest of the set is still
+                # attempted so a retry has less to do, and the result says unknown.
+                timed_out = True
         # An incompatible sandbox discovered while the new process is in open
         # mode may have been provisioned by a previous restricted-mode process.
         # Remove its deterministic sidecar/networks from this provider-owned,
         # fenced destroy path as well (never from discovery itself).
-        if self._runtime == "docker" and (self._network_mode != "open" or info.requires_replacement):
-            self._cleanup_restricted_resources(info.sandbox_id, stop_sandbox=False)
-        # Extract port from sandbox_url for release
-        try:
-            from urllib.parse import urlparse
+        if restricted:
+            try:
+                self._cleanup_restricted_resources(info.sandbox_id, stop_sandbox=False)
+            except subprocess.TimeoutExpired:
+                timed_out = True
 
-            port = urlparse(info.sandbox_url).port
-            if port:
-                release_port(port)
-        except Exception:
-            pass
+        outcome = self._destroy_outcome(info, restricted=restricted)
+        if timed_out and outcome is not DestroyOutcome.ABSENT:
+            outcome = DestroyOutcome.UNKNOWN
+        if outcome is DestroyOutcome.ABSENT:
+            # Extract port from sandbox_url for release
+            try:
+                from urllib.parse import urlparse
+
+                port = urlparse(info.sandbox_url).port
+                if port:
+                    release_port(port)
+            except Exception:
+                pass
+        else:
+            logger.warning("Sandbox %s resource set is not confirmed absent after destroy: %s", info.sandbox_id, outcome)
+        return outcome
+
+    def _destroy_outcome(self, info: SandboxInfo, *, restricted: bool) -> DestroyOutcome:
+        """Inspect every member of *info*'s resource set and classify what remains."""
+        members: list[bool | None] = []
+        container_name = info.container_name or (f"{self._container_prefix}-{info.sandbox_id}" if info.sandbox_id else None)
+        if container_name:
+            members.append(self._container_absent(container_name))
+        elif info.container_id:
+            members.append(self._container_absent(info.container_id))
+        if restricted:
+            proxy_name, network_name = self._resource_names(info.sandbox_id)
+            members.append(self._container_absent(proxy_name))
+            for current_network_name in (network_name, self._egress_network_name(info.sandbox_id)):
+                try:
+                    members.append(self._inspect_network(current_network_name) is None)
+                except RuntimeError:
+                    members.append(None)
+        if not members:
+            return DestroyOutcome.UNKNOWN
+        if any(member is None for member in members):
+            return DestroyOutcome.UNKNOWN
+        if all(members):
+            return DestroyOutcome.ABSENT
+        if any(members):
+            return DestroyOutcome.PARTIAL
+        return DestroyOutcome.FAILED
+
+    def _container_absent(self, container_ref: str) -> bool | None:
+        """Whether a container positively does not exist: True, False, or None if unanswerable.
+
+        A stopped-but-present container (Docker's Created or Exited state) is
+        present: the ``--rm`` flag removes a container after it stops, so one
+        that still answers ``inspect`` was not removed.
+        """
+        try:
+            result = subprocess.run(
+                [self._runtime, "inspect", "-f", "{{.Id}}", container_ref],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+        if result.returncode == 0:
+            return False
+        if _is_no_such_container_error(result.stderr or "", container_ref):
+            return True
+        return None
 
     def is_alive(self, info: SandboxInfo) -> bool:
         """Check if the container is still running (lightweight, no HTTP)."""
