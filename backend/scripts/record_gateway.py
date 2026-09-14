@@ -6,7 +6,7 @@ the real frontend (Playwright), the captured inputs are EXACTLY what the
 frontend produces (date system-reminder, suggestions/title calls, ...), so the
 resulting fixture replays cleanly against the browser.
 
-Used by ``frontend/playwright.record.config.ts``. Env:
+Used by ``frontend-hm/playwright.record.config.ts``. Env:
   OPENAI_API_KEY / OPENAI_API_BASE  - the real upstream (never committed)
   DEERFLOW_RECORD_OUT               - JSONL path to append captured turns to
   RECORD_PORT (default 8012), RECORD_MODEL (default gpt-5.5)

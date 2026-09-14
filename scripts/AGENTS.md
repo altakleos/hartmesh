@@ -1,5 +1,16 @@
 ## Release Tooling Contracts
 
+The coordinated frontend version source is `frontend-hm/package.json`;
+`frontend/package.json` retains the upstream version. Product pnpm calls pass
+`--project frontend-hm --` to `pnpm.py`; its no-selector form is retained for
+the upstream Makefile. `frontend_env.py` migrates existing local UI settings
+or creates them from the new template, without overwriting either app's file.
+`verify_frontend_isolation.py` checks the pinned upstream tree and direct
+Hartmesh source inputs; default mode checks index and worktree, while
+`--revision HEAD` checks committed material in CI. It needs the pinned ancestor
+in Git history, and never updates the pin or the real index. The sync policy
+lives in `../docs/FRONTEND_ISOLATION.md`.
+
 `bump_version.sh` owns coordinated version updates, including regenerating the
 root `deer-flow` entry in `backend/uv.lock` with `uv lock`;
 `verify_versions.sh` validates all five fields without requiring `uv` in the CI

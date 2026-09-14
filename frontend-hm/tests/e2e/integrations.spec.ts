@@ -36,6 +36,19 @@ function configuredLarkStatus() {
 }
 
 test.describe("Integrations settings", () => {
+  test.beforeEach(async ({ context }) => {
+    // The popup's first navigation belongs to the browser context, not the
+    // opener's page routes. Keep this mocked suite independent of Feishu DNS,
+    // TLS, and response latency while still asserting the actual popup URL.
+    await context.route("https://open.feishu.cn/**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><title>Mock Lark authorization</title>",
+      }),
+    );
+  });
+
   test("opens integrations settings from a query-string deep link", async ({
     page,
   }) => {

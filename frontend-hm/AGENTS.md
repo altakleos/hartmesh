@@ -1,6 +1,11 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with the DeerFlow frontend. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+This file guides development of the Hartmesh frontend in `frontend-hm/`. The
+sibling `CLAUDE.md` imports it via `@AGENTS.md`. This app owns its dependencies,
+assets, API clients, and tests. Never import or link application material from
+the pinned upstream `../frontend/`; port changes deliberately. The Gateway
+HTTP/SSE/WebSocket protocols and shared `../contracts/` fixtures define the
+backend boundary. See [the isolation guide](../docs/FRONTEND_ISOLATION.md).
 
 ## Project Overview
 
@@ -41,6 +46,11 @@ Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` wi
 Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
+
+`playwright.real-backend.config.ts` tests the real replay Gateway without
+provider credentials. `playwright.gateway-auth.config.ts` uses the same
+isolated runner with authentication enabled to verify login, SSR session
+forwarding, CSRF enforcement, and logout through the app's same-origin proxy.
 
 ## Architecture
 

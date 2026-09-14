@@ -5,7 +5,7 @@ This document is the **top-level architecture overview** for DeerFlow. It explai
 points to the module-level guides that own the depth:
 
 - Backend depth → [`backend/AGENTS.md`](../backend/AGENTS.md) and [`backend/docs/ARCHITECTURE.md`](../backend/docs/ARCHITECTURE.md)
-- Frontend depth → [`frontend/AGENTS.md`](../frontend/AGENTS.md)
+- Frontend depth → [`frontend-hm/AGENTS.md`](../frontend-hm/AGENTS.md)
 
 DeerFlow 2.0 is a ground-up rewrite of the original Deep Research framework (see
 [`README.md`](../README.md)); it shares no code with v1.
@@ -120,7 +120,7 @@ The frontend is a **stateful chat app**: users create **threads** (conversations
 messages, set thread-scoped `/goal` completion conditions, and receive streamed responses.
 The backend may produce **artifacts** (files/code), **todos**, and goal-state updates.
 
-**Source layout** (`frontend/src/`):
+**Source layout** (`frontend-hm/src/`):
 - `app/` — App Router routes: `/workspace/chats/[thread_id]` (authenticated chat),
   `/workspace/agents/[agent_name]` (custom agents), `/showcase/[thread_id]` (allowlisted
   public read-only demos), `/api/*` route handlers, `(auth)/{login,setup,auth/callback}`.
@@ -167,7 +167,7 @@ These span both layers and require reading multiple files to understand:
 - **Long-running MCP** — a durable `McpTaskService` (leased rows, DB as source of truth)
   keeps remote task IDs/polling out of the agent loop.
 - **Version sources** — a release version must match in `backend/pyproject.toml`,
-  `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml` (`version` + `appVersion`);
+  `frontend-hm/package.json`, and `deploy/helm/deer-flow/Chart.yaml` (`version` + `appVersion`);
   pushing a `v*` tag triggers CI that runs `scripts/verify_versions.sh` and blocks all
   publishing on drift. See [`RELEASING.md`](../RELEASING.md).
 
@@ -192,7 +192,7 @@ These span both layers and require reading multiple files to understand:
 
 - System topology & component depth → [`backend/docs/ARCHITECTURE.md`](../backend/docs/ARCHITECTURE.md)
 - Backend commands, TDD, harness/app boundary, config reload → [`backend/AGENTS.md`](../backend/AGENTS.md)
-- Frontend commands, source layout, streaming data flow → [`frontend/AGENTS.md`](../frontend/AGENTS.md)
+- Frontend commands, source layout, streaming data flow → [`frontend-hm/AGENTS.md`](../frontend-hm/AGENTS.md)
 - Setup & install → [`Install.md`](../Install.md), [`CONTRIBUTING.md`](../CONTRIBUTING.md)
 - Release process → [`RELEASING.md`](../RELEASING.md)
 - User-facing features & deployment sizing → [`README.md`](../README.md)

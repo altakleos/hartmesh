@@ -35,7 +35,7 @@ export default defineConfig({
 
   webServer: [
     {
-      command: `uv run python scripts/run_replay_gateway.py --port ${gatewayPort} --cors ${frontendUrl}`,
+      command: `uv run --no-sync python scripts/run_replay_gateway.py --port ${gatewayPort} --cors ${frontendUrl}`,
       cwd: "../backend",
       url: `${gatewayUrl}/health`,
       reuseExistingServer: !process.env.CI,

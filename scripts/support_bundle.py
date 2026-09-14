@@ -231,9 +231,12 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
                 [
                     sys.executable,
                     str(project_root / "scripts" / "pnpm.py"),
+                    "--project",
+                    "frontend-hm",
+                    "--",
                     "--version",
                 ],
-                project_root / "frontend",
+                project_root / "frontend-hm",
             ),
             _version_command("uv", ["uv", "--version"], project_root),
             _version_command("nginx", ["nginx", "-v"], project_root),

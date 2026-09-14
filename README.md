@@ -96,6 +96,12 @@ Operators evaluating a governed deployment can go directly to the [deployment an
 
 Work from the current HartMesh checkout at the repository root.
 
+The application source is in `frontend-hm/`; `frontend/` stays identical to
+the last integrated upstream snapshot. Existing checkout users can run
+`make frontend-config` once to copy their previous frontend settings into the
+new app without overwriting existing files. Root build and startup commands
+use the Hartmesh app. See [frontend isolation](docs/FRONTEND_ISOLATION.md).
+
 For this preview path, have Python 3.12+, Node.js 22+, pnpm or Corepack, `uv`, GNU Make, nginx, Docker or Apple Container, model credentials, and approximately 4 CPU cores and 8 GB RAM. Windows local development uses Git Bash.
 
 When `make setup` asks for execution mode, choose **Container sandbox**. Durable invocations using `LocalSandboxProvider` work only with an explicitly empty effective skill set; this checkout enables built-in skills by default.
@@ -654,7 +660,7 @@ Version sources report `2.1.0+hartmesh.4`, the newest tag. It predates the evide
 - [Tenant VM compose profile](deploy/compose/README.md) — one Docker Compose stack per customer VM with gVisor sandboxes
 - [Exact two-Gateway qualification](docs/MULTI_GATEWAY_QUALIFICATION.md) — topology boundary, live evidence, maintenance upgrade, rollback, and exclusions
 - [Configuration](config.example.yaml) — operator settings
-- [Backend guide](backend/AGENTS.md) and [frontend guide](frontend/AGENTS.md) — architecture and tests
+- [Backend guide](backend/AGENTS.md) and [frontend guide](frontend-hm/AGENTS.md) — architecture and tests
 
 ## Support and security
 

@@ -415,7 +415,7 @@ HartMesh `main` включает upstream `deerflow/main` по `30788c79ffd988e1
 - [Extension API](backend/packages/extension-api/README.md) — политики и границы доверия
 - [Развёртывание Helm](deploy/helm/deer-flow/README.md) — режимы с одним Gateway и квалификация
 - [Конфигурация](config.example.yaml) — настройки оператора
-- [Руководство backend](backend/AGENTS.md) и [руководство frontend](frontend/AGENTS.md) — архитектура и тесты
+- [Руководство backend](backend/AGENTS.md) и [руководство frontend](frontend-hm/AGENTS.md) — архитектура и тесты
 
 ## Поддержка и безопасность
 

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 PNPM_SCRIPT_PATH = Path(__file__).resolve().with_name("pnpm.py")
-FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend"
+FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend-hm"
 COREPACK_NOTICE = "Using pnpm via Corepack."
 
 
@@ -39,7 +39,7 @@ def run_pnpm_version() -> tuple[str | None, bool, str | None]:
     """Return the pnpm version, resolution source, and failure message."""
     try:
         result = subprocess.run(
-            [sys.executable, str(PNPM_SCRIPT_PATH), "-v"],
+            [sys.executable, str(PNPM_SCRIPT_PATH), "--project", "frontend-hm", "--", "-v"],
             capture_output=True,
             text=True,
             check=False,

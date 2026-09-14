@@ -2,6 +2,11 @@
 
 ## Project Overview
 
+Hartmesh's product frontend and its browser/replay tests live in `frontend-hm/`.
+Repository tests that inspect product builds, package versions, or UI files
+must target that app. `frontend/` is a pinned upstream snapshot; do not modify
+it to satisfy a backend or tooling check. See `../docs/FRONTEND_ISOLATION.md`.
+
 DeerFlow is a LangGraph-based AI super agent system with a full-stack architecture. The backend provides a "super agent" with sandbox execution, persistent memory, subagent delegation, and extensible tool integration - all operating in per-thread isolated environments.
 
 **Architecture**:

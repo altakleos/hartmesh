@@ -1,5 +1,11 @@
 # HartMesh tenant VM compose profile
 
+The `frontend` image is built from `frontend-hm/Dockerfile`, with the app still
+installed at `/app/frontend`. Service names and cache mounts remain stable.
+The sibling `frontend/` source is an upstream reference. Source changes take
+effect on tenants only after the normal candidate publish and digest pinning;
+the checked-in image pins continue to identify their existing release.
+
 One KVM guest per customer. Inside it the whole stack runs under Docker
 Compose: gateway, frontend, nginx, PostgreSQL 16, Redis 7, with sandboxes
 created by the Gateway's local Docker backend as containers under gVisor

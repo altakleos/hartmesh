@@ -21,19 +21,19 @@ repos:
         pass_filenames: false
         files: ^backend/(pyproject\.toml|uv\.lock|packages/harness/pyproject\.toml)$
 
-  # Frontend: eslint + prettier (must run from frontend/ for node_modules resolution)
+  # Frontend: eslint + prettier (must run from frontend-hm/ for node_modules resolution)
   - repo: local
     hooks:
       - id: frontend-eslint
         name: eslint (frontend)
-        entry: bash -c 'cd frontend && npx eslint --fix "${@/#frontend\//}"' --
+        entry: bash -c 'cd frontend-hm && npx eslint --fix "${@/#frontend-hm\//}"' --
         language: system
         types_or: [javascript, tsx, ts]
-        files: ^frontend/
+        files: ^frontend-hm/
 
       - id: frontend-prettier
         name: prettier (frontend)
-        entry: bash -c 'cd frontend && npx prettier --write "${@/#frontend\//}"' --
+        entry: bash -c 'cd frontend-hm && npx prettier --write "${@/#frontend-hm\//}"' --
         language: system
-        files: ^frontend/
+        files: ^frontend-hm/
         types_or: [javascript, tsx, ts, json, css]

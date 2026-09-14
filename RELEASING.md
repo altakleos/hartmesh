@@ -48,18 +48,24 @@ A release version must appear, identically, in five fields:
 | -------------------------------------- | -------------------- |
 | `backend/pyproject.toml`               | `version = "X.Y.Z"`  |
 | `backend/uv.lock`                      | root `deer-flow` package `version = "X.Y.Z"` |
-| `frontend/package.json`                | `"version": "X.Y.Z"` |
+| `frontend-hm/package.json`                | `"version": "X.Y.Z"` |
 | `deploy/helm/deer-flow/Chart.yaml`     | `version: X.Y.Z`     |
 | `deploy/helm/deer-flow/Chart.yaml`     | `appVersion: "X.Y.Z"`|
 
 Plus the git tag `v<version>` itself, which is the canonical release identifier.
+
+The retained `frontend/package.json` is an upstream snapshot and is excluded
+from Hartmesh version bumps. The `frontend` image component is built from
+`frontend-hm/Dockerfile` and keeps the existing image repository and
+`/app/frontend` runtime path. Candidate publishing and digest pinning still
+precede tagging; changing the source directory does not update published pins.
 
 Container images are tagged from the git tag (not from these files), and the
 Helm chart version is validated against the tag — so if any source lags the
 tag, the release is blocked (see [Version gate](#version-gate)).
 
 The frontend's in-app About page (Settings ▸ About) is a *derived* consumer, not
-an additional source: it reads `frontend/package.json`'s version at build time, so it
+an additional source: it reads `frontend-hm/package.json`'s version at build time, so it
 tracks the table above automatically with no bump needed. Nightly builds override
 it with the chart's nightly string (`<base>-nightly.<YYYYMMDD>-<short_sha>`) via
 the `APP_VERSION` build-arg in `nightly.yaml`, so a nightly image's About page
@@ -430,7 +436,7 @@ When it fails, the job annotation names the offending file and suggests the
 fix:
 
 ```
-::error::frontend/package.json is '2.0.0' but expected '2.1.0'.
+::error::frontend-hm/package.json is '2.0.0' but expected '2.1.0'.
 Tip: run scripts/bump_version.sh 2.1.0 to align all sources.
 ```
 

@@ -163,7 +163,7 @@ TAG=latest
 # backend - build with the `postgres` extra used by the durable profile
 docker build -t $REGISTRY/deer-flow-backend:$TAG --build-arg UV_EXTRAS=postgres -f backend/Dockerfile .
 # frontend
-docker build -t $REGISTRY/deer-flow-frontend:$TAG -f frontend/Dockerfile .
+docker build -t $REGISTRY/deer-flow-frontend:$TAG -f frontend-hm/Dockerfile .
 # provisioner
 docker build -t $REGISTRY/deer-flow-provisioner:$TAG -f docker/provisioner/Dockerfile docker/provisioner
 # restricted-profile sandbox
@@ -1048,7 +1048,7 @@ per-workload with testing:
   image writes its socket to `/var/run/postgresql` and isn't designed for a
   read-only root, so it may need socket-path redirection (`PGHOST`/`unix_socket_directories`).
   Optionally, add `USER` directives to the `backend/Dockerfile`,
-  `frontend/Dockerfile`, and `docker/provisioner/Dockerfile` so the images are
+  `frontend-hm/Dockerfile`, and `docker/provisioner/Dockerfile` so the images are
   non-root by default (defense in depth — the chart already forces the uid via
   `securityContext`, so this is not required). A cluster enforcing the
   `restricted` Pod Security Admission standard would require this setting.

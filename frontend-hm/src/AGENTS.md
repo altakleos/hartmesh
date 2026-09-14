@@ -1,5 +1,10 @@
 ### Data Flow
 
+These contracts belong to Hartmesh's `frontend-hm/src/`. Keep API/stream
+clients and application assets in this app; the upstream `frontend/` snapshot
+is not a dependency. Existing shared fixtures under `contracts/` remain the
+cross-language contract.
+
 1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
 2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.
    File-tool artifact auto-open work must run in an effect with timer cleanup; never schedule timers while rendering streamed `write_file` or `str_replace` updates.

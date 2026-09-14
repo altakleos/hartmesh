@@ -39,6 +39,13 @@ HOST_LOCAL_PATHS = [
     ".env",
     "backend/.env",
     "frontend/.env",
+    "frontend-hm/.env",
+    "frontend-hm/.env.local",
+    "frontend-hm/.env.production",
+    "frontend-hm/.next/server/app.js",
+    "frontend-hm/node_modules/next/index.js",
+    "frontend-hm/test-results/report.json",
+    "frontend-hm/playwright-report/index.html",
     ".deer-flow/integrations/skills/provider/pack/SKILL.md",
     "backend/.deer-flow/data/deerflow.db",
     "backend/.deer-flow/.jwt_secret",
@@ -50,6 +57,8 @@ HOST_LOCAL_PATHS = [
 BUILD_INPUT_PATHS = [
     ".env.example",
     "frontend/.env.example",
+    "frontend-hm/.env.example",
+    "frontend-hm/src/app/page.tsx",
     "backend/pyproject.toml",
     "backend/app/gateway/app.py",
     "backend/packages/harness/deerflow/config/extensions_config.py",
@@ -71,7 +80,7 @@ def _pattern_matches(pattern: str, path: str) -> bool:
     pattern = pattern.rstrip("/")
     if pattern.startswith("**/"):
         name = pattern[3:]
-        return name in PurePosixPath(path).parts
+        return any(fnmatchcase(part, name) for part in PurePosixPath(path).parts)
     if pattern.endswith("/**"):
         pattern = pattern[:-3].rstrip("/")
     if "/" not in pattern:

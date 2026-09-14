@@ -12,7 +12,9 @@ on:
   push:
     branches: ["main", "2.0.x-dev"]
     paths:
-      - "frontend/**"
+      - "frontend-hm/**"
+      - "contracts/**"
+      - "scripts/pnpm.py"
       - "backend/app/gateway/**"
       - "backend/packages/harness/**"
       - "backend/tests/fixtures/replay/**"
@@ -25,7 +27,9 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      - "frontend/**"
+      - "frontend-hm/**"
+      - "contracts/**"
+      - "scripts/pnpm.py"
       - "backend/app/gateway/**"
       - "backend/packages/harness/**"
       - "backend/tests/fixtures/replay/**"
@@ -95,20 +99,23 @@ jobs:
       - name: Use pinned pnpm version
         run: corepack prepare pnpm@10.26.2 --activate
       - name: Install frontend dependencies
-        working-directory: frontend
+        working-directory: frontend-hm
         run: pnpm install --frozen-lockfile
       - name: Install Playwright Chromium
-        working-directory: frontend
+        working-directory: frontend-hm
         run: npx playwright install chromium --with-deps
       - name: Full-stack replay render (DOM assertions are the gate)
-        working-directory: frontend
+        working-directory: frontend-hm
         run: pnpm exec playwright test -c playwright.real-backend.config.ts
+      - name: Real Gateway authentication through the Hartmesh proxy
+        working-directory: frontend-hm
+        run: pnpm exec playwright test -c playwright.gateway-auth.config.ts
       - name: Upload report + render artifact
         uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
           name: replay-render
           path: |
-            frontend/playwright-report/
-            frontend/test-results/
+            frontend-hm/playwright-report/
+            frontend-hm/test-results/
           retention-days: 7

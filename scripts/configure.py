@@ -7,6 +7,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from frontend_env import ensure_frontend_env
+
 
 def copy_if_missing(src: Path, dst: Path) -> None:
     if dst.exists():
@@ -36,10 +38,7 @@ def main() -> int:
     try:
         copy_if_missing(project_root / "config.example.yaml", project_root / "config.yaml")
         copy_if_missing(project_root / ".env.example", project_root / ".env")
-        copy_if_missing(
-            project_root / "frontend" / ".env.example",
-            project_root / "frontend" / ".env",
-        )
+        ensure_frontend_env(project_root)
     except (FileNotFoundError, OSError) as exc:
         print("Error while generating configuration files:")
         print(f"  {exc}")

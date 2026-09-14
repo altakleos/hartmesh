@@ -7,7 +7,7 @@
 # Updates:
 #   backend/pyproject.toml              (version = "...")
 #   backend/uv.lock                     (deer-flow root package via uv lock)
-#   frontend/package.json               ("version": "...")
+#   frontend-hm/package.json               ("version": "...")
 #   deploy/helm/deer-flow/Chart.yaml    (version: + appVersion:)
 #
 # This does NOT edit CHANGELOG.md or create/push a git tag — keep those manual.
@@ -35,7 +35,7 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYPROJECT="$ROOT/backend/pyproject.toml"
-PACKAGE="$ROOT/frontend/package.json"
+PACKAGE="$ROOT/frontend-hm/package.json"
 CHART="$ROOT/deploy/helm/deer-flow/Chart.yaml"
 UV_LOCK="$ROOT/backend/uv.lock"
 
@@ -61,7 +61,7 @@ if new == src:
 with open(pyproject, "w") as f:
     f.write(new)
 
-# frontend/package.json — "version": "..." (preserve indentation; minimal diff)
+# frontend-hm/package.json — "version": "..." (preserve indentation; minimal diff)
 with open(package) as f:
     src = f.read()
 new = re.sub(
@@ -94,7 +94,7 @@ fi
 echo "Bumped version to $VERSION in:"
 echo "  backend/pyproject.toml"
 echo "  backend/uv.lock"
-echo "  frontend/package.json"
+echo "  frontend-hm/package.json"
 echo "  deploy/helm/deer-flow/Chart.yaml (version + appVersion)"
 echo
 

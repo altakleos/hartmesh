@@ -1,4 +1,5 @@
 # DeerFlow - Unified Development Environment
+.DEFAULT_GOAL := help
 
 .PHONY: help config config-upgrade check check-agent-guidance install extension-install extension-list extension-enable extension-disable extension-remove setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis setup-sandbox
 
@@ -19,7 +20,14 @@ else
     RUN_SHELL_SCRIPT = $(BASH)
 endif
 
-FRONTEND_PNPM = $(PYTHON) ../scripts/pnpm.py
+FRONTEND_PNPM = $(PYTHON) ../scripts/pnpm.py --project frontend-hm --
+
+.PHONY: frontend-config check-frontend-isolation
+frontend-config:
+	@$(PYTHON) scripts/frontend_env.py
+
+check-frontend-isolation:
+	@$(PYTHON) scripts/verify_frontend_isolation.py
 
 help:
 	@echo "DeerFlow Development Commands:"
@@ -30,6 +38,8 @@ help:
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make check-agent-guidance - Validate scoped AGENTS.md file and chain budgets"
+	@echo "  make check-frontend-isolation - Verify the upstream snapshot and Hartmesh source boundary"
+	@echo "  make frontend-config - Initialize frontend-hm/.env (preserves existing settings)"
 	@echo "  make detect-thread-boundaries - Inventory backend executor/thread/event-loop boundaries"
 	@echo "  make detect-blocking-io        - Inventory blocking IO that may block the backend event loop"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
@@ -94,7 +104,7 @@ install:
 	@echo "Installing backend dependencies..."
 	@cd backend && uv sync --locked
 	@echo "Installing frontend dependencies..."
-	@cd frontend && $(FRONTEND_PNPM) install
+	@cd frontend-hm && $(FRONTEND_PNPM) install
 	@echo "Installing pre-commit hooks..."
 	@uv tool install pre-commit
 	@pre-commit install --overwrite

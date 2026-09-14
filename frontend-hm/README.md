@@ -1,6 +1,10 @@
-# DeerFlow Frontend
+# Hartmesh Frontend
 
-Like the original DeerFlow 1.0, we would love to give the community a minimalistic and easy-to-use web interface with a more modern and flexible architecture.
+Hartmesh's application lives in `frontend-hm/`, seeded from the DeerFlow UI
+with Hartmesh's existing behavior preserved. It owns its source, dependencies,
+and build. The sibling `frontend/` is a pinned upstream reference; it is not
+part of this application's build. See [frontend isolation](../docs/FRONTEND_ISOLATION.md)
+for ownership, upstream syncs, and validation.
 
 ## Tech Stack
 
@@ -21,8 +25,8 @@ Like the original DeerFlow 1.0, we would love to give the community a minimalist
 # Install dependencies
 pnpm install
 
-# Copy environment variables
-cp .env.example .env
+# Initialize settings, preserving existing settings from the old frontend
+python3 ../scripts/frontend_env.py
 # Edit .env with your configuration
 ```
 

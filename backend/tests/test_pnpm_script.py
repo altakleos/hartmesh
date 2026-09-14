@@ -6,9 +6,50 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PNPM_SCRIPT = REPO_ROOT / "scripts" / "pnpm.py"
 FRONTEND_DIR = REPO_ROOT / "frontend"
+HARTMESH_DIR = REPO_ROOT / "frontend-hm"
+
+
+@pytest.mark.parametrize("executable", ["pnpm", "corepack"])
+def test_runner_selects_hartmesh_and_preserves_pnpm_arguments(tmp_path: Path, executable: str):
+    _write_fake_command(tmp_path, executable, executable)
+    result = _run_pnpm(tmp_path, "--project", "frontend-hm", "--", "run", "dev", "--port", "3010", cwd=REPO_ROOT)
+    prefix = "pnpm " if executable == "corepack" else ""
+    assert result.returncode == 0
+    assert result.stdout.strip() == f"{executable}|{HARTMESH_DIR}|{prefix}run dev --port 3010"
+
+
+@pytest.mark.parametrize("project", ["../frontend", "missing", "", "--version"])
+def test_runner_rejects_invalid_project_without_running_pnpm(tmp_path: Path, project: str):
+    _write_fake_command(tmp_path, "pnpm", "must-not-run")
+    result = _run_pnpm(tmp_path, "--project", project, "--", "--version")
+    assert result.returncode == 2
+    assert "project" in result.stderr.lower()
+    assert result.stdout == ""
+
+
+def test_runner_rejects_missing_selected_project(tmp_path: Path):
+    import shutil
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    shutil.copy2(PNPM_SCRIPT, scripts / "pnpm.py")
+    result = subprocess.run([sys.executable, str(scripts / "pnpm.py"), "--project", "frontend-hm", "--", "--version"], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "frontend-hm/package.json" in result.stderr
+
+
+def test_relative_path_executable_is_resolved_before_switching_project(tmp_path: Path):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    _write_fake_command(binary, "pnpm", "relative")
+    result = _run_pnpm(Path("bin"), "--project", "frontend-hm", "--", "--version", cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"relative|{HARTMESH_DIR}|--version"
 
 
 def _write_fake_command(bin_dir: Path, name: str, label: str, exit_code: int = 0) -> Path:
@@ -111,17 +152,17 @@ def test_runner_propagates_selected_pnpm_failure(tmp_path: Path):
 
 def test_official_entrypoints_route_pnpm_through_shared_runner():
     root_makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    frontend_makefile = (FRONTEND_DIR / "Makefile").read_text(encoding="utf-8")
+    frontend_makefile = (HARTMESH_DIR / "Makefile").read_text(encoding="utf-8")
     serve_script = (REPO_ROOT / "scripts" / "serve.sh").read_text(encoding="utf-8")
     doctor_script = (REPO_ROOT / "scripts" / "doctor.py").read_text(encoding="utf-8")
     support_bundle_script = (REPO_ROOT / "scripts" / "support_bundle.py").read_text(encoding="utf-8")
 
-    assert "cd frontend && $(FRONTEND_PNPM) install" in root_makefile
+    assert "cd frontend-hm && $(FRONTEND_PNPM) install" in root_makefile
     assert "PNPM = $(PYTHON) ../scripts/pnpm.py" in frontend_makefile
-    assert '"$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" install --silent' in serve_script
+    assert '"$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" --project frontend-hm -- install --silent' in serve_script
     assert 'DEERFLOW_PNPM_RUNNER="$REPO_ROOT/scripts/pnpm.py"' in serve_script
-    assert 'FRONTEND_CMD=\'env PORT=3000 "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev\'' in serve_script
-    assert '"\\$DEERFLOW_PNPM_RUNNER\\" run preview"' in serve_script
+    assert 'FRONTEND_CMD=\'env PORT=3000 "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" --project frontend-hm -- run dev\'' in serve_script
+    assert '"\\$DEERFLOW_PNPM_RUNNER\\" --project frontend-hm -- run preview"' in serve_script
     assert 'Path(__file__).resolve().with_name("pnpm.py")' in doctor_script
     assert 'project_root / "scripts" / "pnpm.py"' in support_bundle_script
 
@@ -137,6 +178,6 @@ def test_make_install_dry_run_does_not_invoke_bare_pnpm():
     )
 
     assert result.returncode == 0
-    assert "cd frontend && " in result.stdout
-    assert "../scripts/pnpm.py install" in result.stdout
-    assert "cd frontend && pnpm install" not in result.stdout
+    assert "cd frontend-hm && " in result.stdout
+    assert "../scripts/pnpm.py --project frontend-hm -- install" in result.stdout
+    assert "cd frontend-hm && pnpm install" not in result.stdout

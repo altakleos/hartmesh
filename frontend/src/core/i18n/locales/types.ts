@@ -305,40 +305,6 @@ export interface Translations {
     };
   };
 
-  evidence: {
-    label: string;
-    title: string;
-    description: string;
-    empty: string;
-    loadFailed: string;
-    retry: string;
-    overview: string;
-    timeline: string;
-    sections: string;
-    status: string;
-    accepted: string;
-    terminalReason: string;
-    policy: string;
-    completeness: string;
-    copy: string;
-    copied: string;
-    downloadBundle: string;
-    generatingBundle: string;
-    cancelBundle: string;
-    bundleFailed: string;
-    stop: string;
-    warning: string;
-    noDecisions: string;
-    sandboxDiagnostics: string;
-    noDiagnostics: string;
-    state: Record<string, string>;
-    qualification: Record<string, string>;
-    section: Record<string, string>;
-    reason: Record<string, string>;
-    sessionKind: Record<string, string>;
-    diagnostic: Record<string, string>;
-  };
-
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: { cron: string; once: string };
@@ -840,37 +806,6 @@ export interface Translations {
       darkDescription: string;
       languageTitle: string;
       languageDescription: string;
-    };
-    toolPlane: {
-      title: string;
-      checking: string;
-      managed: string;
-      immutable: string;
-      bootstrapRequired: string;
-      recoveryRequired: string;
-      drift: string;
-      unmanaged: string;
-      loadFailed: string;
-      mutationsDisabled: string;
-      activeRevision: string;
-      noActiveRevision: string;
-      latestRevision: string;
-      noRevision: string;
-      stagedBy: string;
-      promotedBy: string;
-      credentialNotice: string;
-      states: Record<
-        | "bootstrap_required"
-        | "staged"
-        | "validating"
-        | "validated"
-        | "rejected"
-        | "prepared"
-        | "promoted"
-        | "superseded"
-        | "recovery_required",
-        string
-      >;
     };
     tools: {
       title: string;

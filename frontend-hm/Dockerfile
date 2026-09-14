@@ -29,7 +29,7 @@ RUN if [ -n "${NPM_REGISTRY}" ]; then pnpm config set registry "${NPM_REGISTRY}"
 # ── Base: shared source setup ───────────────────────────────────────────────
 FROM pnpm-runtime AS base
 WORKDIR /app
-COPY frontend ./frontend
+COPY frontend-hm ./frontend
 
 # ── Dev: install only, CMD is overridden by docker-compose ───────────────────
 FROM base AS dev

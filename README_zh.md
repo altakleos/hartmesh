@@ -415,7 +415,7 @@ PostgreSQL 运维人员应在回滚前停止写入并备份数据；迁移说明
 - [扩展 API](backend/packages/extension-api/README.md) — 策略与信任边界
 - [Helm 部署](deploy/helm/deer-flow/README.md) — 单 Gateway 模式与资格
 - [配置](config.example.yaml) — 运维设置
-- [后端指南](backend/AGENTS.md)和[前端指南](frontend/AGENTS.md) — 架构与测试
+- [后端指南](backend/AGENTS.md)和[前端指南](frontend-hm/AGENTS.md) — 架构与测试
 
 ## 支持与安全
 

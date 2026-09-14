@@ -42,12 +42,10 @@ import {
   useStartLarkAuthorization,
   useStartLarkConfiguration,
 } from "@/core/integrations/lark";
-import { useToolPlaneGovernance } from "@/core/tool-plane";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { SettingsSection } from "./settings-section";
-import { ToolPlaneGovernanceNotice } from "./tool-plane-governance-notice";
 
 type PendingLarkFlow =
   | ({ kind: "config" } & LarkConfigStartResponse)
@@ -133,7 +131,6 @@ function LarkIntegrationCard() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = user?.system_role === "admin";
-  const toolPlane = useToolPlaneGovernance("deployment_base", isAdmin);
   const { data, isLoading, error, refetch, isFetching } =
     useLarkIntegrationStatus();
   const install = useInstallLarkIntegration();
@@ -609,7 +606,6 @@ function LarkIntegrationCard() {
   const installDisabled =
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
     !isAdmin ||
-    toolPlane.legacyMutationBlocked ||
     integrationBusy;
   const authDisabled =
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
@@ -662,14 +658,6 @@ function LarkIntegrationCard() {
         </CardAction>
       </CardHeader>
       <CardContent className="space-y-4">
-        {isAdmin ? (
-          <ToolPlaneGovernanceNotice
-            governance={toolPlane.governance}
-            error={toolPlane.error}
-            isLoading={toolPlane.isLoading}
-            serviceUnavailable={toolPlane.serviceUnavailable}
-          />
-        ) : null}
         {isLoading ? (
           <div className="text-muted-foreground text-sm">
             {t.common.loading}

@@ -24,13 +24,13 @@ Fixes #
 
 <!-- Check every box that applies. Reviewers use this to scope the review. -->
 
-- [ ] **Frontend UI** — page / component / setting / interaction under `frontend/`
+- [ ] **Frontend UI** — page / component / setting / interaction under `frontend-hm/`
 - [ ] **Backend API** — endpoint / SSE event / request-response shape under `backend/app`
 - [ ] **Agents / LangGraph** — agent node, graph wiring, `langgraph.json`, or prompt change
   - Prompt-layer self-check: for every data source in the new text, what is its trust level, and which channel should it ride? Model-supplied or user-influenceable values belong on the untrusted, sanitized data channel (e.g. the task `HumanMessage`) — never interpolated into framework-owned system text, even neutralized.
 - [ ] **Sandbox** — `docker/` or sandboxed execution
 - [ ] **Skills** — change under `skills/`
-- [ ] **Dependencies** — new/upgraded entry in `backend/pyproject.toml` or `frontend/package.json` (say what it buys us)
+- [ ] **Dependencies** — new/upgraded entry in `backend/pyproject.toml` or `frontend-hm/package.json` (say what it buys us)
 - [ ] **Default behavior change** — changes existing behavior without the user opting in (default model, default setting, data shape)
 - [ ] **Docs / tests / CI only** — no runtime behavior change
 
@@ -57,8 +57,8 @@ Fixes #
 
 <!-- What you actually ran. Run at least the checks for the area you changed:
        Backend:   cd backend  && make lint && make test
-       Frontend:  cd frontend && pnpm format && pnpm lint && pnpm typecheck && BETTER_AUTH_SECRET=local-dev-secret pnpm build && make test
-       Frontend E2E (if you touched frontend/): cd frontend && make test-e2e -->
+       Frontend:  cd frontend-hm && pnpm format && pnpm lint && pnpm typecheck && BETTER_AUTH_SECRET=local-dev-secret pnpm build && make test
+       Frontend E2E (if you touched frontend-hm/): cd frontend-hm && make test-e2e -->
 
 
 ## AI assistance
@@ -73,4 +73,3 @@ Fixes #
      "AI wrote tests, I wrote the impl". A prompt or conversation link is great too. -->
 
 - [ ] I've read and understand every line of this change and take responsibility for it — it's not unreviewed AI output.
-

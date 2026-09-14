@@ -417,7 +417,7 @@ Versionsquellen melden `2.1.0+hartmesh.4`, das neueste Tag. Es liegt vor der obe
 - [Erweiterungs-API](backend/packages/extension-api/README.md) — Richtlinien- und Vertrauensgrenzen
 - [Helm-Bereitstellung](deploy/helm/deer-flow/README.md) — Ein-Gateway-Modi und Qualifikation
 - [Konfiguration](config.example.yaml) — Betreibereinstellungen
-- [Backend-Leitfaden](backend/AGENTS.md) und [Frontend-Leitfaden](frontend/AGENTS.md) — Architektur und Tests
+- [Backend-Leitfaden](backend/AGENTS.md) und [Frontend-Leitfaden](frontend-hm/AGENTS.md) — Architektur und Tests
 
 ## Support und Sicherheit
 

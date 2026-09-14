@@ -36,7 +36,7 @@ Consider the setup successful when all of the following are true:
 ## Steps
 
 - If the current directory is not the DeerFlow repository root, clone `https://github.com/bytedance/deer-flow.git` if needed, then change into the repository root.
-- Confirm the current directory is the DeerFlow repository root by checking that `Makefile`, `backend/`, `frontend/`, and `config.example.yaml` exist.
+- Confirm the current directory is the DeerFlow repository root by checking that `Makefile`, `backend/`, `frontend-hm/`, and `config.example.yaml` exist.
 - Detect whether `config.yaml` already exists.
 - If `config.yaml` does not exist, run `make config`.
 - Detect whether Docker is available and the daemon is reachable with `docker info`.
@@ -50,7 +50,7 @@ Consider the setup successful when all of the following are true:
   - If `make check` reports missing system dependencies such as `node`, `pnpm`, `uv`, or `nginx`, stop and report the missing tools instead of attempting privileged installs.
   - If prerequisites are satisfied, run `make install`.
   - Tell the user the recommended next command is `make dev`.
-- Inspect `config.yaml` only for missing model entries or referenced environment variable placeholders. Do not read `.env`, `frontend/.env`, or other secret-bearing files.
+- Inspect `config.yaml` only for missing model entries or referenced environment variable placeholders. Do not read `.env`, `frontend-hm/.env`, or other secret-bearing files.
 - If no model is configured, tell the user they must add at least one entry under `models` in `config.yaml`.
 - If `config.yaml` references variables such as `$OPENAI_API_KEY`, tell the user which variable names still need real values, but do not verify them by opening secret-bearing files.
 - If the repository already appears configured, avoid repeating expensive work unless it is necessary to verify the environment.

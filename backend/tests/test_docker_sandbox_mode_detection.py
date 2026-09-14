@@ -114,7 +114,7 @@ def _seed_compose_file(tmp_root: Path) -> None:
 def _seed_env_examples(tmp_root: Path) -> None:
     """Provide the templates ensure_env_files copies from."""
     (tmp_root / ".env.example").write_text("# test\n", encoding="utf-8")
-    frontend = tmp_root / "frontend"
+    frontend = tmp_root / "frontend-hm"
     frontend.mkdir(exist_ok=True)
     (frontend / ".env.example").write_text("# test\n", encoding="utf-8")
 
@@ -163,7 +163,7 @@ def test_read_only_commands_do_not_create_env_files(docker_command):
         _run_docker_sh(tmp_root, f"COMPOSE_CMD=true\n{docker_command}")
 
         assert not (tmp_root / ".env").exists(), f"{docker_command} created .env"
-        assert not (tmp_root / "frontend" / ".env").exists(), f"{docker_command} created frontend/.env"
+        assert not (tmp_root / "frontend-hm" / ".env").exists(), f"{docker_command} created frontend-hm/.env"
 
 
 @pytest.mark.parametrize("docker_command", ["logs --gateway", "stop", "restart"])
@@ -190,9 +190,9 @@ ensure_env_files
         subprocess.check_call([BASH_EXECUTABLE, "-lc", command])
 
         assert (tmp_root / ".env").is_file()
-        assert (tmp_root / "frontend" / ".env").is_file()
+        assert (tmp_root / "frontend-hm" / ".env").is_file()
         assert (tmp_root / ".env").read_text(encoding="utf-8") == "# test\n"
-        assert (tmp_root / "frontend" / ".env").read_text(encoding="utf-8") == "# test\n"
+        assert (tmp_root / "frontend-hm" / ".env").read_text(encoding="utf-8") == "# test\n"
 
 
 def test_ensure_env_files_leaves_existing_env_untouched():
@@ -201,7 +201,7 @@ def test_ensure_env_files_leaves_existing_env_untouched():
         tmp_root = Path(tmpdir)
         _seed_env_examples(tmp_root)
         (tmp_root / ".env").write_text("KEEP=me\n", encoding="utf-8")
-        frontend = tmp_root / "frontend"
+        frontend = tmp_root / "frontend-hm"
         (frontend / ".env").write_text("KEEP=frontend\n", encoding="utf-8")
 
         command = f"""
@@ -213,6 +213,18 @@ ensure_env_files
 
         assert (tmp_root / ".env").read_text(encoding="utf-8") == "KEEP=me\n"
         assert (frontend / ".env").read_text(encoding="utf-8") == "KEEP=frontend\n"
+
+
+def test_docker_bootstrap_migrates_legacy_frontend_settings(tmp_path: Path):
+    _seed_env_examples(tmp_path)
+    legacy = tmp_path / "frontend"
+    legacy.mkdir()
+    (legacy / ".env").write_bytes(b"EXAMPLE=private\r\n")
+    command = f"source '{SCRIPT_PATH}'\nPROJECT_ROOT='{tmp_path}'\nensure_env_files\n"
+    result = subprocess.run([BASH_EXECUTABLE, "-lc", command], capture_output=True, text=True, check=True)
+    assert (tmp_path / "frontend-hm/.env").read_bytes() == b"EXAMPLE=private\r\n"
+    assert (legacy / ".env").read_bytes() == b"EXAMPLE=private\r\n"
+    assert "EXAMPLE=" not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(

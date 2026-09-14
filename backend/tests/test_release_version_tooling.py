@@ -17,7 +17,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 def release_tree(tmp_path: Path) -> Path:
     """Create the smallest release tree accepted by both helper scripts."""
     backend = tmp_path / "backend"
-    frontend = tmp_path / "frontend"
+    frontend = tmp_path / "frontend-hm"
     chart = tmp_path / "deploy/helm/deer-flow"
     scripts = tmp_path / "scripts"
     for directory in (backend, frontend, chart, scripts):
@@ -90,6 +90,18 @@ def test_verify_versions_rejects_only_a_stale_root_lock_version(release_tree: Pa
 
     assert aligned.returncode == 0
     assert "OK — all version sources agree on 2.1.0." in aligned.stdout
+
+
+def test_version_contract_ignores_upstream_version_but_rejects_hartmesh_drift(release_tree: Path) -> None:
+    upstream = release_tree / "frontend"
+    upstream.mkdir()
+    (upstream / "package.json").write_text('{"version":"0.0.1"}', encoding="utf-8")
+    assert _run_helper(release_tree, "verify_versions.sh", "2.1.0").returncode == 0
+    package = release_tree / "frontend-hm/package.json"
+    package.write_text('{"version":"0.0.1"}', encoding="utf-8")
+    failed = _run_helper(release_tree, "verify_versions.sh", "2.1.0")
+    assert failed.returncode == 1
+    assert "frontend-hm/package.json" in failed.stderr
 
 
 def test_bump_version_accepts_hartmesh_build_metadata_and_updates_lock(release_tree: Path) -> None:

@@ -25,7 +25,7 @@ from typing import Literal
 
 Status = Literal["ok", "warn", "fail", "skip"]
 PNPM_SCRIPT_PATH = Path(__file__).resolve().with_name("pnpm.py")
-FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend"
+FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend-hm"
 
 
 def _supports_color() -> bool:
@@ -169,7 +169,7 @@ def check_node() -> CheckResult:
 def check_pnpm() -> CheckResult:
     try:
         result = subprocess.run(
-            [sys.executable, str(PNPM_SCRIPT_PATH), "-v"],
+            [sys.executable, str(PNPM_SCRIPT_PATH), "--project", "frontend-hm", "--", "-v"],
             cwd=FRONTEND_DIR,
             capture_output=True,
             text=True,
@@ -612,13 +612,13 @@ def check_image_search(config_path: Path) -> CheckResult:
 
 
 def check_frontend_env(project_root: Path) -> CheckResult:
-    env_path = project_root / "frontend" / ".env"
+    env_path = project_root / "frontend-hm" / ".env"
     if env_path.exists():
-        return CheckResult("frontend/.env found", "ok")
+        return CheckResult("frontend-hm/.env found", "ok")
     return CheckResult(
-        "frontend/.env found",
+        "frontend-hm/.env found",
         "warn",
-        fix="Run 'make setup' or copy frontend/.env.example to frontend/.env",
+        fix="Run 'make setup' or copy frontend-hm/.env.example to frontend-hm/.env",
     )
 
 

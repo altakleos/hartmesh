@@ -37,8 +37,8 @@ def test_collect_environment_routes_pnpm_through_shared_runner(tmp_path, monkeyp
     assert pnpm_calls == [
         (
             "pnpm",
-            [sys.executable, str(tmp_path / "scripts" / "pnpm.py"), "--version"],
-            tmp_path / "frontend",
+            [sys.executable, str(tmp_path / "scripts" / "pnpm.py"), "--project", "frontend-hm", "--", "--version"],
+            tmp_path / "frontend-hm",
         )
     ]
 

@@ -34,7 +34,7 @@ labels:
   # Mirrors the "Surface area" section of the pull request template.
   - name: "area:frontend"
     color: c5def5
-    description: Next.js frontend under frontend/
+    description: Hartmesh Next.js app under frontend-hm/ and upstream reference under frontend/
   - name: "area:backend"
     color: c5def5
     description: Gateway / runtime / core backend under backend/

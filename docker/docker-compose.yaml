@@ -70,7 +70,7 @@ services:
   frontend:
     build:
       context: ../
-      dockerfile: frontend/Dockerfile
+      dockerfile: frontend-hm/Dockerfile
       target: prod
       args:
         PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
@@ -80,7 +80,7 @@ services:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
     env_file:
-      - ../frontend/.env
+      - ../frontend-hm/.env
     networks:
       - deer-flow
     restart: unless-stopped

@@ -417,7 +417,7 @@ As fontes de versão informam `2.1.0+hartmesh.4`, a tag mais recente. Ela é ant
 - [API de extensões](backend/packages/extension-api/README.md) — limites de política e confiança
 - [Implantação Helm](deploy/helm/deer-flow/README.md) — modos de um Gateway e qualificação
 - [Configuração](config.example.yaml) — opções do operador
-- [Guia backend](backend/AGENTS.md) e [guia frontend](frontend/AGENTS.md) — arquitetura e testes
+- [Guia backend](backend/AGENTS.md) e [guia frontend](frontend-hm/AGENTS.md) — arquitetura e testes
 
 ## Suporte e segurança
 

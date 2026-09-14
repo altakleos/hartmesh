@@ -61,7 +61,7 @@ jobs:
             build-args: UV_EXTRAS=postgres
           - component: frontend
             context: .
-            file: frontend/Dockerfile
+            file: frontend-hm/Dockerfile
             build-args: ""
           - component: provisioner
             context: docker/provisioner

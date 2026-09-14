@@ -64,6 +64,8 @@ config.yaml.bak
 .playwright-mcp
 /frontend/test-results/
 /frontend/playwright-report/
+/frontend-hm/test-results/
+/frontend-hm/playwright-report/
 .gstack/
 .worktrees
 

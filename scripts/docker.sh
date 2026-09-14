@@ -141,7 +141,11 @@ compose_preflight() {
 # "Le fichier spécifique est introuvable").
 ensure_env_files() {
     ensure_from_example "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.example" ".env"
-    ensure_from_example "$PROJECT_ROOT/frontend/.env" "$PROJECT_ROOT/frontend/.env.example" "frontend/.env"
+    local frontend_env_source="$PROJECT_ROOT/frontend-hm/.env.example"
+    if [ -f "$PROJECT_ROOT/frontend/.env" ]; then
+        frontend_env_source="$PROJECT_ROOT/frontend/.env"
+    fi
+    ensure_from_example "$PROJECT_ROOT/frontend-hm/.env" "$frontend_env_source" "frontend-hm/.env"
 }
 
 load_proxy_env_from_dotenv() {

@@ -1,7 +1,7 @@
 # DeerFlow Development Environment
 #
 # Requires Docker Compose >= 2.24. The env_file entries below use the long-form
-# path/required syntax so a missing ../.env or ../frontend/.env does not abort
+# path/required syntax so a missing ../.env or ../frontend-hm/.env does not abort
 # Compose on Windows ("file not found" / "Le fichier spécifique est
 # introuvable"). Clients older than 2.24 do not understand that field and
 # reject this file with:
@@ -149,7 +149,7 @@ services:
   frontend:
     build:
       context: ../
-      dockerfile: frontend/Dockerfile
+      dockerfile: frontend-hm/Dockerfile
       target: dev
       args:
         PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
@@ -157,9 +157,9 @@ services:
     container_name: deer-flow-frontend
     command: sh -c "cd frontend && pnpm run dev > /app/logs/frontend.log 2>&1"
     volumes:
-      - ../frontend/src:/app/frontend/src
-      - ../frontend/public:/app/frontend/public
-      - ../frontend/next.config.js:/app/frontend/next.config.js:ro
+      - ../frontend-hm/src:/app/frontend/src
+      - ../frontend-hm/public:/app/frontend/public
+      - ../frontend-hm/next.config.js:/app/frontend/next.config.js:ro
       - ../logs:/app/logs
       # Mount pnpm store for caching
       - ${PNPM_STORE_PATH:-~/.local/share/pnpm/store}:/root/.local/share/pnpm/store
@@ -171,7 +171,7 @@ services:
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
       - DEER_FLOW_DEV_ALLOWED_ORIGINS=${DEER_FLOW_DEV_ALLOWED_ORIGINS:-127.0.0.1,::1}
     env_file:
-      - path: ../frontend/.env
+      - path: ../frontend-hm/.env
         required: false
     networks:
       - deer-flow-dev

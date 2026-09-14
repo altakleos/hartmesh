@@ -1,4 +1,6 @@
 **/.env
+**/.env.*
+!**/.env.example
 Dockerfile
 .dockerignore
 .git
@@ -54,7 +56,7 @@ tests/
 *.log
 
 # Exclude directories not needed in Docker context
-# Frontend build only needs frontend/
+# Hartmesh frontend build only copies frontend-hm/ (upstream uses frontend/)
 # Backend build only needs backend/
 scripts/
 logs/
@@ -62,6 +64,10 @@ docker/
 skills/
 frontend/.next
 frontend/node_modules
+frontend-hm/.next
+frontend-hm/node_modules
+frontend-hm/test-results
+frontend-hm/playwright-report
 backend/.venv
 backend/htmlcov
 backend/.coverage
@@ -76,6 +82,7 @@ backend/sandbox/
 *.md
 !README.md
 !frontend/README.md
+!frontend-hm/README.md
 !backend/README.md
 
 # Extension manager snapshots must enter the backend builder intact. A Python

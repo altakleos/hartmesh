@@ -415,7 +415,7 @@ version source は最新 tag である `2.1.0+hartmesh.4` を示します。こ�
 - [Extension API](backend/packages/extension-api/README.md) — policy と trust boundary
 - [Helm deployment](deploy/helm/deer-flow/README.md) — 1 Gateway mode と qualification
 - [Configuration](config.example.yaml) — operator setting
-- [Backend guide](backend/AGENTS.md) と [frontend guide](frontend/AGENTS.md) — architecture と test
+- [Backend guide](backend/AGENTS.md) と [frontend guide](frontend-hm/AGENTS.md) — architecture と test
 
 ## サポートとセキュリティ
 

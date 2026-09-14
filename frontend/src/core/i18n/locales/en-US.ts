@@ -386,92 +386,6 @@ export const enUS: Translations = {
     },
   },
 
-  evidence: {
-    label: "Evidence",
-    title: "Run evidence",
-    description:
-      "Bounded admission, policy, execution, and export evidence for the latest run.",
-    empty: "This thread has no run evidence yet.",
-    loadFailed: "Couldn't load run evidence",
-    retry: "Retry",
-    overview: "Overview",
-    timeline: "Policy timeline",
-    sections: "Evidence sections",
-    status: "Status",
-    accepted: "Accepted",
-    terminalReason: "Terminal reason",
-    policy: "Policy",
-    completeness: "Completeness",
-    copy: "Copy public reference",
-    copied: "Public reference copied",
-    downloadBundle: "Download evidence bundle",
-    generatingBundle: "Generating bundle…",
-    cancelBundle: "Cancel bundle generation",
-    bundleFailed: "Couldn't generate the evidence bundle",
-    stop: "Stop",
-    warning: "Warning",
-    noDecisions: "No policy warnings or stops were recorded.",
-    sandboxDiagnostics: "Sandbox diagnostics",
-    noDiagnostics: "No sandbox diagnostics were recorded.",
-    sessionKind: {
-      ordinary: "Ordinary session",
-      accepted: "Accepted session",
-    },
-    diagnostic: {
-      "egress.blocked": "Egress blocked, approval requested",
-      "egress.bound": "Egress allowance bound to the run",
-      "egress.decided": "Egress decision applied",
-      "egress.denied": "Egress denied without asking",
-      "scope.opened": "Shell scope opened",
-      "scope.released": "Shell scope released",
-      "session.refused": "Sync refused: an accepted run holds the sandbox",
-    },
-    state: {
-      available: "Available",
-      not_applicable: "Not applicable",
-      unsupported: "Unsupported",
-      legacy: "Legacy",
-      pruned: "Pruned",
-      unqualified: "Unqualified",
-      error: "Error",
-    },
-    qualification: {
-      qualified: "Qualified",
-      unqualified: "Unqualified",
-      unverified: "Unverified",
-      legacy: "Legacy evidence",
-      unsupported: "Unsupported",
-    },
-    section: {
-      admission: "Admission and actor",
-      assembly: "Assembly and tool plane",
-      policy: "Execution policy",
-      tools: "Tool receipts",
-      batches: "Subagent batches",
-      sandbox: "Sandbox",
-      retrieval: "Retrieval",
-      mcp: "MCP lineage",
-      artifacts: "Artifacts and export",
-    },
-    reason: {
-      turn_budget_exhausted: "Agent turn budget exhausted",
-      tool_attempt_budget_exhausted: "Tool attempt budget exhausted",
-      repeated_tool_loop: "Repeated equivalent tool loop",
-      no_progress_loop: "No-progress loop",
-      batch_count_budget_exhausted: "Batch count budget exhausted",
-      batch_item_budget_exhausted: "Batch item budget exhausted",
-      batch_attempt_budget_exhausted: "Batch attempt budget exhausted",
-      batch_runtime_budget_exhausted: "Batch runtime budget exhausted",
-      retrieval_budget_exhausted: "Retrieval budget exhausted",
-      sandbox_operation_budget_exhausted: "Sandbox operation budget exhausted",
-      sandbox_runtime_budget_exhausted: "Sandbox runtime budget exhausted",
-      policy_equivalence_key_unavailable: "Accepted policy key unavailable",
-      policy_equivalence_normalizer_unavailable:
-        "Accepted policy normalizer unavailable",
-      policy_state_inconsistent: "Policy state inconsistent",
-    },
-  },
-
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: {
@@ -1032,44 +946,6 @@ export const enUS: Translations = {
       darkDescription: "Dim palette that reduces glare for focus.",
       languageTitle: "Language",
       languageDescription: "Switch between languages.",
-    },
-    toolPlane: {
-      title: "Governed revisions",
-      checking: "Checking revision governance",
-      managed:
-        "Skills and MCP tools are managed through immutable revisions. Direct settings changes are disabled; stage, validate, inspect, and promote a revision through the governed API.",
-      immutable:
-        "This deployment is immutable. Tool-plane material is supplied only by its approved deployment revision.",
-      bootstrapRequired:
-        "Governance bootstrap is required before tool-plane changes or durable runs can proceed.",
-      recoveryRequired:
-        "A prepared revision needs recovery. Tool-plane changes and durable admission remain blocked.",
-      drift:
-        "The projected skill or MCP material differs from the active revision. Direct changes are disabled while operators reconcile the drift.",
-      unmanaged:
-        "No active revision is available for this scope. Direct changes remain disabled.",
-      loadFailed: "Revision governance status is unavailable",
-      mutationsDisabled:
-        "Direct skill and MCP changes are disabled until governance status is verified.",
-      activeRevision: "Active",
-      noActiveRevision: "No active revision",
-      latestRevision: "Latest",
-      noRevision: "No staged revisions",
-      stagedBy: "Staged by",
-      promotedBy: "Promoted by",
-      credentialNotice:
-        "Only revision identifiers and secret-free evidence are shown here. Credential values are never included.",
-      states: {
-        bootstrap_required: "Bootstrap required",
-        staged: "Staged",
-        validating: "Validating",
-        validated: "Validated",
-        rejected: "Invalid",
-        prepared: "Prepared",
-        promoted: "Active",
-        superseded: "Superseded",
-        recovery_required: "Recovery required",
-      },
     },
     tools: {
       title: "Tools",

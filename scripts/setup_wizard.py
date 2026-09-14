@@ -19,6 +19,8 @@ def _is_interactive() -> bool:
 
 
 def main() -> int:
+    from frontend_env import ensure_frontend_env
+
     try:
         if not _is_interactive():
             print(
@@ -53,6 +55,7 @@ def main() -> int:
             print()
             should_reconfigure = ask_yes_no("Do you want to reconfigure?", default=False)
             if not should_reconfigure:
+                ensure_frontend_env(project_root)
                 print()
                 print_info("Keeping existing config. Run 'make doctor' to verify your setup.")
                 return 0
@@ -123,12 +126,7 @@ def main() -> int:
             write_env_file(env_path, env_pairs)
             print_success(f"API keys written to: {env_path.relative_to(project_root)}")
 
-        frontend_env = project_root / "frontend" / ".env"
-        frontend_env_example = project_root / "frontend" / ".env.example"
-        if not frontend_env.exists() and frontend_env_example.exists():
-            import shutil
-            shutil.copyfile(frontend_env_example, frontend_env)
-            print_success("frontend/.env created from example")
+        ensure_frontend_env(project_root)
 
         print_header("Setup complete!")
         print(f"  {green('✓')} LLM:        {llm.provider.display_name} / {llm.model_name}")

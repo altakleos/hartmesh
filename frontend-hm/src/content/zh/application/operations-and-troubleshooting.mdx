@@ -124,7 +124,7 @@ SQLite 应只用于本地开发、单用户部署或短期评估环境。
 ```bash
 # 选项 1：设置环境变量（推荐）
 export BETTER_AUTH_SECRET=your-secret-here-at-least-32-chars
-cd frontend && pnpm build
+cd frontend-hm && pnpm build
 
 # 选项 2：跳过构建时验证（仅限开发）
 SKIP_ENV_VALIDATION=1 pnpm build

@@ -7,27 +7,19 @@ ARG PNPM_STORE_PATH=/root/.local/share/pnpm/store
 ARG NPM_REGISTRY
 
 # ── Base: shared setup ────────────────────────────────────────────────────────
-FROM node:22-alpine AS pnpm-runtime
+FROM node:22-alpine AS base
 ARG PNPM_STORE_PATH
 ARG NPM_REGISTRY
-ENV COREPACK_HOME=/opt/corepack
 # Configure corepack registry before installing pnpm so the download itself
 # succeeds in restricted networks (COREPACK_NPM_REGISTRY controls where
-# corepack fetches package managers from). Keep the downloaded package manager
-# outside root's home so the non-root runtime user can use it without egress.
+# corepack fetches package managers from).
 RUN if [ -n "${NPM_REGISTRY}" ]; then \
       export COREPACK_NPM_REGISTRY="${NPM_REGISTRY}"; \
     fi && \
-    corepack enable && \
-    corepack install -g pnpm@10.26.2 && \
-    chmod -R a+rX "${COREPACK_HOME}"
-ENV COREPACK_ENABLE_NETWORK=0
+    corepack enable && corepack install -g pnpm@10.26.2
 RUN pnpm config set store-dir ${PNPM_STORE_PATH}
 # Optionally override npm registry for restricted networks (e.g. NPM_REGISTRY=https://registry.npmmirror.com)
 RUN if [ -n "${NPM_REGISTRY}" ]; then pnpm config set registry "${NPM_REGISTRY}"; fi
-
-# ── Base: shared source setup ───────────────────────────────────────────────
-FROM pnpm-runtime AS base
 WORKDIR /app
 COPY frontend ./frontend
 
@@ -48,7 +40,15 @@ ENV NEXT_PUBLIC_APP_VERSION=$APP_VERSION
 RUN cd /app/frontend && SKIP_ENV_VALIDATION=1 pnpm build
 
 # ── Prod: minimal runtime with pre-built output ───────────────────────────────
-FROM pnpm-runtime AS prod
+FROM node:22-alpine AS prod
+ARG PNPM_STORE_PATH
+ARG NPM_REGISTRY
+RUN if [ -n "${NPM_REGISTRY}" ]; then \
+      export COREPACK_NPM_REGISTRY="${NPM_REGISTRY}"; \
+    fi && \
+    corepack enable && corepack install -g pnpm@10.26.2
+RUN pnpm config set store-dir ${PNPM_STORE_PATH}
+RUN if [ -n "${NPM_REGISTRY}" ]; then pnpm config set registry "${NPM_REGISTRY}"; fi
 WORKDIR /app
 COPY --from=builder /app/frontend ./frontend
 EXPOSE 3000

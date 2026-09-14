@@ -9,7 +9,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+FRONTEND_DIR = PROJECT_ROOT / "frontend"
 COREPACK_NOTICE = "Using pnpm via Corepack."
 
 
@@ -17,22 +18,35 @@ def find_pnpm_command() -> list[str] | None:
     """Return the preferred pnpm-compatible command for this machine."""
     pnpm_path = shutil.which("pnpm")
     if pnpm_path:
-        return [str(Path(pnpm_path))]
+        return [str(Path(pnpm_path).resolve())]
 
     pnpm_cmd_path = shutil.which("pnpm.cmd")
     if pnpm_cmd_path:
-        return [str(Path(pnpm_cmd_path))]
+        return [str(Path(pnpm_cmd_path).resolve())]
 
     corepack_path = shutil.which("corepack")
     if not corepack_path:
         corepack_path = shutil.which("corepack.cmd")
     if corepack_path:
-        return [str(Path(corepack_path)), "pnpm"]
+        return [str(Path(corepack_path).resolve()), "pnpm"]
     return None
 
 
 def run_pnpm(arguments: Sequence[str]) -> int:
     """Run pnpm with the supplied arguments and propagate its exit status."""
+    arguments = list(arguments)
+    project_dir = FRONTEND_DIR
+    if arguments and arguments[0] == "--project":
+        if len(arguments) < 2 or arguments[1] not in {"frontend", "frontend-hm"}:
+            print("Error: --project must be frontend or frontend-hm.", file=sys.stderr)
+            return 2
+        project_dir = PROJECT_ROOT / arguments[1]
+        arguments = arguments[2:]
+        if arguments[:1] == ["--"]:
+            arguments = arguments[1:]
+    if not (project_dir / "package.json").is_file():
+        print(f"Error: selected project is missing {project_dir}/package.json.", file=sys.stderr)
+        return 2
     command = find_pnpm_command()
     if command is None:
         print(
@@ -53,7 +67,7 @@ def run_pnpm(arguments: Sequence[str]) -> int:
             [*command, *arguments],
             check=False,
             shell=False,
-            cwd=FRONTEND_DIR,
+            cwd=project_dir,
         )
     except OSError as exc:
         print(f"Error: Failed to run pnpm via {command[0]}: {exc}", file=sys.stderr)

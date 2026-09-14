@@ -23,6 +23,7 @@ backend/.coverage
 
 # Components this image never needs
 frontend/
+frontend-hm/
 docs/
 skills/
 **/node_modules/

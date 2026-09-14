@@ -2,7 +2,7 @@
 
 Builds an ephemeral config that points the model at ``ReplayChatModel`` + a
 recorded fixture, then runs uvicorn — no API key, deterministic. Used as a
-Playwright ``webServer`` (see ``frontend/playwright.real-backend.config.ts``) and
+Playwright ``webServer`` (see ``frontend-hm/playwright.real-backend.config.ts``) and
 runnable standalone for debugging::
 
     uv run python scripts/run_replay_gateway.py --port 8011

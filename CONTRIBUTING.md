@@ -281,7 +281,7 @@ If you need to start services individually:
    make dev
 
    # Terminal 2: Start Frontend (port 3000)
-   cd frontend
+   cd frontend-hm
    pnpm dev
    ```
 
@@ -328,7 +328,7 @@ deer-flow/
 │   │   └── channels/       # IM channel integrations
 │   ├── docs/               # Backend documentation
 │   └── Makefile            # Backend commands
-├── frontend/               # Frontend application
+├── frontend-hm/               # Frontend application
 │   └── Makefile            # Frontend commands
 └── skills/                 # Agent skills
     ├── public/             # Public skills
@@ -361,7 +361,7 @@ Nginx (port 2026) ← Unified entry point
    make format   # ruff check --fix + ruff format
 
    # Frontend
-   cd frontend
+   cd frontend-hm
    pnpm format:write   # Prettier
    ```
 
@@ -408,11 +408,11 @@ make test-blocking-io
 make test-live
 
 # Frontend unit tests
-cd frontend
+cd frontend-hm
 make test
 
 # Frontend E2E tests (requires Chromium; builds and auto-starts the Next.js production server)
-cd frontend
+cd frontend-hm
 make test-e2e
 ```
 
@@ -427,7 +427,7 @@ Every pull request triggers the following CI workflows:
 
 - **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
-- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
+- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered by `frontend-hm/`, pnpm runner, or workflow changes)
 
 ## Code Style
 

@@ -30,10 +30,6 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 | `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)        |
 | `pnpm start`     | Start production server                       |
 
-The production Docker image resolves the `packageManager`-pinned pnpm release
-at build time into the shared `/opt/corepack` cache. Keep that cache readable by
-the chart's non-root uid 1000 so `pnpm start` never downloads its toolchain.
-
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
 Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` with `pnpm dev` to opt in to Turbopack when diagnosing a local Next.js bundler issue.
@@ -61,19 +57,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `workspace/` — Chat page components (messages, artifacts, settings)
   - `landing/` — Landing page sections
   - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `tool-plane/` (governance status/history client and legacy-mutation ceiling), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
-
-Skill, MCP, and managed-integration settings are governance-aware. When
-`GET /api/tool-plane/status` succeeds, these existing screens render the safe
-active/history notice and disable their legacy direct mutation controls; they
-must not optimistically call the old write routes. Immutable/exact-two status
-uses the same read-only path and explanation. A status fetch failure is shown as
-an unavailable-governance warning and remains fail-closed for mutation. The UI
-does not render raw candidate archives, scanner payloads, secrets, or another
-user's overlay. Only the explicit `tool_plane_unavailable` response identifies
-the configured legacy opt-out and restores legacy controls; other status errors
-stay fail-closed. See [the governed tool-plane contract](../docs/GOVERNED_TOOL_PLANE.md).
-
+- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
 - **`content/`** — MDX content (blog posts, docs) rendered by the app

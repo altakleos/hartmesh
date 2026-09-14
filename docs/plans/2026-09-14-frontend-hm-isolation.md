@@ -1,6 +1,9 @@
 # Hartmesh frontend isolation
 
-Status: design and implementation plan; application changes have not started.
+Status: implemented and validated. See the
+[ownership guide](../FRONTEND_ISOLATION.md) and
+[validation record](2026-09-14-frontend-hm-isolation-validation.md), including
+the unchanged baseline performance-budget failures and qualification skips.
 Branch: `plan/frontend-hm-isolation`.
 Date: 2026-09-14.
 

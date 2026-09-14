@@ -2,8 +2,8 @@
 
 Pins the backend parser's reserved-command set and skill-name grammar to the
 shared fixture at ``contracts/slash_skill_contract.json``. The frontend display
-parser (``frontend/src/core/skills/slash.ts``) is pinned to the same fixture by
-``frontend/tests/unit/core/skills/slash-contract.test.ts``, so a reserved
+parser (``frontend-hm/src/core/skills/slash.ts``) is pinned to the same fixture by
+``frontend-hm/tests/unit/core/skills/slash-contract.test.ts``, so a reserved
 command added on one side—or a grammar change—cannot silently drift the two
 languages apart.
 """

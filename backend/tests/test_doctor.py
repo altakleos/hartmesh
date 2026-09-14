@@ -52,7 +52,7 @@ class TestCheckPnpm:
 
         assert relative_doctor.PNPM_SCRIPT_PATH == REPO_ROOT / "scripts" / "pnpm.py"
         assert relative_doctor.PNPM_SCRIPT_PATH.is_absolute()
-        assert relative_doctor.FRONTEND_DIR == REPO_ROOT / "frontend"
+        assert relative_doctor.FRONTEND_DIR == REPO_ROOT / "frontend-hm"
         assert relative_doctor.FRONTEND_DIR.is_absolute()
 
     def test_uses_shared_runner_from_frontend(self, monkeypatch):
@@ -70,8 +70,8 @@ class TestCheckPnpm:
         expected_runner = doctor.Path(doctor.__file__).with_name("pnpm.py")
         assert result.status == "ok"
         assert result.detail == "10.26.2"
-        assert captured["cmd"] == [sys.executable, str(expected_runner), "-v"]
-        assert captured["kwargs"]["cwd"] == expected_runner.parent.parent / "frontend"
+        assert captured["cmd"] == [sys.executable, str(expected_runner), "--project", "frontend-hm", "--", "-v"]
+        assert captured["kwargs"]["cwd"] == expected_runner.parent.parent / "frontend-hm"
         assert captured["kwargs"]["shell"] is False
         assert captured["kwargs"]["check"] is False
 
@@ -594,7 +594,7 @@ class TestCheckFrontendEnv:
         assert result.status == "warn"
 
     def test_present(self, tmp_path):
-        frontend_dir = tmp_path / "frontend"
+        frontend_dir = tmp_path / "frontend-hm"
         frontend_dir.mkdir()
         (frontend_dir / ".env").write_text("KEY=val\n")
         result = doctor.check_frontend_env(tmp_path)

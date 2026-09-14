@@ -38,14 +38,14 @@ def test_prod_default_still_builds_via_preview() -> None:
 def test_skip_build_reuses_existing_build_and_requires_build_id() -> None:
     serve = SERVE_SH.read_text(encoding="utf-8")
 
-    assert 'if [ ! -f "$REPO_ROOT/frontend/.next/BUILD_ID" ]; then' in serve
+    assert 'if [ ! -f "$REPO_ROOT/frontend-hm/.next/BUILD_ID" ]; then' in serve
     assert "Run 'make start' once (full build)" in serve
 
 
 def test_skip_build_preflight_runs_before_stop_all() -> None:
     serve = SERVE_SH.read_text(encoding="utf-8")
 
-    assert serve.index("frontend/.next/BUILD_ID") < serve.index('if [ "$ACTION" = "restart" ]; then')
+    assert serve.index("frontend-hm/.next/BUILD_ID") < serve.index('if [ "$ACTION" = "restart" ]; then')
 
 
 def test_make_start_exposes_flag_as_opt_in() -> None:

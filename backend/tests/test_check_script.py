@@ -31,7 +31,7 @@ def test_find_pnpm_command_prefers_resolved_executable(monkeypatch):
 
     monkeypatch.setattr(pnpm_script.shutil, "which", fake_which)
 
-    assert pnpm_script.find_pnpm_command() == [r"C:\Users\tester\AppData\Roaming\npm\pnpm.CMD"]
+    assert pnpm_script.find_pnpm_command() == [str(Path(r"C:\Users\tester\AppData\Roaming\npm\pnpm.CMD").resolve())]
 
 
 def test_find_pnpm_command_falls_back_to_corepack(monkeypatch):
@@ -45,7 +45,7 @@ def test_find_pnpm_command_falls_back_to_corepack(monkeypatch):
     monkeypatch.setattr(pnpm_script.shutil, "which", fake_which)
 
     assert pnpm_script.find_pnpm_command() == [
-        r"C:\Program Files\nodejs\corepack.exe",
+        str(Path(r"C:\Program Files\nodejs\corepack.exe").resolve()),
         "pnpm",
     ]
 
@@ -63,7 +63,7 @@ def test_find_pnpm_command_falls_back_to_corepack_cmd(monkeypatch):
     monkeypatch.setattr(pnpm_script.shutil, "which", fake_which)
 
     assert pnpm_script.find_pnpm_command() == [
-        r"C:\Program Files\nodejs\corepack.cmd",
+        str(Path(r"C:\Program Files\nodejs\corepack.cmd").resolve()),
         "pnpm",
     ]
 
@@ -83,7 +83,7 @@ def test_check_script_resolves_runner_paths_independently_of_cwd(monkeypatch):
 
     assert check_script.PNPM_SCRIPT_PATH == PNPM_SCRIPT_PATH
     assert check_script.PNPM_SCRIPT_PATH.is_absolute()
-    assert check_script.FRONTEND_DIR == REPO_ROOT / "frontend"
+    assert check_script.FRONTEND_DIR == REPO_ROOT / "frontend-hm"
     assert check_script.FRONTEND_DIR.is_absolute()
 
 
@@ -107,7 +107,7 @@ def test_check_script_preserves_runner_failure_diagnostics(monkeypatch):
         False,
         "Error: pnpm command failed with exit status 42.\npartial pnpm output",
     )
-    assert call_kwargs["cwd"] == REPO_ROOT / "frontend"
+    assert call_kwargs["cwd"] == REPO_ROOT / "frontend-hm"
 
 
 def test_check_script_preserves_corepack_resolution_hint(monkeypatch):

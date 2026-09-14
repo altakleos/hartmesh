@@ -5,10 +5,16 @@ Coding-agent source of truth; `CLAUDE.md` imports it. Module guides own depth:
 - **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
   middleware chain, sandbox, MCP, skills, memory, IM channels, persistence/migrations,
   config system, test layout.
-- **[frontend/AGENTS.md](frontend/AGENTS.md)** — frontend depth: Next.js App Router layout,
+- **[frontend-hm/AGENTS.md](frontend-hm/AGENTS.md)** — frontend depth: Next.js App Router layout,
   thread/streaming data flow, code style, commands.
 
 ## What is DeerFlow
+
+Hartmesh's product UI lives in `frontend-hm/`. `frontend/` is an exact upstream
+snapshot pinned by `.github/upstream-frontend.json`; never edit it for Hartmesh,
+including version bumps, formatting, or guidance. `make check-frontend-isolation`
+checks the snapshot and direct source references. Port upstream UI fixes into
+`frontend-hm/` deliberately; see [the isolation guide](docs/FRONTEND_ISOLATION.md).
 
 DeerFlow is a LangGraph-based AI super-agent system with a full-stack architecture. The
 backend runs a "super agent" with sandboxed execution, persistent memory, subagent
@@ -84,7 +90,8 @@ deer-flow/
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
 │   ├── packages/runtime-api/       # deerflow-runtime-api — stdlib-only embedded durable runtime contracts
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
-├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
+├── frontend-hm/                    # Hartmesh Next.js app — see frontend-hm/AGENTS.md
+├── frontend/                       # Pinned upstream reference; no Hartmesh edits
 ├── deploy/                         # compose/ tenant VM profile (.env contract, image pins); helm/ chart
 ├── docker/                         # docker-compose files, nginx config, provisioner
 ├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
@@ -176,16 +183,16 @@ cd backend && make test-blocking-io  # Strict blocking-I/O suite
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
-# Frontend (see frontend/AGENTS.md for the full set)
-cd frontend && pnpm dev       # Dev server: Webpack by default (override with DEER_FLOW_DEV_BUNDLER=turbo)
-cd frontend && pnpm check     # Lint + type check (run before committing)
-cd frontend && pnpm test      # Unit tests
+# Frontend (see frontend-hm/AGENTS.md for the full set)
+cd frontend-hm && pnpm dev    # Dev server: Webpack by default (override with DEER_FLOW_DEV_BUNDLER=turbo)
+cd frontend-hm && pnpm check  # Lint + type check (run before committing)
+cd frontend-hm && pnpm test   # Unit tests
 ```
 
-Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
+Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend-hm/`
 (`pnpm`) = per-module work.**
 
-Host-side pnpm consumers (root/frontend Makefiles, diagnostic scripts) run through `scripts/pnpm.py`: it prefers a direct `pnpm`/`pnpm.cmd`, falls back to `corepack pnpm`, resolves absolute paths before changing directory, and runs from `frontend/` so Corepack honors that project's pinned package-manager version.
+Hartmesh's host-side pnpm consumers use `scripts/pnpm.py --project frontend-hm --`: it prefers direct `pnpm`/`pnpm.cmd`, falls back to `corepack pnpm`, and resolves executable paths before changing to the selected project. The no-selector form retains `frontend/` for upstream Makefile compatibility. `make frontend-config` initializes the new app's ignored `.env`, preserving an existing destination or migrating the old app's settings.
 
 ### Prerequisites before `make dev`
 
@@ -208,7 +215,7 @@ cd backend && python -m pytest tests/test_compose_default_bind_host.py -q
 cd backend && python -m pytest tests/path/to/test.py::test_func -q
 
 # Frontend (rstest)
-cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
+cd frontend-hm && pnpm rstest run <pattern>  # e.g. pnpm rstest run my-component
 ```
 
 ### Logs
@@ -221,7 +228,7 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ## Where to Go Next
 
 - Backend work → **[backend/AGENTS.md](backend/AGENTS.md)**
-- Frontend work → **[frontend/AGENTS.md](frontend/AGENTS.md)**
+- Frontend work → **[frontend-hm/AGENTS.md](frontend-hm/AGENTS.md)**
 - Setup & install → **[Install.md](Install.md)**, **[CONTRIBUTING.md](CONTRIBUTING.md)**
 - Project overview & usage → **[README.md](README.md)** (translations: `README_zh.md`,
   `README_ja.md`, `README_fr.md`, `README_ru.md`, `README_es.md`, `README_pt.md`,
@@ -239,14 +246,14 @@ These apply repo-wide; module guides own the module-specific detail.
   the same change set.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
-  frontend tests live in `frontend/tests/`.
+  frontend tests live in `frontend-hm/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
 - **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
   Python utilities that read or write them must pass `encoding="utf-8"` rather than
   relying on the platform locale.
 - **Version sources must stay in lockstep** — `backend/pyproject.toml`, the
-  root `deer-flow` entry in `backend/uv.lock`, `frontend/package.json`, and
+  root `deer-flow` entry in `backend/uv.lock`, `frontend-hm/package.json`, and
   `deploy/helm/deer-flow/Chart.yaml` (`version` + `appVersion`) must match. A
   `v*` tag triggers `scripts/verify_versions.sh` in CI and **blocks all
   publishing** on drift. Bump with `scripts/bump_version.sh <ver>`, verify with

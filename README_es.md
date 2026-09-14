@@ -417,7 +417,7 @@ Las fuentes de versión informan `2.1.0+hartmesh.4`, la etiqueta más reciente. 
 - [API de extensiones](backend/packages/extension-api/README.md) — límites de políticas y confianza
 - [Despliegue Helm](deploy/helm/deer-flow/README.md) — modos de un Gateway y calificación
 - [Configuración](config.example.yaml) — ajustes del operador
-- [Guía backend](backend/AGENTS.md) y [guía frontend](frontend/AGENTS.md) — arquitectura y pruebas
+- [Guía backend](backend/AGENTS.md) y [guía frontend](frontend-hm/AGENTS.md) — arquitectura y pruebas
 
 ## Soporte y seguridad
 

@@ -4,7 +4,7 @@ else
     PYTHON ?= python3
 endif
 
-PNPM = $(PYTHON) ../scripts/pnpm.py
+PNPM = $(PYTHON) ../scripts/pnpm.py --project frontend-hm --
 
 install:
 	$(PNPM) install
