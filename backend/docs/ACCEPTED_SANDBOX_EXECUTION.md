@@ -278,8 +278,15 @@ explicit destroy, cancellation rollback, unready rollback, reconciliation):
   budget, renewed by the lease thread, ownership re-established at once (a
   lease a peer already holds is not taken back; the set stays tracked and
   pending, retries refuse, and the renewal thread drops the handle on its next
-  tick) -- and is marked pending cleanup (`_cleanup_pending`). It is never
-  handed out: the
+  tick) -- and is marked pending cleanup (`_cleanup_pending`). Quarantine is a
+  lifecycle state, not a warm-pool detail: `get` answers `None` for a pending
+  id whichever map names it, the in-process reuse and the accepted active
+  shortcut refuse it, and the mark is discharged by confirmed absence, by a
+  peer's takeover (its responsibility then) or by a registration under the id
+  (the create path refuses a reserved id, so a registration means the set
+  was confirmed absent first). A mark that no map names any longer has no
+  set to retry and is dropped with an error log; no path produces that
+  state. It is never handed out: the
   ordinary reclaim raises `SandboxBeingDestroyedError`, the accepted reclaim
   refuses with `accepted_sandbox_cleanup_pending`, and a drifted replacement
   that did not confirm refuses with `accepted_sandbox_inputs_changed` rather
@@ -296,6 +303,35 @@ explicit destroy, cancellation rollback, unready rollback, reconciliation):
 - Recovery: once the fault clears, the next trigger finishes the cleanup, the
   set is counted absent exactly once, and the acquisition builds one correctly
   configured replacement.
+- Reconciliation and acquisition arbitrate locally as well as through the
+  store. The accepted-orphan branch observes an unowned id outside the lock;
+  its teardown claim succeeds against this process's own lease, so it cannot
+  see an acquisition that registered the id meanwhile. It therefore takes the
+  local teardown reservation first (`_destroy_accepted_orphan`, the same
+  shape as `_replace_incompatible_sandbox`), whose predicate re-validates in
+  one critical section that the id is still untracked -- not active, not
+  warm, not starting -- and holds it through the claim, the stop and the
+  quarantine. If acquisition won, the obsolete decision is a counted refusal
+  and the live holder is untouched. If teardown won, the create path refuses
+  the id at `_mark_starting` and registration refuses it before and after
+  publishing ownership (`SandboxBeingDestroyedError`), so nothing is handed
+  out while the stop or an uncertain cleanup is in progress; the next
+  acquisition builds one fresh generation. A container this process is still
+  starting is deferred at the loop head before any branch runs (no attempt),
+  and a create that marks the id starting after that check is refused by the
+  reservation predicate (one counted refusal); the incompatible-policy
+  replacement and the ordinary adoption check carry the same `_starting`
+  term. The create path marks the id starting before replica enforcement
+  and before the attempt is journaled, so a refused create evicts nothing
+  and counts nothing. Every warm destroy re-validates the entry's identity
+  inside its reservation, so a decision taken about one generation (a
+  reaper's snapshot, a pending retry) never lands on a later generation
+  parked under the same name.
+- The accepted reclaim checks identity before it drives any cleanup: a known
+  conflicting identity under the id raises `SandboxIdentityCollisionError`
+  with no mutation, pending or not, and the owning identity (or background
+  cleanup under its own authority) still finishes the set. An unknown
+  identity is a separate state, never read as proof of the requester's.
 - An explicit `destroy()` raises `SandboxCleanupIncompleteError` after
   quarantining, so shutdown, the idle checker's active-idle path, cancellation
   rollback and the stale-entry destroy on reuse see the failure instead of a
@@ -313,7 +349,12 @@ the fault clears, same-id replacement at two-slot capacity, a sidecar left
 behind, ownership loss during a pending cleanup, reservation races, explicit
 destroy, cancellation rollback, A/B/A untouched);
 `test_aio_sandbox_local_backend.py` pins the outcome classification at the
-backend seam.
+backend seam. The reconciliation/acquisition boundary is pinned in the same
+file with deterministic scheduling (the acquisition runs between the real
+orphan observation and the teardown claim, between the reservation and the
+claim, and during the stop) on the memory ownership store with its
+cross-process flag raised solely so the real owner/grace decision runs; that
+is a single-process model, not a Redis or multi-instance qualification.
 
 **Counting.** The journal (`deerflow.runtime.turn_phases`) counts resource
 *sets* -- container plus network sidecar and networks locally, Pod plus
