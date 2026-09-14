@@ -332,6 +332,19 @@ explicit destroy, cancellation rollback, unready rollback, reconciliation):
   with no mutation, pending or not, and the owning identity (or background
   cleanup under its own authority) still finishes the set. An unknown
   identity is a separate state, never read as proof of the requester's.
+- The active lookups respect teardown winning first, as the warm and create
+  paths do. Idle destroy reserves an active id and claims ownership before it
+  untracks (so a refused claim can recover), and in that interval `get` and
+  the accepted active shortcut answer `None` / `SandboxBeingDestroyedError`,
+  decided in the critical section that reads the reservation, refreshing no
+  activity and taking no ownership on the refused lookup's behalf. A `get` or
+  an accepted reuse that landed before the reservation counts as activity
+  (the shortcut refreshes it in that same critical section) and is honoured
+  by the reservation's own still-idle predicate (a counted refusal, nothing
+  stopped); a refused claim releases the reservation and the handle answers
+  again; a stop that does not confirm leaves the set quarantined as before,
+  and the pass that quarantined it does not retry it (one attempt per
+  trigger holds on the active-idle path too).
 - An explicit `destroy()` raises `SandboxCleanupIncompleteError` after
   quarantining, so shutdown, the idle checker's active-idle path, cancellation
   rollback and the stale-entry destroy on reuse see the failure instead of a
