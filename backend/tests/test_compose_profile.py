@@ -58,7 +58,19 @@ OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
 PASSTHROUGH_KEYS = {"HARTMESH_MODELS_FILE", "SANDBOX_READY_TIMEOUT"}
-MEMORY_MIB = {"gateway": 1344, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256}
+MEMORY_MIB = {"gateway": 1152, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256}
+# The sandbox image's own service switches (its entrypoint compares each to the
+# string "true"): the profile ships every sandbox with the browser, VNC,
+# Jupyter, code-server and the Node REPL off (README: "Slim services profile").
+SLIM_SANDBOX_SERVICES = {
+    "DISABLE_BROWSER": "true",
+    "DISABLE_JUPYTER": "true",
+    "DISABLE_CODE_SERVER": "true",
+    "DISABLE_VNC": "true",
+    "DISABLE_MCP_BROWSER": "true",
+    "DISABLE_NODEJS_REPL": "true",
+}
+SANDBOX_SLOTS = 4
 NGINX_VARIABLES = {
     "$forwarded_proto",
     "$remote_addr",
@@ -206,14 +218,14 @@ def test_only_nginx_publishes_a_port_and_the_contract_carries_the_bind(compose: 
     assert compose["services"]["nginx"].get("user") == "101:101"
 
 
-def test_memory_limits_sum_to_2880_mib_with_equal_swap(compose: dict) -> None:
+def test_memory_limits_sum_to_2688_mib_with_equal_swap(compose: dict) -> None:
     total = 0
     for name, expected in MEMORY_MIB.items():
         service = compose["services"][name]
         assert _mib(service["mem_limit"]) == expected, name
         assert service["memswap_limit"] == service["mem_limit"], name
         total += expected
-    assert total == 2880, "3072 less the 192 MiB two 1 GiB sandboxes cost over 768 MiB (README: Memory budget)"
+    assert total == 2688, "3072 less 192 MiB for the 1 GiB sandboxes, less 192 MiB more for the third and fourth relays; the Gateway paid both (README: Memory budget)"
 
 
 PIDS_LIMIT = {"gateway": 2048, "frontend": 512, "nginx": 256, "postgres": 512, "redis": 128}
@@ -223,20 +235,36 @@ def test_every_service_bounds_its_processes_and_the_app_tier_its_cpus(compose: d
     for name, expected in PIDS_LIMIT.items():
         assert compose["services"][name]["pids_limit"] == expected, name
     for name in ("gateway", "frontend"):
-        assert compose["services"][name]["cpus"] == 2, f"{name} shares four vCPUs with two sandboxes at --cpus 1"
+        assert compose["services"][name]["cpus"] == 2, f"{name} shares four vCPUs with four sandboxes at --cpus 1"
     for name in ("nginx", "postgres", "redis"):
         assert "cpus" not in compose["services"][name], name
 
 
-def test_two_sandboxes_with_proxies_fit_the_five_gib_budget(compose: dict) -> None:
+def test_four_slim_sandboxes_with_proxies_fit_the_five_gib_budget(compose: dict) -> None:
     env = compose["services"]["gateway"]["environment"]
     sandbox = _mib(env["DEER_FLOW_SANDBOX_MEMORY"])
     proxy = _mib(env["DEER_FLOW_SANDBOX_PROXY_MEMORY"])
     services = sum(MEMORY_MIB.values())
-    assert sandbox == 1024, "the only value that held in every provider-driven gVisor run (README: Memory budget)"
-    assert services + 2 * (sandbox + proxy) == 5120, "exactly on the 5.0 GiB line: raising any limit in compose.yaml must be paid for by lowering another"
-    assert 5120 < services + 3 * (sandbox + proxy)
-    assert services + 2 * sandbox <= 5120 < services + 3 * sandbox, "open mode carries no proxy, fits two and not three"
+    assert sandbox == 512, "half the 1 GiB the full services profile needed: the slim profile idles at about a quarter of that (README: Slim services profile)"
+    assert int(env["DEER_FLOW_SANDBOX_PIDS_LIMIT"]) == 256, "host-side tasks: 58 idle, 62 rendering, 134 under a forty-way fan-out (README: Slim services profile)"
+    assert services + SANDBOX_SLOTS * (sandbox + proxy) == 5120, "exactly on the 5.0 GiB line: raising any limit in compose.yaml must be paid for by lowering another"
+    assert 5120 < services + (SANDBOX_SLOTS + 1) * (sandbox + proxy)
+    assert services + SANDBOX_SLOTS * sandbox <= 5120 < services + (SANDBOX_SLOTS + 1) * sandbox, "open mode carries no proxy, fits four and not five"
+
+
+def test_template_runs_the_slim_services_profile_in_four_slots(compose: dict) -> None:
+    """The ceiling in config.yaml is the one the compose budget pays for, and the
+    sandbox image's service switches are exact strings: its entrypoint compares
+    each to "true", and the harness types the mapping as str -> str, so a bare
+    YAML boolean would refuse to load."""
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    sandbox = template["sandbox"]
+    assert sandbox["replicas"] == SANDBOX_SLOTS, "one slot per 512 MiB sandbox the budget fits (README: Memory budget)"
+    assert sandbox["idle_timeout"] == 1800, "a follow-up half an hour later still finds its sandbox warm"
+    assert sandbox["environment"] == SLIM_SANDBOX_SERVICES
+    assert all(value == "true" and isinstance(value, str) for value in sandbox["environment"].values())
+    for key in SLIM_SANDBOX_SERVICES:
+        assert re.search(rf'^\s+{key}: "true"$', TEMPLATE.read_text(encoding="utf-8"), flags=re.MULTILINE), f"{key} must be the quoted string true"
 
 
 def test_only_the_gateway_reads_the_env_file_and_the_others_get_explicit_environment(compose: dict) -> None:
@@ -273,6 +301,63 @@ def test_bind_mounts_stay_under_the_data_directory_or_the_read_only_bundle(compo
             assert source.startswith("${HARTMESH_DATA_DIR"), (name, volume)
 
 
+MEASURE_SCRIPT = PROFILE / "scripts" / "measure-sandbox-boot.sh"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="the measurement script is bash")
+def test_measurement_script_runs_the_profile_flags_and_the_slim_switches(compose: dict, tmp_path: Path) -> None:
+    """The operator's boot measurement must measure the shipped sandbox: the
+    pinned image, the compose limits, the hardening the backend emits, and the
+    slim switches config.yaml carries, so a figure it records is a figure of
+    this profile. A stub ``docker`` records every invocation and refuses
+    ``run``, which is the script's run_failed path. The environment is built
+    from scratch: the script's knobs are plain uppercase names a runner may
+    already export."""
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    log = tmp_path / "docker.log"
+    (stub / "docker").write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{log}"\n[ "$1" = run ] && exit 1\nexit 0\n', encoding="utf-8")
+    (stub / "docker").chmod(0o755)
+    out = tmp_path / "rows.tsv"
+    env = {"PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}", "HOME": str(tmp_path), "TMPDIR": str(tmp_path), "CPUS": "1", "RUNS": "1", "CONCURRENT": "1", "SETTLE": "0", "OUT": str(out)}
+    result = subprocess.run(["bash", str(MEASURE_SCRIPT)], cwd=PROFILE, env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    runs = [line for line in log.read_text(encoding="utf-8").splitlines() if line.startswith("run ")]
+    assert len(runs) == 2, "one full and one slim container"
+    gateway = compose["services"]["gateway"]["environment"]
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))["sandbox"]
+    for line in runs:
+        assert line.endswith(" " + template["image"]), "the image is the template's digest pin"
+        assert "--runtime runsc" in line and "--cpus 1" in line and "--rm" not in line.split(), "kept until its row is written, so an OOM kill is recorded"
+        assert f"--pids-limit {gateway['DEER_FLOW_SANDBOX_PIDS_LIMIT']}" in line
+        for flag in ("--user 1000:1000", "--cap-drop=ALL", "--security-opt no-new-privileges", "--security-opt seccomp=builtin", "--network none"):
+            assert flag in line, flag
+    full, slim = runs
+    assert "--memory 1024m --memory-swap 1024m" in full, "the full profile is measured at the limit it was released at"
+    assert f"--memory {gateway['DEER_FLOW_SANDBOX_MEMORY']} --memory-swap {gateway['DEER_FLOW_SANDBOX_MEMORY']}" in slim
+    assert "DISABLE_" not in full
+    assert all(f"-e {key}={value}" in slim for key, value in SLIM_SANDBOX_SERVICES.items()), "the slim run carries exactly the switches config.yaml ships"
+    assert slim.count("-e DISABLE_") == len(SLIM_SANDBOX_SERVICES)
+    rows = out.read_text(encoding="utf-8").splitlines()
+    assert rows[0].split("\t") == ["profile", "cpus", "run", "index", "memory", "ready_s", "procs", "mem_MiB", "peak_MiB", "pids_peak", "oom_kills", "exec_s", "exec_exit", "status"]
+    assert [row.split("\t")[0] for row in rows[1:]] == ["full", "slim"] and all(row.endswith("run_failed") for row in rows[1:])
+    rejected = subprocess.run(["bash", str(MEASURE_SCRIPT)], cwd=PROFILE, env={**env, "PROFILES": "Slim"}, capture_output=True, text=True, timeout=60)
+    assert rejected.returncode == 2 and "PROFILES accepts full and slim" in rejected.stderr, "a mislabelled row is worse than a refusal"
+    assert (PROFILE / "README.md").read_text(encoding="utf-8").count("scripts/measure-sandbox-boot.sh") >= 2, "the README names the script where the figures are recorded"
+
+
+def test_readme_tells_the_operator_to_remove_orphaned_sandboxes_before_an_upgrade() -> None:
+    """The provider adopts a surviving sandbox by its labels and networks, never
+    by its image, environment or limits, so a Gateway that was killed rather than
+    stopped brings pre-upgrade 1 GiB full-profile sandboxes into the new budget.
+    Until the backend compares those, the README carries the upgrade step."""
+    readme = (PROFILE / "README.md").read_text(encoding="utf-8")
+    note = readme[readme.index("**Upgrading a guest that already runs sandboxes.**") :]
+    assert "docker ps --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-" in note
+    assert "docker rm -f $(docker ps -q --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-)" in note
+    assert "7168 MiB" in note, "four adopted 1 GiB sandboxes on the 6 GiB guest"
+
+
 def test_gateway_wiring_follows_the_contract(compose: dict) -> None:
     gateway = compose["services"]["gateway"]
     env = gateway["environment"]
@@ -290,9 +375,9 @@ def test_gateway_wiring_follows_the_contract(compose: dict) -> None:
     assert env["DEER_FLOW_SANDBOX_HOST"] == "host.docker.internal"
     assert "host.docker.internal:host-gateway" in gateway["extra_hosts"]
     assert env["DEER_FLOW_SANDBOX_NETWORK"] == "hartmesh_sandbox"
-    assert env["DEER_FLOW_SANDBOX_MEMORY"] == "1024m"
+    assert env["DEER_FLOW_SANDBOX_MEMORY"] == "512m"
     assert env["DEER_FLOW_SANDBOX_CPUS"] == "1"
-    assert int(env["DEER_FLOW_SANDBOX_PIDS_LIMIT"]) > 0
+    assert env["DEER_FLOW_SANDBOX_PIDS_LIMIT"] == "256"
     assert env["DEER_FLOW_SANDBOX_PROXY_MEMORY"].endswith("m")
     assert env["DEER_FLOW_SANDBOX_CONTAINER_USER"] == "1000:1000"
     assert env["DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS"] == "0"
@@ -558,7 +643,7 @@ def test_template_matches_the_example_version_provider_and_local_backend(render_
     assert provider_line is not None
     assert template["sandbox"]["use"] == provider_line.group(1)
     assert "provisioner_url" not in template["sandbox"]
-    assert template["sandbox"]["replicas"] == 2
+    assert template["sandbox"]["replicas"] == SANDBOX_SLOTS
     assert template["sandbox"]["ready_timeout"] == 120, "the one-CPU gVisor cold start measured 80 to 91 s; the harness default of 60 destroyed every one (README: Sandbox readiness budget)"
     assert template["sandbox"]["image"].startswith("ghcr.io/altakleos/hartmesh-sandbox@sha256:"), "the tree carries digest pins between cuts"
     assert template["sandbox"]["network"]["allow_domains"] == ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com"]
@@ -694,7 +779,8 @@ def test_render_output_is_a_valid_app_config(render_config: ModuleType, monkeypa
     config = AppConfig.from_file(str(path))
     assert [model.name for model in config.models] == ["gpt-4", "gpt-5-responses"]
     assert config.sandbox.use == "deerflow.community.aio_sandbox:AioSandboxProvider"
-    assert config.sandbox.replicas == 2
+    assert config.sandbox.replicas == SANDBOX_SLOTS
+    assert config.sandbox.environment == SLIM_SANDBOX_SERVICES, "the render copies the slim switches through unchanged"
     assert config.sandbox.ready_timeout == 120
     assert config.sandbox.network.mode == "allowlist"
     assert config.run_events.backend == "db"

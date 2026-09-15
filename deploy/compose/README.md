@@ -25,8 +25,9 @@ operator's onboarding verb. The stack is started with:
 docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env up -d
 ```
 
-Nothing in the bundle relies on being executable: every script is invoked as
-`sh /opt/hartmesh/...` from `compose.yaml`.
+Nothing in the bundle relies on being executable: every script `compose.yaml`
+runs is invoked as `sh /opt/hartmesh/...`, and the operator tools under
+`scripts/` are invoked as `bash scripts/...` (their headers say so).
 
 ## The `.env` contract
 
@@ -337,7 +338,7 @@ approval card when a session needs it: `raw.githubusercontent.com` and
 `objects.githubusercontent.com` (raw files and release assets; `github.com`
 already covers `git clone` and `pip install git+https`); `api.github.com`
 (token-bearing calls belong in a per-session grant); `huggingface.co` (model
-weights are gigabytes into a 1 GiB sandbox, a per-session decision);
+weights are gigabytes into a 512 MiB sandbox, a per-session decision);
 `deb.debian.org` and `security.debian.org` (the sandbox runs as uid 1000 and
 cannot `apt install`); `crates.io`, `rubygems.org` and `proxy.golang.org`
 (no toolchain in the image); `registry.yarnpkg.com` (a mirror of the npm
@@ -393,10 +394,163 @@ seams added to the backend for this profile:
 | `DEER_FLOW_SANDBOX_CONTAINER_USER` | `1000:1000` | The fork's sandbox image ends in `USER 1000:1000`. |
 | `DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS` | `0` | `--cap-drop=ALL --security-opt no-new-privileges` with no compatibility capabilities: the image is pre-initialised non-root, so it needs neither `FOWNER` nor `DAC_OVERRIDE`. |
 | `DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED` | `0` | Emits `--security-opt seccomp=builtin` explicitly (omitting the option would inherit the daemon default). Under gVisor the host filter applies to the Sentry's own syscalls; the sandbox and its browser were proved to start with it (see below). |
-| `DEER_FLOW_SANDBOX_MEMORY` | `1024m` | The only value that held in every provider-driven run under gVisor (see "Memory budget"): the design's 640 MiB and the standalone-measured 768 MiB were both OOM-killed through the real `create` path. The 192 MiB two such sandboxes cost over 768 MiB is paid for by the Gateway's limit. `--memory-swap` is pinned equal (the guest has no swap, so this is explicitness, not a measurable change). |
-| `DEER_FLOW_SANDBOX_CPUS` | `1` | Two sandboxes plus two proxies at `--cpus 1` sum to the guest's four vCPUs. |
-| `DEER_FLOW_SANDBOX_PIDS_LIMIT` | `384` | The sandbox image idles at 198 processes (Chromium, Jupyter, node, supervisord) and peaked at 232 during a measured bash-plus-browser turn; 384 leaves 1.6x headroom over that peak while still bounding a fork bomb. |
+| `DEER_FLOW_SANDBOX_MEMORY` | `512m` | Half the 1 GiB the full services profile needed. Every sandbox runs the image's slim services profile (§ "Slim services profile"), which idled at 226 to 238 MiB under gVisor on a development host against 1,209 MiB for the full one, and four of them rendering a 5,000-row report at once peaked at 355 MiB with no OOM kill; a 600 MiB file written and read on a bind mount pushed the cgroup to the limit and was reclaimed, while files written to the container's own root filesystem stay in gVisor's memory, so about 280 MiB of those is the ceiling (figures there). The full profile's own history (640 and 768 MiB OOM-killed through the real `create` path, 1 GiB held) is under "Memory budget" and is what a tenant that turns the browser back on returns to. `--memory-swap` is pinned equal (the guest has no swap, so this is explicitness, not a measurable change). |
+| `DEER_FLOW_SANDBOX_CPUS` | `1` | One CPU per sandbox at steady state, as before. Four sandboxes plus four relays at `--cpus 1` are eight quotas on the guest's four vCPUs: oversubscribed two to one while several boot at once, for tens of seconds, which the readiness budget absorbs. A sandbox rendering a report needs one CPU for seconds, so density rather than comfort sets the steady-state figure. |
+| `DEER_FLOW_SANDBOX_PIDS_LIMIT` | `256` | The limit bounds the host-side task count, gVisor's own threads included, not the eleven processes the slim profile shows inside. Measured (§ "Slim services profile"): 54 to 58 host tasks idle, 58 to 62 through a report render, 134 under a forty-way process fan-out inside the sandbox, which a 128 limit (the first candidate) capped exactly. 256 leaves that fan-out room while still bounding a fork bomb; the full profile idled at 198 processes inside (Chromium, Jupyter, node, supervisord), peaked at 232 in a bash-plus-browser turn and needed 384. |
 | `DEER_FLOW_SANDBOX_PROXY_MEMORY` | `96m` | The sidecar's cgroup peaked at 48 MiB (process high-water mark 33 MiB) during the same turn; 96 MiB is twice that peak, with `--memory-swap` equal. |
+
+### Slim services profile
+
+Every sandbox this profile creates runs the image's own service switches
+off, set as `sandbox.environment` in `config.yaml` and passed to `docker run`
+as `-e` by the local backend (the render copies the mapping through
+unchanged):
+
+```yaml
+sandbox:
+  environment:
+    DISABLE_BROWSER: "true"
+    DISABLE_JUPYTER: "true"
+    DISABLE_CODE_SERVER: "true"
+    DISABLE_VNC: "true"
+    DISABLE_MCP_BROWSER: "true"
+    DISABLE_NODEJS_REPL: "true"
+```
+
+The memory figure that goes with this profile, `DEER_FLOW_SANDBOX_MEMORY:
+512m`, is deliberately not a `.env` key: it is one term of the budget
+equality, so an operator who meets OOM kills in a sandbox does not edit the
+bundle, which the next upgrade replaces; the remedies are the 8 GiB VM class
+or the full-profile set below, both operator decisions recorded here.
+
+Each value is the quoted string `"true"` on purpose: the image's entrypoint
+compares strings, and the harness types the mapping as text, so a bare YAML
+boolean refuses to load. The mapping is injected verbatim into a container
+that runs model-authored code, and a value of the form `$NAME` is resolved
+from the Gateway's own environment, which carries the tenant `.env`; never
+put a credential reference here. Off: Chromium and its MCP server, VNC (with the
+window manager and the CJK input method that depend on it), Jupyter,
+code-server and the Node REPL, whose switch also stops its on-demand start.
+Left running in the container: the sandbox API server and its nginx; the
+relay is unchanged and stays where it always was, in its own sidecar. The
+switches stop services, not runtimes: `node`, `npx` and `python3` with the document
+libraries, which `bash` and the public skills invoke, were checked in a slim
+container (`node --version && npx --version && python3 -c "import weasyprint,
+matplotlib, pandas, docx, duckdb"` exits 0), and the shipped tool list is
+`bash` and the file tools. A tenant that needs the browser removes the six
+lines and returns to the full profile's figures as a set, because they were
+measured as one: `replicas: 2`, `DEER_FLOW_SANDBOX_MEMORY: 1024m`,
+`DEER_FLOW_SANDBOX_PIDS_LIMIT: "384"`, Gateway `mem_limit` 1344 MiB
+(§ "Memory budget" keeps that history).
+
+**Measured on a development host, not the tenant class.** Proxmox host,
+Intel Xeon Gold 6138 at 2.0 GHz, eight vCPUs, `runsc` (systrap), the pinned
+tenant image, the profile's hardening, no network, readiness polled from
+inside the container against `/v1/sandbox`, memory and processes read five
+seconds after readiness, every container at a 1 GiB limit and 384 pids (the
+full profile's released figures; the memory a gVisor sandbox shows depends on
+the limit it is given, § "Memory budget"). `scripts/measure-sandbox-boot.sh`,
+below, is the script: the second slim one-CPU figure in each cell is its
+first run, the rest are the same measurement by its predecessor on the same
+day, 2026-09-15:
+
+| profile | cpus | `--memory` | ready | processes in the sandbox | idle memory |
+| --- | --- | --- | --- | --- | --- |
+| full | 1 | 1 GiB | 20.2 s | 31 at +5 s (198 once every service is up) | 1,209 MiB |
+| slim | 1 | 1 GiB | 10.2 s, 10.8 s | 11 | 238 MiB, 226 MiB |
+| full | 2 | 1 GiB | 10.8 s | 34 at +5 s | 1,363 MiB |
+| slim | 2 | 1 GiB | 5.7 s | 11 | 239 MiB |
+
+Slim at its own 512 MiB limit, same script after its clock moved to each
+container's own `docker run`: ready in 12.1 and 12.5 s, 212 and 264 MiB idle,
+54 host-side tasks. This host is roughly four times faster than the tenant
+class at the same settings (the full profile at one CPU took 80 to 91 s
+there, § "Sandbox readiness budget", on an earlier image, `runsc` release and
+Docker), so the slim boot on the tenant class is expected in the 40 to 50 s
+range at one CPU and is **not yet measured**: the readiness budget stays at
+120 until it is. The measurement to run there, from the bundle directory on
+the guest, ten serial starts per cell (the script measures full containers
+at 1 GiB and slim ones at the profile's limit unless `MEMORY` says
+otherwise):
+
+```sh
+RUNS=10 bash scripts/measure-sandbox-boot.sh          # full and slim, one and two CPUs
+PROFILES=slim CPUS=1 CONCURRENT=4 RUNS=10 bash scripts/measure-sandbox-boot.sh
+```
+
+Run it with the stack down (`docker compose --project-directory /opt/hartmesh
+--env-file /srv/hartmesh/.env down`) or on a scratch guest: four measurement
+containers beside a live stack and its own warm sandboxes do not fit the
+6 GiB, and the figures are only comparable to the ones here without the
+stack's own load.
+
+The script reads the image and the limits from this directory's
+`config.yaml` and `compose.yaml`; its knobs are `IMAGE`, `RUNTIME`,
+`PROFILES`, `CPUS`, `MEMORY`, `PIDS`, `RUNS`, `CONCURRENT`, `EXEC`, `MOUNTS`,
+`TIMEOUT`, `SETTLE` and `OUT` (its header documents each). It starts every
+container with the profile's hardening after any `MOUNTS`, so those cannot
+undo it, refuses a profile name it does not know, keeps each container until
+its row is written so an OOM kill is recorded as `oom_killed` rather than as
+blank figures, removes its containers on interrupt, and writes one TSV row
+per container: the memory limit, time to ready from that container's own
+`docker run`, processes and idle memory read `SETTLE` seconds after
+readiness and before `EXEC`, the host cgroup's memory and pid peaks and OOM
+kills read after `EXEC`, and `EXEC`'s duration and exit code. The bundle's
+compose-run scripts are invoked with `sh`; this operator tool needs `bash`.
+
+**Four sandboxes rendering at once, on the same development host
+(2026-09-15).** The four-slot budget is only true if four slim sandboxes
+doing real work stay under 512 MiB each. Measured with the script above at
+the profile's limits (`--cpus 1`, 512 MiB, 128 pids, `runsc`), the sandbox
+image built from `docker/sandbox/` at the current tree (the pinned tenant
+image predates the document libraries; the next release cut moves the pin),
+`CONCURRENT=4 RUNS=2`, and `EXEC` running the public `business-report` skill
+end to end in every container: build from the skill's 5,000-row test workbook
+(`backend/tests/skills/business_report/fixtures/example_services_export.xlsx`,
+generated by the `make_example_services_export.py` beside it), then render
+PDF, Word and Excel. Host cgroup figures, so gVisor's own memory and threads
+are counted. The ready times in this table were taken from a clock started
+after the fourth `docker run` returned (the script has since moved to one
+clock per container), so they understate readiness by up to the
+`docker run` latency and the spread across indices is partly probe order:
+
+| run | ready (four at once) | render, build + three formats | `memory.peak` | `pids.peak` | OOM kills |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 7.5, 8.1, 8.8, 10.7 s | 13.2, 13.4, 13.4, 13.4 s | 334 to 338 MiB | 58 to 62 | 0 |
+| 2 | 7.6, 8.2, 10.1, 10.7 s | 12.2, 12.4, 12.6, 12.9 s | 335 to 355 MiB | 58 to 60 | 0 |
+
+Memory after the renders was 221 to 242 MiB. The peak leaves 157 MiB of the
+512 under a render heavier than the skill's small fixture (300 rows), and the
+pid peak sits at a quarter of the 256 limit. This host gave each of the four
+sandboxes two vCPUs where the tenant class gives one, so the concurrency
+figures are the least transferable in this section. The invocation, from
+the bundle directory on a guest whose skills directory carries the skill and
+a workbook to build from:
+
+```sh
+PROFILES=slim CPUS=1 CONCURRENT=4 RUNS=2 \
+  MOUNTS="-v /srv/hartmesh/home/skills:/mnt/skills:ro -v /srv/hartmesh/operator/measure:/mnt/measure:ro" \
+  EXEC='set -e; R=/mnt/skills/business-report/scripts/report.py; python3 $R build /mnt/measure/export.xlsx --period 2026-08 --out /tmp/r >/dev/null; for f in pdf docx xlsx; do python3 $R render /tmp/r/2026-08-business-review.report.json --to $f >/dev/null; done' \
+  bash scripts/measure-sandbox-boot.sh
+```
+
+Three more single-container probes at 512 MiB, slim, one CPU, same host and
+script, for the two ways a sandbox has died before (§ "Memory budget"):
+
+| probe (`EXEC`) | `memory.peak` | `pids.peak` | outcome |
+| --- | --- | --- | --- |
+| forty processes at once (`seq 1 40 \| xargs -P 40 -I{} python3 -c "import time; time.sleep(5)"`) | 412 MiB | 134 (at a 384 limit); at the first candidate of 128 the peak was 128, the limit itself | held; the limit is now 256 |
+| a 600 MiB file written with `dd` then read, on a bind mount (`/mnt/user-data/outputs`) | 512 MiB, the limit | 54 | held, no OOM kill: file pages on a bind mount are reclaimed under pressure |
+| a 200 MiB file written then read on the container's own root filesystem (`/tmp`) | 479 MiB | 50 | held; the same at 600 MiB was OOM-killed (`exit 128`), because root-filesystem writes stay in gVisor's memory. About 280 MiB is the ceiling for files a sandbox keeps outside its bind mounts |
+
+Package installation through the proxy, the load that killed the full profile
+below 1 GiB, was not re-run here (the script runs without a network); with
+the slim profile idling at 226 MiB rather than the full profile's 760 MiB it is
+a different case, and it is the first item for the tenant-class gate. This is
+the development-host stand-in for that gate, not the gate itself: the same
+invocations on the tenant VM class, with the skill at its data-disk path and
+the pinned image once the next cut carries the document libraries, are what
+close it.
 
 ### Sandbox readiness budget
 
@@ -486,9 +640,10 @@ and the shutdown phases are unaffected.
 chosen as roughly a third above the slower of the two observed one-CPU starts.
 One 91-second success on one VM does not establish a fleet-wide bound.
 Acceptance needs repeated cold starts on representative Intel and AMD VM
-hosts, serially and with two sandboxes starting concurrently, each capped at
-one CPU, recording the `create` duration separately from the readiness poll,
-the sample count, every observed latency and the margin against the effective
+hosts, serially and with a full ceiling of sandboxes (four) starting
+concurrently, each capped at one CPU, recording the `create` duration
+separately from the readiness poll, the sample count, every observed latency
+and the margin against the effective
 deadline; if the margin is inadequate the evidence is what to report, and the
 budget (or the fleet's CPU allocation, a separate capacity decision) is what
 changes. The live regression prints exactly those records:
@@ -501,8 +656,9 @@ cd backend && PYTHONPATH=. HARTMESH_READINESS_SAMPLES=5 \
 It needs a Docker 28+ daemon with a registered `runsc` runtime and skips
 anywhere else (a skip is an unpassed gate, not a pass). It builds the released
 topology from this directory's `config.yaml` and `compose.yaml` (image and
-proxy digests, allowlist, limits, hardening) through the real provider, on
-both acquisition paths and with two concurrent starts; it requires readiness
+proxy digests, allowlist, limits, hardening, the slim service switches)
+through the real provider, on both acquisition paths and with as many
+concurrent starts as `sandbox.replicas`; it requires readiness
 within the profile's own budget, resolved by the same function the Gateway
 uses; on failure it prints the inner listener state and the python-server and
 nginx program logs with the relay token redacted; it checks that a missing
@@ -510,29 +666,59 @@ and a wrong relay token are refused; and a never-ready control (the image with
 its service port set to 1, which uid 1000 cannot bind) must fail within the
 budget plus the cleanup allowance with the sandbox, sidecar and both networks
 gone. A warm diagnostic sandbox or a temporary CPU increase satisfies none of
-this. Changing the fleet's CPU allocation, adding a startup burst or slimming
-the image are separate capacity and tool-surface decisions.
+this. Changing the fleet's CPU allocation or adding a startup burst is a
+separate capacity decision. Slimming is the tool-surface decision the profile
+has since taken (§ "Slim services profile"), and the 80 to 91 s that set this
+budget were the full profile's; the slim boot on the tenant class is the
+measurement that decides whether 120 can come down.
 
 ## Memory budget
 
 The guest has 6 GiB and no swap. In-VM limits sum to at most 5.0 GiB so it
-keeps at least 512 MiB `MemAvailable` under a burst of Chromium sandboxes plus
-a 1 GiB file operation.
+keeps at least 512 MiB `MemAvailable` under a burst of sandbox starts plus a
+1 GiB file operation (the line was drawn when every sandbox ran Chromium; the
+slim profile has not moved it).
 
 | Service | `mem_limit` = `memswap_limit` |
 | --- | --- |
-| gateway | 1344 MiB |
+| gateway | 1152 MiB |
 | frontend | 384 MiB |
 | nginx | 128 MiB |
 | postgres | 768 MiB |
 | redis | 256 MiB (`maxmemory 128mb`, `volatile-lru`) |
-| **services** | **2880 MiB** |
+| **services** | **2688 MiB** |
 
 Equal `memswap_limit` is an assertion of intent: with no swap device it
 changes nothing measurable. The services were 3072 MiB (exactly 3.0 GiB) with
 the Gateway at 1536 MiB until 2026-09-06; the Gateway gave up 192 MiB so the
 sandbox could go from 768 MiB to 1 GiB without moving the 5.0 GiB line (the
 measurement that chose the Gateway is under "Settling the sandbox figure").
+On 2026-09-15 the sandbox went from two 1 GiB full-profile slots to four
+512 MiB slim ones (§ "Slim services profile"): the sandboxes themselves cost
+the same 2048 MiB, the two extra 96 MiB relays cost 192 MiB more, and the
+Gateway paid that too, 1344 to 1152 MiB. That is 1.97 times the 586 MiB it
+peaked at under the 2026-09-06 tenant-load runs, just under the twice-the-peak
+rule the first trim applied, and leaves 566 MiB for MCP servers a tenant
+adds; the datastores were left alone for the reason recorded below. Those
+runs were two concurrent turns at `replicas: 2`; the Gateway's peak at four
+concurrent turns is not yet measured and is an open item beside the
+tenant-class gate. Moving the 5.0 GiB line instead (832 MiB unallocated
+rather than 1024) is the operator's call, not this profile's.
+
+**Upgrading a guest that already runs sandboxes.** `docker compose up -d`
+stops the Gateway with SIGTERM and its shutdown destroys every sandbox it
+owns, so the new limits and switches apply from the next acquisition. A
+Gateway that was killed rather than stopped leaves its sandboxes running, and
+the provider adopts survivors on restart by their labels and networks alone,
+with whatever environment and cgroup they were created with: four adopted
+1 GiB full-profile sandboxes would be 7168 MiB on this guest. Before bringing
+up a new bundle on a guest whose Gateway did not stop cleanly, list and
+remove them:
+
+```sh
+docker ps --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-
+docker rm -f $(docker ps -q --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-)
+```
 
 Redis's `maxmemory` is half its cgroup on purpose: a background AOF rewrite
 forks, and the parent plus the copy-on-write child must fit under the limit,
@@ -555,22 +741,49 @@ Memory is what the budget bounds; these bound availability. Without them a
 runaway MCP server the Gateway spawns in its own container (`npx`, `uvx`) or
 a Next.js fault could take every pid and every core of the four-vCPU guest
 from the sandboxes, which are the only other bounded processes. The Gateway
-and frontend caps of two vCPUs keep the two sandboxes' `--cpus 1` shares
-under contention; nginx and the datastores are small enough to leave to the
-scheduler.
+and frontend caps of two vCPUs keep the sandboxes' `--cpus 1` shares under
+contention; nginx and the datastores are small enough to leave to the
+scheduler. Four sandboxes and four relays at one CPU each are eight quotas
+on four vCPUs, with the Gateway's and the frontend's two each on top: while
+several sandboxes boot at once the guest is oversubscribed for tens of
+seconds, which is what the readiness budget is for, provided the tenant-class
+slim boot measures inside it (§ "Slim services profile"); at steady state a
+sandbox that is rendering needs one CPU for seconds and an idle one needs
+none.
 
-Under `allowlist` each concurrent sandbox costs its 1 GiB plus its proxy's
+Under `allowlist` each concurrent sandbox costs its 512 MiB plus its proxy's
 limit (96 MiB, from the measurement above; the backend's own default is
-256 MiB). The concurrent-sandbox ceiling is therefore **2**
-(`sandbox.replicas: 2` in both modes, one budget, one gate, one behaviour):
-2880 + 2 × (1024 + 96) = 5120 MiB, **exactly** the 5.0 GiB line with nothing
-to spare, against 6240 MiB for three. `open` mode carries no proxy and still
-does not fit three (2880 + 3 × 1024 = 5952 MiB > 5120), so the ceiling is 2
-in both modes. A third concurrent sandbox is the 8 GiB VM class: an operator
+256 MiB). The concurrent-sandbox ceiling is therefore **4**
+(`sandbox.replicas: 4` in both modes, one budget, one gate, one behaviour):
+2688 + 4 × (512 + 96) = 5120 MiB, **exactly** the 5.0 GiB line with nothing
+to spare, against 5728 MiB for five. `open` mode carries no proxy and still
+does not fit five (2688 + 5 × 512 = 5248 MiB > 5120), so the ceiling is 4 in
+both modes. A fifth concurrent sandbox is the 8 GiB VM class: an operator
 change, not a profile change. Because the total sits on the line, the next
 increase to any limit in `compose.yaml` has to be paid for by a decrease
 somewhere else in it; `backend/tests/test_compose_profile.py` asserts the
 equality, not just the bound.
+
+`replicas` is a soft maximum with **LRU eviction of warm sandboxes**: a fifth
+acquisition does not fail, it evicts the least-recently-used sandbox that no
+thread is using, which is what keeps the count at four and the budget true
+while at least one slot is idle. With all four in active use the provider
+logs a soft-cap breach and creates a fifth anyway; one such overflow
+(512 + 96 MiB) fits inside the 1024 MiB the line leaves unallocated, a second
+does not. Eviction is customer-visible: a thread whose sandbox was evicted
+gets a fresh one on its next turn (its files persist under `home/`).
+`idle_timeout: 1800` keeps an idle sandbox warm for thirty minutes: the budget
+reserves every slot whether or not it is used, and a cold start of the
+sandbox image under gVisor takes tens of seconds, so idle slots are kept
+rather than freed; eviction still reclaims one when a fifth thread needs it.
+
+**History: the full services profile.** Everything from here to the end of
+"Settling the sandbox figure" was measured with every service in the image
+running (Chromium, Jupyter, VNC, code-server, the Node REPL), which the
+profile no longer does by default (§ "Slim services profile"). The figures
+stay because they are the ones a tenant that turns the browser back on
+returns to, and because the Gateway and frontend measurements below are
+still the basis of those two limits.
 
 The design's 640 MiB was already tight for the fork's sandbox image under
 `runc`, where the idle container sat at about 600 MiB of its 640 MiB cgroup
@@ -622,8 +835,9 @@ from the five services, run one sandbox at 1 GiB, or move the class to
 
 ### Settling the sandbox figure (2026-09-06, P-s)
 
-`compose.yaml` now says 1 GiB for the sandbox and **1344 MiB for the Gateway**
-(1536 less the 192 MiB). Which limit gave up the memory was decided by
+`compose.yaml` then said 1 GiB for the sandbox and **1344 MiB for the Gateway**
+(1536 less the 192 MiB; since 2026-09-15 it says 512 MiB and 1152 MiB, § "Memory
+budget"). Which limit gave up the memory was decided by
 measuring the trimmed services the way the sandbox should have been measured
 the first time: the whole profile running under Compose on a host with
 `runsc` (release-20260817.0, systrap; Docker Engine 28.4.0, Compose v2.39.4),
@@ -660,14 +874,15 @@ under 12 concurrent page loads its cgroup reached 272 MiB, and Node 22 in the
 image sizes its default V8 heap limit at 259 MiB whether the cgroup is 320 or
 384 MiB, so a 320 MiB limit would leave about 60 MiB for everything the
 process holds outside that heap. At 384 MiB the same load peaked at 178 MiB.
-The Gateway carries the whole 192 MiB because it is the only service that
-still has more than twice its measured peak after the trim: 586 MiB at the
+The Gateway carried the whole 192 MiB because it was then the only service
+with more than twice its measured peak after the trim: 586 MiB at the
 end of the second, heavier run (14 of 14 turns succeeded, 14 uploads, 11.5
 thousand page loads, 23 thousand API reads; one upload during the final
 eviction answered `504` from nginx and the upload after it succeeded, a
 latency observation, not a memory one). Its earlier 1536 MiB was headroom for MCP
 servers the Gateway spawns in its own container (`npx`, `uvx`); none is
-configured by default, and 758 MiB of spare remains for those a tenant adds.
+configured by default, and 758 MiB of spare remained at the time for those a
+tenant adds (566 MiB after the second trim, § "Memory budget").
 The datastores were not touched: the brief's own reasoning, that a Redis or
 PostgreSQL OOM loses work in flight and drags derived figures with it, holds,
 and neither was near its limit. The proxy sidecar keeps 96 MiB: one of the 20
@@ -685,14 +900,7 @@ download and the Python step, and **20 of 20 survived**: `memory.peak` between
 inside the image reaching for Google, recorded on each run as an
 `egress.blocked` diagnostic; that is the standing list doing its job.
 
-`replicas` is a maximum with **LRU eviction**: a third acquisition does not
-fail, it evicts the least-recently-used sandbox, which is what keeps the count
-at two and the budget true. It is customer-visible: a thread whose sandbox was
-evicted gets a fresh one on its next turn (its files persist under `home/`).
-`idle_timeout: 1800` keeps an idle sandbox warm for thirty minutes: the budget
-reserves both slots whether or not they are used, and a cold start of the
-sandbox image under gVisor takes tens of seconds, so idle slots are kept
-rather than freed; eviction still reclaims one when a third thread needs it.
+
 
 ## Durability
 
@@ -1099,8 +1307,9 @@ config ConfigMap under the chart README's recommended values, at
 | `models` | `[]` | the catalog entries for the keys present, or the operator's own list when `HARTMESH_MODELS_FILE` is set | the chart leaves models to the operator's values; the profile renders them from the tenant's keys, or from the file § "Operator-managed models" describes |
 | `tools[web_search]` | DuckDuckGo | DuckDuckGo without a search key, the keyed provider when one is present (Tavily here) | same ten tools; only the search backend follows the tenant |
 | `sandbox.image` | upstream `latest` | the fork's digest pin | release pinning |
-| `sandbox.replicas` | 3 | 2 | the memory budget |
+| `sandbox.replicas` | 3 | 4 | the memory budget |
 | `sandbox.idle_timeout` | absent | 1800 | recorded above |
+| `sandbox.environment` | absent | the six `DISABLE_*` switches, each `"true"` | § "Slim services profile": the slim sandbox is what the four 512 MiB slots are measured for |
 | `sandbox.network` | absent | `allowlist` block | the chart's sandboxes are fenced by CiliumNetworkPolicy; the VM has no such fence, so the backend's own mode is the fence |
 | `sandbox.provisioner_url`, `provisioner_service_account_token_file`, `accepted_skill_projection_profile` | set | absent | the Kubernetes provisioner path; the local Docker backend has no provisioner and mounts skills directly |
 | `skills` | absent (PVC mounts) | `path` under `home/`, `container_path: /mnt/skills` | the local backend's skills mount |
@@ -1254,7 +1463,7 @@ files carried no exec bit.
   across the eleven names). `GET /` through nginx returns the frontend
   (`<title>DeerFlow</title>`), `GET /health` the Gateway's health document.
 - `allowlist`, from inside a live sandbox created through the real provider
-  (two sandboxes acquired, the ceiling): `id` is `uid=1000(gem)`; the only
+  (two sandboxes acquired, the ceiling at the time): `id` is `uid=1000(gem)`; the only
   route is the internal network; `postgres`/`redis` do not resolve and their
   `app` addresses are unreachable; the peer sandbox is unreachable both on its
   internal address and on its published host-gateway port; `https://pypi.org/
@@ -1665,3 +1874,47 @@ was available here.
   tenant. The two 80 to 91 s observations that motivated this change give
   120 s roughly a third of margin on that class; whether that holds across
   the fleet is what those runs decide.
+
+Slim services profile and four slots (2026-09-15). Same development host as
+the readiness-budget entry above (`runsc` systrap, eight vCPUs), so a
+development-host stand-in, not the tenant-class gate.
+
+- The offline suites: `pytest tests/test_compose_profile.py` 85 passed (six
+  tests new or rewritten: the six switches as exact strings, slot count,
+  512 MiB and 256 pids, the 5120 equality and the open-mode bound, the render
+  carrying the switches into a valid `AppConfig`, the measurement script's
+  flags against a stub `docker`); with `test_aio_sandbox_local_backend.py`
+  and `test_sandbox_image_contract.py` 213 passed (three live tests
+  deselected); ruff clean.
+- Boot and idle with `scripts/measure-sandbox-boot.sh`: the tables under
+  "Slim services profile". Four slim sandboxes at 512 MiB each building a
+  5,000-row report and rendering PDF, Word and Excel at once, two runs:
+  `memory.peak` 334 to 355 MiB, `pids.peak` 58 to 62, no OOM kill, renders
+  12.2 to 13.4 s each; the fan-out, bind-mount and root-filesystem probes
+  there, which moved the pid limit from a 128 candidate to 256.
+- The live regression against the new profile (`pytest -m live
+  tests/test_restricted_runsc_readiness_live.py`, 5 passed in 8 m 16 s), the
+  template's switches applied and asserted in each container's environment,
+  limits asserted from `compose.yaml`: sync path `create` 6.1 s, ready after
+  22.9 s (23 probes), margin 97.1 s; async path 3.6 s, 10.7 s (11 probes),
+  margin 109.3 s; four concurrent starts, one CPU each: ready after 10.8,
+  11.6, 11.7 and 11.9 s (`create` 5.6 to 6.4 s), worst margin 108.1 s.
+  Never-ready control, sync and async: `failed to become ready within 120s`
+  after 146.4 s and 147.0 s in total (`create` 3.5 and 3.9 s, cleanup 22.9
+  and 23.1 s against the 60 s allowance); sandbox, sidecar and both networks
+  gone afterwards. The full-profile figures on the same host were 57.4 s
+  sync, 49.6 s async and 23.0 to 38.3 s in concurrent pairs. Re-run after
+  the pid limit moved from the 128 candidate to 256 and the switches were
+  routed through the provider's resolver (5 passed in 8 m 03 s): sync
+  10.9 s, async 10.8 s, four concurrent 11.8 to 12.8 s (worst margin
+  107.2 s), never-ready controls 146.7 and 146.4 s.
+- Not proved here, and the estate's gate: the slim boot on the tenant VM
+  class (serial and four at once, ten runs, both CPU quotas) and the
+  four-way render there with the skill at its data-disk path; both
+  invocations are under "Slim services profile". Also open: package
+  installation through the proxy at 512 MiB (the load that decided the full
+  profile's figure), the Gateway's peak at four concurrent turns (its
+  1152 MiB is set against a two-turn peak), and the shipped pinned image
+  under the render load (the render here used the image built from the
+  current tree). The readiness budget stays at 120 until the first of the
+  tenant-class runs has run.

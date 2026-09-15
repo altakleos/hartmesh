@@ -142,13 +142,24 @@ services:
       # Only open+runsc sandboxes bind it; allowlist uses its policy proxy.
       HARTMESH_SANDBOX_RESOLV_CONF: ${HARTMESH_SANDBOX_RESOLV_CONF:-/run/systemd/resolve/resolv.conf}
       # Per-sandbox limits from the memory budget (README: "Memory budget").
-      # 1 GiB is the only value that held in every provider-driven run under
-      # gVisor; the design's 640 MiB and the standalone-measured 768 MiB were
-      # both OOM-killed through the real create path (README). Paid for by
-      # the Gateway's limit below.
-      DEER_FLOW_SANDBOX_MEMORY: 1024m
+      # The sandbox runs the image's slim services profile (config.yaml
+      # `sandbox.environment`), which idles at about a quarter of the 1 GiB
+      # the full profile needed under gVisor; four such sandboxes with their
+      # relays sit on the same 5.0 GiB line two full ones did, the two extra
+      # relays paid for by the Gateway's limit below. The full profile's own
+      # figures (640 and 768 MiB OOM-killed, 1 GiB held) are in the README.
+      DEER_FLOW_SANDBOX_MEMORY: 512m
+      # Four sandboxes plus four relays at one CPU each oversubscribe the
+      # four-vCPU guest two to one while several boot at once; a sandbox that
+      # is rendering needs one CPU for seconds (README: "Process and CPU
+      # limits").
       DEER_FLOW_SANDBOX_CPUS: "1"
-      DEER_FLOW_SANDBOX_PIDS_LIMIT: "384"
+      # The limit bounds host-side tasks, gVisor's own threads included: the
+      # slim profile idles at 58 of them, a report render peaks at 62, and a
+      # forty-way process fan-out inside the sandbox needs 134 (README: "Slim
+      # services profile"); 256 leaves that fan-out room and still bounds a
+      # fork bomb (the full profile needed 384).
+      DEER_FLOW_SANDBOX_PIDS_LIMIT: "256"
       DEER_FLOW_SANDBOX_PROXY_MEMORY: 96m
       # The fork's sandbox image is pre-initialised as uid 1000 and needs none
       # of the upstream root-startup capabilities; the browser starts under
@@ -201,12 +212,14 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
-    # 1536 MiB less the 192 MiB that two 1 GiB sandboxes cost over the
-    # 768 MiB figure they replaced, so the in-VM total stays on the 5.0 GiB
-    # line; the Gateway peaked at 586 MiB under tenant load (README: "Memory
-    # budget").
-    mem_limit: 1344m
-    memswap_limit: 1344m
+    # 1536 MiB, less the 192 MiB the move to 1 GiB sandboxes put over the
+    # 5.0 GiB line, less the 192 MiB the third and fourth sandboxes' 96 MiB
+    # relays add, so the in-VM total stays on that line;
+    # the Gateway peaked at 586 MiB under tenant load at the previous two-slot
+    # ceiling, so this is 1.97 times that peak; its peak at four concurrent
+    # turns is not yet measured (README: "Memory budget").
+    mem_limit: 1152m
+    memswap_limit: 1152m
     # Availability bounds (README: "Process and CPU limits"): the Gateway
     # spawns MCP servers (npx, uvx) in its own container, and the sandboxes
     # are the only other bounded processes on the guest.

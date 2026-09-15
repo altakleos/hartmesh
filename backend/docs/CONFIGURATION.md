@@ -1052,6 +1052,8 @@ continue to use the normal environment proxy configuration.
 
 This repository's own `docker/sandbox/Dockerfile` (the image the tenant Compose profile pins) follows the pattern below: it layers pinned Python libraries for skill scripts (`duckdb`, imported by the data-analysis skill; `python-docx`, used by the business-report skill's Word render) and a pre-built matplotlib font cache on the upstream base, next to the pandas, openpyxl, xlrd, matplotlib, jinja2 and WeasyPrint the base already carries, so skill scripts install nothing at runtime. The upstream image alone does not carry `duckdb`: on it the data-analysis skill exits with a message naming this Dockerfile instead of installing anything. Add libraries there rather than in a skill script; the build verifies the imports.
 
+The image's entrypoint honours six service switches, each compared to the string `true`: `DISABLE_BROWSER`, `DISABLE_JUPYTER`, `DISABLE_CODE_SERVER`, `DISABLE_VNC`, `DISABLE_MCP_BROWSER` and `DISABLE_NODEJS_REPL` (the last also stops the REPL's on-demand start; the `node` binary stays). `sandbox.environment` in `config.yaml` is how the local Docker backend passes them to every container (`-e`, with values quoted so they load as text). With all six set the sandbox keeps only its API server, nginx and the relay, boots in about half the time and idles at about a fifth of the memory; the tenant Compose profile ships that way and records the figures in `deploy/compose/README.md` ("Slim services profile").
+
 For persistent system or language dependencies, extend the published image and keep its startup command intact:
 
 ```dockerfile

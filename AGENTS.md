@@ -54,6 +54,13 @@ data disk: that list is then authoritative (a provider key adds tools, never
 models) and a bad one refuses to render instead of falling back. It also sets
 `sandbox.ready_timeout: 120` (one-CPU gVisor cold starts measured 80 to 91 s);
 the optional `SANDBOX_READY_TIMEOUT` overrides it within 60 to 600 or refuses.
+Its sandboxes run the image's slim services profile (`sandbox.environment`
+carries the six `DISABLE_*` switches as quoted strings; browser, VNC, Jupyter,
+code-server and the Node REPL stay off) in four 512 MiB slots (`replicas: 4`,
+128 pids) on the same 5.0 GiB line the earlier two 1 GiB full-profile slots
+sat on; `deploy/compose/scripts/measure-sandbox-boot.sh` measures boot, idle
+and a command under exactly those limits, and the compose README's "Slim
+services profile" section holds the figures.
 
 `durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
 AIO/RWX artifact, not arbitrary scaling, IM HA, cross-region operation, or
