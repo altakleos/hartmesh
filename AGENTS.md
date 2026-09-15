@@ -83,7 +83,7 @@ deer-flow/
 ├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
 │                                    # Integration credentials and enabled state remain per-user
-├── contracts/                      # Cross-component JSON contracts
+├── contracts/                      # Cross-component JSON contracts (business_report/: the report skill's report.json)
 ├── examples/deerflow-extension-example/ # Standalone package demonstrating all extension contribution kinds
 ├── scripts/                        # Root orchestration and release scripts invoked by the Makefile
 ├── tests/                          # Root-level tests (tests/skills/: earlier public-skill tests, not run in CI; new skill tests live in backend/tests/skills/)

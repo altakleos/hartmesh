@@ -44,3 +44,4 @@ Makefile text eol=lf
 
 # Binary test fixtures
 *.xls binary
+*.xlsx binary

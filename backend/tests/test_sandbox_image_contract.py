@@ -158,7 +158,8 @@ def test_sandbox_smoke_imports_the_document_libraries_as_the_runtime_user() -> N
     assert workflow.index("/v1/bash/exec", workflow.index(import_payload)) < workflow.index("library_version=")
     assert f'[ "$library_version" != "{duckdb_pin}" ]' in workflow
     # The endpoint answers 200 whatever the command's exit code.
-    assert workflow.count("jq -e '.data.exit_code == 0'") == 2
+    # library import, data-analysis run, font cache, business-report run
+    assert workflow.count("jq -e '.data.exit_code == 0'") == 4
     assert "printf '%s\\n' \"$library_response\"" in workflow
 
 
@@ -171,3 +172,52 @@ def test_sandbox_smoke_runs_the_data_analysis_script_on_the_built_image() -> Non
     assert "python3 /mnt/smoke/analyze.py --files /mnt/smoke/example_orders.xls --action inspect" in workflow
     assert "grep -q 'Rows: 12'" in workflow
     assert (REPO_ROOT / "backend/tests/skills/data_analysis/fixtures/example_orders.xls").is_file()
+
+
+FONT_CACHE_LAYER = (
+    'ENV MPLCONFIGDIR=/opt/aio/matplotlib\nRUN set -eux; \\\n    mkdir -p "$MPLCONFIGDIR"; \\\n    cp /opt/gem/matplotlibrc "$MPLCONFIGDIR/matplotlibrc"; \\\n'
+    '    python3 -c \'import matplotlib.pyplot\'; \\\n    chown -R 1000:1000 "$MPLCONFIGDIR"; \\\n    test -n "$(ls "$MPLCONFIGDIR"/fontlist-*.json)"'
+)
+
+
+def test_sandbox_dockerfile_prebuilds_the_font_cache_for_the_runtime_user() -> None:
+    dockerfile = SANDBOX_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert FONT_CACHE_LAYER in dockerfile
+    # After the libraries it caches, before the switch to the runtime user that owns the result.
+    assert dockerfile.index(DOCUMENT_LIBRARY_LAYER) < dockerfile.index(FONT_CACHE_LAYER) < dockerfile.index("USER 1000:1000")
+
+
+def test_sandbox_smoke_checks_the_font_cache_as_the_runtime_user() -> None:
+    workflow = SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8")
+
+    # The vendor entrypoint wipes ~/.cache/matplotlib at start; the cache must be found at MPLCONFIGDIR instead.
+    assert 'ls \\"$MPLCONFIGDIR\\"/fontlist-*.json && python3 -c' in workflow
+    # The cache directory in use is asserted (a read-only MPLCONFIGDIR makes matplotlib fall back to a temp dir silently).
+    assert "assert matplotlib.get_cachedir() == os.environ[" in workflow
+    assert "grep -Eqi 'building the font cache|temporary cache directory'" in workflow
+    assert "printf '%s\\n' \"$font_response\"" in workflow
+
+
+def test_sandbox_smoke_builds_and_renders_a_business_report_on_the_built_image() -> None:
+    workflow = SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert '--volume "$PWD/skills/public/business-report:/mnt/smoke/business-report:ro"' in workflow
+    assert '--volume "$PWD/backend/tests/skills/business_report/fixtures/example_services_export_small.xls:/mnt/smoke/example_services_export_small.xls:ro"' in workflow
+    assert '--volume "$PWD/backend/tests/skills/business_report/check_pdf_on_image.py:/mnt/smoke/check_pdf_on_image.py:ro"' in workflow
+    assert "python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/smoke-report" in workflow
+    for target in ("pdf", "docx", "xlsx"):
+        assert f"python3 $R render /tmp/smoke-report/2026-08-business-review.report.json --to {target}" in workflow
+    assert "python3 /mnt/smoke/check_pdf_on_image.py /tmp/smoke-report/2026-08-business-review.pdf" in workflow
+    assert "grep -q 'Checks: Totals match your file'" in workflow
+    assert "printf '%s\\n' \"$report_response\"" in workflow
+    assert (REPO_ROOT / "backend/tests/skills/business_report/fixtures/example_services_export_small.xls").is_file()
+    assert (REPO_ROOT / "backend/tests/skills/business_report/check_pdf_on_image.py").is_file()
+
+
+def test_sandbox_smoke_runs_when_a_public_skill_script_changes() -> None:
+    workflow = SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8")
+
+    # Both the push and the pull_request trigger list the skill paths the job exercises.
+    for path in ('"skills/public/data-analysis/**"', '"skills/public/business-report/**"', '"backend/tests/skills/**"'):
+        assert workflow.count(path) == 2, path

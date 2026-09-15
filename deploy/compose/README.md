@@ -105,9 +105,12 @@ Two directories cross the container boundary:
   `/srv/hartmesh/home/skills` fixes `HARTMESH_DATA_DIR` to `/srv/hartmesh`:
   changing it is a profile change, not a tenant setting. Whatever is placed
   there must not run ahead of the pinned sandbox image: `data-analysis`
-  imports `duckdb` from the image (shipped from the first release with the
-  skill-library layer, see RELEASING.md) and exits with a message naming
-  the image rather than installing anything. The Gateway keeps
+  imports `duckdb` and `business-report` imports `python-docx` from the
+  image (both shipped from the first release with the skill-library layer,
+  see RELEASING.md) and each exits with a message naming the image rather
+  than installing anything. `business-report` also reads an optional tenant
+  bundle at `/mnt/tenant` (`brand.json`, a logo, `report-profiles/`) when a
+  deployment mounts one; without it, reports carry no company branding. The Gateway keeps
   uploads and artifacts under `home/threads/<thread>/user-data/`, so the
   pre-created `uploads/` and `artifacts/` directories are unused by this
   profile and stay empty.

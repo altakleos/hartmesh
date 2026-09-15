@@ -1,0 +1,37 @@
+{
+  "name": "services-generic",
+  "description": "A generic services business: jobs done for customers by a team, with an amount per job.",
+  "title": "{period} Business Review",
+  "vocabulary": {
+    "record": "job",
+    "records": "jobs",
+    "person": "technician",
+    "people": "technicians",
+    "category": "service",
+    "categories": "services",
+    "customer": "customer",
+    "customers": "customers",
+    "source": "lead source",
+    "amount": "revenue"
+  },
+  "aliases": {
+    "date": ["date", "job date", "service date", "completed on", "completed", "completed date", "invoice date", "appointment date", "scheduled", "scheduled on", "work date", "created", "created on"],
+    "amount": ["amount", "total", "revenue", "invoice total", "grand total", "job total", "net", "net amount", "price", "sales", "subtotal"],
+    "category": ["service", "service type", "job type", "category", "type", "line item", "product", "work type"],
+    "person": ["technician", "tech", "assigned to", "assigned", "employee", "provider", "staff", "rep", "sales rep", "team member", "worker", "crew"],
+    "customer": ["customer", "customer name", "client", "client name", "account", "contact", "company"],
+    "status": ["status", "invoice status", "payment status", "job status", "state", "paid"],
+    "source": ["lead source", "source", "channel", "referral source", "campaign", "how heard", "origin"],
+    "quantity": ["quantity", "qty", "units", "count", "hours"],
+    "location": ["city", "location", "zip", "zip code", "postal code", "region", "area", "branch", "address", "town"],
+    "id": ["id", "job id", "job #", "job number", "job no", "invoice", "invoice #", "invoice number", "order id", "order number", "ticket", "ticket #", "reference", "ref"]
+  },
+  "status_groups": {
+    "paid": ["paid", "closed", "complete", "completed", "done", "settled", "yes", "true"],
+    "unpaid": ["unpaid", "open", "due", "overdue", "invoiced", "pending", "partial", "no", "false"],
+    "cancelled": ["cancelled", "canceled", "void", "voided", "refunded"],
+    "no_show": ["no show", "no-show", "missed"]
+  },
+  "sections": ["summary", "comparison", "by_period", "by_category", "by_person", "customers", "status", "source", "actions"],
+  "top_n": 10
+}

@@ -19,6 +19,9 @@ on:
       - "docker/sandbox/**"
       - "backend/packages/harness/deerflow/community/aio_sandbox/**"
       - "backend/tests/test_aio_sandbox_local_backend.py"
+      - "skills/public/data-analysis/**"
+      - "skills/public/business-report/**"
+      - "backend/tests/skills/**"
       - ".github/workflows/sandbox-image-smoke.yml"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -26,6 +29,9 @@ on:
       - "docker/sandbox/**"
       - "backend/packages/harness/deerflow/community/aio_sandbox/**"
       - "backend/tests/test_aio_sandbox_local_backend.py"
+      - "skills/public/data-analysis/**"
+      - "skills/public/business-report/**"
+      - "backend/tests/skills/**"
       - ".github/workflows/sandbox-image-smoke.yml"
 
 concurrency:
@@ -55,6 +61,9 @@ jobs:
             --publish 127.0.0.1:18080:8080 \
             --volume "$PWD/skills/public/data-analysis/scripts/analyze.py:/mnt/smoke/analyze.py:ro" \
             --volume "$PWD/backend/tests/skills/data_analysis/fixtures/example_orders.xls:/mnt/smoke/example_orders.xls:ro" \
+            --volume "$PWD/skills/public/business-report:/mnt/smoke/business-report:ro" \
+            --volume "$PWD/backend/tests/skills/business_report/fixtures/example_services_export_small.xls:/mnt/smoke/example_services_export_small.xls:ro" \
+            --volume "$PWD/backend/tests/skills/business_report/check_pdf_on_image.py:/mnt/smoke/check_pdf_on_image.py:ro" \
             deer-flow-sandbox-smoke)"
           trap 'docker logs "$container_id" 2>&1 || true; docker rm --force "$container_id" >/dev/null 2>&1 || true' EXIT
 
@@ -113,6 +122,37 @@ jobs:
             || ! printf '%s' "$skill_response" | jq --raw-output '.data.stdout' | grep -q 'Rows: 12'; then
             printf '%s\n' "$skill_response"
             echo "::error::data-analysis script failed on the built image"
+            exit 1
+          fi
+
+          # The image ships matplotlib's font cache at MPLCONFIGDIR (the vendor
+          # entrypoint wipes the one under the home directory at every start),
+          # so the first chart a skill draws does not spend seconds building it.
+          font_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"ls \"$MPLCONFIGDIR\"/fontlist-*.json && python3 -c \"import os, matplotlib, matplotlib.pyplot; assert matplotlib.get_cachedir() == os.environ[\\\"MPLCONFIGDIR\\\"], matplotlib.get_cachedir()\""}' \
+            http://127.0.0.1:18080/v1/bash/exec)"
+          # matplotlib falls back to a temporary directory (rebuilding the cache
+          # every process) when MPLCONFIGDIR is not writable, so the cache dir
+          # in use is asserted, not only the file's presence.
+          if ! printf '%s' "$font_response" | jq -e '.data.exit_code == 0' >/dev/null \
+            || printf '%s' "$font_response" | jq --raw-output '.data.stderr' | grep -Eqi 'building the font cache|temporary cache directory'; then
+            printf '%s\n' "$font_response"
+            echo "::error::matplotlib font cache is not pre-built for the runtime user"
+            exit 1
+          fi
+
+          # Build and render the business-report skill's small fixture on the
+          # image (mounted read-only above), then check the PDF with the
+          # PyMuPDF the image ships. Proves the report path, not only imports.
+          report_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"set -e; R=/mnt/smoke/business-report/scripts/report.py; python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/smoke-report; python3 $R render /tmp/smoke-report/2026-08-business-review.report.json --to pdf; python3 $R render /tmp/smoke-report/2026-08-business-review.report.json --to docx; python3 $R render /tmp/smoke-report/2026-08-business-review.report.json --to xlsx; python3 /mnt/smoke/check_pdf_on_image.py /tmp/smoke-report/2026-08-business-review.pdf"}' \
+            http://127.0.0.1:18080/v1/bash/exec)"
+          if ! printf '%s' "$report_response" | jq -e '.data.exit_code == 0' >/dev/null \
+            || ! printf '%s' "$report_response" | jq --raw-output '.data.stdout' | grep -q 'Checks: Totals match your file'; then
+            printf '%s\n' "$report_response"
+            echo "::error::business-report script failed on the built image"
             exit 1
           fi
 
