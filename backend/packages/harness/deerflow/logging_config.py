@@ -41,6 +41,12 @@ class JsonTraceFormatter(logging.Formatter):
             "trace_id": record.trace_id,
             "message": record.getMessage(),
         }
+        # The turn-phase journal is the one structured payload this process
+        # emits as a field rather than as text; a JSON line that dropped it
+        # would say less than the text format it replaced.
+        turn_phases = getattr(record, "turn_phases", None)
+        if isinstance(turn_phases, dict):
+            payload["turn_phases"] = turn_phases
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         if record.stack_info:

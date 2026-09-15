@@ -88,6 +88,13 @@ MAX_PHASE_RECORDS = 256
 # How many finished-but-unclosed run journals the registry keeps. Bounded so a
 # run that never reaches its terminal cannot retain memory indefinitely.
 MAX_TRACKED_RUNS = 64
+# How much of the journal the emitted *message* carries. The structured record
+# is complete; the message is what a deployment's formatter actually prints, so
+# it is rendered for an operator reading one line per turn and is bounded
+# independently of the record cap above.
+MAX_RENDERED_PHASES = 24
+MAX_RENDERED_UNOBSERVABLE = 4
+MAX_RENDERED_REASON = 80
 
 
 class TurnPhase(StrEnum):
@@ -208,6 +215,63 @@ class TurnPhaseSnapshot:
             if record.phase is phase:
                 return record.started_ms
         return None
+
+    def to_log_line(self) -> str:
+        """Render the journal as one bounded line a text formatter will print.
+
+        The structured record is the complete one; this is the same reading
+        for whoever has only the deployment's log. Offsets are ``@`` and
+        measured durations ``+``, both in milliseconds from the turn's start,
+        so ``first_stream_text@1904ms`` minus ``sandbox_acquire@145ms`` is the
+        wait a reader is usually after, with no second log line to correlate.
+        """
+        parts = [f"turn phase timings run={self.run_id or '-'}", f"correlation={self.correlation_id}", f"total={round(self.total_ms)}ms"]
+        if self.outcome:
+            parts.append(f"outcome={self.outcome}")
+        if self.session_kind:
+            parts.append(f"kind={self.session_kind}")
+        if self.acquisition_source is not None:
+            parts.append(f"acquisition={self.acquisition_source}")
+        if self.acquire_reason:
+            parts.append(f"acquire_reason={self.acquire_reason}")
+        if self.snapshot_present is not None:
+            snapshot = "present" if self.snapshot_present else "absent"
+            if self.snapshot_package_count is not None:
+                snapshot = f"{snapshot}/{self.snapshot_package_count}pkg"
+            if self.mandatory_materialization:
+                snapshot = f"{snapshot}/mandatory"
+            parts.append(f"snapshot={snapshot}")
+        if self.queue_ms:
+            parts.append(f"queue={round(self.queue_ms)}ms")
+        for label, value in (
+            ("creates", self.resource_creates),
+            ("rediscoveries", self.resource_rediscoveries),
+            ("teardowns", self.resource_teardowns),
+            ("teardown_refusals", self.teardown_refusals),
+            ("teardown_failures", self.teardown_failures),
+            ("evictions", self.evictions),
+            ("failed_attempts", self.failed_attempts),
+            ("dropped_records", self.dropped_records),
+        ):
+            if value:
+                parts.append(f"{label}={value}")
+        rendered: list[str] = []
+        for record in self.phases[:MAX_RENDERED_PHASES]:
+            entry = f"{record.phase}@{round(record.started_ms)}ms"
+            if record.duration_ms is not None:
+                entry = f"{entry}+{round(record.duration_ms)}ms"
+            rendered.append(entry)
+        omitted = len(self.phases) - len(rendered)
+        if omitted > 0:
+            rendered.append(f"+{omitted} more")
+        if rendered:
+            parts.append("phases=" + " ".join(rendered))
+        for phase, reason in self.unobservable[:MAX_RENDERED_UNOBSERVABLE]:
+            parts.append(f"unobservable={phase}({reason[:MAX_RENDERED_REASON]})")
+        unobservable_omitted = len(self.unobservable) - MAX_RENDERED_UNOBSERVABLE
+        if unobservable_omitted > 0:
+            parts.append(f"unobservable=+{unobservable_omitted} more")
+        return " ".join(parts)
 
     def to_wire(self) -> dict[str, object]:
         return {
@@ -491,9 +555,14 @@ class TurnPhaseJournal:
             )
 
     def emit(self, target: logging.Logger | None = None) -> TurnPhaseSnapshot:
-        """Log the journal once, as one structured record, and return it."""
+        """Log the journal once, as one record, and return it.
+
+        The message carries the reading (``TurnPhaseSnapshot.to_log_line``)
+        because that is all a deployment's formatter prints; the structured
+        payload rides along for anything that reads fields.
+        """
         snapshot = self.snapshot()
-        (target or logger).info("turn phase timings", extra={"turn_phases": snapshot.to_wire()})
+        (target or logger).info("%s", snapshot.to_log_line(), extra={"turn_phases": snapshot.to_wire()})
         return snapshot
 
 

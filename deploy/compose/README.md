@@ -1536,6 +1536,33 @@ No service carries a `logging:` block. The guest's daemon sets
 journal, which the VM caps and ships; a `logging:` block would override that
 with `json-file` on the root disk.
 
+### Reading a turn's timing
+
+Every turn ends with one `turn phase timings` line from
+`deerflow.runtime.turn_phases`, which carries the whole reading:
+
+```text
+turn phase timings run=<run id> correlation=<id> total=16624ms outcome=success
+kind=accepted acquisition=created acquire_reason=accepted_binding snapshot=13pkg/mandatory
+phases=admission@0ms assembly@19ms sandbox_lookup@409ms+4ms sandbox_create@417ms+4777ms
+sandbox_readiness@5201ms+10654ms sandbox_acquire@407ms+15747ms model_request@16176ms
+first_provider_text@16385ms first_stream_text@16387ms model_completion@16519ms terminal@16624ms
+unobservable=browser_first_text(requires_a_browser_measurement_through_public_ingress)
+```
+
+`@` is an offset from the turn's start and `+` a measured duration, both in
+milliseconds, so questions are subtractions on one line:
+`first_stream_text - sandbox_acquire` is the wait between the chat's sandbox
+being in hand and the first assistant text leaving the Gateway;
+`first_stream_text - first_provider_text` is what the Gateway added to the
+provider's own first token; `acquisition=` says whether the turn created its
+sandbox or reclaimed a warm one (`accepted_warm_reclaim`). What the server
+cannot see it declares instead of inferring: `browser_first_text` is always
+`unobservable` here, because only a browser measuring through the front door
+can time what the person actually waited for. `journalctl -u ... | grep "turn
+phase timings"` is therefore a complete per-turn latency record, with the same
+fields also attached to the record for JSON logging.
+
 ## Release pinning
 
 At release the `image:` references in `compose.yaml`, `sandbox.image` and
@@ -2153,3 +2180,40 @@ by a registered user.
 - Not proved here: the tenant class itself (the tenant-class qualification
   is to be rerun on a release that carries the repair), and a turn that runs
   a tool in the projected skill through a real model.
+
+A turn's log after the seeded library (2026-09-15). The tenant-class rerun of
+v2.1.0+hartmesh.14 passed the normal chat and the report workflow, and left two
+observations the log itself owed: the `turn phase timings` line carried no
+timings, and the lifecycle ERROR of the previous entry still followed every
+turn, this time after successes. Both reproduced on the same development host,
+now on the released profile shape (this directory's `compose.yaml` and
+`config.yaml`, PostgreSQL and Redis, `run_ownership.heartbeat_enabled` at its
+default `false`, the probe model as above), and repaired.
+
+- The timing line was emitted only into the log record's `extra`, which the
+  default text format drops and the JSON formatter rebuilt without; a turn
+  printed the bare words `turn phase timings`. It now renders the reading into
+  the message ("Reading a turn's timing" above) and the JSON formatter carries
+  the structured field. Measured here: a cold chat `sandbox_create@417ms+4777ms
+  sandbox_readiness@5201ms+10654ms model_request@16176ms
+  first_stream_text@16387ms terminal@16624ms`; the next turn on that chat
+  `acquisition=accepted_warm_reclaim sandbox_acquire@336ms+159ms
+  first_stream_text@715ms total=967ms` — the reclaim-to-first-text figure the
+  qualification could not observe is now one subtraction on one line.
+- `Refused to recreate missing authoritative lifecycle row ... during
+  completion persistence` was neither a missing row nor only noise. A durable
+  store stamps the terminal projection whether or not lease heartbeats run and
+  refuses a completion write that does not name it; the manager supplied that
+  authority only with heartbeats on, so on this profile **every** turn's token
+  counts, message count and message previews were dropped, and the refusal was
+  then misreported as a missing row. Before: `total_tokens 0, message_count 0,
+  last_ai_message NULL` on both runs of a two-turn chat, with the ERROR after
+  each. After: `message_count 2`, the answer preview present, no ERROR. (The
+  probe model reports no token usage, so `total_tokens` stays 0 here; a real
+  provider's usage rides the same write.)
+- Offline: the run-manager, turn-phase, logging and Gateway stream-e2e suites,
+  including a new e2e assertion that the line a deployment prints carries
+  `first_stream_text@`, and a single-worker completion regression.
+- Not proved here: the tenant class itself, and a four-turn or concurrent
+  measurement of what the added line costs (it is one formatted string per
+  turn, built from the journal already taken).

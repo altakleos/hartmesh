@@ -345,3 +345,61 @@ def test_the_callback_handler_judges_a_structured_chunk_by_its_blocks():
     assert journal.snapshot().phase_at_ms(TurnPhase.FIRST_PROVIDER_TEXT) is None
     handler.on_llm_new_token("", chunk=text)
     assert journal.snapshot().phase_at_ms(TurnPhase.FIRST_PROVIDER_TEXT) is not None
+
+
+def test_the_emitted_message_carries_the_timings_a_plain_formatter_shows(caplog):
+    """The numbers must survive the formatter a deployment actually runs.
+
+    ``extra`` reaches nothing a released deployment prints: the default text
+    format renders ``%(message)s`` and the JSON formatter builds a fixed
+    payload. A journal whose whole purpose is telling an operator where a
+    turn's time went has to put the timings in the message itself.
+    """
+    journal = TurnPhaseJournal(correlation_id="trace-msg", run_id="run-msg")
+    journal.set_acquisition_source(AcquisitionSource.ACCEPTED_WARM_RECLAIM)
+    journal.set_session_kind("accepted")
+    with journal.span(TurnPhase.SANDBOX_ACQUIRE):
+        pass
+    journal.mark_once(TurnPhase.FIRST_STREAM_TEXT)
+    journal.set_outcome("success")
+
+    with caplog.at_level(logging.INFO, logger="deerflow.runtime.turn_phases"):
+        journal.emit()
+
+    message = caplog.records[0].getMessage()
+    assert message.startswith("turn phase timings")
+    assert "run=run-msg" in message
+    assert "outcome=success" in message
+    assert "acquisition=accepted_warm_reclaim" in message
+    assert "kind=accepted" in message
+    assert "first_stream_text@" in message
+    assert "sandbox_acquire@" in message
+    # The structured record stays for anything that reads fields.
+    assert caplog.records[0].turn_phases["run_id"] == "run-msg"
+
+
+def test_an_unobservable_phase_is_named_in_the_message_with_its_reason(caplog):
+    journal = TurnPhaseJournal(correlation_id="trace-unobs", run_id="run-unobs")
+    journal.unobservable(TurnPhase.FIRST_STREAM_TEXT, "no SSE consumer in this process marked it")
+
+    with caplog.at_level(logging.INFO, logger="deerflow.runtime.turn_phases"):
+        journal.emit()
+
+    message = caplog.records[0].getMessage()
+    # The reason keeps the journal's own bounded-label spelling.
+    assert "unobservable=first_stream_text(no_SSE_consumer_in_this_process_marked_it)" in message
+
+
+def test_the_rendered_message_stays_bounded_when_a_turn_records_many_phases(caplog):
+    journal = TurnPhaseJournal(correlation_id="trace-many", run_id="run-many")
+    for _ in range(MAX_PHASE_RECORDS + 20):
+        journal.mark(TurnPhase.SANDBOX_LOOKUP)
+
+    with caplog.at_level(logging.INFO, logger="deerflow.runtime.turn_phases"):
+        journal.emit()
+
+    message = caplog.records[0].getMessage()
+    assert len(message) <= 2048
+    assert "more" in message
+    # Nothing is lost from the structured record the message summarises.
+    assert len(caplog.records[0].turn_phases["phases"]) == MAX_PHASE_RECORDS
